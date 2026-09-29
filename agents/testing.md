@@ -1,6 +1,6 @@
 # Testing
 
-Load when adding or changing behavior, fixing a defect, editing tests or fixtures, changing user-visible output, or making a correctness, security, durability, provider, performance, or platform-support claim. The detailed rationale and V1 evidence register live in `docs/research/testing-strategy-for-rust-cli-harness.md`; keep this file as the concise working contract.
+Load when adding or changing behavior, fixing a defect, editing tests or fixtures, changing user-visible output, or making a correctness, security, durability, provider, performance, or platform-support claim. The detailed rationale and beta evidence register live in `docs/research/testing-strategy-for-rust-cli-harness.md`; keep this file as the concise working contract.
 
 ## Evidence budget
 
@@ -14,12 +14,13 @@ Load when adding or changing behavior, fixing a defect, editing tests or fixture
 
 ## User-visible proof
 
-- Acceptance scenarios produce an `ObservationBundle`: exit class, exact stdout bytes, exact stderr bytes, Events reopened from a closed SQLite store, and the RunView reduced from those Events.
+- Noninteractive acceptance scenarios produce an `ObservationBundle`: exit class, exact stdout bytes, exact stderr bytes, Events reopened from a closed SQLite store, and the SessionView/RunView reduced from those Events. Interactive scenarios add a separate PTY observation rather than weakening exact `exec` evidence.
 - A successful assertion is incomplete when it checks only an Engine return, a Provider call, stdout, or live in-memory state.
-- Compare human output as exact bytes. Canonicalize only parsed UUIDs, timestamps, and temporary paths explicitly declared volatile; preserve identity relationships, ordering, counts, and every user-controlled byte.
+- Compare `exec` text, screen-reader output, final receipts, and `show` as exact bytes. Canonicalize only parsed UUIDs, timestamps, and temporary paths explicitly declared volatile; preserve identity relationships, ordering, counts, and every user-controlled byte. Raw interactive escape bytes are not public golden output.
 - Parse JSONL one line at a time, compare it semantically with persisted Events, and verify its exact newline and channel contract.
 - Use a fresh product process for argument parsing, exit codes, stdout/stderr separation, signal wiring, and `show`. Use Cargo's absolute binary path, an explicit working directory, a cleared allowlisted environment, isolated temporary roots, a parent deadline, and guaranteed kill/reap cleanup.
-- The deterministic successful `run` exercises the real CLI adapter, Engine, SQLite file, reducer, and renderers in-process with the strict scripted Provider. Do not expose a fake-provider CLI mode or add a second product binary for tests.
+- The deterministic successful `exec` exercises the real CLI adapter, Engine, SQLite file, reducer, and renderers in-process with the strict scripted Provider. Bare interactive `arany` reuses the same semantic scenario through the PTY lane. Do not expose a fake-provider CLI mode or add a second product binary for tests.
+- The central deterministic Session journey covers process exit/resume, multiple ordered Runs, one single-agent Run, one bounded `N`-child Run with controlled completion order, fork lineage, compaction failure safety, replay, cancellation, and task/thread cleanup. Boundary tables own other collaboration capacities and invalid snapshots.
 - Keep a few manually reviewed goldens only for public human/JSONL output. CI never rewrites them, and an agent updates them only with an intentional contract change and a summarized diff.
 
 ## Test doubles and fixtures
@@ -28,13 +29,16 @@ Load when adding or changing behavior, fixing a defect, editing tests or fixture
 - Use real temporary filesystem objects and real file-backed SQLite for state, reopen, permission, journaling, replay, and recovery evidence. `:memory:` is not durability evidence.
 - Use explicit gates and paused Tokio time for schedules and deadlines. Never coordinate with wall sleeps, randomness, repeated attempts, or assumed task order.
 - Keep provider response fixtures minimal and hand-reviewed from the official wire contract. Never capture production responses, credentials, prompts, or user data.
-- Use one bounded canary assertion across Provider observations, Events, database bytes, stdout, stderr, controlled panic/error text, and optional telemetry without echoing the canary on failure.
+- Use one bounded canary assertion across Provider observations, Events, database bytes, stdout, stderr, controlled panic/error text, and runtime-opt-in telemetry without echoing the canary on failure.
 
 ## Evidence lanes
 
 - Default `cargo test` is offline, deterministic, isolated, retry-free, free of wall sleeps and hardware-sensitive timing assertions, and quiet on success.
-- Keep V1 integration scenarios in one `tests/team_run.rs` target. Focused owning-module tests use compact transition, boundary, hostile-input, or parser tables only where the central journey cannot prove the claim.
-- One ignored, explicitly paid `live_openai_team_run` launches the shipped executable and asserts structural bounds, persistence, channels, and replay—not prose, latency, or model quality. Missing credentials fail only when that test is selected.
+- Keep beta integration scenarios in one `tests/session_run.rs` target. Focused owning-module tests use compact transition, boundary, hostile-input, or parser tables only where the central journey cannot prove the claim.
+- Use pure presentation tables and Ratatui `TestBackend` for Session/composer/status/activity-shelf frames, including single/team/overflow states. Use native Linux/macOS PTY process tests for terminal acquisition/restoration, Session and agent pickers, transient mouse reporting, signals, resize, suspend/resume, cancellation, fallback, tmux, and broken stderr. Do not duplicate Engine scenarios per width or key.
+- Exact linear accessibility fixtures prove the absence of CSI/OSC and carriage-return rewriting; manual VoiceOver and Orca checks are release evidence, not silent CI skips.
+- One closed-registry contract test owns slash help, aliases, availability, exact parsing, completion, and handlers. A compact corpus owns unknown commands, `//` escape, hostile Unicode/control text, lifecycle availability, and the invariant that interactive commands never enter Provider input while `exec` treats them literally.
+- Ignored, explicitly activated and paid live runs cover each native claimed adapter separately. They launch the shipped executable and assert structural bounds, provenance, persistence, channels, and replay—not prose, latency, or model quality. Custom profiles own a data-free exact endpoint/model conformance lane before any Workspace-bearing smoke. A built-in OpenRouter profile remains deferred behind its route/privacy gate; Z.AI remains unadmitted until its strict-outcome gate passes.
 - Cross-platform claims require native behavior tests for filesystem, ACL, signal, process, SQLite reopen, and terminal semantics. A compile-only target or silent skip is not evidence.
 - Process-death, disk-fault, fuzz, repeated-flake, and named-host performance work may run as scheduled or release gates when too expensive for the default loop.
 - Stochastic model quality belongs to evaluations; latency and resource distributions belong to benchmarks. Neither can override a failed deterministic invariant.

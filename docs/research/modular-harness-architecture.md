@@ -4,7 +4,7 @@
 **Research date:** 2026-09-28  
 **Question:** How should a Rust-first agent harness be decomposed so that its core remains fast and coherent while CLI, web, desktop, IDE, providers, storage, and tool implementations can be replaced independently—even by implementations written in other languages?
 
-> **Scope amendment — 2026-09-29:** Version 1 has one product Client: `arany`, one package, and one process. References below to multiple crates/adapters, daemon/protocol, web, desktop, IDE, TUI, SDK, HTTP, or SSE are triggered future-option analysis, not version-1 commitments. Provider is the only Engine behavior seam. Optional OTLP is a private output module after the core proof, not another adapter trait. The [closure audit](./research-closure-audit.md), [system overview](../architecture/system-overview.md), and [OTLP report](./otlp-observability.md) are canonical for current scope.
+> **Scope amendment — 2026-09-29:** Version 1 has one product Client: `arany`, one package, and one process. Its in-process `presentation.rs`/`terminal.rs` provide inline, deterministic, and accessible terminal modes without creating a Client protocol or renderer trait. References below to multiple crates/adapters, daemon/protocol, web, desktop, IDE, standalone UI client, SDK, HTTP, or SSE are triggered future-option analysis, not version-1 commitments. Provider is the only Engine behavior seam. Optional OTLP is a private output module after the core proof, not another adapter trait. The [decision register](./next-step-decision-register.md), [system overview](../architecture/system-overview.md), and [beta terminal report](./beta-terminal-interface-and-multi-agent-feedback.md) are canonical for current scope.
 
 ## Reading guide
 

@@ -1,10 +1,12 @@
 # Provider adapters and the tool/effect runtime
 
+> **Beta profile amendment — 2026-09-29:** Native OpenAI and Anthropic remain supported adapters. Beta also admits exact trusted custom endpoint/model profiles after a data-free strict conformance gate; it does not ship a universal OpenAI-compatible adapter. A built-in OpenRouter profile is deferred behind its broker/privacy gate. Provider and model are pinned per Run but may change between durable Session Runs.
+
 **Status:** research and architectural recommendation  
 **Research date:** 2026-09-28  
 **Question:** How should a Rust-first harness integrate fast-changing model providers and execute native, MCP, interactive, and background tools without losing provider features, durability, security, or user-visible feedback?
 
-> **Scope amendment — 2026-09-29:** Version 1 implements only deterministic fake and bounded non-streaming OpenAI behind the Provider seam. It has no effectful Tool, effect coordinator, MCP, PTY, background process, or provider streaming. Those designs below activate on their named triggers; the [system overview](../architecture/system-overview.md) and [next-step decision register](./next-step-decision-register.md) are canonical.
+> **Scope amendment — 2026-09-29:** Version 1 keeps bounded non-streaming calls and the single Provider seam but now requires explicit multi-provider selection. Native OpenAI and Anthropic launch first; constrained OpenRouter follows its route gate; Z.AI remains experimental until its strict-outcome gate passes. The focused [beta multi-provider report](./beta-multi-provider-routing-and-adapters.md) supersedes this report wherever its exact provider set, configuration, endpoints, and strict-output gates differ. V1 still has no effectful Tool, effect coordinator, MCP, PTY, background process, or provider streaming.
 
 ## Reading guide
 

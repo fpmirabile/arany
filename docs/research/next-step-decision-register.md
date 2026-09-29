@@ -1,325 +1,237 @@
-# Minimum-Arany next-step decision register
+# Arany beta decision register
 
-**Status:** research closure for the first executable slice  
+**Status:** research closure for the first implementation
 **Date:** 2026-09-29  
-**Canonical physical design:** [minimum harness architecture](../architecture/system-overview.md)
-
-This register closes the implementation decisions that remained after the broader architecture research. It does not create more modules. The architecture document owns the physical shape; the subject reports linked here own the evidence and detailed failure analysis.
+**Canonical design:** [Arany beta architecture](../architecture/system-overview.md)
 
 Every item has one of three statuses:
 
-- **V1 decision:** implement this in the minimum demonstrator.
-- **Implementation gate:** code or runtime evidence must pass before the associated guarantee is claimed.
-- **Triggered scope:** do not build it until the named product or measurement trigger occurs.
+- **Beta decision:** implement it.
+- **Implementation gate:** prove it with code or runtime evidence before claiming it.
+- **Triggered scope:** do not build it until the named condition occurs.
 
-## Executive result
+There is no missing research choice blocking the implementation plan. The repository now includes the exact Apache-2.0 `LICENSE` and a project `NOTICE` attributed to `fpmirabile`.
 
-There is no missing research choice blocking an implementation plan for the minimum Rust CLI harness or its optional standard observability edge. Implementation itself starts only after that plan imports the V1 security claim, non-claims, P0 controls, and verification gates in [Harness security lessons and controls](./harness-security-lessons-and-controls.md).
+## 1. Why SQLite remains canonical state
 
-The selected slice is one Cargo package and one process. A synchronously owned current-thread Tokio coordinator drives one root and exactly two concurrent child AgentRuns through four Provider calls. A dedicated standard-library thread owns one bundled SQLite connection. The CLI snapshots bounded Workspace files through capability-rooted no-follow handles, persists semantic transitions before rendering them, prints append-only progress, and calls OpenAI through one bounded non-streaming HTTPS adapter. After that proof passes, one private opt-in module may project content-free traces over OTLP/HTTP protobuf to a numeric-loopback Collector.
+Arany now needs durable Sessions as well as Runs, but its storage requirement is unchanged: one local authoritative writer, transactional semantic transitions, crash recovery, indexed replay, and no service.
 
-This is intentionally not the final platform. It is the smallest slice that can honestly prove delegation, concurrency, join behavior, cancellation, durable replay, safe inputs, a replaceable Provider, and a narrow non-effectful security boundary. Rust, `cap-std`, and SQLite are not security claims by themselves.
-
-## 1. Why SQLite wins for agent state
-
-SQLite is selected because the product needs a durable acknowledged event prefix, not because the schema needs sophisticated SQL.
-
-| Option | Why it is not V1 canonical state | Proper role or trigger |
+| Option | Why it is not beta canonical state | Triggered role |
 |---|---|---|
-| In-memory `Vec<Event>` | Disappears on exit and cannot satisfy `arany show` | First reducer/loop test only |
-| JSONL append file | Atomic multi-Event transitions, torn-tail recovery, checksums, locking, sync, directory durability, indexing, and migration would become Arany code | Deterministic output/export and test fixtures |
-| Directory per Run | Atomicity does not span several files; derived summaries can disagree with the event log | Large immutable Artifacts later |
-| SQLite rollback journal | Already supplies transactions, recovery, constraints, inspection, migration, and reopening without a service | **Selected** |
-| SQLite WAL | Adds persistent sidecars, checkpoint policy, and backup rules while current V1 has no concurrent reader | Benchmark `WAL + FULL` on a SQLite release containing the WAL-reset fix after a live reader or durable-commit breach |
-| redb | Strong pure-Rust ACID option, but indexes, value migrations, queries, inspection, and export become Arany responsibilities | Spike only when C/FFI is forbidden |
-| Fjall or RocksDB | LSM compaction and throughput machinery solve no measured V1 workload; RocksDB also adds C++ and a large build surface | Benchmark only after sustained SQLite write-pressure evidence |
-| sled | Pre-1.0 format and reliability posture are inappropriate for canonical history | Not selected |
-| PostgreSQL | Adds a server, authentication, lifecycle, upgrades, and backup operations to a local CLI | Multiple authoritative hosts/writers, tenancy, replication, or PITR |
+| Memory only | Cannot resume after process exit | Reducer tests only |
+| JSONL files | Arany would own torn tails, multi-Event atomicity, locking, sync, indexes, and migration | Deterministic export |
+| Directory per Session | Cross-file atomicity and derived-summary consistency become application code | Large Artifacts later |
+| SQLite rollback journal | Supplies transactions, recovery, constraints, migrations, and inspection locally | **Selected** |
+| SQLite WAL | Adds sidecars and checkpoint policy without a live second reader | Benchmark after measured reader/commit pressure |
+| redb/Fjall/RocksDB | Indexes, queries, migrations, inspection, or compaction become Arany work | Revisit only after a measured SQLite breach or C prohibition |
+| PostgreSQL | Adds a server and operator lifecycle | Multi-host writers, tenancy, replication, or PITR |
 
-The exact storage decision is:
+Use bundled `rusqlite`/SQLite on a verified local filesystem, one connection on one named thread, a private state root outside the Workspace, no-follow open, defensive mode, `DELETE + EXTRA`, `trusted_schema=OFF`, a 250 ms busy timeout, short `BEGIN IMMEDIATE` transactions, bounded payloads/pages, and commit-before-feedback. Incomplete committed histories replay as `Interrupted`; they are never auto-resumed as work.
 
-- bundled `rusqlite`/SQLite on a local filesystem;
-- one connection on one named standard-library thread;
-- private outside-Workspace state root with verified owner/permissions or ACL;
-- read-write/create open with `SQLITE_OPEN_NOFOLLOW` and defensive mode;
-- `journal_mode=DELETE`;
-- `synchronous=EXTRA`;
-- `trusted_schema=OFF`;
-- 250 ms busy timeout;
-- short `BEGIN IMMEDIATE` transactions;
-- commit before reduction, `RunUpdate`, terminal progress, or JSONL;
-- one `STRICT` Events table and `(run_id, sequence)` index;
-- plain `INTEGER PRIMARY KEY`, not `AUTOINCREMENT`;
-- `PRAGMA user_version=1` plus per-kind `event_version=1`;
-- 64 KiB maximum serialized Event payload; and
-- 4 KiB pages, a 65,536-page/256 MiB cap, and 4 MiB new-Run headroom; and
-- incomplete committed histories display as `Interrupted`; V1 never resumes them automatically.
+## 2. Settled beta decisions
 
-The complete comparison, crash model, benchmarks, and backend triggers are in [agent-state-persistence.md](./agent-state-persistence.md).
+### D-01 — Runtime and physical ownership
 
-## 2. Settled V1 decisions
+**Beta decision:** one package and process. A current-thread Tokio runtime owns network, timers, signals, AgentRuns, and coordination. One standard-library thread owns SQLite; one bounded worker owns OTLP export. Do not use the multithreaded Tokio scheduler, `spawn_blocking`, SQLx, or a pool without profile evidence.
 
-### D-01 — Runtime ownership
+The physical files are `main.rs`, deep `lib.rs`, `session.rs`, `provider.rs`, `store.rs`, `presentation.rs`, `terminal.rs`, and last-slice `telemetry.rs`. A daemon, process protocol, or crate split requires a measured client/release/privilege/dependency boundary.
 
-**V1 decision:** use Tokio's current-thread runtime for network, timers, signals, and task coordination. Synchronous `main` constructs the runtime, calls `runtime.block_on(...)`, completes canonical Engine and store cleanup, then performs bounded telemetry shutdown after the runtime returns. Put synchronous SQLite on one owned `std::thread` behind a bounded request channel and one-shot replies. Do not use Tokio's multi-thread scheduler, `spawn_blocking`, SQLx, or a connection pool.
+### D-02 — Durable Session model
 
-**Reason:** only two remote calls run concurrently; database flush latency must not block the coordinator; one owner makes ordering and shutdown explicit.
+**Beta decision:** `Session -> Run -> AgentRun` is canonical vocabulary.
 
-**Gate:** stress the fixed channel capacities, prove no task or store thread survives shutdown, and enable a multi-thread runtime only after profiling coordinator starvation.
+- Session: durable ordered Messages, Runs, title, defaults, fork lineage, and derived compaction snapshots.
+- Run: one accepted user submission to one terminal outcome.
+- AgentRun: one primary or child execution inside a Run.
 
-### D-02 — Fixed agent protocol
+Resume preserves Session identity. Fork creates a new Session from an exact committed Run/sequence/prefix digest. Historical children remain inspectable but never become live again. Retrying interrupted work creates a new Run. Provider/model/profile defaults may change only between Runs; `RunStarted` persists resolved values.
 
-**V1 decision:** the success path is exactly:
+Compaction creates digest-bound derived context and never deletes or replaces canonical history. Manual compaction is idle-only and visible; automatic compaction runs only at a committed boundary after warning. Provider state is an optimization, never the sole resume path.
 
-1. `RootPlan -> Delegate([child_a, child_b])`;
-2. two concurrent `ChildWork -> Finish` calls;
-3. join both successful children; and
-4. `RootSynthesis -> Finish`.
+### D-03 — Generic bounded agent protocol
 
-This is exactly four Provider invocations. Children cannot delegate, root cannot synthesize early, either child failure prevents synthesis, there is no retry, and only root owns the final answer.
+**Beta decision:** every Run pins one collaboration policy:
 
-**Gate:** the strict scripted Provider proves overlapping child calls, reverse completion order, join-all, invalid phase/outcome rejection, and cancellation of pending calls.
+- `single`: no children;
+- `auto(N)`: primary may finish directly or delegate; and
+- `team(N)`: primary must propose a non-empty bounded decomposition.
 
-### D-03 — Provider seam
+The beta topology is one primary plus an ordered `0..N` collection of direct read-only children. Children cannot create nested teams. The default is `auto` with three active children maximum; the beta process hard ceiling is eight active children. `--max-agents` counts active children and excludes the primary.
 
-**V1 decision:** `Provider` is the only trait. Use a statically dispatched generic with two implementations: the strict scripted fake and OpenAI. The semantic request contains phase, objective, instruction snapshot, documents, child results, and bounds; provider wire types never cross inward.
+Effective capacity is the minimum of the selected maximum, hard ceiling, aggregate call/token/byte/time budgets, and Provider concurrency. A direct answer is one Provider call. With `k` children, a successful team Run is `k + 2` calls: primary plan, `k` child calls, primary synthesis. All required children must finish successfully before synthesis. There are no detached children or automatic retries.
 
-The OpenAI adapter uses direct `reqwest` HTTPS to the fixed Responses endpoint with Rustls, a reused client, redirects off, inherited proxies off, retries off, cookies off, unsafe TLS options absent, `store:false`, truncation disabled, explicit model, strict Structured Outputs, and `max_output_tokens=4096`.
+**Gate:** one scripted scenario proves direct single completion, generic ordered children, bounded concurrency, reverse completion, join-all, overflow rejection, cancellation of all children, and invalid phase/outcome rejection. Boundary tables cover `N = 0, 1, 3, 8, 9`.
 
-**V1 deliberately does not stream model tokens.** It reads the non-streaming body incrementally through `Response::chunk()` and rejects byte 1 MiB + 1. Streaming is triggered only when a real Client consumes partial output or measured time-to-first-useful-output becomes a product requirement.
+### D-04 — Provider seam and profiles
 
-### D-04 — Event contract and replay
+**Beta decision:** `Provider` is the only Engine trait. Engine types carry Arany semantics, never vendor wire objects or generic parameter bags. Use the strict scripted fake for Engine proof and a closed adapter enum for product Providers.
 
-**V1 decision:** persist only five explicit Event kinds:
+Native OpenAI Responses and Anthropic Messages are supported first. One ProviderProfile/model/outcome encoding/privacy profile is pinned before Workspace input and for every call in a Run. Strict provider-enforced JSON Schema is preferred; a synthetic outcome tool is allowed only with documented strict arguments and forced selection. JSON mode, prompt-only repair, and automatic tool selection fail admission.
 
-- `RunStarted`
-- `AgentSpawned`
-- `AgentUpdated`
-- `AgentFinished`
-- `RunFinished`
+Custom endpoint support is part of beta, beginning with a closed `openai-responses` protocol family. Profiles live only in trusted user configuration and name exact normalized origin/base path, model, credential environment reference, outcome encoding, privacy assertion, and evidence version. `arany provider check PROFILE` must pass a data-free bounded conformance suite before the profile receives Workspace content. Evidence is keyed by Arany/adapter/test versions, exact endpoint, model, encoding, output cap, timestamp, and expiry. A model catalog alone proves nothing.
 
-The envelope contains global `sequence`, typed Run/Agent IDs, `event_version`, Unix-millisecond display time, explicit `kind`, and typed JSON payload. Sequence—not timestamp—defines order. Unknown kind/version, a sequence gap, malformed payload, or illegal reducer transition fails closed; replay never skips evidence.
+Receipts classify `native supported`, `custom verified`, `custom unverified`, or future `broker constrained`. A built-in OpenRouter profile is triggered scope behind route/privacy/provenance/no-fallback gates. Z.AI remains unadmitted while the exact route lacks strict outcome enforcement.
 
-`Run` and `AgentRun` remain reduced state. There are no canonical Run, AgentRun, Message, Session, snapshot, projection, outbox, Memory, or Artifact tables.
+### D-05 — Event contract and replay
 
-### D-05 — Identity and time
+**Beta decision:** one STRICT Events table contains global sequence, required Session ID, optional Run/AgentRun IDs, kind, event version, bounded JSON payload, and display timestamp. Sequence defines order.
 
-**V1 decision:** use typed UUIDv7 newtypes for `RunId` and `AgentRunId`; use the SQLite integer sequence for event order. Use `SystemTime` only for persisted Unix milliseconds and `Instant` for elapsed time/deadlines. Do not add Clock, ID-generator, or calendar-time abstractions.
+Initial semantic kinds are:
 
-### D-06 — Workspace and instruction inputs
+- `SessionStarted`, `SessionRenamed`, `SessionDefaultChanged`, `SessionForked`, `ContextCompacted`;
+- `MessageAccepted`, `MessageCommitted`;
+- `RunStarted`, `RunFinished`; and
+- `AgentSpawned`, `AgentUpdated`, `AgentFinished`.
 
-**V1 decision:** open the user-selected Workspace once as a `cap_std::fs::Dir`. Resolve exact root `AGENTS.md`, using exact root `CLAUDE.md` only on actual absence. Resolve every `--include` by walking one component at a time with no-follow handles. Reject absolute paths, `.`, `..`, empty components, every symlink/junction/reparse component, and non-regular files.
+SessionView and RunView are pure reductions. Unknown kind/version, gaps, malformed payload, illegal transition, wrong scope, invalid fork boundary, or compaction digest mismatch fails closed. Rebuildable Session-list indexes are allowed; duplicate canonical Session/Run/Message tables are not.
 
-Read each opened handle once into a bounded buffer, validate UTF-8, calculate SHA-256 over those exact bytes, and give the Provider the immutable snapshot. Persist only relative manifests/digests, not included file bodies. The contract prevents pathname escape and check-then-reopen races; it does not pretend several files form an atomic repository snapshot.
+### D-06 — Identity and time
 
-### D-07 — Fixed resource bounds
+**Beta decision:** typed UUIDv7 newtypes identify Sessions, Runs, and AgentRuns; SQLite integer sequence is authoritative Event order. Persist Unix milliseconds for display and use monotonic `Instant` for deadlines. Do not add Clock or ID-generator traits.
 
-**V1 decision:** limits are constants, not configuration.
+### D-07 — Workspace and instruction inputs
 
-| Resource | Limit |
+**Beta decision:** pin the user-selected Workspace as a capability. Resolve exact root `AGENTS.md`, falling back to exact root `CLAUDE.md` only on absence. Resolve every explicit include component-by-component with no-follow handles. Reject absolute paths, `.`, `..`, empty components, links/reparse points, and non-regular files.
+
+Read each opened handle once, bound it, validate UTF-8, hash exact bytes, and send snapshots rather than paths. Repository/Git configuration, `.env`, hooks, plugins, packages, tests, and startup commands are never consulted.
+
+### D-08 — Resource bounds
+
+**Beta decision:** keep limits fixed until measurements justify configuration.
+
+| Resource | Beta limit |
 |---|---:|
-| Objective | 8 KiB |
-| Includes | 16 files |
-| One include | 128 KiB |
-| All includes | 256 KiB |
+| User Message/objective | 8 KiB |
+| Explicit includes | 16 files |
+| One include / all includes | 128 KiB / 256 KiB |
 | Instruction file | 64 KiB |
-| Compiled provider input | 384 KiB |
-| Child objective | 2 KiB |
-| Agent summary | 2 KiB |
-| Worker result | 16 KiB |
-| Root final result | 32 KiB |
+| Compiled Provider input | 384 KiB |
+| Child objective / summary / result | 2 KiB / 2 KiB / 16 KiB |
+| Primary final result | 32 KiB |
 | Provider response body | 1 MiB |
 | Event payload | 64 KiB |
-| Provider calls | 4 |
+| Default / hard active children | 3 / 8 |
+| Provider calls | `1` direct or at most `N + 2` team calls |
 | Output tokens per call | 4,096 |
-| Provider-call deadline | 120 seconds |
-| Whole-Run deadline | 300 seconds |
-| Cancellation drain | 2 seconds |
+| Provider-call / Run deadline | 120 s / 300 s |
+| Cancellation drain | 2 s |
 | Automatic retries | 0 |
-| SQLite busy wait | 250 ms |
-| SQLite database | 4 KiB pages × 65,536 = 256 MiB |
-| Headroom to admit a Run | 4 MiB |
-| RunUpdate channel | 32 items |
-| Store request channel | 64 items |
+| SQLite busy wait / database / admission headroom | 250 ms / 256 MiB / 4 MiB |
+| Update / store channels | 32 / 64 items |
 
-Every overflow is typed and visible; canonical content is never silently truncated.
+Before `RunStarted`, reserve the selected policy's maximum call/output/resource budget. Every overflow is typed and visible; canonical content is never silently truncated. The eight-child ceiling may increase only after named-host concurrency, memory, cost-feedback, and terminal-density gates pass.
 
-### D-08 — CLI and output
+### D-09 — CLI and Session commands
 
-**V1 decision:** expose only:
+**Beta decision:** expose:
 
 ```text
-arany [--state-dir DIR] run [--workspace DIR] [--include PATH]... [--model ID] [--otlp-endpoint URL] [--jsonl] OBJECTIVE
-arany [--state-dir DIR] show [--jsonl] RUN_ID
+arany [GLOBAL_OPTIONS] [PROMPT]
+arany --continue
+arany --resume [SESSION_ID]
+arany --fork SESSION_ID
+arany exec [GLOBAL_OPTIONS] --output text|jsonl PROMPT
+arany show [--state-dir DIR] --output text|jsonl SESSION_OR_RUN_ID
+arany provider check PROFILE
 ```
 
-Human `run` writes committed append-only progress to stderr and the final root result to stdout. Human `show` writes deterministic reconstructed state to stdout. JSONL writes one compact persisted Event per stdout line and typed diagnostics to stderr.
+Bare `arany` creates a persistent Session; with a prompt it starts the first Run and remains interactive. `--continue`, `--resume`, and `--fork` are explicit; directory matching never resumes implicitly. `exec` creates a single-Run Session by default and requires an explicit Session ID to append. There is no `run` alias.
 
-Reuse the mature terminal contracts compared in [CLI user-feedback patterns from agent harnesses](./cli-user-feedback-patterns-from-agent-harnesses.md):
+The closed slash set is `/help`, `/status`, `/sessions`, `/new`, `/clear`, `/resume`, `/fork`, `/rename`, `/compact`, `/agents`, `/provider`, `/model`, `/permissions`, `/quit`, and `/exit`. `/clear` aliases `/new`; it does not delete history. `/agents` inspects AgentRuns and configures next-Run `single|auto|team` plus `N`. Provider/model/collaboration changes are locked during a Run. Commands are local and never Provider input; `//` escapes a leading slash. Machine modes interpret prefixes literally.
 
-- every AgentRun has a trusted stable display label plus typed ID; untrusted objectives and summaries never supply the prefix;
-- root wait updates identify the exact outstanding worker IDs and count;
-- the terminal Run Event separates outcome, usage, and recovery, reporting calls used/limit, provider-reported tokens when present, elapsed time, terminal reason, Run ID, last committed sequence, and the exact `arany show` replay command;
-- provider-reported, locally calculated, estimated, and unavailable usage are labelled distinctly; V1 never invents currency cost;
-- every worker receives one persisted terminal success, failure, or cancellation status before the Run terminates, even when it produced no result; and
-- errors identify the phase, stable symbolic code, affected Run/AgentRun when known, last durable sequence, and one safe next action without exposing raw provider or secret data.
+Approval/sandbox controls remain absent until effectful Tools and enforcement exist.
 
-There is no TTY branch, color, cursor movement, redraw, width calculation, resize handling, raw mode, spinner, alternate screen, recursive/glob input, prompt-from-stdin, verbose logging, or general config file.
+### D-10 — Terminal contract
 
-Exit codes are `0` success/help, `1` operational failure, `2` invalid invocation or pre-Run input/configuration, and `130` user cancellation.
+**Beta decision:** use a bounded inline Ratatui viewport in normal terminal flow:
 
-### D-09 — Configuration, state, and credentials
+1. committed transcript in native scrollback;
+2. composer;
+3. compact status row below input; and
+4. conditional activity shelf.
 
-**V1 decision:** use named precedence only:
+The single-agent case gets one active row, not empty team chrome. Multiple/attention agents use at most three rows plus `+N more`; `/agents` opens full details. The footer prioritizes Session, pinned/next Provider and model, permission profile, collaboration mode, and context remaining.
 
-- state directory: `--state-dir` > non-empty `ARANY_STATE_DIR` > platform `ProjectDirs` location;
-- model: `--model` > non-empty `ARANY_OPENAI_MODEL` > error; and
-- OTLP traces endpoint: `--otlp-endpoint` > `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` > `OTEL_EXPORTER_OTLP_ENDPOINT` > disabled; and
-- credential: non-empty `OPENAI_API_KEY` > error.
+Keyboard behavior is complete. Normal mode does not enable mouse reporting. Open command/Session/agent pickers may enable it transiently; every action has a keyboard equivalent and the RAII owner disables mouse on close, signal, suspension, panic, cancellation, render failure, or lost ownership. Never enter alternate screen or enable focus, title/clipboard OSC, or global mouse capture.
 
-There is no compiled model default, `.env` loading, API-key flag, login flow, keychain, arbitrary base URL, or ambient enterprise proxy. The API key is held in `secrecy::SecretString`, exposed only to build the sensitive Authorization header, and never persisted or formatted. This reduces accidental application disclosure; it does not claim to erase environment or TLS copies.
+Screen-reader mode is append-only and control-free. `exec` and `show` never initialize terminal state. The command, not TTY detection, selects behavior.
 
-Resolve the state root before reading repository input. Whether defaulted or explicit, it must be outside the Workspace, local, no-follow, owned by the current OS user, and private: directory `0700` and database/sidecars `0600` on Unix, or an equivalently verified effective ACL on Windows. An insecure or unverifiable root fails before `RunStarted`; the program never repairs broad permissions silently.
+### D-11 — Configuration, credentials, and custom endpoints
 
-### D-10 — Cancellation and terminal truth
+**Beta decision:** resolve CLI selections over trusted user config/Session defaults. State/config roots are platform user locations outside the Workspace and admitted before project input. Custom Provider profiles are configuration, not repository data.
 
-**V1 decision:** first Ctrl-C cancels the Run token and every child. The supervisor—not child tasks—owns terminal Events. A second Ctrl-C or the two-second deadline aborts and reaps the `JoinSet`, after which the supervisor best-effort persists stable cancelled Agent/Run terminals. Do not call `process::exit`.
+Credentials remain API-key references only. Native adapters read their named environment variables; custom profiles name one environment variable. Never accept keys in arguments, profile files, Events, terminal output, or telemetry. Do not load `.env` or run credential commands.
 
-If terminal persistence succeeds, return 130. If the store fails, return 1 rather than claiming durable cancellation. Whole-Run deadline produces `TimedOut` and exit 1. A forced process death leaves a valid prefix that offline replay labels `Interrupted` without appending a fictional Event.
+Native origins are compiled. Custom non-loopback origins require HTTPS; numeric loopback may use explicit HTTP. Normalize and pin origin/base path, disable redirects/cookies/ambient proxies, reject metadata/link-local/multicast and route drift, and bind one credential to one origin.
 
-### D-11 — Error and retry boundary
+### D-12 — Cancellation, errors, and retries
 
-**V1 decision:** typed Engine errors cover input, storage, update-sink loss, and invariant failure. Provider failures after `RunStarted` become bounded safe terminal Event data when the store remains writable. Diagnostics allowlist codes, IDs, counts, status, request ID, and safe timing; they never include credentials, headers, prompts, included content, response bodies, or raw database payloads.
+**Beta decision:** the first Ctrl-C cancels the active Run and every child but leaves the Session durable. A second press or two-second drain deadline aborts/reaps remaining tasks; the supervisor persists the strongest honest terminal prefix. Store failure returns operational exit 1 rather than false durable cancellation. Process death replays as `Interrupted`.
 
-There are zero automatic retries, including reqwest protocol retries. A post-send transport failure is potentially billable/ambiguous and is not replayed. Retry becomes a separate Engine policy only after measured transient failure, explicit attempt Events, one total deadline, and provider idempotency/resume evidence where required.
+Provider/Engine errors are typed safe classes. No credentials, headers, prompts, Messages, includes, response bodies, or raw stored payloads enter diagnostics. Automatic retries, provider/model fallback, and broker fallback are zero; a sent request may already be billable.
 
-### D-12 — Exact dependency boundary
+### D-13 — Dependency boundary
 
-**V1 decision:** the direct dependency set is the one in [rust-foundation-and-engine-contract.md](./rust-foundation-and-engine-contract.md): `cap-std`, `cap-fs-ext`, `clap`, `directories`, `opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp`, `reqwest`, `rusqlite`, `secrecy`, `serde`, `serde_json`, `sha2`, `thiserror`, `tokio`, `tokio-util`, `uuid`, target-specific `windows-sys`, and dev-only `tempfile`, the OpenTelemetry SDK `testing` feature, and Tokio `test-util` without macros.
+**Beta decision:** direct dependencies remain the reviewed Rust foundation set: capability filesystem crates, clap, Tokio/cancellation, serde/JSON, reqwest+Rustls, rusqlite/bundled SQLite, directories, secrecy, SHA-256, UUID, error handling, Ratatui/Crossterm, target-specific platform APIs, and trace-only OpenTelemetry crates for the final slice. Dev dependencies include tempfile, Tokio test utilities, OpenTelemetry test support, and a reviewed PTY helper such as expectrl.
 
-Notably absent as direct architectural choices are SQLx, a pool, `async-trait`, an OpenAI community SDK, SSE libraries, a TUI, a configuration framework, `tracing`, a schema generator, a migration framework, and a web framework. An OpenTelemetry dependency may pull `futures-util` transitively; dependency inspection must distinguish unavoidable upstream internals from direct application APIs. `Cargo.lock` must pin transitive resolution and dependency updates repeat feature/advisory/license review.
+Do not add SQLx, a pool, async-trait, vendor community SDKs, browser/OAuth/keyring/SSE libraries, a generic configuration framework, tracing subscriber, a second terminal framework, or dynamic plugin loading. `Cargo.lock`, feature inspection, advisories, licenses, build scripts, proc macros, native code, and application `unsafe` are release gates.
 
-### D-13 — Optional OTLP trace export
+### D-14 — OTLP ships last in beta
 
-**V1 decision:** after the core team-run/replay/cancellation proof passes, add one private `telemetry.rs` module. It exports traces only over OTLP/HTTP binary protobuf to an explicit numeric-loopback `http` Collector endpoint. It defines no trait, exposes no OpenTelemetry type to Engine callers, creates no global tracer or `tracing` subscriber, and cannot affect persisted Events, `RunView`, cancellation, or process exit status after a Run starts.
+**Beta decision:** after Session/team/native/custom-provider gates pass, ship runtime-opt-in trace-only OTLP/HTTP protobuf to an explicit numeric-loopback Collector. It is part of beta, not deferred to an external request.
 
-SQLite Events remain canonical. The module accepts a compile-time typed allowlist of identifiers, phases, outcomes, event kinds/sequences, timing, and bounded model/token metadata. It cannot accept objectives, prompts, instructions, summaries, results, paths, file metadata or contents, Event payloads, provider bodies, headers, credentials, arbitrary attributes, or formatted errors.
+Each Run is a trace correlated by safe Session/Run/AgentRun IDs. Spans are dynamic and bounded by admitted agents and calls; the topology is not fixed at nine. Typed fields exclude user Messages, objectives, prompts, instructions, summaries, results, paths, contents, Event payloads, bodies, headers, credentials, and arbitrary attributes. Export failure/drop/shutdown never changes canonical state or Run exit.
 
-Initial operational bounds are fixed:
+### D-15 — Security boundary
 
-| Resource | Limit |
-|---|---:|
-| Successful fixed workflow | 9 spans |
-| Ended-span queue | 256; drop new spans when full |
-| Export batch | 64 spans |
-| Batch schedule | 250 ms |
-| Attributes / span | 32 |
-| Events / span | 32 |
-| Attribute string | 256 UTF-8 bytes |
-| Encoded request | 256 KiB |
-| One export attempt | 500 ms |
-| Retries | 1; two attempts total |
-| Normal telemetry shutdown | 750 ms |
-| Queued telemetry memory target | 4 MiB |
+**Beta decision:** establish all authority before project input. Session history, repository text, Provider/custom-profile output, compaction, child data, and replay are untrusted. None may widen roots, endpoints, credentials, protocol, models, budgets, topology, policy, instruction role, telemetry, or capabilities.
 
-Redirects and ambient proxies are disabled. The local Collector owns remote TLS, authentication, secrets, routing, and backend retry. Invalid explicit telemetry configuration fails before `RunStarted` with exit 2; a valid but unavailable Collector produces a safe diagnostic and is non-fatal. The evidence contract is in [OTLP observability](./otlp-observability.md).
+The beta has no shell, subprocess, Workspace write, arbitrary fetch, MCP, runtime plugin, callback listener, or sandbox claim. State is private/no-follow/defensive; output is inert; custom egress requires exact current evidence; budgets are aggregate; mouse capture is transient and restored; supply-chain inputs are pinned and reviewed. The first effectful Tool activates typed EffectIntent, Policy, approval proof, separate Guard, and attestation.
 
-### D-14 — V1 security boundary
+### D-16 — Evidence-dense testing
 
-**V1 decision:** establish every authority source before consuming project-controlled input. Parse only CLI syntax and named trusted process configuration, resolve and pin the private state root and caller-selected Workspace, and then read exact instruction/include snapshots. V1 never reads or executes repository/Git configuration, `.env`, hooks, filters, `fsmonitor`, plugins, package-manager metadata, test discovery, startup commands, or a trust cache. Repository text, provider output, child messages, and replayed Events are untrusted data; none can select or widen a root, endpoint, model, credential, budget, topology, policy, instruction role, or telemetry destination.
+**Beta decision:** maximize evidence per test, not test count or line coverage. One deterministic Session journey owns new/single Run, exit/resume, Provider switch, `N`-child team, controlled completion, fork, compaction failure, cancellation, replay, and exact output with only Provider scripted.
 
-The initial state and output rules are:
+Tables/corpora own other `N` values, parser/command states, illegal histories, path/security inputs, custom-profile conformance, and terminal controls. TestBackend owns semantic composer/footer/shelf frames. Native Linux/macOS PTYs own scrollback, Session/agent pickers, transient mouse, signals, suspension, cancellation, and restoration. Native adapters own explicit paid live runs; custom profiles own data-free conformance before Workspace-bearing smoke.
 
-- open SQLite read-write/create with `SQLITE_OPEN_NOFOLLOW`, defensive mode, `trusted_schema=OFF`, and the selected rollback configuration on one dedicated thread;
-- refuse non-local storage, links/reparse points, wrong type, unexpected owner, or broad permissions/ACL;
-- initialize 4 KiB pages with a 65,536-page limit (256 MiB), require at least 4 MiB headroom before a new Run, and never silently prune canonical Events;
-- validate schema/version/identity/sequence/legal transitions/counts/sizes during replay and never feed persisted text into instructions, policy, configuration, or a later Provider request;
-- reserve one aggregate four-call and maximum-output-token budget before `RunStarted`; children draw from the same non-widening Run budget; and
-- escape or reject terminal ESC/CSI/OSC/DCS, C0/C1 controls, carriage return, backspace, bidi controls, and forged status prefixes; emit JSONL only through a serializer as one object per line.
+### D-17 — Product identity, platforms, and license
 
-Provider egress remains the only intentional network authority: one compiled origin/path, no redirects/proxies/cookies/ambient credentials/retries, bounded compressed and decompressed bodies, and an explicit request assembler that accepts only phase-required data. Endpoint authorization never authorizes arbitrary upload. Canary tests prove omitted Workspace content, secrets, state, and telemetry-forbidden data do not leave.
+**Beta decision:** the product and executable are Arany/`arany`. Linux and macOS require the same native filesystem, persistence, signal, terminal, packaging, and accessibility evidence. Windows remains triggered scope.
 
-The application crate uses `#![forbid(unsafe_code)]`, commits `Cargo.lock`, pins the toolchain, minimizes features, and inventories dependency sources, build scripts, procedural macros, native code, FFI, unsafe code, licenses, advisories, and development-Skill provenance. Bundled SQLite is an explicit native-code exception with runtime option checks. V1 has no listener, runtime plugin, self-update, temp response file, shell, subprocess, arbitrary HTTP, callback URL, or effectful Tool.
+Use **Apache-2.0 plus a project NOTICE** attributed to `fpmirabile`. This is the closest standard license to free use/modification with redistributed attribution, changed-file marking, and an explicit patent grant. Do not dual-license with MIT and do not append a custom attribution clause. It cannot force private users or hosted services to display credit. Preserve `LICENSE` and `NOTICE` in every release artifact.
 
-**Implementation gates:** pass the incident-derived startup, path-race, state permission/ACL, corrupt replay, disk-full, hostile provider-network, secret/egress canary, terminal-control, aggregate-budget, cancellation/backpressure, supply-chain, and platform-capability suites in the [security report](./harness-security-lessons-and-controls.md). Publish the supported-platform matrix and explicit non-claims with the result. No sandbox or arbitrary-code containment claim is permitted.
+### D-18 — Consumer subscription authentication remains triggered
 
-### D-15 — Evidence-dense V1 testing
+**Triggered scope:** beta is API-key only. Reopen OpenAI's official plan profile only when its inference route gains a provider-enforced output cap or an approved ADR replaces the universal budget guarantee, and browser/OIDC/secret/conformance gates pass. Anthropic subscription auth requires explicit prior approval. Never import other harness credentials or call private ChatGPT routes.
 
-**V1 decision:** optimize for evidence per test rather than test count or coverage percentage. Every acceptance scenario produces one `ObservationBundle`: exit class, exact stdout bytes, exact stderr bytes, Events reopened from a closed SQLite store, and the RunView reduced from those Events. The central deterministic journey uses the real CLI adapter, Engine, scheduler, file-backed SQLite, reducer, and renderers with only the semantic Provider scripted. A product-process table separately owns arguments, channel separation, exit codes, signal wiring, and `show`; one ignored paid OpenAI smoke owns the complete live path.
+## 3. Triggered modules
 
-Add a test only for a user-visible contract, durable/security invariant, protocol boundary, concurrency/failure mode, or demonstrated regression that no existing owner catches with equally useful diagnostics. Large verification matrices become compact scenarios, data tables, hostile corpora, or failpoint loops; exact boundary rows do not become individual test functions. Refactors normally add no tests, and superseded tests/fixtures are deleted when a stronger owner covers the same defect.
-
-Default `cargo test` is offline, deterministic, retry-free, free of wall sleeps and hardware-sensitive timing assertions, and uses real temporary filesystem objects plus file-backed SQLite. A few manual byte goldens own only public human/JSONL output and require line-by-line review. Property, fuzz, model-checking, snapshot, process-test, or concurrency frameworks activate only when a named state space or repeated mechanism earns them. Stochastic model quality remains an evaluation; performance remains a named-host measurement.
-
-**Implementation gates:** pass the V1 verification register, platform behavior matrix, exact-output review, flake rules, and test-deletion review in [Testing strategy for the Rust CLI harness](./testing-strategy-for-rust-cli-harness.md). The ignored live test must run explicitly before claiming OpenAI compatibility, but it never enters the default deterministic suite.
-
-### D-16 — Product identity, beta platforms, and distribution intent
-
-**V1 decision:** the product is **Arany** and the executable and Cargo package are `arany`. The checkout directory is not part of the public contract. Environment variables owned by the product use the `ARANY_` prefix.
-
-The beta supports Linux and macOS only after the same native startup, path, persistence, signal, cancellation, terminal, and packaging suites pass on each platform. Windows is intentionally deferred until its reparse-point, ACL, console-control, path-namespace, packaging, and future containment gates pass; this is a release boundary, not an architectural fork.
-
-Arany will be available without a purchase requirement and will preserve author attribution. The exact open-source license is a pre-public-release product decision because permissive attribution can be expressed by more than one legal instrument; repository prose must not imply MIT, Apache-2.0, dual licensing, or another license until that choice is recorded and a license file exists.
-
-## 3. Every previously listed next step
-
-| Previous next step | Status | Closed by |
+| Trigger | Introduce | Evidence already available |
 |---|---|---|
-| Choose Rust dependencies and runtime | V1 decision | [Rust foundation](./rust-foundation-and-engine-contract.md) D-01/D-12 |
-| Define `Delegate`, `Finish`, Event, and RunView | V1 decision | [Rust foundation](./rust-foundation-and-engine-contract.md) D-02–D-04 |
-| Decide all fixed limits | V1 decision | [CLI and operability](./cli-inputs-configuration-and-operability.md) D-07 |
-| Decide IDs, time, versions, and redaction | V1 decision | Rust foundation, [persistence](./agent-state-persistence.md), and CLI report |
-| Define terminal behavior | V1 decision | CLI report D-08 |
-| Define OpenAI model/config/credential behavior | V1 decision | CLI report and Rust foundation D-03/D-09 |
-| Define deterministic fake and live fixture | V1 decision plus implementation gate | CLI report sections 11–13 |
-| Compare SQLite with other persistence options | V1 decision plus backend triggers | Persistence report |
-| Prove crash durability and replay | Implementation gate | Persistence report sections 12–13 |
-| Prove local overhead is negligible | Implementation gate | Persistence and CLI performance gates |
-| Prove no-follow input handling on supported beta platforms | Implementation gate | Native Linux and macOS CLI/Rust resolver suites; Windows is deferred to its support gate |
-| Prove provider compatibility | Implementation gate | Strict fake plus ignored live OpenAI smoke |
-| Define standard observability export | V1 decision plus implementation gates | [OTLP observability](./otlp-observability.md) D-01/D-13 |
-| Learn from existing harness security failures and fix the V1 boundary | V1 decision plus release gates | [Harness security lessons](./harness-security-lessons-and-controls.md) D-14 |
-| Keep testing small while proving real user-visible behavior | V1 decision plus release gates | [Testing strategy](./testing-strategy-for-rust-cli-harness.md) D-15 |
-| Name the product and bound beta support | V1 decision plus native release gates | D-16 |
+| First effectful Tool | Typed effects, Policy, approval proof, separate Guard | Security/protection reports |
+| Children need nested delegation | Recursive supervision and depth budgets | Multi-agent report |
+| Concurrent writes | Isolated Workspace views and integration owner | Multi-agent report |
+| Dependencies/ownership transfer | Assignment DAG, attempts, leases, fencing | Multi-agent report |
+| Knowledge helps another Session | Scoped Memory and retrieval/deletion evaluation | Context/Memory report |
+| Event payload bound is exceeded | Content-addressed Artifacts | Context/Provider reports |
+| Replay misses measured budget | Rebuildable snapshots | Persistence report |
+| Retrieval quality requires it | FTS5, then vector/hybrid only after labelled gap | Context report |
+| Second Client or detached work | Per-user daemon and versioned local protocol | Modular architecture |
+| Built-in OpenRouter support is claimed | Exact broker route/privacy/provenance/no-fallback adapter | Provider report |
+| Browser/remote/multi-tenant product exists | New authn/authz/quota/encryption/retention/threat model | Modular/security reports |
+| Direct remote telemetry is required | TLS/auth/secrets/proxy/SSRF design | OTLP report |
 
-The implementation gates require executable evidence. More general architecture research cannot make them pass.
+## 4. Implementation handoff
 
-## 4. Triggered modules already researched
+1. Write one implementation plan from `planning/TEMPLATE.md`, importing D-15 security and D-16 evidence owners.
+2. Create the one package with pinned toolchain, lockfile, minimal features, and supply-chain inventory.
+3. Implement trusted startup, private state, Workspace snapshots, Session/Event schema, reducers, deterministic output, and hostile-content handling.
+4. Prove create/exit/resume/multi-Run/fork and deterministic context compilation with the scripted Provider.
+5. Prove `single`, `auto`, `team`, ordered `0..N` children, aggregate budgets, join, and cancellation.
+6. Add the native-scrollback composer/footer/activity shelf, Session/agent pickers, accessibility, and transient mouse after keyboard/restoration proof.
+7. Add native OpenAI and Anthropic API-key adapters and their offline/live conformance.
+8. Add trusted custom `openai-responses` profiles and data-free `provider check`.
+9. Pass native Linux/macOS security, fault, PTY/accessibility, packaging, license, and performance gates.
+10. Add opt-in OTLP as the last beta slice and prove dynamic topology, privacy, bounds, failure isolation, and shutdown.
 
-These items are not unfinished V1 work. Their architecture is researched and their activation condition is explicit.
-
-| Trigger | Introduce | Existing evidence |
-|---|---|---|
-| First effectful Tool | One immutable `EffectIntent`, deterministic restrict-only Policy, digest-bound `ApprovalProof`, separate Guard process, effective-capability attestation, and adversary corpus | [Harness security lessons](./harness-security-lessons-and-controls.md), [deterministic protection](./deterministic-harness-protection.md), [instruction policy](./instruction-markdown-and-policy-enforcement.md) |
-| Agents may write concurrently | Isolated Workspace views, deterministic changesets, one integration owner | [Multi-agent loop](./multi-agent-loop-and-user-feedback.md) |
-| Dependencies, optional work, ownership transfer, or custom joins | Assignment DAG, attempts, leases, fencing, join policy | Multi-agent loop report |
-| Follow-up objectives need a durable conversation | Session | [Context and Memory](./context-memory-and-compaction.md) |
-| Knowledge must improve a later Run | Scoped Memory, retrieval evaluation, review/deletion lifecycle | Context and Memory report |
-| Event payloads exceed 64 KiB | Content-addressed Artifacts with retention and atomic publication | Context/Memory and [provider/tool runtime](./provider-and-tool-runtime.md) |
-| Replay breaches its measured budget | Rebuildable snapshots | Persistence report |
-| Lexical retrieval is required | FTS5 derived index | Context and Memory report |
-| Labelled retrieval evaluation proves lexical quality insufficient | Vector/hybrid derived index | Context and Memory report |
-| Second Client or detached execution | Per-user daemon and versioned local process protocol | [Modular architecture](./modular-harness-architecture.md) |
-| OpenAI blocks a required behavior | Second hosted Provider adapter | Provider/tool runtime report |
-| A Client needs incremental output | Bounded provider streaming and partial-output contract | Rust foundation |
-| Repeated trials need statistical release evidence | Evaluation runner, datasets, graders, baselines | [Evaluation strategy](./evaluation-and-quality-strategy.md) |
-| Browser, remote, or multi-tenant product exists | HTTP/SSE, identity, authorization, encryption, quota, retention, new threat model | Modular architecture and protection reports |
-| Measured terminal usability requires a richer renderer | TTY renderer over the same RunView, then color/width/resize policy | CLI report |
-| Direct remote telemetry is required | Explicit TLS, authentication, secret, proxy, and trust policy; preserve the Collector option | [OTLP observability](./otlp-observability.md) |
-| A daemon or aggregate SLO requires process-wide telemetry | Evaluate bounded OTLP metrics without making them canonical state | OTLP report |
-| Safe traces and canonical Events cannot diagnose a concrete field failure | Design allowlisted structured logs; never mirror Event payloads by default | OTLP report |
-
-## 5. Implementation handoff
-
-Research is complete when every design choice is settled or triggered; product guarantees still require code. The next execution sequence is:
-
-1. Write one implementation plan from the repository planning template, referencing this register and the canonical architecture. Import D-14's security claim, non-claims, P0 gates, and supported-platform evidence plus D-15's evidence owners, test-admission rule, and execution lanes explicitly.
-2. Create the one Cargo package with `#![forbid(unsafe_code)]`, the exact dependency/features boundary, pinned toolchain, committed lockfile, and reviewed build/proc-macro/native/Skill inventory.
-3. Implement and adversarially test startup ordering, trusted configuration, private state-root admission, Workspace handle pinning/snapshots, and inert human/JSONL output before any live Provider call.
-4. Add the dedicated SQLite thread, hardened open/schema, aggregate page admission, transition transactions, strict data-only replay, crash/disk/corruption tests, and forced-death recovery.
-5. Make the fixed four-call scripted `team_run` pass under one aggregate Run budget, then add graceful/forced cancellation and prove task/thread cleanup and backpressure behavior.
-6. Add the fixed bounded OpenAI adapter, hostile-network and secret/egress-canary tests, then run the ignored live structural smoke.
-7. Run every deterministic, fault, security, supply-chain, packaging, and performance gate natively on Linux and macOS before claiming the beta core demonstrator complete; publish its exact security claims and non-claims. Windows remains unsupported until its deferred native gate passes.
-8. In a separate patch, add private opt-in OTLP trace export and pass its topology, privacy-canary, loopback receiver, failure, cancellation, saturation, and performance gates.
-
-No daemon, protocol, Guard, effect runtime, Memory, Artifact store, Assignment DAG, snapshot, search index, second Provider, evaluation service, TUI, web API, direct remote telemetry, OTLP logs, or OTLP metrics precedes that vertical proof.
+No daemon, process protocol, Guard, Tool runtime, cross-Session Memory, Artifact store, nested team, Assignment DAG, search index, automatic Provider router, built-in OpenRouter, evaluation service, web API, direct remote telemetry, OTLP logs, or OTLP metrics precedes that proof.

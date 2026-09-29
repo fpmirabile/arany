@@ -1,8 +1,10 @@
 # Agent-state persistence for the minimum harness
 
+> **Session amendment — 2026-09-29:** The selected SQLite rollback-journal architecture remains. The canonical Events table now requires `session_id` and optional Run/AgentRun scopes so it can replay durable multi-Run Sessions, fork/default/compaction facts, and ordered bounded teams. SessionView/RunView remain reductions; no duplicate canonical entity tables are added. The [system overview](../architecture/system-overview.md) owns the current schema.
+
 **Status:** research and implementation recommendation  
 **Research date:** 2026-09-29  
-**Scope:** one local Rust CLI process, one authoritative writer, one root plus exactly two children on the success path, append/replay Events, no daemon, no effectful Tools  
+**Scope:** one local Rust CLI process, one authoritative writer, durable Sessions, one primary plus an ordered budget-bounded `0..N` collection of direct children per Run, append/replay Events, no daemon, no effectful Tools
 **Question:** Is SQLite the smallest honest persistence mechanism for this harness, and what exact durability contract should the demonstrator implement?
 
 > **Security amendment — 2026-09-29:** [Harness security lessons](./harness-security-lessons-and-controls.md) and D-14 in the [decision register](./next-step-decision-register.md) make no-follow open, defensive mode, owner/ACL validation, outside-Workspace local storage, data-only replay, a 256 MiB page cap, and 4 MiB Run-admission headroom release requirements rather than optional hardening.
@@ -50,9 +52,9 @@ The narrower correction to the previous research is important: **SQLite remains 
 
 The minimum architecture requires:
 
-- one process to append state transitions while a Run is active;
-- at most three active `AgentRun`s, all scheduled by the same Engine;
-- a global order sufficient to replay one Run;
+- one process to append Session and Run state transitions;
+- one primary plus at most the admitted bounded number of active child `AgentRun`s, all scheduled by the same Engine;
+- a global order sufficient to replay one durable Session or an individual Run;
 - reconstruction after normal exit, `Ctrl-C`, panic, or forced process death;
 - the same facts in human terminal output and JSONL;
 - no background service and no external database installation; and
@@ -73,9 +75,9 @@ Transient provider text may be shown before it is an Application Event only if t
 The unit of durability is a **logical Engine transition**, not necessarily one row:
 
 - `RunStarted`: one row and one commit;
-- delegating two workers: the root state update and both spawn Events in one transaction;
+- delegating an admitted team: the primary state update and all child-spawn Events in one transaction;
 - a worker completion: its final state and summary in one Event, one transaction;
-- root completion: root `AgentFinished` and `RunFinished` in one transaction; and
+- primary completion: primary `AgentFinished` and `RunFinished` in one transaction; and
 - graceful cancellation: all terminal cancellation Events in one transaction.
 
 SQLite states that changes inside one transaction are atomic, including across application, OS, and power failure subject to the filesystem and hardware honoring its sync and locking contracts ([SQLite transactional guarantee](https://www.sqlite.org/transactional.html), [atomic commit assumptions](https://www.sqlite.org/atomiccommit.html)).
@@ -297,7 +299,8 @@ If activated, keep one writer, use local storage only, retain `synchronous=FULL`
 ```sql
 CREATE TABLE events (
     sequence       INTEGER PRIMARY KEY,
-    run_id         TEXT NOT NULL,
+    session_id     TEXT NOT NULL,
+    run_id         TEXT,
     agent_run_id   TEXT,
     kind           TEXT NOT NULL,
     event_version  INTEGER NOT NULL CHECK (event_version >= 1),
@@ -305,8 +308,12 @@ CREATE TABLE events (
     created_at_ms  INTEGER NOT NULL
 ) STRICT;
 
+CREATE INDEX events_by_session
+    ON events (session_id, sequence);
+
 CREATE INDEX events_by_run
-    ON events (run_id, sequence);
+    ON events (run_id, sequence)
+    WHERE run_id IS NOT NULL;
 
 PRAGMA user_version = 1;
 ```
@@ -317,7 +324,7 @@ Changes from the earlier sketch are deliberate:
 - add an explicit `event_version`;
 - validate canonical JSON text;
 - make the table `STRICT`; and
-- retain exactly one application table and one index.
+- retain exactly one canonical application table with rebuildable Session and Run indexes.
 
 SQLite says `AUTOINCREMENT` adds CPU, memory, disk-space, and disk-I/O overhead and is usually unnecessary. A plain `INTEGER PRIMARY KEY` normally assigns one more than the largest row ID. Reuse is possible only after deleting the largest row or exhausting the signed 64-bit range ([SQLite autoincrement](https://www.sqlite.org/autoinc.html)). V1 never deletes canonical Events, so non-reuse does not justify the feature.
 
@@ -527,7 +534,7 @@ Do not use Rust enum variant names or default Serde layouts as the durable contr
 The selected schema immediately supports:
 
 ```sql
--- Replay one Run.
+-- Replay one Run within its Session.
 SELECT sequence, agent_run_id, kind, event_version, payload, created_at_ms
 FROM events
 WHERE run_id = ?1
@@ -587,7 +594,7 @@ When explicit whole-Run deletion becomes a product requirement, define whether a
 
 ### 12.1 Schema tests
 
-- A new database has `user_version=1`, one `events` table, and one Run index.
+- A new database has `user_version=1`, one `events` table, and the canonical Session and Run indexes.
 - `journal_mode` returns `delete`; `synchronous` returns `3` (`EXTRA`).
 - The table is `STRICT`.
 - malformed JSON, unknown application kinds, empty/oversized identifiers, payloads over the application limit, and version zero are rejected at the correct boundary.
@@ -597,7 +604,7 @@ When explicit whole-Run deletion becomes a product requirement, define whether a
 
 - a valid multi-Event transition commits all rows in order;
 - an injected failure on the second insert leaves none of that transition's rows;
-- `RunFinished` cannot commit before both child terminals;
+- `RunFinished` cannot commit before every admitted child reaches a terminal state;
 - committed Events are reduced before rendering and uncommitted Events are never rendered as durable;
 - a concurrent second writer hits the bounded busy behavior;
 - disk-full and read-only errors leave the prior prefix replayable.

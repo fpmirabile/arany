@@ -3,7 +3,7 @@
 **Research and source-access date:** 2026-09-28  
 **Question:** How should a Rust-first, multi-agent harness preserve canonical history, construct bounded model context, retrieve durable memory, compact long-running sessions, isolate agent branches, and give users reliable control without making provider-specific behavior part of the domain?
 
-> **Scope amendment — 2026-09-29:** Version 1 keeps bounded input assembly private inside Engine and runs exactly one root plus two children. Cross-Run Memory, retrieval, compaction, lineage for larger teams, and persistent caches below are triggered future designs. The [system overview](../architecture/system-overview.md) and [next-step decision register](./next-step-decision-register.md) are canonical for implementation.
+> **Scope amendment — 2026-09-29:** Beta now activates durable multi-Run Sessions, deterministic context compilation, explicit resume/fork lineage, and digest-bound derived compaction for one primary plus bounded `0..N` direct children. Cross-Session Memory, autonomous retrieval, Artifacts, embeddings, and nested team lineage remain triggered future designs. The [system overview](../architecture/system-overview.md), [focused Session/team report](./beta-sessions-teams-terminal-providers-and-license.md), and [decision register](./next-step-decision-register.md) are canonical.
 
 ## Reading guide
 

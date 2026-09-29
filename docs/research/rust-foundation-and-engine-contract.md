@@ -1,23 +1,31 @@
 # Rust foundation and minimum Engine contract
 
+> **Session/team amendment — 2026-09-29:** [Beta Sessions, teams, terminal, providers, and license](./beta-sessions-teams-terminal-providers-and-license.md) supersedes the fixed four-call/two-child shape. Beta adds focused `session.rs`, Session-scoped Events, explicit resume/fork/compaction, and one primary plus ordered budget-bounded `0..N` direct children. A direct answer uses one Provider call; a team with `k` children uses `k + 2`. Native OpenAI/Anthropic remain; exact custom endpoint/model profiles require data-free conformance before Workspace disclosure.
+
 Status: recommended foundation for the first executable demonstrator  
-Scope: one Cargo package, one process, CLI only, one root agent, exactly two child agents, SQLite event journal, scripted and OpenAI providers  
+Scope: one Cargo package, one process, CLI only, durable Sessions, one accountable primary with ordered budget-bounded direct children, SQLite event journal, one scripted Provider, native OpenAI/Anthropic, and exact conformance-gated custom profiles
 Research date: 2026-09-29
 
 > **Security amendment — 2026-09-29:** [Harness security lessons](./harness-security-lessons-and-controls.md) and D-14 in the [decision register](./next-step-decision-register.md) supplement this contract. Startup pins private state and Workspace authority before repository input; SQLite opens no-follow in defensive mode with ownership/ACL and aggregate-growth checks; replay remains data-only; terminal output is inert; one aggregate Run budget is reserved before `RunStarted`; and dependency/build/Skill provenance is a release gate.
+
+> **Multi-provider amendment — 2026-09-29:** [Beta multi-provider routing and adapters](./beta-multi-provider-routing-and-adapters.md) supersedes the OpenAI-only adapter, configuration, egress, provenance, and live-test details below. The non-streaming semantic `Delegate | Finish` contract remains, with one direct call or `N + 2` team calls; native OpenAI and Anthropic launch first, exact custom profiles require data-free conformance, and built-in OpenRouter/Z.AI remain gated.
+
+> **Terminal amendment — 2026-09-29:** [Beta terminal interface and multi-agent feedback](./beta-terminal-interface-and-multi-agent-feedback.md) supersedes direct rendering in `main.rs` and the absence of terminal dependencies below. [Interactive CLI conventions](./interactive-cli-conventions-and-command-surface.md) defines the durable bare-entry Session and closed slash registry. Add pure `presentation.rs` and terminal-owned `terminal.rs`; Ratatui/Crossterm types never enter Engine interfaces. D-12/D-18/D-20 in the [decision register](./next-step-decision-register.md) are authoritative.
 
 ## Decision
 
 Rust is a good fit for the harness core, but Rust alone will not make model generation faster. The useful latency win is to keep the local path short and predictable: one current-thread Tokio runtime, a reused HTTP client, a bounded response body, one coordinator loop, and one SQLite connection on a dedicated standard-library thread. The Engine should expose one real behavior seam, `Provider`; everything else remains concrete and private until a second implementation or an isolation requirement exists.
 
-The core proof should have four source files:
+The core proof should have six source files:
 
-- `main.rs`: parse CLI input, install Ctrl-C handling, select the concrete provider, and render `RunUpdate` or `RunView`.
+- `main.rs`: parse CLI input, select Provider and presentation, install signal handling, and compose the process.
 - `lib.rs`: public Engine command/data contract, private orchestration loop, event reducer, and handle-relative instruction/workspace input handling.
-- `provider.rs`: the `Provider` trait plus the scripted and OpenAI adapters.
+- `provider.rs`: the `Provider` trait plus scripted and private beta adapters.
 - `store.rs`: a private SQLite actor that owns its connection and migration.
+- `presentation.rs`: pure bounded `RunView -> PresentationModel` projection and deterministic linear rendering.
+- `terminal.rs`: Ratatui widgets, Crossterm event/resize handling, and one RAII terminal owner.
 
-After that core proof passes, the optional OTLP patch adds one more private file:
+After the Session, team, replay, and cancellation proof passes, the final beta OTLP slice adds one more private file:
 
 - `telemetry.rs`: typed content-free span mapping, OTLP/HTTP-protobuf export, bounded batching, and shutdown.
 
@@ -80,14 +88,14 @@ Use rusqlite's `bundled` feature. Its project recommends bundled SQLite for appl
 
 The demonstrator is a bounded workflow, not an open-ended autonomous loop:
 
-1. The root agent performs `RootPlan` and must return `Delegate` with exactly two child objectives.
-2. The Engine creates two child `AgentRun`s and invokes both concurrently.
+1. The primary AgentRun performs planning and may return a direct `Finish` or `Delegate` with the number of child objectives admitted by the pinned `single|auto|team` policy.
+2. For a team Run, the Engine creates the admitted ordered collection of child `AgentRun`s and invokes at most the pinned concurrency limit at once.
 3. Each child performs `ChildWork` and must return `Finish`. A child cannot delegate.
-4. The Engine waits for both children. If either terminally fails, the run fails; it does not synthesize from partial results.
-5. The root performs `RootSynthesis` using the two child results and must return `Finish`.
-6. The Engine persists the root terminal event and then the run terminal event.
+4. The Engine waits for every admitted child. If any terminally fails, the Run fails; it does not synthesize from partial results.
+5. The primary performs synthesis using all ordered child results and must return `Finish`.
+6. The Engine persists the primary terminal Event and then the Run terminal Event.
 
-This creates exactly four provider invocations on the success path. It proves concurrent delegation, join, replay, cancellation, and feedback without introducing recursion, work stealing, leases, daemon recovery, or an unbounded model-driven loop.
+A direct success uses one Provider invocation; a team success with `N` children uses `N + 2`. This proves bounded delegation, concurrency, join, replay, cancellation, and feedback without introducing recursion, work stealing, leases, daemon recovery, or an unbounded model-driven loop.
 
 The semantic outcomes are deliberately narrow:
 
@@ -157,7 +165,7 @@ pub struct RunUpdate {
 }
 ```
 
-`run` persists an event, applies that same committed event to the reducer, and only then sends `RunUpdate`. Terminal and JSONL rendering therefore observe journal truth rather than optimistic in-memory state. A slow renderer backpressures through the bounded update channel instead of consuming unlimited memory. A closed receiver is an output failure: the Engine cancels and terminalizes the Run instead of silently spending provider budget with no attached CLI.
+The Engine persists an Event, applies that same committed Event to the reducer, and only then sends `RunUpdate`. Interactive, linear, and JSONL presentations therefore observe journal truth rather than optimistic in-memory state. A slow presentation backpressures through the bounded update channel instead of consuming unlimited memory. A closed receiver is an output failure: the Engine cancels and terminalizes the Run instead of silently spending Provider budget with no attached CLI.
 
 `show` replays the run and invokes the same reducer. There is no separately maintained projection table in the demonstrator. A failure to replay is surfaced; the Engine never skips an event it does not understand. `close` sends the store's terminal command, awaits its acknowledgement, and joins the SQLite thread. Dropping without `close` closes the last request sender and joins as a defensive fallback, but the CLI must use the explicit path so shutdown failures are reportable.
 
@@ -356,7 +364,7 @@ The storage codec writes `Event::kind()` to `kind` and the variant body to `payl
 - `AgentFinished`: terminal agent state, result or a redacted failure descriptor, usage, and provider request ID if present.
 - `RunFinished`: terminal run state. The successful final result remains on the root `AgentFinished` event and is not duplicated.
 
-The reducer rejects, at minimum, a sequence gap or regression; an event before `RunStarted`; a duplicate start; an update or finish for an unknown agent; an illegal state transition; a second terminal event; a third child; a child with a non-root parent; root success before both child successes; and run success before root success. Reducer failure while replaying is `StoreError::CorruptJournal`, not a best-effort partial view.
+The reducer rejects, at minimum, a sequence gap or regression; an Event before `RunStarted`; a duplicate start; an update or finish for an unknown AgentRun; an illegal state transition; a second terminal Event; children above the pinned limit or hard ceiling; a child with a non-primary parent; primary success before every admitted child succeeds; and Run success before primary success. Reducer failure while replaying is `StoreError::CorruptJournal`, not a best-effort partial view.
 
 ## RunView
 
@@ -471,7 +479,7 @@ OpenAI distinguishes authentication, permission, rate limit, quota, server, and 
 
 ## Retry boundary
 
-There is no automatic retry in the demonstrator. Configure reqwest with `retry::never()` and surface a typed failure. This keeps the exactly-four-call proof, lifecycle event sequence, cancellation, and cost behavior intelligible.
+There is no automatic retry in the demonstrator. Configure reqwest with `retry::never()` and surface a typed failure. This keeps the admitted call budget, lifecycle event sequence, cancellation, and cost behavior intelligible.
 
 Reqwest has its own retry layer and documents a default safe protocol retry policy, so disabling it is necessary if the Engine is to be the only future retry owner ([reqwest retry module](https://docs.rs/reqwest/latest/reqwest/retry/)). OpenAI recommends exponential backoff with jitter for transient rate limits and notes that failed requests still count toward rate limits ([OpenAI rate limits](https://developers.openai.com/api/docs/guides/rate-limits)). Those recommendations support a later bounded Engine policy, not nested provider and HTTP retries.
 
@@ -496,7 +504,7 @@ The data boundaries are:
 - Included file bodies are sent only for the invocation and are not journaled; the start event stores validated relative paths, sizes, and SHA-256 digests of the exact bytes read.
 - Raw provider responses and API error bodies are bounded to 1 MiB in memory, reduced to typed safe fields, and discarded.
 - `store: false` prevents default provider-side Response storage.
-- No general tracing/logging façade is present. The optional OTLP module exports only typed allowlisted spans; it never mirrors journal Events or arbitrary diagnostic fields. JSONL is a deliberate user output mode, not an internal dump.
+- No general tracing/logging façade is present. The runtime-opt-in OTLP module exports only typed allowlisted spans; it never mirrors journal Events or arbitrary diagnostic fields. JSONL is a deliberate user output mode, not an internal dump.
 - The OpenAI origin is fixed; redirects, arbitrary base URLs, cookies, and ambient proxies are absent. A custom endpoint becomes a separate security decision.
 
 ## What stays private
@@ -507,7 +515,7 @@ Only `Provider` is a trait. These remain concrete private implementation:
 | --- | --- | --- |
 | SQLite | `Store` actor in `store.rs` | second durable backend or separate privilege/process boundary |
 | Event reduction | private pure functions in `lib.rs` | reused by a second package or independently versioned protocol |
-| Scheduling | bounded root/two-child coordinator | recursive or queued work with a real scheduling policy |
+| Scheduling | bounded primary plus flat `0..N` direct-child coordinator | recursive or queued work with a real scheduling policy |
 | Cancellation | Engine-owned token tree | remote execution with acknowledged cancellation |
 | Retry | none | measured transient failures and an idempotency/resume contract |
 | Instruction resolution | private Engine function | a second resolution strategy with materially different policy |
@@ -515,11 +523,11 @@ Only `Provider` is a trait. These remain concrete private implementation:
 | State location | private `ProjectDirs`/override resolver in `store.rs` | a second state profile or system-wide installation |
 | Time and IDs | `SystemTime`, `Instant`, `Uuid::now_v7` | deterministic simulation that cannot test through persisted fixtures |
 | HTTP | private reqwest client in OpenAI adapter | a second transport for the same provider or test need not met by scripted Provider |
-| Rendering | direct terminal/JSONL functions in `main.rs` | second interactive renderer with shared nontrivial behavior |
+| Presentation | pure semantic/linear functions in `presentation.rs`; Ratatui/Crossterm ownership in `terminal.rs` | second independently consumed Client or measured need for a renderer protocol |
 | Configuration | named CLI/environment values with fixed per-setting precedence | multiple layered sources or a configuration file with merge semantics |
 | Telemetry | private concrete `Disabled | Otlp` module with typed safe fields | a second independently owned instrumentation implementation with genuinely different behavior |
 
-Do not create `Engine`, `Store`, `Repository`, `Scheduler`, `Memory`, `Clock`, `IdGenerator`, `Renderer`, `RetryPolicy`, `HttpClient`, `InstructionResolver`, `Workspace`, or `Telemetry` traits. Do not split the package into crates. A future web client first justifies a daemon/client protocol; it does not justify one in advance.
+Do not create `Engine`, `Store`, `Repository`, `Scheduler`, `Memory`, `Clock`, `IdGenerator`, `Renderer`, `RetryPolicy`, `HttpClient`, `InstructionResolver`, `Workspace`, or `Telemetry` traits. Two presentation files do not justify a renderer trait. Do not split the package into crates. A future web client first justifies a daemon/client protocol; it does not justify one in advance.
 
 ## Verification gates for implementation
 
@@ -527,8 +535,8 @@ The foundation is accepted only after these tests pass:
 
 ### Contract and orchestration
 
-- Scripted success produces exactly four provider calls, two overlapping child calls, and a successful replay-identical `RunView`.
-- Invalid phase/outcome pairs and a third child are rejected.
+- Scripted direct and `team(2)` successes produce the admitted call counts, overlapping child calls where applicable, and replay-identical `SessionView`/`RunView` values.
+- Invalid phase/outcome pairs and delegation above the pinned child limit or hard ceiling are rejected.
 - One child failure prevents synthesis and produces deterministic failed terminal events.
 - Slow `RunUpdate` consumers apply backpressure without unbounded growth or changing journal results.
 
@@ -556,10 +564,10 @@ The foundation is accepted only after these tests pass:
 - Store and update channels remain at their declared capacities under stress.
 - A second Ctrl-C and the two-second cleanup deadline both abort and reap the `JoinSet`, then let the supervisor best-effort persist stable cancellation events before exit 130; neither path calls `process::exit`.
 
-### Optional telemetry patch
+### Final beta telemetry slice
 
 - Disabled telemetry starts no worker and performs no network I/O; its fixed scripted Run overhead stays within 1% median and 100 µs absolute.
-- The successful workflow produces exactly nine spans with exact parentage, two overlapping children, four Provider spans, and no trace from `arany show`.
+- A direct Run and a `team(2)` Run produce the topology-derived span counts with exact parentage, overlapping children where applicable, one Provider span per admitted call, safe Session correlation, and no trace from `arany show`.
 - A canary corpus spanning every objective, instruction, include, result, path, Event payload, provider body/header, and credential is absent from in-memory spans, encoded protobuf, diagnostics, and snapshots.
 - A bounded loopback receiver proves OTLP/HTTP protobuf method, path, content type, status/retry classification, redirect rejection, proxy isolation, and request size limits.
 - Queue saturation drops telemetry without blocking Engine state, while queued telemetry remains within the 4 MiB target.
@@ -575,14 +583,14 @@ The foundation is accepted only after these tests pass:
 
 ### Dependency gates
 
-- Run `cargo tree -e features` and verify that Tokio multi-thread runtime and macro features, reqwest's `stream` feature, `sse-core`, native TLS, cookies, compression, SQLx, OpenTelemetry gRPC/Tonic, HTTP/JSON, runtime integration, log-provider bridges, and gzip are absent. `http-proto` unavoidably activates internal OTLP metric protocol code, but no meter provider or reader is constructed. `futures-util` may be an unavoidable OpenTelemetry transitive dependency; it is not a direct application dependency or an authorization to add streaming. Reqwest internally includes Tower's retry machinery, so also test that the OpenAI client uses `reqwest::retry::never()`; dependency-feature inspection alone cannot prove that runtime policy.
+- Run `cargo tree -e features` and verify that Tokio multi-thread runtime and macro features, reqwest's `stream` feature, `sse-core`, native TLS, cookies, compression, SQLx, OpenTelemetry gRPC/Tonic, HTTP/JSON, runtime integration, log-provider bridges, and gzip are absent. Review and minimize Ratatui, Crossterm, and PTY-test features separately. `http-proto` unavoidably activates internal OTLP metric protocol code, but no meter provider or reader is constructed. `futures-util` may be an unavoidable OpenTelemetry transitive dependency; it is not a direct application dependency or an authorization to add streaming. Reqwest internally includes Tower's retry machinery, so also test that every Provider client uses `reqwest::retry::never()`; dependency-feature inspection alone cannot prove that runtime policy.
 - Review `cargo deny` or equivalent advisory/license output before merging.
 - Run the handle-relative/no-follow resolver suite on Linux, macOS, and Windows before claiming those targets; never replace an unsupported target with path canonicalization plus reopen.
 - Commit `Cargo.lock`; dependency updates are deliberate changes with the same gates.
 
 ## Exact dependency recommendation
 
-The following is the complete first-slice dependency set. Versions reflect the primary crate documentation reviewed on 2026-09-29; `Cargo.lock` records the exact transitive resolution.
+The following block is the original Engine/storage/network baseline. The canonical complete set additionally includes reviewed pinned Ratatui and Crossterm runtime dependencies plus a reviewed development-only PTY helper such as `expectrl`, as required by D-12. Exact terminal versions and enabled features are selected only after the terminal report's dependency/security review; `Cargo.lock` records the resolution.
 
 ```toml
 [package]
@@ -621,7 +629,7 @@ tokio = { version = "1.53", default-features = false, features = ["rt", "signal"
 
 The three OpenTelemetry dependencies are confined behind `telemetry.rs`; default features are disabled because the upstream defaults include broader signals and transports. The OTLP `http-proto` feature currently activates internal metric-protocol support even though this application constructs no meter provider; this exception must remain recorded and re-reviewed on upgrades. The SDK `testing` feature is dev-only.
 
-Explicitly absent as direct application choices are `anyhow`, `async-trait`, SQLx, a connection pool, Hyper and rustls as direct dependencies, direct `rustix`, an OpenAI community SDK, `futures-util`, `sse-core`, BLAKE3, `chrono`, `time`, `jiff`, ULID, `schemars`, a migration framework, a retry crate, `tracing`, `dotenv`, a general configuration crate, direct `zeroize`, `dashmap`, `parking_lot`, terminal UI crates, and a web framework. OpenTelemetry may pull `futures-util` transitively; application code still does not use it.
+Explicitly absent as direct application choices are `anyhow`, `async-trait`, SQLx, a connection pool, Hyper and rustls as direct dependencies, direct `rustix`, an OpenAI community SDK, `futures-util`, `sse-core`, BLAKE3, `chrono`, `time`, `jiff`, ULID, `schemars`, a migration framework, a retry crate, `tracing`, `dotenv`, a general configuration crate, direct `zeroize`, `dashmap`, `parking_lot`, a terminal component framework beyond Ratatui/Crossterm, and a web framework. OpenTelemetry may pull `futures-util` transitively; application code still does not use it.
 
 ## Evolution triggers
 
@@ -630,7 +638,7 @@ Change this foundation only on evidence:
 - Enable Tokio multi-thread when profiling shows coordinator starvation from CPU work or materially higher runnable concurrency.
 - Add a database pool or SQLx when there are multiple concurrent writers, a remote database, or database portability—not merely because the API is asynchronous.
 - Add provider streaming only when a real client consumes incremental model output or measured time-to-first-useful-output is a product requirement; introduce the bounded parser, forward-compatibility policy, and partial-output cancellation/retry semantics together.
-- Add recursive scheduling only after the bounded two-child workflow is correct and evaluated; introduce explicit depth, fan-out, token, time, and concurrency budgets first.
+- Add nested or recursive scheduling only after the bounded flat `0..N` workflow is correct and evaluated; introduce explicit depth, fan-out, token, time, and concurrency budgets first.
 - Add automatic retry only under the six retry conditions above.
 - Add a daemon and transport only when a second client or detached execution exists.
 - Add another crate only for measured compile pressure, independent release/ownership, or privilege isolation.

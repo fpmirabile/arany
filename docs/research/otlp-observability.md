@@ -1,13 +1,17 @@
 # OTLP observability for the Rust-first harness
 
+> **Session/team amendment — 2026-09-29:** OTLP ships as the last beta slice, still opt-in at runtime. Each Run is a trace correlated by safe Session/Run/AgentRun IDs; span topology is derived from admitted `0..N` children, Provider calls, and context/compaction work rather than fixed at nine spans. Existing privacy, loopback-Collector, bounded-export, failure-isolation, and canonical-Events rules remain authoritative.
+
 **Status:** implementation recommendation  
 **Researched:** 2026-09-29  
-**Scope:** optional OpenTelemetry trace export from the local, CLI-only V1 harness  
+**Scope:** runtime-opt-in OpenTelemetry trace export from the local, CLI-only beta harness
 **Evidence rule:** protocol and SDK claims below cite primary specifications, official documentation, or upstream source at a reviewed version. Recommendations are labeled separately.
+
+> **Terminal amendment — 2026-09-29:** Bare interactive `arany`, deterministic `exec`/`show`, and screen-reader output are presentations of committed state. OTLP remains a separate lossy projection and cannot affect terminal updates, keys, cancellation, fallback, restoration, receipts, or exit status.
 
 ## Executive decision
 
-Add optional OTLP trace export to V1, but only as a second vertical patch after the canonical four-call team run, replay, and cancellation proof passes. It must be disabled unless the operator provides an endpoint. It must not become a condition of Run success.
+Add runtime-opt-in OTLP trace export as the last beta slice, after the canonical durable-Session, direct/team Run, replay, and cancellation proofs pass. It must be disabled unless the operator provides an endpoint. It must not become a condition of Run success.
 
 The smallest appropriate shape is one private `telemetry` module inside the existing Cargo package. That module owns OpenTelemetry SDK construction, a fixed HTTP/protobuf exporter, span mapping, privacy filtering, bounded batching, and shutdown. It exposes typed, synchronous lifecycle handles to the Engine. It does not expose OpenTelemetry types and does not define a trait.
 
@@ -15,7 +19,7 @@ This does not contradict the rule that Provider is the only Engine behavior seam
 
 - **Provider remains the only substitutable behavior that can change Engine outcomes.** The fake and OpenAI adapters are real alternatives behind that interface.
 - **Telemetry is a private output mechanism, not an Engine behavior seam.** Its `Disabled` and `Otlp` modes are concrete implementation states, not injected domain behavior. It receives completed facts and can only observe them.
-- An exporter outage, full queue, timeout, partial export, or shutdown failure cannot alter persisted Events, `RunView`, CLI output, cancellation, or exit status.
+- An exporter outage, full queue, timeout, partial export, or shutdown failure cannot alter persisted Events, `RunView`, any presentation, terminal lifecycle, cancellation, or exit status.
 - No telemetry trait, crate, daemon, global logging façade, or event-consumer interface is earned in V1.
 
 Export **traces only**. Persisted SQLite Events remain the canonical, replayable history. OTLP is a lossy and disposable operational projection. Do not export OpenTelemetry logs in V1 because they would duplicate Events and widen the content-leak surface. Do not export metrics in V1 because periodic metric export is a poor fit for a short-lived CLI and the relevant GenAI metrics conventions are still in development.
@@ -28,7 +32,7 @@ V1 accepts only a numeric loopback collector endpoint, with redirects and ambien
 
 | Question | V1 decision | Why | Revisit trigger |
 | --- | --- | --- | --- |
-| Include OTLP now? | Yes, after the core proof, as an optional second patch | It directly serves the requested integration without making observability part of Run correctness | Remove from V1 if it delays the fixed team-run proof |
+| Include OTLP in beta? | Yes, as the last runtime-opt-in slice after the core proof | It directly serves the requested integration without making observability part of Run correctness | Remove from beta only if it delays the durable Session/team proof |
 | Module placement | Private `src/telemetry.rs` inside the existing package | External I/O, privacy, SDK lifecycle, and bounds have enough depth for one module; no crate boundary is earned | Measured dependency/compile, release, privilege, or ownership pressure |
 | Engine seam | No new trait or injected behavior seam | Telemetry cannot affect decisions or outcomes; Provider remains the only behavior seam | A second independently owned instrumentation implementation with genuinely different behavior |
 | Signal | Traces only | Traces represent nesting, concurrency, latency, and errors; Events already represent durable history | Logs: a concrete diagnostic need not served by safe trace fields. Metrics: daemon or aggregate SLO need |
@@ -36,7 +40,7 @@ V1 accepts only a numeric loopback collector endpoint, with redirects and ambien
 | Transport | OTLP/HTTP with binary protobuf | Smaller feature/runtime surface than gRPC; standard, Collector-compatible path | A required backend lacks HTTP/protobuf, or measurement shows a material deficiency |
 | Endpoint | Explicit opt-in, numeric loopback only | Prevents implicit exfiltration and contains SSRF/configuration risk | Direct remote export becomes an explicit product requirement |
 | SDK | `opentelemetry*` `0.33.0`, minimal features | Current reviewed Rust release; thread-based batch export fits current-thread Tokio | Normal dependency-review cadence or a security fix |
-| Sampling | Always-on | The fixed successful run has only nine spans, so partial traces are not useful | Run topology/volume becomes configurable or large |
+| Sampling | Always-on in beta | The hard child ceiling keeps each Run trace small, so partial traces are not useful | Measured Session/Run volume makes this materially expensive |
 | Queue overflow | Drop newly ended spans; never block Engine | Matches SDK behavior and the repository's non-fatal observability rule | A delivery SLO is adopted; prefer Collector durability first |
 | Flush | Bounded shutdown after the Tokio runtime returns | Avoids current-thread runtime deadlock and preserves cancellation priorities | Runtime architecture changes |
 | Remote TLS/auth | Deferred to local Collector | Keeps credentials and certificate policy outside V1 harness | A user must bypass a local Collector |
@@ -45,12 +49,12 @@ V1 accepts only a numeric loopback collector endpoint, with redirects and ambien
 
 ## Reconciliation with current repository architecture
 
-The canonical architecture is one package, one process, one current-thread Tokio coordinator, one dedicated SQLite thread, exactly one root plus exactly two concurrent children, and exactly four Provider calls. The terminal contract is append-only human progress or append-only JSONL; it is not an interactive TUI.
+The canonical architecture is one package, one process, one current-thread Tokio coordinator, one dedicated SQLite thread, durable Sessions, and Runs with one accountable primary plus an ordered budget-bounded `0..N` collection of direct children. A direct answer uses one Provider call; a team with `N` children uses `N + 2`. The terminal uses native scrollback, a composer, a compact footer, and a conditional activity shelf; deterministic `exec` and `show` retain strict stream contracts.
 
-The visual review at `/tmp/architecture-review-20260928T213608Z.html` is useful design history, not current authority. It has now been updated to match the canonical architecture. The reconciliation corrected three earlier details that must not reappear in telemetry tests or names:
+The visual review at `/tmp/architecture-review-20260928T213608Z.html` is useful design history, not current authority. The canonical Markdown architecture supersedes its earlier constraints. Telemetry tests and names must follow these corrections:
 
-1. diagrams showing a third worker and text saying “maximum three workers” are superseded by **exactly two children**;
-2. “interactive terminal table” is superseded by **append-only human output or JSONL**; and
+1. fixed two-child/four-call diagrams are superseded by bounded `0..N` direct children and dynamic semantic call budgets;
+2. the interactive terminal uses native scrollback plus a small bottom control surface, while machine modes remain append-only; and
 3. “Provider is the only initial seam” means the only replaceable Engine behavior boundary, not that every external library must live in `lib.rs`.
 
 The private module adds implementation depth while preserving the public shape:
@@ -181,23 +185,23 @@ Never call telemetry shutdown from an async Engine future. Do not add `spawn_blo
 
 ### Traces
 
-Traces answer the operational questions the fixed proof creates: Did both children overlap? Which Provider call was slow? Did the root wait for both? Where did cancellation propagate? They preserve causality and duration without becoming history.
+Traces answer the operational questions the bounded proof creates: Which children overlapped? Which Provider call was slow? Did the primary wait for every admitted child? Where did cancellation propagate? They preserve causality and duration without becoming history.
 
-The successful V1 topology is deterministically nine spans:
+The successful topology is derived from the admitted Run:
 
 ```text
-invoke_workflow harness.team                          (1)
-└── invoke_agent harness.root                        (2)
-    ├── plan harness.root                            (3)
-    │   └── chat <requested-model>                   (4: root planning Provider call)
-    ├── invoke_agent harness.worker                  (5)
-    │   └── chat <requested-model>                   (6: child A Provider call)
-    ├── invoke_agent harness.worker                  (7)
-    │   └── chat <requested-model>                   (8: child B Provider call)
-    └── chat <requested-model>                       (9: root synthesis Provider call)
+invoke_workflow harness.run
+└── invoke_agent harness.primary
+    ├── direct: chat <requested-model>
+    └── team(N)
+        ├── plan harness.primary
+        │   └── chat <requested-model>
+        ├── N × invoke_agent harness.child
+        │       └── chat <requested-model>
+        └── chat <requested-model>                   (primary synthesis)
 ```
 
-The child agent spans are explicit children of the root agent span and can overlap. Reverse completion order is valid. Root agent and workflow spans finish only after both child terminal Events and the root terminal Event commit.
+A direct Run has three required spans: Run, primary AgentRun, and Provider call. A team Run with `N` children has `5 + 2N` required spans: Run, primary AgentRun, plan, planning Provider call, `N` child AgentRun/Provider pairs, and synthesis Provider call. Visible context compilation or compaction may add separately named spans; it never changes the semantic Provider-call count. Child spans are explicit children of the primary span and may overlap. Reverse completion order is valid. Primary and Run spans finish only after every child terminal Event and the primary terminal Event commit.
 
 ### Logs
 
@@ -486,7 +490,7 @@ The SDK cannot provide a durable per-span delivery receipt to the Engine. Succes
 
 On first Ctrl-C:
 
-1. cancel root and both child tasks;
+1. cancel the primary and every active child task;
 2. abort/reap as defined by the Engine deadline;
 3. persist stable cancelled terminal Events best effort;
 4. close Store resources;
@@ -502,7 +506,7 @@ On second Ctrl-C or deadline exhaustion, abandon telemetry immediately. Never ca
 One CLI option is sufficient:
 
 ```text
-arany run --otlp-endpoint http://127.0.0.1:4318 ...
+arany --otlp-endpoint http://127.0.0.1:4318 ...
 ```
 
 Treat the CLI value as a generic base URL and append `/v1/traces`, preserving a validated path prefix according to the OTLP exporter rules.
@@ -542,11 +546,12 @@ Normalize random trace/span IDs, process instance ID, and timestamps into symbol
 
 Required deterministic cases:
 
-- successful run yields exactly nine spans, three agent spans, two child agents, one plan, and four Provider spans;
-- both child spans overlap and can finish in reverse order;
-- root agent/workflow cannot finish before both child terminal commits;
+- a direct Run yields exactly three required spans and one Provider span;
+- a `team(2)` fixture yields exactly nine required spans, three AgentRun spans, one plan span, and four Provider spans, while table-driven cases prove the `5 + 2N` formula through the configured and hard bounds;
+- admitted child spans overlap when capacity permits and can finish in reverse order;
+- primary AgentRun/Run spans cannot finish before every admitted child terminal commit;
 - every parent/child relationship is exact;
-- `harness.run.id` and `harness.agent_run.id` correlate correctly without replacing trace/span IDs;
+- safe `harness.session.id`, `harness.run.id`, and `harness.agent_run.id` values correlate correctly without replacing trace/span IDs;
 - committed-event sequence numbers appear only after Store acknowledgment and in canonical order;
 - Provider timeout, invalid response, cancellation, store failure, and interrupted cleanup map to bounded outcomes/error classes;
 - `arany show` emits zero run spans;
@@ -626,7 +631,7 @@ The new dependency surface is justified only if the trace integration ships in t
 
 ### Gate 0 — preserve the current proof
 
-The fixed team-run architecture test must already pass: one root, exactly two concurrent children, exactly four Provider calls, canonical commit-before-render behavior, replay, and cancellation. OTLP must not be used to debug an incomplete core implementation into existence.
+The durable-Session architecture journey must already pass: direct and bounded-team Runs, canonical commit-before-render behavior, replay, resume/fork, and cancellation. OTLP must not be used to debug an incomplete core implementation into existence.
 
 ### Gate 1 — configuration and privacy boundary
 
@@ -634,7 +639,7 @@ Implement endpoint parsing, precedence, unsupported-variable detection, typed me
 
 ### Gate 2 — in-memory trace model
 
-Build the private module against the in-memory exporter. Prove the exact nine-span tree, reverse child completion, error/cancellation mapping, post-commit event markers, `show` silence, and content exclusion. No network test is needed yet.
+Build the private module against the in-memory exporter. Prove span trees derived from both direct and bounded-team Runs, reverse child completion, Session/Run/AgentRun correlation, error/cancellation mapping, post-commit event markers, `show` silence, and content exclusion. No network test is needed yet.
 
 ### Gate 3 — bounded local OTLP/HTTP exporter
 
@@ -659,7 +664,7 @@ Document the CLI/environment contract, privacy denylist, Collector example, best
 | OTLP/gRPC | A required backend lacks HTTP/protobuf or benchmarks show a meaningful need |
 | OTLP/HTTP JSON | A required receiver supports only JSON |
 | Compression | Measured payload/network cost outweighs dependency/CPU/config cost |
-| Configurable sampling | Trace volume grows beyond the fixed tiny topology |
+| Configurable sampling | Measured Session/Run volume grows beyond the beta-bounded topology |
 | Persistent telemetry queue | A written delivery SLO exists; prefer Collector persistent queue first |
 | Context propagation | A trusted owned downstream process/Guard exists and its trust boundary is explicit |
 | Separate observability crate | Measured dependency compile cost, independent release, ownership, or privilege boundary appears |
@@ -667,11 +672,11 @@ Document the CLI/environment contract, privacy denylist, Collector example, best
 
 ## Final recommendation
 
-OTLP is feasible and fits the Rust-first harness without weakening the core architecture if it is treated as optional operational output rather than state or policy. Implement a trace-only, HTTP/protobuf, local-Collector integration in one private module after the minimum team proof. Keep Provider as the only Engine behavior seam, SQLite Events as the only canonical history, and the terminal as append-only human/JSONL output.
+OTLP is feasible and fits the Rust-first harness without weakening the core architecture if it is treated as runtime-opt-in operational output rather than state or policy. Implement a trace-only, HTTP/protobuf, local-Collector integration in one private module as the last beta slice after the durable Session/team proof. Keep Provider as the only Engine behavior seam, SQLite Events as the only canonical history, and terminal presentation derived from SessionView/RunView.
 
 The implementation is ready to plan when these non-negotiable gates are accepted:
 
-- exact two-child/four-Provider-call trace model;
+- trace topology derived from the admitted direct or `N + 2` team-call model;
 - disabled by default and local numeric loopback only;
 - no prompts/results/tool content/secrets in any signal;
 - fixed minimal Resource and no ambient resource/header configuration;

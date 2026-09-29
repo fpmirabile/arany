@@ -1,5 +1,7 @@
 # CLI inputs, configuration, credentials, cancellation, and operability
 
+> **Session/product amendment — 2026-09-29:** [Beta Sessions, teams, terminal, providers, and license](./beta-sessions-teams-terminal-providers-and-license.md) supersedes the one-Run exit, fixed topology, always-expanded control room, no-mouse rule, and compiled-endpoint-only boundary below. Bare `arany` is a durable Session with explicit continue/resume/fork; `/agents` configures bounded `single|auto|team`; the bottom UI is composer + footer + conditional activity shelf; mouse is transient inside open panels; and exact custom endpoint/model profiles require data-free conformance.
+
 **Status:** research and concrete recommendation for the minimum demonstrator  
 **Research date:** 2026-09-29  
 **Question:** What is the smallest safe and testable CLI contract for the first Rust harness, including bounded workspace input, provider configuration, credentials, terminal feedback, cancellation, diagnostics, fixtures, and proof thresholds?
@@ -13,43 +15,59 @@ This report distinguishes four kinds of statements:
 - **Recommendation**: the exact version-1 decision proposed for this repository.
 - **Gate**: evidence implementation must produce before the behavior is claimed.
 
-The current architecture is authoritative about product scope: one Cargo package, one process, one root orchestrator, exactly two read-only workers on the success path, one Provider behavior seam, one SQLite event table, and no effectful Tool. The optional OTLP second patch adds one private module, not a runtime service or another Engine seam.
+The current architecture is authoritative about product scope: one Cargo package, one process, durable Sessions, one accountable primary plus an ordered budget-bounded `0..N` collection of direct read-only children per Run, one Provider behavior seam, one SQLite event table, and no effectful Tool. Runtime-opt-in OTLP ships last in beta as one private module, not a runtime service or another Engine seam.
 
 > **Security amendment — 2026-09-29:** [Harness security lessons](./harness-security-lessons-and-controls.md) and D-14 in the [decision register](./next-step-decision-register.md) strengthen the concrete CLI contract. Resolve and admit the private state root before repository input; process no repository/Git configuration or `.env`; escape terminal and bidi controls deterministically; keep replayed text as data; reserve one aggregate Run budget before `RunStarted`; and treat dependency/build/Skill provenance as a release gate.
 
 > **Testing amendment — 2026-09-29:** [Testing strategy for the Rust CLI harness](./testing-strategy-for-rust-cli-harness.md) is authoritative for how this report's verification matrix is implemented. Each area is a compact scenario, table, corpus, or failpoint owner rather than a requirement for one test function per row. User-visible acceptance captures exit status, exact stdout/stderr, and Events/RunView reopened from SQLite; deterministic, live-provider, evaluation, and performance evidence remain separate lanes.
 
+> **Provider amendment — 2026-09-29:** [Beta multi-provider routing and adapters](./beta-multi-provider-routing-and-adapters.md) supersedes the OpenAI-only configuration below. `--provider`/`ARANY_PROVIDER` selects one capability-proven adapter before Workspace input; `--model` overrides the selected provider's model variable. Native OpenAI and Anthropic are supported first, constrained OpenRouter follows its route gate, and Z.AI remains experimental. No hidden fallback or universal compatibility endpoint exists.
+
+> **Terminal amendment — 2026-09-29:** [Beta terminal interface and multi-agent feedback](./beta-terminal-interface-and-multi-agent-feedback.md) supersedes the append-only/no-TTY recommendations below. Its scrollback-first interactive presentation, deterministic `exec --output text|jsonl`, deterministic `show`, and linear screen-reader mode remain canonical; the later interactive-command amendment below owns the bare entry point and composer. D-08/D-18 in the [decision register](./next-step-decision-register.md) own terminal lifecycle, accessibility, dependencies, and evidence gates.
+
+> **Interactive-command amendment — 2026-09-29:** [Interactive CLI conventions](./interactive-cli-conventions-and-command-surface.md) further supersedes the attached-human spelling and “no prompt editor” assumption: bare `arany [MESSAGE]` owns a durable Session composer and a closed local slash registry; `arany run` does not exist. Each accepted Message creates one bounded Run. [Consumer subscription authentication](./consumer-subscription-authentication-for-provider-adapters.md) keeps beta authentication API-key only; login commands and profiles activate only if the provider-policy, remote-budget, browser/process, secret-storage, and conformance gates reopen.
+
 ## Executive conclusion
 
-The minimum CLI should be deliberately less interactive than Claude Code or Codex. It should prove the multi-agent Engine without first building a terminal application framework.
+The minimum CLI should provide a focused multi-agent control room without becoming a general chat IDE. It preserves a separate deterministic command for automation.
 
-**Recommendation:** version 1 has two commands, six run options, two output modes, four exit codes, no configuration file, no login flow, no keychain integration, no terminal redraw, no color, no width calculation, and no Engine retry:
+**Recommendation:** version 1 has three commands, explicit provider/model selection, four presentation modes, four exit codes, no general configuration file, no automatic Provider fallback, and no Engine retry:
 
 ```text
-arany [--state-dir <DIR>] run \
+arany [--state-dir <DIR>] \
   [--workspace <DIR>] \
   [--include <RELATIVE_PATH>]... \
+  [--provider <PROVIDER_ID>] \
   [--model <MODEL_ID>] \
   [--otlp-endpoint <URL>] \
-  [--jsonl] \
+  [--screen-reader] [--no-color] \
+  [<OBJECTIVE>]
+
+arany [--state-dir <DIR>] exec \
+  [--workspace <DIR>] \
+  [--include <RELATIVE_PATH>]... \
+  [--provider <PROVIDER_ID>] \
+  [--model <MODEL_ID>] \
+  [--otlp-endpoint <URL>] \
+  [--output text|jsonl] \
   <OBJECTIVE>
 
-arany [--state-dir <DIR>] show [--jsonl] <RUN_ID>
+arany [--state-dir <DIR>] show [--output text|jsonl] <RUN_ID>
 ```
 
 The important design decisions are:
 
-1. `run` validates and snapshots every input before `RunStarted`; the model never receives a path it can open later.
+1. Bare interactive mode and `exec` validate and snapshot every input before `RunStarted`; the model never receives a path it can open later.
 2. Workspace-relative files are opened through pinned directory handles with no-follow traversal. Absolute paths, `..`, symlinks, junctions/reparse points, non-regular files, invalid UTF-8, duplicates, and over-limit inputs fail before provider I/O.
-3. Human progress is append-only on stderr and the final answer is plain text on stdout. JSONL writes persisted Events to stdout in sequence order. TTY detection does not change bytes in version 1.
-4. Version 1 emits no ANSI styling. `NO_COLOR`, terminal resize, CJK width, grapheme width, alternate screens, and cursor control therefore need no dependency or special case.
-5. The OpenAI model is explicit through `--model` or `ARANY_OPENAI_MODEL`; there is no changing compiled-in model default. The API key comes only from `OPENAI_API_KEY`; no `--api-key`, `.env`, config file, or database field exists.
+3. Bare interactive `arany` uses a bounded durable Session composer, native-scrollback transcript, compact footer, and conditional activity shelf; committed primary results go to stdout. Deterministic `exec` and `show` never initialize terminal modes; JSONL writes persisted Events to stdout in sequence order.
+4. Screen-reader mode is labeled and append-only. Standard interactive mode supports optional redundant color, resize, grapheme/cell width, keyboard navigation, and RAII restoration, but no alternate screen, spinner, idle redraw, or raw model stream.
+5. Provider and model are explicit through CLI or selected-provider environment variables; there is no compiled default or hidden fallback. Only the selected credential source is read; no credential argument, `.env`, arbitrary base URL, or database credential exists.
 6. First `Ctrl-C` requests structured cancellation of the root token and every child. A second `Ctrl-C` or a two-second cleanup deadline aborts remaining tasks, then the supervisor records terminal cancellation and returns exit code 130.
 7. The scripted fake is a strict expectation machine, not a second product mode. It injects outcomes at the Provider seam, can hold calls behind gates, and fails on unexpected, duplicate, unclaimed, or incompletely resolved expectations.
-8. One integration-test file covers the architecture, boundary failures, replay, rendering, and cancellation. One ignored live smoke test proves the OpenAI adapter with explicit credentials and model.
-9. OTLP traces are disabled unless `run` receives an explicit loopback Collector endpoint through CLI or the supported standard environment variables. Export failure never changes canonical Run truth or exit status.
+8. One durable-Session integration journey covers direct and small-team paths; pure/TestBackend and native PTY lanes own interactive behavior. Each claimed hosted adapter owns explicitly activated live direct/team conformance.
+9. OTLP traces are disabled unless the selected entry path receives an explicit loopback Collector endpoint through CLI or the supported standard environment variables. Export failure never changes canonical Run truth or exit status.
 
-This is the Ponytail result: delete every terminal feature that does not prove the team loop, and spend the saved complexity on trustworthy path handling, cancellation, and deterministic evidence.
+This is still a small interface: one semantic view, one inline terminal owner, no editor or terminal framework exposed to the Engine, and deterministic automation kept separate.
 
 ## 1. Scope, assets, and trust boundaries
 
@@ -84,7 +102,7 @@ Repository content and model output are data. They do not gain filesystem author
 
 The user authorizes one ambient path only: the `--workspace` directory, defaulting to the current directory. The Engine converts that authority into an open directory handle. Every instruction and `--include` file is resolved relative to that handle. A CLI path string never becomes continuing authority for the model.
 
-The OpenAI endpoint is fixed to the official Responses endpoint. Version 1 has no user-supplied provider base URL, redirect target, hosted Tool, or provider plugin. The separate optional OTLP endpoint accepts only numeric loopback `http`; it is not a Provider endpoint and the Collector owns every remote connection.
+Native provider endpoints are compiled exact origins. Version 1 also permits trusted exact custom protocol/origin/model profiles only after data-free conformance; it has no per-request base URL, redirect target, hosted Tool, or provider plugin. The separate runtime-opt-in OTLP endpoint accepts only numeric loopback `http`; it is not a Provider endpoint and the Collector owns every remote connection.
 
 ### 1.4 Failure posture
 
@@ -100,8 +118,9 @@ Use `clap` derive with a required subcommand. Its derive API maps structs and en
 arany [GLOBAL_OPTIONS] <COMMAND>
 
 Commands:
-  run   Start one bounded multi-agent Run
-  show  Replay one stored Run
+  <none>  Start attached-human preflight or one bounded Run
+  exec  Start one bounded Run for automation or capture
+  show  Replay one stored Run deterministically
   help  Print help
 
 Global options:
@@ -110,33 +129,39 @@ Global options:
   -V, --version          Print version
 ```
 
-`run`:
+Bare interactive mode:
 
 ```text
-Usage: arany [--state-dir <DIR>] run [OPTIONS] <OBJECTIVE>
+Usage: arany [--state-dir <DIR>] [OPTIONS] [OBJECTIVE]
 
 Arguments:
-  <OBJECTIVE>  Non-empty UTF-8 objective, at most 8 KiB
+  [OBJECTIVE]  Optional non-empty UTF-8 objective, at most 8 KiB
 
 Options:
       --workspace <DIR>          Workspace root [default: .]
       --include <RELATIVE_PATH>  Include one read-only UTF-8 file; repeatable
-      --model <MODEL_ID>         OpenAI model; overrides ARANY_OPENAI_MODEL
+      --provider <PROVIDER_ID>   Provider; overrides ARANY_PROVIDER
+      --model <MODEL_ID>         Model; overrides selected Provider variable
       --otlp-endpoint <URL>      Export traces to a numeric-loopback HTTP Collector
-      --jsonl                    Emit ordered Event objects instead of human output
+      --screen-reader            Use labeled linear output without terminal control
+      --no-color                 Disable redundant color
   -h, --help                     Print help
 ```
+
+`exec` accepts the same Workspace, include, Provider, model, and OTLP options, plus `--output text|jsonl`. It accepts neither screen-reader nor layout flags and never initializes terminal state.
+
+With no objective, bare Arany opens or resumes a durable Session composer. Its closed slash set includes `/help`, `/status`, `/sessions`, `/new` (`/clear` alias), `/resume`, `/fork`, `/rename`, `/compact`, `/agents`, `/provider`, `/model`, `/permissions`, `/quit`, and `/exit`; `//` escapes literal slash-prefixed objective text. Provider/model/team policy are mutable only for the next Run and become pinned at `RunStarted`. Machine modes never interpret slash commands.
 
 `show`:
 
 ```text
-Usage: arany [--state-dir <DIR>] show [--jsonl] <RUN_ID>
+Usage: arany [--state-dir <DIR>] show [--output text|jsonl] <RUN_ID>
 
 Arguments:
   <RUN_ID>  Exact Arany Run identifier
 
 Options:
-      --jsonl  Emit the stored Event objects in sequence order
+      --output <text|jsonl>  Select deterministic replay format
   -h, --help   Print help
 ```
 
@@ -144,13 +169,13 @@ Options:
 
 Version 1 has no:
 
-- `--provider`: OpenAI is the only product adapter; the fake is injected by tests.
 - `--api-key`: secrets in command arguments are too easy to expose through shell history, process inspection, test failure output, or copied commands.
 - `--config`: two environment variables and one state-directory override do not justify a file format, discovery rules, migrations, or merge semantics.
 - timeout, retry, concurrency, input-limit, or output-limit options: all are fixed constants until real usage demonstrates that a specific bound must vary.
-- `--color`, `--no-color`, quiet, verbose, log-level, or terminal-layout flags: version 1 has no ANSI styling, redraw, or debug log stream.
+- `--color=always`, quiet, verbose, log-level, theme, refresh-rate, alternate-screen, or general layout options: the beta owns one bounded adaptive layout and no debug log stream.
 - prompt-from-stdin mode: it complicates TTY ownership and piping semantics without helping the initial proof.
 - recursive include, glob, URL, directory include, ignore-file expansion, or model-driven file discovery.
+- approval/permission-mode, sandbox, full-auto, resume/continue/fork, or arbitrary config flags: the beta has neither effectful authority nor durable Session semantics for them to control.
 
 ### 2.3 Parsing and validation order
 
@@ -159,9 +184,9 @@ The command boundary performs work in this order:
 1. `clap` parses syntax and basic values.
 2. Resolve the state directory before repository input; require an outside-Workspace, local, no-follow, current-user private root; open SQLite no-follow in defensive mode and verify aggregate headroom.
 3. For `show`, parse the Run ID and replay; no provider credential, Workspace, or telemetry exporter is read or constructed.
-4. For `run`, validate objective, model, and OTLP configuration. Reject unsupported OTLP variables by name without reading or printing their values.
+4. For bare interactive mode or `exec`, validate objective when present, Provider, model, selected authentication/endpoint profile, presentation eligibility, and OTLP configuration. Reject unsupported OTLP variables by name without reading or printing their values.
 5. Construct disabled telemetry or the bounded blocking exporter before entering the current-thread Tokio runtime.
-6. Load `OPENAI_API_KEY` into a secret wrapper without formatting it.
+6. Load only the selected Provider credential into a secret wrapper without formatting it.
 7. Open and pin the Workspace directory.
 8. Resolve the exact root instruction file and every explicit include into immutable byte snapshots.
 9. Validate aggregate bounds and compile the initial provider input.
@@ -188,30 +213,36 @@ Do not create a numeric code per error kind. Human and JSON diagnostics carry a 
 
 ### 3.1 Channel contract
 
-Human `run` mode:
+Bare interactive mode:
 
 - stdout contains only the sanitized root final result followed by one newline;
-- stderr contains append-only state transitions and safe diagnostics;
+- stderr contains the bounded inline control room, native-scrollback transition lines, and safe diagnostics;
 - every visible transition is derived from a persisted Event;
 - no partial model token stream is printed in the first slice.
 
-Human `show` mode:
+Screen-reader interactive mode:
 
-- stdout contains a deterministic text rendering of the reconstructed `RunView`;
+- stdout has the same successful result contract;
+- stderr contains labeled append-only committed facts;
+- it enters no raw mode and emits no CSI/OSC, boxes, cursor movement, or line rewriting.
+
+Deterministic `exec` and `show` modes:
+
+- text output deterministically renders the live or reconstructed `RunView` using the documented channel split;
 - stderr contains only diagnostics;
 - rendering the same stored Events twice produces identical stdout.
 
-JSONL mode:
+Deterministic JSONL mode:
 
 - stdout contains only Event envelopes;
 - stderr contains only diagnostic envelopes;
 - no human prefix, spinner, ANSI sequence, progress table, or final plain-text copy is added.
 
-This separation lets `arany run ... > answer.txt` capture the answer while the user still sees team progress. It also lets automation request the canonical event stream explicitly.
+This separation lets `arany ... > answer.txt` capture the answer while the user still sees team progress. Automation selects `arany exec` explicitly and never depends on descriptor detection.
 
-### 3.2 Human progress grammar
+### 3.2 Linear progress grammar
 
-Use one line for each semantic state transition:
+`exec` text, screen-reader mode, final receipts, and committed scrollback insertion use one bounded line for each semantic state transition:
 
 ```text
 run 01J... started
@@ -227,35 +258,27 @@ run 01J... finished
 
 The prefix is ASCII and machine-testable. Objectives and summaries are untrusted fields: flatten CR/LF to spaces for progress, visibly escape or replace ESC/CSI/OSC/DCS, C0/C1 controls, carriage return, backspace, bidi overrides/isolation controls, and any forged line-prefix delimiter, and enforce stored size limits. The final result preserves the deliberate LF/TAB policy but cannot carry terminal or bidi control actions. JSONL preserves underlying strings as JSON data and is emitted only by the serializer as exactly one complete object per line; never construct it by interpolation or apply human-terminal rewriting to the serialized representation.
 
-Do not render Markdown, OSC hyperlinks, model-provided ANSI, or terminal titles. The CLI is a text adapter, not a trusted rich renderer.
+Do not render active Markdown, OSC hyperlinks, model-provided ANSI, or terminal titles. Only `terminal.rs` may emit Arany-owned control sequences.
 
 ### 3.3 TTY and non-TTY
 
 Rust's `IsTerminal` reports whether a descriptor or handle refers to a terminal and returns false on unsupported platforms or unexpected detection errors. [`std::io::IsTerminal`](https://doc.rust-lang.org/std/io/trait.IsTerminal.html) **Fact**
 
-**Recommendation:** do not call `is_terminal()` or branch output in version 1. A TTY and redirected stream receive the same bytes. This removes an unused observation, avoids snapshot-test divergence, and makes CI logs match local behavior.
+**Recommendation:** command choice defines behavior. Bare `arany` checks terminal stdin and stderr as an eligibility precondition; it does not silently turn into `exec`. `exec`, `show`, usage errors, and screen-reader mode never initialize terminal state. Standard interactive mode uses Crossterm key/resize events and a Ratatui inline viewport, but no alternate screen, mouse, focus reporting, title/clipboard OSC, bracketed paste, spinner, idle refresh, or token stream.
 
-The first version therefore has:
-
-- no spinner;
-- no cursor movement or line erasure;
-- no alternate screen or raw mode;
-- no keyboard handling beyond the OS/Tokio Ctrl-C signal;
-- no terminal-size query or resize subscription.
-
-`crossterm` can report terminal size and resize events, but adopting those APIs would create a live layout lifecycle. [`crossterm::terminal::size`](https://docs.rs/crossterm/latest/crossterm/terminal/fn.size.html) [`crossterm::event`](https://docs.rs/crossterm/latest/crossterm/event/) **Fact** The minimum proof does not need that lifecycle.
+One RAII owner acquires raw mode and the minimal enabled modes transactionally, restores them on every exit/signal/panic/suspend path, and prints the final receipt only after restoration. Below eight rows or when capability is unsafe, bare interactive mode selects the linear attached presentation before acquisition.
 
 ### 3.4 Color and `NO_COLOR`
 
 The `NO_COLOR` convention says that a present, non-empty `NO_COLOR` disables default ANSI color. [NO_COLOR](https://no-color.org/) **Fact**
 
-**Recommendation:** emit no ANSI color under any condition. This satisfies `NO_COLOR` without reading it and avoids a `--color` policy. Add color only when user testing proves that semantic attribution is materially harder without it. At that point use `auto|always|never`, with an explicit CLI choice overriding `NO_COLOR` as the convention permits.
+**Recommendation:** color is optional and redundant. `--no-color` or a non-empty `NO_COLOR` disables it; no fact, severity, selection, or causality edge depends on color. The beta does not offer forced color.
 
 ### 3.5 Unicode and width
 
 Accept objectives and file contents only as valid UTF-8. Preserve Unicode text in provider input, Events, and JSON. Structural labels and status markers remain ASCII.
 
-Do not calculate display width or truncate to terminal columns. The `unicode-width` crate has separate ordinary and CJK width behavior, and string width may differ from the sum of scalar widths for emoji sequences. [`unicode-width` source and rules](https://docs.rs/unicode-width/latest/src/unicode_width/lib.rs.html) [`UnicodeWidthChar`](https://docs.rs/unicode-width/latest/unicode_width/trait.UnicodeWidthChar.html) **Fact** The terminal is allowed to wrap append-only lines. This avoids choosing an incorrect locale, grapheme, emoji, or font model.
+The interactive view sanitizes text first, then wraps/truncates at grapheme and terminal-cell boundaries. It has semantic layouts at widths `>=80`, `50..79`, and `<50`, with fixtures at 40/50/79/80/120 columns. CJK, combining marks, emoji sequences, zero-width text, and bidirectional controls belong in the hostile-width corpus. Linear presentations remain width-independent.
 
 ### 3.6 JSONL semantics
 
@@ -393,12 +416,12 @@ The first demonstrator needs constants, not tunables. The values below comfortab
 | all include bytes | 256 KiB | exit 2 before Run |
 | selected instruction file | 64 KiB | exit 2; never fallback from invalid `AGENTS.md` |
 | compiled provider input | 384 KiB serialized UTF-8 | exit 2 before first call; fail Run before later call |
-| one child objective | 2 KiB | reject Provider outcome; fail root |
-| children requested by root | exactly 2 | reject every other delegate count |
-| concurrent workers | 2 | fixed semaphore/scheduler rule |
+| one child objective | 2 KiB | reject Provider outcome; fail primary |
+| children requested by primary | at most pinned `N`, hard ceiling 8 | reject overflow or zero under `team` |
+| concurrent children | at most effective pinned capacity | bounded semaphore/scheduler rule |
 | AgentUpdated summary | 2 KiB | reject Provider outcome; no silent truncation |
-| one worker result | 16 KiB | reject Provider outcome |
-| root final result | 32 KiB | reject Provider outcome |
+| one child result | 16 KiB | reject Provider outcome |
+| primary final result | 32 KiB | reject Provider outcome |
 | Provider HTTP response body | 1 MiB | stop reading, drop request, fail AgentRun |
 | Event JSON payload | 64 KiB | reject append and fail Run |
 | provider calls per Run | 4 | root delegate + 2 workers + root finish; fifth is invariant failure |
@@ -413,7 +436,7 @@ The first demonstrator needs constants, not tunables. The values below comfortab
 | SQLite headroom before new Run | 4 MiB | reject admission before `RunStarted` |
 | recent Events in human `show` | all events for this bounded proof | add pagination only after a measured event-volume issue |
 
-Before `RunStarted`, one Engine-owned budget reserves the four Provider call slots and the worst-case 16,384 requested output tokens. Root and children consume that same budget; delegation never creates a new allowance. Version 1 does not need an unbounded Event queue. Append and reduce each Event before notifying the renderer. If the implementation uses a Tokio channel to decouple rendering, make it a 32-item bounded channel and await capacity; canonical Events are never dropped or coalesced. A closed receiver follows the output-I/O failure policy, and a slow receiver applies backpressure. This keeps memory finite and makes detachment visible instead of silently spending provider budget.
+Before `RunStarted`, one Engine-owned budget reserves one Provider call for a direct answer or `N + 2` calls for an admitted team Run, together with the corresponding aggregate output-token ceiling. Primary and children consume that same budget; delegation never creates a new allowance. Version 1 does not need an unbounded Event queue. Append and reduce each Event before notifying the renderer. If the implementation uses a Tokio channel to decouple rendering, make it a 32-item bounded channel and await capacity; canonical Events are never dropped or coalesced. A closed receiver follows the output-I/O failure policy, and a slow receiver applies backpressure. This keeps memory finite and makes detachment visible instead of silently spending provider budget.
 
 Set `rusqlite::Connection::busy_timeout(Duration::from_millis(250))` explicitly on the connection. `rusqlite` currently installs a five-second default, but its documentation says that default may change; relying on it would make the CLI deadline an accidental dependency-version property. [`rusqlite::Connection::busy_timeout`](https://docs.rs/rusqlite/latest/rusqlite/struct.Connection.html#method.busy_timeout) **Fact**
 
@@ -437,18 +460,19 @@ This resolves the token policy without claiming false precision:
 
 ### 6.1 Precedence
 
-There is no general configuration object or config file. Resolve only four settings:
+There is no general configuration object or config file. Resolve only the named settings:
 
 | Setting | Precedence |
 |---|---|
 | state directory | `--state-dir` > `ARANY_STATE_DIR` > platform default |
-| OpenAI model | `--model` > `ARANY_OPENAI_MODEL` > error |
+| Provider | `--provider` > `ARANY_PROVIDER` > error |
+| model | `--model` > selected Provider variable (`ARANY_OPENAI_MODEL`, `ARANY_ANTHROPIC_MODEL`, `ARANY_OPENROUTER_MODEL`; `ARANY_ZAI_MODEL` reserved) > error |
 | OTLP traces endpoint | `--otlp-endpoint` > `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` > `OTEL_EXPORTER_OTLP_ENDPOINT` > disabled |
-| OpenAI credential | `OPENAI_API_KEY` > error |
+| Provider credential | selected adapter's named source (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`; `ZAI_API_KEY` experimental) > error |
 
 An explicitly present but empty CLI or environment value is invalid; it does not fall through. This prevents a typo or cleared secret from silently selecting another source.
 
-`--workspace` has no environment counterpart and defaults to the process current directory. Output mode comes only from `--jsonl`. The trace-specific environment value is an exact trace URL; the generic endpoint is a base to which `/v1/traces` is appended. The CLI value is a validated base URL. Only numeric loopback `http` endpoints are accepted.
+`--workspace` has no environment counterpart and defaults to the process current directory. `exec`/`show` output format comes only from `--output`; screen-reader behavior is `--screen-reader` or `ARANY_SCREEN_READER=1`; color is disabled by `--no-color` or `NO_COLOR`. The trace-specific environment value is an exact trace URL; the generic endpoint is a base to which `/v1/traces` is appended. The CLI value is a validated base URL. Only numeric loopback `http` endpoints are accepted.
 
 Other OTLP environment variables—including headers, certificates, client keys, compression, protocol selectors, and resource attributes—are unsupported. Detect them by variable name and fail before `RunStarted`; never read or render their values. Queue, batch, timeout, retry, privacy, Resource, and sampling settings remain fixed constants. The local Collector owns remote authentication, TLS, routing, and vendor configuration.
 
@@ -476,23 +500,13 @@ The override exists for tests, portable development, backup, and recovery. It st
 
 Do not compile a default model ID. Model names, availability, pricing, context, and feature support change independently of the binary. A silent default also hides a meaningful cost and quality decision.
 
-`--model` and `ARANY_OPENAI_MODEL` accept a non-empty ASCII identifier of at most 128 bytes. The exact value is recorded in `RunStarted`. The Provider must require Structured Outputs support for the semantic `Delegate|Finish` schema; strict Structured Outputs conforms to a supplied JSON Schema and rejects unsupported schemas/models rather than silently approximating. [OpenAI Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs) **Fact**
+`--model` and the selected Provider's model variable accept a non-empty ASCII identifier of at most 128 bytes. The canonical provider/model/endpoint profile and tested outcome encoding are recorded in `RunStarted`. OpenAI and Anthropic use native strict structured output. OpenRouter must pin one reviewed strict-capable upstream and prove route/privacy controls. Z.AI remains experimental while it offers only weaker JSON/tool selection mechanisms.
 
 If the chosen model does not support the contract, fail before accepting a semantic outcome. Do not fall back to another model.
 
 ### 6.4 Provider request defaults
 
-Fixed OpenAI behavior:
-
-- endpoint: `POST https://api.openai.com/v1/responses`;
-- foreground request;
-- `store: false`;
-- `truncation: disabled`;
-- strict JSON Schema output for `Delegate|Finish`;
-- no built-in Tool, web search, file search, MCP, or code execution;
-- `max_output_tokens: 4096`;
-- one 120-second attempt;
-- no automatic retry.
+Each adapter owns a compiled official endpoint profile and its native strict-output encoding. Shared invariants are foreground non-streaming requests, no Provider Tools, no hidden model or upstream fallback, disabled provider-side storage/caching where supported, `max_output_tokens: 4096`, one 120-second attempt, and no automatic retry. OpenRouter additionally requires exact upstream provenance, required parameters, fallback off, data collection denied, ZDR required, and response caching off.
 
 OpenAI documents that Responses default to stored application state when `store` is omitted/true and that `store: false` disables response storage subject to the documented abuse-monitoring/data-control policy. [OpenAI data controls](https://developers.openai.com/api/docs/guides/your-data) [Responses `store`](https://developers.openai.com/api/reference/cli/resources/responses/methods/create) **Fact** The local event journal remains canonical.
 
@@ -506,7 +520,7 @@ Disabling inherited proxy configuration is deliberate: an ambient `HTTPS_PROXY` 
 
 OpenAI recommends keeping API keys out of source and exposing them through an environment variable or secret-management service; its quickstart uses `OPENAI_API_KEY`. [OpenAI production best practices](https://developers.openai.com/api/docs/guides/production-best-practices) [OpenAI SDKs and CLI](https://developers.openai.com/api/docs/libraries) **Fact**
 
-Version 1 reads only `OPENAI_API_KEY` from the inherited environment. It never:
+The API-key path reads only the selected adapter's named credential from the inherited environment. It never:
 
 - loads `.env`;
 - accepts a key argument or stdin prompt;
@@ -516,7 +530,7 @@ Version 1 reads only `OPENAI_API_KEY` from the inherited environment. It never:
 
 Wrap the key immediately in `secrecy::SecretString`, expose it only while building the Authorization header, and do not enable its serde feature. The crate's stated goals are explicit secret exposure, prevention of debug-log leakage, and zeroization on drop. [`secrecy` crate](https://docs.rs/secrecy/latest/secrecy/) **Fact** This dependency earns its place by making the most damaging accidental formatting error harder.
 
-An absent or empty environment value is diagnostic `H_CONFIG_OPENAI_API_KEY` and exit 2. An API 401 is a runtime provider failure and exit 1; report “OpenAI authentication failed” without reflecting the key or response body.
+An absent or empty selected credential is a provider-specific configuration diagnostic and exit 2. An API 401/403 is a runtime provider authentication/permission failure and exit 1; report the canonical Provider ID without reflecting the credential or response body.
 
 ### 7.2 Why keychain support is deferred
 
@@ -524,7 +538,7 @@ Platform stores are valuable but materially different. Apple's Keychain stores s
 
 Adding “use the keychain” therefore means defining service/account naming, headless behavior, locked-session behavior, prompts, migration, deletion, CI behavior, backend availability, and native dependencies on three platforms. That is not needed to prove the Engine.
 
-**Trigger:** add an `arany auth login/logout/status` flow and one credential-store adapter only when users need persisted credentials or OAuth. At that point environment input remains an explicit higher-precedence deployment override, and the keychain failure mode must be visible rather than falling back to plaintext storage.
+**Trigger:** add `arany auth login/logout/status` and one credential-store adapter only for an approved subscription path whose provider-policy, remote-budget, browser/process, secret-storage, and live-conformance gates all pass. For the researched OpenAI path, this requires either a provider-enforced output ceiling or an approved ADR replacing Arany's universal token-budget guarantee. Environment API keys remain a separate explicit mode, never an implicit override or fallback, and keychain failure must be visible rather than falling back silently to plaintext storage.
 
 ## 8. Provider errors, deadlines, and retries
 
@@ -732,7 +746,7 @@ Do not script workers as “next response A, then next response B,” because tw
 root call 1 -> Delegate(worker-a, worker-b)
 worker-a    -> wait gate A -> Finish(A)
 worker-b    -> wait gate B -> Finish(B)
-root call 2 -> Finish(final)
+primary synthesis -> Finish(final)
 ```
 
 The test releases B before A and proves:
@@ -740,7 +754,7 @@ The test releases B before A and proves:
 - completion order may differ from spawn order;
 - Event sequences remain total and monotonic;
 - RunView child ordering is stable by spawn sequence, not completion race;
-- root call 2 is impossible until both child terminal Events exist.
+- primary synthesis is impossible until both admitted child terminal Events exist in this `team(2)` fixture.
 
 For cancellation, use a fake Provider future with a drop guard that notifies the test when dropped. This proves that cancellation reaches the actual in-flight future rather than merely changing the RunView.
 
@@ -772,7 +786,7 @@ Requirements:
 - use a temporary Workspace and temporary state directory;
 - use two tiny deterministic text fixtures;
 - send `store: false`, no Tools, and the same strict semantic schema as production;
-- assert structural invariants only: one root, two workers, join-all, terminal root synthesis, valid Events, replay equality, non-empty bounded results;
+- use a documented small `team(2)` fixture and assert structural invariants only: one primary, two admitted children, join-all, terminal primary synthesis, valid Events, replay equality, non-empty bounded results;
 - do not assert exact natural-language text or latency;
 - never run by default in CI or `cargo test`;
 - do not retry automatically;
@@ -788,8 +802,8 @@ The minimum release-blocking matrix is:
 
 | Area | Required cases |
 |---|---|
-| happy path | root delegates two workers, workers finish in controlled reverse order, root synthesizes, Run finishes |
-| loop invariants | same loop handles root/workers; children cannot delegate; third child rejected; root cannot finish early; fifth provider call rejected |
+| happy path | one direct Run plus one `team(2)` Run whose children finish in controlled reverse order before primary synthesis |
+| loop invariants | same loop handles primary/children; children cannot delegate; delegation above the pinned limit or hard ceiling is rejected; primary cannot finish early; calls above the admitted budget are rejected |
 | instructions | `AGENTS.md` wins; `CLAUDE.md` only on NotFound; both absent allowed; invalid/oversized/symlink `AGENTS.md` fails without fallback |
 | includes | exact files only; order preserved; duplicates, absolute, `.`, `..`, symlink component, external escape, non-regular, invalid UTF-8, per-file and aggregate overflow rejected |
 | snapshot | Provider observes only immutable bytes and digests captured before Run start; later path modification does not alter request |
@@ -819,12 +833,12 @@ Model generation dominates live latency, so the local harness should be both bou
 The demonstrator is successful only when all of these are true:
 
 1. The deterministic team scenario passes 100 consecutive times with identical semantic Events and RunView after normalizing generated IDs/timestamps.
-2. Root delegates exactly two bounded objectives; both workers use the same loop; root synthesis begins only after both terminal child Events.
+2. The primary either finishes directly or delegates the admitted number of bounded objectives; every child uses the same loop; synthesis begins only after all admitted children reach terminal Events.
 3. Human and JSONL renderers expose the same Run, AgentRun, state, summary, result, and order facts.
 4. Replay after process/connection teardown is exactly equal to the live terminal RunView.
 5. All boundary and failure cases in the matrix pass on Linux; path/cancellation subsets pass on every claimed platform.
 6. Cancellation drops every pending fake Provider future, empties the JoinSet, records terminal state, and returns 130.
-7. The ignored live OpenAI smoke passes once with an explicitly selected model before the adapter is called working.
+7. One ignored paid live smoke passes with an explicitly selected model for each Provider adapter before that adapter is called working.
 8. Secret canary scanning finds zero API-key bytes in stdout, stderr, Events, SQLite bytes, panic output, and test snapshots.
 
 ### 14.2 Local performance gates
@@ -834,7 +848,7 @@ On a named developer reference machine, release build, warm filesystem, fake Pro
 | Measurement | Required threshold | Method |
 |---|---:|---|
 | CLI start to `RunStarted` with two 32 KiB files | p95 <= 50 ms over 100 runs | wall-clock external runner |
-| complete fake two-worker Run including SQLite commits | p95 <= 100 ms over 100 runs | wall-clock external runner |
+| complete fake `team(2)` Run including SQLite commits | p95 <= 100 ms over 100 runs | wall-clock external runner |
 | `show` replay for 100 Events | p95 <= 25 ms over 1,000 runs | wall-clock external runner |
 | cancellation request to terminal cancellation with cooperative fake | p95 <= 100 ms over 100 runs | monotonic clock |
 | peak resident memory for 256 KiB included input | <= 32 MiB above idle baseline | platform measurement |
@@ -868,13 +882,13 @@ If the store fails during terminalization, return 1 even for Ctrl-C because the 
 
 ## 16. Minimal implementation shape
 
-Keep the four-file core proof, then add one private module in the optional OTLP patch:
+Keep one package with a deep Engine and focused Session/presentation/terminal files, then add one private telemetry module as the last beta slice:
 
 ```text
 src/main.rs
   clap types
   env/config resolution
-  human and JSONL writers
+  mode selection and composition
   signal-to-Engine cancellation
 
 src/lib.rs
@@ -887,12 +901,20 @@ src/lib.rs
 src/provider.rs
   Provider trait
   strict scripted fake under test support
-  OpenAI HTTP adapter
+  staged OpenAI, Anthropic, and constrained OpenRouter adapters
   SecretString credential ownership
 
 src/store.rs
   state-path resolution helper
   SQLite append/replay
+
+src/presentation.rs
+  pure RunView-to-semantic presentation projection
+  deterministic human, screen-reader, and JSONL mapping
+
+src/terminal.rs
+  bounded inline Ratatui/Crossterm ownership and drawing
+  composer, local command registry, keys, resize, and restoration
 
 src/telemetry.rs
   Disabled | Otlp concrete mode
@@ -901,10 +923,10 @@ src/telemetry.rs
 
 tests/team_run.rs
   deterministic matrix
-  ignored live smoke
+  ignored live smoke per claimed adapter
 ```
 
-`Workspace`, renderer, limits, cancellation, and config are private functions/types until their implementation gains enough depth to deserve a file. `cap-std`/`cap-fs-ext` are mechanisms hidden inside `lib.rs`, not adapter traits. `directories` is a path helper hidden by `store.rs`, not a state-location interface.
+`Workspace`, limits, cancellation, and config are private functions/types until their implementation gains enough depth to deserve a file. `cap-std`/`cap-fs-ext` are mechanisms hidden inside `lib.rs`, not adapter traits. `directories` is a path helper hidden by `store.rs`, not a state-location interface.
 
 Suggested direct dependencies earned by the minimum behavior:
 
@@ -916,16 +938,18 @@ Suggested direct dependencies earned by the minimum behavior:
 - `cap-std` and `cap-fs-ext` for handle-relative no-follow Workspace access;
 - `directories` for platform state location;
 - `secrecy` for credential handling;
-- the selected SHA-256 implementation for required snapshot digests.
+- the selected SHA-256 implementation for required snapshot digests;
+- `ratatui` and `crossterm` after their terminal dependency review; and
 - `opentelemetry`, `opentelemetry_sdk`, and `opentelemetry-otlp` with trace-only minimal features for the OTLP patch.
 
-Dev dependency:
+Dev dependencies:
 
 - `tempfile`;
+- `expectrl` after its platform/native review for PTY evidence;
 - `opentelemetry_sdk` with the `testing` feature for in-memory span assertions; and
 - Tokio's `test-util` feature for paused time in ordinary tests with an explicitly constructed current-thread runtime.
 
-Do not add `crossterm`, `unicode-width`, `indicatif`, `console`, `keyring`, `dotenv`, `figment`, `config`, `tracing-subscriber`, `assert_cmd`, `insta`, `proptest`, or a tokenizer in the first implementation.
+Do not add `indicatif`, `console`, `keyring`, `dotenv`, `figment`, `config`, `tracing-subscriber`, `assert_cmd`, `insta`, `proptest`, or a tokenizer in the first implementation. Do not add OAuth, browser, listener, keyring, or SSE dependencies while consumer-subscription inference remains release-blocked.
 
 ## 17. Triggers for future configurability
 
@@ -936,10 +960,8 @@ Add a setting only when its named trigger occurs:
 | users repeatedly need different limits for valid repositories | one named limit with validated range; do not expose the entire Limits struct |
 | exact context failures occur despite byte bounds | model-aware local token counter or bounded count endpoint, with measured latency |
 | temporary 429/503 materially harms completion | bounded two-attempt retry policy with recorded attempts |
-| users need persisted credential UX or OAuth | `auth` commands and platform credential store |
-| a second hosted Provider ships | explicit `--provider` and provider-scoped model config |
+| an approved subscription path clears its policy, remote-budget, browser/process, secret-store, and conformance gates | `auth` commands and one platform credential-store adapter |
 | a deployment requires an enterprise egress proxy | explicit proxy URL/trust configuration with redaction and credential-path tests |
-| append-only progress is proven insufficient | TTY-only renderer behind the same RunView, then width/resize/color policy |
 | terminal color materially improves attribution | `--color auto|always|never` and `NO_COLOR` precedence |
 | large output is common | Artifact storage and Event references; do not just raise 64 KiB rows |
 | event replay misses its 25 ms/100-Event gate at real scale | measured snapshot strategy |
@@ -957,12 +979,12 @@ An implementer should be able to work from this checklist without another design
 
 ### Commands and configuration
 
-- [ ] Implement only `run` and `show`.
+- [ ] Implement bare `arany [OBJECTIVE]`, deterministic `exec --output text|jsonl`, and deterministic `show --output text|jsonl RUN_ID`; do not add a `run` alias.
 - [ ] Support global `--state-dir`; support `ARANY_STATE_DIR` beneath it in precedence.
-- [ ] Support `--workspace`, repeated `--include`, `--model`, `--otlp-endpoint`, and `--jsonl` on `run`.
-- [ ] Resolve model as CLI then `ARANY_OPENAI_MODEL`; error if absent/empty.
+- [ ] Support `--workspace`, repeated `--include`, `--provider`, `--model`, and `--otlp-endpoint` on bare interactive mode and `exec`; keep presentation flags out of `exec` and `show`.
+- [ ] Resolve one Provider and its model from CLI then provider-scoped environment; error if either is absent, empty, or lacks the strict outcome capability.
 - [ ] Resolve OTLP as CLI, trace-specific environment, generic environment, then disabled; accept only numeric-loopback `http` and reject unsupported OTLP variable names without reading their values.
-- [ ] Read credential only from non-empty `OPENAI_API_KEY` into `SecretString`.
+- [ ] Read only the selected adapter's non-empty API-key source into `SecretString`; ship no login commands or profiles.
 - [ ] Use four exit codes: 0, 1, 2, 130.
 
 ### Inputs and bounds
@@ -976,9 +998,9 @@ An implementer should be able to work from this checklist without another design
 
 ### Provider and cancellation
 
-- [ ] Use fixed OpenAI Responses endpoint, `store:false`, truncation disabled, strict schema, 4,096 output tokens.
-- [ ] Use HTTPS-only Rustls transport with no redirect, retry, inherited proxy, cookies, or unsafe TLS override; mark Authorization sensitive.
-- [ ] Permit at most four Provider calls, two workers, and two concurrent worker futures.
+- [ ] Give each claimed adapter a fixed reviewed origin, native wire format, strict outcome encoding, 4,096-output-token ceiling, privacy controls, and safe error/usage mapping.
+- [ ] Use HTTPS-only Rustls transport with no redirect, retry, inherited proxy, cookies, compatibility endpoint, or unsafe TLS override; mark credentials sensitive.
+- [ ] Enforce one direct call or the admitted `N + 2` team-call budget, the configured child limit, and the beta hard ceiling.
 - [ ] Use 120-second call and 300-second Run deadlines with zero retry.
 - [ ] Propagate a root cancellation token to every child and prioritize it at awaits.
 - [ ] Drain for two seconds; second Ctrl-C or deadline aborts and reaps the JoinSet.
@@ -986,10 +1008,12 @@ An implementer should be able to work from this checklist without another design
 
 ### Output and safety
 
-- [ ] Human progress is append-only stderr; final root result is stdout.
+- [ ] Bare interactive progress is one bounded inline stderr composer/footer/shelf with native scrollback insertion; committed primary results are stdout after terminal restoration.
+- [ ] Implement the exact closed slash registry and keep every command local; disable active-Run free text and expose no approval/sandbox command or flag.
 - [ ] JSONL stdout is one compact persisted Event plus newline, flushed per Event.
 - [ ] JSONL stderr diagnostics use a distinct typed envelope.
-- [ ] Emit no color, cursor control, alternate screen, width calculation, or resize handling.
+- [ ] Keep `exec`, `show`, and screen-reader output free of terminal initialization or rewriting; the interactive path uses no alternate screen, mouse, focus, OSC, spinner, animation, or idle redraw.
+- [ ] Restore every enabled terminal mode on success, failure, cancellation, signal, panic, partial acquisition, suspension, broken output, and renderer failure.
 - [ ] Escape or reject ANSI/ECMA-48 and OSC sequences, C0/C1 controls, carriage return, backspace, bidirectional controls, and forged line prefixes; allowlist diagnostic fields.
 - [ ] Never persist or render credential, headers, raw provider body, inherited environment, or included file contents.
 
@@ -1005,14 +1029,15 @@ An implementer should be able to work from this checklist without another design
 ### Proof
 
 - [ ] Implement the strict gated fake without a public fake CLI mode.
-- [ ] Put the deterministic matrix and ignored OpenAI smoke in `tests/team_run.rs`.
+- [ ] Put the deterministic matrix and one ignored paid smoke per claimed adapter in `tests/team_run.rs`.
+- [ ] Pass pure projection, TestBackend, native Linux/macOS PTY, exact screen-reader, parser/collision, terminal-restoration, and semantic-parity gates.
 - [ ] Run the happy path 100 times and compare normalized semantic output.
 - [ ] Prove path resolution on every claimed platform.
 - [ ] Prove secret canary absence across output and persisted bytes.
 - [ ] Measure the four local latency gates in release mode on a named machine.
 - [ ] Prove telemetry topology, canary absence in spans and encoded protobuf, loopback protocol behavior, cancellation progress, thread cleanup, saturation, and disabled-path overhead.
 
-No research question remains open for the minimum CLI. The cross-platform path suite, performance measurements, and live OpenAI smoke are implementation gates because they require the real code and runtime environment; they are not reasons to add more architecture before the tracer bullet exists.
+No research question remains open for the minimum CLI. The cross-platform path/PTy suites, performance measurements, and per-adapter live smokes are implementation gates because they require the real code and runtime environment; they are not reasons to add more architecture before the tracer bullet exists.
 
 ## Primary sources
 

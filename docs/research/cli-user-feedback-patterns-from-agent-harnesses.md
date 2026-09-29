@@ -8,7 +8,7 @@
 
 What do established coding-agent harnesses do especially well in terminal feedback that Arany should reuse rather than reinvent?
 
-The answer is constrained by Arany's fixed beta shape: CLI only; append-only output with no TUI; Linux and macOS; one Rust-first process; SQLite Events as canonical state; optional, lossy OTLP; a read-only first slice; and exactly one root plus two workers. This report does not reopen those decisions.
+The original comparison assumed append-only output with no TUI. The focused [beta terminal report](./beta-terminal-interface-and-multi-agent-feedback.md) supersedes that presentation constraint with a durable inline scrollback-first Session, accessible linear mode, and deterministic `exec`/`show`, while preserving the source comparison, channel separation, durability, child attribution, and recovery conclusions below.
 
 Claims labeled **Fact** come from a linked first-party document or official source repository. **Inference** identifies a conclusion for Arany rather than a vendor guarantee. Absence from reviewed documentation is an evidence gap, not proof that a feature does not exist.
 
@@ -35,7 +35,7 @@ The products differ mainly in presentation. Codex has the cleanest default stdou
 
 **Fact.** Codex separates the sandbox's effective technical boundary from the approval policy. Read-only, never-ask is a documented unattended combination, while bypassing both protections is explicitly dangerous. Optional OTLP complements rather than replaces sandboxing or local history. [OpenAI: approvals and security](https://learn.chatgpt.com/docs/agent-approvals-security)
 
-**Inference for Arany.** Adopt Codex's output-channel split, terminal usage event, explicit worker attribution, and fail-closed unattended approval behavior. Adapt thread switching into stable append-only worker prefixes. Reject its TUI, editable interactive sessions, and any future bypass flag as beta precedents.
+**Inference for Arany.** Adopt Codex's output-channel split, terminal usage event, explicit worker attribution, and fail-closed unattended approval behavior. Adapt thread switching into stable inline rows and causal detail backed by replay. Reject alternate-screen transcript ownership and any future bypass flag as beta precedents.
 
 ### Anthropic Claude Code
 
@@ -109,19 +109,19 @@ The products differ mainly in presentation. Codex has the cleanest default stdou
 
 | Pattern | Decision | Arany beta form |
 |---|---|---|
-| Final answer isolated from progress | **Adopt** | Human `run`: sanitized root result plus newline on `stdout`; committed progress and diagnostics on `stderr`. |
+| Final answer isolated from progress | **Adopt** | Interactive `arany`: sanitized primary result plus newline on `stdout`; committed progress and diagnostics on `stderr`. |
 | Typed machine stream | **Adopt** | `--jsonl`: exactly one serialized persisted Event per `stdout` line in ascending sequence; diagnostic envelopes only on `stderr`. |
-| Stable lifecycle states | **Adopt** | Started, running, waiting, completed, failed, and cancelled for the Run and each of exactly three AgentRuns. No free-form state inference. |
-| One accountable final owner | **Adopt** | Workers return bounded results; only the root produces the user-facing final result. |
-| Worker/source attribution | **Adopt** | Every worker line and event carries `agent_run_id`, role, and a short stable display label; parent wait lines identify the outstanding worker count. |
+| Stable lifecycle states | **Adopt** | Started, running, waiting, completed, failed, and cancelled for the Run and every admitted AgentRun. No free-form state inference. |
+| One accountable final owner | **Adopt** | Children return bounded results; only the primary produces the user-facing final result. |
+| Child/source attribution | **Adopt** | Every child line and Event carries `agent_run_id`, role, and a short stable display label; primary wait lines identify the outstanding child count. |
 | Usage and bounds in terminal outcome | **Adopt** | Terminal Run event reports provider calls used/limit, provider-reported token fields when available, elapsed time, and terminal reason. Never fabricate currency cost. |
 | Fail-closed unattended behavior | **Adopt** | Beta has no effectful Tool or approval prompt. Any unavailable required input or future ungranted effect fails rather than waiting or widening authority. |
-| Structured cancellation | **Adopt** | First `Ctrl+C` cancels root and both workers and persists cancellation; second signal or cleanup deadline forces abort, then returns 130. |
+| Structured cancellation | **Adopt** | First `Ctrl+C` cancels the primary and every active child and persists cancellation; second signal or cleanup deadline forces abort, then returns 130. |
 | Deterministic history and replay | **Adopt** | `show` reduces validated SQLite Events and renders deterministic human or JSONL output. |
 | Actionable errors | **Adopt** | State the failing phase, stable symbolic code, affected run/worker when known, last durable sequence, and safe next command. Never expose secrets or raw provider bodies. |
-| TUI worker rows, panes, spinners, todo widgets | **Adapt** | Render the semantic transition once as an append-only attributed line. Do not port cursor control, hiding, collapsing, color, or terminal-width logic. |
-| Full worker transcript drill-down | **Adapt** | Preserve typed worker Events for `show`; do not stream private reasoning or every token/tool payload into the root transcript. |
-| Resume and fork | **Adapt** | Beta exposes replay, not continuation. Add resumable execution only after a deterministic recovery contract exists for interrupted provider calls and joins. |
+| TUI agent rows, panes, spinners, todo widgets | **Adapt** | Use a bounded inline composer/footer and conditional activity shelf over native scrollback; no alternate screen, idle animation, or miniature IDE. |
+| Full child transcript drill-down | **Adapt** | Preserve typed child Events for `/agents` and `show`; do not stream private reasoning or every token/tool payload into the primary transcript. |
+| Resume and fork | **Adopt** | Beta uses durable explicit Session resume and committed-boundary fork; interrupted provider work is never silently continued. |
 | Approval source labels | **Adapt** | Reserve actor and intent identity in the Event vocabulary. There is no approval UI until effectful Tools and the separate Guard exist. |
 | Cost reporting | **Adapt** | Mark values as provider-reported, locally calculated, estimated, or unavailable. Calls, tokens, elapsed time, and configured limits remain the portable truth. |
 | Retry feedback | **Adapt** | The beta Engine performs no provider retry. If retry is later added, emit attempt, cap, delay, cause class, and final exhaustion as Events. |
@@ -132,7 +132,7 @@ The products differ mainly in presentation. Codex has the cleanest default stdou
 | Daemon, server, SSE, remote client, or import/export protocol | **Reject** | One CLI process and in-process Engine calls only. |
 | Remembered prefix approvals or blanket auto-approve | **Reject** | Future effects require typed immutable intents and deterministic Policy/Guard enforcement. |
 | Rewind, checkpoint, auto-commit, and code undo | **Reject** | The first slice is read-only; SQLite Events are append-only and never rewritten. |
-| Telemetry as user feedback or truth | **Reject** | OTLP is optional and lossy. SQLite Events and RunView remain canonical even when export fails. |
+| Telemetry as user feedback or truth | **Reject** | OTLP ships last in beta, is runtime-opt-in and lossy. SQLite Events and SessionView/RunView remain canonical even when export fails. |
 
 ## Recommended human and machine contracts
 
@@ -165,7 +165,7 @@ End every human run with the Run ID, terminal reason, and last committed sequenc
 
 ### 2. Causal join feedback
 
-Have root wait Events name the exact outstanding worker IDs and count. Completion/failure Events carry the assignment identity that satisfied or broke the join. This gives orchestrator-to-worker visibility without a task list, panel, or raw transcript and makes the fixed two-worker topology easy to verify.
+Have primary wait Events name the exact outstanding child IDs and count. Completion/failure Events carry the assignment identity that satisfied or broke the join. This gives orchestrator-to-child visibility without a permanent dashboard or raw transcript and makes any admitted bounded topology easy to verify.
 
 ### 3. Three-part terminal accounting
 

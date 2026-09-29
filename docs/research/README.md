@@ -19,39 +19,46 @@ The earlier conversational `P0`/`P1`/`P2` shorthand is retired. It mixed researc
 |---|---|---|
 | [Rust core feasibility](./rust-core-feasibility.md) | Engine language, storage, latency, async runtime, process protocol | Rust selected; its broader WAL/FTS/process shape is superseded for the minimum slice |
 | [Agent-state persistence](./agent-state-persistence.md) | SQLite versus files, Rust KV stores, RocksDB, and PostgreSQL; crash/durability contract | SQLite `DELETE + EXTRA`, one strict Events table, commit-before-feedback |
-| [Rust foundation and Engine contract](./rust-foundation-and-engine-contract.md) | Exact runtime, dependencies, Provider/Engine/Event types, store thread, HTTP path | Current-thread Tokio, dedicated SQLite thread, four-call workflow, bounded non-streaming OpenAI |
-| [CLI inputs and operability](./cli-inputs-configuration-and-operability.md) | Commands, inputs, limits, output, configuration, credentials, cancellation, fixtures | Complete fixed V1 CLI and evidence contract |
-| [Testing strategy](./testing-strategy-for-rust-cli-harness.md) | Evidence-dense Rust/CLI testing, exact user output, SQLite replay, live Provider smoke, flake and deletion policy | V1 testing contract resolved; executable proof pending |
-| [Existing-harness CLI feedback patterns](./cli-user-feedback-patterns-from-agent-harnesses.md) | Primary-source comparison of progress, attribution, approvals, replay, machine output, and failure UX | Reuse/adapt/reject guidance for Arany's append-only beta |
+| [Rust foundation and Engine contract](./rust-foundation-and-engine-contract.md) | Exact runtime, dependencies, Provider/Engine/Event types, store thread, HTTP path | Runtime/storage/network baseline retained; fixed topology is superseded by the Session/team report |
+| [CLI inputs and operability](./cli-inputs-configuration-and-operability.md) | Commands, inputs, limits, output, configuration, credentials, cancellation, fixtures | Input/security baseline retained; Session/team/provider surface superseded by the focused report |
+| [Testing strategy](./testing-strategy-for-rust-cli-harness.md) | Evidence-dense Rust/CLI testing, exact user output, SQLite replay, live Provider smoke, flake and deletion policy | Evidence discipline retained; central scenario expanded to Session + bounded N |
+| [Existing-harness CLI feedback patterns](./cli-user-feedback-patterns-from-agent-harnesses.md) | Primary-source comparison of progress, attribution, approvals, replay, machine output, and failure UX | Comparative evidence retained; focused terminal decisions are superseded by the beta terminal report |
+| [Beta terminal interface and multi-agent feedback](./beta-terminal-interface-and-multi-agent-feedback.md) | Attached-human control room, deterministic automation, accessibility, terminal lifecycle, and PTY evidence | Native scrollback/lifecycle retained; default layout and transient mouse superseded by the Session/team report |
+| [Interactive CLI conventions and command surface](./interactive-cli-conventions-and-command-surface.md) | Entry-point conventions, startup flags, slash commands, parsing, lifecycle, and permission controls | Bare `arany` and parsing retained; one-Run/session deferral is superseded |
+| [Beta Sessions, teams, terminal, providers, and license](./beta-sessions-teams-terminal-providers-and-license.md) | Footer/activity UX, mouse, bounded N, durable Sessions, custom endpoints, and attribution license | Canonical product decisions: Session beta, `/agents`, verified custom profiles, Apache-2.0 + NOTICE |
 | [Modular harness architecture](./modular-harness-architecture.md) | Deep modules, dependency direction, protocol/client seams, polyglot boundary | Research retained; first physical shape reduced to one package and one Provider seam |
 | [Deterministic protection](./deterministic-harness-protection.md) | Capabilities, Policy, Guard, platform enforcement, Jev boundary | Required before the first effectful Tool; absent from the read-only proof |
 | [Harness security lessons and controls](./harness-security-lessons-and-controls.md) | Primary-source failures in coding harnesses; V1 threat model, release blockers, non-claims, and future effect gates | P0 controls apply before implementation; separate Guard still activates with the first effectful Tool |
 | [Instruction Markdown](./instruction-markdown-and-policy-enforcement.md) | `AGENTS.md`, `CLAUDE.md`, imports, typed restrict-only Policy | Root `AGENTS.md` and absence-only `CLAUDE.md` fallback included; expansion deferred |
-| [Multi-agent loop and feedback](./multi-agent-loop-and-user-feedback.md) | Reusable loop, supervision, Assignment DAG, scheduling, user feedback | Same loop retained; reduced to one root, two children, join-all, and one RunView |
-| [Context, Memory, and compaction](./context-memory-and-compaction.md) | Context compiler, Memory lifecycle, retrieval, caching, deletion | Bounded input remains private Engine implementation; cross-Run Memory is deferred |
-| [Provider and tool runtime](./provider-and-tool-runtime.md) | Provider adapters, effect coordinator, processes, MCP, PTY/jobs | Fake and OpenAI retained; effect runtime, MCP, and PTY are deferred |
+| [Multi-agent loop and feedback](./multi-agent-loop-and-user-feedback.md) | Reusable loop, supervision, Assignment DAG, scheduling, user feedback | Same loop retained; beta now uses one primary plus bounded `0..N` direct children |
+| [Context, Memory, and compaction](./context-memory-and-compaction.md) | Context compiler, Session/Memory lifecycle, retrieval, caching, deletion | Session context and compaction activated; cross-Session Memory remains deferred |
+| [Provider and tool runtime](./provider-and-tool-runtime.md) | Provider adapters, effect coordinator, processes, MCP, PTY/jobs | General runtime evidence retained; beta adapters are superseded by the multi-provider report; effect runtime and Tool PTY are deferred |
+| [Beta multi-provider routing and adapters](./beta-multi-provider-routing-and-adapters.md) | OpenAI, Anthropic, OpenRouter, and Z.AI capability, routing, privacy, and strict-output evidence | Native OpenAI + Anthropic retained; built-in OpenRouter deferred, exact custom profiles added by the focused report |
+| [Consumer subscription authentication](./consumer-subscription-authentication-for-provider-adapters.md) | OpenCode/Codex/Claude subscription flows, official policy, OAuth, secret lifecycle, and provider conformance | Beta remains API-key only; official OpenAI plan support is trigger-gated, Anthropic requires prior approval |
 | [Evaluation and quality](./evaluation-and-quality-strategy.md) | Cases, trials, graders, baselines, release evidence | One deterministic architecture test retained; evaluation runtime is deferred |
-| [OTLP observability](./otlp-observability.md) | Standard trace export, privacy, local Collector trust boundary, lifecycle, bounds, and evidence gates | Opt-in trace-only second V1 patch after the core proof; Events remain canonical |
-| [Research closure audit](./research-closure-audit.md) | Conflicts, 54-decision register, remaining gates and deferred scope | Canonical research closure |
+| [OTLP observability](./otlp-observability.md) | Standard trace export, privacy, local Collector trust boundary, lifecycle, bounds, and evidence gates | Opt-in trace-only final beta slice; dynamic Session/Run/Agent topology, Events remain canonical |
+| [Research closure audit](./research-closure-audit.md) | Conflicts, decision register, remaining gates and deferred scope | Canonical research closure; terminal/provider amendments apply |
 | [Next-step decision register](./next-step-decision-register.md) | Reconciliation of every immediate next step and future trigger | Canonical implementation-research handoff |
 
-## Canonical minimum demonstrator
+## Canonical beta
 
 The [architecture overview](../architecture/system-overview.md) now applies the Ponytail deletion test to the research. The first implementation contains only:
 
 - one Cargo package and one CLI process;
-- one deep Engine module;
-- one fixed four-call workflow for a root orchestrator and exactly two read-only children;
-- one Provider interface with a deterministic fake and OpenAI;
+- one deep Engine plus focused Session/context implementation;
+- durable multi-Run Sessions with explicit resume, fork, rename, and derived compaction;
+- one primary plus ordered budget-bounded `0..N` direct read-only children under `single`, `auto`, or `team` policy;
+- one Provider interface with a deterministic fake, native OpenAI and Anthropic, and exact data-free-conformance-qualified custom endpoint/model profiles;
 - exact root `AGENTS.md`, with exact root `CLAUDE.md` as absence-only fallback;
 - one SQLite Events table owned by a dedicated thread using rollback `DELETE + EXTRA`;
-- one replayed RunView rendered as append-only terminal output or JSONL; and
-- one evidence-dense deterministic team journey, compact boundary corpora, exact user-output goldens, real `show` subprocess proof, and one ignored live OpenAI smoke; then
-- one private, opt-in OTLP/HTTP-protobuf trace projection to a numeric-loopback Collector, with no prompt or repository content.
+- replayed SessionView/RunView projected through bare interactive `arany`, accessible linear mode, deterministic text/JSONL `exec`, and deterministic `show`;
+- a native-scrollback composer with status footer, conditional agent shelf, keyboard-complete pickers, transient picker-only mouse, and a closed trusted slash registry;
+- API-key-only authentication, Apache-2.0 + NOTICE distribution, and one evidence-dense deterministic Session/team journey; and finally
+- one private, runtime-opt-in OTLP/HTTP-protobuf trace projection with dynamic bounded agent topology and no prompt or repository content.
 
-Before those behaviors run, startup pins trusted CLI-selected Workspace and state roots without reading repository/Git configuration, `.env`, hooks, or plugins. SQLite opens no-follow in a private owner-only state directory with defensive replay and an aggregate cap; one Run-owned budget bounds every child; terminal output is inert; and Provider egress is fixed and content-allowlisted. The demonstrator has no effectful Tool and therefore makes no sandbox claim. The first effectful Tool activates immutable typed effects, deterministic Policy, exact approval binding, and the separate Guard before that Tool ships.
+Before those behaviors run, startup pins trusted CLI-selected Workspace, configuration, ProviderProfile, and state roots without reading repository/Git configuration, `.env`, hooks, or plugins. SQLite opens no-follow in a private owner-only state directory with defensive replay and an aggregate cap; one Run-owned budget bounds every child; terminal output is inert; and Provider egress is admitted and content-allowlisted. The beta has no effectful Tool and therefore makes no sandbox claim. The first effectful Tool activates immutable typed effects, deterministic Policy, exact approval binding, and the separate Guard before that Tool ships.
 
-The subject reports remain design evidence, not a scaffold list. Daemon, protocol, Session, Assignment DAG, Memory, Artifacts, snapshots, FTS5, additional Providers, MCP, PTY, worktrees, evaluation runtime, HTTP/SSE, other Clients, direct remote telemetry, OTLP logs, and OTLP metrics are all trigger-based future scope.
+The subject reports remain design evidence, not a scaffold list. Daemon, protocol, nested teams, Assignment DAG, cross-Session Memory, Artifacts, snapshots, FTS5, automatic cross-provider routing, built-in OpenRouter, effectful Tools, MCP tool/process PTYs, worktrees, evaluation runtime, HTTP/SSE, other Clients, direct remote telemetry, OTLP logs, and OTLP metrics are trigger-based future scope. A development PTY harness for terminal safety is beta test infrastructure, not the deferred Tool runtime.
 
 ## Handoff
 

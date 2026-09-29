@@ -1,44 +1,51 @@
 # Testing strategy for the Rust CLI harness
 
-**Status:** recommended V1 testing contract  
+> **Session/team amendment — 2026-09-29:** The central journey is now one durable Session covering a single-agent Run, process exit/resume, provider switch, bounded `N`-child Run, fork, compaction failure, cancellation, and replay. TestBackend owns composer/footer/conditional-shelf frames; native PTY owns Session/agent pickers and transient mouse restoration. Custom profiles require data-free exact conformance before Workspace-bearing smoke. The evidence-per-test and no-duplication rules remain unchanged.
+
+**Status:** recommended beta testing contract
 **Research date:** 2026-09-29  
 **Scope:** the canonical single-package, single-process, CLI-only, read-only demonstrator in [the system overview](../architecture/system-overview.md)
+
+> **Provider and terminal amendment — 2026-09-29:** [Beta multi-provider routing](./beta-multi-provider-routing-and-adapters.md) replaces the single-OpenAI live lane with one explicitly activated paid test per claimed adapter. [Beta terminal interface](./beta-terminal-interface-and-multi-agent-feedback.md) preserves the exact-byte `ObservationBundle` for deterministic `exec`/`show` and adds separate pure/TestBackend, native PTY, and accessibility lanes for bare interactive `arany`. Raw interactive escape bytes are not public golden output.
+
+> **Interactive/auth amendment — 2026-09-29:** [Interactive CLI conventions](./interactive-cli-conventions-and-command-surface.md) replaces `run` with a durable bare `arany` Session, adds the composer and closed slash-registry corpus, and keeps `exec` as deterministic one-Run automation. [Consumer subscription authentication](./consumer-subscription-authentication-for-provider-adapters.md) keeps the beta API-key only. The suite must prove login commands are absent and imported subscription credentials are rejected; future OpenAI plan support would require separate OAuth/OIDC/secret/SSE/live gates, while Anthropic subscription login remains prohibited without prior approval.
 
 ## Executive decision
 
 The harness should optimize for **evidence per test**, not test count or line coverage.
 
-The initial suite should have one deterministic user journey as its center: a root delegates exactly two workers, the workers finish in a controlled reverse order, the root synthesizes, the Events are committed, the visible output is captured, and a fresh process reconstructs the same facts from SQLite. Around that journey, add only compact table-driven or corpus tests for boundaries that the happy path cannot prove: rejected startup input, illegal Event histories, terminal-control payloads, cancellation/deadlines, provider wire parsing, and durable failure.
+The initial suite should have one deterministic durable-Session journey as its center: one Run finishes directly; a second Run delegates a small admitted team whose children finish in controlled reverse order; the primary synthesizes; Events are committed; visible output is captured; and a fresh process reconstructs the same Session facts from SQLite. Around that journey, add only compact table-driven or corpus tests for boundaries that the happy path cannot prove: rejected startup input, illegal Event histories, terminal-control payloads, cancellation/deadlines, provider wire parsing, and durable failure.
 
 This produces three honest levels of end-to-end evidence:
 
-1. **Deterministic product composition:** real Engine, loop, scheduler, store, reducer, and renderer with the strict scripted `Provider`. This is the main release gate and compares the exact bytes a user would receive.
-2. **Real product process:** spawn the Cargo-built executable to prove argument parsing, exit status, stdout/stderr separation, environment isolation, and `show` replay. It must not add a hidden fake-provider mode to production.
-3. **Real provider smoke:** one explicitly selected, ignored, paid OpenAI test runs the actual executable and asserts structural facts, not exact natural language.
+1. **Deterministic product composition:** real Engine, loop, scheduler, store, reducer, and deterministic renderers with the strict scripted `Provider`. This is the main release gate and compares the exact bytes `exec`/`show` users receive.
+2. **Real product process and terminal:** spawn the Cargo-built executable to prove arguments, exits, streams, environment isolation, replay, and native PTY lifecycle. It must not add a hidden fake-provider mode to production.
+3. **Real provider smoke:** one explicitly selected, ignored, paid test per claimed adapter runs the actual executable and asserts structural facts, not exact natural language.
 
-The product cannot have a deterministic, subprocess-level `run` using the fake without exposing a fake route in the production binary or creating a second test binary. Neither is justified for V1. The deterministic journey should therefore exercise the actual CLI adapter and writers in-process, while the product-process test owns OS plumbing and `show`, and the live smoke owns the complete production path. Calling these three layers separately is more accurate than overstating one test as fully real.
+The product cannot have a deterministic, subprocess-level bare interactive Run using the fake without exposing a fake route in the production binary or creating a second test binary. Neither is justified for V1. The deterministic journey should therefore exercise the actual CLI adapter and writers in-process, while the product-process/PTy tests own OS plumbing and `show`, and live smokes own complete production paths. Calling these layers separately is more accurate than overstating one test as fully real.
 
 The practical target is a small number of named scenarios, each owning several related assertions. There is no test-per-function policy, no coverage percentage target, no snapshot for every error, and no duplicate assertion merely because another layer could repeat it. Rust's own testing introduction notes that tests demonstrate failures rather than prove their absence; the suite should make the strongest product claims executable without pretending that volume equals assurance. [The Rust Programming Language: Writing Automated Tests](https://doc.rust-lang.org/book/ch11-00-testing.html)
 
 ## 1. V1 claims the suite must prove
 
-Testing follows the architecture rather than inventing a parallel product. V1 contains one Cargo package, one CLI process, one Engine behavior seam, one SQLite Events table, exactly four Provider calls, and no effectful Tool. The suite must prove these externally meaningful claims:
+Testing follows the architecture rather than inventing a parallel product. Beta contains one Cargo package, one CLI process, durable Sessions, one Engine behavior seam, one SQLite Events table, admitted direct or `N + 2` team-call budgets, and no effectful Tool. The suite must prove these externally meaningful claims:
 
-- `run` accepts the documented bounded inputs, executes one root and exactly two concurrent children through the same loop, and does not synthesize until both children finish;
-- human mode writes append-only committed progress to stderr and only the final answer to stdout;
-- JSONL writes one serialized persisted Event per stdout line and diagnostics only to stderr;
+- bare interactive `arany` and `exec` accept the documented bounded inputs, execute direct and bounded-team Runs through the same loop, and do not synthesize until every admitted child finishes;
+- bare interactive mode shows the durable causal team state on stderr, restores terminal state on every exit path, and writes only the successful final answer to stdout;
+- screen-reader mode is labeled and append-only with no CSI/OSC or rewriting;
+- deterministic `exec` text/JSONL and `show` obey exact channel and byte contracts without terminal initialization;
 - `show <run-id>` reconstructs the same facts after the originating process and database connection have ended;
 - input, state, provider, output, concurrency, time, storage, and cost limits fail in the documented class without widening authority;
 - cancellation reaches every active child, drops pending Provider futures, drains or aborts within the fixed bound, and leaves an honest durable prefix;
 - malformed or hostile repository content, restored Events, provider data, and terminal content remain data rather than authority;
-- the OpenAI adapter still matches the provider's live protocol when the explicitly paid smoke is run; and
+- every claimed Provider adapter still matches its live protocol when its explicitly paid smoke is run; and
 - the same claimed filesystem and process behavior works on every supported platform.
 
-Tests do **not** need to prove deferred modules. There should be no V1 tests for Memory, MCP, plugins, a daemon, a process protocol, a TUI, a browser, effect Policy/Guard, general assignment DAGs, snapshots, FTS, a second hosted Provider, or remote OTLP. Adding tests for absent abstractions would pressure the codebase to create those abstractions prematurely.
+Tests do **not** need to prove deferred modules. There should be no V1 tests for Memory, MCP, plugins, a daemon, a process protocol, a browser, effect Policy/Guard, general assignment DAGs, snapshots, FTS, automatic Provider routing, or remote OTLP. The inline terminal is V1 scope and owns focused tests; this does not justify a general UI framework.
 
 ### 1.1 Canonical user-visible observation bundle
 
-Every acceptance scenario produces one diagnostic value, even if its assertions inspect only part of it:
+Every deterministic noninteractive acceptance scenario produces one diagnostic value, even if its assertions inspect only part of it:
 
 ```text
 ObservationBundle
@@ -51,7 +58,7 @@ ObservationBundle
 
 This is the minimum evidence unit for user-visible behavior. A success assertion is incomplete if it checks only an Engine return value, only a mock call, or only stdout. The bundle proves together what the user received, what automation received, whether the process reported success, and what durable truth survives for `show` after exit. Dynamic IDs and timestamps may be canonically labelled for comparison, but the raw bundle remains available in bounded escaped failure output.
 
-For the deterministic in-process journey, `exit` is the exact exit class returned by the CLI adapter and the byte buffers are the actual writer outputs; the reopened state uses a fresh SQLite connection. For subprocess cases, all five fields come from the shipped executable and its closed state database. The ignored live smoke produces the same bundle from the complete production path.
+For the deterministic in-process journey, `exit` is the exact exit class returned by the CLI adapter and the byte buffers are the actual writer outputs; the reopened state uses a fresh SQLite connection. For subprocess cases, all five fields come from the shipped executable and its closed state database. Each ignored live smoke produces the same bundle from the complete production path. Bare interactive `arany` adds a PTY observation containing semantic frames, terminal settings before/after, keys/signals, and the final post-restore receipt; it does not replace or redefine this exact-byte bundle.
 
 ## 2. Admission rule for a test
 
@@ -85,10 +92,13 @@ Use the following portfolio. The “owner” column prevents duplication.
 |---|---|---|---|---|
 | deterministic team journey | Engine, loop, SQLite file, reducer, renderer, filesystem fixtures | Provider semantic outcomes, release gates, monotonic test time | topology, concurrency, commits, replay, visible human/JSONL facts | yes |
 | real-binary contract | shipped executable, OS process, clap, stdout, stderr, exit status, `show` | temporary state/workspace and known stored Run | process channels, invocation errors, replay after process exit | yes |
+| pure terminal projection | PresentationModel, sanitizer, Ratatui TestBackend | RunView fixtures, widths, colors, focus | semantic parity, hostile text, 40/50/79/80/120 layouts | yes |
+| native PTY contract | shipped bare `arany`, OS terminal, Crossterm/Ratatui lifecycle | scripted scenario, composer/commands, keys, resize, signals, terminal emulator/tmux matrix | eligibility, parsing, restoration, scrollback, cancellation, suspend/resume, fallback | CI on claimed OS |
+| accessibility contract | linear presentation and shipped screen-reader mode | exact fixtures plus manual assistive technology | no control rewriting, reading order, labelled facts | automated + release manual |
 | focused owning-module tests | production parsers/reducer/sanitizer/store code | small tables or hostile corpora | exhaustive transition and boundary invariants | yes |
 | crash/fault scenario | child process, real SQLite file, reopen and replay | deterministic kill/fault point | old-or-complete transaction and honest interrupted recovery | release/CI gate |
 | cross-platform conformance | actual OS filesystem, ACL/path/signal behavior | same logical cases per platform | supported-platform claims | CI on claimed OS |
-| live OpenAI smoke | shipped executable, DNS/TLS/HTTP, provider, persistence, output | tiny fixed workspace and structural assertions | current wire compatibility and complete production wiring | ignored/manual |
+| live Provider matrix | shipped executable, DNS/TLS/HTTP, selected adapter, persistence, output | tiny fixed workspace and structural assertions | current wire compatibility and complete production wiring per claimed adapter | ignored/manual |
 | performance measurement | release binary and named machine | scripted Provider and fixed fixtures | local overhead and resource budgets | release measurement |
 | fuzz/property/model checks | one bounded pure boundary or state machine | generated inputs and retained regressions | broad input/trace classes | triggered, not initial default |
 
@@ -128,9 +138,9 @@ worker B  -> wait B -> finish first
 root      -> synthesize only after A and B -> finish
 ```
 
-One scenario then asserts:
+The small-team portion may choose `N=2` to make overlap and reverse completion easy to observe; separate table rows cover `N=0`, configured limits, and the hard ceiling. The scenario then asserts:
 
-- exactly four calls and no unclaimed expectation;
+- exactly the admitted calls and no unclaimed expectation;
 - two child calls overlap, completion order differs from spawn order, and child display order remains stable by spawn sequence;
 - root synthesis input includes both committed child results and cannot occur early;
 - selected instruction path/digest and include digests match the bytes actually read;
@@ -193,7 +203,7 @@ The first black-box table should cover related process contracts without one fun
 |---|---:|---|---|
 | `--help` | 0 | help contract | empty or documented clap behavior |
 | invalid syntax | 2 | empty | safe invocation diagnostic |
-| missing required model/key for `run` | 2 | empty | safe configuration diagnostic |
+| missing required model/key for bare interactive mode | 2 | empty | safe configuration diagnostic |
 | unknown Run for `show` | 1 | empty | safe operational diagnostic |
 | known completed Run for human `show` | 0 | exact reconstructed view | empty |
 | known completed Run for JSONL `show` | 0 | exact stored Events | empty |
@@ -242,14 +252,14 @@ Do not copy a live database file as a fixture. SQLite warns that a database and 
 
 Concurrency tests must schedule events; they must not hope for an interleaving.
 
-Required deterministic scenarios:
+Required deterministic scenarios for the selected `team(2)` overlap fixture:
 
-- both child Provider calls reach claimed expectations before either gate is released;
+- both child Provider calls in the `team(2)` fixture reach claimed expectations before either gate is released;
 - worker B completes before A even though A was spawned first;
-- root synthesis remains blocked until both child terminal Events commit;
-- cancelling while both workers are pending drops both Provider futures and prevents late results from committing;
+- primary synthesis remains blocked until both child terminal Events in that fixture commit;
+- cancelling while both children are pending drops both Provider futures and prevents late results from committing;
 - a response made ready concurrently with cancellation cannot win after the supervisor has observed cancellation;
-- a closed update sink or blocked store applies bounded backpressure and cannot create a fifth call; and
+- a closed update sink or blocked store applies bounded backpressure and cannot exceed the fixture's admitted four calls; and
 - the call and whole-Run deadlines produce the documented durable status and exit class.
 
 Use Tokio's paused time on the explicit current-thread runtime. Tokio's `pause`/auto-advance support requires a current-thread runtime and advances timer-backed work without wall sleeps. [`tokio::time::pause`](https://docs.rs/tokio/latest/tokio/time/fn.pause.html)
@@ -286,12 +296,12 @@ Keep exactly one ignored test, selected by name:
 live_openai_team_run
 ```
 
-It should spawn the actual product executable with a temporary Workspace/state directory, two tiny deterministic documents, the explicitly provided model, and the inherited API key passed without formatting. It incurs four Provider calls. It asserts only:
+It should spawn the actual product executable with a temporary Workspace/state directory, tiny deterministic documents, the explicitly provided model, and the inherited API key passed without formatting. Use one direct Run and one small bounded team Run; the test records and asserts the admitted call count. It asserts only:
 
 - exit 0;
 - stdout is a non-empty bounded final result with the documented newline policy;
-- stderr contains the expected root/two-worker lifecycle grammar and no raw terminal controls;
-- exactly four provider-call facts and one terminal Run exist in SQLite;
+- stderr contains the expected primary/child lifecycle grammar and no raw terminal controls;
+- the admitted provider-call facts and terminal Runs exist in SQLite;
 - fresh product-process `show` and `show --jsonl` succeed and expose the same identities/states/results; and
 - canary content excluded from the request does not appear in persisted or rendered output.
 
@@ -303,7 +313,8 @@ Rust supports `#[ignore]` so tests run only when explicitly requested. One passi
 
 Use goldens only where the bytes are themselves a product contract:
 
-- one canonical human `run` stdout/stderr pair;
+- one canonical deterministic `exec` text stdout/stderr pair;
+- one canonical screen-reader output and post-restore receipt;
 - one canonical human `show` output;
 - one canonical JSONL Event stream; and
 - later, one safe diagnostic format if it cannot be covered legibly inline.
@@ -354,11 +365,11 @@ Maintain focused tables for:
 - state: state inside Workspace, link substitution, wrong type, broad permissions/ACL, wrong owner, non-local filesystem, malformed header/schema/Event, page/headroom failure;
 - egress and secrets: hostile proxy environment, redirects, oversized/compressed responses, omitted-file canary, credential canary, forbidden telemetry fields;
 - output: every C0/C1 byte, ESC/CSI/OSC/DCS, CR, backspace, bidi controls, newlines, JSON delimiters, forged prefixes, oversized fields, and broken pipes; and
-- topology/budget: third child, child delegation, root early finish, fifth call, late completion, closed receiver, and blocked store.
+- topology/budget: direct mode, representative `team(N)` values, limit/hard-ceiling overflow, child delegation, primary early finish, calls above the admitted budget, late completion, closed receiver, and blocked store.
 
 Each corpus row records the invariant and expected error class. A loop executes the table and reports the row name on failure. Add a new row for a genuinely distinct encoding, platform primitive, or escaped defect; do not turn every row into another test function.
 
-Canary scanning is one shared assertion helper over all relevant sinks: provider observations, stdout, stderr, serialized Events, database bytes, panic text produced by controlled failures, and optional OTLP capture. The canary must be a test-only value and output reporting must not echo it when the assertion fails.
+Canary scanning is one shared assertion helper over all relevant sinks: provider observations, stdout, stderr, serialized Events, database bytes, panic text produced by controlled failures, and runtime-opt-in OTLP capture. The canary must be a test-only value and output reporting must not echo it when the assertion fails.
 
 The security report remains authoritative for the required threat cases and non-claims: [Harness security lessons and controls](./harness-security-lessons-and-controls.md).
 
@@ -374,7 +385,7 @@ The blocking beta matrix runs on Linux and macOS:
 - state ownership and private permission/ACL admission;
 - close/reopen SQLite replay and process-death recovery;
 - cancellation supervisor plus actual process signal/control delivery;
-- terminal/JSONL byte contract; and
+- deterministic text/JSONL byte contract, terminal TestBackend frames, native PTY restoration, and manual VoiceOver/Orca evidence; and
 - explicit `ProtectionUnavailable` for any required invariant the platform implementation cannot attest.
 
 Use a shared semantic case description with small platform adapters. Do not force identical low-level setup where operating systems differ, and do not hide an unsupported case behind an unconditional skip. Platform exclusions must name the missing claim in the support matrix. Windows is a deferred support target and must pass the corresponding ACL, reparse-point, console-control, path-namespace, persistence, terminal, and packaging cases natively before it becomes supported; compiling for Windows is not a beta release gate and is not a support claim.
@@ -409,7 +420,7 @@ Shared assertion helpers should produce:
 
 ```text
 scenario: deterministic team run / human output
-command:  arany run <redacted fixture objective> ...
+command:  arany <redacted fixture objective> ...
 exit:     expected 0, observed 1
 stdout:   <bounded escaped bytes>
 stderr:   <bounded escaped bytes>
@@ -470,7 +481,7 @@ Run the deterministic suite and platform conformance subset on every claimed OS.
 - bounded fuzz targets after their trigger;
 - sanitizer/Miri or model-checking jobs if the implementation earns them;
 - release-mode local latency/RSS measurements on a named environment; and
-- one explicitly authorized live OpenAI smoke.
+- one explicitly authorized live smoke per Provider Arany intends to claim.
 
 Performance is a measurement, not a correctness assertion. Keep the existing local thresholds in the CLI research as release evidence, but do not fail ordinary tests on host-sensitive milliseconds. Repeating one scenario 100 times for a release measurement is not 100 tests and should not inflate the developer loop.
 
@@ -480,15 +491,15 @@ Keep test support as small as the production design:
 
 ```text
 src/
-  main.rs       private CLI adapter tests for exact run writers
+  main.rs       private CLI adapter tests for exact mode/channel behavior
   lib.rs        reducer, bounds, sanitizer, cancellation tables near owners
   provider.rs   strict fake plus request/response fixture tests
   store.rs      real-file append/reopen/replay/fault tests
 tests/
-  team_run.rs   deterministic journey, real-binary contract, ignored live smoke
+  team_run.rs   deterministic journey, real-binary contract, ignored live smokes
   fixtures/
-    human-run.stdout.txt
-    human-run.stderr.txt
+    interactive.stdout.txt
+    interactive.stderr.txt
     human-show.stdout.txt
     team-run.jsonl
 ```
@@ -509,7 +520,7 @@ The implementation plan should turn these claims into a small set of scenario/ta
 
 | Claim family | Evidence | Release blocking |
 |---|---|---|
-| four-call root/two-child workflow | deterministic team journey with controlled reverse completion | yes |
+| direct and bounded-team workflows | deterministic durable-Session journey with controlled reverse child completion | yes |
 | exact human stdout/stderr | byte golden from actual CLI adapter | yes |
 | JSONL validity/facts/order | parsed lines plus canonical Event comparison | yes |
 | real process arguments/channels/exits | product subprocess table | yes |
@@ -522,9 +533,9 @@ The implementation plan should turn these claims into a small set of scenario/ta
 | no secret/omitted-input leakage | shared canary scan over every sink | yes |
 | terminal inertness | hostile control corpus plus human/JSONL byte checks | yes |
 | platform support | native CI behavior, no silent skip | yes for each claimed OS |
-| live OpenAI compatibility | one ignored actual-binary structural smoke | required before claiming adapter works, not default CI |
+| live adapter compatibility | one ignored actual-binary structural smoke per claimed Provider | required before claiming that adapter works, not default CI |
 | local performance | release measurement on named host | release evidence, not ordinary test |
-| OTLP privacy/topology/failure | separate optional-patch scenario | only when telemetry patch ships |
+| OTLP privacy/topology/failure | separate runtime-opt-in scenario | only when the final beta telemetry slice ships |
 
 ## 19. Decisions that supersede or sharpen earlier research
 
@@ -533,7 +544,7 @@ The existing CLI and architecture research is directionally correct but its “s
 - every matrix section becomes a scenario, table, or corpus owner rather than a test-count requirement;
 - exact boundary and boundary + 1 checks share tables instead of separate functions;
 - the deterministic fake proves the composition in-process, while the real binary owns OS channels and replay; no hidden fake CLI is added;
-- the ignored live smoke should spawn the shipped executable so it is the one genuinely complete `run` path;
+- each ignored live smoke should spawn the shipped executable so it is the genuinely complete Provider path;
 - user-output goldens are few, explicit, and manually reviewed without a snapshot dependency;
 - 100-run repeatability and latency loops are release measurements, not 100 permanent test cases;
 - property/model/fuzz tools are triggered by state-space growth or escaped bugs rather than installed preemptively; and
@@ -541,7 +552,7 @@ The existing CLI and architecture research is directionally correct but its “s
 
 ## 20. Final recommendation
 
-Begin implementation with the deterministic journey and make it display the exact human stdout/stderr and JSONL facts the user will see. Add the real `show` subprocess as soon as SQLite replay exists. Add compact adversarial tables only at the boundaries named by the architecture and security reports. Finish the core proof with deterministic cancellation and one real OS signal test per supported platform. Only then run the explicitly paid actual-binary OpenAI smoke.
+Begin implementation with the deterministic journey and make it display the exact human stdout/stderr and JSONL facts the user will see. Add the real `show` subprocess as soon as SQLite replay exists. Add compact adversarial tables only at the boundaries named by the architecture and security reports. Finish the core proof with deterministic cancellation and one real OS signal test per supported platform. Only then run each explicitly paid actual-binary smoke for an adapter Arany intends to claim.
 
 This testing model keeps the suite small because each test is broad in composition but precise in ownership. It remains strong because storage, rendering, process behavior, hostile input, and cancellation are real; only the stochastic Provider is replaced in the default journey, at the exact seam the production architecture already requires.
 

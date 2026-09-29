@@ -1,12 +1,14 @@
 # Harness security lessons and controls
 
+> **Session/team/custom-profile amendment — 2026-09-29:** The beta security boundary now includes durable Session history, one primary plus ordered aggregate-budget-bounded `0..N` direct children, and exact trusted custom endpoint/model profiles admitted only after data-free conformance. Replace every fixed two-child/four-call bound below with the immutable per-Run `single|auto|team` policy, the eight-child process ceiling, `1` or `N + 2` call reservation, and origin-bound profile evidence. Native scrollback remains; mouse reporting is transient picker-only. OTLP ships last in beta but remains runtime-opt-in. The incident-derived principles, no-effect claim, startup ordering, state hardening, content authorization, inert output, supply-chain gates, and future Guard requirements remain authoritative.
+
 **Status:** implementation input  
 **Date:** 2026-09-29  
 **Scope:** the Rust-first, CLI-only minimum demonstrator and the gates that must precede effectful Tools, MCP, durable Memory, plugins, remote clients, or additional providers
 
 ## Executive decision
 
-The minimum demonstrator can make a small, defensible security claim because it has no Tool execution, child process, MCP client or server, runtime plugin, durable Memory, workspace write, remote listener, or arbitrary provider endpoint. It has one user-selected read-only Workspace, one fixed HTTPS provider, one private SQLite journal, one root agent, and exactly two children. Preserve that narrow claim.
+The minimum demonstrator can make a small, defensible security claim because it has no Tool execution, child process, MCP client or server, runtime plugin, cross-Session Memory, workspace write, or remote listener. It has one user-selected read-only Workspace, native exact HTTPS origins or one trusted conformance-gated exact custom profile, one private SQLite journal, one accountable primary, and bounded flat direct children. Preserve that narrow claim.
 
 Rust helps with memory safety and precise types, but it does not solve the failures that repeatedly affected coding agents. The recurring failures were authority-selection bugs, trusted configuration loaded before workspace trust, shell syntax misclassification, symlink and time-of-check/time-of-use composition bugs, unauthenticated local servers, untrusted rendering reaching a privileged local API, ambient credential access, and delegated agents receiving more authority than their parent. These are architecture and enforcement failures, not language-memory failures.
 
@@ -35,7 +37,7 @@ GitHub issues are not treated as confirmed advisories. Where used, they are iden
 V1 may claim:
 
 - The process reads only explicitly selected, bounded Workspace files through a pinned root capability and rejects symlinks in the selected path.
-- The model cannot cause local command execution, workspace mutation, arbitrary file reads, arbitrary network access, or spawning of more agents than the fixed root-and-two-child topology.
+- The model cannot cause local command execution, workspace mutation, arbitrary file reads, arbitrary network access, nested delegation, or spawning more children than the pinned Run policy and beta hard ceiling permit.
 - Provider requests go only to the compiled official endpoint through a client with redirects, proxies, cookies, retries, and ambient credentials disabled.
 - The provider key is accepted only from the named environment variable, retained in a secret type, and excluded from canonical state and observability.
 - Canonical state is a local, user-private SQLite event journal with typed, bounded events and deterministic replay.
@@ -201,9 +203,9 @@ Priority `P0` means the minimum demonstrator must not ship without the control a
 - Expose no shell, subprocess, filesystem-write, patch, browser, MCP, plugin, dynamic library, callback URL, local server, arbitrary HTTP, or self-update path.
 - Compile the Engine against only the `Provider` seam. Do not add a latent generic Tool registry or permission bypass for future use.
 - Root and children have the same non-effectful capability set; children receive only bounded objective data and immutable Workspace snapshots. They cannot delegate.
-- Treat the fixed success topology—one root, exactly two concurrent children, exactly four Provider calls—as a security bound, not only a functional test.
+- Treat the admitted semantic topology—one accountable primary, `0..N` direct children, and one or `N + 2` Provider calls—as a security bound, not only a functional test. The aggregate budget and hard child ceiling are immutable after `RunStarted`.
 
-**Verification gate:** static dependency/API review plus integration tests demonstrate that malicious provider output resembling a command, URL, file request, tool call, policy block, or third child is rejected as a protocol outcome and causes no local or network effect other than the fixed provider calls.
+**Verification gate:** static dependency/API review plus integration tests demonstrate that malicious provider output resembling a command, URL, file request, tool call, policy block, nested delegation, or children above the admitted limit is rejected as a protocol outcome and causes no local or network effect other than admitted Provider calls.
 
 ### P0 — Harden Workspace snapshots
 
@@ -217,13 +219,13 @@ Priority `P0` means the minimum demonstrator must not ship without the control a
 
 ### P0 — Harden provider networking and secrets
 
-- Compile the exact HTTPS origin and request path. Reject user/model/provider overrides in V1.
+- Compile exact origins and paths for native Providers. Admit a custom profile only from trusted user configuration after exact data-free protocol/origin/model conformance; reject repository- or model-selected overrides.
 - Use rustls with certificate and hostname validation. Disable redirects, environment/system proxies, `.netrc`, cookies, connection-auth negotiation, and automatic retries.
-- Resolve and connect only as required for the fixed public origin. Do not expose a generic URL fetcher. Bound connect, request, and total elapsed time separately; bound compressed and decompressed response bytes.
-- Set `store:false`; send only the assembled bounded request; never send state-directory paths, unrelated environment values, or host metadata.
-- Read only `OPENAI_API_KEY`. Do not enumerate, log, persist, format with `Debug`, include in panic text, attach to telemetry, or pass it to another process. Clear the secret as early as practical while documenting that zeroization cannot guarantee removal from all allocator, TLS, kernel, swap, or provider copies.
+- Resolve and connect only as required for the admitted exact origin. Do not expose a generic URL fetcher. Bound connect, request, and total elapsed time separately; bound compressed and decompressed response bytes.
+- Set the native provider's strongest documented storage controls, including `store:false` for OpenAI; send only the assembled bounded request; never send state-directory paths, unrelated environment values, or host metadata.
+- Read only the credential environment reference named by the selected native or verified custom profile. Do not enumerate, log, persist, format with `Debug`, include in panic text, attach to telemetry, or pass it to another process. Clear the secret as early as practical while documenting that zeroization cannot guarantee removal from all allocator, TLS, kernel, swap, or provider copies.
 - Redact authorization values and provider-response bodies from errors. Preserve a bounded request ID and status only where safe.
-- No automatic retry. A timeout or lost response after bytes may have been sent is an ambiguous outcome and consumes one of the four call slots.
+- No automatic retry. A timeout or lost response after bytes may have been sent is an ambiguous outcome and consumes one slot from the admitted Run call budget.
 
 **Verification gate:** run through a hostile local proxy environment and assert no proxy is contacted; return redirects to loopback/private/file/alternate hosts and assert no follow; return chunked/compressed oversized bodies and assert bounded rejection; search Events, human output, JSONL, panic/error fixtures, and OTLP captures for a canary key and prompt.
 
@@ -251,14 +253,14 @@ Priority `P0` means the minimum demonstrator must not ship without the control a
 
 ### P0 — Enforce aggregate concurrency, time, and cost bounds
 
-- One run owns one budget object. Root and both children draw from it; delegation never creates new call, token, time, memory, or byte budgets.
-- Reserve the fixed four provider-call slots and maximum output-token allowance before `RunStarted`. Reject admission if the configured operational budget cannot cover the worst case.
-- Enforce the existing two-child concurrency, four calls, `max_output_tokens=4096` per call, bounded request/response/event sizes, 120-second per-call deadline, 300-second run deadline, two-second cancellation grace, bounded channels, and zero retries.
+- One Run owns one budget object. The primary and every admitted child draw from it; delegation never creates new call, token, time, memory, or byte budgets.
+- Reserve one direct-call slot or the full `N + 2` team-call budget and maximum aggregate output-token allowance before `RunStarted`. Reject admission if the configured operational budget cannot cover the worst case.
+- Enforce the pinned child limit and beta hard ceiling, `max_output_tokens=4096` per call, bounded request/response/event sizes, 120-second per-call deadline, 300-second Run deadline, two-second cancellation grace, bounded channels, and zero retries.
 - Count input/output sizes before cloning or queueing. Cancellation closes producers, releases permits, and prevents late results from becoming terminal state.
 - Persist provider-reported usage as bounded numeric metadata when available. Treat monetary cost as an estimate tied to a versioned operator-supplied price table; a hard currency cap cannot recall an in-flight request.
 - Ensure a stalled SQLite thread, blocked output sink, or telemetry exporter cannot retain unbounded provider tasks.
 
-**Verification gate:** deterministic fake time and provider tests cover a child stall, both children reaching limits concurrently, oversized structured output, cancellation races, closed receivers, SQLite backpressure, broken stdout, and a response arriving after cancellation. Total observed calls never exceed four.
+**Verification gate:** deterministic fake time and provider tests cover a child stall, concurrent children reaching limits, oversized structured output, cancellation races, closed receivers, SQLite backpressure, broken stdout, and a response arriving after cancellation. Total observed calls never exceed the admitted semantic budget.
 
 ### P0 — Preserve monotonic multi-agent authority
 
@@ -412,7 +414,7 @@ Required before enabling any MCP integration:
 
 ### OTLP
 
-The selected optional OTLP design is suitably narrow: trace-only, binary HTTP/protobuf, explicit numeric loopback endpoint, no redirect/proxy, typed allowlist, bounded lossy queue, and nonfatal failure. Preserve these constraints.
+The selected runtime-opt-in OTLP design is suitably narrow: trace-only, binary HTTP/protobuf, explicit numeric loopback endpoint, no redirect/proxy, typed allowlist, bounded lossy queue, and nonfatal failure. It ships last in beta; preserve these constraints.
 
 Additional gates:
 
@@ -434,7 +436,7 @@ Additional gates:
 | Provider egress | Hostile proxy/DNS/redirect/body/TLS fixtures; only fixed origin contacted; canary secret absent from all outputs. | Bounded `ProviderError`; zero retry. |
 | Store integrity | Mode/ACL/no-follow tests; corruption/schema/event-transition/disk-full/crash corpus; stable replay. | Typed state error; never fabricate success. |
 | Output safety | Full terminal-control and structured-output corpus through human and JSONL modes. | Escaped/replaced human text or valid serialized JSON only. |
-| Multi-agent bounds | Property tests for subset authority and integration tests for exactly root + two children + four calls. | Reject invalid plan/result and cancel run. |
+| Multi-agent bounds | Property tests for subset authority and integration tables spanning direct mode, representative `team(N)` cases, configured limits, and the hard ceiling. | Reject invalid plan/result and cancel Run. |
 | Resource/cost | Fake-clock saturation tests for all queues, bytes, tokens, call slots, deadlines, disk admission, and cancellation. | Deterministic bound error; no leaked task/permit. |
 | Secret hygiene | Canary API key, objective, and result scanned across Events, stdout/stderr, errors, panic fixtures, and OTLP capture. | Test failure and release block. |
 | Supply chain | Locked sources, reviewed feature/build-script/native/unsafe inventory, RustSec and license/source policy, reproducible release provenance. | CI/release failure. |
@@ -484,7 +486,7 @@ The following existing decisions should remain authoritative:
 - `cli-inputs-configuration-and-operability.md` correctly selects one ambient Workspace root, forbids `.env`, fixes the provider endpoint, disables V1 ANSI/Markdown rendering, defines JSONL, and validates before `RunStarted`.
 - `rust-foundation-and-engine-contract.md` correctly uses one current-thread runtime, a dedicated SQLite thread/connection, immutable Workspace snapshots, strict phase/outcome types, bounded queues, and only one Provider seam.
 - `otlp-observability.md` correctly makes traces optional, lossy, content-free, loopback-only, bounded, and noncanonical.
-- `system-overview.md`, the closure audit, and the decision register correctly keep V1 to one process, one root, two children, four Provider calls, zero retries, and no effectful Tool.
+- `system-overview.md`, the closure audit, and the decision register correctly keep beta to one process, bounded flat direct children, an admitted aggregate Provider-call budget, zero retries, and no effectful Tool.
 
 ### Missing or too weak
 
@@ -567,7 +569,7 @@ Do not copy product-specific CVEs into `agents/security.md`; this report is thei
 2. Implement startup/config parsing and Workspace/state capability opening before provider or agent-loop code.
 3. Build adversarial path/store/output tests against the platform APIs selected by the implementation.
 4. Implement the typed Event journal/reducer and verify corruption, crash, disk, and replay-poisoning behavior.
-5. Implement the scripted Provider and fixed root/two-child/four-call loop with one aggregate budget.
+5. Implement the scripted Provider and durable Session loop for direct and bounded-team Runs with one aggregate budget.
 6. Implement the fixed OpenAI adapter and hostile-network/secret-canary tests.
 7. Add optional content-free OTLP only after the core gates pass.
 8. Run dependency/native/build-script review and publish the supported-platform security matrix before calling the demonstrator releasable.

@@ -1,10 +1,12 @@
 # A durable multi-agent loop with user-first feedback
 
+> **Beta topology amendment — 2026-09-29:** Beta uses one primary plus an ordered, aggregate-budget-bounded `0..N` collection of direct read-only children under `single`, `auto`, or `team` policy. The default permits at most three active children and the beta hard ceiling is eight. Children do not create nested teams; the broader recursive supervision and Assignment DAG research below remains triggered scope.
+
 **Status:** research and architectural recommendation  
 **Research date:** 2026-09-28  
 **Question:** How should this Rust-first harness implement a reusable, durable agent loop that can supervise a team of subagents while showing the user what every agent is doing, why it is doing it, what needs attention, and what the team has produced?
 
-> **Scope amendment — 2026-09-29:** Version 1 exposes this runtime only through `arany`: exactly one root and two children, fixed join-all, append-only human output or JSONL, and one RunView. Interactive terminal rendering, three-worker phases, recursive teams, Assignment DAGs, web, desktop, IDE, and standalone SDK presentations below are triggered future analysis, not current implementation scope. The [closure audit](./research-closure-audit.md) and [system overview](../architecture/system-overview.md) are canonical.
+> **Scope amendment — 2026-09-29:** Beta exposes this runtime only through `arany`: durable Sessions, one accountable primary plus bounded flat `0..N` direct children per Run, join-all, SessionView, and RunView. The focused [beta terminal report](./beta-terminal-interface-and-multi-agent-feedback.md) activates an inline scrollback-first presentation plus deterministic and accessible linear projections; it does not activate recursive teams, Assignment DAGs, web, desktop, IDE, daemon, or standalone SDK presentations below. The [decision register](./next-step-decision-register.md) and [system overview](../architecture/system-overview.md) are canonical.
 
 ## Reading guide
 

@@ -3,7 +3,7 @@
 **Research and source access date:** 2026-09-28  
 **Question:** How should a provider-neutral, durable agent harness evaluate deterministic runtime correctness, model behavior, multi-agent coordination, memory, security, performance, and user feedback without confusing tests, benchmarks, traces, and model-graded judgments?
 
-> **Scope amendment — 2026-09-29:** Version 1 evaluates `arany` as the sole product Client through one deterministic `team_run` architecture test plus focused storage, input, cancellation, provider, and optional OTLP gates. The evaluation runtime, hosted service, web Clients, and broader suites below remain triggered future work. Engine is tested in-process; no protocol seam is implemented yet.
+> **Scope amendment — 2026-09-29:** Version 1 evaluates `arany` as the sole product Client through one deterministic durable-Session journey that covers both a direct answer and a bounded `team(N)` Run, plus focused storage, input, cancellation, provider, and runtime-opt-in OTLP gates. The evaluation runtime, hosted service, web Clients, and broader suites below remain triggered future work. Engine is tested in-process; no protocol seam is implemented yet.
 
 > **Testing amendment — 2026-09-29:** [Testing strategy for the Rust CLI harness](./testing-strategy-for-rust-cli-harness.md) owns deterministic V1 verification, exact user-output evidence, the ignored live Provider smoke, and test-admission/deletion rules. This report owns stochastic behavioral evaluation after its trigger; an eval score never substitutes for a failed deterministic test.
 
