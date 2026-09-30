@@ -1,6 +1,11 @@
 {
   "version": 1,
   "skills": {
+    "arany-terminal-design": {
+      "source": "./agents/skills",
+      "sourceType": "local",
+      "computedHash": "a3cb9f72c8de5e3edfd0bf2f17ad395e902c09bea4913a5281ff21d003e45973"
+    },
     "ask-matt": {
       "source": "mattpocock/skills",
       "sourceType": "github",
@@ -132,6 +137,11 @@
       "sourceType": "github",
       "skillPath": "skills/in-progress/retro/SKILL.md",
       "computedHash": "b8d55851a2909e26c2dbb2e8563719c87b3b700559f604e4df344f8c27e21047"
+    },
+    "rust-clean-code": {
+      "source": "./agents/skills",
+      "sourceType": "local",
+      "computedHash": "0a21d9437fe012b3190c0fc143ed918fb54e457bd8bb580fe959c71ecbffcf3a"
     },
     "scaffold-exercises": {
       "source": "mattpocock/skills",

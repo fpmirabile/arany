@@ -1,0 +1,4 @@
+interface:
+  display_name: "Rust Clean Code"
+  short_description: "Practical Rust guidance with explained tradeoffs"
+  default_prompt: "Use $rust-clean-code to improve this Rust code and briefly explain the meaningful tradeoffs."
