@@ -7,12 +7,19 @@ Rust-first, CLI-only agent harness. The product and executable are named Arany a
 - Git operations or a plan containing git steps → [agents/git.md](./agents/git.md)
 - Auth, secrets, external I/O, provider APIs, tools, processes, MCP, memory, remote transports, or rendering untrusted content → [agents/security.md](./agents/security.md)
 - Provider selection, models, capability evidence, adapter behavior, credentials, routing, or live conformance → [agents/provider.md](./agents/provider.md)
+- Saved API accounts, OS keyring access, or Linux D-Bus credential transport → [agents/credentials.md](./agents/credentials.md)
+- ChatGPT-plan OAuth, account consent, token storage, or weaker output bounds → [agents/chatgpt.md](./agents/chatgpt.md)
 - Sessions, resume/fork/compaction, collaboration policy, agent topology, or context reconstruction → [agents/session.md](./agents/session.md)
+- SQLite state admission, Event persistence, migrations, or replay → [agents/store.md](./agents/store.md)
 - Interactive terminal behavior, plain output, accessibility, terminal restoration, or presentation state → [agents/terminal.md](./agents/terminal.md)
 - Behavior changes, defect fixes, tests, fixtures, user-visible output, or correctness and release claims → [agents/testing.md](./agents/testing.md)
 - Architecture, codebase shape, data model, or a proposed new seam → [docs/architecture/system-overview.md](./docs/architecture/system-overview.md)
 - Creating or changing an implementation plan → [planning/PLANNING.md](./planning/PLANNING.md)
+- Engine Run coordination, budgets, or Provider outcome handling → [agents/engine.md](./agents/engine.md)
 - Work inside a module → its file under `agents/<module>.md`
+- Development-skill installation or maintenance → [agents/skills/README.md](./agents/skills/README.md)
+- CLI command admission, mode selection, process channels, or `exec` composition → [agents/cli.md](./agents/cli.md)
+- OTLP endpoint admission, trace privacy, export bounds, or shutdown → [agents/telemetry.md](./agents/telemetry.md)
 
 Load every relevant file for cross-module changes. A module file contains only module-specific knowledge; these root rules still apply.
 
@@ -22,7 +29,7 @@ When a new module is introduced, add `agents/<module>.md` and link it here. Crea
 
 1. **English only**: use English for all repository content, including code, comments, documentation, configuration text, user-facing copy, commit messages, and public API names.
 2. **Minimal comments**: default to none. Add one short comment when the reason is non-obvious. Architectural reasoning belongs in the relevant design document or ADR.
-3. **Simple over clever**: implement the smallest design that satisfies current requirements. Introduce an abstraction only when a real seam or repeated policy justifies it.
+3. **Simple over clever**: apply [Ponytail](./.agents/skills/ponytail/SKILL.md) to code changes and reviews. Understand the full flow, then prefer existing code, standard/native facilities, and installed dependencies before adding complexity. Complete the agreed objective and acceptance criteria; never reduce requested scope or weaken correctness, security, accessibility, error handling, resource bounds, or required verification to save lines. Favor readable Rust over the shortest diff. Repository rules take precedence over the skill's shortcuts, testing, comment, and output conventions.
 4. **Deep modules**: keep interfaces small and hide complexity inside the implementation. Prefer in-process calls. Add a seam only when at least two adapters exist or privilege, process, release, or ownership isolation makes it unavoidable.
 5. **Explicit resource bounds**: queues, buffers, caches, request bodies, tool output, artifacts, concurrency, and retry counts have declared limits and overflow behavior.
 6. **No historical residue**: remove superseded code cleanly. Documentation describes the current system; git history records the old one.
@@ -46,7 +53,7 @@ Record decisions with context, decision, reason, trade-offs, scope, and current 
 
 ## Module boundaries
 
-The beta is one Cargo package and one process. `main.rs` selects a presentation and calls the deep Engine module in `lib.rs`. Session/context lifecycle has enough depth for `session.rs`; pure semantic presentation lives in `presentation.rs`; terminal ownership and drawing live in `terminal.rs`. None may leak Ratatui, Crossterm, key, color, width, hover, or focus types into the Engine. Each Run has one accountable primary AgentRun and an ordered, budget-bounded `0..N` collection of direct read-only children; `single`, `auto`, or explicit `team` policy is pinned per Run, and children do not create nested teams in beta. Provider is the only Engine behavior seam: the scripted fake proves Engine behavior; native OpenAI and Anthropic prove supported switching; exact custom endpoint/model profiles must pass data-free conformance before Workspace disclosure. A built-in OpenRouter profile is deferred until its route/privacy gate; Z.AI remains unadmitted until it can enforce the strict outcome contract. Beta credentials are explicit API-key references only. A dedicated standard-library thread owns the sole SQLite connection; replay, instruction resolution, Workspace input, scheduling, SessionView/RunView reduction, and context compilation remain private Engine implementation. OTLP trace export ships as the last beta slice in one private `telemetry.rs` module; it is opt-in at runtime, lossy output, never canonical state or an Engine behavior seam.
+The beta is one Cargo package and one process. `main.rs` selects a presentation and calls the deep Engine module in `lib.rs`. Session/context lifecycle has enough depth for `session.rs`; pure semantic presentation lives in `presentation.rs`; terminal ownership and drawing live in `terminal.rs`. None may leak Ratatui, Crossterm, key, color, width, hover, or focus types into the Engine. Each Run has one accountable primary AgentRun and an ordered, budget-bounded `0..N` collection of direct read-only children; `single`, `auto`, or explicit `team` policy is pinned per Run, and children do not create nested teams in beta. Provider is the only Engine behavior seam: the scripted fake proves Engine behavior; native OpenAI and Anthropic prove supported switching; exact custom endpoint/model profiles must pass data-free conformance before Workspace disclosure. A built-in OpenRouter profile is deferred until its route/privacy gate; Z.AI remains unadmitted until it can enforce the strict outcome contract. A dedicated standard-library thread owns the sole SQLite connection; replay, instruction resolution, Workspace input, scheduling, SessionView/RunView reduction, and context compilation remain private Engine implementation. OTLP trace export lives in one private `telemetry.rs` module; it is opt-in at runtime, lossy output, never canonical state or an Engine behavior seam.
 
 Create a new module only after its implementation gains depth. Create a crate only after measured dependency, release, privilege, ownership, or compile pressure. Add a daemon only when a second Client or detached execution exists. Add deterministic Policy and the separate Guard before the first effectful Tool ships.
 

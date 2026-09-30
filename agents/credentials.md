@@ -1,0 +1,9 @@
+# Protected API accounts
+
+Load for changes to `src/cli/credentials.rs`, saved-account selection, OS keyring integration, or Linux D-Bus transport admission. [security.md](./security.md) still owns the repository-wide secret and supply-chain rules; [provider.md](./provider.md) owns Provider admission.
+
+- The private CLI credential module owns one versioned, at-most-1-KiB default native API account record in the OS store. It validates the exact native Provider, reviewed model/effort, UUIDv7 account identity, and bounded printable key on both write and read. It returns only redacted error variants; never format a platform error or derive `Debug` for the record.
+- A Session stores only the account UUID. Before native Run or `/models` use, resolve that UUID and Provider against the current protected record; a replaced account is unavailable to an older Session. Explicit environment-backed paths never fall through to the protected record, and the protected path never falls through to an environment variable.
+- Keyring access is blocking OS I/O, so perform it off the current-thread coordinator. Keep the selected key in-process; do not put it in arguments, Events, logs, telemetry, terminal drawing calls, or process-global environment. Failure never creates plaintext state.
+- On Linux, the Secret Service dependency reads `DBUS_SESSION_BUS_ADDRESS` and supports executable `unixexec` transports. Admit a single bounded `unix:path=` or `unix:abstract=` address with an optional exact GUID, or a bounded absolute `XDG_RUNTIME_DIR` fallback, before invoking keyring. Reject every other transport and address list without command execution. Re-check this invariant whenever the keyring or D-Bus dependency changes.
+- The system-store availability, replacement, unlock/failure behavior, and key-at-rest properties require native Linux and macOS release checks. Arany claims OS-store protection, not that every Linux Secret Service backend encrypts at rest.

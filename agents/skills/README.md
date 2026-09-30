@@ -33,3 +33,15 @@ In this CLI version, `install` is an alias for `add` and requires a source; `exp
 Edit its source under `agents/skills`, then rerun the targeted installation to refresh the installed copies and generated lock hashes. Review the source changes and corresponding lock entries together. Never treat edits to the ignored installed copies as durable repository changes.
 
 When checking a move or installation, validate skill frontmatter and relative references, compare source and installed files, and verify restoration from a relocated checkout using its local lock entries. Changes to these instructions do not require rebuilding the Rust executable.
+
+## Ponytail
+
+[Ponytail](https://github.com/DietrichGebert/ponytail) is an external skill installed through Skills CLI. Its entry in `skills-lock.json` pins the reviewed commit, skill path, and content hash. The repository's [simplicity rule](../../AGENTS.md#global-rules) defines how to apply it without compromising the agreed objective; local Rust and terminal skills remain complementary.
+
+Lockfile restoration installs it into `.agents/skills/ponytail`. To install the reviewed version for both existing harness targets:
+
+```bash
+DISABLE_TELEMETRY=1 npx --yes skills@1.7.0 add https://github.com/DietrichGebert/ponytail/tree/e3ba2aa6f1e6f0bc4d69eb09c9f0d0a93af56156/skills/ponytail --skill ponytail --agent codex claude-code --yes
+```
+
+This installs only the skill, not the upstream plugin or lifecycle hooks. Review source changes before updating the pinned revision and this command. Keep edits to project-specific application rules here or in `AGENTS.md`, rather than modifying the ignored upstream installation.
