@@ -69,33 +69,156 @@ The current-thread Tokio coordinator owns async lifecycle. One named standard-li
 ```text
 Cargo.toml
 src/
-├── main.rs          CLI grammar, mode selection, composition, exit mapping
-├── lib.rs           deep Engine, loop, budgets, SessionView and RunView
-├── session.rs       Session lifecycle, fork/resume/compaction, context compiler
-├── provider.rs      Provider contract, native adapters, exact custom profiles
-├── store.rs         private SQLite owner, migration, append, replay
-├── presentation.rs  pure bounded PresentationModel and linear projections
-├── terminal.rs      inline Ratatui view, pickers, transient mouse, RAII ownership
-└── telemetry.rs     private opt-in OTLP trace projection
+├── main.rs          CLI grammar, mode selection, exit mapping
+├── cli.rs           shared CLI output and state-path selection
+├── cli/
+│   ├── attached.rs  attached Session lifecycle and composer loop
+│   ├── attached/
+│   │   ├── active.rs    active Run and compaction terminal handling
+│   │   ├── agents.rs    agent inspector command handling
+│   │   ├── controls.rs  trusted local command handlers
+│   │   ├── picker.rs    private Session picker input and selection
+│   │   ├── models.rs    bounded attached model catalog browsing
+│   │   ├── run.rs       selected native Provider Run composition
+│   │   └── setup.rs     first-run attached account selection
+│   ├── chatgpt.rs  staged OAuth account access (not wired)
+│   ├── chatgpt/
+│   │   ├── callback.rs one-shot loopback HTTP callback (not wired)
+│   │   ├── catalog.rs  bounded account-scoped subscription model listing
+│   │   ├── consent.rs  versioned account-bound warning acceptance
+│   │   ├── exchange.rs bounded token/JWKS redemption
+│   │   ├── exchange/
+│   │   │   ├── revoke.rs private discovered-endpoint token revocation
+│   │   │   └── tests.rs synthetic issuer and signed-identity corpus
+│   │   └── identity.rs strict signed ID-token admission
+│   ├── credentials.rs protected default native API account access
+│   ├── exec.rs      one-Run command composition and durable receipt
+│   └── provider.rs  model catalog and data-free custom profile check commands
+├── lib.rs           small public interface for the deep Engine
+├── engine.rs        Run admission, budgets, Provider outcomes
+├── engine/
+│   ├── compaction.rs private manual and duplicate-safe automatic compaction
+│   ├── lifecycle.rs private Session create/resume/fork/default operations
+│   ├── progress.rs  committed bounded Run observation
+│   ├── run_loop.rs  private Run orchestration and terminal transitions
+│   └── run_loop/
+│       └── children.rs private bounded child scheduling and synthesis
+├── session.rs       Session module interface
+├── session/
+│   ├── events.rs    typed canonical facts and scope validation
+│   ├── reducer.rs   strict Session/Run/AgentRun replay
+│   ├── input.rs     pinned no-follow Workspace snapshots
+│   ├── input/
+│   │   └── race_tests.rs ignored Linux component-replacement gate
+│   ├── context.rs   deterministic bounded history selection
+│   ├── lineage.rs   canonical Event-prefix digest for fork replay
+│   └── compaction.rs bounded summary input and snapshot validation
+├── provider.rs      Provider semantic contract and adapter selection
+├── provider/
+│   ├── custom.rs     private exact custom-profile admission
+│   ├── custom/
+│   │   ├── adapter.rs      verified semantic custom Provider
+│   │   ├── destination.rs  bounded resolution and pinned HTTP destination
+│   │   ├── check.rs        synthetic conformance and evidence orchestration
+│   │   └── transport.rs    shared bounded custom wire and egress
+│   ├── anthropic.rs  native Messages key and bounded HTTP behavior
+│   ├── anthropic/
+│   │   ├── wire.rs  strict Messages documents and decoding
+│   │   └── wire/
+│   │       └── tests.rs  offline wire corpus
+│   ├── effort.rs     reviewed native model-specific effort admission
+│   ├── catalog.rs    bounded account-scoped native model discovery
+│   ├── openai.rs     native Responses key and bounded HTTP behavior
+│   └── openai/
+│       ├── subscription.rs dormant bounded ChatGPT-plan streaming wire
+│       ├── subscription/
+│       │   └── tests.rs synthetic stream and local-limit corpus
+│       ├── wire.rs  strict Responses documents and decoding
+│       └── wire/
+│           └── tests.rs  offline wire corpus
+├── store.rs         private SQLite owner and Store interface
+├── store/
+│   ├── evidence.rs  bounded expiring custom Provider evidence
+│   ├── journal.rs   SQLite setup, migration, append, fork writes
+│   ├── journal/
+│   │   └── crash_tests.rs ignored Linux append transaction-death gate
+│   ├── replay.rs    bounded strict Event loading and lineage resolution
+│   ├── state.rs     private state-root admission inside the store boundary
+│   └── state/
+│       └── lock.rs  per-Session operation lock and private lock-file checks
+├── presentation.rs  pure linear projections and sanitization
+├── presentation/
+│   ├── agents.rs    bounded semantic agent inspection
+│   └── model.rs     bounded semantic status and activity rows
+├── terminal.rs      attached terminal ownership and lifecycle
+├── terminal/
+│   ├── agents.rs    agent inspector navigation and state
+│   ├── commands.rs  closed trusted slash registry and parser
+│   ├── composer.rs  bounded grapheme-safe draft editing
+│   ├── input.rs     bounded Crossterm reader and semantic input mapping
+│   ├── linear.rs    labeled append-only terminal output
+│   └── view.rs      inline Ratatui frame drawing
+├── telemetry.rs     private opt-in OTLP trace lifecycle and SDK owner
+└── telemetry/
+    ├── config.rs    numeric-loopback endpoint admission
+    ├── tests.rs     topology, privacy, and transport fixtures
+    └── tests/
+        └── performance.rs ignored Linux release queue-saturation measurement
 tests/
-└── session_run.rs   central deterministic product journey
+├── session_run.rs   journal, replay, and process-level output
+├── session_run/
+│   ├── active_terminal.rs Linux signals, cancellation, suspend, and restoration PTYs
+│   ├── active_terminal/
+│   │   ├── acquisition.rs  Linux partial-acquisition restoration PTY
+│   │   ├── broken_stderr.rs Linux active-renderer fault PTY
+│   │   ├── panic.rs Linux terminal-owner panic-unwind PTY
+│   │   └── output_window.rs Linux signal during restored-output PTY
+│   ├── agent_inspector.rs Linux active/idle inspector PTYs
+│   ├── auto_compaction.rs Linux attached threshold and compaction process journey
+│   ├── custom.rs    exact custom-profile process journey in the same test target
+│   ├── disk_fault.rs Linux Store file-growth recovery release gate
+│   ├── disk_fault/
+│   │   └── product.rs ignored Linux shipped-exec failure-channel gate
+│   ├── live.rs      ignored paid native direct/team conformance journeys
+│   ├── loopback.rs  shared bounded local Provider process fixture
+│   ├── performance.rs ignored Linux release replay and team process measurements
+│   ├── performance/
+│   │   ├── memory.rs  ignored Linux two-file and capped-response RSS measurement
+│   │   └── startup.rs ignored two-file startup upper-bound measurement
+│   ├── session_picker.rs Linux transient mouse-capture picker PTY
+│   ├── session_picker/
+│   │   └── termination.rs Linux picker signal and suspend restoration PTY
+│   ├── slash_completion.rs Linux Tab, ghost placeholder, and restoration PTY
+│   ├── setup.rs    Linux hidden-key cancellation and terminal restoration PTY
+│   ├── startup_trust.rs Linux adversarial repository-startup process gate
+│   └── telemetry.rs product-process trace and canonical replay journey
+├── engine_run.rs   scripted Provider and Workspace input journey
+└── engine_run/
+    ├── performance.rs ignored release two-child core Run measurement
+    ├── workspace_security.rs explicit include admission corpus
+    └── performance/
+        └── cancellation.rs ignored release team cancellation measurement
 ```
 
-This remains one package and one process. `session.rs` exists because durable resume/fork/compaction and deterministic context construction form one deep lifecycle boundary. Do not create crates for domain nouns, protocol, providers, scheduling, projections, or evaluation. A crate appears only after measured release, privilege, ownership, dependency, or compile pressure.
+This remains one package and one process. The `session/` files are private implementation of one Session module, not separate public seams. The dormant subscription stream is private OpenAI Provider implementation, not a new Engine seam or an admitted route. `engine.rs` holds orchestration behind `Engine::run`, keeping `lib.rs` readable. Do not create crates for domain nouns, protocol, providers, scheduling, projections, or evaluation. A crate appears only after measured release, privilege, ownership, dependency, or compile pressure.
 
 ## 4. Public command contract
 
 ```text
 arany [GLOBAL_OPTIONS] [PROMPT]
+arany --setup
 arany --continue
 arany --resume [SESSION_ID]
 arany --fork SESSION_ID
-arany exec [GLOBAL_OPTIONS] --output text|jsonl PROMPT
+arany exec [GLOBAL_OPTIONS] --provider openai|anthropic|custom:NAME --model ID [--effort LEVEL] --output text|jsonl PROMPT
 arany show [--state-dir DIR] --output text|jsonl SESSION_OR_RUN_ID
 arany provider check PROFILE
+arany provider models openai|anthropic|custom:NAME [--state-dir DIR]
 ```
 
-Bare `arany` starts a new persistent Session. A positional prompt starts its first Run and remains interactive. `--continue` resumes the last admitted-Workspace Session; `--resume` resumes an exact Session or opens the picker; `--fork` creates a new Session at the source's latest committed Run boundary. Nothing resumes implicitly merely because a directory or TTY matches.
+Bare `arany` starts a new persistent Session after automatic account setup if no selected account or explicit Provider is available. Setup chooses an access method, native Provider, hidden API key, account-visible model, and supported effort before creating the Session; `--setup` reopens it. A positional prompt starts its first Run and remains interactive. The ChatGPT-plan choice is not yet functional. `--continue` resumes the admitted-Workspace Session with the greatest committed Event sequence; discovery is bounded to 65,536 Session heads and fails with an exact-ID resume fallback on overflow or malformed history. `--resume` resumes an exact Session or opens the picker; `--fork` creates a new Session at the source's latest committed Run boundary. Nothing resumes implicitly merely because a directory or TTY matches.
+
+The human setup and headless credential paths are documented in [Account setup](../setup.md).
 
 `exec` is deterministic one-Run automation and creates its own Session by default; appending to an existing Session requires an explicit Session ID. `show` is deterministic replay. There is no `run` alias.
 
@@ -103,10 +226,12 @@ The beta slash registry is closed and trusted:
 
 ```text
 /help  /status  /sessions  /new  /clear  /resume  /fork  /rename
-/compact  /agents  /provider  /model  /permissions  /quit  /exit
+/compact  /agents  /provider  /models  /model  /effort  /permissions  /quit  /exit
 ```
 
-`/clear` is the familiar alias of `/new`; it never deletes existing history. `/agents` owns agent inspection and next-Run collaboration settings; Arany does not invent a second `/team` spelling. `/provider`, `/model`, and collaboration settings mutate only idle Session defaults. During a Run they display the pinned values. Commands never become Provider input; `//text` escapes a leading slash. `exec` and `show` treat slash, at-sign, and exclamation prefixes literally.
+`/clear` is the familiar alias of `/new`; it never deletes existing history. `/agents` owns agent inspection and next-Run collaboration settings; Arany does not invent a second `/team` spelling. Idle `/models` pages through the selected Provider's bounded catalog and can select only Arany-admitted native or exact custom models; it is locked during a Run. `/provider`, `/model`, `/effort`, and collaboration settings mutate only idle Session defaults. A changed Provider or model clears the previous effort choice. During a Run the latter controls display pinned values. Commands never become Provider input; `//text` escapes a leading slash. `exec` and `show` treat slash, at-sign, and exclamation prefixes literally.
+
+The inline composer previews only compiled slash names and argument schemas. Tab fills a unique command prefix, static Provider/collaboration value, or a selectable model from the last explicit `/models` browse; effort candidates follow the current reviewed native model or loaded exact custom profile. Changing Provider invalidates cached model candidates. Dim argument placeholders are never draft bytes or submitted input and remain visible until that argument starts. Ambiguous prefixes do not change the draft. Linear/screen-reader input remains canonical and announces literal arguments instead of capturing Tab. Model catalogs and credential sources are not consulted on keystrokes.
 
 Approval and sandbox flags or commands remain absent until effectful Tools, deterministic Policy, a separate Guard, and effective-capability attestation exist.
 
@@ -125,7 +250,7 @@ Session
             └── ordered 0..N direct children
 ```
 
-A Session has at most one active Run in beta. Completed, failed, cancelled, and interrupted Runs remain immutable history. Resume reconstructs the same Session; fork creates a new Session and records source Session, boundary Run, boundary sequence, and prefix digest. Historical children remain inspectable but are never recreated as live work.
+A Session has at most one active Run in beta. The Engine holds a private per-Session state lock across each Run, source fork, and manual compaction; a brief private namespace lock coordinates file creation and removal while other Sessions can proceed independently during work. At most 65,536 Session lock files may exist, including crash-stranded pre-commit files. Completed, failed, cancelled, and interrupted Runs remain immutable history. Resume reconstructs the same Session; fork creates a new Session with a single `SessionForked` first Event recording source Session, boundary Run, boundary sequence, and canonical Event-prefix digest. Store replay validates bounded source ancestry; the context compiler selects successful inherited turns only through that boundary. Historical children remain inspectable but are never recreated as live work.
 
 Before each Run, Arany pins one collaboration policy:
 
@@ -147,7 +272,7 @@ The semantic Provider outcome is either:
 - `Finish { summary, result }`; or
 - `Delegate { children: bounded ordered objectives }`.
 
-In `single`, the primary may only finish. In `auto`, it may finish directly or delegate. In `team`, its first valid outcome is a non-empty bounded delegation. Every child must finish; after all required children terminate successfully, the primary receives their bounded results and performs synthesis. With `k` children, a successful team Run uses `k + 2` Provider calls: primary planning, `k` child calls, and primary synthesis. A direct single/auto answer uses one. There are no automatic retries or cross-provider fallbacks.
+In `single`, the primary may only finish. In `auto`, it may finish directly or delegate. In `team`, its first valid outcome is a non-empty bounded delegation. Every child must finish; after all required children terminate successfully, the primary receives their bounded results and performs synthesis. With `k` children, a successful team Run uses `k + 2` Provider calls: primary planning, `k` child calls, and primary synthesis. A direct single/auto answer uses one. Reported input usage above 1,000,000 tokens or output usage above the pinned call cap fails the call. There are no automatic retries or cross-provider fallbacks.
 
 Context is isolated per AgentRun. Children receive explicit assignment capsules and narrower-or-equal authority, never a shared mutable prompt. Only the primary writes the final assistant Message.
 
@@ -157,6 +282,8 @@ Session history is local canonical state. Provider conversation IDs, cache keys,
 
 The deterministic context compiler selects trusted instructions, the current user Message, bounded recent Session history, valid compaction material, explicit include snapshots, and required child results under the chosen Provider's exact budget. It records what was included and excluded. Provider switching between Runs recompiles from Arany state.
 
+Provider-neutral textual compaction uses the Provider's separate semantic `compact` operation rather than inventing an AgentRun. Accepted conversation outcomes, including unanswered objectives, and an optional prior summary enter that call; the model-authored result remains untrusted derived data. A later `RunStarted` pins the selected snapshot Event and content digest.
+
 Compaction never replaces or deletes canonical history. `/compact` creates a derived snapshot for an exact committed Session prefix and records:
 
 - covered Run/sequence and source digest;
@@ -165,7 +292,7 @@ Compaction never replaces or deletes canonical history. `/compact` creates a der
 - byte/token estimates and content digest; and
 - completion/failure provenance.
 
-Manual compaction runs only while idle and makes its Provider usage visible. Automatic compaction may run only at a committed Run boundary after a visible threshold warning. Failure leaves the Session intact; an incompatible or digest-mismatched snapshot is ignored with a typed failure. Cross-Session Memory remains deferred and distinct.
+Manual compaction runs only while idle and makes its Provider usage visible. Each new `RunStarted` records actual selected context-content bytes, its compactable Session-history share, and the policy-adjusted byte budget. After a successful attached Run reaches 80% of that budget with at least 10% compactable history, or 24 of the 32 selectable history Runs, Arany prints a durable warning after the confirmed receipt, then attempts automatic compaction for that exact committed boundary using the Run's pinned Provider/model. A large immutable Workspace input alone cannot trigger a call that would not relieve pressure. The Engine checks the expected Run ID and prior attempts under the Session lock, so a stale warning or concurrent compaction does not spend another call for that boundary. `exec` makes no hidden post-Run Provider call. Failure leaves the Session intact; an incompatible or digest-mismatched snapshot is ignored with a typed failure. Cross-Session Memory remains deferred and distinct.
 
 ## 7. Canonical persistence
 
@@ -193,6 +320,8 @@ The initial vocabulary is intentionally small:
 - `MessageAccepted`, `MessageCommitted`;
 - `RunStarted`, `RunFinished`; and
 - `AgentSpawned`, `AgentUpdated`, `AgentFinished`.
+
+New `SessionStarted` Events use payload version 2 to pin the admitted Workspace device and inode atomically with the title, including for an empty Session. Version 1 title-only Events remain readable; their Workspace identity is established by the first `RunStarted` if one exists. Replay rejects a later Run or fork whose identity disagrees with the pinned Session. Legacy empty Sessions cannot be selected by Workspace until a Run binds them.
 
 Provider/profile, collaboration policy, limits, instruction digest, and Workspace snapshot facts are fixed in `RunStarted`. A logical transition commits before reduction or feedback. A crash leaves a valid prefix; replay labels incomplete work `Interrupted` rather than inventing cancellation or success.
 
@@ -222,19 +351,35 @@ The activity shelf is conditional:
 - overflow: one `+N more` row;
 - failed/blocked agents remain until acknowledged or the Run ends.
 
-`/agents` opens every active/recent AgentRun and the collaboration controls. The default screen never reserves an empty team dashboard.
+`/agents` opens primary-first AgentRuns from the active and 16 most recent Runs, plus the next-Run collaboration controls. It shows bounded objective, summary, and result previews; `arany show SESSION_ID` exposes older and complete committed history. The default screen never reserves an empty team dashboard.
 
-Keyboard behavior is complete. Normal transcript/composer mode does not enable terminal mouse reporting. An open command palette, Session picker, or agent picker may enable mouse reporting transiently; hover, click, and wheel operate only that surface and have exact keyboard equivalents. Close, suspension, error, panic, cancellation, or loss of terminal ownership disables mouse reporting before returning control. Native scrollback wins over mouse enhancement.
+Keyboard behavior is complete. Normal transcript/composer mode does not enable terminal mouse reporting. The inline Session picker and `/agents` inspector enable mouse reporting transiently while their selectable rows are open; hover, click, and wheel operate only visible rows and have exact keyboard equivalents. Close, suspension, error, panic, cancellation, or loss of terminal ownership disables mouse reporting before returning control. Native scrollback wins over mouse enhancement.
 
-The terminal never enters alternate screen and never enables focus reporting, clipboard/title OSC, or globally captured mouse. `presentation.rs` is pure over SessionView/RunView; `terminal.rs` alone owns keys, mouse, width, focus, layout, redraw, and RAII restoration. Screen-reader, `exec`, and `show` emit no cursor rewriting or control sequences.
+The terminal never enters alternate screen and never enables focus reporting, clipboard/title OSC, or globally captured mouse. `presentation.rs` is pure over SessionView/RunView; the `terminal` module alone owns keys, mouse, width, focus, layout, redraw, and RAII restoration. Screen-reader, `exec`, and `show` emit no cursor rewriting or control sequences.
+
+During an attached Run, the Engine incrementally reduces each acknowledged Event and publishes the latest `RunView` with its committed sequence through a one-slot coalescing observation handle. The terminal redraws semantic activity rows from that snapshot, never from raw Provider streams; skipped display intermediates do not skip canonical Events. Closed-history replay still marks an unfinished Run interrupted, while the in-process projection retains its active state until a terminal Event commits.
+
+The attached composer remains terminal-local during a Run. Editing and Enter can retain a bounded objective draft, but only a later idle Enter submits it as a new Run. Active slash inspection reads the current committed projection; Session and next-Run default changes stay locked. Linear input carries its draft byte count through Enter, suspension, and post-Run terminal reacquisition so the 8 KiB limit cannot be bypassed.
+
+The linear screen-reader presentation retains canonical terminal editing and append-only labels. Enter submits a logical draft; Ctrl+D after nonempty input continues it across bounded physical lines, up to the same 8 KiB objective limit as the inline composer. A rejected physical or aggregate overflow is visible and never automatically submits a prefix; earlier accepted draft remains for an explicit retry or clearing. Ctrl+D on an empty draft exits, while Ctrl+C clears a retained draft. Native macOS behavior and screen-reader review remain release gates.
+
+Unix suspend is owned by the attached terminal: SIGTSTP and inline Ctrl+Z release input and terminal modes before the process stops, then reacquire presentation after SIGCONT. The local composer and any pinned Run future remain in memory; the linear reader restores the composer's byte count so its aggregate limit cannot widen after resume.
+
+Unix SIGTERM and SIGHUP pass through the same terminal-owned input path in idle, picker, compaction, and Run states. An active Run first requests Engine cancellation, releases terminal ownership, and waits for a bounded durable outcome before a committed receipt can be emitted. The released owner keeps its signal listeners alive during committed output and transfers them to the next terminal acquisition, preserving notifications queued during that interval. A second Ctrl+C during cancellation forces the same bounded shutdown; after an expired grace period, replay determines whether cancellation committed or only an interrupted prefix remains.
 
 ## 9. Provider profiles and custom endpoints
 
-One ProviderProfile binds protocol family, normalized endpoint/base path, credential reference, model, outcome encoding, privacy claim, and capability evidence. Native profiles are compiled and release-tested. Custom profiles live only in trusted user configuration outside the Workspace.
+One ProviderProfile binds protocol family, normalized endpoint/base path, credential reference, model, outcome encoding, privacy claim, and capability evidence. Native profiles are compiled; each admitted model still requires paid model-scoped live proof before a release claim. Custom profiles live only in trusted user configuration outside the Workspace.
+
+Native model effort is selected from a reviewed per-model set or resolved to an explicit reviewed default before Workspace input. The native adapter sends the resolved level explicitly on every Run and compaction request, and `RunStarted` pins it for replay. The finite reviewed table currently contains four exact OpenAI and four exact Anthropic model IDs; account catalogs may contain many more. Custom capability-evidence v1 binds only its exact model and provider-default reasoning behavior. Version 2 adds a bounded ordered effort list to the exact profile and fingerprint; each declared effort receives a data-free strict finish probe. An admitted explicit choice is sent on every Run and compaction call and pinned in `RunStarted`; omission retains the conformed provider-default behavior. Catalog availability alone cannot authorize a model/effort combination.
+
+`provider models` performs read-only, account-scoped native discovery without Workspace data, or lists the configured model of an exact custom profile without egress. Idle attached `/models` uses the same discovery and a bounded keyboard-accessible page view. Both show every returned model and label unreviewed native entries unsupported; custom v2 entries show their declared effort choices alongside provider default. The catalog is never consulted implicitly during a Run. A model remains selectable only through explicit CLI or idle Session defaults and the existing admission gate.
+
+The admission layer reads a versioned `provider-profiles.json` from the existing private state root through a bounded no-follow file handle. It validates the entire closed profile set, including unique names and a one-origin binding per credential reference, before returning the named profile. `arany provider check PROFILE` runs data-free synthetic probes and stores 24-hour evidence in a bounded auxiliary SQLite table. `custom:NAME` selects the exact checked profile and requires an explicit matching model; the custom adapter re-resolves and compares fresh fingerprint/address evidence before reading its key or any Workspace input.
 
 Closed custom protocol families begin with `openai-responses`; additional `openai-chat-completions` or parameterized `anthropic-messages` support must earn the same adapter and security review. Arany never accepts arbitrary headers, shell credential commands, repository profiles, raw key arguments, automatic model discovery, or a generic compatibility plugin.
 
-Before a custom profile receives Workspace data, `arany provider check PROFILE` performs a synthetic bounded conformance sequence with no repository content. Evidence is keyed by Arany version, adapter/test version, exact normalized origin, model, outcome encoding, requested output cap, timestamp, and expiry. It must prove strict outcome enforcement, server-side output bound, safe auth behavior, fixed route/model, bounded errors/body/time, cancellation, and labeled usage provenance. Any relevant change invalidates evidence.
+Before a custom profile receives Workspace data, `arany provider check PROFILE` performs a synthetic bounded conformance sequence with no repository content. The checker probes a direct finish, one-child delegation, and compaction through the strict Responses wire format; v2 additionally probes each declared effort with a strict finish. It validates response model, IDs, usage bounds, and bodies. Evidence binds the Arany/check version, exact endpoint and profile fields including v2 efforts, allowed address set, timestamp, and expiry. After a profile is admitted, a failed recheck leaves no prior evidence for that profile. Each Run admission re-resolves and matches all bound fields and addresses before Workspace disclosure; `RunStarted` records the exact endpoint and evidence fingerprint. The checker and adapter share the same bounded transport and reject raw or decoded exact key reflection. Paid exact-endpoint live proof remains separate.
 
 Receipts use exact support language:
 
@@ -243,21 +388,23 @@ Receipts use exact support language:
 - `custom verified`; or
 - `custom unverified`, eligible only for `provider check`.
 
-Non-loopback endpoints require HTTPS. Numeric loopback may use explicit HTTP. Redirects, cookies, ambient proxies, DNS/route drift, metadata/link-local/multicast destinations, and credential reuse across origins are rejected. “OpenAI-shaped” is never treated as proof of compatibility.
+Non-loopback endpoints require HTTPS. Numeric loopback may use explicit HTTP. Redirects, cookies, ambient proxies, DNS/route drift, metadata/link-local/multicast destinations, and credential reuse across origins are rejected. IPv6 domain answers are limited to reviewed allocated ranges; unknown global-unicast space is not assumed routable. “OpenAI-shaped” is never treated as proof of compatibility.
 
-Beta authentication remains API-key only. OpenAI plan-funded inference is blocked while its route cannot enforce Arany's remote output cap; Anthropic consumer-subscription authentication requires prior approval. Arany imports no other CLI's token and calls no private ChatGPT route.
+The current CLI has two explicit API-key sources: environment references for `exec` and flag-selected attached use, and one protected default native API account for bare new attached use. The latter is a versioned record in the OS credential store, with Provider/model/effort/key and an account UUID. Session defaults pin only that UUID; Run and catalog admission re-read the account and reject a changed ID or Provider before using its key. The native Provider then carries that validated UUID into `RunStarted`; environment-backed, custom, and legacy Runs have no saved-account UUID. Replay validates a present ID as UUIDv7 on a native Provider, but it is provenance, never credential authority. A cancelled setup creates no Session or Run; no key enters arguments, Events, output, or telemetry. Linux uses Secret Service through the selected keyring library; macOS uses Keychain Services. Its dependency and native-platform review remain release gates. This is an OS-store protection claim, not an assertion that every Linux backend encrypts at rest. A private CLI module constructs and validates new-registration or returning-account ChatGPT OAuth attempts and has an offline-tested, compiled-endpoint code/JWKS redemption path that returns credentials only after signed identity and granted-plan checks. Returning redemption must preserve the selected signed subject. Its private refresh exchange returns a whole replacement token value after checking the issued client and renewed scopes, but has no active caller or protected atomic-save owner. A separate private sign-out operation discovers a same-origin revocation endpoint and confirms remote revocation only from an empty `200`; it cannot mutate saved credentials and has no active caller. The official `earliest_refresh_at` field has no documented scheduling interpretation in the current guide, so active refresh remains gated. A private OpenAI module also forms a streaming-only subscription request and withholds all output until `response.completed` passes strict outcome and local usage bounds. Setup does not call either module: no product path starts a callback listener or browser, saves subscription tokens, or admits a subscription Run. The approved official ChatGPT-plan route still needs explicit weaker-bound consent and full admission; the setup labels it unavailable. Existing API-key and custom routes retain their strict remote cap. Anthropic consumer-subscription authentication remains unadmitted. Arany imports no other CLI's token and calls no private ChatGPT route. The [decision register](../research/next-step-decision-register.md) records the trade-off and gates.
 
 ## 10. OTLP ships last in beta
 
 OTLP is part of the beta milestone but added after the Session/team/provider proof. It is runtime opt-in and cannot change canonical truth or a Run outcome.
 
-Each Run is one trace correlated by safe Session, Run, and AgentRun IDs. Dynamic bounded spans cover the Run, each AgentRun, each Provider call, context compilation/compaction when applicable, and durable transition timing. The successful topology is derived from admitted agents and calls; it is not a fixed nine-span shape.
+Each admitted Run is one trace correlated by safe Session, Run, and AgentRun IDs. Its root is created only after `RunStarted` commits; the preceding context compilation is represented by a backdated child span only for that admitted Run. Dynamic bounded spans cover the Run, each AgentRun, each Provider call, and committed transition timing. Manual or automatic compaction is a separate Session operation trace with its Provider call and a marker only after `ContextCompacted` commits. The successful topology is derived from admitted agents and calls; it is not a fixed nine-span shape.
 
-Arany exports trace-only OTLP/HTTP protobuf to an explicit numeric-loopback Collector. Objectives, Messages, prompts, instructions, summaries, results, paths, file contents, Event payloads, provider bodies, headers, and credentials are excluded by type. The Collector owns remote TLS, authentication, vendor routing, and backend retry. Export remains bounded, lossy, and failure-isolated.
+Arany exports trace-only OTLP/HTTP protobuf to an explicit numeric-loopback Collector selected by `--otlp-endpoint`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, or `OTEL_EXPORTER_OTLP_ENDPOINT` in that order. A trace-specific endpoint is exact; the other two append `/v1/traces`. Invalid explicit configuration is rejected before Workspace input. Objectives, Messages, prompts, instructions, summaries, results, paths, file contents, Event payloads, provider bodies, headers, and credentials are excluded by type. Resource attributes are limited to service and SDK identity; Provider identity is a closed category and custom destinations are not exported. Provider-call failures carry only a closed low-cardinality `error.type` (`timeout`, `provider_unavailable`, `provider_rejected`, `invalid_response`, `output_limit`, or `task_panic`); cancellation uses `cancelled`. The Collector owns remote TLS, authentication, vendor routing, buffering, and backend retry. Arany uses a fixed 256-span queue, 64-span batches, a 256 KiB body ceiling, 500 ms request timeout, 750 ms shutdown timeout, and no exporter retry so process shutdown stays bounded. Export remains lossy and failure-isolated; SQLite replay is canonical.
 
 ## 11. Security boundary
 
 Authority is fixed before project input. Repository text, Session history, provider output, child Messages, custom-profile responses, and replayed Events are untrusted data. They cannot widen Workspace roots, endpoints, credentials, protocol, models, budgets, topology, policy, instruction role, telemetry destination, or capabilities.
+
+On Unix, the Workspace input loader rejects an opened instruction or explicit-include file whose hard-link count is not exactly one. This conservatively excludes static aliases to files outside the Workspace, at the cost of rejecting legitimate multi-linked files inside it. Link-count admission is not a defense against concurrent hard-link churn or bind mounts; those require separate native evidence and policy.
 
 The release boundary includes:
 
@@ -305,7 +452,6 @@ It does not force private users or hosted services to show a public “Powered b
 | Labelled evaluation proves recent/lexical context insufficient | FTS/vector or hybrid derived retrieval |
 | Second Client or detached execution exists | Per-user daemon and versioned local protocol |
 | Built-in OpenRouter support is claimed | Exact route, privacy, provenance, strict-output, and no-fallback gates |
-| OpenAI plan route gains a remote cap or budget ADR changes | Official dynamic-registration auth after browser/OIDC/secret gates |
 | Anthropic explicitly approves third-party subscription auth | Reassess native Claude subscription profile |
 | Browser/remote/multi-tenant product exists | New identity, authorization, quota, encryption, retention, threat model |
 
@@ -319,7 +465,9 @@ It does not force private users or hosted services to show a public “Powered b
 6. Add composer + status row + conditional activity shelf with keyboard-complete Session/agent pickers and native-scrollback PTY proof; add transient mouse only after restoration gates pass.
 7. Add native OpenAI and Anthropic API-key adapters and their offline/live conformance.
 8. Add trusted custom `openai-responses` profiles plus data-free `provider check`; do not admit unverified endpoints.
-9. Run complete Linux/macOS security, PTY/accessibility, fault, packaging, license, and performance gates.
-10. Add opt-in OTLP trace export as the last beta slice and prove dynamic topology, privacy, bounds, failure isolation, and shutdown.
+9. Add slash-command Tab completion and persistent argument previews without changing the trusted command boundary.
+10. Add first-run account setup, protected API-key storage, and the separately admitted official ChatGPT-plan route with explicit weaker-bound consent.
+11. Run complete Linux/macOS security, PTY/accessibility, fault, packaging, license, and performance gates.
+12. Verify the existing opt-in OTLP trace export still meets topology, privacy, bounds, failure-isolation, and shutdown gates after the new routes.
 
 Stop there. That is the minimum honest Arany beta.

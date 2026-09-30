@@ -160,7 +160,7 @@ Screen-reader mode is append-only and control-free. `exec` and `show` never init
 
 **Beta decision:** resolve CLI selections over trusted user config/Session defaults. State/config roots are platform user locations outside the Workspace and admitted before project input. Custom Provider profiles are configuration, not repository data.
 
-Credentials remain API-key references only. Native adapters read their named environment variables; custom profiles name one environment variable. Never accept keys in arguments, profile files, Events, terminal output, or telemetry. Do not load `.env` or run credential commands.
+The current CLI retains explicit API-key environment references for `exec`, custom profiles, and flag-selected attached use. Bare new attached mode can select one native API account from the OS credential store; first-run setup writes one versioned record containing its key and selected Provider/model/effort, and Session defaults pin only the account UUID. Replacing the record makes older saved-account Sessions fail closed. Linux Secret Service and macOS Keychain use keyring 4.2.0 with only its `v1` feature; native-platform and dependency review remain release gates. No plaintext fallback or at-rest encryption guarantee is claimed for every Linux backend. Never accept keys in arguments, profile files, Events, terminal output, or telemetry. Do not load `.env` or run credential commands.
 
 Native origins are compiled. Custom non-loopback origins require HTTPS; numeric loopback may use explicit HTTP. Normalize and pin origin/base path, disable redirects/cookies/ambient proxies, reject metadata/link-local/multicast and route drift, and bind one credential to one origin.
 
@@ -174,7 +174,7 @@ Provider/Engine errors are typed safe classes. No credentials, headers, prompts,
 
 **Beta decision:** direct dependencies remain the reviewed Rust foundation set: capability filesystem crates, clap, Tokio/cancellation, serde/JSON, reqwest+Rustls, rusqlite/bundled SQLite, directories, secrecy, SHA-256, UUID, error handling, Ratatui/Crossterm, target-specific platform APIs, and trace-only OpenTelemetry crates for the final slice. Dev dependencies include tempfile, Tokio test utilities, OpenTelemetry test support, and a reviewed PTY helper such as expectrl.
 
-Do not add SQLx, a pool, async-trait, vendor community SDKs, browser/OAuth/keyring/SSE libraries, a generic configuration framework, tracing subscriber, a second terminal framework, or dynamic plugin loading. `Cargo.lock`, feature inspection, advisories, licenses, build scripts, proc macros, native code, and application `unsafe` are release gates.
+Do not add SQLx, a pool, async-trait, vendor community SDKs, a generic configuration framework, tracing subscriber, a second terminal framework, or dynamic plugin loading. The approved account-setup and ChatGPT-plan slices may need reviewed OS credential, OAuth, browser-open, and streaming support; add only the minimal dependencies justified by those concrete boundaries. `Cargo.lock`, feature inspection, advisories, licenses, build scripts, proc macros, native code, and application `unsafe` are release gates.
 
 ### D-14 — OTLP ships last in beta
 
@@ -186,7 +186,7 @@ Each Run is a trace correlated by safe Session/Run/AgentRun IDs. Spans are dynam
 
 **Beta decision:** establish all authority before project input. Session history, repository text, Provider/custom-profile output, compaction, child data, and replay are untrusted. None may widen roots, endpoints, credentials, protocol, models, budgets, topology, policy, instruction role, telemetry, or capabilities.
 
-The beta has no shell, subprocess, Workspace write, arbitrary fetch, MCP, runtime plugin, callback listener, or sandbox claim. State is private/no-follow/defensive; output is inert; custom egress requires exact current evidence; budgets are aggregate; mouse capture is transient and restored; supply-chain inputs are pinned and reviewed. The first effectful Tool activates typed EffectIntent, Policy, approval proof, separate Guard, and attestation.
+The current implementation has no shell, subprocess, Workspace write, arbitrary fetch, MCP, runtime plugin, callback listener, or sandbox claim. The approved official ChatGPT OAuth slice may add a bounded loopback callback listener only after its separate authentication and local-transport review. State is private/no-follow/defensive; output is inert; custom egress requires exact current evidence; budgets are aggregate; mouse capture is transient and restored; supply-chain inputs are pinned and reviewed. The first effectful Tool activates typed EffectIntent, Policy, approval proof, separate Guard, and attestation.
 
 ### D-16 — Evidence-dense testing
 
@@ -200,9 +200,13 @@ Tables/corpora own other `N` values, parser/command states, illegal histories, p
 
 Use **Apache-2.0 plus a project NOTICE** attributed to `fpmirabile`. This is the closest standard license to free use/modification with redistributed attribution, changed-file marking, and an explicit patent grant. Do not dual-license with MIT and do not append a custom attribution clause. It cannot force private users or hosted services to display credit. Preserve `LICENSE` and `NOTICE` in every release artifact.
 
-### D-18 — Consumer subscription authentication remains triggered
+### D-18 — Explicitly accepted ChatGPT-plan route is beta scope
 
-**Triggered scope:** beta is API-key only. Reopen OpenAI's official plan profile only when its inference route gains a provider-enforced output cap or an approved ADR replaces the universal budget guarantee, and browser/OIDC/secret/conformance gates pass. Anthropic subscription auth requires explicit prior approval. Never import other harness credentials or call private ChatGPT routes.
+**Context:** OpenAI's official open-source Sign in with ChatGPT flow now permits eligible Plus/Pro users to authorize Responses inference with their plan. Its preview route requires `stream: true` and rejects `max_output_tokens`, so it cannot satisfy the existing remote output-token guarantee. See the [official quickstart](https://developers.openai.com/siwc/quickstart), [route limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations), and [error guidance](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery).
+
+**Beta decision (approved, not implemented):** offer API key and ChatGPT-plan access as distinct first-run choices. The plan route requires a clear warning and affirmative account-level acceptance that local time/read limits cannot guarantee a remote output-token or plan-usage cap. Pin access method and effective guarantee before each Run; never silently fall back to API-key billing. Keep the strict remote cap on existing API-key and custom routes. This accepts a weaker cost guarantee for the voluntary subscription route in exchange for using an eligible existing plan; it does not authorize an unbounded local stream or a claim of exact cost control. Browser/OIDC, protected token storage, streaming, model/effort admission, and offline/live conformance remain release gates. Anthropic subscription auth remains unadmitted. Never import other harness credentials or call private ChatGPT routes.
+
+**Implementation boundary:** the user's approval sets product policy, not consent for any particular ChatGPT account. Bind affirmative acceptance to the verified registration and warning version before activating it; an account switch or changed warning needs its own acceptance. The official route has a distinct account-specific model catalog and treats only a terminal `response.completed` event as success. Sources: [accounts and sessions](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions), [models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference).
 
 ## 3. Triggered modules
 
@@ -231,7 +235,8 @@ Use **Apache-2.0 plus a project NOTICE** attributed to `fpmirabile`. This is the
 6. Add the native-scrollback composer/footer/activity shelf, Session/agent pickers, accessibility, and transient mouse after keyboard/restoration proof.
 7. Add native OpenAI and Anthropic API-key adapters and their offline/live conformance.
 8. Add trusted custom `openai-responses` profiles and data-free `provider check`.
-9. Pass native Linux/macOS security, fault, PTY/accessibility, packaging, license, and performance gates.
-10. Add opt-in OTLP as the last beta slice and prove dynamic topology, privacy, bounds, failure isolation, and shutdown.
+9. Add slash-command Tab completion and persistent argument placeholders, then first-run account setup with protected keys and the separately admitted ChatGPT-plan route.
+10. Pass native Linux/macOS security, fault, PTY/accessibility, packaging, license, and performance gates.
+11. Recheck the existing opt-in OTLP slice for topology, privacy, bounds, failure isolation, and shutdown after the new routes.
 
 No daemon, process protocol, Guard, Tool runtime, cross-Session Memory, Artifact store, nested team, Assignment DAG, search index, automatic Provider router, built-in OpenRouter, evaluation service, web API, direct remote telemetry, OTLP logs, or OTLP metrics precedes that proof.
