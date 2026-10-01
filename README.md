@@ -11,7 +11,7 @@ cargo build --locked
 target/debug/arany --help
 ```
 
-The current repository build uses local, pinned repairs for Crossterm terminal hangup and the macOS TLS verifier's certificate-network-fetch policy. `bash scripts/source-archive.sh` creates and verifies a separate source archive that retains both; ordinary `cargo package` removes local patches and is not an installation path for either repair. The guarded native release build is `bash scripts/release-build.sh`. Neither command by itself clears the remaining beta release gates.
+The current repository build uses one local, pinned repair for Crossterm terminal hangup and the published `rustls-platform-verifier` for system TLS trust. `bash scripts/source-archive.sh` creates and verifies a separate source archive that retains the Crossterm repair; ordinary `cargo package` removes local patches and is not an installation path for that repair. The guarded native release build is `bash scripts/release-build.sh`. Arany restricts its own request destinations and which content and credentials it sends; operating-system TLS validation may make separate certificate-related connections. Neither build command by itself clears the remaining beta release gates.
 
 In a terminal, `arany` opens account setup when no default API account exists. It asks for an OpenAI or Anthropic API key, a model, and an effort, then prefers the operating system's credential store. If no keyring is available and none is pinned, it can save to a private but unencrypted file after an explicit warning and confirmation. `arany --setup` deliberately replaces the default account. See the [setup guide](./docs/setup.md) for saved-account limitations, model checks, and cancellation behavior.
 

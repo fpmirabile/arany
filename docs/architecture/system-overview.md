@@ -92,7 +92,8 @@ src/
 │   │   ├── exchange/
 │   │   │   ├── revoke.rs private discovered-endpoint token revocation
 │   │   │   └── tests.rs synthetic issuer and signed-identity corpus
-│   │   └── identity.rs strict signed ID-token admission
+│   │   ├── identity.rs strict signed ID-token admission
+│   │   └── registration.rs stable host and issued-client registration
 │   ├── credentials.rs protected default native API account access
 │   ├── credentials/
 │   │   └── keyring_helper.rs supervised bounded OS-store process
@@ -410,6 +411,8 @@ The CLI has two explicit API-key sources: environment references for `exec` and 
 
 A saved unreviewed model requires explicit effort and separate current evidence before Workspace input. Session defaults pin only the account UUID; Run and catalog admission re-read the record and reject a changed ID or Provider before using its key. The selected native Provider carries the validated UUID into `RunStarted`; environment-backed, custom, and legacy Runs have no saved-account UUID. Replay validates a present native UUIDv7 as provenance, never credential authority. Keys never enter arguments, Events, output, or telemetry. A private CLI module constructs and validates new-registration or returning-account ChatGPT OAuth attempts and has an offline-tested, compiled-endpoint code/JWKS redemption path that returns credentials only after signed identity and granted-plan checks. Returning redemption must preserve the selected signed subject. Its private refresh exchange returns a whole replacement token value after checking the issued client and renewed scopes, but has no active caller or protected atomic-save owner; the account lock does not activate refresh. A separate private sign-out operation discovers a same-origin revocation endpoint and confirms remote revocation only from an empty `200`; it cannot mutate saved credentials and has no active caller. The official guide directs renewal near access-token expiry, so the future account owner can use the bounded stored expiry while treating the undocumented `earliest_refresh_at` scheduling semantics as opaque; active refresh remains gated by protected atomic storage and cross-process coordination, not by interpreting that field. A private OpenAI module also forms streaming-only subscription Run and compaction requests and withholds each result until `response.completed` passes strict decoding and local usage bounds. Setup does not call either module: no product path starts a callback listener or browser, saves subscription tokens, or admits a subscription Run. The approved official ChatGPT-plan route still needs explicit weaker-bound consent and full admission; the setup labels it unavailable. Existing API-key and custom routes retain their strict remote cap. Anthropic consumer-subscription authentication remains unadmitted. Arany imports no other CLI's token and calls no private ChatGPT route. The [decision register](../research/next-step-decision-register.md) records the trade-off and gates.
 
+The dormant ChatGPT authorization path now has a default-user StateRoot registration record, distinct from saved API accounts and subscription tokens. It atomically stores one UUIDv4 host ID before constructing a first authorization request, and stores the issued client ID under the account lock before code redemption. Reopening the record reuses both for a fresh PKCE attempt. The client ID remains unverified callback state until signed identity succeeds; a stale or conflicting registration fails closed. This record contains no code, token, or consent receipt and does not enable setup, browser launch, subscription catalog use, or a Run.
+
 ## 10. OTLP ships last in beta
 
 OTLP is part of the beta milestone but added after the Session/team/provider proof. It is runtime opt-in and cannot change canonical truth or a Run outcome.
@@ -429,7 +432,7 @@ The release boundary includes:
 - no shell, subprocess, write-capable Workspace operation, arbitrary fetch, MCP, runtime plugin, callback listener, or self-update;
 - private no-follow SQLite state outside the Workspace, strict data-only replay, aggregate growth admission, and no encryption-at-rest claim;
 - one immutable aggregate Run budget for calls, output tokens, bytes, time, memory, disk, `N`, and concurrency;
-- only admitted fixed native or exact verified custom Provider egress, with phase-minimal content and origin-bound credentials;
+- only admitted fixed native or exact verified custom Provider requests, with phase-minimal content and origin-bound credentials; standard OS TLS validation may make auxiliary certificate-related connections, never an Arany payload destination;
 - inert terminal output, no alternate screen, transient picker-only mouse, and one RAII terminal owner that restores every enabled mode on every exit path; and
 - pinned/reviewed dependencies, lockfile, build/proc-macro/native inventory, and forbidden application `unsafe`.
 

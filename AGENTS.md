@@ -12,6 +12,7 @@ Rust-first, CLI-only agent harness. The product and executable are named Arany a
 - Sessions, resume/fork/compaction, collaboration policy, agent topology, or context reconstruction → [agents/session.md](./agents/session.md)
 - SQLite state admission, Event persistence, migrations, or replay → [agents/store.md](./agents/store.md)
 - Interactive terminal behavior, plain output, accessibility, terminal restoration, or presentation state → [agents/terminal.md](./agents/terminal.md)
+- Terminal history indexing, navigation, find, or reading anchors → [agents/history.md](./agents/history.md)
 - Behavior changes, defect fixes, tests, fixtures, user-visible output, or correctness and release claims → [agents/testing.md](./agents/testing.md)
 - Architecture, codebase shape, data model, or a proposed new seam → [docs/architecture/system-overview.md](./docs/architecture/system-overview.md)
 - Creating or changing an implementation plan → [planning/PLANNING.md](./planning/PLANNING.md)
