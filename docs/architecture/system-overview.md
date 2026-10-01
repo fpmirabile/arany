@@ -15,7 +15,7 @@ The beta is successful when it proves all of these together:
 1. a Session survives process exit, explicit resume, multiple Runs, provider changes between Runs, compaction, and deterministic replay;
 2. `single`, `auto`, and `team` policies all use the same reusable loop and a generic ordered child collection rather than a fixed two-worker shape;
 3. the primary cannot finish team work before every required child has a persisted terminal disposition;
-4. the default terminal feels like established coding harnesses: native-scrollback transcript, composer, compact status row below input, and a conditional agent activity shelf;
+4. the default terminal keeps a native-scrollback transcript, conditional agent activity above the composer, and a compact status row below input;
 5. keyboard access is complete, while mouse reporting exists only transiently inside an open picker or detail panel;
 6. native OpenAI and Anthropic plus every admitted exact custom endpoint/model profile satisfy the same semantic Provider contract;
 7. exact Workspace-root `AGENTS.md` loads first, with exact `CLAUDE.md` as absence-only fallback;
@@ -83,7 +83,7 @@ src/
 │   │   └── setup.rs     first-run attached account selection
 │   ├── chatgpt.rs  staged OAuth account access (not wired)
 │   ├── chatgpt/
-│   │   ├── callback.rs one-shot loopback HTTP callback (not wired)
+│   │   ├── callback.rs bounded one-result loopback HTTP callback (not wired)
 │   │   ├── catalog.rs  bounded account-scoped subscription model listing
 │   │   ├── consent.rs  versioned account-bound warning acceptance
 │   │   ├── exchange.rs bounded token/JWKS redemption
@@ -128,6 +128,7 @@ src/
 │   │       └── tests.rs  offline wire corpus
 │   ├── effort.rs     reviewed native model-specific effort admission
 │   ├── catalog.rs    bounded account-scoped native model discovery
+│   ├── native_check.rs  exact-key synthetic conformance and evidence admission
 │   ├── openai.rs     native Responses key and bounded HTTP behavior
 │   └── openai/
 │       ├── subscription.rs dormant bounded ChatGPT-plan streaming wire
@@ -138,14 +139,14 @@ src/
 │           └── tests.rs  offline wire corpus
 ├── store.rs         private SQLite owner and Store interface
 ├── store/
-│   ├── evidence.rs  bounded expiring custom Provider evidence
+│   ├── evidence.rs  bounded expiring custom and native Provider evidence
 │   ├── journal.rs   SQLite setup, migration, append, fork writes
 │   ├── journal/
 │   │   └── crash_tests.rs ignored Linux append transaction-death gate
 │   ├── replay.rs    bounded strict Event loading and lineage resolution
 │   ├── state.rs     private state-root admission inside the store boundary
 │   └── state/
-│       └── lock.rs  per-Session operation lock and private lock-file checks
+│       └── lock.rs  per-Session and account-replacement locks, private file checks
 ├── presentation.rs  pure linear projections and sanitization
 ├── presentation/
 │   ├── agents.rs    bounded semantic agent inspection
@@ -178,6 +179,9 @@ tests/
 │   ├── custom.rs    exact custom-profile process journey in the same test target
 │   ├── disk_fault.rs Linux Store file-growth recovery release gate
 │   ├── disk_fault/
+│   │   ├── enospc.rs ignored Linux private-tmpfs ENOSPC recovery gate
+│   │   ├── enospc/
+│   │   │   └── product.rs ignored shipped-exec private-tmpfs ENOSPC gate
 │   │   └── product.rs ignored Linux shipped-exec failure-channel gate
 │   ├── live.rs      ignored paid native direct/team conformance journeys
 │   ├── loopback.rs  shared bounded local Provider process fixture
@@ -213,6 +217,7 @@ arany --fork SESSION_ID
 arany exec [GLOBAL_OPTIONS] --provider openai|anthropic|custom:NAME --model ID [--effort LEVEL] --output text|jsonl PROMPT
 arany show [--state-dir DIR] --output text|jsonl SESSION_OR_RUN_ID
 arany provider check PROFILE
+arany provider check openai|anthropic MODEL --effort LEVEL --accept-cost [--state-dir DIR]
 arany provider models openai|anthropic|custom:NAME [--state-dir DIR]
 ```
 
@@ -229,9 +234,11 @@ The beta slash registry is closed and trusted:
 /compact  /agents  /provider  /models  /model  /effort  /permissions  /quit  /exit
 ```
 
-`/clear` is the familiar alias of `/new`; it never deletes existing history. `/agents` owns agent inspection and next-Run collaboration settings; Arany does not invent a second `/team` spelling. Idle `/models` pages through the selected Provider's bounded catalog and can select only Arany-admitted native or exact custom models; it is locked during a Run. `/provider`, `/model`, `/effort`, and collaboration settings mutate only idle Session defaults. A changed Provider or model clears the previous effort choice. During a Run the latter controls display pinned values. Commands never become Provider input; `//text` escapes a leading slash. `exec` and `show` treat slash, at-sign, and exclamation prefixes literally.
+`/clear` is the familiar alias of `/new`; it never deletes existing history. `/agents` owns agent inspection and next-Run collaboration settings; Arany does not invent a second `/team` spelling. Idle `/models` pages through the selected Provider's bounded catalog, with a local inline model-ID filter and numbered linear pages. It may stage an unreviewed native row, but separate exact conformance remains required before effort selection or a Run; the browser is locked during a Run. `/provider`, `/model`, `/effort`, and collaboration settings mutate only idle Session defaults. A changed Provider or model clears the previous effort choice. During a Run the latter controls display pinned values. Commands never become Provider input; `//text` escapes a leading slash. `exec` and `show` treat slash, at-sign, and exclamation prefixes literally.
 
 The inline composer previews only compiled slash names and argument schemas. Tab fills a unique command prefix, static Provider/collaboration value, or a selectable model from the last explicit `/models` browse; effort candidates follow the current reviewed native model or loaded exact custom profile. Changing Provider invalidates cached model candidates. Dim argument placeholders are never draft bytes or submitted input and remain visible until that argument starts. Ambiguous prefixes do not change the draft. Linear/screen-reader input remains canonical and announces literal arguments instead of capturing Tab. Model catalogs and credential sources are not consulted on keystrokes.
+
+An unknown idle slash command or locally invalid argument leaves the inline draft and caret in place for correction before any Session or Provider effect. The same inline recovery applies to a parser-rejected slash command during a Run; it cannot steer that Run. No-argument controls reject extra text before acting. Errors after State access or an attempted effect do not restore a command that could be resubmitted. Canonical screen-reader input reports a local rejection and clears the submitted line instead: that line cannot be edited after Enter, and the next physical command must not join it.
 
 Approval and sandbox flags or commands remain absent until effectful Tools, deterministic Policy, a separate Guard, and effective-capability attestation exist.
 
@@ -319,11 +326,11 @@ The initial vocabulary is intentionally small:
 - `SessionStarted`, `SessionRenamed`, `SessionDefaultChanged`, `SessionForked`, `ContextCompacted`;
 - `MessageAccepted`, `MessageCommitted`;
 - `RunStarted`, `RunFinished`; and
-- `AgentSpawned`, `AgentUpdated`, `AgentFinished`.
+- `AgentSpawned`, `ProviderCallRecorded`, `AgentFinished`.
 
 New `SessionStarted` Events use payload version 2 to pin the admitted Workspace device and inode atomically with the title, including for an empty Session. Version 1 title-only Events remain readable; their Workspace identity is established by the first `RunStarted` if one exists. Replay rejects a later Run or fork whose identity disagrees with the pinned Session. Legacy empty Sessions cannot be selected by Workspace until a Run binds them.
 
-Provider/profile, collaboration policy, limits, instruction digest, and Workspace snapshot facts are fixed in `RunStarted`. A logical transition commits before reduction or feedback. A crash leaves a valid prefix; replay labels incomplete work `Interrupted` rather than inventing cancellation or success.
+Provider/profile, collaboration policy, limits, instruction digest, and Workspace snapshot facts are fixed in `RunStarted`. Each observed Run call then records its phase, local disposition, bounded response ID, provider-reported token usage, and accepted wire provenance when available before the relevant AgentRun finishes. Compaction records carry the same optional wire provenance. The closed values distinguish Responses `completed` plus a local `store: false` request from Messages `end_turn` with no equivalent request switch; they do not assert remote retention, account-level Zero Data Retention, or a custom endpoint's compliance. Cancellation and timeout leave usage and wire provenance unknown, not zero; a crash can retain a known call result without inventing a final answer. Replay checks call order and accepts older journals with no call records or provenance. A logical transition commits before reduction or feedback. A crash leaves a valid prefix; replay labels incomplete work `Interrupted` rather than inventing cancellation or success.
 
 The sole connection opens no-follow in a private owner-verified local state directory, uses defensive mode, rollback `DELETE + EXTRA`, `trusted_schema=OFF`, bounded pages, short transactions, and fixed payload limits. Rebuildable indexes may accelerate Session listing; they never become canonical.
 
@@ -334,14 +341,17 @@ Arany owns only a bounded bottom viewport. Committed transcript lines move into 
 ```text
 transcript in native scrollback
 
+primary · working · Comparing provider contracts
 ┌──────────────────────────────────────────────────────────────────┐
 │ Ask Arany…                                                      │
+│ next draft line                                                  │
 └──────────────────────────────────────────────────────────────────┘
-session-name · openai/model · read-only · auto · context 68%
-● primary  working  Comparing provider contracts
+working · openai/model · input 1200/65536 B · session-name
 ```
 
-The persistent row prioritizes Session label, pinned or next-Run Provider/model, effective permission profile, collaboration policy, and remaining context when known. Full usage, costs, paths, request IDs, telemetry, event sequence, and completed-agent history belong in `/status`, `/agents`, transcript, or `show`.
+The inline composer accepts Ctrl+O-delimited logical lines, shows at most four, and grows upward while Enter keeps its submission behavior; linear/screen-reader mode uses Ctrl+D after text to continue a draft. Idle inline Ctrl+K opens a fixed local selector for the existing model, agent, and Session panels without consuming the composer; changing Sessions is unavailable while a draft is nonempty pending the cross-Session draft policy. The persistent row prioritizes state and selected model, adds Provider from 50 columns, and shows the active Run's recorded context-input used/budget bytes from 80 columns. Active `/status` puts those bytes before optional IDs at narrower widths. It adds the Session title only when space remains. These bytes are not a Provider context-window percentage, and a completed Run's footprint is not shown as the current draft's usage. Permissions, collaboration policy, costs, paths, request IDs, telemetry, event sequence, and completed-agent history remain in their existing detail surfaces or `show`.
+
+The inline renderer uses restrained terminal-native cyan for semantic leads and focused rows, yellow for attention, and red for textual errors, without colored backgrounds. `--no-color` or `NO_COLOR` removes those accents, including after reacquisition; wording, `>` selection markers, and bold focus retain meaning. The linear and deterministic renderers remain unstyled. Terminal-theme contrast and native assistive-technology usability still require release review.
 
 The activity shelf is conditional:
 
@@ -373,9 +383,9 @@ One ProviderProfile binds protocol family, normalized endpoint/base path, creden
 
 Native model effort is selected from a reviewed per-model set or resolved to an explicit reviewed default before Workspace input. The native adapter sends the resolved level explicitly on every Run and compaction request, and `RunStarted` pins it for replay. The finite reviewed table currently contains four exact OpenAI and four exact Anthropic model IDs; account catalogs may contain many more. Custom capability-evidence v1 binds only its exact model and provider-default reasoning behavior. Version 2 adds a bounded ordered effort list to the exact profile and fingerprint; each declared effort receives a data-free strict finish probe. An admitted explicit choice is sent on every Run and compaction call and pinned in `RunStarted`; omission retains the conformed provider-default behavior. Catalog availability alone cannot authorize a model/effort combination.
 
-`provider models` performs read-only, account-scoped native discovery without Workspace data, or lists the configured model of an exact custom profile without egress. Idle attached `/models` uses the same discovery and a bounded keyboard-accessible page view. Both show every returned model and label unreviewed native entries unsupported; custom v2 entries show their declared effort choices alongside provider default. The catalog is never consulted implicitly during a Run. A model remains selectable only through explicit CLI or idle Session defaults and the existing admission gate.
+`provider models` performs read-only, account-scoped native discovery without Workspace data, or lists the configured model of an exact custom profile without egress. The native command can select either its named environment key or the current OS-stored API account. Native catalog responses require one JSON media type before bounded body reading. Idle attached `/models` uses the same discovery and a bounded keyboard-accessible page view. Both show every returned model; native rows outside the reviewed table require separate current conformance, while custom v2 entries show their declared effort choices alongside provider default. The catalog is never consulted implicitly during a Run. An unreviewed native row can be staged as an idle Session model without a Provider inference call; selecting its effort and admitting its Run require current exact evidence.
 
-The admission layer reads a versioned `provider-profiles.json` from the existing private state root through a bounded no-follow file handle. It validates the entire closed profile set, including unique names and a one-origin binding per credential reference, before returning the named profile. `arany provider check PROFILE` runs data-free synthetic probes and stores 24-hour evidence in a bounded auxiliary SQLite table. `custom:NAME` selects the exact checked profile and requires an explicit matching model; the custom adapter re-resolves and compares fresh fingerprint/address evidence before reading its key or any Workspace input.
+The admission layer reads a versioned `provider-profiles.json` from the existing private state root through a bounded no-follow file handle. It validates the entire closed profile set, including unique names and a one-origin binding per credential reference, before returning the named profile. `arany provider check PROFILE` runs data-free synthetic probes and stores 24-hour evidence in a bounded auxiliary SQLite table. `custom:NAME` selects the exact checked profile and requires an explicit matching model; the custom adapter re-resolves and compares fresh fingerprint/address evidence before reading its key or any Workspace input. Schema version 3 has a separate bounded table for native model evidence. The explicit, potentially billable native check confirms account-catalog visibility, then reuses the fixed native adapters for strict synthetic direct, delegation, and compaction probes under remote output caps. Its HMAC fingerprint binds protocol/endpoint, model, effort, version, key, and source/account identity without storing the key. Environment-backed `exec` and attached saved-account Runs recompute and read exact evidence before Workspace input; setup offers an unreviewed visible model only after explicit effort selection, separate billable consent, and a successful check bound to the new saved-account UUID.
 
 Closed custom protocol families begin with `openai-responses`; additional `openai-chat-completions` or parameterized `anthropic-messages` support must earn the same adapter and security review. Arany never accepts arbitrary headers, shell credential commands, repository profiles, raw key arguments, automatic model discovery, or a generic compatibility plugin.
 
@@ -390,7 +400,7 @@ Receipts use exact support language:
 
 Non-loopback endpoints require HTTPS. Numeric loopback may use explicit HTTP. Redirects, cookies, ambient proxies, DNS/route drift, metadata/link-local/multicast destinations, and credential reuse across origins are rejected. IPv6 domain answers are limited to reviewed allocated ranges; unknown global-unicast space is not assumed routable. “OpenAI-shaped” is never treated as proof of compatibility.
 
-The current CLI has two explicit API-key sources: environment references for `exec` and flag-selected attached use, and one protected default native API account for bare new attached use. The latter is a versioned record in the OS credential store, with Provider/model/effort/key and an account UUID. Session defaults pin only that UUID; Run and catalog admission re-read the account and reject a changed ID or Provider before using its key. The native Provider then carries that validated UUID into `RunStarted`; environment-backed, custom, and legacy Runs have no saved-account UUID. Replay validates a present ID as UUIDv7 on a native Provider, but it is provenance, never credential authority. A cancelled setup creates no Session or Run; no key enters arguments, Events, output, or telemetry. Linux uses Secret Service through the selected keyring library; macOS uses Keychain Services. Its dependency and native-platform review remain release gates. This is an OS-store protection claim, not an assertion that every Linux backend encrypts at rest. A private CLI module constructs and validates new-registration or returning-account ChatGPT OAuth attempts and has an offline-tested, compiled-endpoint code/JWKS redemption path that returns credentials only after signed identity and granted-plan checks. Returning redemption must preserve the selected signed subject. Its private refresh exchange returns a whole replacement token value after checking the issued client and renewed scopes, but has no active caller or protected atomic-save owner. A separate private sign-out operation discovers a same-origin revocation endpoint and confirms remote revocation only from an empty `200`; it cannot mutate saved credentials and has no active caller. The official `earliest_refresh_at` field has no documented scheduling interpretation in the current guide, so active refresh remains gated. A private OpenAI module also forms a streaming-only subscription request and withholds all output until `response.completed` passes strict outcome and local usage bounds. Setup does not call either module: no product path starts a callback listener or browser, saves subscription tokens, or admits a subscription Run. The approved official ChatGPT-plan route still needs explicit weaker-bound consent and full admission; the setup labels it unavailable. Existing API-key and custom routes retain their strict remote cap. Anthropic consumer-subscription authentication remains unadmitted. Arany imports no other CLI's token and calls no private ChatGPT route. The [decision register](../research/next-step-decision-register.md) records the trade-off and gates.
+The current CLI has two explicit API-key sources: environment references for `exec` and flag-selected attached use, and one protected default native API account for bare new attached use. The latter is a versioned record in the OS credential store, with Provider/model/effort/key and an account UUID. A record with an unreviewed model requires an explicit effort and remains structurally valid after its short-lived evidence expires; a Run separately checks current evidence before Workspace input. A fixed, empty, private StateRoot lock serializes replacement attempts sharing that StateRoot; it is acquired inside the same blocking task as the OS-store write, after an opened-Workspace overlap check, and returns busy on contention. The OS-store slot is currently global, so different StateRoots are not yet coordinated. Session defaults pin only that UUID; Run and catalog admission re-read the account and reject a changed ID or Provider before using its key. The native Provider then carries that validated UUID into `RunStarted`; environment-backed, custom, and legacy Runs have no saved-account UUID. Replay validates a present ID as UUIDv7 on a native Provider, but it is provenance, never credential authority. A cancelled setup creates no Session or Run; no key enters arguments, Events, output, or telemetry. Linux uses Secret Service through the selected keyring library; macOS uses Keychain Services. Its dependency and native-platform review remain release gates. This is an OS-store protection claim, not an assertion that every Linux backend encrypts at rest or that secrets in process memory cannot be read by a privileged debugger. A private CLI module constructs and validates new-registration or returning-account ChatGPT OAuth attempts and has an offline-tested, compiled-endpoint code/JWKS redemption path that returns credentials only after signed identity and granted-plan checks. Returning redemption must preserve the selected signed subject. Its private refresh exchange returns a whole replacement token value after checking the issued client and renewed scopes, but has no active caller or protected atomic-save owner; the account lock does not activate refresh. A separate private sign-out operation discovers a same-origin revocation endpoint and confirms remote revocation only from an empty `200`; it cannot mutate saved credentials and has no active caller. The official guide directs renewal near access-token expiry, so the future account owner can use the bounded stored expiry while treating the undocumented `earliest_refresh_at` scheduling semantics as opaque; active refresh remains gated by protected atomic storage and cross-process coordination, not by interpreting that field. A private OpenAI module also forms streaming-only subscription Run and compaction requests and withholds each result until `response.completed` passes strict decoding and local usage bounds. Setup does not call either module: no product path starts a callback listener or browser, saves subscription tokens, or admits a subscription Run. The approved official ChatGPT-plan route still needs explicit weaker-bound consent and full admission; the setup labels it unavailable. Existing API-key and custom routes retain their strict remote cap. Anthropic consumer-subscription authentication remains unadmitted. Arany imports no other CLI's token and calls no private ChatGPT route. The [decision register](../research/next-step-decision-register.md) records the trade-off and gates.
 
 ## 10. OTLP ships last in beta
 
