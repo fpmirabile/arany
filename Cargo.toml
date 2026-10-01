@@ -9,6 +9,7 @@ repository = "https://github.com/fpmirabile/arany"
 include = ["src/**", "tests/**", "scripts/**", "Cargo.toml", "Cargo.lock", "/LICENSE", "/NOTICE"]
 
 [dependencies]
+async-trait = "=0.1.92"
 aws-lc-rs = { version = "=1.18.1", default-features = false }
 base64 = { version = "=0.23.1", default-features = false, features = ["alloc"] }
 cap-fs-ext = { version = "4.0.3", default-features = false, features = ["std"] }
@@ -19,8 +20,9 @@ directories = "6.0.0"
 getrandom = { version = "=0.3.4", default-features = false }
 keyring = { version = "=4.2.0", default-features = false, features = ["v1"] }
 opentelemetry = { version = "=0.33.0", default-features = false, features = ["trace"] }
+opentelemetry-http = { version = "=0.33.0", default-features = false, features = ["reqwest"] }
 opentelemetry_sdk = { version = "=0.33.0", default-features = false, features = ["trace"] }
-opentelemetry-otlp = { version = "=0.33.0", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
+opentelemetry-otlp = { version = "=0.33.0", default-features = false, features = ["trace", "http-proto", "reqwest-client"] }
 ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm", "scrolling-regions"] }
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
@@ -47,3 +49,7 @@ tokio = { version = "1.53.1", default-features = false, features = ["test-util",
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 rustix = { version = "1.1.5", default-features = false, features = ["pipe", "pty"] }
+
+[patch.crates-io]
+crossterm = { path = "vendor/crossterm-0.29.0" }
+rustls-platform-verifier = { path = "vendor/rustls-platform-verifier-0.7.1" }

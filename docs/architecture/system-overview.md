@@ -15,7 +15,7 @@ The beta is successful when it proves all of these together:
 1. a Session survives process exit, explicit resume, multiple Runs, provider changes between Runs, compaction, and deterministic replay;
 2. `single`, `auto`, and `team` policies all use the same reusable loop and a generic ordered child collection rather than a fixed two-worker shape;
 3. the primary cannot finish team work before every required child has a persisted terminal disposition;
-4. the default terminal keeps a native-scrollback transcript, conditional agent activity above the composer, and a compact status row below input;
+4. the default terminal keeps a navigable committed transcript in the primary screen, conditional agent activity above a fixed-bottom composer, and a compact status row below input;
 5. keyboard access is complete, while mouse reporting exists only transiently inside an open picker or detail panel;
 6. native OpenAI and Anthropic plus every admitted exact custom endpoint/model profile satisfy the same semantic Provider contract;
 7. exact Workspace-root `AGENTS.md` loads first, with exact `CLAUDE.md` as absence-only fallback;
@@ -26,13 +26,13 @@ Startup resolves trusted user/process configuration, admits a private state root
 
 ## 2. Runtime architecture
 
-There is one Rust package, one process, and one Engine behavior seam.
+There is one Rust package, one long-lived process, and one Engine behavior seam. A short-lived same-binary child isolates blocking OS-credential calls; it is neither a second Client nor a daemon.
 
 ```mermaid
 flowchart LR
     User([User or script]) --> CLI[Arany CLI]
 
-    subgraph Process[One Arany process]
+    subgraph Process[Main Arany process]
         CLI --> Engine[Deep Engine]
         CLI --> Terminal[Inline terminal or deterministic output]
         Engine --> Session[Session lifecycle + context]
@@ -53,6 +53,8 @@ flowchart LR
     Provider --> Custom[Exact verified custom profile]
     Engine --> Workspace[Pinned read-only Workspace]
     OTLP -. opt-in .-> Collector[Loopback Collector]
+    CLI --> CredentialHelper[Bounded OS-credential helper]
+    CredentialHelper --> Keyring[OS keyring]
 
     classDef deep fill:#173b34,color:#fff,stroke:#5eead4,stroke-width:2px;
     classDef canonical fill:#2b2346,color:#fff,stroke:#c4b5fd,stroke-width:2px;
@@ -92,6 +94,8 @@ src/
 │   │   │   └── tests.rs synthetic issuer and signed-identity corpus
 │   │   └── identity.rs strict signed ID-token admission
 │   ├── credentials.rs protected default native API account access
+│   ├── credentials/
+│   │   └── keyring_helper.rs supervised bounded OS-store process
 │   ├── exec.rs      one-Run command composition and durable receipt
 │   └── provider.rs  model catalog and data-free custom profile check commands
 ├── lib.rs           small public interface for the deep Engine
@@ -158,7 +162,9 @@ src/
 │   ├── composer.rs  bounded grapheme-safe draft editing
 │   ├── input.rs     bounded Crossterm reader and semantic input mapping
 │   ├── linear.rs    labeled append-only terminal output
-│   └── view.rs      inline Ratatui frame drawing
+│   ├── view.rs      inline Ratatui frame drawing
+│   └── view/
+│       └── tests.rs  inline frame and picker TestBackend cases
 ├── telemetry.rs     private opt-in OTLP trace lifecycle and SDK owner
 └── telemetry/
     ├── config.rs    numeric-loopback endpoint admission
@@ -204,7 +210,7 @@ tests/
         └── cancellation.rs ignored release team cancellation measurement
 ```
 
-This remains one package and one process. The `session/` files are private implementation of one Session module, not separate public seams. The dormant subscription stream is private OpenAI Provider implementation, not a new Engine seam or an admitted route. `engine.rs` holds orchestration behind `Engine::run`, keeping `lib.rs` readable. Do not create crates for domain nouns, protocol, providers, scheduling, projections, or evaluation. A crate appears only after measured release, privilege, ownership, dependency, or compile pressure.
+This remains one package and one long-lived process, with only the supervised credential helper as a transient child. The `session/` files are private implementation of one Session module, not separate public seams. The dormant subscription stream is private OpenAI Provider implementation, not a new Engine seam or an admitted route. `engine.rs` holds orchestration behind `Engine::run`, keeping `lib.rs` readable. Do not create crates for domain nouns, protocol, providers, scheduling, projections, or evaluation. A crate appears only after measured release, privilege, ownership, dependency, or compile pressure.
 
 ## 4. Public command contract
 
@@ -336,10 +342,10 @@ The sole connection opens no-follow in a private owner-verified local state dire
 
 ## 8. Terminal presentation
 
-Arany owns only a bounded bottom viewport. Committed transcript lines move into the normal terminal buffer and remain available to native scrollback, search, selection, tmux, and crash recovery.
+Arany owns the full primary-screen viewport without entering alternate screen. It derives the transcript from committed Session state, indexes message row counts without another full-history copy, and materializes only visible rows. `PageUp`/`PageDown` navigate older content; `Ctrl+F` performs bounded literal find; `Ctrl+L` returns to the live tail. A new committed turn does not displace an older reading anchor. Ordinary `show` remains the complete deterministic history and export path; emulator scrollback/search of physical output is no longer a complete Session transcript.
 
 ```text
-transcript in native scrollback
+committed Session transcript · older rows navigable
 
 primary · working · Comparing provider contracts
 ┌──────────────────────────────────────────────────────────────────┐
@@ -349,9 +355,9 @@ primary · working · Comparing provider contracts
 working · openai/model · input 1200/65536 B · session-name
 ```
 
-The inline composer accepts Ctrl+O-delimited logical lines, shows at most four, and grows upward while Enter keeps its submission behavior; linear/screen-reader mode uses Ctrl+D after text to continue a draft. Idle inline Ctrl+K opens a fixed local selector for the existing model, agent, and Session panels without consuming the composer; changing Sessions is unavailable while a draft is nonempty pending the cross-Session draft policy. The persistent row prioritizes state and selected model, adds Provider from 50 columns, and shows the active Run's recorded context-input used/budget bytes from 80 columns. Active `/status` puts those bytes before optional IDs at narrower widths. It adds the Session title only when space remains. These bytes are not a Provider context-window percentage, and a completed Run's footprint is not shown as the current draft's usage. Permissions, collaboration policy, costs, paths, request IDs, telemetry, event sequence, and completed-agent history remain in their existing detail surfaces or `show`.
+The inline composer accepts Ctrl+O-delimited logical lines, shows at most four, and grows upward while Enter keeps its submission behavior; linear/screen-reader mode uses Ctrl+D after text to continue a draft. Idle inline Ctrl+K opens a fixed local selector for the existing model, agent, and Session panels without consuming the composer; changing Sessions is unavailable while a draft is nonempty, so the user must submit or clear it first. The persistent row prioritizes state and selected model, adds Provider from 50 columns, and shows the active Run's recorded context-input used/budget bytes from 80 columns. Active `/status` puts those bytes before optional IDs at narrower widths. It adds the Session title only when space remains. These bytes are not a Provider context-window percentage, and a completed Run's footprint is not shown as the current draft's usage. Permissions, collaboration policy, costs, paths, request IDs, telemetry, event sequence, and completed-agent history remain in their existing detail surfaces or `show`.
 
-The inline renderer uses restrained terminal-native cyan for semantic leads and focused rows, yellow for attention, and red for textual errors, without colored backgrounds. `--no-color` or `NO_COLOR` removes those accents, including after reacquisition; wording, `>` selection markers, and bold focus retain meaning. The linear and deterministic renderers remain unstyled. Terminal-theme contrast and native assistive-technology usability still require release review.
+The inline renderer uses restrained terminal-native cyan for semantic leads and focused rows, yellow for attention, and red for textual errors, without colored backgrounds. `--no-color` or `NO_COLOR` removes those accents, including after reacquisition; wording, `>` selection markers, bold focus, and bracketed slash hints retain meaning. The linear and deterministic renderers remain unstyled. Terminal-theme contrast and native assistive-technology usability still require release review.
 
 The activity shelf is conditional:
 
@@ -363,7 +369,7 @@ The activity shelf is conditional:
 
 `/agents` opens primary-first AgentRuns from the active and 16 most recent Runs, plus the next-Run collaboration controls. It shows bounded objective, summary, and result previews; `arany show SESSION_ID` exposes older and complete committed history. The default screen never reserves an empty team dashboard.
 
-Keyboard behavior is complete. Normal transcript/composer mode does not enable terminal mouse reporting. The inline Session picker and `/agents` inspector enable mouse reporting transiently while their selectable rows are open; hover, click, and wheel operate only visible rows and have exact keyboard equivalents. Close, suspension, error, panic, cancellation, or loss of terminal ownership disables mouse reporting before returning control. Native scrollback wins over mouse enhancement.
+Keyboard behavior is complete. Normal transcript/composer mode does not enable terminal mouse reporting. The Session picker and `/agents` inspector enable mouse reporting transiently while their selectable rows are open; hover, click, and wheel operate only visible rows and have exact keyboard equivalents. Close, suspension, error, panic, cancellation, or loss of terminal ownership disables mouse reporting before returning control. Internal history navigation never enables mouse capture.
 
 The terminal never enters alternate screen and never enables focus reporting, clipboard/title OSC, or globally captured mouse. `presentation.rs` is pure over SessionView/RunView; the `terminal` module alone owns keys, mouse, width, focus, layout, redraw, and RAII restoration. Screen-reader, `exec`, and `show` emit no cursor rewriting or control sequences.
 
@@ -400,7 +406,9 @@ Receipts use exact support language:
 
 Non-loopback endpoints require HTTPS. Numeric loopback may use explicit HTTP. Redirects, cookies, ambient proxies, DNS/route drift, metadata/link-local/multicast destinations, and credential reuse across origins are rejected. IPv6 domain answers are limited to reviewed allocated ranges; unknown global-unicast space is not assumed routable. “OpenAI-shaped” is never treated as proof of compatibility.
 
-The current CLI has two explicit API-key sources: environment references for `exec` and flag-selected attached use, and one protected default native API account for bare new attached use. The latter is a versioned record in the OS credential store, with Provider/model/effort/key and an account UUID. A record with an unreviewed model requires an explicit effort and remains structurally valid after its short-lived evidence expires; a Run separately checks current evidence before Workspace input. A fixed, empty, private StateRoot lock serializes replacement attempts sharing that StateRoot; it is acquired inside the same blocking task as the OS-store write, after an opened-Workspace overlap check, and returns busy on contention. The OS-store slot is currently global, so different StateRoots are not yet coordinated. Session defaults pin only that UUID; Run and catalog admission re-read the account and reject a changed ID or Provider before using its key. The native Provider then carries that validated UUID into `RunStarted`; environment-backed, custom, and legacy Runs have no saved-account UUID. Replay validates a present ID as UUIDv7 on a native Provider, but it is provenance, never credential authority. A cancelled setup creates no Session or Run; no key enters arguments, Events, output, or telemetry. Linux uses Secret Service through the selected keyring library; macOS uses Keychain Services. Its dependency and native-platform review remain release gates. This is an OS-store protection claim, not an assertion that every Linux backend encrypts at rest or that secrets in process memory cannot be read by a privileged debugger. A private CLI module constructs and validates new-registration or returning-account ChatGPT OAuth attempts and has an offline-tested, compiled-endpoint code/JWKS redemption path that returns credentials only after signed identity and granted-plan checks. Returning redemption must preserve the selected signed subject. Its private refresh exchange returns a whole replacement token value after checking the issued client and renewed scopes, but has no active caller or protected atomic-save owner; the account lock does not activate refresh. A separate private sign-out operation discovers a same-origin revocation endpoint and confirms remote revocation only from an empty `200`; it cannot mutate saved credentials and has no active caller. The official guide directs renewal near access-token expiry, so the future account owner can use the bounded stored expiry while treating the undocumented `earliest_refresh_at` scheduling semantics as opaque; active refresh remains gated by protected atomic storage and cross-process coordination, not by interpreting that field. A private OpenAI module also forms streaming-only subscription Run and compaction requests and withholds each result until `response.completed` passes strict decoding and local usage bounds. Setup does not call either module: no product path starts a callback listener or browser, saves subscription tokens, or admits a subscription Run. The approved official ChatGPT-plan route still needs explicit weaker-bound consent and full admission; the setup labels it unavailable. Existing API-key and custom routes retain their strict remote cap. Anthropic consumer-subscription authentication remains unadmitted. Arany imports no other CLI's token and calls no private ChatGPT route. The [decision register](../research/next-step-decision-register.md) records the trade-off and gates.
+The CLI has two explicit API-key sources: environment references for `exec` and flag-selected attached use, and one protected default native API account for bare new attached use. A versioned record under the default user StateRoot pins either the OS keyring or a user-confirmed private-file account. The keyring record contains no key; the file record is plaintext with private-mode, no-follow, owner and link checks. One empty private StateRoot lock serializes account replacement across Session `--state-dir` choices using the same default root. The keyring helper is killed and reaped after a five-second deadline, but a timed-out OS-store write may still complete after its request was accepted. A different environment-derived root and other same-UID or privileged processes are outside this coordination and secrecy claim. Linux uses Secret Service; macOS uses Keychain Services, still requiring native release checks. A cancelled setup creates no Session or Run, but a failed save is not a rollback guarantee.
+
+A saved unreviewed model requires explicit effort and separate current evidence before Workspace input. Session defaults pin only the account UUID; Run and catalog admission re-read the record and reject a changed ID or Provider before using its key. The selected native Provider carries the validated UUID into `RunStarted`; environment-backed, custom, and legacy Runs have no saved-account UUID. Replay validates a present native UUIDv7 as provenance, never credential authority. Keys never enter arguments, Events, output, or telemetry. A private CLI module constructs and validates new-registration or returning-account ChatGPT OAuth attempts and has an offline-tested, compiled-endpoint code/JWKS redemption path that returns credentials only after signed identity and granted-plan checks. Returning redemption must preserve the selected signed subject. Its private refresh exchange returns a whole replacement token value after checking the issued client and renewed scopes, but has no active caller or protected atomic-save owner; the account lock does not activate refresh. A separate private sign-out operation discovers a same-origin revocation endpoint and confirms remote revocation only from an empty `200`; it cannot mutate saved credentials and has no active caller. The official guide directs renewal near access-token expiry, so the future account owner can use the bounded stored expiry while treating the undocumented `earliest_refresh_at` scheduling semantics as opaque; active refresh remains gated by protected atomic storage and cross-process coordination, not by interpreting that field. A private OpenAI module also forms streaming-only subscription Run and compaction requests and withholds each result until `response.completed` passes strict decoding and local usage bounds. Setup does not call either module: no product path starts a callback listener or browser, saves subscription tokens, or admits a subscription Run. The approved official ChatGPT-plan route still needs explicit weaker-bound consent and full admission; the setup labels it unavailable. Existing API-key and custom routes retain their strict remote cap. Anthropic consumer-subscription authentication remains unadmitted. Arany imports no other CLI's token and calls no private ChatGPT route. The [decision register](../research/next-step-decision-register.md) records the trade-off and gates.
 
 ## 10. OTLP ships last in beta
 
@@ -408,7 +416,7 @@ OTLP is part of the beta milestone but added after the Session/team/provider pro
 
 Each admitted Run is one trace correlated by safe Session, Run, and AgentRun IDs. Its root is created only after `RunStarted` commits; the preceding context compilation is represented by a backdated child span only for that admitted Run. Dynamic bounded spans cover the Run, each AgentRun, each Provider call, and committed transition timing. Manual or automatic compaction is a separate Session operation trace with its Provider call and a marker only after `ContextCompacted` commits. The successful topology is derived from admitted agents and calls; it is not a fixed nine-span shape.
 
-Arany exports trace-only OTLP/HTTP protobuf to an explicit numeric-loopback Collector selected by `--otlp-endpoint`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, or `OTEL_EXPORTER_OTLP_ENDPOINT` in that order. A trace-specific endpoint is exact; the other two append `/v1/traces`. Invalid explicit configuration is rejected before Workspace input. Objectives, Messages, prompts, instructions, summaries, results, paths, file contents, Event payloads, provider bodies, headers, and credentials are excluded by type. Resource attributes are limited to service and SDK identity; Provider identity is a closed category and custom destinations are not exported. Provider-call failures carry only a closed low-cardinality `error.type` (`timeout`, `provider_unavailable`, `provider_rejected`, `invalid_response`, `output_limit`, or `task_panic`); cancellation uses `cancelled`. The Collector owns remote TLS, authentication, vendor routing, buffering, and backend retry. Arany uses a fixed 256-span queue, 64-span batches, a 256 KiB body ceiling, 500 ms request timeout, 750 ms shutdown timeout, and no exporter retry so process shutdown stays bounded. Export remains lossy and failure-isolated; SQLite replay is canonical.
+Arany exports trace-only OTLP/HTTP protobuf to an explicit numeric-loopback Collector selected by `--otlp-endpoint`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, or `OTEL_EXPORTER_OTLP_ENDPOINT` in that order. A trace-specific endpoint is exact; the other two append `/v1/traces`. Invalid explicit configuration is rejected before Workspace input. Objectives, Messages, prompts, instructions, summaries, results, paths, file contents, Event payloads, provider bodies, headers, and credentials are excluded by type. Resource attributes are limited to service and SDK identity; Provider identity is a closed category and custom destinations are not exported. Provider-call failures carry only a closed low-cardinality `error.type` (`timeout`, `provider_unavailable`, `provider_rejected`, `invalid_response`, `output_limit`, or `task_panic`); cancellation uses `cancelled`. The Collector owns remote TLS, authentication, vendor routing, buffering, and backend retry. Arany uses a fixed 256-span queue, 64-span batches, a 256 KiB body ceiling, a 500 ms complete-request deadline, a 750 ms shutdown timeout, and no exporter retry. Its private async Reqwest adapter runs on an owned current-thread Tokio runtime inside the bounded SDK batch worker; automatic decompression is disabled. The Linux [trickling-Collector gate](../security/findings/otlp-http-response-deadline.md) verifies that a slow response cannot indefinitely occupy that worker; native macOS behavior remains unverified. Export remains lossy and failure-isolated; SQLite replay is canonical.
 
 ## 11. Security boundary
 
@@ -440,7 +448,7 @@ The central deterministic test is one Session journey, not dozens of isolated un
 7. cancel another Run and prove every admitted child terminates; and
 8. replay Session and Run views from a closed SQLite connection.
 
-Its `ObservationBundle` joins exit class, exact deterministic stdout/stderr, reopened Events, SessionView, and RunView. Compact tables/corpora own collaboration capacities, parser commands, invalid snapshots, paths, hostile terminal text, custom profile conformance, and fault injection. Ratatui TestBackend owns semantic bottom-region frames. Native Linux/macOS PTY tests own scrollback, pickers, transient mouse capture/restoration, signals, suspension, cancellation stages, and terminal restoration. Each native claimed Provider owns an opt-in paid live test; custom profiles own data-free exact conformance before any Workspace-bearing smoke.
+Its `ObservationBundle` joins exit class, exact deterministic stdout/stderr, reopened Events, SessionView, and RunView. Compact tables/corpora own collaboration capacities, parser commands, invalid snapshots, paths, hostile terminal text, custom profile conformance, and fault injection. Ratatui TestBackend owns transcript/composer/status frames. Native Linux/macOS PTY tests own history navigation, pickers, transient mouse capture/restoration, signals, suspension, cancellation stages, and terminal restoration. Each native claimed Provider owns an opt-in paid live test; custom profiles own data-free exact conformance before any Workspace-bearing smoke.
 
 ## 13. Distribution decision
 
@@ -472,7 +480,7 @@ It does not force private users or hosted services to show a public “Powered b
 3. Implement trusted startup, private state admission, Workspace snapshots, Session identity, Event schema, reducers, deterministic output, and hostile-content handling.
 4. Make create/exit/resume/multi-Run/fork and deterministic context compilation pass with the scripted Provider.
 5. Implement ordered bounded `0..N` children and prove `single`, `auto`, `team`, aggregate budgets, join, and cancellation.
-6. Add composer + status row + conditional activity shelf with keyboard-complete Session/agent pickers and native-scrollback PTY proof; add transient mouse only after restoration gates pass.
+6. Add a primary-screen committed transcript, fixed-bottom composer/status, conditional activity shelf, keyboard-complete Session/agent pickers, and native history/restoration PTY proof; add transient picker mouse only after restoration gates pass.
 7. Add native OpenAI and Anthropic API-key adapters and their offline/live conformance.
 8. Add trusted custom `openai-responses` profiles plus data-free `provider check`; do not admit unverified endpoints.
 9. Add slash-command Tab completion and persistent argument previews without changing the trusted command boundary.

@@ -11,7 +11,9 @@ cargo build --locked
 target/debug/arany --help
 ```
 
-In a terminal, `arany` opens account setup when no default API account exists. It asks for an OpenAI or Anthropic API key, a model, and an effort, then saves the key in the operating system's credential store. `arany --setup` deliberately replaces the default account. See the [setup guide](./docs/setup.md) for saved-account limitations, model checks, and cancellation behavior.
+The current repository build uses local, pinned repairs for Crossterm terminal hangup and the macOS TLS verifier's certificate-network-fetch policy. `bash scripts/source-archive.sh` creates and verifies a separate source archive that retains both; ordinary `cargo package` removes local patches and is not an installation path for either repair. The guarded native release build is `bash scripts/release-build.sh`. Neither command by itself clears the remaining beta release gates.
+
+In a terminal, `arany` opens account setup when no default API account exists. It asks for an OpenAI or Anthropic API key, a model, and an effort, then prefers the operating system's credential store. If no keyring is available and none is pinned, it can save to a private but unencrypted file after an explicit warning and confirmation. `arany --setup` deliberately replaces the default account. See the [setup guide](./docs/setup.md) for saved-account limitations, model checks, and cancellation behavior.
 
 In the inline composer, `Ctrl+O` inserts a newline, Tab completes supported slash commands, and `Ctrl+K` opens quick actions without discarding your draft. Use `/help` for the full command list. The screen-reader mode keeps labeled, append-only output and literal slash commands.
 
