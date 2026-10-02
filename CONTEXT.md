@@ -64,6 +64,10 @@ _Avoid_: Model, LLM service
 A trusted user-selected binding of a protocol family, endpoint, credential reference, model, and verified capability claims. It never grants a repository authority to choose egress or secrets.
 _Avoid_: Base URL, compatibility mode, Provider
 
+**Provider Account**:
+A saved connection to a Provider owned by one operating-system user and selectable across that user's Sessions. A Session references an account but does not own its credentials.
+_Avoid_: Machine-global account, Session credential
+
 **Telemetry**:
 An optional, lossy operational trace projection derived from safe Engine facts after canonical Event commits.
 _Avoid_: Event journal, Run history, logging subsystem

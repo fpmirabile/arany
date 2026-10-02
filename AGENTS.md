@@ -37,6 +37,7 @@ When a new module is introduced, add `agents/<module>.md` and link it here. Crea
 7. **Never inspect or print `.env`**: read `.env.example` only. Commands may load secrets without echoing them or dumping the process environment.
 8. **Unsafe Rust is exceptional**: keep `unsafe` isolated behind a safe interface, document its invariants, and require a dedicated review and test strategy.
 9. **Rules stay terse**: keep one authoritative source for each rule. Prefer rewriting or pruning existing entries over appending duplicates.
+10. **Platform portability**: for every feature needing OS facilities, evaluate the most general kernel or standard OS capability that meets its security, durability, and usability contract before choosing a desktop- or distribution-specific integration. Keep unavoidable platform-specific code behind narrow adapters; do not restrict Arany to one OS, Linux distribution, or desktop when equivalent behavior is feasible.
 
 ## Auto-learning
 

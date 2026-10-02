@@ -31,6 +31,7 @@ The evidence and rationale live in `docs/research/beta-sessions-teams-terminal-p
 - Do not implicitly resume based only on the current directory. A draft or active Run must be handled explicitly before switching Sessions.
 - Provider, model, effort, profile, permission, and collaboration defaults may change between Runs, never during one. `RunStarted` persists the resolved immutable values; legacy records without effort remain readable.
 - A saved native API account is selected by a UUID in Session defaults, never by replayed credential bytes. The CLI resolves that UUID and exact Provider against the current protected account before Run or catalog access; replacing the account makes an older Session's saved-key selection unavailable rather than silently switching billing identity. `RunStarted` pins the selected saved-account UUID as optional provenance; replay requires a native Provider and UUIDv7 when it is present. Legacy Session and Run records without it remain readable and never authorize a credential lookup.
+- ChatGPT Session defaults pin the selected account UUID without a token. Each checked Run and compaction records its account UUID, opaque model-check fingerprint, and local-only output-bound category; strict replay validates the combination but cannot turn historical evidence into current account authority. Legacy records omit these fields and retain their earlier bound interpretation.
 - `exec` creates one Run and exits by default. Appending to an existing Session requires an explicit Session ID.
 
 ## Context and compaction

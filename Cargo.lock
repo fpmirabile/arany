@@ -125,6 +125,7 @@ dependencies = [
  "getrandom 0.3.4",
  "keyring",
  "mio",
+ "nix",
  "opentelemetry",
  "opentelemetry-http",
  "opentelemetry-otlp",

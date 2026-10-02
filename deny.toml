@@ -25,7 +25,11 @@ allow = [
     "Unlicense",
     "Zlib",
 ]
-# MPL-2.0 remains unapproved pending redistribution review.
+
+[[licenses.exceptions]]
+name = "option-ext"
+version = "=0.2.0"
+allow = ["MPL-2.0"]
 
 [bans]
 multiple-versions = "warn"
