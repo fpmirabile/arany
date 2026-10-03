@@ -1,6 +1,6 @@
 # Arany
 
-Arany is a Rust-first, CLI-only agent harness. It keeps Sessions and Runs in a local SQLite journal, supports bounded direct read-only child agents, and makes Provider and model selection explicit. The beta is still in development; the [implementation plan](./planning/arany-beta/README.md) tracks the remaining release gates.
+Arany is a Rust-first, CLI-only agent harness. It keeps Sessions and Runs in a local SQLite journal, supports bounded direct read-only child agents, and makes Provider and model selection explicit. The beta is still in development; the [implementation plan](./planning/arany-beta/README.md) tracks its evidence, and [next steps](./NEXT_STEPS.md) separates the final user-owned beta 1 checks from beta 2 and broader release work.
 
 ## Try the current build
 
@@ -15,7 +15,7 @@ The current repository build uses one local, pinned repair for Crossterm termina
 
 In a terminal, `arany` opens the normal chat input even without a default account. Submitting work then points you to `/setup`, where you can choose an OpenAI or Anthropic API key, a model, and an effort, or connect a ChatGPT account. ChatGPT setup then lists visible models, asks for an explicit effort, and offers a separate plan-consuming compatibility check before a Run. Setup prefers the operating system's credential store; if no keyring is available and none is pinned, it can save to a private but unencrypted file after an explicit warning and confirmation. `arany --setup` opens setup before creating a new Session. See the [setup guide](./docs/setup.md) for account limitations, model checks, and cancellation behavior.
 
-In the inline composer, `Ctrl+O` inserts a newline, Tab completes supported slash commands, and `Ctrl+K` opens quick actions without discarding your draft. Use `/help` for the full command list. The screen-reader mode keeps labeled, append-only output and literal slash commands.
+In the inline composer, `Ctrl+O` inserts a newline, Tab completes supported slash commands, and `Ctrl+K` opens Models, Agents, Sessions, or Setup without discarding your draft. Use `/help` for the full command list. Important notices and errors remain readable in the chat; this local feedback lasts only within the attached Session. The screen-reader mode keeps labeled, append-only output and literal slash commands.
 
 For a headless Run, provide the selected API key through its named environment variable using your secret manager, then choose the Provider and model explicitly:
 
