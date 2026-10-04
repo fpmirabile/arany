@@ -152,15 +152,39 @@ impl ToolRuntime {
         }
         match guard::execute(self, &intent, cancellation).await {
             Ok(observation) => observation,
-            Err(error) => ToolObservation {
-                intent,
-                disposition: ToolDisposition::Uncertain,
-                output: format!(
-                    "Guard did not confirm complete execution and cleanup ({error}); do not retry automatically"
-                ),
-                guard: None,
-            },
+            Err(error) => uncertain_observation(intent, error),
         }
+    }
+}
+
+fn uncertain_observation(intent: EffectIntent, error: ToolError) -> ToolObservation {
+    let stage = match error {
+        ToolError::GuardRejected("admission") | ToolError::Configuration => "admission",
+        ToolError::GuardRejected("Workspace identity")
+        | ToolError::ChangedInput
+        | ToolError::Path => "pinned input",
+        ToolError::GuardRejected("kernel capability") | ToolError::ProtectionUnavailable => {
+            "native protection"
+        }
+        ToolError::GuardRejected("handshake") => "handshake",
+        ToolError::GuardRejected("receipt") => "receipt",
+        ToolError::GuardRejected("resource attestation") => "resource attestation",
+        ToolError::GuardRejected("process-unit cleanup") => "process cleanup",
+        ToolError::GuardRejected("launcher reap") => "launcher reap",
+        ToolError::GuardRejected("stderr EOF") => "output EOF",
+        ToolError::GuardRejected("namespace bootstrap") => "namespace bootstrap",
+        ToolError::GuardRejected("native manager") => "native manager",
+        ToolError::GuardRejected("bounded control protocol") => "control protocol",
+        ToolError::Limit => "resource limit",
+        _ => "execution",
+    };
+    ToolObservation {
+        intent,
+        disposition: ToolDisposition::Uncertain,
+        output: format!(
+            "Guard {stage} unconfirmed; effects may have occurred. Do not retry automatically."
+        ),
+        guard: None,
     }
 }
 

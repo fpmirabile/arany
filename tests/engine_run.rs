@@ -2128,6 +2128,51 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             assert!(view.runs.iter().all(|run| run.status == RunStatus::Finished));
             store.close().await.unwrap();
         }
+        for (index, (prefix, prior_forks, admitted)) in [
+            (9999, 0, true),
+            (10_000, 0, false),
+            (8, 7, true),
+            (8, 8, false),
+        ].into_iter().enumerate() {
+            let path = temp.path().join(format!("fork-admission-{index}"));
+            let mut engine = Engine::open(StateRoot::admit(&path).unwrap(), ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish { summary: "done".into(), result: "answer".into() })])).unwrap();
+            let root = engine.run(request(&workspace, "Fork source")).await.unwrap().session_id;
+            engine.close().await.unwrap();
+            let mut connection = rusqlite::Connection::open(path.join("events.sqlite3")).unwrap();
+            let transaction = connection.transaction().unwrap();
+            for sequence in 9..=prefix {
+                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',1,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, root.to_string()]).unwrap();
+            }
+            transaction.commit().unwrap();
+            drop(connection);
+            let provider = ScriptedProvider::new(Vec::new());
+            let requests = provider.requests.clone();
+            let mut engine = Engine::open(StateRoot::admit(&path).unwrap(), provider).unwrap();
+            let mut source = root;
+            for _ in 0..prior_forks {
+                source = engine.fork_session(source, workspace.clone(), None).await.unwrap();
+            }
+            let result = engine.fork_session(source, workspace.clone(), None).await;
+            let forked = if admitted {
+                Some(result.expect("a boundary-admitted fork must commit"))
+            } else {
+                assert!(matches!(result, Err(EngineError::Store(arany::StoreError::ReplayLimit))), "fork case {index}: resulting lineage must be rejected before commitment");
+                None
+            };
+            engine.close().await.unwrap();
+            assert!(requests.lock().unwrap().is_empty(), "fork admission makes no Provider call");
+            let store = Store::open_read_only(StateRoot::open_existing(&path).unwrap()).unwrap();
+            for id in [Some(root), Some(source), forked].into_iter().flatten() {
+                let view = store.load_view(id).await.unwrap().unwrap();
+                assert_eq!(view.runs.len(), 1);
+                assert_eq!(view.runs[0].status, RunStatus::Finished);
+                assert_eq!(view.runs[0].assistant_message.as_deref(), Some("answer"));
+            }
+            store.close().await.unwrap();
+            let connection = rusqlite::Connection::open_with_flags(path.join("events.sqlite3"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            let count: i64 = connection.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0)).unwrap();
+            assert_eq!(count, prefix + prior_forks + i64::from(admitted), "fork case {index}: rejected insert must roll back");
+        }
         let path = temp.path().join("compactions");
         let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish { summary: "source".into(), result: "answer".into() }), ProviderOutcome::Finish(Finish { summary: "later".into(), result: "later answer".into() })])
             .with_compactions((0..65).map(|_| Err(ProviderError::RemoteHttp(403))).collect());

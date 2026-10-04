@@ -75,6 +75,15 @@ fn required_nullable<'de, D: serde::Deserializer<'de>>(
     Option::<String>::deserialize(deserializer)
 }
 
+pub(crate) fn parse_mcp_arguments(arguments: &str) -> Result<Value, super::ToolError> {
+    let value = super::skills::parse_json(arguments.as_bytes(), 8 * 1024)?;
+    if value.is_object() {
+        Ok(value)
+    } else {
+        Err(super::ToolError::Operation)
+    }
+}
+
 impl ToolCall {
     pub(crate) fn valid(&self) -> bool {
         if !serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_ARGUMENT_BYTES) {
@@ -137,7 +146,7 @@ impl ToolCall {
                     && !tool.is_empty()
                     && tool.len() <= 128
                     && tool.chars().all(|ch| !ch.is_control())
-                    && arguments.len() <= 8 * 1024
+                    && parse_mcp_arguments(arguments).is_ok()
             }
         }
     }

@@ -415,6 +415,87 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
         Some(ProviderWireProvenance::ResponsesCompletedStoreFalseRequested)
     );
     assert_eq!(accepted.input_tokens, Some(12));
+    for compaction in [false, true] {
+        let text = if compaction {
+            r#"{"summary":"short"}"#
+        } else {
+            r#"{"outcome":{"type":"finish","summary":"done","result":"answer"}}"#
+        };
+        let mut final_message = message(text);
+        final_message["phase"] = json!("final_answer");
+        let mut commentary = message("Checking the supplied task.");
+        commentary["phase"] = json!("commentary");
+        let mut segmented = final_message.clone();
+        segmented["content"] = json!([
+            {"type":"output_text","text":&text[..10]},
+            {"type":"output_text","text":&text[10..]}
+        ]);
+        let mut legacy_segmented = segmented.clone();
+        legacy_segmented["phase"] = Value::Null;
+        for output in [
+            json!([final_message.clone()]),
+            json!([commentary.clone(), final_message.clone()]),
+            json!([commentary.clone(), commentary.clone(), segmented.clone()]),
+            json!([legacy_segmented]),
+        ] {
+            let fixture = response("completed", output);
+            let bytes = serde_json::to_vec(&fixture).unwrap();
+            let streamed =
+                serde_json::to_vec(&json!({"type":"response.completed","response":fixture}))
+                    .unwrap();
+            if compaction {
+                assert_eq!(
+                    decode_compaction(&bytes, "gpt-5.4").unwrap().summary,
+                    "short"
+                );
+                assert_eq!(
+                    decode_streamed_compaction(&streamed, "gpt-5.4")
+                        .unwrap()
+                        .summary,
+                    "short"
+                );
+            } else {
+                for accepted in [
+                    decode_run(&bytes, "gpt-5.4").unwrap(),
+                    decode_streamed_run(&streamed, "gpt-5.4").unwrap(),
+                ] {
+                    assert!(
+                        matches!(accepted.outcome, ProviderOutcome::Finish(Finish { result, .. }) if result == "answer")
+                    );
+                }
+            }
+        }
+        let mut unknown_phase = final_message.clone();
+        unknown_phase["phase"] = json!("unknown");
+        let mut malformed_commentary = commentary.clone();
+        malformed_commentary["content"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("text");
+        let mut refusal = commentary.clone();
+        refusal["content"] = json!([{"type":"refusal","refusal":"No."}]);
+        for output in [
+            json!([commentary.clone()]),
+            json!([final_message.clone(), final_message.clone()]),
+            json!([final_message.clone(), commentary]),
+            json!([unknown_phase]),
+            json!([malformed_commentary, final_message.clone()]),
+            json!([refusal, final_message]),
+        ] {
+            let fixture = response("completed", output);
+            let bytes = serde_json::to_vec(&fixture).unwrap();
+            let streamed =
+                serde_json::to_vec(&json!({"type":"response.completed","response":fixture}))
+                    .unwrap();
+            if compaction {
+                assert!(decode_compaction(&bytes, "gpt-5.4").is_err());
+                assert!(decode_streamed_compaction(&streamed, "gpt-5.4").is_err());
+            } else {
+                assert!(decode_run(&bytes, "gpt-5.4").is_err());
+                assert!(decode_streamed_run(&streamed, "gpt-5.4").is_err());
+            }
+        }
+    }
     let compact_response = response("completed", json!([message(r#"{"summary":"short"}"#)]));
     let compact = decode_compaction(&serde_json::to_vec(&compact_response).unwrap(), "gpt-5.4")
         .expect("completed Responses compaction");
@@ -501,6 +582,29 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
             parsed.completed_text("gpt-5.4").is_err(),
             "bad wire case {index}"
         );
+    }
+    for field in ["error", "incomplete_details"] {
+        for value in [
+            json!({"reason":"incomplete"}),
+            json!(false),
+            json!("invalid"),
+        ] {
+            let mut fixture = response(
+                "completed",
+                json!([message(
+                    r#"{"outcome":{"type":"finish","summary":"done","result":"answer"}}"#
+                )]),
+            );
+            fixture[field] = value;
+            let streamed =
+                serde_json::to_vec(&json!({"type":"response.completed","response":fixture}))
+                    .unwrap();
+            assert_eq!(
+                decode_streamed_run(&streamed, "gpt-5.4").unwrap_err(),
+                ResponseError::Status,
+                "contradictory completed response {field}"
+            );
+        }
     }
     for text in [
         r#"{"outcome":{"type":"finish","summary":"x"}}"#,

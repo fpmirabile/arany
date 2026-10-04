@@ -28,15 +28,15 @@ pub(crate) fn decode_run(bytes: &[u8], model: &str) -> Result<ProviderResponse, 
 pub(crate) fn decode_streamed_run(
     bytes: &[u8],
     model: &str,
-) -> Result<ProviderResponse, ProviderError> {
+) -> Result<ProviderResponse, ResponseError> {
     decode_run_response(decode_completed_event(bytes)?, model)
 }
 
-fn decode_completed_event(bytes: &[u8]) -> Result<WireResponse, ProviderError> {
+fn decode_completed_event(bytes: &[u8]) -> Result<WireResponse, ResponseError> {
     let event: CompletedEvent =
-        serde_json::from_slice(bytes).map_err(|_| ProviderError::InvalidResponseContract)?;
+        serde_json::from_slice(bytes).map_err(|_| ResponseError::Envelope)?;
     if event.kind != "response.completed" {
-        return Err(ProviderError::InvalidResponseContract);
+        return Err(ResponseError::Envelope);
     }
     Ok(event.response)
 }
@@ -44,19 +44,17 @@ fn decode_completed_event(bytes: &[u8]) -> Result<WireResponse, ProviderError> {
 fn decode_run_response(
     response: WireResponse,
     model: &str,
-) -> Result<ProviderResponse, ProviderError> {
-    let (response_id, usage, text) = response
-        .completed_text(model)
-        .map_err(|_| ProviderError::InvalidResponseContract)?;
+) -> Result<ProviderResponse, ResponseError> {
+    let (response_id, usage, text) = response.completed_text(model)?;
     let envelope: OutcomeEnvelope =
-        serde_json::from_str(&text).map_err(|_| ProviderError::InvalidOutcomeContract)?;
+        serde_json::from_str(&text).map_err(|_| ResponseError::Outcome)?;
     let outcome = match envelope.outcome {
         WireOutcome::Finish { summary, result } => {
             ProviderOutcome::Finish(Finish { summary, result })
         }
         WireOutcome::Delegate { children } => ProviderOutcome::Delegate(Delegate { children }),
         WireOutcome::Tool { call } if call.valid() => ProviderOutcome::Tool(call),
-        WireOutcome::Tool { .. } => return Err(ProviderError::InvalidOutcomeContract),
+        WireOutcome::Tool { .. } => return Err(ResponseError::Outcome),
     };
     Ok(ProviderResponse {
         outcome,
@@ -86,12 +84,10 @@ pub(crate) fn decode_compaction(
 fn decode_compaction_response(
     response: WireResponse,
     model: &str,
-) -> Result<CompactionResponse, ProviderError> {
-    let (response_id, usage, text) = response
-        .completed_text(model)
-        .map_err(|_| ProviderError::InvalidResponseContract)?;
+) -> Result<CompactionResponse, ResponseError> {
+    let (response_id, usage, text) = response.completed_text(model)?;
     let summary: SummaryEnvelope =
-        serde_json::from_str(&text).map_err(|_| ProviderError::InvalidOutcomeContract)?;
+        serde_json::from_str(&text).map_err(|_| ResponseError::Outcome)?;
     Ok(CompactionResponse {
         summary: summary.summary,
         response_id: Some(response_id),
@@ -104,7 +100,7 @@ fn decode_compaction_response(
 pub(crate) fn decode_streamed_compaction(
     bytes: &[u8],
     model: &str,
-) -> Result<CompactionResponse, ProviderError> {
+) -> Result<CompactionResponse, ResponseError> {
     let response = decode_completed_event(bytes)?;
     decode_compaction_response(response, model)
 }
@@ -265,6 +261,8 @@ struct WireResponse {
     model: String,
     output: Vec<WireItem>,
     usage: Option<WireUsage>,
+    error: Option<Value>,
+    incomplete_details: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -273,7 +271,30 @@ struct WireItem {
     kind: String,
     role: Option<String>,
     status: Option<String>,
+    phase: Option<String>,
     content: Option<Vec<WireContent>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ResponseError {
+    Envelope,
+    Model,
+    Status,
+    Identifier,
+    Message,
+    Content,
+    Phase,
+    FinalMessage,
+    Outcome,
+}
+
+impl ResponseError {
+    pub(crate) fn provider_error(self) -> ProviderError {
+        match self {
+            Self::Outcome => ProviderError::InvalidOutcomeContract,
+            _ => ProviderError::InvalidResponseContract,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -293,14 +314,18 @@ impl WireResponse {
     fn completed_text(
         self,
         model: &str,
-    ) -> Result<(String, Option<WireUsage>, String), ProviderError> {
-        if self.status != "completed"
-            || self.model != model
-            || self.id.is_empty()
+    ) -> Result<(String, Option<WireUsage>, String), ResponseError> {
+        if self.status != "completed" || self.error.is_some() || self.incomplete_details.is_some() {
+            return Err(ResponseError::Status);
+        }
+        if self.model != model {
+            return Err(ResponseError::Model);
+        }
+        if self.id.is_empty()
             || self.id.len() > 128
             || !self.id.bytes().all(|byte| byte.is_ascii_graphic())
         {
-            return Err(ProviderError::InvalidOutcome);
+            return Err(ResponseError::Identifier);
         }
         let mut text = None;
         for item in self.output {
@@ -313,25 +338,33 @@ impl WireResponse {
                             .as_deref()
                             .is_none_or(|status| status == "completed") =>
                 {
-                    let content = item.content.ok_or(ProviderError::InvalidOutcome)?;
-                    if content.len() != 1 || content[0].kind != "output_text" || text.is_some() {
-                        return Err(ProviderError::InvalidOutcome);
+                    let content = item
+                        .content
+                        .filter(|content| !content.is_empty())
+                        .ok_or(ResponseError::Content)?;
+                    let mut message = String::new();
+                    for part in content {
+                        if part.kind != "output_text" {
+                            return Err(ResponseError::Content);
+                        }
+                        message.push_str(&part.text.ok_or(ResponseError::Content)?);
                     }
-                    text = Some(
-                        content
-                            .into_iter()
-                            .next()
-                            .and_then(|value| value.text)
-                            .ok_or(ProviderError::InvalidOutcome)?,
-                    );
+                    match item.phase.as_deref() {
+                        Some("commentary") if text.is_none() => {}
+                        None | Some("final_answer") if text.is_none() => text = Some(message),
+                        Some("commentary" | "final_answer") | None => {
+                            return Err(ResponseError::FinalMessage);
+                        }
+                        Some(_) => return Err(ResponseError::Phase),
+                    }
                 }
-                _ => return Err(ProviderError::InvalidOutcome),
+                _ => return Err(ResponseError::Message),
             }
         }
         Ok((
             self.id,
             self.usage,
-            text.ok_or(ProviderError::InvalidOutcome)?,
+            text.ok_or(ResponseError::FinalMessage)?,
         ))
     }
 }

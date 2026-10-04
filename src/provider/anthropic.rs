@@ -472,18 +472,41 @@ mod tests {
         let mut tool = tool_rows[9].clone();
         let good_tool = synthetic_reply(&tool.to_string());
         assert!(provider.decode_run(&good_tool, 4096).is_ok());
-        for arguments in [
-            r#"{"value":"\u0073ynthetic-native-secret"}"#,
-            r#"{"value":["\u0073ynthetic-native-secret"]}"#,
-            r#"{"\u0073ynthetic-native-secret":"safe"}"#,
+        for (case, arguments) in [
+            (
+                "escaped value",
+                r#"{"value":"\u0073ynthetic-native-secret"}"#,
+            ),
+            (
+                "escaped array value",
+                r#"{"value":["\u0073ynthetic-native-secret"]}"#,
+            ),
+            ("escaped key", r#"{"\u0073ynthetic-native-secret":"safe"}"#),
+            (
+                "overwritten escaped value",
+                r#"{"value":"\u0073ynthetic-native-secret","value":"safe"}"#,
+            ),
+            (
+                "duplicate decoded key",
+                r#"{"value":"\u0073ynthetic-native-secret","\u0076alue":"safe"}"#,
+            ),
+            (
+                "malformed escaped value",
+                r#"{"value":"\u0073ynthetic-native-secret",}"#,
+            ),
+            ("non-object arguments", "[]"),
+            ("null arguments", "null"),
         ] {
             tool["outcome"]["call"]["arguments"] = serde_json::json!(arguments);
             let reflected_tool = synthetic_reply(&tool.to_string());
             assert!(!raw_reflects_secret(&reflected_tool, secret));
-            assert!(matches!(
-                provider.decode_run(&reflected_tool, 4096),
-                Err(ProviderError::InvalidOutcome)
-            ));
+            assert!(
+                matches!(
+                    provider.decode_run(&reflected_tool, 4096),
+                    Err(ProviderError::InvalidOutcome)
+                ),
+                "MCP argument rejection: {case}"
+            );
         }
 
         let good_compaction = synthetic_reply(r#"{"summary":"safe"}"#);

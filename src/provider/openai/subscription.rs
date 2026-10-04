@@ -252,14 +252,14 @@ async fn invoke_at(
         return Err(ProviderError::Rejected);
     }
     let body = subscription_body(request, effort)?;
-    let completed = completed_at(client, endpoint, access_token, body).await?;
+    let (completed, counts) = completed_at(client, endpoint, access_token, body).await?;
     let result = wire::decode_streamed_run(&completed, &request.model)
-        .map_err(|error| failure(Stage::ResponseContract, error, StreamCounts::default()))?;
+        .map_err(|error| response_failure(error, counts))?;
     if result.reflects_secret(access_token) {
         return Err(failure(
             Stage::CredentialReflection,
             ProviderError::InvalidOutcome,
-            StreamCounts::default(),
+            counts,
         ));
     }
     if result
@@ -270,7 +270,7 @@ async fn invoke_at(
         return Err(failure(
             Stage::UsageContract,
             ProviderError::InvalidResponseContract,
-            StreamCounts::default(),
+            counts,
         ));
     }
     if result
@@ -280,7 +280,7 @@ async fn invoke_at(
         return Err(failure(
             Stage::LocalOutputLimit,
             ProviderError::LocalOutputLimit,
-            StreamCounts::default(),
+            counts,
         ));
     }
     Ok(result)
@@ -297,14 +297,14 @@ async fn compact_at(
         return Err(ProviderError::Rejected);
     }
     let body = subscription_compaction_body(request, effort)?;
-    let completed = completed_at(client, endpoint, access_token, body).await?;
+    let (completed, counts) = completed_at(client, endpoint, access_token, body).await?;
     let result = wire::decode_streamed_compaction(&completed, &request.model)
-        .map_err(|error| failure(Stage::ResponseContract, error, StreamCounts::default()))?;
+        .map_err(|error| response_failure(error, counts))?;
     if result.reflects_secret(access_token) {
         return Err(failure(
             Stage::CredentialReflection,
             ProviderError::InvalidOutcome,
-            StreamCounts::default(),
+            counts,
         ));
     }
     if result
@@ -315,7 +315,7 @@ async fn compact_at(
         return Err(failure(
             Stage::UsageContract,
             ProviderError::InvalidResponseContract,
-            StreamCounts::default(),
+            counts,
         ));
     }
     if result
@@ -325,7 +325,7 @@ async fn compact_at(
         return Err(failure(
             Stage::LocalOutputLimit,
             ProviderError::LocalOutputLimit,
-            StreamCounts::default(),
+            counts,
         ));
     }
     Ok(result)
@@ -336,7 +336,7 @@ async fn completed_at(
     endpoint: Url,
     access_token: &str,
     body: Vec<u8>,
-) -> Result<Vec<u8>, ProviderError> {
+) -> Result<(Vec<u8>, StreamCounts), ProviderError> {
     if access_token.is_empty()
         || access_token.len() > MAX_ACCESS_TOKEN_BYTES
         || !access_token.bytes().all(|byte| byte.is_ascii_graphic())
@@ -420,7 +420,7 @@ async fn completed_at(
             .feed(&chunk)
             .map_err(|error| failure(decoder.stage, error, decoder.counts()))?
         {
-            return Ok(completed);
+            return Ok((completed, decoder.counts()));
         }
     }
     Err(failure(
@@ -431,14 +431,24 @@ async fn completed_at(
 }
 
 fn failure(stage: Stage, error: ProviderError, counts: StreamCounts) -> ProviderError {
-    let stage =
-        if stage == Stage::ResponseContract && matches!(error, ProviderError::InvalidOutcome) {
-            Stage::OutcomeContract
-        } else {
-            stage
-        };
     subscription_failure(stage, counts);
     error
+}
+
+fn response_failure(error: wire::ResponseError, counts: StreamCounts) -> ProviderError {
+    use wire::ResponseError;
+    let stage = match error {
+        ResponseError::Envelope => Stage::ResponseEnvelope,
+        ResponseError::Model => Stage::ResponseModel,
+        ResponseError::Status => Stage::ResponseStatus,
+        ResponseError::Identifier => Stage::ResponseIdentifier,
+        ResponseError::Message => Stage::ResponseMessage,
+        ResponseError::Content => Stage::ResponseContent,
+        ResponseError::Phase => Stage::ResponsePhase,
+        ResponseError::FinalMessage => Stage::ResponseFinalMessage,
+        ResponseError::Outcome => Stage::OutcomeContract,
+    };
+    failure(stage, error.provider_error(), counts)
 }
 
 fn subscription_body(request: &ProviderRequest, effort: Effort) -> Result<Vec<u8>, ProviderError> {

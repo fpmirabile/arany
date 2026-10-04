@@ -171,6 +171,40 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
     let mut reusable = intent;
     reusable.use_count = 2;
     assert!(!reusable.valid());
+    for error in [
+        super::ToolError::MissingConfiguration,
+        super::ToolError::Configuration,
+        super::ToolError::ProtectionUnavailable,
+        super::ToolError::ChangedInput,
+        super::ToolError::Path,
+        super::ToolError::Limit,
+        super::ToolError::Conflict,
+        super::ToolError::Operation,
+        super::ToolError::Uncertain,
+        super::ToolError::GuardRejected("admission"),
+        super::ToolError::GuardRejected("Workspace identity"),
+        super::ToolError::GuardRejected("kernel capability"),
+        super::ToolError::GuardRejected("handshake"),
+        super::ToolError::GuardRejected("payload"),
+        super::ToolError::GuardRejected("receipt"),
+        super::ToolError::GuardRejected("resource attestation"),
+        super::ToolError::GuardRejected("process-unit cleanup"),
+        super::ToolError::GuardRejected("launcher reap"),
+        super::ToolError::GuardRejected("stderr EOF"),
+        super::ToolError::GuardRejected("namespace bootstrap"),
+        super::ToolError::GuardRejected("native manager"),
+        super::ToolError::GuardRejected("bounded control protocol"),
+        super::ToolError::GuardRejected("arbitrary text is not a durable diagnostic"),
+    ] {
+        let mut reserved = observation.intent.clone();
+        reserved.limits.result_bytes = 128;
+        let uncertain = super::uncertain_observation(reserved, error);
+        assert_eq!(uncertain.disposition, ToolDisposition::Uncertain);
+        assert!(uncertain.guard.is_none());
+        assert!(uncertain.valid(), "minimum-budget uncertainty receipt");
+        assert!(uncertain.output.ends_with("Do not retry automatically."));
+        assert!(!uncertain.output.contains("arbitrary text"));
+    }
     let mut oversized = observation;
     oversized.output = "x".repeat(MAX_TOOL_RESULT_BYTES + 1);
     assert!(!oversized.valid());

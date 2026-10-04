@@ -12,12 +12,6 @@ initialize = json.loads(sys.stdin.readline())
 assert initialize["method"] == "initialize"
 assert initialize["params"]["protocolVersion"] == "2025-11-25"
 assert initialize["params"]["capabilities"] == {}
-if mode == "wrong_id":
-    send(initialize["id"] + 1, {})
-    sys.exit(0)
-if mode == "duplicate_json":
-    print('{"jsonrpc":"2.0","jsonrpc":"2.0","id":1,"result":{}}', flush=True)
-    sys.exit(0)
 if mode == "oversized_frame":
     print("x" * (128 * 1024 + 1), flush=True)
     sys.exit(0)
@@ -35,11 +29,17 @@ if mode == "disabled_capabilities":
             assert reply == {"jsonrpc": "2.0", "id": identifier, "result": {}}
         else:
             assert reply["error"]["code"] == -32601 and "result" not in reply
-send(initialize["id"], {
+initialization_result = {
     "protocolVersion": "2026-07-28" if mode == "wrong_version" else "2025-11-25",
     "capabilities": {"tools": {}},
     "serverInfo": {"name": "synthetic-tools", "version": "1"},
-})
+}
+if mode == "duplicate_json":
+    print('{"jsonrpc":"2.0","jsonrpc":"2.0","id":'
+          + json.dumps(initialize["id"]) + ',"result":'
+          + json.dumps(initialization_result) + '}', flush=True)
+else:
+    send(initialize["id"] + (1 if mode == "wrong_id" else 0), initialization_result)
 assert json.loads(sys.stdin.readline())["method"] == "notifications/initialized"
 listing = json.loads(sys.stdin.readline())
 assert listing["method"] == "tools/list" and listing["params"] == {}
@@ -63,7 +63,6 @@ if mode == "schema_drift":
     definition["description"] = "Changed after selection"
 if mode == "list_changed":
     print('{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}', flush=True)
-    sys.exit(0)
 send(listing["id"], {"tools": [definition, definition] if mode == "duplicate_tool" else [definition]})
 line = sys.stdin.readline()
 if line:

@@ -11,6 +11,7 @@ const TEAM_CHILD: &str = "offline child assignment";
 const TEAM_CHILD_ANSWER: &str = "offline child answer";
 const TEAM_ANSWER: &str = "offline team answer";
 const FAILED_OBJECTIVE: &str = "offline usage-limit objective";
+const COMMENTARY_CANARY: &str = "UNCOMMITTED_COMMENTARY_CANARY";
 pub(super) const FAILURE_BODY_CANARY: &str = "UPSTREAM_FAILURE_BODY_CANARY";
 
 fn checked_request(output: &mut impl Read, method: &str) -> Option<serde_json::Value> {
@@ -67,7 +68,7 @@ fn checked_request(output: &mut impl Read, method: &str) -> Option<serde_json::V
 }
 
 fn send_sse(input: &mut impl Write, id: &str, text: serde_json::Value) {
-    let response = serde_json::json!({
+    let mut response = serde_json::json!({
         "id": id,
         "status": "completed",
         "model": "gpt-6.1-sol",
@@ -79,6 +80,30 @@ fn send_sse(input: &mut impl Write, id: &str, text: serde_json::Value) {
         }],
         "usage": {"input_tokens": 12, "output_tokens": 8}
     });
+    if id == "resp_without_check" {
+        let text = text.to_string();
+        let split = text.find(ANSWER).expect("unchecked direct answer") + ANSWER.len() / 2;
+        let (first, last) = text.split_at(split);
+        response["output"] = serde_json::json!([
+            {
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "phase": "commentary",
+                "content": [{"type": "output_text", "text": COMMENTARY_CANARY}]
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "phase": "final_answer",
+                "content": [
+                    {"type": "output_text", "text": first},
+                    {"type": "output_text", "text": last}
+                ]
+            }
+        ]);
+    }
     let stream = format!(
         "event: response.created\r\ndata: {{\"type\":\"response.created\"}}\r\n\r\nevent: response.completed\r\ndata: {}\r\n\r\n",
         serde_json::json!({"type": "response.completed", "response": response})
@@ -137,8 +162,19 @@ pub(super) fn respond_after_catalog(
     assert_eq!(direct["text"]["format"]["strict"], true);
     let context: serde_json::Value =
         serde_json::from_str(direct["input"][0]["content"].as_str().unwrap()).unwrap();
-    assert_eq!(context["objective"], UNCHECKED_OBJECTIVE);
-    assert_eq!(context["history"], serde_json::json!([]));
+    assert_eq!(
+        context,
+        serde_json::json!({
+            "phase": "root_plan",
+            "collaboration": {"mode": "single"},
+            "objective": UNCHECKED_OBJECTIVE,
+            "workspace_guidance": null,
+            "includes": [],
+            "history": [],
+            "derived_context_summary": null,
+            "child_results": []
+        })
+    );
     send_sse(
         input,
         "resp_without_check",
@@ -297,14 +333,49 @@ pub(super) fn respond_after_catalog(
     );
     let rejected_body = format!("{FAILURE_BODY_CANARY} {ACCESS} {REFRESH}");
     input.write_all(format!("HTTP/1.1 429 Too Many Requests\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{rejected_body}", rejected_body.len()).as_bytes()).expect("synthetic Run rejection");
+    let completed = |model: &str, text: serde_json::Value| {
+        format!(
+            "data: {{\"type\":\"response.created\"}}\n\ndata: {}\n\n",
+            serde_json::json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_contract_rejection",
+                    "status": "completed",
+                    "model": model,
+                    "output": [{
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "phase": "final_answer",
+                        "content": [{"type": "output_text", "text": text.to_string()}]
+                    }],
+                    "usage": {"input_tokens": 12, "output_tokens": 8}
+                }
+            })
+        )
+    };
     for (stage, stream) in [
         (
             "EndBeforeCompleted",
-            "data: {\"type\":\"response.created\"}\n\n",
+            "data: {\"type\":\"response.created\"}\n\n".to_owned(),
         ),
         (
             "IncompleteResponse",
-            "data: {\"type\":\"response.incomplete\"}\n\n",
+            "data: {\"type\":\"response.incomplete\"}\n\n".to_owned(),
+        ),
+        (
+            "ResponseModel",
+            completed(
+                "gpt-6-astra",
+                serde_json::json!({"outcome": {"type": "finish", "summary": "safe", "result": "done"}}),
+            ),
+        ),
+        (
+            "OutcomeContract",
+            completed(
+                "gpt-6.1-sol",
+                serde_json::json!({"outcome": {"type": "finish", "summary": "missing result"}}),
+            ),
         ),
     ] {
         let body =
@@ -314,10 +385,24 @@ pub(super) fn respond_after_catalog(
         assert_eq!(body["store"], false);
         assert_eq!(body["stream"], true);
         assert!(body.get("max_output_tokens").is_none());
+        assert!(body.get("previous_response_id").is_none());
+        assert_eq!(body["text"]["format"]["name"], "arany_outcome");
+        assert_eq!(body["text"]["format"]["strict"], true);
         let context: serde_json::Value =
             serde_json::from_str(body["input"][0]["content"].as_str().unwrap()).unwrap();
-        assert_eq!(context["objective"], format!("offline diagnostic {stage}"));
-        assert_eq!(context["history"], serde_json::json!([]));
+        assert_eq!(
+            context,
+            serde_json::json!({
+                "phase": "root_plan",
+                "collaboration": {"mode": "single"},
+                "objective": format!("offline diagnostic {stage}"),
+                "workspace_guidance": null,
+                "includes": [],
+                "history": [],
+                "derived_context_summary": null,
+                "child_results": []
+            })
+        );
         input.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{stream}", stream.len()).as_bytes()).expect("diagnostic failure reply");
     }
 }
@@ -485,7 +570,7 @@ pub(super) fn accept_check_and_run(
     assert_ne!(provenance.evidence_fingerprint, [0; 32]);
     assert!(root.read_chatgpt_accounts_record().unwrap().unwrap() == record);
     let journal = std::fs::read("/root/state-without-check/events.sqlite3").unwrap();
-    for secret in [ACCESS, REFRESH, signed] {
+    for secret in [ACCESS, REFRESH, signed, COMMENTARY_CANARY] {
         assert!(
             !result
                 .stdout
@@ -652,7 +737,28 @@ pub(super) fn accept_check_and_run(
             .windows(FAILURE_BODY_CANARY.len())
             .any(|part| part == FAILURE_BODY_CANARY.as_bytes())
     );
-    for stage in ["EndBeforeCompleted", "IncompleteResponse"] {
+    for (stage, reason, events) in [
+        (
+            "EndBeforeCompleted",
+            arany::ProviderFailureReason::StreamProtocol,
+            1,
+        ),
+        (
+            "IncompleteResponse",
+            arany::ProviderFailureReason::StreamProtocol,
+            1,
+        ),
+        (
+            "ResponseModel",
+            arany::ProviderFailureReason::ResponseContract,
+            2,
+        ),
+        (
+            "OutcomeContract",
+            arany::ProviderFailureReason::OutcomeContract,
+            2,
+        ),
+    ] {
         let state = format!("/root/state-diagnostic-{stage}");
         let objective = format!("offline diagnostic {stage}");
         let result = Command::new("/arany")
@@ -695,15 +801,36 @@ pub(super) fn accept_check_and_run(
         assert!(view.runs[0].assistant_message.is_none());
         assert_eq!(
             view.runs[0].agents[0].provider_calls[0].failure_reason,
-            Some(arany::ProviderFailureReason::StreamProtocol)
+            Some(reason)
         );
         let path = Path::new(&state).join("development.log");
         if cfg!(debug_assertions) {
             let log = std::fs::read(&path)
                 .expect("debug process must record its actual subscription failure");
             let text = std::str::from_utf8(&log).unwrap();
-            assert!(text.contains(&format!("stage={stage}")));
-            assert!(text.contains("subscription::completed_at"));
+            let headers = text
+                .lines()
+                .filter(|line| line.starts_with("subscription "))
+                .collect::<Vec<_>>();
+            assert_eq!(headers.len(), 1, "one diagnostic per rejected call");
+            let fields = headers[0].split_ascii_whitespace().collect::<Vec<_>>();
+            assert_eq!(fields.len(), 5);
+            assert_eq!(fields[1], format!("stage={stage}"));
+            let bytes = fields[2]
+                .strip_prefix("bytes=")
+                .unwrap()
+                .parse::<usize>()
+                .unwrap();
+            assert!(bytes > 0 && bytes <= 1024 * 1024);
+            assert_eq!(fields[3], format!("events={events}"));
+            assert_eq!(fields[4], "http_status=Some(200)");
+            assert!(
+                text.contains(if reason == arany::ProviderFailureReason::StreamProtocol {
+                    "subscription::completed_at"
+                } else {
+                    "subscription::invoke_at"
+                })
+            );
             assert!(log.len() <= 24 * 1024);
             for forbidden in [
                 ACCESS,

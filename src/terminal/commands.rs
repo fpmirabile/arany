@@ -321,6 +321,7 @@ pub fn parse_submission(line: &str) -> Result<Submission<'_>, CommandParseError>
     let Some(control) = line.strip_prefix('/') else {
         return Ok(Submission::Objective(line));
     };
+    let control = control.trim_end();
     let (name, argument) = control
         .split_once(' ')
         .map_or((control, None), |(name, rest)| (name, Some(rest.trim())));
@@ -624,11 +625,28 @@ mod tests {
                 })
             );
             if spec.argument.is_none() {
+                for suffix in ["\t", "\n", "\r", "\r\n", " \t\n\r"] {
+                    assert_eq!(
+                        parse_submission(&format!("/{}{suffix}", spec.name)),
+                        Ok(Submission::Command {
+                            command: spec.command,
+                            argument: None,
+                        }),
+                        "trailing whitespace on /{}: {suffix:?}",
+                        spec.name
+                    );
+                }
                 for argument in ["unexpected", "two words", "\u{1b}[31m"] {
                     let message = parse_submission(&format!("/{} {argument}", spec.name))
                         .expect_err("extra text must not activate a no-argument control")
                         .to_string();
                     assert_eq!(message, format!("Usage: /{}", spec.name));
+                }
+                for separator in ["\t", "\n", "\r"] {
+                    assert!(matches!(
+                        parse_submission(&format!("/{}{separator}unexpected", spec.name)),
+                        Err(CommandParseError::Unknown { .. })
+                    ));
                 }
             } else {
                 assert_eq!(
@@ -639,6 +657,16 @@ mod tests {
                     })
                 );
             }
+        }
+        for line in ["//literal\t", "//literal\n", "//literal\r", "literal\t\n\r"] {
+            assert_eq!(
+                parse_submission(line),
+                Ok(Submission::Objective(if line.starts_with("//") {
+                    &line[1..]
+                } else {
+                    line
+                }))
+            );
         }
         assert_eq!(parse_submission("/clear"), parse_submission("/new"));
         assert_eq!(parse_submission("/exit"), parse_submission("/quit"));

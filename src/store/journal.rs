@@ -381,6 +381,7 @@ pub(super) fn fork_session(
             prefix_digest: digest,
         },
     )?;
+    resolve_view(&transaction, id, 0, &mut 0)?;
     transaction.commit()?;
     Ok(id)
 }

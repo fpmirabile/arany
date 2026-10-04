@@ -2,7 +2,7 @@ use super::ToolError;
 use super::config::Config;
 use super::guard::{payload, read_capped, read_line_capped};
 use super::skills::parse_json;
-use super::types::{MAX_TOOL_RESULT_BYTES, ToolCall, hex_digest};
+use super::types::{MAX_TOOL_RESULT_BYTES, ToolCall, hex_digest, parse_mcp_arguments};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Stdio;
@@ -182,8 +182,8 @@ pub(super) async fn execute(call: &ToolCall, config: &Config) -> Result<String, 
         let ToolCall::McpCall { tool, schema_digest, arguments, .. } = call else { return Err(ToolError::Operation); };
         let definition = tools.get(tool).ok_or(ToolError::Configuration)?;
         if definition["sha256"].as_str() != Some(schema_digest) { return Err(ToolError::ChangedInput); }
-        let arguments = parse_json(arguments.as_bytes(), 8 * 1024)?;
-        if !arguments.is_object() || !schema(&definition["inputSchema"])?.is_valid(&arguments) { return Err(ToolError::Configuration); }
+        let arguments = parse_mcp_arguments(arguments)?;
+        if !schema(&definition["inputSchema"])?.is_valid(&arguments) { return Err(ToolError::Configuration); }
         let reply = connection.request("tools/call", json!({"name":tool,"arguments":arguments})).await?;
         let is_error = match reply.get("isError") { None => false, Some(value) => value.as_bool().ok_or(ToolError::Operation)? };
         let content = reply["content"].as_array().filter(|items| items.len() <= 64).ok_or(ToolError::Operation)?;

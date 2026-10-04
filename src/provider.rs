@@ -330,8 +330,8 @@ impl ProviderResponse {
                     serde_json::to_value(call)
                         .is_ok_and(|value| tool_reflects_secret(&value, secret))
                         || if let crate::tools::ToolCall::McpCall { arguments, .. } = call {
-                            serde_json::from_str(arguments)
-                                .is_ok_and(|value| tool_reflects_secret(&value, secret))
+                            crate::tools::types::parse_mcp_arguments(arguments)
+                                .map_or(true, |value| tool_reflects_secret(&value, secret))
                         } else {
                             false
                         }
