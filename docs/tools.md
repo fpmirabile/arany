@@ -117,6 +117,8 @@ Native file writes use digest/create preconditions, no-follow handles and a fres
 
 Before dispatch the Engine commits an immutable `ToolStarted` intent. Before inferring again it commits the correlated bounded `ToolFinished` observation. An interrupted or uncertain effect stops the loop without automatic retry; inspect `arany show --output text SESSION_ID` or the private JSONL export and the actual files before intentionally retrying. Replay, resume, fork and compaction carry past tool facts only as untrusted context and never execute an old intent or renew permission. JSONL is an explicit sensitive-data export.
 
+Run admission requires enough resolved Event slots for its entire bounded topology and all configured Tool continuations, before Provider usage or Tool preparation. The Session and its fork ancestors stay locked throughout, so cooperating operations cannot consume that logical headroom. Near the history quota, start a new Session; this admission does not reserve physical disk or eliminate crash/disk-fault uncertainty after dispatch.
+
 ## Linux enforcement and verification
 
 The first enforcer requires installed non-set-ID, root-owned `/usr/bin/bwrap`, `/usr/bin/systemd-run`, `/usr/bin/systemctl` and `/usr/bin/env`, working unprivileged user namespaces, a systemd user manager and cgroup v2 with effective memory/swap/PID/CPU limits and owned cgroup termination. This is a kernel/native-capability contract, not a GNOME/KDE dependency. Other Linux init systems need a separately enforcing adapter; Arany does not pretend the present implementation works without these facilities. Unsupported architecture or missing enforcement fails closed, with no unsandboxed fallback. Native macOS containment is not implemented or claimed.

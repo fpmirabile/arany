@@ -1,6 +1,6 @@
 # Project skills
 
-Maintain Arany's own development skills here. `rust-clean-code` guides Rust engineering; `arany-terminal-design` guides terminal design and interaction. These files are the editable sources. `.agents/skills/` and agent-specific skill directories are generated, gitignored installations.
+Maintain Arany's own development skills here. `rust-clean-code` guides Rust engineering; `arany-terminal-design` guides terminal design and interaction; `clean-architecture-review` guides evidence-backed Robert C. Martin architecture reviews and bounded improvements. These files are the editable sources. `.agents/skills/` and agent-specific skill directories are generated, gitignored installations.
 
 The repository's single manifest is [`skills-lock.json`](../../skills-lock.json). Local entries use portable paths under `./agents/skills`; external entries retain their existing sources. Skills guide the development agent and do not register commands or tools in the Arany executable.
 
@@ -18,7 +18,7 @@ Select another supported harness with `--agent`, or provide multiple targets:
 DISABLE_TELEMETRY=1 npx --yes skills@1.7.0 add ./agents/skills --agent codex claude-code --yes
 ```
 
-This installs both local skills and regenerates their content hashes in the existing lockfile. Codex uses `.agents/skills`; the second target receives links under its own skill directory. The source folders remain unchanged. Keep the Rust skill's license and attribution with its references.
+This installs the local skills and regenerates their content hashes in the existing lockfile. Codex uses `.agents/skills`; the second target receives links under its own skill directory. The source folders remain unchanged. Keep the Rust skill's license and attribution with its references. Use `--skill clean-architecture-review` to install only that skill without refreshing unrelated entries.
 
 ## Restore the lockfile
 

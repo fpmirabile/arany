@@ -18,6 +18,11 @@
       "skillPath": "skills/in-progress/claude-handoff/SKILL.md",
       "computedHash": "f8c4754a25aa4e12601ce69db4388bb0d30ca526b225351180c5b0d2a4649a95"
     },
+    "clean-architecture-review": {
+      "source": "./agents/skills",
+      "sourceType": "local",
+      "computedHash": "2e923d6a282fe5a3c07a2daed4374331c2311aca5fc8e39ff2957f67cce689d9"
+    },
     "code-review": {
       "source": "mattpocock/skills",
       "sourceType": "github",

@@ -17,6 +17,8 @@ The earlier conversational `P0`/`P1`/`P2` shorthand is retired. It mixed researc
 
 | Report | Primary decision area | Status |
 |---|---|---|
+| [Agent instructions and product specifications](./agent-instructions-and-product-specs-2026-10.md) | Conditional instruction loading, focused behavior specs, ADRs, Skills and evidence ownership | Proposed incremental documentation split; no instruction or runtime migration applied |
+| [Clean Architecture principles](./clean-architecture-principles-2026-10.md) | Martin's dependency rule and SOLID, interpreted against Arany's real ownership and privilege seams | Three-reviewer application and dispositions in the [architecture review](../architecture/clean-architecture-review-2026-10.md) |
 | [Current harness effect loops](./effectful-harness-tool-loops-2026-10.md) | Codex, Claude Code, Pi and OpenCode proposal/observation/recovery ownership | Implemented strict semantic primary continuation; native function-call migration is not required for the local base |
 | [MCP and runtime Skills](./mcp-and-runtime-skills-2026-10.md) | Current MCP versions, complete legacy tools flow, portable progressive Skills, bounded parser choices | Implemented pinned local 2025-11-25 stdio profile and progressive resources; newer stateless/remote profiles remain separate |
 | [Platform effect Guard](./effect-guard-platform-base-2026-10.md) | Kernel filesystem/namespace/cgroup enforcement, lifecycle, quotas and immutable receipts | Implemented native Linux local Guard; native macOS and alternative enforcers remain future adapters |

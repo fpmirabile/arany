@@ -24,6 +24,7 @@ Rust-first, CLI-only agent harness. The product and executable are named Arany a
 - Development-skill installation or maintenance → [agents/skills/README.md](./agents/skills/README.md)
 - CLI command admission, mode selection, process channels, or `exec` composition → [agents/cli.md](./agents/cli.md)
 - OTLP endpoint admission, trace privacy, export bounds, or shutdown → [agents/telemetry.md](./agents/telemetry.md)
+- Local development logs, failure stages, or stack traces → [agents/diagnostics.md](./agents/diagnostics.md)
 
 Load every relevant file for cross-module changes. A module file contains only module-specific knowledge; these root rules still apply.
 
