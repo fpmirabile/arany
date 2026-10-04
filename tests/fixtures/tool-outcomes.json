@@ -1,0 +1,12 @@
+[
+  {"outcome":{"type":"tool","call":{"operation":"list","path":"src"}}},
+  {"outcome":{"type":"tool","call":{"operation":"read","path":"src/main.rs","offset":0,"limit":4096}}},
+  {"outcome":{"type":"tool","call":{"operation":"search","path":"src","query":"fn main"}}},
+  {"outcome":{"type":"tool","call":{"operation":"mkdir","path":"src/generated"}}},
+  {"outcome":{"type":"tool","call":{"operation":"write","path":"src/new.rs","expected_digest":null,"content":"fn new() {}\n"}}},
+  {"outcome":{"type":"tool","call":{"operation":"edit","path":"src/main.rs","expected_digest":"0000000000000000000000000000000000000000000000000000000000000000","old":"old","new":"new"}}},
+  {"outcome":{"type":"tool","call":{"operation":"command","program":"bash","args":["src/check.sh"],"cwd":""}}},
+  {"outcome":{"type":"tool","call":{"operation":"skill","name":"example","resource":null}}},
+  {"outcome":{"type":"tool","call":{"operation":"mcp_list","server":"example"}}},
+  {"outcome":{"type":"tool","call":{"operation":"mcp_call","server":"example","tool":"echo","schema_digest":"0000000000000000000000000000000000000000000000000000000000000000","arguments":"{\"value\":42}"}}}
+]
