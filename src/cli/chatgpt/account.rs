@@ -21,8 +21,8 @@ use uuid::{Uuid, Variant, Version};
 const MAX_ACCOUNTS: usize = 8;
 const MAX_MODEL_CHECKS: usize = 64;
 const MODEL_CHECK_AGE_SECONDS: u64 = 24 * 60 * 60;
-const MODEL_CHECK_VERSION: &str = "chatgpt-strict-stream-conformance-v6";
-const ACCOUNT_ADMISSION_VERSION: &str = "chatgpt-consented-account-admission-v6";
+const MODEL_CHECK_VERSION: &str = "chatgpt-strict-stream-conformance-v7";
+const ACCOUNT_ADMISSION_VERSION: &str = "chatgpt-consented-account-admission-v7";
 const REFRESH_EARLY_SECONDS: u64 = 300;
 pub(crate) const MAX_TOKEN_RECORD_BYTES: usize = 64 * 1024;
 
@@ -961,8 +961,8 @@ fn read_keyring_token(
 ) -> Result<TokenRecord, AuthorizationError> {
     let slot = keyring_slot(client_id);
     let bytes = read_chatgpt_keyring_record(&slot)
-        .map_err(|_| AuthorizationError::Unavailable)?
-        .ok_or(AuthorizationError::Unavailable)?;
+        .map_err(AuthorizationError::CredentialStore)?
+        .ok_or(AuthorizationError::CredentialMissing)?;
     if bytes.len() > MAX_TOKEN_RECORD_BYTES {
         return Err(AuthorizationError::InvalidIdentity);
     }

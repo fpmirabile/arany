@@ -1,5 +1,7 @@
 use super::{DEADLINE, ENDPOINT, wire};
-use crate::diagnostics::{StreamCounts, SubscriptionFailureStage as Stage, subscription_failure};
+use crate::diagnostics::{
+    ResponseShape, StreamCounts, SubscriptionFailureStage as Stage, subscription_failure,
+};
 use crate::provider::{
     AgentPhase, ChatGptProvenance, CompactionItem, CompactionRequest, CompactionResponse, Effort,
     HistoryTurn, MAX_REPORTED_INPUT_TOKENS, MAX_RESPONSE_BYTES, OutputTokenBound, Provider,
@@ -7,6 +9,7 @@ use crate::provider::{
 };
 use crate::session::{AgentRunId, RunId, SessionId};
 use reqwest::{Client, Url, header, redirect::Policy};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::time::timeout;
@@ -445,7 +448,10 @@ fn response_failure(error: wire::ResponseError, counts: StreamCounts) -> Provide
         ResponseError::Message => Stage::ResponseMessage,
         ResponseError::Content => Stage::ResponseContent,
         ResponseError::Phase => Stage::ResponsePhase,
-        ResponseError::FinalMessage => Stage::ResponseFinalMessage,
+        ResponseError::MissingFinalMessage => Stage::ResponseMissingFinalMessage,
+        ResponseError::DuplicateFinalMessage => Stage::ResponseDuplicateFinalMessage,
+        ResponseError::AmbiguousFinalMessage => Stage::ResponseAmbiguousFinalMessage,
+        ResponseError::LateCommentary => Stage::ResponseLateCommentary,
         ResponseError::Outcome => Stage::OutcomeContract,
     };
     failure(stage, error.provider_error(), counts)
@@ -487,6 +493,25 @@ struct StreamDecoder<'a> {
     event: Option<String>,
     data: Vec<u8>,
     stage: Stage,
+    response_shape: ResponseShape,
+    response_id: Option<String>,
+    done_items: Vec<wire::WireItem>,
+}
+
+#[derive(Deserialize)]
+struct CreatedEvent {
+    response: Option<CreatedResponse>,
+}
+
+#[derive(Deserialize)]
+struct CreatedResponse {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct DoneEvent {
+    output_index: usize,
+    item: wire::WireItem,
 }
 
 impl<'a> StreamDecoder<'a> {
@@ -500,6 +525,9 @@ impl<'a> StreamDecoder<'a> {
             event: None,
             data: Vec::new(),
             stage: Stage::EventFraming,
+            response_shape: ResponseShape::default(),
+            response_id: None,
+            done_items: Vec::new(),
         }
     }
 
@@ -617,12 +645,115 @@ impl<'a> StreamDecoder<'a> {
             return Err(ProviderError::InvalidStream);
         }
         match kind {
+            "response.created" => {
+                self.stage = Stage::CompletedResponse;
+                let created: CreatedEvent = serde_json::from_slice(&data)
+                    .map_err(|_| ProviderError::InvalidResponseContract)?;
+                if let Some(response) = created.response {
+                    if self.response_id.is_some()
+                        || !self.done_items.is_empty()
+                        || response.id.is_empty()
+                        || response.id.len() > 128
+                        || !response.id.bytes().all(|byte| byte.is_ascii_graphic())
+                    {
+                        return Err(ProviderError::InvalidResponseContract);
+                    }
+                    self.response_id = Some(response.id);
+                }
+                Ok(None)
+            }
             "response.completed" => {
                 self.stage = Stage::CompletedResponse;
                 if value.get("response").is_none() {
                     return Err(ProviderError::InvalidResponseContract);
                 }
-                Ok(Some(data))
+                if cfg!(debug_assertions)
+                    && let Some(output) =
+                        value.pointer("/response/output").and_then(Value::as_array)
+                {
+                    for item in output {
+                        if item.get("type").and_then(Value::as_str) != Some("message") {
+                            continue;
+                        }
+                        self.response_shape.messages += 1;
+                        match item.get("phase").and_then(Value::as_str) {
+                            Some("commentary") => self.response_shape.commentary += 1,
+                            Some("final_answer") => self.response_shape.finals += 1,
+                            None => self.response_shape.unphased += 1,
+                            _ => {}
+                        }
+                        if let Some(content) = item.get("content").and_then(Value::as_array) {
+                            let text = content
+                                .iter()
+                                .filter(|part| {
+                                    part.get("type").and_then(Value::as_str) == Some("output_text")
+                                })
+                                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                                .collect::<String>();
+                            self.response_shape.structured +=
+                                usize::from(wire::is_structured_text(&text));
+                        }
+                    }
+                }
+                if !self.done_items.is_empty() {
+                    let id = self
+                        .response_id
+                        .as_deref()
+                        .ok_or(ProviderError::InvalidResponseContract)?;
+                    let completed = wire::reconcile_streamed_output(
+                        &data,
+                        id,
+                        std::mem::take(&mut self.done_items),
+                    )
+                    .map_err(|error| {
+                        self.stage = match error {
+                            wire::ResponseError::Identifier => Stage::ResponseIdentifier,
+                            wire::ResponseError::Message => Stage::ResponseMessage,
+                            _ => Stage::ResponseEnvelope,
+                        };
+                        error.provider_error()
+                    })?;
+                    self.stage = Stage::StreamLimit;
+                    if completed.len() > MAX_RESPONSE_BYTES {
+                        return Err(ProviderError::InvalidStream);
+                    }
+                    Ok(Some(completed))
+                } else {
+                    if self.response_id.as_deref().is_some_and(|id| {
+                        value.pointer("/response/id").and_then(Value::as_str) != Some(id)
+                    }) {
+                        self.stage = Stage::ResponseIdentifier;
+                        return Err(ProviderError::InvalidResponseContract);
+                    }
+                    Ok(Some(data))
+                }
+            }
+            "response.output_item.done" => {
+                if cfg!(debug_assertions)
+                    && value.pointer("/item/type").and_then(Value::as_str) == Some("message")
+                {
+                    self.response_shape.done_messages += 1;
+                    if value.pointer("/item/phase").and_then(Value::as_str) == Some("final_answer")
+                    {
+                        self.response_shape.done_finals += 1;
+                    }
+                }
+                self.stage = Stage::CompletedResponse;
+                let done: DoneEvent = serde_json::from_slice(&data)
+                    .map_err(|_| ProviderError::InvalidResponseContract)?;
+                if self.response_id.is_none()
+                    || done.output_index != self.done_items.len()
+                    || done.output_index >= MAX_EVENTS
+                    || done.item.completed_id().is_none()
+                    || self
+                        .done_items
+                        .iter()
+                        .any(|item| item.completed_id() == done.item.completed_id())
+                {
+                    return Err(ProviderError::InvalidResponseContract);
+                }
+                self.done_items.push(done.item);
+                Ok(None)
             }
             "response.failed" | "error" => {
                 self.stage = Stage::RemoteFailure;
@@ -641,6 +772,7 @@ impl<'a> StreamDecoder<'a> {
             bytes: self.total_bytes,
             events: self.events,
             http_status: Some(200),
+            response_shape: Some(self.response_shape),
         }
     }
 }

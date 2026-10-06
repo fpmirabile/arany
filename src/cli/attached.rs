@@ -220,6 +220,8 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
     }
     let mut setup_notice = None;
     let mut setup_catalog = None;
+    let reuse_saved_selection =
+        matches!(admission.entry, EntryMode::New) && admission.defaults.provider.is_none();
     if matches!(admission.entry, EntryMode::New) && admission.defaults.provider.is_none() {
         if admission.setup_requested {
             match setup::resolve(&mut terminal, &admission.state_dir, &admission.workspace).await? {
@@ -248,6 +250,36 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                 setup::SavedDefaults::Selected(defaults) => admission.defaults = defaults,
                 setup::SavedDefaults::Cancelled => return Ok(()),
                 setup::SavedDefaults::Unconfigured => {}
+            }
+        }
+    }
+    if reuse_saved_selection {
+        let mut remembered = admission.defaults.clone();
+        match models::restore_saved_models(
+            &admission.workspace,
+            &admission.state_dir,
+            &mut remembered,
+            true,
+        )
+        .await
+        {
+            Ok(catalog) => {
+                if setup_catalog
+                    .as_ref()
+                    .is_none_or(|fresh: &Vec<arany::ModelEntry>| {
+                        fresh
+                            .iter()
+                            .any(|row| Some(row.id.as_str()) == remembered.model.as_deref())
+                    })
+                {
+                    admission.defaults = remembered;
+                }
+                if setup_catalog.is_none() {
+                    setup_catalog = Some(catalog);
+                }
+            }
+            Err(error) => {
+                setup_notice = Some(format!("Error: {error}; choose /model to select again"))
             }
         }
     }
@@ -299,6 +331,31 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         arany::enable_development_diagnostics(&root);
     }
     let mut composer = Composer::default();
+    if setup_catalog.is_none() {
+        match models::restore_saved_models(
+            &admission.workspace,
+            &admission.state_dir,
+            &mut view.defaults.clone(),
+            false,
+        )
+        .await
+        {
+            Ok(catalog) => setup_catalog = Some(catalog),
+            Err(error) => setup_notice = Some(format!("Error: {error}; cached models unavailable")),
+        }
+    }
+    if admission.setup_requested
+        && let Err(error) = models::remember_models(
+            &admission.workspace,
+            &view.defaults,
+            setup_catalog.as_deref(),
+        )
+        .await
+    {
+        setup_notice = Some(format!(
+            "Error: {error}; selection saved for this Session only"
+        ));
+    }
     seed_setup_catalog(&mut composer, &view.defaults, setup_catalog.as_deref());
     let mut notice = if setup_notice.is_some() {
         setup_notice
@@ -834,6 +891,13 @@ async fn configure_account(
     admission.defaults = defaults;
     *view = load_view(&admission.state_dir, session_id).await?;
     seed_setup_catalog(composer, &view.defaults, Some(&catalog));
+    if let Err(error) =
+        models::remember_models(&admission.workspace, &view.defaults, Some(&catalog)).await
+    {
+        return Ok(format!(
+            "{notice}; Error: {error}; selection saved for this Session only"
+        ));
+    }
     Ok(notice)
 }
 

@@ -534,8 +534,8 @@ async fn connect_chatgpt(
         let Some(b'1') = choose(
             terminal,
             1,
-            "Keyring unavailable",
-            "Private file is NOT encrypted",
+            "Choose storage",
+            "Password store unavailable. Unencrypted file",
             &[(b'2', "Cancel"), (b'1', "Use private file")],
         )
         .await?
@@ -555,7 +555,7 @@ async fn reconnect_chatgpt(
     if target.storage == AccountStorage::Keyring
         && !chatgpt_keyring_available(credentials::probe_chatgpt_keyring().await)?
     {
-        return Err("Saved ChatGPT keyring is unavailable; restore it before reconnecting".into());
+        return Err("Saved ChatGPT keyring is unavailable. Unlock your desktop password store and retry Reconnect; or choose Connect new, then Use private file (not encrypted)".into());
     }
     authorize_chatgpt(terminal, workspace, target.storage, Some(target)).await
 }
@@ -673,9 +673,10 @@ fn chatgpt_keyring_available(probe: Result<(), CredentialError>) -> Result<bool,
     match probe {
         Ok(()) => Ok(true),
         Err(CredentialError::Unavailable | CredentialError::TimedOut) => Ok(false),
-        Err(CredentialError::Locked) => {
-            Err("Keyring is locked; unlock it before ChatGPT setup".into())
-        }
+        Err(CredentialError::Locked) => Err(
+            "OS credential store is locked. Unlock your desktop password store, then retry /setup"
+                .into(),
+        ),
         Err(error) => Err(error.to_string()),
     }
 }

@@ -244,6 +244,171 @@ fn subscription_compaction_body_keeps_only_bounded_history_data() {
 
 #[test]
 fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
+    {
+        let full = completed(Some(12));
+        let data = String::from_utf8(full).unwrap();
+        let data = data
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("data: ")
+                    .filter(|data| data.contains("response.completed"))
+            })
+            .unwrap();
+        let mut terminal: Value = serde_json::from_str(data).unwrap();
+        let mut item = terminal["response"]["output"][0].clone();
+        item["id"] = json!("msg_synthetic");
+        item["phase"] = json!("final_answer");
+        terminal["response"]["output"] = json!([]);
+        let created = json!({"type":"response.created", "response":{"id":"resp_synthetic"}});
+        let done = json!({"type":"response.output_item.done", "output_index":0, "item":item});
+        let reasoning = json!({"type":"response.output_item.done", "output_index":0,
+            "item":{"id":"rs_synthetic", "type":"reasoning", "summary":[]}});
+        let prefix = format!("data: {created}\n\ndata: {done}\n\n");
+        for (operation, text) in [
+            (
+                "Run",
+                r#"{"outcome":{"type":"finish","summary":"safe","result":"done"}}"#,
+            ),
+            ("compaction", r#"{"summary":"Condensed"}"#),
+        ] {
+            for populated in [false, true] {
+                let mut done = done.clone();
+                done["output_index"] = json!(1);
+                done["item"]["content"][0]["text"] = json!(text);
+                let mut terminal = terminal.clone();
+                if populated {
+                    terminal["response"]["output"] = json!([reasoning["item"], done["item"]]);
+                }
+                let mut decoder = StreamDecoder::new(TOKEN);
+                let prefix = format!("data: {created}\n\ndata: {reasoning}\n\ndata: {done}\n\n");
+                assert!(
+                    decoder.feed(prefix.as_bytes()).unwrap().is_none(),
+                    "{operation}: done alone is not success"
+                );
+                let closing = format!("data: {terminal}\n\n");
+                let mut body = None;
+                for byte in closing.as_bytes().chunks(1) {
+                    if let Some(completed) = decoder.feed(byte).unwrap() {
+                        body = Some(completed);
+                    }
+                }
+                let body = body.unwrap();
+                if operation == "Run" {
+                    wire::decode_streamed_run(&body, "model-a").expect("complete streamed Run");
+                } else {
+                    wire::decode_streamed_compaction(&body, "model-a")
+                        .expect("complete streamed compaction");
+                }
+            }
+        }
+        let mut rejected = Vec::new();
+        let mut changed = terminal.clone();
+        changed["response"]["id"] = json!("resp_other");
+        rejected.push((
+            "response identity drift",
+            format!("{prefix}data: {changed}\n\n"),
+        ));
+        changed = terminal.clone();
+        changed["response"]["output"] = json!([done["item"]]);
+        changed["response"]["output"][0]["content"][0]["text"] = json!("conflicting text");
+        rejected.push((
+            "conflicting terminal output",
+            format!("{prefix}data: {changed}\n\n"),
+        ));
+        rejected.push(("duplicate done index", format!("{prefix}data: {done}\n\n")));
+        rejected.push((
+            "done without response identity",
+            format!("data: {done}\n\n"),
+        ));
+        for (label, pointer, value) in [
+            ("gapped index", "/output_index", json!(1)),
+            ("negative index", "/output_index", json!(-1)),
+            ("unfinished message", "/item/status", json!("in_progress")),
+            ("missing item identity", "/item/id", Value::Null),
+        ] {
+            let mut changed = done.clone();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            rejected.push((label, format!("data: {created}\n\ndata: {changed}\n\n")));
+        }
+        let mut repeated_id = done.clone();
+        repeated_id["output_index"] = json!(1);
+        rejected.push((
+            "repeated item identity",
+            format!("{prefix}data: {repeated_id}\n\n"),
+        ));
+        for (label, stream) in rejected {
+            assert!(
+                StreamDecoder::new(TOKEN).feed(stream.as_bytes()).is_err(),
+                "{label}"
+            );
+        }
+        for kind in ["response.failed", "response.incomplete", "error"] {
+            let stream = format!("{prefix}data: {}\n\n", json!({"type":kind}));
+            assert!(
+                StreamDecoder::new(TOKEN).feed(stream.as_bytes()).is_err(),
+                "{kind} after done"
+            );
+        }
+        for (label, pointer, value) in [
+            ("commentary only", "/item/phase", json!("commentary")),
+            ("refusal", "/item/content/0/type", json!("refusal")),
+            (
+                "malformed outcome",
+                "/item/content/0/text",
+                json!("plain text"),
+            ),
+        ] {
+            let mut changed = done.clone();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            let stream = format!("data: {created}\n\ndata: {changed}\n\ndata: {terminal}\n\n");
+            let body = StreamDecoder::new(TOKEN)
+                .feed(stream.as_bytes())
+                .unwrap()
+                .unwrap();
+            assert!(
+                wire::decode_streamed_run(&body, "model-a").is_err(),
+                "{label}"
+            );
+            assert!(
+                wire::decode_streamed_compaction(&body, "model-a").is_err(),
+                "{label}"
+            );
+        }
+        for (label, pointer, value) in [
+            ("failed terminal", "/response/status", json!("failed")),
+            ("wrong model", "/response/model", json!("model-b")),
+        ] {
+            let mut changed = terminal.clone();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            let stream = format!("{prefix}data: {changed}\n\n");
+            let body = StreamDecoder::new(TOKEN)
+                .feed(stream.as_bytes())
+                .unwrap()
+                .unwrap();
+            assert!(
+                wire::decode_streamed_run(&body, "model-a").is_err(),
+                "{label}"
+            );
+            assert!(
+                wire::decode_streamed_compaction(&body, "model-a").is_err(),
+                "{label}"
+            );
+        }
+        let reflected = prefix.replace("safe", TOKEN);
+        assert!(
+            StreamDecoder::new(TOKEN)
+                .feed(reflected.as_bytes())
+                .is_err()
+        );
+        let duplicate_item = format!(
+            "data: {created}\n\ndata: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{{\"id\":\"one\",\"id\":\"two\",\"type\":\"message\",\"status\":\"completed\"}}}}\n\n"
+        );
+        assert!(
+            StreamDecoder::new(TOKEN)
+                .feed(duplicate_item.as_bytes())
+                .is_err()
+        );
+    }
     let mut decoder = StreamDecoder::new(TOKEN);
     let stream = completed(Some(12));
     let split = stream.len() / 3;

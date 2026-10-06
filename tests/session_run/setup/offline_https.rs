@@ -422,7 +422,10 @@ fn run_pty_with_gate(
             after_answer,
             needle,
         );
-        if needle != b"Choose number, n next, p previous, or q close:" {
+        let catalog_busy = needle == b"Notice: Loading model catalog; Ctrl+C cancels"
+            || needle.ends_with(b"catalog loading; Ctrl+C cancels")
+            || needle.ends_with(b"draft unchanged; catalog loading");
+        if needle != b"Choose number, n next, p previous, or q close:" && !catalog_busy {
             wait_for_sanitized(
                 &mut output,
                 &mut input,
@@ -760,10 +763,29 @@ fn isolated_stage() {
         "empty catalog changed saved account"
     );
     let empty = session("/root/state-five");
-    assert_eq!(empty.defaults, first.defaults);
+    assert_eq!(empty.defaults, checked.defaults);
     assert!(empty.runs.is_empty(), "empty catalog started a Run");
     assert_eq!(empty.last_sequence, empty.created_sequence + 1);
 
+    let mut preferences: serde_json::Value = serde_json::from_slice(
+        &account_root
+            .read_model_preferences_record()
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    for source in preferences["sources"].as_array_mut().unwrap() {
+        if source["account_id"] == account_id.to_string() {
+            source["catalog"] = serde_json::json!([]);
+        }
+    }
+    account_root
+        .with_account_replacement_lock(std::path::Path::new("/root/workspace"), || {
+            account_root
+                .replace_model_preferences_record(&serde_json::to_vec(&preferences).unwrap())
+        })
+        .unwrap()
+        .unwrap();
     let (started, request_started) = std::sync::mpsc::sync_channel(1);
     let mut server = start_response_server(NativeReplies::PendingCatalog(started));
     let output = run_pty_with_gate(
@@ -830,7 +852,7 @@ fn isolated_stage() {
     );
     assert!(!text.contains("Notice: Catalog loading; draft retained; Ctrl+C cancels"));
     let loading = session("/root/state-six");
-    assert_eq!(loading.defaults, first.defaults);
+    assert_eq!(loading.defaults, checked.defaults);
     assert!(loading.runs.is_empty(), "catalog draft started a Run");
     assert_eq!(loading.last_sequence, loading.created_sequence + 1);
     assert!(

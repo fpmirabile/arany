@@ -39,7 +39,10 @@ pub(crate) enum SubscriptionFailureStage {
     ResponseMessage,
     ResponseContent,
     ResponsePhase,
-    ResponseFinalMessage,
+    ResponseMissingFinalMessage,
+    ResponseDuplicateFinalMessage,
+    ResponseAmbiguousFinalMessage,
+    ResponseLateCommentary,
     OutcomeContract,
     UsageContract,
     LocalOutputLimit,
@@ -50,6 +53,18 @@ pub(crate) struct StreamCounts {
     pub(crate) bytes: usize,
     pub(crate) events: usize,
     pub(crate) http_status: Option<u16>,
+    pub(crate) response_shape: Option<ResponseShape>,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ResponseShape {
+    pub(crate) messages: usize,
+    pub(crate) commentary: usize,
+    pub(crate) finals: usize,
+    pub(crate) unphased: usize,
+    pub(crate) structured: usize,
+    pub(crate) done_messages: usize,
+    pub(crate) done_finals: usize,
 }
 
 pub(crate) fn subscription_failure(stage: SubscriptionFailureStage, counts: StreamCounts) {
@@ -70,6 +85,19 @@ fn write_failure(root: &StateRoot, stage: SubscriptionFailureStage, counts: Stre
         "subscription stage={stage:?} bytes={} events={} http_status={:?}",
         counts.bytes, counts.events, counts.http_status
     );
+    if let Some(shape) = counts.response_shape {
+        let _ = writeln!(
+            record,
+            "response_shape messages={} commentary={} finals={} unphased={} structured={} done_messages={} done_finals={}",
+            shape.messages,
+            shape.commentary,
+            shape.finals,
+            shape.unphased,
+            shape.structured,
+            shape.done_messages,
+            shape.done_finals,
+        );
+    }
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -128,6 +156,7 @@ mod tests {
                 bytes: 42,
                 events: 1,
                 http_status: None,
+                response_shape: None,
             },
         );
         let bytes = std::fs::read(&path).unwrap();

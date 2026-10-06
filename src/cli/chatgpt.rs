@@ -192,8 +192,18 @@ const MAX_SCOPE_BYTES: usize = 512;
 
 #[derive(Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum AuthorizationError {
-    #[error("authorization is unavailable")]
+    #[error(
+        "ChatGPT authorization is unavailable; retry later, or use /setup > ChatGPT plan > Reconnect to sign in again"
+    )]
     Unavailable,
+    #[error(
+        "ChatGPT authorization is unavailable: {0}; unlock your desktop password store and retry. If it stays unavailable, /setup > ChatGPT plan > Connect new offers Use private file (not encrypted)"
+    )]
+    CredentialStore(super::credentials::CredentialError),
+    #[error(
+        "Saved ChatGPT sign-in is missing from the desktop password store; use /setup > ChatGPT plan > Reconnect"
+    )]
+    CredentialMissing,
     #[error("no selected ChatGPT account; run arany --setup")]
     NoSelectedAccount,
     #[error("ChatGPT sign-out is incomplete; retry arany provider logout chatgpt")]

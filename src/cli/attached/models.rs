@@ -5,9 +5,282 @@ use arany::{
     ModelPicker, NativeApiCredentials, SessionId, SessionView, ShutdownSignal, StateRoot,
     TerminalInput, list_native_models_with_credentials, resolve_native_effort,
 };
-use std::{collections::HashMap, future::Future, pin::Pin};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    path::Path,
+    pin::Pin,
+};
 
 const CATALOG_LOADING: &str = "Loading model catalog; Ctrl+C cancels";
+const MAX_PREFERENCE_BYTES: usize = StateRoot::MAX_MODEL_PREFERENCES_BYTES;
+const MAX_PREFERENCE_SOURCES: usize = 8;
+const MAX_CACHED_MODELS: usize = 4096;
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ModelPreferences {
+    version: u8,
+    #[serde(deserialize_with = "bounded_sources")]
+    sources: Vec<SavedModels>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SavedModels {
+    profile: String,
+    account_id: uuid::Uuid,
+    model: Option<String>,
+    effort: Option<Effort>,
+    #[serde(deserialize_with = "bounded_models")]
+    catalog: Vec<String>,
+}
+
+fn bounded_sources<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<SavedModels>, D::Error> {
+    bounded_list::<D, SavedModels, MAX_PREFERENCE_SOURCES>(deserializer)
+}
+
+fn bounded_models<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<String>, D::Error> {
+    bounded_list::<D, String, MAX_CACHED_MODELS>(deserializer)
+}
+
+fn bounded_list<'de, D, T, const LIMIT: usize>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct Visitor<T, const LIMIT: usize>(std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>, const LIMIT: usize> serde::de::Visitor<'de> for Visitor<T, LIMIT> {
+        type Value = Vec<T>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "at most {LIMIT} entries")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut sequence: A,
+        ) -> Result<Vec<T>, A::Error> {
+            let mut values = Vec::new();
+            while values.len() < LIMIT {
+                let Some(value) = sequence.next_element()? else {
+                    return Ok(values);
+                };
+                values.push(value);
+            }
+            if sequence.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                return Err(serde::de::Error::custom(
+                    "saved model preference limit exceeded",
+                ));
+            }
+            Ok(values)
+        }
+    }
+    deserializer.deserialize_seq(Visitor::<T, LIMIT>(std::marker::PhantomData))
+}
+
+fn read_preferences(root: &StateRoot) -> Result<ModelPreferences, String> {
+    let Some(record) = root
+        .read_model_preferences_record()
+        .map_err(|_| "saved model preferences unavailable or unsafe")?
+    else {
+        return Ok(ModelPreferences {
+            version: 1,
+            sources: Vec::new(),
+        });
+    };
+    let preferences: ModelPreferences =
+        serde_json::from_slice(&record).map_err(|_| "invalid saved model preferences")?;
+    validate_preferences(preferences)
+}
+
+fn validate_preferences(preferences: ModelPreferences) -> Result<ModelPreferences, String> {
+    let mut sources = HashSet::new();
+    if preferences.version != 1 || preferences.sources.len() > MAX_PREFERENCE_SOURCES {
+        return Err("invalid saved model preferences".into());
+    }
+    for source in &preferences.sources {
+        let mut models = HashSet::new();
+        let valid_selection = match source.model.as_deref() {
+            Some(model) if arany::validate_native_model_id(model).is_ok() => {
+                if source.profile == "chatgpt" {
+                    source.effort.is_some()
+                } else {
+                    arany::resolve_native_effort_for_run(&source.profile, model, source.effort)
+                        .is_ok()
+                }
+            }
+            None => source.effort.is_none(),
+            _ => false,
+        };
+        if !matches!(source.profile.as_str(), "openai" | "anthropic" | "chatgpt")
+            || source.account_id.get_version() != Some(uuid::Version::SortRand)
+            || !sources.insert((&source.profile, source.account_id))
+            || !valid_selection
+            || source.catalog.len() > MAX_CACHED_MODELS
+            || source.catalog.iter().any(|model| {
+                arany::validate_native_model_id(model).is_err() || !models.insert(model)
+            })
+        {
+            return Err("invalid saved model preferences".into());
+        }
+    }
+    Ok(preferences)
+}
+
+fn matching_source<'a>(
+    preferences: &'a ModelPreferences,
+    defaults: &arany::SessionDefaults,
+) -> Option<&'a SavedModels> {
+    preferences.sources.iter().find(|source| {
+        Some(source.profile.as_str()) == defaults.provider.as_deref()
+            && Some(source.account_id) == defaults.account_id
+    })
+}
+
+pub(super) async fn restore_saved_models(
+    workspace: &Path,
+    state_dir: &Path,
+    defaults: &mut arany::SessionDefaults,
+    restore_selection: bool,
+) -> Result<Vec<ModelEntry>, String> {
+    if defaults.account_id.is_none() {
+        return Ok(Vec::new());
+    }
+    let root = StateRoot::open_existing(
+        &StateRoot::account_path().map_err(|_| "saved model preferences unavailable")?,
+    )
+    .map_err(|_| "saved model preferences unavailable")?;
+    let saved = root
+        .with_account_replacement_lock(workspace, || {
+            let preferences = read_preferences(&root)?;
+            Ok::<_, String>(matching_source(&preferences, defaults).cloned())
+        })
+        .map_err(|_| "saved model preferences unavailable")??;
+    if let Some(source) = saved {
+        if restore_selection && source.model.is_some() {
+            defaults.model = source.model.clone();
+            defaults.effort = source.effort;
+        }
+        Ok(source
+            .catalog
+            .iter()
+            .map(|id| ModelEntry {
+                id: id.clone(),
+                runnable: resolve_native_effort(&source.profile, id, None).is_ok(),
+                efforts: Effort::ALL
+                    .into_iter()
+                    .filter(|effort| {
+                        resolve_native_effort(&source.profile, id, Some(*effort)).is_ok()
+                    })
+                    .collect(),
+            })
+            .collect())
+    } else {
+        if restore_selection && let Ok(state) = StateRoot::open_existing(state_dir) {
+            match arany::continue_session(state, workspace.to_path_buf()).await {
+                Ok(previous)
+                    if previous.defaults.provider == defaults.provider
+                        && previous.defaults.account_id == defaults.account_id
+                        && previous.defaults.model.is_some() =>
+                {
+                    defaults.model = previous.defaults.model;
+                    defaults.effort = previous.defaults.effort;
+                    remember_models(workspace, defaults, None).await?;
+                }
+                Ok(_) | Err(arany::EngineError::NoSessionForWorkspace) => {}
+                Err(_) => return Err("previous model selection unavailable; choose /model".into()),
+            }
+        }
+        Ok(Vec::new())
+    }
+}
+
+pub(super) async fn remember_models(
+    workspace: &Path,
+    defaults: &arany::SessionDefaults,
+    catalog: Option<&[ModelEntry]>,
+) -> Result<(), String> {
+    let Some(account_id) = defaults.account_id else {
+        return Ok(());
+    };
+    let Some(profile) = defaults
+        .provider
+        .as_deref()
+        .filter(|profile| matches!(*profile, "openai" | "anthropic" | "chatgpt"))
+    else {
+        return Ok(());
+    };
+    let source = SavedModels {
+        profile: profile.to_owned(),
+        account_id,
+        model: defaults.model.clone(),
+        effort: defaults.effort,
+        catalog: catalog
+            .unwrap_or_default()
+            .iter()
+            .map(|item| item.id.clone())
+            .collect(),
+    };
+    let replace_catalog = catalog.is_some();
+    let workspace = workspace.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let root = StateRoot::open_existing(
+            &StateRoot::account_path().map_err(|_| "model preferences unavailable")?,
+        )
+        .map_err(|_| "model preferences unavailable")?;
+        root.with_account_replacement_lock(&workspace, || {
+            write_preferences(&root, source, replace_catalog)
+        })
+        .map_err(|_| "model preferences unavailable")?
+    })
+    .await
+    .map_err(|_| "model preferences unavailable")?
+}
+
+fn write_preferences(
+    root: &StateRoot,
+    source: SavedModels,
+    replace_catalog: bool,
+) -> Result<(), String> {
+    let mut preferences = read_preferences(root)?;
+    let mut source = source;
+    if let Some(index) = preferences
+        .sources
+        .iter()
+        .position(|old| old.profile == source.profile && old.account_id == source.account_id)
+    {
+        let old = preferences.sources.remove(index);
+        if !replace_catalog {
+            source.catalog = old.catalog;
+        }
+        if source.model.is_none() || (replace_catalog && old.model.is_some()) {
+            source.model = old.model;
+            source.effort = old.effort;
+        }
+    }
+    preferences.sources.push(source);
+    while preferences.sources.len() > MAX_PREFERENCE_SOURCES {
+        preferences.sources.remove(0);
+    }
+    preferences = validate_preferences(preferences)?;
+    loop {
+        let record =
+            serde_json::to_vec(&preferences).map_err(|_| "model preferences unavailable")?;
+        if record.len() <= MAX_PREFERENCE_BYTES {
+            root.replace_model_preferences_record(&record)
+                .map_err(|_| "model preferences unavailable or unsafe")?;
+            return Ok(());
+        }
+        if preferences.sources.len() == 1 {
+            return Err("model catalog exceeds saved preference limit".into());
+        }
+        preferences.sources.remove(0);
+    }
+}
 
 pub(super) enum ModelBrowse {
     Notice(String),
@@ -149,7 +422,7 @@ async fn load_catalog(
     view: &SessionView,
     profile: &str,
 ) -> Result<(Vec<ModelEntry>, bool), String> {
-    match profile {
+    let result = match profile {
         "openai" | "anthropic" => {
             let key = match view.defaults.account_id {
                 Some(id) => credentials::load_selected(&admission.workspace, id, profile)
@@ -199,7 +472,11 @@ async fn load_catalog(
             entry.efforts = custom.efforts().to_vec();
             Ok((vec![entry], true))
         }
+    };
+    if let Ok((items, false)) = &result {
+        remember_models(&admission.workspace, &view.defaults, Some(items)).await?;
     }
+    result
 }
 
 async fn load_while_owned(
@@ -608,5 +885,116 @@ mod tests {
         let (visible, selected) = matching_models(&items, "gpt-6", "gpt-6-luna");
         assert_eq!(visible.len(), 3);
         assert_eq!(items[visible[selected]].id, "gpt-6-luna");
+    }
+}
+
+#[cfg(test)]
+mod preference_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn private_preferences_reopen_only_bounded_valid_account_selections() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = StateRoot::admit(&temp.path().join("state")).unwrap();
+        let id = uuid::Uuid::now_v7();
+        let source = json!({
+            "profile": "chatgpt", "account_id": id, "model": "gpt-6.1-sol",
+            "effort": "medium", "catalog": ["gpt-6.1-sol", "another-model"]
+        });
+        let document = json!({"version": 1, "sources": [source.clone()]});
+        let mut cases = vec![(document.clone(), true)];
+        for (field, value) in [
+            ("profile", json!("custom:host")),
+            ("account_id", json!("2e664d00-3f9a-40c3-adeb-c6447313a871")),
+            ("effort", json!(null)),
+            ("model", json!("bad\nmodel")),
+            ("catalog", json!(["duplicate", "duplicate"])),
+            ("catalog", json!(["bad\u{1b}model"])),
+            ("runnable", json!(true)),
+        ] {
+            let mut changed = document.clone();
+            changed["sources"][0][field] = value;
+            cases.push((changed, false));
+        }
+        let mut changed = document.clone();
+        changed["version"] = json!(2);
+        cases.push((changed, false));
+        let mut changed = document.clone();
+        changed["sources"] = json!([source.clone(), source.clone()]);
+        cases.push((changed, false));
+        let mut changed = document.clone();
+        changed["sources"] = json!(vec![source.clone(); MAX_PREFERENCE_SOURCES + 1]);
+        cases.push((changed, false));
+        for count in [MAX_CACHED_MODELS, MAX_CACHED_MODELS + 1] {
+            let mut changed = document.clone();
+            changed["sources"][0]["catalog"] = json!(
+                (0..count)
+                    .map(|index| format!("model-{index}"))
+                    .collect::<Vec<_>>()
+            );
+            cases.push((changed, count == MAX_CACHED_MODELS));
+        }
+        for (document, accepted) in cases {
+            root.replace_model_preferences_record(&serde_json::to_vec(&document).unwrap())
+                .unwrap();
+            let reopened = StateRoot::open_existing(root.path()).unwrap();
+            assert_eq!(read_preferences(&reopened).is_ok(), accepted);
+        }
+        root.replace_model_preferences_record(&serde_json::to_vec(&document).unwrap())
+            .unwrap();
+        let preferences = read_preferences(&root).unwrap();
+        let mut defaults = arany::SessionDefaults {
+            provider: Some("chatgpt".into()),
+            account_id: Some(id),
+            ..arany::SessionDefaults::default()
+        };
+        assert_eq!(
+            matching_source(&preferences, &defaults).unwrap().effort,
+            Some(Effort::Medium)
+        );
+        defaults.account_id = Some(uuid::Uuid::now_v7());
+        assert!(matching_source(&preferences, &defaults).is_none());
+        defaults.account_id = Some(id);
+        defaults.provider = Some("openai".into());
+        assert!(matching_source(&preferences, &defaults).is_none());
+        assert!(
+            root.replace_model_preferences_record(&vec![b'x'; MAX_PREFERENCE_BYTES + 1])
+                .is_err()
+        );
+        assert_eq!(
+            root.read_model_preferences_record().unwrap().unwrap(),
+            serde_json::to_vec(&document).unwrap()
+        );
+        let original: SavedModels = serde_json::from_value(source).unwrap();
+        let mut choice = original.clone();
+        choice.effort = Some(Effort::High);
+        choice.catalog.clear();
+        write_preferences(&root, choice, false).unwrap();
+        let mut stale_refresh = original.clone();
+        stale_refresh.catalog = vec!["fresh-model".into()];
+        write_preferences(&root, stale_refresh, true).unwrap();
+        let reopened = StateRoot::open_existing(root.path()).unwrap();
+        let current = read_preferences(&reopened).unwrap();
+        assert_eq!(current.sources[0].effort, Some(Effort::High));
+        assert_eq!(current.sources[0].catalog, ["fresh-model"]);
+        for _ in 0..MAX_PREFERENCE_SOURCES {
+            let mut other = original.clone();
+            other.account_id = uuid::Uuid::now_v7();
+            write_preferences(&root, other, true).unwrap();
+        }
+        let current = read_preferences(&reopened).unwrap();
+        assert_eq!(current.sources.len(), MAX_PREFERENCE_SOURCES);
+        assert!(current.sources.iter().all(|source| source.account_id != id));
+        let mut large = original;
+        large.catalog = (0..MAX_CACHED_MODELS)
+            .map(|index| format!("{index:04}{}", "x".repeat(124)))
+            .collect();
+        write_preferences(&root, large.clone(), true).unwrap();
+        large.account_id = uuid::Uuid::now_v7();
+        write_preferences(&root, large.clone(), true).unwrap();
+        let current = read_preferences(&reopened).unwrap();
+        assert_eq!(current.sources.len(), 1, "byte quota evicts older sources");
+        assert_eq!(current.sources[0].account_id, large.account_id);
     }
 }

@@ -553,6 +553,10 @@ fn isolated_stage(checked_turn: bool) {
                 b"type a choice name: Cancel or Use private file",
                 None,
             );
+            assert!(
+                String::from_utf8_lossy(&transcript)
+                    .contains("Password store unavailable. Unencrypted file")
+            );
             input
                 .write_all(b"Use private file\r")
                 .expect("select file storage");
@@ -985,7 +989,38 @@ fn isolated_stage(checked_turn: bool) {
         assert!(second.runs.is_empty(), "bare restart started a Run");
         assert_eq!(second.defaults.provider.as_deref(), Some("chatgpt"));
         assert_eq!(second.defaults.account_id, Some(account_id));
-        assert!(second.defaults.model.is_none() && second.defaults.effort.is_none());
+        assert_eq!(second.defaults.model, view.defaults.model);
+        assert_eq!(second.defaults.effort, view.defaults.effort);
+        let preferences = account_root
+            .read_model_preferences_record()
+            .unwrap()
+            .unwrap();
+        let cache: serde_json::Value = serde_json::from_slice(&preferences).unwrap();
+        assert_eq!(cache["version"], 1);
+        let source = cache["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|source| source["account_id"] == account_id.to_string())
+            .unwrap();
+        assert_eq!(source["profile"], "chatgpt");
+        assert_eq!(source["model"], view.defaults.model.as_deref().unwrap());
+        assert_eq!(source["effort"], view.defaults.effort.unwrap().as_str());
+        assert_eq!(
+            source["catalog"],
+            if checked_turn {
+                serde_json::json!(["gpt-6.1-sol", "model-new"])
+            } else {
+                serde_json::json!(["gpt-6.1-sol"])
+            }
+        );
+        for secret in [ACCESS, REFRESH, signed.as_str()] {
+            assert!(
+                !preferences
+                    .windows(secret.len())
+                    .any(|part| part == secret.as_bytes())
+            );
+        }
         if checked_turn {
             let output = Command::new("/arany")
                 .args(["provider", "logout", "chatgpt"])

@@ -474,13 +474,31 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
             .remove("text");
         let mut refusal = commentary.clone();
         refusal["content"] = json!([{"type":"refusal","refusal":"No."}]);
-        for output in [
-            json!([commentary.clone()]),
-            json!([final_message.clone(), final_message.clone()]),
-            json!([final_message.clone(), commentary]),
-            json!([unknown_phase]),
-            json!([malformed_commentary, final_message.clone()]),
-            json!([refusal, final_message]),
+        let mut unphased = final_message.clone();
+        unphased.as_object_mut().unwrap().remove("phase");
+        for (output, expected) in [
+            (json!([]), "MissingFinalMessage"),
+            (json!([commentary.clone()]), "MissingFinalMessage"),
+            (
+                json!([final_message.clone(), final_message.clone()]),
+                "DuplicateFinalMessage",
+            ),
+            (
+                json!([unphased.clone(), final_message.clone()]),
+                "AmbiguousFinalMessage",
+            ),
+            (
+                json!([final_message.clone(), unphased.clone()]),
+                "AmbiguousFinalMessage",
+            ),
+            (json!([unphased.clone(), unphased]), "AmbiguousFinalMessage"),
+            (json!([final_message.clone(), commentary]), "LateCommentary"),
+            (json!([unknown_phase]), "Phase"),
+            (
+                json!([malformed_commentary, final_message.clone()]),
+                "Content",
+            ),
+            (json!([refusal, final_message]), "Content"),
         ] {
             let fixture = response("completed", output);
             let bytes = serde_json::to_vec(&fixture).unwrap();
@@ -489,10 +507,22 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
                     .unwrap();
             if compaction {
                 assert!(decode_compaction(&bytes, "gpt-5.4").is_err());
-                assert!(decode_streamed_compaction(&streamed, "gpt-5.4").is_err());
+                assert_eq!(
+                    format!(
+                        "{:?}",
+                        decode_streamed_compaction(&streamed, "gpt-5.4").unwrap_err()
+                    ),
+                    expected,
+                );
             } else {
                 assert!(decode_run(&bytes, "gpt-5.4").is_err());
-                assert!(decode_streamed_run(&streamed, "gpt-5.4").is_err());
+                assert_eq!(
+                    format!(
+                        "{:?}",
+                        decode_streamed_run(&streamed, "gpt-5.4").unwrap_err()
+                    ),
+                    expected,
+                );
             }
         }
     }

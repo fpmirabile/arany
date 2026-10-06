@@ -100,10 +100,18 @@ pub(super) async fn select_model(
         return recover_defaults_change(error);
     }
     *view = load_view(&admission.state_dir, session_id).await?;
-    Ok(format!(
+    let notice = format!(
         "Model: {model} · {}",
         effort.map_or("default", Effort::as_str)
-    ))
+    );
+    if let Err(error) =
+        super::models::remember_models(&admission.workspace, &view.defaults, None).await
+    {
+        return Ok(format!(
+            "{notice}; Error: {error}; selection saved for this Session only"
+        ));
+    }
+    Ok(notice)
 }
 
 pub(super) enum ActiveSubmission {

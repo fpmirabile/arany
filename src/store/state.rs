@@ -29,6 +29,7 @@ impl StateRoot {
     pub const MAX_ACCOUNT_RECORD_BYTES: usize = 1024;
     pub const MAX_CHATGPT_REGISTRATION_BYTES: usize = 256;
     pub const MAX_CHATGPT_ACCOUNTS_BYTES: usize = 384 * 1024;
+    pub const MAX_MODEL_PREFERENCES_BYTES: usize = 1024 * 1024;
 
     pub(crate) fn try_clone(&self) -> Result<Self, StoreError> {
         Ok(Self {
@@ -218,6 +219,19 @@ impl StateRoot {
 
     pub fn read_saved_account_record(&self) -> Result<Option<Vec<u8>>, StoreError> {
         self.read_private_record(SAVED_ACCOUNT_FILE, Self::MAX_ACCOUNT_RECORD_BYTES)
+    }
+
+    pub fn read_model_preferences_record(&self) -> Result<Option<Vec<u8>>, StoreError> {
+        self.read_private_record("model-preferences.json", Self::MAX_MODEL_PREFERENCES_BYTES)
+    }
+
+    pub fn replace_model_preferences_record(&self, record: &[u8]) -> Result<(), StoreError> {
+        self.replace_private_record(
+            "model-preferences.json",
+            "model-preferences.pending",
+            record,
+            Self::MAX_MODEL_PREFERENCES_BYTES,
+        )
     }
 
     pub fn saved_account_record_present(&self) -> Result<bool, StoreError> {
@@ -868,6 +882,7 @@ mod tests {
             CHATGPT_REGISTRATION_FILE,
             CHATGPT_ACCOUNTS_FILE,
             PROVIDER_PROFILES_FILE,
+            "model-preferences.json",
         ] {
             mkfifoat(CWD, path.join(name), Mode::RUSR | Mode::WUSR).expect("test FIFO");
         }
@@ -895,13 +910,19 @@ mod tests {
             state.read_provider_profiles(),
             Err(StoreError::StateNotPrivate)
         ));
+        assert!(matches!(
+            state.read_model_preferences_record(),
+            Err(StoreError::StateNotPrivate)
+        ));
 
         std::fs::remove_file(path.join(SAVED_ACCOUNT_FILE)).expect("remove account FIFO");
+        std::fs::remove_file(path.join("model-preferences.json")).expect("remove preference FIFO");
         for name in [
             PENDING_ACCOUNT_FILE,
             PENDING_CHATGPT_REGISTRATION_FILE,
             PENDING_CHATGPT_ACCOUNTS_FILE,
             "account-credentials.lock",
+            "model-preferences.pending",
         ] {
             mkfifoat(CWD, path.join(name), Mode::RUSR | Mode::WUSR).expect("test FIFO");
         }
@@ -915,6 +936,10 @@ mod tests {
         ));
         assert!(matches!(
             state.replace_chatgpt_accounts_record(b"synthetic"),
+            Err(StoreError::StateNotPrivate)
+        ));
+        assert!(matches!(
+            state.replace_model_preferences_record(b"synthetic"),
             Err(StoreError::StateNotPrivate)
         ));
         assert!(matches!(

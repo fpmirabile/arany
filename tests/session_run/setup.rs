@@ -531,6 +531,8 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
         let text = String::from_utf8(transcript).expect("screen-reader UTF-8");
         if choice == "Reconnect" {
             assert!(text.contains("Saved ChatGPT keyring is unavailable"));
+            assert!(text.contains("Unlock your desktop password store"));
+            assert!(text.contains("Connect new, then Use private file (not encrypted)"));
             assert!(!text.contains("Choose Accept to continue"));
             if disconnected {
                 assert!(text.contains("ChatGPT account disconnected"));
@@ -539,6 +541,7 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
         } else if other_saved {
             assert!(text.contains("ChatGPT account disconnected"));
             assert!(text.contains("authorization is unavailable"));
+            assert!(text.contains("unlock your desktop password store and retry"));
             assert!(!text.contains("no selected ChatGPT account"));
         } else {
             assert!(text.contains("Model catalog failed"));
@@ -951,6 +954,7 @@ fn screen_reader_chatgpt_consent_defaults_to_back_before_browser_or_account_stat
             "pre-consent setup created account State"
         );
         let text = String::from_utf8(transcript).expect("screen-reader UTF-8");
+        assert!(text.contains("Password store unavailable. Unencrypted file"));
         assert_eq!(text.contains("remote output-token limit"), accept_file);
         assert_eq!(
             text.contains("private account file is not encrypted"),
@@ -1716,7 +1720,7 @@ fn narrow_no_color_chatgpt_warning_pages_before_acceptance_and_restores_terminal
         &mut input,
         &mut transcript,
         &mut answered,
-        b"encrypted",
+        b"\x1b[7;13Hfile",
     );
     input
         .write_all(b"\x1b[B\r")

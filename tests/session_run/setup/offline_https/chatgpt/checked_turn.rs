@@ -1,6 +1,44 @@
 use super::*;
 use crate::process::BoundedOutput;
 
+const FINAL_MESSAGE_FAILURES: [(&str, &[Option<&str>]); 4] = [
+    ("ResponseMissingFinalMessage", &[Some("commentary")]),
+    (
+        "ResponseDuplicateFinalMessage",
+        &[Some("final_answer"), Some("final_answer")],
+    ),
+    (
+        "ResponseAmbiguousFinalMessage",
+        &[None, Some("final_answer")],
+    ),
+    (
+        "ResponseLateCommentary",
+        &[Some("final_answer"), Some("commentary")],
+    ),
+];
+
+fn final_message_failure_stream(phases: &[Option<&str>]) -> String {
+    let output = phases
+        .iter()
+        .map(|phase| {
+            serde_json::json!({
+                "type": "message", "role": "assistant", "status": "completed", "phase": phase,
+                "content": [{"type": "output_text", "text": serde_json::json!({"outcome": {"type": "finish", "summary": "safe", "result": FAILURE_BODY_CANARY}}).to_string()}]
+            })
+        })
+        .collect::<Vec<_>>();
+    format!(
+        "data: {{\"type\":\"response.created\"}}\n\ndata: {}\n\n",
+        serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp_final_message_rejection", "status": "completed", "model": "gpt-6.1-sol",
+                "output": output, "usage": {"input_tokens": 12, "output_tokens": 8}
+            }
+        })
+    )
+}
+
 const OBJECTIVE: &str = "offline chatgpt objective";
 const UNCHECKED_OBJECTIVE: &str = "offline direct Run without a model check";
 const ANSWER: &str = "offline chatgpt answer";
@@ -104,10 +142,24 @@ fn send_sse(input: &mut impl Write, id: &str, text: serde_json::Value) {
             }
         ]);
     }
-    let stream = format!(
-        "event: response.created\r\ndata: {{\"type\":\"response.created\"}}\r\n\r\nevent: response.completed\r\ndata: {}\r\n\r\n",
-        serde_json::json!({"type": "response.completed", "response": response})
+    let mut stream = format!(
+        "event: response.created\r\ndata: {}\r\n\r\n",
+        serde_json::json!({"type":"response.created", "response":{"id":id}})
     );
+    let output = response["output"].take().as_array().unwrap().clone();
+    for (index, mut item) in output.into_iter().enumerate() {
+        item["id"] = serde_json::json!(format!("msg_{index}"));
+        if item["phase"].is_null() {
+            item["phase"] = serde_json::json!("final_answer");
+        }
+        stream.push_str(&format!("event: response.output_item.done\r\ndata: {}\r\n\r\n",
+            serde_json::json!({"type":"response.output_item.done", "output_index":index, "item":item})));
+    }
+    response["output"] = serde_json::json!([]);
+    stream.push_str(&format!(
+        "event: response.completed\r\ndata: {}\r\n\r\n",
+        serde_json::json!({"type": "response.completed", "response": response})
+    ));
     let stream = if id == "resp_without_check" {
         stream
             .split_inclusive("\r\n")
@@ -377,7 +429,12 @@ pub(super) fn respond_after_catalog(
                 serde_json::json!({"outcome": {"type": "finish", "summary": "missing result"}}),
             ),
         ),
-    ] {
+    ]
+    .into_iter()
+    .chain(
+        FINAL_MESSAGE_FAILURES
+            .map(|(stage, phases)| (stage, final_message_failure_stream(phases))),
+    ) {
         let body =
             checked_request(output, "POST /v1/responses").expect("diagnostic failure request");
         assert_eq!(body["model"], "gpt-6.1-sol");
@@ -758,7 +815,12 @@ pub(super) fn accept_check_and_run(
             arany::ProviderFailureReason::OutcomeContract,
             2,
         ),
-    ] {
+    ]
+    .into_iter()
+    .chain(
+        FINAL_MESSAGE_FAILURES
+            .map(|(stage, _)| (stage, arany::ProviderFailureReason::ResponseContract, 2)),
+    ) {
         let state = format!("/root/state-diagnostic-{stage}");
         let objective = format!("offline diagnostic {stage}");
         let result = Command::new("/arany")
@@ -824,6 +886,19 @@ pub(super) fn accept_check_and_run(
             assert!(bytes > 0 && bytes <= 1024 * 1024);
             assert_eq!(fields[3], format!("events={events}"));
             assert_eq!(fields[4], "http_status=Some(200)");
+            if let Some((_, phases)) = FINAL_MESSAGE_FAILURES
+                .iter()
+                .find(|(name, _)| *name == stage)
+            {
+                assert!(text.contains(&format!(
+                    "response_shape messages={} commentary={} finals={} unphased={} structured={} done_messages=0 done_finals=0",
+                    phases.len(),
+                    phases.iter().filter(|phase| **phase == Some("commentary")).count(),
+                    phases.iter().filter(|phase| **phase == Some("final_answer")).count(),
+                    phases.iter().filter(|phase| phase.is_none()).count(),
+                    phases.len(),
+                )));
+            }
             assert!(
                 text.contains(if reason == arany::ProviderFailureReason::StreamProtocol {
                     "subscription::completed_at"

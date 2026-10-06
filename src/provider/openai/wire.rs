@@ -3,7 +3,7 @@ use crate::provider::{
     ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse, ProviderWireProvenance,
     UnansweredStatus,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 const MAX_REQUEST_BYTES: usize = 512 * 1024;
@@ -65,7 +65,7 @@ fn decode_run_response(
     })
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct CompletedEvent {
     #[serde(rename = "type")]
     kind: String,
@@ -254,7 +254,7 @@ fn summary_schema() -> Value {
     })
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct WireResponse {
     id: String,
     status: String,
@@ -265,8 +265,9 @@ struct WireResponse {
     incomplete_details: Option<Value>,
 }
 
-#[derive(Deserialize)]
-struct WireItem {
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
+pub(super) struct WireItem {
+    id: Option<String>,
     #[serde(rename = "type")]
     kind: String,
     role: Option<String>,
@@ -284,7 +285,10 @@ pub(crate) enum ResponseError {
     Message,
     Content,
     Phase,
-    FinalMessage,
+    MissingFinalMessage,
+    DuplicateFinalMessage,
+    AmbiguousFinalMessage,
+    LateCommentary,
     Outcome,
 }
 
@@ -297,17 +301,46 @@ impl ResponseError {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, PartialEq, Clone)]
 struct WireContent {
     #[serde(rename = "type")]
     kind: String,
     text: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct WireUsage {
     input_tokens: u32,
     output_tokens: u32,
+}
+
+impl WireItem {
+    pub(super) fn completed_id(&self) -> Option<&str> {
+        self.id.as_deref().filter(|id| {
+            !id.is_empty()
+                && id.len() <= 128
+                && id.bytes().all(|byte| byte.is_ascii_graphic())
+                && (self.kind != "message" || self.status.as_deref() == Some("completed"))
+        })
+    }
+}
+
+pub(super) fn reconcile_streamed_output(
+    bytes: &[u8],
+    response_id: &str,
+    items: Vec<WireItem>,
+) -> Result<Vec<u8>, ResponseError> {
+    let mut event: CompletedEvent =
+        serde_json::from_slice(bytes).map_err(|_| ResponseError::Envelope)?;
+    if event.response.id != response_id {
+        return Err(ResponseError::Identifier);
+    }
+    if event.response.output.is_empty() {
+        event.response.output = items;
+    } else if event.response.output != items {
+        return Err(ResponseError::Message);
+    }
+    serde_json::to_vec(&event).map_err(|_| ResponseError::Envelope)
 }
 
 impl WireResponse {
@@ -351,10 +384,17 @@ impl WireResponse {
                     }
                     match item.phase.as_deref() {
                         Some("commentary") if text.is_none() => {}
-                        None | Some("final_answer") if text.is_none() => text = Some(message),
-                        Some("commentary" | "final_answer") | None => {
-                            return Err(ResponseError::FinalMessage);
+                        None | Some("final_answer") => {
+                            if let Some((_, explicit)) = text {
+                                return Err(if explicit && item.phase.is_some() {
+                                    ResponseError::DuplicateFinalMessage
+                                } else {
+                                    ResponseError::AmbiguousFinalMessage
+                                });
+                            }
+                            text = Some((message, item.phase.is_some()));
                         }
+                        Some("commentary") => return Err(ResponseError::LateCommentary),
                         Some(_) => return Err(ResponseError::Phase),
                     }
                 }
@@ -364,7 +404,7 @@ impl WireResponse {
         Ok((
             self.id,
             self.usage,
-            text.ok_or(ResponseError::FinalMessage)?,
+            text.ok_or(ResponseError::MissingFinalMessage)?.0,
         ))
     }
 }
@@ -387,6 +427,11 @@ enum WireOutcome {
 #[serde(deny_unknown_fields)]
 struct SummaryEnvelope {
     summary: String,
+}
+
+pub(super) fn is_structured_text(text: &str) -> bool {
+    serde_json::from_str::<OutcomeEnvelope>(text).is_ok()
+        || serde_json::from_str::<SummaryEnvelope>(text).is_ok()
 }
 
 #[cfg(test)]
