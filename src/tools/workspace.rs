@@ -312,6 +312,15 @@ mod tests {
                 .map(|index| format!("entry-{index:03}.md"))
                 .collect::<Vec<_>>()
         );
+        let large = workspace.join("large");
+        std::fs::create_dir(&large).unwrap();
+        for index in 0..8193 {
+            std::fs::write(large.join(format!("item-{index:05}.md")), b"synthetic").unwrap();
+        }
+        let partial = fs::workspace_entries(&workspace, "large", "").unwrap();
+        assert_eq!(partial.len(), 64);
+        assert!(partial.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(partial.iter().all(|path| path.starts_with("large/item-")));
         let deep = std::iter::repeat_n("level", 16)
             .collect::<Vec<_>>()
             .join("/");

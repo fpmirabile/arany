@@ -4,7 +4,7 @@ use super::{
     resolve_native_effort, resolve_native_effort_for_run, valid_saved_api_account_id,
     validate_native_api_key,
 };
-use reqwest::{Client, redirect::Policy};
+use reqwest::Client;
 use serde_json::Value;
 use std::time::Duration;
 use uuid::Uuid;
@@ -160,19 +160,8 @@ impl AnthropicProvider {
     ) -> Result<Self, ProviderError> {
         credentials.require_profile("anthropic")?;
         validate_native_api_key(credentials.api_key())?;
-        let client = Client::builder()
+        let client = super::http_client(DEADLINE)
             .https_only(true)
-            .no_proxy()
-            .no_gzip()
-            .no_brotli()
-            .no_zstd()
-            .no_deflate()
-            .redirect(Policy::none())
-            .referer(false)
-            .retry(reqwest::retry::never())
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(DEADLINE)
-            .pool_max_idle_per_host(0)
             .build()
             .map_err(|_| ProviderError::Unavailable)?;
         let max_concurrent_calls =
@@ -225,31 +214,7 @@ impl AnthropicProvider {
                 },
             );
         }
-        if response
-            .headers()
-            .get_all(reqwest::header::CONTENT_ENCODING)
-            .iter()
-            .any(|value| !value.as_bytes().eq_ignore_ascii_case(b"identity"))
-        {
-            return Err(ProviderError::InvalidOutcome);
-        }
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
-        {
-            return Err(ProviderError::InvalidOutcome);
-        }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| ProviderError::Unavailable)?
-        {
-            if chunk.len() > MAX_RESPONSE_BYTES - bytes.len() {
-                return Err(ProviderError::InvalidOutcome);
-            }
-            bytes.extend_from_slice(&chunk);
-        }
+        let bytes = super::read_identity_body(&mut response, MAX_RESPONSE_BYTES).await?;
         if raw_reflects_secret(&bytes, &self.key) {
             return Err(ProviderError::InvalidOutcome);
         }

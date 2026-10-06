@@ -100,7 +100,7 @@ fn screen_reader_agent_inspector_opens_and_closes_without_provider_access() {
     assert!(text.contains("No Runs yet"));
     assert!(text.contains("History: 0 agents in 0 recent Runs; 0 older Runs"));
     assert!(text.contains("No AgentRuns yet"));
-    assert!(text.contains("Next Run: Auto { max_active_children: 3 }"));
+    assert!(text.contains("Next Run: auto · up to 3 children"));
     assert!(text.contains("Agent inspection closed"));
     assert!(!text.contains("\x1b[?1000h"));
 }
@@ -238,9 +238,9 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
     let reader = thread::spawn(move || {
         let mut bytes = Vec::new();
         let patterns: [&[u8]; 7] = [
-            b"Agent: primary; state: working",
+            b"Agent: primary; state: active",
             b"Agent choice: n next",
-            b"Agent 2/2: primary; Finished",
+            b"Agent 2/2: primary; finished",
             b"Notice: Run in progress... Ctrl+C cancels",
             b"Agent choice: n next",
             b"z",
@@ -310,7 +310,7 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
     assert_eq!(result.stderr, b"");
     let transcript = String::from_utf8(output).expect("linear transcript UTF-8");
     assert!(transcript.contains("Objective: prior"));
-    assert!(transcript.contains("Current Run: Auto { max_active_children: 3 }; topology locked"));
+    assert!(transcript.contains("Current Run: auto · up to 3 children; topology locked"));
     assert!(transcript.contains("Arany · Answer:\r\n  current answer"));
     assert!(!transcript.contains("OMITTED_CANARY"));
     assert!(!transcript.contains("test-key"));

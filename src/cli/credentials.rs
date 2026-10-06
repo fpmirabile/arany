@@ -454,15 +454,10 @@ fn migrate_legacy_at(
     if account_path == old_path {
         return Ok(());
     }
-    let old = match StateRoot::open_existing(old_path) {
-        Ok(state) => state,
-        Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            return match std::fs::symlink_metadata(old_path) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                _ => Err(CredentialError::StateUnavailable),
-            };
-        }
-        Err(_) => return Err(CredentialError::StateUnavailable),
+    let Some(old) =
+        super::open_optional_state(old_path).map_err(|_| CredentialError::StateUnavailable)?
+    else {
+        return Ok(());
     };
     old.with_account_replacement_lock(workspace, || {
         let record = old
@@ -549,15 +544,10 @@ fn load_file() -> Result<Option<StoredAccountFile>, CredentialError> {
 }
 
 fn load_file_at(path: &Path) -> Result<Option<StoredAccountFile>, CredentialError> {
-    let state = match StateRoot::open_existing(path) {
-        Ok(state) => state,
-        Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            return match std::fs::symlink_metadata(path) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                _ => Err(CredentialError::StateUnavailable),
-            };
-        }
-        Err(_) => return Err(CredentialError::StateUnavailable),
+    let Some(state) =
+        super::open_optional_state(path).map_err(|_| CredentialError::StateUnavailable)?
+    else {
+        return Ok(None);
     };
     let Some(record) = state
         .read_saved_account_record()

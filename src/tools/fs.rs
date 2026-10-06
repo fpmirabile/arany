@@ -384,6 +384,10 @@ fn collect_open(
     Ok(())
 }
 
+fn ignored_directory(name: &str) -> bool {
+    matches!(name, "target" | "node_modules" | ".venv" | "venv")
+}
+
 fn collect_root(
     root: &Dir,
     path: &str,
@@ -409,9 +413,7 @@ fn collect_root(
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if !valid_relative(&name, false)
-            || matches!(name.as_str(), "target" | "node_modules" | ".venv" | "venv")
-        {
+        if !valid_relative(&name, false) || ignored_directory(&name) {
             continue;
         }
         let metadata = directory
@@ -488,15 +490,13 @@ pub(crate) fn workspace_entries(
         .enumerate()
     {
         if index >= MAX_SNAPSHOT_FILES * 4 {
-            return Err(ToolError::Limit);
+            break;
         }
         let entry = entry.map_err(|_| ToolError::Path)?;
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if !valid_relative(&name, false)
-            || matches!(name.as_str(), "target" | "node_modules" | ".venv" | "venv")
-        {
+        if !valid_relative(&name, false) || ignored_directory(&name) {
             continue;
         }
         let metadata = directory
@@ -555,7 +555,7 @@ fn find_entries(
         };
         if !valid_relative(&relative, false)
             || relative.split('/').count() > 16
-            || matches!(name.as_str(), "target" | "node_modules" | ".venv" | "venv")
+            || ignored_directory(&name)
         {
             continue;
         }

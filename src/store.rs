@@ -327,113 +327,64 @@ impl Store {
         session_id: SessionId,
         event: Event,
     ) -> Result<EventEnvelope, StoreError> {
-        let (reply, answer) = oneshot::channel();
-        self.requests
-            .as_ref()
-            .ok_or(StoreError::Closed)?
-            .send(Request::Append {
-                session_id,
-                event: Box::new(event),
-                reply,
-            })
-            .await
-            .map_err(|_| StoreError::Closed)?;
-        answer.await.map_err(|_| StoreError::Closed)?
+        self.call(|reply| Request::Append {
+            session_id,
+            event: Box::new(event),
+            reply,
+        })
+        .await
     }
 
     pub(crate) async fn clear_provider_evidence(&self, name: String) -> Result<(), StoreError> {
-        let (reply, answer) = oneshot::channel();
-        self.requests
-            .as_ref()
-            .ok_or(StoreError::Closed)?
-            .send(Request::ClearProviderEvidence { name, reply })
+        self.call(|reply| Request::ClearProviderEvidence { name, reply })
             .await
-            .map_err(|_| StoreError::Closed)?;
-        answer.await.map_err(|_| StoreError::Closed)?
     }
 
     pub(crate) async fn record_provider_evidence(
         &self,
         record: ProviderEvidenceRecord,
     ) -> Result<(), StoreError> {
-        let (reply, answer) = oneshot::channel();
-        self.requests
-            .as_ref()
-            .ok_or(StoreError::Closed)?
-            .send(Request::RecordProviderEvidence { record, reply })
+        self.call(|reply| Request::RecordProviderEvidence { record, reply })
             .await
-            .map_err(|_| StoreError::Closed)?;
-        answer.await.map_err(|_| StoreError::Closed)?
     }
 
     pub(crate) async fn load_provider_evidence(
         &self,
         name: String,
     ) -> Result<Option<ProviderEvidenceRecord>, StoreError> {
-        let (reply, answer) = oneshot::channel();
-        self.requests
-            .as_ref()
-            .ok_or(StoreError::Closed)?
-            .send(Request::LoadProviderEvidence { name, reply })
+        self.call(|reply| Request::LoadProviderEvidence { name, reply })
             .await
-            .map_err(|_| StoreError::Closed)?;
-        answer.await.map_err(|_| StoreError::Closed)?
     }
 
     pub(crate) async fn clear_native_evidence(
         &self,
         fingerprint: [u8; 32],
     ) -> Result<(), StoreError> {
-        let (reply, answer) = oneshot::channel();
-        self.requests
-            .as_ref()
-            .ok_or(StoreError::Closed)?
-            .send(Request::ClearNativeEvidence { fingerprint, reply })
+        self.call(|reply| Request::ClearNativeEvidence { fingerprint, reply })
             .await
-            .map_err(|_| StoreError::Closed)?;
-        answer.await.map_err(|_| StoreError::Closed)?
     }
 
     pub(crate) async fn record_native_evidence(
         &self,
         record: NativeEvidenceRecord,
     ) -> Result<(), StoreError> {
-        let (reply, answer) = oneshot::channel();
-        self.requests
-            .as_ref()
-            .ok_or(StoreError::Closed)?
-            .send(Request::RecordNativeEvidence { record, reply })
+        self.call(|reply| Request::RecordNativeEvidence { record, reply })
             .await
-            .map_err(|_| StoreError::Closed)?;
-        answer.await.map_err(|_| StoreError::Closed)?
     }
 
     pub(crate) async fn load_native_evidence(
         &self,
         fingerprint: [u8; 32],
     ) -> Result<Option<NativeEvidenceRecord>, StoreError> {
-        let (reply, answer) = oneshot::channel();
-        self.requests
-            .as_ref()
-            .ok_or(StoreError::Closed)?
-            .send(Request::LoadNativeEvidence { fingerprint, reply })
+        self.call(|reply| Request::LoadNativeEvidence { fingerprint, reply })
             .await
-            .map_err(|_| StoreError::Closed)?;
-        answer.await.map_err(|_| StoreError::Closed)?
     }
 
     pub async fn load_session(
         &self,
         session_id: SessionId,
     ) -> Result<Vec<EventEnvelope>, StoreError> {
-        let (reply, answer) = oneshot::channel();
-        self.requests
-            .as_ref()
-            .ok_or(StoreError::Closed)?
-            .send(Request::Load { session_id, reply })
-            .await
-            .map_err(|_| StoreError::Closed)?;
-        answer.await.map_err(|_| StoreError::Closed)?
+        self.call(|reply| Request::Load { session_id, reply }).await
     }
 
     pub(crate) async fn admit_operation(
@@ -441,91 +392,55 @@ impl Store {
         session_id: SessionId,
         event_slots: usize,
     ) -> Result<(), StoreError> {
-        let (reply, answer) = oneshot::channel();
-        self.requests
-            .as_ref()
-            .ok_or(StoreError::Closed)?
-            .send(Request::AdmitOperation {
-                session_id,
-                event_slots,
-                reply,
-            })
-            .await
-            .map_err(|_| StoreError::Closed)?;
-        answer.await.map_err(|_| StoreError::Closed)?
+        self.call(|reply| Request::AdmitOperation {
+            session_id,
+            event_slots,
+            reply,
+        })
+        .await
     }
 
     pub async fn session_for_run(&self, run_id: RunId) -> Result<Option<SessionId>, StoreError> {
-        let (reply, answer) = oneshot::channel();
-        self.requests
-            .as_ref()
-            .ok_or(StoreError::Closed)?
-            .send(Request::RunSession { run_id, reply })
+        self.call(|reply| Request::RunSession { run_id, reply })
             .await
-            .map_err(|_| StoreError::Closed)?;
-        answer.await.map_err(|_| StoreError::Closed)?
     }
 
     pub async fn load_view(
         &self,
         session_id: SessionId,
     ) -> Result<Option<SessionView>, StoreError> {
-        let (reply, answer) = oneshot::channel();
-        self.requests
-            .as_ref()
-            .ok_or(StoreError::Closed)?
-            .send(Request::LoadView { session_id, reply })
+        self.call(|reply| Request::LoadView { session_id, reply })
             .await
-            .map_err(|_| StoreError::Closed)?;
-        answer.await.map_err(|_| StoreError::Closed)?
     }
 
     pub(crate) async fn load_resolved(
         &self,
         session_id: SessionId,
     ) -> Result<ResolvedSession, StoreError> {
-        let (reply, answer) = oneshot::channel();
-        self.requests
-            .as_ref()
-            .ok_or(StoreError::Closed)?
-            .send(Request::LoadResolved { session_id, reply })
+        self.call(|reply| Request::LoadResolved { session_id, reply })
             .await
-            .map_err(|_| StoreError::Closed)?;
-        answer.await.map_err(|_| StoreError::Closed)?
     }
 
     pub(crate) async fn latest_session_id(
         &self,
         workspace_identity: (u64, u64),
     ) -> Result<Option<SessionId>, StoreError> {
-        let (reply, answer) = oneshot::channel();
-        self.requests
-            .as_ref()
-            .ok_or(StoreError::Closed)?
-            .send(Request::LatestSession {
-                workspace_identity,
-                reply,
-            })
-            .await
-            .map_err(|_| StoreError::Closed)?;
-        answer.await.map_err(|_| StoreError::Closed)?
+        self.call(|reply| Request::LatestSession {
+            workspace_identity,
+            reply,
+        })
+        .await
     }
 
     pub(crate) async fn list_sessions(
         &self,
         workspace_identity: (u64, u64),
     ) -> Result<Vec<SessionListItem>, StoreError> {
-        let (reply, answer) = oneshot::channel();
-        self.requests
-            .as_ref()
-            .ok_or(StoreError::Closed)?
-            .send(Request::ListSessions {
-                workspace_identity,
-                reply,
-            })
-            .await
-            .map_err(|_| StoreError::Closed)?;
-        answer.await.map_err(|_| StoreError::Closed)?
+        self.call(|reply| Request::ListSessions {
+            workspace_identity,
+            reply,
+        })
+        .await
     }
 
     pub(crate) async fn fork_session(
@@ -533,15 +448,23 @@ impl Store {
         source_session_id: SessionId,
         title: String,
     ) -> Result<SessionId, StoreError> {
+        self.call(|reply| Request::Fork {
+            source_session_id,
+            title,
+            reply,
+        })
+        .await
+    }
+
+    async fn call<T>(
+        &self,
+        request: impl FnOnce(oneshot::Sender<Result<T, StoreError>>) -> Request,
+    ) -> Result<T, StoreError> {
         let (reply, answer) = oneshot::channel();
         self.requests
             .as_ref()
             .ok_or(StoreError::Closed)?
-            .send(Request::Fork {
-                source_session_id,
-                title,
-                reply,
-            })
+            .send(request(reply))
             .await
             .map_err(|_| StoreError::Closed)?;
         answer.await.map_err(|_| StoreError::Closed)?

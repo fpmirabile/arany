@@ -16,7 +16,7 @@ pub use diagnostics::{
 pub use engine::{
     Engine, EngineError, RunCancellation, RunOutcome, RunProgress, RunRequest, RunUpdate,
     continue_session, create_session, fork_session, list_sessions, rename_session, resume_session,
-    set_session_defaults,
+    set_session_defaults, validate_workspace_inputs,
 };
 pub use presentation::{Output, escape_terminal, render_exec, render_run_feedback, render_session};
 pub use provider::{
@@ -45,7 +45,7 @@ pub use telemetry::{Telemetry, TelemetryConfigError};
 pub use terminal::{
     AttachedTerminal, CommandAvailability, CommandParseError, CompletionLayout, Composer,
     ComposerEdit, InteractiveCommand, ModelCatalogState, ModelPicker, ShutdownSignal, Submission,
-    TerminalError, TerminalInput, command_completions, parse_submission,
+    TerminalError, TerminalInput, TerminalNotice, command_completions, parse_submission,
 };
 pub use tools::{
     ApprovalInbox, ApprovalMode, EffectIntent, GuardReceipt, MAX_SKILLS, NetworkGrant,

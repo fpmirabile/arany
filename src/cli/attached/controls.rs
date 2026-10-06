@@ -555,11 +555,11 @@ pub(super) async fn handle_command(
                     {
                         return recover_defaults_change(error);
                     }
-                    format!("Next-Run collaboration: {policy:?}")
+                    format!("Next-Run collaboration: {policy}")
                 }
                 Err(error) => error.into(),
             },
-            None => format!("Next-Run collaboration: {:?}", view.defaults.policy),
+            None => format!("Next-Run collaboration: {}", view.defaults.policy),
         },
         InteractiveCommand::Status if view.created_sequence == 0 => {
             "New conversation · not saved · 0 Runs".into()
@@ -610,7 +610,7 @@ pub(super) fn active_command_notice(
                         "Working · request {}% of local limit · {agents}. Includes chat, instructions, files and images; not model tokens. Details: /agents",
                         usage.utilization_percent(),
                     ),
-                    None => format!("Task: {:?} · {agents} · details: /agents", run.status),
+                    None => format!("Task: {} · {agents} · details: /agents", run.status),
                 }
             }
             None => "Preparing message · Ctrl+C cancels".into(),
@@ -859,7 +859,7 @@ mod tests {
         });
         assert_eq!(
             active_command_notice(&view, InteractiveCommand::Status, starting_sequence),
-            "Task: Active · 1 agent · details: /agents"
+            "Task: working · 1 agent · details: /agents"
         );
         view.runs.last_mut().expect("active Run").config = Some(RunConfig {
             provider: "openai".into(),
@@ -897,7 +897,7 @@ mod tests {
             view.runs.last_mut().expect("latest Run").status = status;
             assert_eq!(
                 active_command_notice(&view, InteractiveCommand::Status, starting_sequence),
-                format!("Task: {status:?} · 1 agent · details: /agents"),
+                format!("Task: {status} · 1 agent · details: /agents"),
                 "current terminal facts remain visible without active context usage"
             );
             assert_eq!(
@@ -1554,7 +1554,7 @@ mod tests {
             account_id: None,
             policy: CollaborationPolicy::Single,
         };
-        for defaults in [
+        for (index, defaults) in [
             SessionDefaults::default(),
             SessionDefaults {
                 provider: Some("anthropic".into()),
@@ -1575,7 +1575,10 @@ mod tests {
                 },
             },
             current_defaults,
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             persist_defaults(&admission, session_id, defaults.clone())
                 .await
                 .expect("current selection");
@@ -1632,12 +1635,18 @@ mod tests {
                     .is_none()
             );
             store.close().await.expect("close replay Store");
+            let title = [
+                "Local title",
+                "New Session",
+                "Forked Session",
+                "Local title",
+            ][index];
             handle_command(
                 &admission,
                 &mut session_id,
                 &mut view,
                 InteractiveCommand::Rename,
-                Some("Local title"),
+                Some(title),
             )
             .await
             .expect("local title");
@@ -1649,7 +1658,7 @@ mod tests {
                 .await
                 .expect("new replay");
             assert_eq!(reopened.defaults, defaults);
-            assert_eq!(reopened.title, "Local title");
+            assert_eq!(reopened.title, title);
             assert!(reopened.title_is_explicit);
             assert!(reopened.runs.is_empty() && reopened.compactions.is_empty());
         }

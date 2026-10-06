@@ -32,7 +32,7 @@ cleanup() {
 }
 trap cleanup EXIT
 bundle="$stage/$package"
-mkdir -p "$bundle/sources" "$bundle/third-party/crossterm-0.29.0"
+mkdir -p "$bundle/sources"
 staged_source="$bundle/sources/arany-0.1.0-source.tar.gz"
 cp "$source_archive" "$staged_source"
 tar -xzf "$staged_source" -C "$stage"
@@ -53,7 +53,6 @@ if [[ "$binary" != "$build_root"/target/release-guarded.*/release/arany || ! -f 
 fi
 cp "$binary" "$bundle/arany"
 cp LICENSE NOTICE "$bundle/"
-cp vendor/crossterm-0.29.0/LICENSE "$bundle/third-party/crossterm-0.29.0/LICENSE"
 
 option_checksum=04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d
 cargo_cache="${CARGO_HOME:-${HOME:?}/.cargo}/registry/cache"
@@ -81,7 +80,7 @@ for target in x86_64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin;
     --prefix none --format '{p}' > "$stage/tree-$target"
 done
 awk '
-  NF == 0 || $1 == "arany" || ($1 == "crossterm" && $2 == "v0.29.0") { next }
+  NF == 0 || $1 == "arany" { next }
   $1 ~ /^[A-Za-z0-9_-]+$/ && $2 ~ /^v[0-9A-Za-z.+-]+$/ {
     print $1, substr($2, 2)
     next
@@ -276,9 +275,9 @@ option-ext 0.2.0 is included under MPL-2.0. Its exact published source is
 sources/option-ext-0.2.0.crate; its license is in
 third-party/option-ext-0.2.0/LICENSE.txt. Arany does not modify its source.
 
-Crossterm 0.29.0 is locally patched under MIT. Its license is in
-third-party/crossterm-0.29.0/LICENSE. The patched source is in
-sources/arany-0.1.0-source.tar.gz under vendor/crossterm-0.29.0.
+Crossterm 0.29.0 is the unmodified published crate under MIT. Its license
+is in third-party/crossterm-0.29.0/LICENSE; its checksum-matched source
+archive is sources/crossterm-0.29.0.crate.
 
 rustls-platform-verifier 0.7.1 is the unmodified published crate under
 MIT OR Apache-2.0. Its checksum-matched source archive is in sources/ and

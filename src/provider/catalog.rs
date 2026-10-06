@@ -1,7 +1,9 @@
 use super::{
     Effort, MAX_RESPONSE_BYTES, NativeApiCredentials, ProviderError, resolve_native_effort,
 };
-use reqwest::{Client, Url, header, redirect::Policy};
+#[cfg(test)]
+use reqwest::redirect::Policy;
+use reqwest::{Client, Url, header};
 use serde::{Deserialize, Deserializer, de};
 use std::{collections::HashSet, fmt, time::Duration};
 
@@ -116,19 +118,8 @@ pub async fn list_native_models_with_credentials(
         _ => return Err(ProviderError::Rejected),
     };
     credentials.require_profile(profile)?;
-    let client = Client::builder()
+    let client = super::http_client(Duration::from_secs(20))
         .https_only(true)
-        .no_proxy()
-        .no_gzip()
-        .no_brotli()
-        .no_zstd()
-        .no_deflate()
-        .redirect(Policy::none())
-        .referer(false)
-        .retry(reqwest::retry::never())
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(20))
-        .pool_max_idle_per_host(0)
         .build()
         .map_err(|_| ProviderError::Unavailable)?;
     let endpoint = Url::parse(endpoint).map_err(|_| ProviderError::Unavailable)?;
@@ -187,17 +178,6 @@ async fn list_at(
                 },
             );
         }
-        if response
-            .headers()
-            .get_all(header::CONTENT_ENCODING)
-            .iter()
-            .any(|value| !value.as_bytes().eq_ignore_ascii_case(b"identity"))
-            || response
-                .content_length()
-                .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
-        {
-            return Err(ProviderError::InvalidOutcome);
-        }
         let mut content_types = response.headers().get_all(header::CONTENT_TYPE).iter();
         let kind = content_types
             .next()
@@ -209,17 +189,7 @@ async fn list_at(
         {
             return Err(ProviderError::InvalidOutcome);
         }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| ProviderError::Unavailable)?
-        {
-            if chunk.len() > MAX_RESPONSE_BYTES - bytes.len() {
-                return Err(ProviderError::InvalidOutcome);
-            }
-            bytes.extend_from_slice(&chunk);
-        }
+        let bytes = super::read_identity_body(&mut response, MAX_RESPONSE_BYTES).await?;
         if bytes
             .windows(key.len())
             .any(|window| window == key.as_bytes())

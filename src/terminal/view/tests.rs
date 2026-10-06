@@ -3,6 +3,12 @@ use crate::provider::Effort;
 use crate::terminal::{ComposerEdit, TerminalInput};
 use ratatui::backend::{Backend, TestBackend};
 
+fn buffer_row(buffer: &ratatui::buffer::Buffer, y: u16) -> String {
+    (buffer.area.x..buffer.area.right())
+        .map(|x| buffer[(x, y)].symbol())
+        .collect()
+}
+
 #[test]
 fn help_keeps_every_registered_command_reachable_at_narrow_widths() {
     for (width, height) in [(16, 8), (40, 12), (80, 24)] {
@@ -16,11 +22,7 @@ fn help_keeps_every_registered_command_reachable_at_narrow_widths() {
                 .expect("help frame");
             let buffer = terminal.backend().buffer();
             let rows = (0..height)
-                .map(|y| {
-                    (0..width)
-                        .map(|x| buffer[(x, y)].symbol())
-                        .collect::<String>()
-                })
+                .map(|y| buffer_row(buffer, y))
                 .collect::<Vec<_>>();
             assert!(
                 rows.iter().any(|row| row.contains(command)),
@@ -49,7 +51,7 @@ fn help_keeps_every_registered_command_reachable_at_narrow_widths() {
             .expect("help frame");
         let buffer = terminal.backend().buffer();
         let visible = (0..24)
-            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .map(|y| buffer_row(buffer, y))
             .collect::<Vec<_>>()
             .join(" ");
         assert!(visible.contains(&format!("/{}", entry.name)), "{visible}");
@@ -80,11 +82,7 @@ fn setup_step_stays_centered_and_borderless_without_echoing_input() {
             .expect("setup frame");
         let buffer = terminal.backend().buffer();
         let rows = (0..height)
-            .map(|y| {
-                (0..width)
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>()
-            })
+            .map(|y| buffer_row(buffer, y))
             .collect::<Vec<_>>();
         assert_eq!(
             rows[usize::from(top)].find("Arany setup"),
@@ -135,11 +133,7 @@ fn setup_step_stays_centered_and_borderless_without_echoing_input() {
                         .expect("visible workspace field");
                     let buffer = terminal.backend().buffer();
                     let visible = (0..height)
-                        .map(|y| {
-                            (0..width)
-                                .map(|x| buffer[(x, y)].symbol())
-                                .collect::<String>()
-                        })
+                        .map(|y| buffer_row(buffer, y))
                         .collect::<Vec<_>>()
                         .join("\n");
                     assert!(visible.contains("API workspace ID"));
@@ -260,11 +254,7 @@ fn setup_choices_remain_visible_at_narrow_widths_without_color() {
                 .expect("setup choices");
             let buffer = terminal.backend().buffer();
             let visible = (0..height)
-                .map(|y| {
-                    (0..width)
-                        .map(|x| buffer[(x, y)].symbol())
-                        .collect::<String>()
-                })
+                .map(|y| buffer_row(buffer, y))
                 .collect::<Vec<_>>()
                 .join(" ");
             assert!(visible.contains(expected), "{width}: {visible}");
@@ -355,11 +345,7 @@ fn setup_warning_pages_every_line_before_showing_acceptance_actions() {
                 }
             }
             let visible = (0..height)
-                .map(|y| {
-                    (0..width)
-                        .map(|x| buffer[(x, y)].symbol())
-                        .collect::<String>()
-                })
+                .map(|y| buffer_row(buffer, y))
                 .collect::<Vec<_>>()
                 .join(" ");
             assert_eq!(visible.contains("› Back"), !has_more);
@@ -459,11 +445,7 @@ fn empty_session_has_a_quiet_welcome_without_obscuring_the_composer() {
             .expect("idle frame");
         let buffer = terminal.backend().buffer();
         let rows = (0..height)
-            .map(|y| {
-                (0..width)
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>()
-            })
+            .map(|y| buffer_row(buffer, y))
             .collect::<Vec<_>>();
         assert!(
             rows.iter().any(|row| row.starts_with("Arany")),
@@ -569,11 +551,7 @@ fn inline_frame_keeps_composer_and_status_in_the_viewport() {
             .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
             .expect("frame");
         let buffer = terminal.backend().buffer();
-        let row = |y| {
-            (0..width)
-                .map(|x| buffer[(x, y)].symbol())
-                .collect::<String>()
-        };
+        let row = |y| buffer_row(buffer, y);
         assert!(row(0).contains("primary · working"));
         assert!(row(1).contains("Ask Arany"));
         assert!(row(2).contains("hello\\u{202e}[31m"));
@@ -596,11 +574,7 @@ fn inline_frame_keeps_composer_and_status_in_the_viewport() {
             })
             .expect("error frame");
         let buffer = terminal.backend().buffer();
-        let row = |y| {
-            (0..width)
-                .map(|x| buffer[(x, y)].symbol())
-                .collect::<String>()
-        };
+        let row = |y| buffer_row(buffer, y);
         assert!(row(2).contains("hello\\u{202e}[31m"));
         assert!(row(4).contains("Error: retry"));
     }
@@ -671,9 +645,7 @@ fn inline_frame_keeps_composer_and_status_in_the_viewport() {
                             })
                             .expect("input action frame");
                         let buffer = terminal.backend().buffer();
-                        let footer = (0..width)
-                            .map(|x| buffer[(x, 6)].symbol())
-                            .collect::<String>();
+                        let footer = buffer_row(buffer, 6);
                         let keeps_draft = draft_action != DraftAction::Submit;
                         let command = command && draft_action != DraftAction::Retain;
                         let action = if command {
@@ -709,9 +681,7 @@ fn inline_frame_keeps_composer_and_status_in_the_viewport() {
                             })
                             .expect("busy draft-end frame");
                         let buffer = terminal.backend().buffer();
-                        let status = (0..width)
-                            .map(|x| buffer[(x, 7)].symbol())
-                            .collect::<String>();
+                        let status = buffer_row(buffer, 7);
                         assert!(
                             status.contains("state"),
                             "busy draft never advertises command submission"
@@ -729,10 +699,7 @@ fn inline_frame_keeps_composer_and_status_in_the_viewport() {
                             .expect("busy completion frame");
                         let buffer = terminal.backend().buffer();
                         assert!(
-                            (0..8).any(|y| (0..width)
-                                .map(|x| buffer[(x, y)].symbol())
-                                .collect::<String>()
-                                .contains("Enter keeps")),
+                            (0..8).any(|y| buffer_row(buffer, y).contains("Enter keeps")),
                             "busy completion does not imply execution"
                         );
                         assert_eq!(composer.text(), "/s");
@@ -786,7 +753,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
         })
         .expect("history frame");
     let buffer = terminal.backend().buffer();
-    let row = |y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+    let row = |y| buffer_row(buffer, y);
     assert!(
         row(0).trim().is_empty(),
         "top edge stays clear of speaker labels"
@@ -867,8 +834,8 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
             "{status}"
         );
         let buffer = wide.backend().buffer();
-        let chat_error = (0..80).map(|x| buffer[(x, 4)].symbol()).collect::<String>();
-        let chat_body = (0..80).map(|x| buffer[(x, 5)].symbol()).collect::<String>();
+        let chat_error = buffer_row(buffer, 4);
+        let chat_body = buffer_row(buffer, 5);
         assert!(chat_error.starts_with("Arany · error:"));
         assert!(chat_body.contains("Retry /setup; your draft is retained"));
         assert_eq!(
@@ -970,11 +937,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
                 })
                 .expect("conversation frame");
             let buffer = terminal.backend().buffer();
-            let row = |y| {
-                (0..width)
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>()
-            };
+            let row = |y| buffer_row(buffer, y);
             assert!(row(0).trim().is_empty());
             assert!(row(1).starts_with("› You:"));
             assert!(row(2).starts_with("│ e\u{301}👩‍💻"));
@@ -1022,11 +985,7 @@ fn multiline_frame_keeps_activity_draft_caret_and_status_in_order() {
             .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
             .expect("multiline frame");
         let buffer = terminal.backend().buffer();
-        let row = |y| {
-            (0..width)
-                .map(|x| buffer[(x, y)].symbol())
-                .collect::<String>()
-        };
+        let row = |y| buffer_row(buffer, y);
         assert!(row(0).contains("primary · working"));
         assert!(row(1).contains("Ask Arany"));
         assert!(row(2).contains("top"));
@@ -1067,7 +1026,7 @@ fn multiline_frame_keeps_activity_draft_caret_and_status_in_order() {
         .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
         .expect("short multiline frame");
     let buffer = terminal.backend().buffer();
-    let row = |y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+    let row = |y| buffer_row(buffer, y);
     assert!(row(0).contains("primary · working"));
     assert!(row(1).contains("Ask Arany"));
     assert!(row(1).contains("rows 3-6/6"));
@@ -1090,7 +1049,7 @@ fn multiline_frame_keeps_activity_draft_caret_and_status_in_order() {
             .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
             .expect("draft window position");
         let buffer = terminal.backend().buffer();
-        let heading = (0..40).map(|x| buffer[(x, 1)].symbol()).collect::<String>();
+        let heading = buffer_row(buffer, 1);
         assert!(heading.contains(expected_range), "{heading}");
         assert_eq!(composer.cursor_byte_offset(), cursor);
         assert_eq!(composer.text(), "line0\nline1\nline2\nline3\nline4\nline5");
@@ -1134,11 +1093,7 @@ fn multiline_frame_keeps_activity_draft_caret_and_status_in_order() {
                 .draw(|frame| draw_frame(frame, &preparing, &composer, None, Palette { color }))
                 .expect("preparing frame");
             let buffer = terminal.backend().buffer();
-            let row = |y| {
-                (0..width)
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>()
-            };
+            let row = |y| buffer_row(buffer, y);
             assert!(row(3).starts_with("Preparing"));
             assert!(row(4).contains("Ask Arany"));
             assert!(row(5).contains("draft中"));
@@ -1182,9 +1137,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
                 .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
                 .expect("frame");
             let buffer = terminal.backend().buffer();
-            let row = (0..width)
-                .map(|x| buffer[(x, 1)].symbol())
-                .collect::<String>();
+            let row = buffer_row(buffer, 1);
             assert!(row.contains("/provider <provider>"));
             assert!(!buffer[(1, 1)].modifier.contains(Modifier::DIM));
             assert!(!buffer[(12, 1)].modifier.contains(Modifier::DIM));
@@ -1206,7 +1159,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
         .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
         .expect("frame");
     let buffer = terminal.backend().buffer();
-    let row = (0..80).map(|x| buffer[(x, 1)].symbol()).collect::<String>();
+    let row = buffer_row(buffer, 1);
     assert!(row.contains("/provider o[penai]"));
     assert!(!row.contains("<provider>"));
     assert_eq!(composer.text(), "/provider o");
@@ -1216,9 +1169,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
             .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
             .expect("narrow frame");
         let buffer = narrow.backend().buffer();
-        let row = (0..width)
-            .map(|x| buffer[(x, 1)].symbol())
-            .collect::<String>();
+        let row = buffer_row(buffer, 1);
         assert!(row.contains(expected), "width {width}: {row}");
     }
     let mut too_narrow = Terminal::new(TestBackend::new(14, 4)).expect("short test terminal");
@@ -1230,7 +1181,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
         .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: true }))
         .expect("colored completion frame");
     let buffer = colored.backend().buffer();
-    let row = (0..40).map(|x| buffer[(x, 1)].symbol()).collect::<String>();
+    let row = buffer_row(buffer, 1);
     assert!(row.contains("/provider openai"));
     assert!(buffer[(13, 1)].modifier.contains(Modifier::DIM));
 
@@ -1242,17 +1193,17 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
         .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
         .expect("mid-draft frame");
     let buffer = terminal.backend().buffer();
-    let row = (0..80).map(|x| buffer[(x, 1)].symbol()).collect::<String>();
+    let row = buffer_row(buffer, 1);
     assert!(row.contains("/provider o"));
     assert!(!row.contains("penai"));
-    let status = (0..80).map(|x| buffer[(x, 3)].symbol()).collect::<String>();
+    let status = buffer_row(buffer, 3);
     assert!(status.starts_with("idle"));
     composer.apply(TerminalInput::End);
     terminal
         .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
         .expect("end-of-draft frame");
     let buffer = terminal.backend().buffer();
-    let row = (0..80).map(|x| buffer[(x, 1)].symbol()).collect::<String>();
+    let row = buffer_row(buffer, 1);
     assert!(row.contains("/provider o[penai]"));
 
     composer.apply(TerminalInput::Backspace);
@@ -1260,7 +1211,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
         .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
         .expect("frame");
     let buffer = terminal.backend().buffer();
-    let row = (0..80).map(|x| buffer[(x, 1)].symbol()).collect::<String>();
+    let row = buffer_row(buffer, 1);
     assert!(row.contains("/provider <provider>"));
     assert_eq!(composer.text(), "/provider ");
 
@@ -1282,7 +1233,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
         .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
         .expect("frame");
     let buffer = terminal.backend().buffer();
-    let row = (0..80).map(|x| buffer[(x, 1)].symbol()).collect::<String>();
+    let row = buffer_row(buffer, 1);
     assert!(row.contains("/model gpt-5[.4]"));
     assert!(!buffer[(13, 1)].modifier.contains(Modifier::DIM));
     assert_eq!(composer.text(), "/model gpt-5");
@@ -1304,7 +1255,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
         .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
         .expect("model bracket frame");
     let buffer = terminal.backend().buffer();
-    let row = (0..80).map(|x| buffer[(x, 1)].symbol()).collect::<String>();
+    let row = buffer_row(buffer, 1);
     assert!(row.contains("/model gpt-[[alpha]]"));
     assert_eq!(composer.text(), "/model gpt-");
 
@@ -1316,7 +1267,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
         .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
         .expect("command preview frame");
     let buffer = terminal.backend().buffer();
-    let row = (0..80).map(|x| buffer[(x, 1)].symbol()).collect::<String>();
+    let row = buffer_row(buffer, 1);
     assert!(row.contains("/prov"));
     assert!(!row.contains("[ider"));
     assert_eq!(composer.text(), "/prov");
@@ -1325,7 +1276,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
         .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
         .expect("completed command argument frame");
     let buffer = terminal.backend().buffer();
-    let row = (0..80).map(|x| buffer[(x, 1)].symbol()).collect::<String>();
+    let row = buffer_row(buffer, 1);
     assert!(row.contains("/provider <provider>"));
     assert_eq!(composer.text(), "/provider ");
 
@@ -1357,11 +1308,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
                         .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color }))
                         .expect("completion choices frame");
                     let buffer = terminal.backend().buffer();
-                    let row = |y| {
-                        (0..width)
-                            .map(|x| buffer[(x, y)].symbol())
-                            .collect::<String>()
-                    };
+                    let row = |y| buffer_row(buffer, y);
                     let menu_height = completion_height(&composer, height.saturating_sub(4));
                     let input_y = height - 3 - menu_height;
                     let focused_y = (0..height)
@@ -1424,11 +1371,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
                         .unwrap();
                     let caret = terminal.get_cursor_position().unwrap();
                     let buffer = terminal.backend().buffer();
-                    let row = |y| {
-                        (0..width)
-                            .map(|x| buffer[(x, y)].symbol())
-                            .collect::<String>()
-                    };
+                    let row = |y| buffer_row(buffer, y);
                     assert!(row(caret.y).starts_with("> /"));
                     let labels = (caret.y + 2..height - 1).map(row).collect::<Vec<_>>();
                     assert!(!labels.is_empty());
@@ -1504,12 +1447,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
         .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
         .expect("closed completion frame");
     let buffer = terminal.backend().buffer();
-    assert!(!(0..8).any(|y| {
-        (0..40)
-            .map(|x| buffer[(x, y)].symbol())
-            .collect::<String>()
-            .contains("> Cmd /status")
-    }));
+    assert!(!(0..8).any(|y| { buffer_row(buffer, y).contains("> Cmd /status") }));
     assert_eq!(
         terminal.get_cursor_position().expect("retained cursor").y,
         5
@@ -1540,9 +1478,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
                     .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color }))
                     .expect("pending effort frame");
                 let buffer = terminal.backend().buffer();
-                let row = (0..width)
-                    .map(|x| buffer[(x, 5)].symbol())
-                    .collect::<String>();
+                let row = buffer_row(buffer, 5);
                 assert!(row.contains("/model x "));
                 assert!(!row.contains("default"));
                 if width >= 40 {
@@ -1559,7 +1495,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
             .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
             .expect("explicit effort frame");
         let buffer = terminal.backend().buffer();
-        let row = (0..40).map(|x| buffer[(x, 5)].symbol()).collect::<String>();
+        let row = buffer_row(buffer, 5);
         assert!(row.contains("/model x h[igh]"));
         assert!(!row.contains("<effort>"));
         assert_eq!(composer.text(), "/model x h");
@@ -1651,13 +1587,7 @@ fn composer_frame_wraps_draft_and_keeps_grapheme_cursor_visible() {
                 assert_eq!(composer.text(), text);
                 assert_eq!(composer.cursor_byte_offset(), caret);
                 let buffer = terminal.backend().buffer();
-                let rows = (0..8)
-                    .map(|y| {
-                        (0..width)
-                            .map(|x| buffer[(x, y)].symbol())
-                            .collect::<String>()
-                    })
-                    .collect::<Vec<_>>();
+                let rows = (0..8).map(|y| buffer_row(buffer, y)).collect::<Vec<_>>();
                 assert!(
                     rows[3].contains(if width < 40 { "1img" } else { "1 image" }),
                     "{width}: {rows:?}"
@@ -1972,11 +1902,7 @@ fn session_picker_keeps_selection_visible_and_titles_inert() {
             .draw(|frame| draw_session_picker_frame(frame, &items, 14, Palette { color: false }))
             .expect("picker frame");
         let buffer = terminal.backend().buffer();
-        let row = |y| {
-            (0..width)
-                .map(|x| buffer[(x, y)].symbol())
-                .collect::<String>()
-        };
+        let row = |y| buffer_row(buffer, y);
         assert!(row(0).contains("Resume · 15"));
         assert!(row(6).starts_with("> Hostile"));
         if width == 80 {
@@ -2039,11 +1965,7 @@ fn quick_actions_keep_focus_and_draft_guard_visible_without_color() {
                             .expect("quick frame");
                         let buffer = terminal.backend().buffer();
                         let rows = (0..height)
-                            .map(|y| {
-                                (0..width)
-                                    .map(|x| buffer[(x, y)].symbol())
-                                    .collect::<String>()
-                            })
+                            .map(|y| buffer_row(buffer, y))
                             .collect::<Vec<_>>();
                         let row = rows
                             .iter()
@@ -2147,11 +2069,7 @@ fn model_catalog_keeps_selected_row_visible_and_hostile_ids_inert() {
                         .expect("chat model panel");
                     let buffer = terminal.backend().buffer();
                     let rows = (0..height)
-                        .map(|y| {
-                            (0..width)
-                                .map(|x| buffer[(x, y)].symbol())
-                                .collect::<String>()
-                        })
+                        .map(|y| buffer_row(buffer, y))
                         .collect::<Vec<_>>();
                     let focused = rows
                         .iter()
@@ -2252,13 +2170,7 @@ fn inline_custom_model_catalog_shows_declared_efforts() {
                 })
                 .expect("custom model panel");
             let buffer = terminal.backend().buffer();
-            let rows = (0..8)
-                .map(|y| {
-                    (0..width)
-                        .map(|x| buffer[(x, y)].symbol())
-                        .collect::<String>()
-                })
-                .collect::<Vec<_>>();
+            let rows = (0..8).map(|y| buffer_row(buffer, y)).collect::<Vec<_>>();
             if empty {
                 assert!(rows.iter().any(|row| row.contains("No matches")));
             } else {
@@ -2286,13 +2198,13 @@ fn agent_inspector_keeps_details_and_keyboard_help_in_viewport() {
         let model = AgentInspectorModel {
             selected: 1,
             choices: vec![
-                "Run 1: primary; Finished".into(),
+                "Run 1: primary; finished".into(),
                 "Run 1: child 1; Failed".into(),
             ],
             lines: vec![
                 "Last Run: 2 agents; children: 1".into(),
                 "History: 2 agents in 1 recent Runs".into(),
-                "Next Run: Single".into(),
+                "Next Run: single".into(),
                 "Agent 2/2: child 1; Failed".into(),
                 "Objective: hostile\\u{001b}[31m".into(),
                 "Summary: bounded details".into(),
@@ -2302,13 +2214,9 @@ fn agent_inspector_keeps_details_and_keyboard_help_in_viewport() {
             .draw(|frame| draw_agent_inspector_frame(frame, &model, 0, Palette { color: false }))
             .expect("agent frame");
         let buffer = terminal.backend().buffer();
-        let row = |y| {
-            (0..width)
-                .map(|x| buffer[(x, y)].symbol())
-                .collect::<String>()
-        };
+        let row = |y| buffer_row(buffer, y);
         assert!(row(0).contains("Last Run: 2 agents; children: 1"));
-        assert!(row(1).contains("primary; Finished"));
+        assert!(row(1).contains("primary; finished"));
         assert!(row(2).starts_with("> Run 1: child 1; Failed"));
         assert!(row(5).contains("child 1; Failed"));
         assert!(row(6).contains("hostile\\u{001b}[31m"));
@@ -2331,10 +2239,10 @@ fn agent_inspector_keeps_details_and_keyboard_help_in_viewport() {
     let mut terminal = Terminal::new(TestBackend::new(16, 14)).expect("narrow terminal");
     let model = AgentInspectorModel {
         selected: 0,
-        choices: vec!["Run 1: primary; Finished".into()],
+        choices: vec!["Run 1: primary; finished".into()],
         lines: vec![
             "Last Run: 1 agent; children: 0".into(),
-            "Next Run: Single".into(),
+            "Next Run: single".into(),
         ],
     };
     terminal

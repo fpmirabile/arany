@@ -47,9 +47,24 @@ pub async fn set_session_defaults(
     defaults
         .validate()
         .map_err(|_| EngineError::InvalidRequest)?;
+    append_idle_event(
+        state,
+        workspace,
+        session_id,
+        Event::SessionDefaultChanged { defaults },
+    )
+    .await
+}
+
+async fn append_idle_event(
+    state: StateRoot,
+    workspace: PathBuf,
+    session_id: SessionId,
+    event: Event,
+) -> Result<(), EngineError> {
     let mut session_lock = lock_session(&state, session_id)?;
     let store = Store::open(state.try_clone()?)?;
-    let result = async {
+    let result: Result<(), EngineError> = async {
         let view = store
             .load_view(session_id)
             .await?
@@ -64,9 +79,7 @@ pub async fn set_session_defaults(
         }
         let (device, inode) = WorkspaceInputs::admit_identity(&workspace, &state)?;
         ensure_session_workspace(&view, device, inode)?;
-        store
-            .append(session_id, Event::SessionDefaultChanged { defaults })
-            .await?;
+        store.append(session_id, event).await?;
         Ok(())
     }
     .await;
@@ -145,34 +158,13 @@ pub async fn rename_session(
     if title.is_empty() || title.len() > 128 {
         return Err(EngineError::InvalidRequest);
     }
-    let mut session_lock = lock_session(&state, session_id)?;
-    let store = Store::open(state.try_clone()?)?;
-    let result: Result<(), EngineError> = async {
-        let view = store
-            .load_view(session_id)
-            .await?
-            .ok_or(EngineError::MissingSession)?;
-        session_lock.keep();
-        if view
-            .runs
-            .last()
-            .is_some_and(|run| matches!(run.status, RunStatus::Pending | RunStatus::Active))
-        {
-            return Err(EngineError::SessionNotIdle);
-        }
-        let (device, inode) = WorkspaceInputs::admit_identity(&workspace, &state)?;
-        ensure_session_workspace(&view, device, inode)?;
-        store
-            .append(session_id, Event::SessionRenamed { title })
-            .await?;
-        Ok(())
-    }
-    .await;
-    let closed = store.close().await;
-    result?;
-    closed?;
-    drop(session_lock);
-    Ok(())
+    append_idle_event(
+        state,
+        workspace,
+        session_id,
+        Event::SessionRenamed { title },
+    )
+    .await
 }
 
 pub async fn fork_session(

@@ -8,7 +8,7 @@ This contract owns bounded Run coordination, delegation, accepted outcomes and h
 
 Each accepted task has one accountable primary AgentRun and an ordered, bounded collection of direct read-only children. Children reason over supplied data and cannot create nested teams, acquire Tools or mutate files. The primary obtains file evidence, performs authorized effects and owns the final answer.
 
-Pin one policy before the Run: `single` admits no children; default `auto` allows up to three active children when useful; explicit `team` requires decomposition on the first non-Tool outcome. Effective child capacity is the minimum of policy, process safety, Provider concurrency and remaining call/token/byte/time budgets. A ceiling is permission, not a required team size.
+Pin one policy before the Run: `single` admits no children; default `auto` allows up to three total direct children when useful; explicit `team` requires decomposition on the first non-Tool outcome. The persisted `max_active_children` field limits total direct children for the delegation. Policy, process safety and remaining call/token/byte/time budgets bound team size; the Provider concurrency ceiling separately bounds simultaneous calls while admitted children wait in order. A ceiling is permission, not a required team size.
 
 Auto guidance asks the primary to keep routine edits and simple inspection local, delegate substantial independent work only when its benefit justifies extra calls, and choose the smallest useful team. Typed policy and budgets enforce capacity; guidance does not guarantee every model's judgment. Agent inspection distinguishes the current/last Run from historical agents rather than presenting accumulated history as simultaneous activity.
 

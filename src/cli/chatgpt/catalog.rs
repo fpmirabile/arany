@@ -1,8 +1,10 @@
 use super::{AuthorizationError, VerifiedCredentials, consent::ConsentReceipt};
 use crate::cli::credentials::AccountStorage;
-use reqwest::{Client, Url, header, redirect::Policy};
-use serde::{Deserialize, Deserializer, de};
-use std::{collections::HashSet, fmt, time::Duration};
+#[cfg(test)]
+use reqwest::redirect::Policy;
+use reqwest::{Client, Url, header};
+use serde::{Deserialize, Deserializer};
+use std::{collections::HashSet, time::Duration};
 
 const MODELS_ENDPOINT: &str = "https://api.openai.com/v1/models";
 const MAX_BODY_BYTES: usize = 1024 * 1024;
@@ -42,21 +44,7 @@ pub(crate) async fn list_models(
     {
         return Err(AuthorizationError::ConsentRequired);
     }
-    let client = Client::builder()
-        .https_only(true)
-        .no_proxy()
-        .no_gzip()
-        .no_brotli()
-        .no_zstd()
-        .no_deflate()
-        .redirect(Policy::none())
-        .referer(false)
-        .retry(reqwest::retry::never())
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(DEADLINE)
-        .pool_max_idle_per_host(0)
-        .build()
-        .map_err(|_| AuthorizationError::Unavailable)?;
+    let client = super::exchange::client(true)?;
     let endpoint = Url::parse(MODELS_ENDPOINT).expect("compiled ChatGPT models endpoint");
     tokio::time::timeout(DEADLINE, list_at(&client, endpoint, credentials))
         .await
@@ -68,7 +56,7 @@ async fn list_at(
     endpoint: Url,
     credentials: &VerifiedCredentials,
 ) -> Result<Vec<ChatGptModel>, AuthorizationError> {
-    let mut response = client
+    let response = client
         .get(endpoint.clone())
         .header(header::ACCEPT, "application/json")
         .header(header::ACCEPT_ENCODING, "identity")
@@ -82,39 +70,14 @@ async fn list_at(
     if response.status() != reqwest::StatusCode::OK {
         return Err(catalog_http_error(response.status()));
     }
-    if response
-        .headers()
-        .get_all(header::CONTENT_ENCODING)
-        .iter()
-        .any(|value| !value.as_bytes().eq_ignore_ascii_case(b"identity"))
-        || response
-            .content_length()
-            .is_some_and(|length| length > MAX_BODY_BYTES as u64)
-    {
-        return Err(AuthorizationError::InvalidCatalog);
-    }
-    let mut types = response.headers().get_all(header::CONTENT_TYPE).iter();
-    let kind = types
-        .next()
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(';').next())
-        .map(str::trim);
-    if types.next().is_some()
-        || !kind.is_some_and(|kind| kind.eq_ignore_ascii_case("application/json"))
-    {
-        return Err(AuthorizationError::InvalidCatalog);
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| AuthorizationError::Unavailable)?
-    {
-        if chunk.len() > MAX_BODY_BYTES - body.len() {
-            return Err(AuthorizationError::InvalidCatalog);
-        }
-        body.extend_from_slice(&chunk);
-    }
+    let body = super::exchange::read_json(
+        response,
+        reqwest::StatusCode::OK,
+        MAX_BODY_BYTES,
+        false,
+        || AuthorizationError::InvalidCatalog,
+    )
+    .await?;
     if !credentials.access_token.is_empty()
         && body
             .windows(credentials.access_token.len())
@@ -186,35 +149,8 @@ fn unsafe_display_character(character: char) -> bool {
         )
 }
 
-fn bounded_models<'de, D>(deserializer: D) -> Result<Vec<CatalogRow>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    struct ModelsVisitor;
-
-    impl<'de> de::Visitor<'de> for ModelsVisitor {
-        type Value = Vec<CatalogRow>;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("a bounded ChatGPT model array")
-        }
-
-        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-        where
-            A: de::SeqAccess<'de>,
-        {
-            let mut rows = Vec::new();
-            while let Some(row) = sequence.next_element::<CatalogRow>()? {
-                if rows.len() == MAX_MODELS {
-                    return Err(de::Error::custom("too many models"));
-                }
-                rows.push(row);
-            }
-            Ok(rows)
-        }
-    }
-
-    deserializer.deserialize_seq(ModelsVisitor)
+fn bounded_models<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<CatalogRow>, D::Error> {
+    crate::cli::bounded_list::<D, CatalogRow, MAX_MODELS>(deserializer, "too many models")
 }
 
 #[cfg(test)]

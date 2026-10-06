@@ -177,7 +177,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         ),
         (
             "/agents team 2",
-            "Next-Run collaboration: Team { max_active_children: 2 }",
+            "Next-Run collaboration: team · up to 2 children",
         ),
     ] {
         let from = transcript.len();
@@ -1266,171 +1266,254 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
 
 #[test]
 fn inline_quick_selector_returns_to_the_same_draft_and_caret() {
-    let temp = tempfile::tempdir().expect("private test root");
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir(&workspace).expect("Workspace");
-    let state = temp.path().join("state");
-    let shell = "stty rows 24 cols 40; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --no-color; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
-    let mut command = Command::new("/usr/bin/script");
-    command
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "xterm")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", shell, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = ChildGuard::new(command.spawn().expect("attached PTY process"));
-    let mut input = child.child().stdin.take().expect("PTY input");
-    let mut output = child.child().stdout.take().expect("PTY output");
-    let flags = fcntl_getfl(&output).expect("stdout flags");
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
-    let mut transcript = Vec::new();
-    let mut answered = 0;
-    wait_for(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        b"Ask Arany",
-    );
-    input
-        .write_all("a🙂b\x1b[D\x0b".as_bytes())
-        .expect("draft and selector");
-    wait_for(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        b"Quick actions",
-    );
-    let after_menu = transcript.len();
-    input
-        .write_all(b"\x1b[200~INERT_MODAL_PASTE\r/quit\x03\x1b[201~\x1b")
-        .expect("ignore paste in selector and close without changing draft");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        after_menu,
-        b"Ask Arany",
-    );
-    input.write_all(b"X").expect("edit returned draft");
-    wait_for(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        b"Xb",
-    );
-    input
-        .write_all(b"\x0b\x1b[B\r")
-        .expect("open Agent inspector");
-    wait_for(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        b"No Runs yet",
-    );
-    let after_inspector = transcript.len();
-    input.write_all(b"\x1b").expect("close inspector");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        after_inspector,
-        b"Ask Arany",
-    );
-    input.write_all(b"Y").expect("edit returned draft");
-    wait_for(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        b"Yb",
-    );
-    let after_inspection = transcript.len();
-    input.write_all(b"\x0b").expect("reopen quick selector");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        after_inspection,
-        b"return",
-    );
-    input
-        .write_all(b"\x1b[B\x1b[B\r")
-        .expect("choose guarded Session action");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        after_inspection,
-        b"Submit",
-    );
-    input.write_all(b"Z").expect("edit after guarded action");
-    wait_for(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        b"Zb",
-    );
-    input
-        .write_all(b"\x03/quit\r")
-        .expect("clear draft and quit");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        if child.child().try_wait().expect("process status").is_some() {
-            break;
+    for merged_overflow in [false, true] {
+        let temp = tempfile::tempdir().expect("private test root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("Workspace");
+        let state = temp.path().join("state");
+        for index in 0..16 {
+            std::fs::write(
+                workspace.join(format!("included-{index}.txt")),
+                b"synthetic",
+            )
+            .unwrap();
         }
-        assert!(Instant::now() < deadline, "PTY exit: {}", tail(&transcript));
-        thread::yield_now();
-    }
-    let status = child.take().wait().expect("process exit");
-    assert!(status.success(), "product failed: {}", tail(&transcript));
-    pump(&mut output, &mut input, &mut transcript, &mut answered);
-    let text = String::from_utf8_lossy(&transcript);
-    let marker = |name: &str| {
-        text.lines()
-            .find_map(|line| line.trim_end_matches('\r').strip_prefix(name))
-            .expect("TTY marker")
-            .to_owned()
-    };
-    assert_eq!(marker("TTY_BEFORE:"), marker("TTY_AFTER:"));
-    assert!(
-        !text.contains("INERT_MODAL_PASTE"),
-        "ignored modal paste entered the draft"
-    );
-    let enabled = text.matches("\x1b[?2004h").count();
-    let disabled = text.matches("\x1b[?2004l").count();
-    assert!(
-        enabled > 0 && enabled == disabled,
-        "paste mode was not restored"
-    );
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("read-only runtime");
-    runtime.block_on(async {
-        let root = StateRoot::open_existing(&state).expect("existing State");
-        let sessions = list_sessions(root, workspace.clone())
-            .await
-            .expect("listed Sessions");
-        assert!(
-            sessions.is_empty(),
-            "selector navigation and retained drafts save no conversation"
+        let outside = temp.path().join("outside.txt");
+        std::fs::write(&outside, b"OUTSIDE_INPUT_CANARY").unwrap();
+        std::os::unix::fs::symlink(&outside, workspace.join("unsafe.txtZ")).unwrap();
+        let shell = "stty rows 24 cols 40; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4 --no-color $ARANY_TEST_INCLUDES; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
+        let includes = if merged_overflow {
+            (0..16)
+                .map(|index| format!("--include included-{index}.txt"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        } else {
+            String::new()
+        };
+        let mut command = Command::new("/usr/bin/script");
+        command
+            .env_clear()
+            .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
+            .env("ARANY_TEST_STATE", &state)
+            .env("ARANY_TEST_INCLUDES", includes)
+            .env("ARANY_TEST_WORKSPACE", &workspace)
+            .env("SHELL", "/bin/sh")
+            .env("TERM", "xterm")
+            .env("OPENAI_API_KEY", "synthetic-never-sent-key")
+            .current_dir(&workspace)
+            .args(["-q", "-e", "-c", shell, "/dev/null"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = ChildGuard::new(command.spawn().expect("attached PTY process"));
+        let mut input = child.child().stdin.take().expect("PTY input");
+        let mut output = child.child().stdout.take().expect("PTY output");
+        let flags = fcntl_getfl(&output).expect("stdout flags");
+        fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
+        let mut transcript = Vec::new();
+        let mut answered = 0;
+        wait_for(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            b"Ask Arany",
         );
-    });
+        input
+            .write_all("a🙂b\x1b[D\x0b".as_bytes())
+            .expect("draft and selector");
+        wait_for(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            b"Quick actions",
+        );
+        let after_menu = transcript.len();
+        input
+            .write_all(b"\x1b[200~INERT_MODAL_PASTE\r/quit\x03\x1b[201~\x1b")
+            .expect("ignore paste in selector and close without changing draft");
+        wait_for_after(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            after_menu,
+            b"Ask Arany",
+        );
+        input.write_all(b"X").expect("edit returned draft");
+        wait_for(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            b"Xb",
+        );
+        input
+            .write_all(b"\x0b\x1b[B\r")
+            .expect("open Agent inspector");
+        wait_for(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            b"No Runs yet",
+        );
+        let after_inspector = transcript.len();
+        input.write_all(b"\x1b").expect("close inspector");
+        wait_for_after(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            after_inspector,
+            b"Ask Arany",
+        );
+        input.write_all(b"Y").expect("edit returned draft");
+        wait_for(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            b"Yb",
+        );
+        let after_inspection = transcript.len();
+        input.write_all(b"\x0b").expect("reopen quick selector");
+        wait_for_after(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            after_inspection,
+            b"return",
+        );
+        input
+            .write_all(b"\x1b[B\x1b[B\r")
+            .expect("choose guarded Session action");
+        wait_for_after(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            after_inspection,
+            b"Submit",
+        );
+        input.write_all(b"Z").expect("edit after guarded action");
+        wait_for(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            b"Zb",
+        );
+        let cases = if merged_overflow {
+            vec![("Check @extra.txtZ", b"includes;".as_slice())]
+        } else {
+            vec![
+                ("Check @missing.txtZ", b"exist;".as_slice()),
+                ("Check @unsafe.txtZ", b"unavailable;".as_slice()),
+            ]
+        };
+        for (draft, diagnostic) in cases {
+            let from = transcript.len();
+            input.write_all(b"\x03").unwrap();
+            input.write_all(draft.as_bytes()).unwrap();
+            input.write_all(b"\x1b[D\r").unwrap();
+            wait_for_after(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                from,
+                diagnostic,
+            );
+            let after_diagnostic = from
+                + transcript[from..]
+                    .windows(diagnostic.len())
+                    .position(|part| part == diagnostic)
+                    .unwrap()
+                + diagnostic.len();
+            wait_for_after(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                after_diagnostic,
+                b"\x1b[?25h",
+            );
+            let from = transcript.len();
+            input.write_all(b"X").unwrap();
+            wait_for_after(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                from,
+                b"XZ",
+            );
+        }
+        input
+            .write_all(b"\x03/quit\r")
+            .expect("clear draft and quit");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            pump(&mut output, &mut input, &mut transcript, &mut answered);
+            if child.child().try_wait().expect("process status").is_some() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "PTY exit: {}", tail(&transcript));
+            thread::yield_now();
+        }
+        let status = child.take().wait().expect("process exit");
+        assert!(status.success(), "product failed: {}", tail(&transcript));
+        pump(&mut output, &mut input, &mut transcript, &mut answered);
+        let text = String::from_utf8_lossy(&transcript);
+        let marker = |name: &str| {
+            text.lines()
+                .find_map(|line| line.trim_end_matches('\r').strip_prefix(name))
+                .expect("TTY marker")
+                .to_owned()
+        };
+        assert_eq!(marker("TTY_BEFORE:"), marker("TTY_AFTER:"));
+        assert!(
+            !text.contains("INERT_MODAL_PASTE"),
+            "ignored modal paste entered the draft"
+        );
+        assert!(
+            !text.contains("Do you trust this folder?"),
+            "invalid inputs must be rejected before trust or Run admission"
+        );
+        if state.join("events.sqlite3").exists() {
+            let connection = rusqlite::Connection::open_with_flags(
+                state.join("events.sqlite3"),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            let count: i64 = connection
+                .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, 0, "invalid inputs must not materialize a Session");
+        }
+        let enabled = text.matches("\x1b[?2004h").count();
+        let disabled = text.matches("\x1b[?2004l").count();
+        assert!(
+            enabled > 0 && enabled == disabled,
+            "paste mode was not restored"
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("read-only runtime");
+        runtime.block_on(async {
+            let root = StateRoot::open_existing(&state).expect("existing State");
+            let sessions = list_sessions(root, workspace.clone())
+                .await
+                .expect("listed Sessions");
+            assert!(
+                sessions.is_empty(),
+                "selector navigation and retained drafts save no conversation"
+            );
+        });
+    }
 }
 
 fn session_picker_close_case(quick: bool) {
@@ -1648,7 +1731,6 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
         &mut answered,
         b"Notice: Provider: openai; set /model\r\nInput:\r\n",
     );
-    #[cfg(debug_assertions)]
     {
         let model_at = transcript.len();
         input
@@ -1662,6 +1744,29 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
             model_at,
             "Notice: Model: gpt-5.4 · low\r\nInput:\r\n".as_bytes(),
         );
+        for (objective, error) in [
+            ("Check @../outside", "Tool path is not admitted"),
+            ("Check @missing.txt", "explicit include does not exist"),
+        ] {
+            let from = transcript.len();
+            input
+                .write_all(format!("{objective}\r").as_bytes())
+                .unwrap();
+            wait_for_after(&mut output, &mut input, &mut transcript, &mut answered, from, format!("Notice: Error: {error}; check the file inputs and enter a new line\r\nInput:\r\n").as_bytes());
+            let from = transcript.len();
+            input.write_all(b"/provider\r").unwrap();
+            wait_for_after(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                from,
+                b"Notice: Provider: openai\r\nInput:\r\n",
+            );
+        }
+    }
+    #[cfg(debug_assertions)]
+    {
         let effort_at = transcript.len();
         input
             .write_all(b"/model gpt-5.4 low\r")
@@ -1861,7 +1966,7 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
         &mut input,
         &mut transcript,
         &mut answered,
-        b"Notice: Next-Run collaboration: Team { max_active_children: 2 }\r\nInput:\r\n",
+        b"Notice: Next-Run collaboration: team \xc2\xb7 up to 2 children\r\nInput:\r\n",
     );
     let missing_at = transcript.len();
     input
@@ -1958,6 +2063,11 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
             assert_eq!(view.defaults.model.as_deref(), Some("gpt-5.4"));
             assert_eq!(view.defaults.effort, Some(arany::Effort::Low));
         }
+        #[cfg(not(debug_assertions))]
+        {
+            assert_eq!(view.defaults.model, None);
+            assert_eq!(view.defaults.effort, None);
+        }
         assert_eq!(view.title, "Corrected title");
         assert_eq!(
             view.defaults.policy,
@@ -1972,7 +2082,7 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
             .expect("closed command Events");
         assert_eq!(
             events.len(),
-            if cfg!(debug_assertions) { 12 } else { 8 },
+            if cfg!(debug_assertions) { 12 } else { 9 },
             "only Session creation, accepted defaults and one rename are durable"
         );
         let renames = events

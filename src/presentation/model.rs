@@ -104,7 +104,13 @@ impl PresentationModel {
                             AgentRole::Primary => "primary".to_owned(),
                             AgentRole::Child => format!("child {}", agent.ordinal),
                         };
-                        let status = agent_state_label(agent.status);
+                        let status = if agent.role == AgentRole::Primary
+                            && agent.status == AgentStatus::Active
+                        {
+                            "working"
+                        } else {
+                            agent_state_label(agent.status)
+                        };
                         let prefix = format!("{role} · {status}");
                         let tool = run.tools.last().filter(|tool| {
                             tool.intent.agent_run_id == agent.id && tool.observation.is_none()
@@ -113,8 +119,13 @@ impl PresentationModel {
                             .map(|tool| tool.intent.call.label())
                             .or(agent.summary.as_deref())
                             .or_else(|| {
-                                (agent.status == AgentStatus::Active)
-                                    .then_some("Waiting for response; Ctrl+C cancels")
+                                (agent.status == AgentStatus::Active).then_some(
+                                    if agent.role == AgentRole::Child {
+                                        "Queued or awaiting response; Ctrl+C cancels"
+                                    } else {
+                                        "Waiting for response; Ctrl+C cancels"
+                                    },
+                                )
                             })
                             .or(agent.objective.as_deref());
                         match detail {
@@ -246,7 +257,7 @@ fn chat_state_label(status: Option<RunStatus>) -> &'static str {
     }
 }
 
-fn run_state_label(status: Option<RunStatus>) -> &'static str {
+pub(super) fn run_state_label(status: Option<RunStatus>) -> &'static str {
     match status {
         None => "idle",
         Some(RunStatus::Pending) => "starting",
@@ -258,9 +269,9 @@ fn run_state_label(status: Option<RunStatus>) -> &'static str {
     }
 }
 
-fn agent_state_label(status: AgentStatus) -> &'static str {
+pub(super) fn agent_state_label(status: AgentStatus) -> &'static str {
     match status {
-        AgentStatus::Active => "working",
+        AgentStatus::Active => "active",
         AgentStatus::Finished => "finished",
         AgentStatus::Failed => "failed",
         AgentStatus::Cancelled => "cancelled",

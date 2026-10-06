@@ -1,4 +1,4 @@
-use super::{chatgpt, exec::ProviderArg, state_dir};
+use super::{chatgpt, exec::ProviderArg};
 use arany::{
     AttachedTerminal, CollaborationPolicy, Composer, ComposerEdit, Effort, InteractiveCommand,
     RunOutcome, RunStatus, SessionDefaults, SessionId, SessionView, StateRoot, Store, Submission,
@@ -67,6 +67,41 @@ enum EntryMode {
     PickSession,
     Fork(SessionId),
     Continue,
+}
+
+enum Feedback {
+    History(String),
+    Transient(String),
+}
+
+impl Feedback {
+    fn notice(&self) -> arany::TerminalNotice<'_> {
+        match self {
+            Self::History(text) => arany::TerminalNotice::History(text),
+            Self::Transient(text) => arany::TerminalNotice::Transient(text),
+        }
+    }
+}
+
+impl From<String> for Feedback {
+    fn from(text: String) -> Self {
+        Self::History(text)
+    }
+}
+
+impl std::ops::Deref for Feedback {
+    type Target = str;
+    fn deref(&self) -> &str {
+        match self {
+            Self::History(text) | Self::Transient(text) => text,
+        }
+    }
+}
+
+impl std::fmt::Display for Feedback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -174,16 +209,8 @@ impl AttachedArgs {
         {
             return Err("a prompt requires --provider and --model".into());
         }
-        let workspace = match self.workspace {
-            Some(path) => path,
-            None => std::env::current_dir().map_err(|_| "Workspace unavailable".to_owned())?,
-        };
-        let state_dir = state_dir(self.state_dir).map_err(str::to_owned)?;
-        let workspace_identity =
-            std::fs::canonicalize(&workspace).map_err(|_| "Workspace unavailable".to_owned())?;
-        if state_dir.starts_with(&workspace_identity) {
-            return Err("state directory overlaps the Workspace".into());
-        }
+        let (workspace, state_dir) =
+            super::admit_workspace(self.workspace, self.state_dir).map_err(str::to_owned)?;
         let provider = self.provider.map(|value| value.profile_label());
         let defaults = SessionDefaults {
             provider,
@@ -343,7 +370,9 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
             Ok(permissions::PermissionChoice::Selected(access)) => {
                 admission.workspace_permissions = Some(access)
             }
-            Ok(permissions::PermissionChoice::Closed) => {}
+            Ok(permissions::PermissionChoice::Closed(access)) => {
+                admission.workspace_permissions = Some(access);
+            }
             Ok(permissions::PermissionChoice::Exit) => {
                 return Ok(());
             }
@@ -367,7 +396,9 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
             Ok(permissions::PermissionChoice::Selected(access)) => {
                 admission.workspace_permissions = Some(access)
             }
-            Ok(permissions::PermissionChoice::Closed) => {}
+            Ok(permissions::PermissionChoice::Closed(access)) => {
+                admission.workspace_permissions = Some(access);
+            }
             Ok(permissions::PermissionChoice::Exit) => {
                 return Ok(());
             }
@@ -429,9 +460,11 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                 format!("Session {session_id} · /help for commands")
             }
         })
-    };
+    }
+    .map(Feedback::History);
     let mut empty_interrupt = None::<Instant>;
     if let Some(prompt) = admission.prompt.clone() {
+        active::validate_objective_inputs(&admission, &prompt)?;
         materialize_session(&admission, &mut session_id, &mut view).await?;
         terminal
             .draw_progress(&view, notice.as_deref().expect("startup notice exists"))
@@ -456,14 +489,16 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         }
     }
     loop {
-        permissions::refresh_files(&admission.workspace, &mut composer);
+        if let Some(error) = permissions::refresh_files(&admission.workspace, &mut composer) {
+            append_notice(&mut notice, &error);
+        }
         composer.set_completion_selection(
             view.defaults.provider.as_deref(),
             view.defaults.model.as_deref(),
             view.defaults.account_id,
         );
         terminal
-            .draw(&view, &composer, notice.as_deref())
+            .draw_notice(&view, &composer, notice.as_ref().map(Feedback::notice))
             .map_err(|error| error.to_string())?;
         notice = None;
         let input = terminal
@@ -481,19 +516,21 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         }
         match input {
             TerminalInput::CycleApprovalMode => {
-                notice = Some(permissions::cycle(&mut composer));
+                notice = Some(Feedback::History(permissions::cycle(&mut composer)));
                 empty_interrupt = None;
             }
             TerminalInput::ClipboardPaste => {
                 notice = Some(match terminal.request_clipboard_paste() {
-                    Ok(()) => "Reading clipboard... draft retained".into(),
-                    Err(error) => format!("Error: {error}; draft unchanged"),
+                    Ok(()) => Feedback::Transient("Reading clipboard... draft retained".into()),
+                    Err(error) => Feedback::History(format!("Error: {error}; draft unchanged")),
                 });
                 empty_interrupt = None;
             }
             TerminalInput::Paste => {
                 if let Err(error) = terminal.paste_into(&mut composer) {
-                    notice = Some(format!("Error: {error}; draft unchanged"));
+                    notice = Some(Feedback::History(format!(
+                        "Error: {error}; draft unchanged"
+                    )));
                 }
                 empty_interrupt = None;
             }
@@ -513,19 +550,23 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
             | TerminalInput::Tab
             | TerminalInput::Escape) => {
                 if composer.apply(input) == ComposerEdit::AtCapacity {
-                    notice = Some("Error: message is too long; shorten it; draft unchanged".into());
+                    notice = Some(Feedback::History(
+                        "Error: message is too long; shorten it; draft unchanged".into(),
+                    ));
                 }
                 empty_interrupt = None;
             }
             TerminalInput::LineRejected => {
-                notice = Some("Error: invalid or overlong terminal line; draft unchanged".into());
+                notice = Some(Feedback::History(
+                    "Error: invalid or overlong terminal line; draft unchanged".into(),
+                ));
                 empty_interrupt = None;
             }
             TerminalInput::LineContinued => {
-                notice = Some(format!(
+                notice = Some(Feedback::History(format!(
                     "Draft: {} characters; Enter submits",
                     composer.character_count()
-                ));
+                )));
                 empty_interrupt = None;
             }
             TerminalInput::QuickActions if !terminal.is_linear() => {
@@ -533,8 +574,9 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                     .await?
                 {
                     QuickChoice::Selected(Selector::Resume) if !composer.is_empty() => {
-                        notice =
-                            Some("Submit or clear this draft before switching Sessions".into());
+                        notice = Some(Feedback::History(
+                            "Submit or clear this draft before switching Sessions".into(),
+                        ));
                     }
                     QuickChoice::Selected(selector) => {
                         notice = Some(
@@ -557,7 +599,9 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                 empty_interrupt = None;
             }
             TerminalInput::Submit if terminal.clipboard_loading() => {
-                notice = Some("Clipboard loading; press Enter after paste to submit".into());
+                notice = Some(Feedback::Transient(
+                    "Clipboard loading; press Enter after paste to submit".into(),
+                ));
                 terminal
                     .restore_draft_input(composer.text().len())
                     .map_err(|error| error.to_string())?;
@@ -575,14 +619,14 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                         match error {
                             arany::CommandParseError::Empty => composer.clear(),
                             arany::CommandParseError::Unknown { suggestion } => {
-                                notice = Some(match suggestion {
+                                notice = Some(Feedback::History(match suggestion {
                                     Some(name) => {
                                         format!("Error: Unknown command; did you mean /{name}?")
                                     }
                                     None => "Error: Unknown command".into(),
-                                });
+                                }));
                             }
-                            error => notice = Some(format!("Error: {error}")),
+                            error => notice = Some(Feedback::History(format!("Error: {error}"))),
                         }
                         if terminal.is_linear() {
                             composer.take();
@@ -599,7 +643,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                     | InteractiveCommand::Fork
                             )
                         {
-                            notice = Some("Error: Submit or clear image attachments before switching Sessions".into());
+                            notice = Some(Feedback::History("Error: Submit or clear image attachments before switching Sessions".into()));
                             if terminal.is_linear() {
                                 composer.take();
                             }
@@ -609,7 +653,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                         if let Err(error) =
                             controls::validate_idle_command(&view, command, argument)
                         {
-                            notice = Some(format!("Error: {error}"));
+                            notice = Some(Feedback::History(format!("Error: {error}")));
                             if terminal.is_linear() {
                                 composer.take();
                             }
@@ -618,7 +662,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                         }
                     }
                     Ok(Submission::Objective(_)) if view.defaults.provider.is_none() => {
-                        notice = Some("Use /setup to choose an account".into());
+                        notice = Some(Feedback::History("Use /setup to choose an account".into()));
                         if terminal.is_linear() {
                             composer.take();
                         }
@@ -627,7 +671,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                     }
                     Ok(Submission::Objective(_)) if view.defaults.model.is_none() => {
                         let missing_model = "Choose a model with /model before submitting";
-                        notice = Some(
+                        notice = Some(Feedback::History(
                             match view
                                 .defaults
                                 .account_id
@@ -642,7 +686,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 },
                                 None => missing_model.into(),
                             },
-                        );
+                        ));
                         if terminal.is_linear() {
                             composer.take();
                         }
@@ -650,15 +694,6 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                         continue;
                     }
                     Ok(Submission::Objective(_)) => {
-                        if let Err(error) = arany::mention_paths(composer.text()) {
-                            notice = Some(format!(
-                                "Error: {error}; check the @file mention; draft unchanged"
-                            ));
-                            if terminal.is_linear() {
-                                composer.take();
-                            }
-                            continue;
-                        }
                         if !composer.images().is_empty()
                             && view
                                 .defaults
@@ -666,7 +701,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 .as_deref()
                                 .is_some_and(|profile| profile.starts_with("custom:"))
                         {
-                            notice = Some("Error: Image input is not admitted for custom Providers; clear these attachments first".into());
+                            notice = Some(Feedback::History("Error: Image input is not admitted for custom Providers; clear these attachments first".into()));
                             if terminal.is_linear() {
                                 composer.take();
                             }
@@ -684,7 +719,24 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                             effort: view.defaults.effort,
                             account_id: view.defaults.account_id,
                         }) {
-                            notice = Some(format!("Error: {error}"));
+                            notice = Some(Feedback::History(format!("Error: {error}")));
+                            if terminal.is_linear() {
+                                composer.take();
+                            }
+                            empty_interrupt = None;
+                            continue;
+                        }
+                        if let Err(error) =
+                            active::validate_objective_inputs(&admission, composer.text())
+                        {
+                            notice = Some(Feedback::History(format!(
+                                "Error: {error}; {}",
+                                if terminal.is_linear() {
+                                    "check the file inputs and enter a new line"
+                                } else {
+                                    "check the file inputs; draft unchanged"
+                                }
+                            )));
                             if terminal.is_linear() {
                                 composer.take();
                             }
@@ -705,11 +757,8 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 permissions::PermissionChoice::Selected(access) => {
                                     admission.workspace_permissions = Some(access)
                                 }
-                                permissions::PermissionChoice::Closed => {
-                                    notice = Some(
-                                        "Choose /permissions before sending; draft retained".into(),
-                                    );
-                                    continue;
+                                permissions::PermissionChoice::Closed(access) => {
+                                    admission.workspace_permissions = Some(access);
                                 }
                                 permissions::PermissionChoice::Exit => return Ok(()),
                             }
@@ -756,14 +805,14 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                             }
                             Ok(RunSubmission::Shutdown(reason)) => return Err(reason),
                             Err(error) => {
-                                notice = Some(if composer.is_empty() {
+                                notice = Some(Feedback::History(if composer.is_empty() {
                                     format!("Error: {error}")
                                 } else {
                                     format!(
                                         "Error: {error}; draft retained ({} characters)",
                                         composer.character_count()
                                     )
-                                });
+                                }));
                                 view = load_view(&admission.state_dir, session_id).await?;
                             }
                         }
@@ -774,11 +823,15 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                         }
                         if command == InteractiveCommand::Paste {
                             notice = Some(match terminal.request_clipboard_paste() {
-                                Ok(()) => "Reading clipboard... draft retained".into(),
-                                Err(error) => format!("Error: {error}; draft unchanged"),
+                                Ok(()) => Feedback::Transient(
+                                    "Reading clipboard... draft retained".into(),
+                                ),
+                                Err(error) => {
+                                    Feedback::History(format!("Error: {error}; draft unchanged"))
+                                }
                             });
                         } else if command == InteractiveCommand::Settings {
-                            notice = Some(
+                            notice = Some(Feedback::History(
                                 controls::settings(
                                     &mut terminal,
                                     &admission,
@@ -786,7 +839,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                     argument,
                                 )
                                 .await?,
-                            );
+                            ));
                         } else if command == InteractiveCommand::Permissions {
                             let access = permissions::choose(
                                 &mut terminal,
@@ -796,13 +849,14 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                             .await?;
                             let access = match access {
                                 permissions::PermissionChoice::Selected(access) => access,
-                                permissions::PermissionChoice::Closed => {
-                                    notice = Some("Permissions unchanged".into());
+                                permissions::PermissionChoice::Closed(_) => {
+                                    notice =
+                                        Some(Feedback::History("Permissions unchanged".into()));
                                     continue;
                                 }
                                 permissions::PermissionChoice::Exit => return Ok(()),
                             };
-                            notice = Some(if access.is_trusted() {
+                            notice = Some(Feedback::History(if access.is_trusted() {
                                 format!(
                                     "Folder trusted · {} · Shift+Tab changes mode",
                                     access.mode().label()
@@ -810,7 +864,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                             } else {
                                 "Read only · /permissions can enable guarded edits and commands"
                                     .into()
-                            });
+                            }));
                             admission.workspace_permissions = Some(access);
                             admission.tools = false;
                             refresh_runtime_skills(&admission, &mut composer, &mut notice);
@@ -841,8 +895,9 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                             );
                         } else if command == InteractiveCommand::Compact {
                             if view.created_sequence == 0 {
-                                notice =
-                                    Some("No messages to compact; send a message first".into());
+                                notice = Some(Feedback::History(
+                                    "No messages to compact; send a message first".into(),
+                                ));
                                 continue;
                             }
                             let maintenance = match compact_current(
@@ -863,10 +918,11 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                     return Err(format!("terminated by {}", signal.name()));
                                 }
                             };
-                            notice = Some(match retained_draft_notice(&composer) {
-                                Some(draft) => format!("{maintenance}; {draft}"),
-                                None => maintenance,
-                            });
+                            notice =
+                                Some(Feedback::History(match retained_draft_notice(&composer) {
+                                    Some(draft) => format!("{maintenance}; {draft}"),
+                                    None => maintenance,
+                                }));
                             view = load_view(&admission.state_dir, session_id).await?;
                         } else if argument.is_none()
                             && matches!(
@@ -891,7 +947,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 .await?,
                             );
                         } else {
-                            notice = Some(
+                            notice = Some(Feedback::History(
                                 controls::handle_command(
                                     &admission,
                                     &mut session_id,
@@ -900,7 +956,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                     argument,
                                 )
                                 .await?,
-                            );
+                            ));
                         }
                     }
                 }
@@ -909,7 +965,9 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
             TerminalInput::Interrupt => {
                 if terminal.clipboard_loading() {
                     terminal.cancel_clipboard_paste();
-                    notice = Some("Clipboard read cancelled; draft retained".into());
+                    notice = Some(Feedback::Transient(
+                        "Clipboard read cancelled; draft retained".into(),
+                    ));
                     empty_interrupt = None;
                 } else if !composer.is_empty() {
                     composer.clear();
@@ -921,19 +979,23 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                     break;
                 } else {
                     empty_interrupt = Some(Instant::now());
-                    notice = Some("Ctrl+Shift+C copies. Ctrl+C again exits.".into());
+                    notice = Some(Feedback::History(
+                        "Ctrl+Shift+C copies. Ctrl+C again exits.".into(),
+                    ));
                 }
             }
             TerminalInput::EndOfInput if composer.is_empty() => break,
             TerminalInput::EndOfInput => {
-                notice = Some("Draft retained; press Enter to submit or Ctrl+C to clear".into());
+                notice = Some(Feedback::History(
+                    "Draft retained; press Enter to submit or Ctrl+C to clear".into(),
+                ));
             }
             TerminalInput::Resize => {}
             TerminalInput::Suspend => {
                 terminal
                     .suspend_and_resume(composer.text().len())
                     .map_err(|error| error.to_string())?;
-                notice = Some("Terminal resumed".into());
+                notice = Some(Feedback::Transient("Terminal resumed".into()));
             }
             TerminalInput::Shutdown(signal) => {
                 return Err(format!("terminated by {}", signal.name()));
@@ -959,7 +1021,7 @@ async fn run_selector(
     session_id: &mut SessionId,
     view: &mut SessionView,
     composer: &mut Composer,
-) -> Result<String, String> {
+) -> Result<Feedback, String> {
     match selector {
         Selector::Setup => {
             configure_account(terminal, admission, *session_id, view, composer).await
@@ -972,7 +1034,7 @@ async fn run_selector(
         }
         Selector::Agents => match agents::inspect(terminal, view).await? {
             Some(signal) => Err(format!("terminated by {}", signal.name())),
-            None => Ok("Agent inspection closed".into()),
+            None => Ok(Feedback::Transient("Agent inspection closed".into())),
         },
         Selector::Resume => {
             let choice = pick_session(terminal, admission, Some(&view.defaults)).await?;
@@ -987,26 +1049,34 @@ async fn run_selector(
                                     .await
                                 {
                                     Ok(selected) => selected,
-                                    Err(error) => return Ok(format!("Error: {error}")),
+                                    Err(error) => {
+                                        return Ok(Feedback::History(format!("Error: {error}")));
+                                    }
                                 };
                             *session_id = id;
                             *view = selected;
-                            Ok(remembered_session_notice(
-                                admission,
-                                view,
-                                format!(
-                                    "Resumed: {}",
-                                    arany::escape_terminal(&view.conversation_title())
-                                ),
-                            )
-                            .await)
+                            Ok(Feedback::History(
+                                remembered_session_notice(
+                                    admission,
+                                    view,
+                                    format!(
+                                        "Resumed: {}",
+                                        arany::escape_terminal(&view.conversation_title())
+                                    ),
+                                )
+                                .await,
+                            ))
                         }
-                        Err(error) => Ok(format!("Error: {error}")),
+                        Err(error) => Ok(Feedback::History(format!("Error: {error}"))),
                     }
                 }
-                PickerChoice::Unavailable(error) => Ok(format!("Error: {error}")),
-                PickerChoice::Empty => Ok("No Sessions for this Workspace".into()),
-                PickerChoice::Closed => Ok("Session selection closed".into()),
+                PickerChoice::Unavailable(error) => {
+                    Ok(Feedback::History(format!("Error: {error}")))
+                }
+                PickerChoice::Empty => {
+                    Ok(Feedback::History("No Sessions for this Workspace".into()))
+                }
+                PickerChoice::Closed => Ok(Feedback::Transient("Session selection closed".into())),
                 PickerChoice::Shutdown(signal) => Err(format!("terminated by {}", signal.name())),
             }
         }
@@ -1019,7 +1089,7 @@ async fn configure_account(
     session_id: SessionId,
     view: &mut SessionView,
     composer: &mut Composer,
-) -> Result<String, String> {
+) -> Result<Feedback, String> {
     let (defaults, notice, catalog) =
         match setup::resolve(terminal, &admission.state_dir, &admission.workspace).await {
             Ok(Some(setup::SetupSelection::Native {
@@ -1041,8 +1111,12 @@ async fn configure_account(
                 });
                 (defaults, notice, catalog)
             }
-            Ok(None) => return Ok("Setup closed".into()),
-            Err(setup::SetupError::Recoverable(error)) => return Ok(format!("Error: {error}")),
+            Ok(None) => {
+                return Ok(Feedback::Transient("Setup closed".into()));
+            }
+            Err(setup::SetupError::Recoverable(error)) => {
+                return Ok(Feedback::History(format!("Error: {error}")));
+            }
             Err(error) => return Err(error.into()),
         };
     update_defaults(admission, session_id, view, defaults.clone()).await?;
@@ -1051,11 +1125,11 @@ async fn configure_account(
     if let Err(error) =
         models::remember_models(&admission.workspace, &view.defaults, Some(&catalog), true).await
     {
-        return Ok(format!(
+        return Ok(Feedback::History(format!(
             "{notice}; Error: {error}; selection kept for this conversation only"
-        ));
+        )));
     }
-    Ok(notice)
+    Ok(Feedback::History(notice))
 }
 
 fn seed_setup_catalog(
@@ -1073,12 +1147,12 @@ fn seed_setup_catalog(
     }
 }
 
-fn retained_draft_notice(composer: &Composer) -> Option<String> {
+fn retained_draft_notice(composer: &Composer) -> Option<Feedback> {
     (!composer.is_empty()).then(|| {
-        format!(
+        Feedback::Transient(format!(
             "Draft retained: {} characters; Enter submits",
             composer.character_count()
-        )
+        ))
     })
 }
 
@@ -1087,7 +1161,7 @@ async fn finish_interrupted_submission(
     admission: &Admission,
     composer: &Composer,
     session_id: SessionId,
-) -> Result<(SessionView, Option<String>), String> {
+) -> Result<(SessionView, Option<Feedback>), String> {
     let view = load_view(&admission.state_dir, session_id).await?;
     terminal
         .draw(
@@ -1105,7 +1179,7 @@ async fn finish_submission(
     composer: &mut Composer,
     outcome: &RunOutcome,
     user_recorded: bool,
-) -> Result<(SessionView, Option<String>), String> {
+) -> Result<(SessionView, Option<Feedback>), String> {
     let automatic =
         outcome.run.config.as_ref().filter(|config| {
             outcome.run.status == RunStatus::Finished && config.auto_compaction_due()
@@ -1138,7 +1212,7 @@ async fn finish_submission(
     let feedback = render_run_feedback(&outcome.run);
     if let Some(feedback) = feedback {
         if composer.is_empty() {
-            notice = Some(feedback);
+            notice = Some(Feedback::History(feedback));
         } else {
             terminal
                 .draw(&view, composer, Some(&feedback))
@@ -1166,10 +1240,10 @@ async fn finish_submission(
                 return Err(format!("terminated by {}", signal.name()));
             }
         };
-        notice = Some(match retained_draft_notice(composer) {
+        notice = Some(Feedback::History(match retained_draft_notice(composer) {
             Some(draft) => format!("{compaction_notice}; {draft}"),
             None => compaction_notice,
-        });
+        }));
         view = load_view(&admission.state_dir, outcome.session_id).await?;
     }
     Ok((view, notice))
@@ -1219,10 +1293,10 @@ async fn start_session(admission: &Admission) -> Result<(SessionId, SessionView)
     }
 }
 
-fn refresh_runtime_skills(
+fn refresh_runtime_skills<N: From<String> + std::fmt::Display>(
     admission: &Admission,
     composer: &mut Composer,
-    notice: &mut Option<String>,
+    notice: &mut Option<N>,
 ) {
     let project = arany::project_skills(&admission.workspace);
     if let Ok(project) = &project
@@ -1268,11 +1342,14 @@ fn refresh_runtime_skills(
     }
 }
 
-fn append_notice(notice: &mut Option<String>, message: &str) {
-    *notice = Some(match notice.take() {
-        Some(previous) => format!("{message}; {previous}"),
-        None => message.to_owned(),
-    });
+fn append_notice<N: From<String> + std::fmt::Display>(notice: &mut Option<N>, message: &str) {
+    *notice = Some(
+        match notice.take() {
+            Some(previous) => format!("{message}; {previous}"),
+            None => message.to_owned(),
+        }
+        .into(),
+    );
 }
 
 fn new_conversation(defaults: SessionDefaults) -> SessionView {
@@ -1302,11 +1379,23 @@ async fn materialize_session(
     let root = StateRoot::admit(&admission.state_dir)
         .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
     let title = view.title_is_explicit.then(|| view.title.clone());
-    let id = create_session(root, admission.workspace.clone(), title)
+    let id = create_session(root, admission.workspace.clone(), title.clone())
         .await
         .map_err(|error| error.to_string())?;
     let defaults = view.defaults.clone();
     *view = load_view(&admission.state_dir, id).await?;
+    if let Some(title) = title.filter(|_| !view.title_is_explicit) {
+        arany::rename_session(
+            StateRoot::open_existing(&admission.state_dir)
+                .map_err(|_| "state directory unavailable or unsafe".to_owned())?,
+            admission.workspace.clone(),
+            id,
+            title,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        *view = load_view(&admission.state_dir, id).await?;
+    }
     *session_id = id;
     update_defaults(admission, id, view, defaults)
         .await

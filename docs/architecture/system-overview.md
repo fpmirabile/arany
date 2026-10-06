@@ -13,7 +13,7 @@ Arany is an interactive Session-oriented CLI, not a one-shot team demo. Bare `ar
 The full product contract is successful when it proves all of these together:
 
 1. a Session survives process exit, explicit resume, multiple Runs, provider changes between Runs, compaction, and deterministic replay;
-2. `single`, `auto`, and `team` policies all use the same reusable loop and a generic ordered child collection rather than a fixed two-worker shape;
+2. `single`, `auto`, and `team` policies all use the primary coordination loop and a generic ordered child collection rather than a fixed two-worker shape;
 3. the primary cannot finish team work before every required child has a persisted terminal disposition;
 4. the default terminal keeps a navigable committed transcript in the primary screen, conditional agent activity above a bottom composer, a slash menu below input when open, and a compact status row;
 5. keyboard access is complete, while mouse reporting exists only transiently inside an open picker or detail panel;
@@ -27,7 +27,7 @@ The current personal beta 1 implementation milestone is narrower: build a local 
 
 Startup resolves trusted user/process configuration, admits a private state root outside the Workspace, selects one ProviderProfile, and pins the caller-selected Workspace before consuming project-controlled input. Admission never executes or discovers Git/repository configuration, `.env`, hooks, plugins, packages, tests, or startup commands. Instruction and explicit include files remain bounded immutable no-follow snapshots. Explicit include data preserves its escaped relative path and raw-file SHA-256 alongside untrusted text; the full envelope counts toward context admission. Untrusted and ordinary headless Runs are read-only. Attached folder trust generates a user-owned, directory-pinned grant; `--tools` loads an explicit private grant. Both use the separately enforcing Linux Guard described in [local tools](../tools.md). Unsupported native enforcement fails closed. The selected ChatGPT subscription has completed the reported resumed file edit; other live model workflows and native macOS remain unverified.
 
-Tools owns one private model-input projection shared by the native adapters. It exposes structured bounded catalog/output data and ordered call/disposition/workspace-effect facts, while keeping journal intent identities, enforcement digests, limits and receipts out of current Tool observations sent to the model. Canonical Tool observations retain all enforcement evidence; projection changes neither authority nor replay. OpenAI/ChatGPT coding requests encode catalog-available operations as strict native functions plus phase-available Finish/Delegate submissions, requiring one non-parallel call. The adapter reconstructs paired current action/result items with request-local correlation labels, translating the completed function back to the existing semantic Provider outcome. Read-only requests, children, compaction and Anthropic keep structured-text encoding. Provider instructions explain continuation and completion evidence independently of untrusted result text.
+Tools owns one private model-input projection shared by the native adapters. It exposes structured bounded catalog/output data and ordered call/disposition/workspace-effect facts, while keeping journal intent identities, enforcement digests, limits and receipts out of current Tool observations sent to the model. Canonical Tool observations retain all enforcement evidence; projection changes neither authority nor replay. OpenAI/ChatGPT coding requests encode catalog-available operations as strict native functions plus phase-available Finish/Delegate submissions, requiring one non-parallel call. The adapter reconstructs paired current action/result items with request-local correlation labels, carries each complete current observation only in its result item, and omits the duplicate observation list from the task-data envelope, translating the completed function back to the existing semantic Provider outcome. Read-only requests, children, compaction and Anthropic keep structured-text encoding. Provider instructions explain continuation and completion evidence independently of untrusted result text.
 
 ## 2. Runtime architecture
 
@@ -41,9 +41,9 @@ flowchart LR
         CLI --> Engine[Deep Engine]
         CLI --> Terminal[Inline terminal or deterministic output]
         Engine --> Session[Session lifecycle + context]
-        Engine --> Loop[Reusable AgentRun loop]
+        Engine --> Loop[Primary coordination loop]
         Loop --> Primary[Primary AgentRun]
-        Primary --> Children[Ordered 0..N child AgentRuns]
+        Primary --> Children[Ordered 0..N one-call read-only children]
         Primary --> Tools[Private Tool router + Policy]
         Engine --> Store[(SQLite owner thread)]
         Store --> Views[SessionView + RunView]
@@ -277,7 +277,7 @@ Before each Run, Arany pins one collaboration policy:
 
 ```text
 single
-  maximum active children = 0
+  maximum total direct children = 0
 
 auto(max_active_children = N)
   primary may delegate only when independent work is useful
@@ -286,7 +286,7 @@ team(max_active_children = N)
   primary must propose a non-empty team decomposition
 ```
 
-The product default is `auto` with at most three active children. `N` is a numeric input, not a compiled topology, but spawning is always bounded. Effective capacity is the minimum of the Session policy, a process safety ceiling, remaining call/token/byte/time budgets, and Provider concurrency. Children cannot create nested teams in beta.
+The product default is `auto` with at most three total direct children. The historical field name `max_active_children` bounds total delegation size, not only simultaneous dispatch. `N` is a numeric input and bounded by policy, process safety and remaining call/token/byte/time budgets. The separate Provider concurrency ceiling limits simultaneous calls; admitted children can wait in the ordered queue. Children cannot create nested teams in beta.
 
 The semantic Provider outcome is:
 

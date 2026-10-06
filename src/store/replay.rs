@@ -208,7 +208,7 @@ fn scan_session_heads(
             heads.insert(
                 id,
                 SessionHead {
-                    explicit_title: !matches!(title.as_str(), "New Session" | "Forked Session"),
+                    explicit_title: !crate::session::placeholder_title(&title),
                     title,
                     created_at_ms: envelope.created_at_ms,
                     last_activity_at_ms: envelope.created_at_ms,

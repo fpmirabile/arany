@@ -1,4 +1,5 @@
 use super::{CustomProfileError, PinnedDestination};
+use crate::provider::ProviderError;
 use crate::provider::{
     CompactionRequest, CompactionResponse, Effort, MAX_REPORTED_INPUT_TOKENS, MAX_RESPONSE_BYTES,
     ProviderRequest, ProviderResponse, openai::wire, raw_reflects_secret,
@@ -118,31 +119,12 @@ impl CustomTransport {
                 TransportError::Rejected
             });
         }
-        if response
-            .headers()
-            .get_all(header::CONTENT_ENCODING)
-            .iter()
-            .any(|value| !value.as_bytes().eq_ignore_ascii_case(b"identity"))
-        {
-            return Err(TransportError::InvalidOutcome);
-        }
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
-        {
-            return Err(TransportError::InvalidOutcome);
-        }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
+        let bytes = super::super::read_identity_body(&mut response, MAX_RESPONSE_BYTES)
             .await
-            .map_err(|_| TransportError::Unavailable)?
-        {
-            if chunk.len() > MAX_RESPONSE_BYTES - bytes.len() {
-                return Err(TransportError::InvalidOutcome);
-            }
-            bytes.extend_from_slice(&chunk);
-        }
+            .map_err(|error| match error {
+                ProviderError::Unavailable => TransportError::Unavailable,
+                _ => TransportError::InvalidOutcome,
+            })?;
         if raw_reflects_secret(&bytes, &self.key) {
             return Err(TransportError::InvalidOutcome);
         }

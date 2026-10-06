@@ -204,7 +204,7 @@ async fn classify_code_error(response: Response) -> AuthorizationError {
     }
 }
 
-fn client(https_only: bool) -> Result<Client, AuthorizationError> {
+pub(super) fn client(https_only: bool) -> Result<Client, AuthorizationError> {
     Client::builder()
         .https_only(https_only)
         .no_proxy()
@@ -410,7 +410,7 @@ fn access_expiry_at(requested_at_unix: u64, expires_in: u64) -> Result<u64, Auth
         .ok_or(AuthorizationError::ExchangeFailed)
 }
 
-async fn read_json(
+pub(super) async fn read_json(
     mut response: Response,
     expected_status: StatusCode,
     max: usize,

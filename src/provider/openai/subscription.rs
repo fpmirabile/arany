@@ -8,7 +8,9 @@ use crate::provider::{
     ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse, catalog::valid_model_id,
 };
 use crate::session::{AgentRunId, RunId, SessionId};
-use reqwest::{Client, Url, header, redirect::Policy};
+#[cfg(test)]
+use reqwest::redirect::Policy;
+use reqwest::{Client, Url, header};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -227,19 +229,8 @@ async fn probe_model_at(
 }
 
 fn client() -> Result<Client, ProviderError> {
-    Client::builder()
+    super::super::http_client(DEADLINE)
         .https_only(true)
-        .no_proxy()
-        .no_gzip()
-        .no_brotli()
-        .no_zstd()
-        .no_deflate()
-        .redirect(Policy::none())
-        .referer(false)
-        .retry(reqwest::retry::never())
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(DEADLINE)
-        .pool_max_idle_per_host(0)
         .build()
         .map_err(|_| ProviderError::Unavailable)
 }
@@ -275,34 +266,13 @@ async fn invoke_at(
         }
         response_failure(error, counts)
     })?;
-    if result.reflects_secret(access_token) {
-        return Err(failure(
-            Stage::CredentialReflection,
-            ProviderError::InvalidOutcome,
-            counts,
-        ));
-    }
-    if result
-        .input_tokens
-        .is_none_or(|count| count == 0 || count > MAX_REPORTED_INPUT_TOKENS)
-        || result.output_tokens.is_none_or(|count| count == 0)
-    {
-        return Err(failure(
-            Stage::UsageContract,
-            ProviderError::InvalidResponseContract,
-            counts,
-        ));
-    }
-    if result
-        .output_tokens
-        .is_some_and(|count| count > request.max_output_tokens)
-    {
-        return Err(failure(
-            Stage::LocalOutputLimit,
-            ProviderError::LocalOutputLimit,
-            counts,
-        ));
-    }
+    accept_result(
+        result.reflects_secret(access_token),
+        result.input_tokens,
+        result.output_tokens,
+        request.max_output_tokens,
+        counts,
+    )?;
     Ok(result)
 }
 
@@ -320,17 +290,32 @@ async fn compact_at(
     let (completed, counts) = completed_at(client, endpoint, access_token, body).await?;
     let result = wire::decode_streamed_compaction(&completed, &request.model)
         .map_err(|error| response_failure(error, counts))?;
-    if result.reflects_secret(access_token) {
+    accept_result(
+        result.reflects_secret(access_token),
+        result.input_tokens,
+        result.output_tokens,
+        request.max_output_tokens,
+        counts,
+    )?;
+    Ok(result)
+}
+
+fn accept_result(
+    reflects_secret: bool,
+    input_tokens: Option<u32>,
+    output_tokens: Option<u32>,
+    max_output_tokens: u32,
+    counts: StreamCounts,
+) -> Result<(), ProviderError> {
+    if reflects_secret {
         return Err(failure(
             Stage::CredentialReflection,
             ProviderError::InvalidOutcome,
             counts,
         ));
     }
-    if result
-        .input_tokens
-        .is_none_or(|count| count == 0 || count > MAX_REPORTED_INPUT_TOKENS)
-        || result.output_tokens.is_none_or(|count| count == 0)
+    if input_tokens.is_none_or(|count| count == 0 || count > MAX_REPORTED_INPUT_TOKENS)
+        || output_tokens.is_none_or(|count| count == 0)
     {
         return Err(failure(
             Stage::UsageContract,
@@ -338,17 +323,14 @@ async fn compact_at(
             counts,
         ));
     }
-    if result
-        .output_tokens
-        .is_some_and(|count| count > request.max_output_tokens)
-    {
+    if output_tokens.is_some_and(|count| count > max_output_tokens) {
         return Err(failure(
             Stage::LocalOutputLimit,
             ProviderError::LocalOutputLimit,
             counts,
         ));
     }
-    Ok(result)
+    Ok(())
 }
 
 async fn completed_at(

@@ -366,7 +366,7 @@ fn frontmatter(text: &str) -> Option<&str> {
     Some(&text[..boundary])
 }
 
-pub(super) fn parse_json(bytes: &[u8], max_bytes: usize) -> Result<Value, ToolError> {
+pub(crate) fn parse_json(bytes: &[u8], max_bytes: usize) -> Result<Value, ToolError> {
     if bytes.len() > max_bytes {
         return Err(ToolError::Limit);
     }

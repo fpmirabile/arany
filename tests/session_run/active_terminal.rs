@@ -286,7 +286,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             if inline {
                 b"TTY_BEFORE:"
             } else {
-                b"Agent: primary; state: working"
+                b"Agent: primary; state: active"
             },
         ];
         if expect_draft {
@@ -588,9 +588,27 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             attached.child().kill().expect("close PTY master");
             attached.take().wait().expect("reap PTY owner");
             let output = reader.join().expect("PTY output reader");
-            socket_closed
-                .recv_timeout(Duration::from_secs(3))
-                .expect("Provider socket remained open after PTY loss");
+            if let Err(error) = socket_closed.recv_timeout(Duration::from_secs(3)) {
+                let owned = product.is_owned_and_running();
+                let process = if owned {
+                    format!(
+                        "state={} wait={}",
+                        product_state(product_pid),
+                        std::fs::read_to_string(format!(
+                            "/proc/{}/wchan",
+                            product_pid.as_raw_pid()
+                        ))
+                        .unwrap_or_else(|_| "unavailable".into())
+                        .trim()
+                    )
+                } else {
+                    "exited".into()
+                };
+                panic!(
+                    "Provider socket remained open after PTY loss: {error}; product {process}; output: {}",
+                    redacted_tail(&output)
+                );
+            }
             let deadline = Instant::now() + Duration::from_secs(5);
             while product.is_owned_and_running() {
                 assert!(

@@ -23,21 +23,18 @@ trap 'rm -rf -- "$stage" "$verify"' EXIT
 tar -xzf "$project_root/target/package/$package.crate" -C "$stage"
 cp "$project_root/Cargo.toml" "$stage/$package/Cargo.toml"
 cp "$project_root/Cargo.lock" "$stage/$package/Cargo.lock"
-mkdir -p "$stage/$package/vendor"
-cp -R "$project_root/vendor/crossterm-0.29.0" "$stage/$package/vendor/"
-cp "$project_root/vendor/README.md" "$stage/$package/vendor/README.md"
 
 archive="$artifact/$package-source.tar.gz"
 tar -czf "$archive" -C "$stage" "$package"
 tar -xzf "$archive" -C "$verify"
 extracted="$verify/$package"
-cmp "$project_root/vendor/crossterm-0.29.0/src/event/source/unix/mio.rs" \
-  "$extracted/vendor/crossterm-0.29.0/src/event/source/unix/mio.rs"
+cmp "$project_root/Cargo.toml" "$extracted/Cargo.toml"
+cmp "$project_root/Cargo.lock" "$extracted/Cargo.lock"
 (
   cd "$extracted"
   selected_terminal="$(cargo tree --offline --locked -p crossterm --depth 0)"
-  if [[ "$selected_terminal" != "crossterm v0.29.0 ($extracted/vendor/crossterm-0.29.0)" ]]; then
-    printf 'source archive refused: patched Crossterm was not selected\n' >&2
+  if [[ "$selected_terminal" != 'crossterm v0.29.0' ]]; then
+    printf 'source archive refused: published Crossterm was not selected\n' >&2
     exit 1
   fi
   for target in x86_64-apple-darwin aarch64-apple-darwin; do

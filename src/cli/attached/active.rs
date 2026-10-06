@@ -1,8 +1,8 @@
-use super::{Admission, controls::ActiveSubmission, emit_outcome, run};
+use super::{Admission, Feedback, controls::ActiveSubmission, emit_outcome, run};
 use arany::{
     AttachedTerminal, CompactionFailure, CompactionRecord, CompactionStatus, Composer,
     ComposerEdit, RunCancellation, RunOutcome, RunProgress, RunRequest, SessionView,
-    ShutdownSignal, TerminalError, TerminalInput,
+    ShutdownSignal, TerminalError, TerminalInput, TerminalNotice,
 };
 use std::time::Duration;
 
@@ -19,6 +19,30 @@ pub(super) enum CompactionOutcome {
     Unavailable(String),
     Interrupted(String),
     Shutdown(ShutdownSignal),
+}
+
+pub(super) fn objective_includes(
+    admission: &Admission,
+    objective: &str,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    let mut paths = admission.include_paths.clone();
+    for path in arany::mention_paths(objective).map_err(|error| error.to_string())? {
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    Ok(paths)
+}
+
+pub(super) fn validate_objective_inputs(
+    admission: &Admission,
+    objective: &str,
+) -> Result<(), String> {
+    let paths = objective_includes(admission, objective)?;
+    let root = arany::StateRoot::admit(&admission.state_dir)
+        .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+    arany::validate_workspace_inputs(&root, &admission.workspace, &paths)
+        .map_err(|error| error.to_string())
 }
 
 pub(super) async fn submit_objective(
@@ -47,12 +71,7 @@ pub(super) async fn submit_objective(
     let mut approval_page = 0usize;
     let mut approval_allow = false;
     let mut approval_answer = Composer::default();
-    let mut include_paths = admission.include_paths.clone();
-    for path in arany::mention_paths(&objective).map_err(|error| error.to_string())? {
-        if !include_paths.contains(&path) {
-            include_paths.push(path);
-        }
-    }
+    let include_paths = objective_includes(admission, &objective)?;
     let request = RunRequest {
         session_id: Some(view.id),
         title: None,
@@ -224,14 +243,14 @@ pub(super) async fn submit_objective(
                     TerminalInput::CycleApprovalMode => {
                         let notice = super::permissions::cycle(composer);
                         approvals.set_mode(composer.approval_mode().unwrap_or_default());
-                        Some(notice)
+                        Some(Feedback::History(notice))
                     }
                     TerminalInput::ClipboardPaste => Some(match terminal.request_clipboard_paste() {
-                        Ok(()) => "Reading clipboard... draft retained".to_owned(),
-                        Err(error) => format!("Error: {error}; draft unchanged"),
+                        Ok(()) => Feedback::Transient("Reading clipboard... draft retained".into()),
+                        Err(error) => Feedback::History(format!("Error: {error}; draft unchanged")),
                     }),
                     TerminalInput::Paste => match terminal.paste_into(composer) {
-                        Err(error) => Some(format!("Error: {error}; draft unchanged")),
+                        Err(error) => Some(Feedback::History(format!("Error: {error}; draft unchanged"))),
                         Ok(ComposerEdit::Changed) => {
                             if draw_active_snapshot(terminal, view, composer, user_recorded, cancelling, None).is_err() {
                                 break "terminal rendering failed".to_owned();
@@ -255,7 +274,7 @@ pub(super) async fn submit_objective(
                     | TerminalInput::End
                     | TerminalInput::Tab
                     | TerminalInput::Escape) => match composer.apply(input) {
-                        ComposerEdit::AtCapacity => Some("Error: message is too long; shorten it; draft unchanged".to_owned()),
+                        ComposerEdit::AtCapacity => Some(Feedback::History("Error: message is too long; shorten it; draft unchanged".into())),
                         ComposerEdit::Changed if !terminal.is_linear() => {
                             if draw_active_snapshot(terminal, view, composer, user_recorded, cancelling, None).is_err() {
                                 break "terminal rendering failed".to_owned();
@@ -266,19 +285,19 @@ pub(super) async fn submit_objective(
                         ComposerEdit::Changed => None,
                     },
                     TerminalInput::LineRejected => {
-                        Some("Error: invalid or overlong terminal line; draft unchanged".to_owned())
+                        Some(Feedback::History("Error: invalid or overlong terminal line; draft unchanged".into()))
                     }
                     TerminalInput::LineContinued => {
-                        Some(format!("Draft: {} characters; Enter retains until Run ends", composer.character_count()))
+                        Some(Feedback::History(format!("Draft: {} characters; Enter retains until Run ends", composer.character_count())))
                     }
                     TerminalInput::QuickActions => {
-                        Some("Quick actions are unavailable during a Run; /agents opens details".to_owned())
+                        Some(Feedback::History("Quick actions are unavailable during a Run; /agents opens details".into()))
                     }
                     TerminalInput::Submit if terminal.clipboard_loading() => {
                         if terminal.restore_draft_input(composer.text().len()).is_err() {
                             break "terminal input failed".to_owned();
                         }
-                        Some("Clipboard loading; press Enter after paste to submit".to_owned())
+                        Some(Feedback::Transient("Clipboard loading; press Enter after paste to submit".into()))
                     }
                     TerminalInput::Submit if !terminal.is_linear()
                         && composer.apply(TerminalInput::Submit) == ComposerEdit::Changed => {
@@ -293,18 +312,18 @@ pub(super) async fn submit_objective(
                                 if terminal.restore_draft_input(composer.text().len()).is_err() {
                                     break "terminal input failed".to_owned();
                                 }
-                                Some("Draft retained; press Enter after this Run to submit".to_owned())
+                                Some(Feedback::Transient("Draft retained; press Enter after this Run to submit".into()))
                             }
                             ActiveSubmission::Rejected(notice) => {
                                 if terminal.is_linear() {
                                     composer.take();
                                 }
-                                Some(format!("Error: {notice}"))
+                                Some(Feedback::History(format!("Error: {notice}")))
                             }
-                            ActiveSubmission::Notice(notice) => Some(notice),
+                            ActiveSubmission::Notice(notice) => Some(Feedback::History(notice)),
                             ActiveSubmission::ReadClipboard => Some(match terminal.request_clipboard_paste() {
-                                Ok(()) => "Reading clipboard... draft retained".to_owned(),
-                                Err(error) => format!("Error: {error}; draft unchanged"),
+                                Ok(()) => Feedback::Transient("Reading clipboard... draft retained".into()),
+                                Err(error) => Feedback::History(format!("Error: {error}; draft unchanged")),
                             }),
                             ActiveSubmission::OpenAgents => {
                                 if terminal.open_agents(view, true).is_err() {
@@ -347,12 +366,12 @@ pub(super) async fn submit_objective(
                         None
                     }
                     TerminalInput::EndOfInput if !composer.is_empty() => {
-                        Some("Draft retained; press Enter after this Run to submit".to_owned())
+                        Some(Feedback::Transient("Draft retained; press Enter after this Run to submit".into()))
                     }
                     _ => None,
                 };
                 if (notice.is_some() || matches!(input, TerminalInput::Interrupt))
-                    && draw_active_snapshot(terminal, view, composer, user_recorded, cancelling, notice.as_deref()).is_err()
+                    && draw_active_snapshot(terminal, view, composer, user_recorded, cancelling, notice.as_ref().map(Feedback::notice)).is_err()
                 {
                     break "terminal rendering failed".to_owned();
                 }
@@ -397,24 +416,27 @@ fn draw_active_snapshot(
     composer: &Composer,
     current_run_started: bool,
     cancelling: bool,
-    notice: Option<&str>,
+    notice: Option<TerminalNotice<'_>>,
 ) -> Result<(), TerminalError> {
     if !current_run_started {
-        terminal.draw_preparing(
+        terminal.draw_preparing_notice(
             view,
             composer,
-            notice.or(cancelling.then_some("Stopping request...")),
+            notice.or(cancelling.then_some(TerminalNotice::Transient("Stopping request..."))),
         )
-    } else if cancelling {
-        terminal.draw_progress_with_draft(view, composer, notice.unwrap_or("Cancelling Run..."))
-    } else if terminal.is_linear() {
-        terminal.draw_progress_with_draft(
-            view,
-            composer,
-            notice.unwrap_or("Run in progress... Ctrl+C cancels"),
-        )
+    } else if cancelling || terminal.is_linear() {
+        let notice = notice.unwrap_or(TerminalNotice::Transient(if cancelling {
+            "Cancelling Run..."
+        } else {
+            "Run in progress... Ctrl+C cancels"
+        }));
+        if terminal.is_linear() {
+            terminal.draw_busy_notice(view, composer, Some(notice))
+        } else {
+            terminal.draw_notice(view, composer, Some(notice))
+        }
     } else {
-        terminal.draw(view, composer, notice)
+        terminal.draw_notice(view, composer, notice)
     }
 }
 
@@ -468,7 +490,11 @@ pub(super) async fn compact_current(
         "Compacting Session... Ctrl+C interrupts"
     };
     terminal
-        .draw_busy(view, composer, Some(progress_text))
+        .draw_busy_notice(
+            view,
+            composer,
+            Some(TerminalNotice::Transient(progress_text)),
+        )
         .map_err(|error| error.to_string())?;
     let future = run::compact_selected(
         &admission.state_dir,
@@ -497,11 +523,11 @@ pub(super) async fn compact_current(
                 }
                 let notice = match input {
                     TerminalInput::ClipboardPaste => Some(match terminal.request_clipboard_paste() {
-                        Ok(()) => "Reading clipboard... draft retained".to_owned(),
-                        Err(error) => format!("Error: {error}; draft unchanged"),
+                        Ok(()) => Feedback::Transient("Reading clipboard... draft retained".into()),
+                        Err(error) => Feedback::History(format!("Error: {error}; draft unchanged")),
                     }),
                     TerminalInput::Paste => match terminal.paste_into(composer) {
-                        Err(error) => Some(format!("Error: {error}; draft unchanged")),
+                        Err(error) => Some(Feedback::History(format!("Error: {error}; draft unchanged"))),
                         Ok(ComposerEdit::Changed) => {
                             terminal.draw_busy(view, composer, None)
                                 .map_err(|error| error.to_string())?;
@@ -532,28 +558,22 @@ pub(super) async fn compact_current(
                     TerminalInput::Submit | TerminalInput::EndOfInput => {
                         terminal.restore_draft_input(composer.text().len())
                             .map_err(|error| error.to_string())?;
-                        Some("Draft retained; press Enter after compaction to submit".to_owned())
+                        Some(Feedback::Transient("Draft retained; press Enter after compaction to submit".into()))
                     }
-                    TerminalInput::LineRejected => Some(
-                        "Error: invalid or overlong terminal line; draft unchanged".to_owned(),
-                    ),
-                    TerminalInput::LineContinued => Some(format!(
+                    TerminalInput::LineRejected => Some(Feedback::History("Error: invalid or overlong terminal line; draft unchanged".into())),
+                    TerminalInput::LineContinued => Some(Feedback::History(format!(
                         "Draft: {} characters; Enter retains until compaction ends",
                         composer.character_count(),
-                    )),
-                    TerminalInput::QuickActions => Some(
-                        "Quick actions are unavailable during compaction; draft retained".to_owned(),
-                    ),
+                    ))),
+                    TerminalInput::QuickActions => Some(Feedback::History("Quick actions are unavailable during compaction; draft retained".into())),
                     input => match composer.apply(input) {
-                        ComposerEdit::AtCapacity => Some(
-                            "Error: message is too long; shorten it; draft unchanged".to_owned(),
-                        ),
-                        ComposerEdit::Changed if !terminal.is_linear() => Some(progress_text.to_owned()),
+                        ComposerEdit::AtCapacity => Some(Feedback::History("Error: message is too long; shorten it; draft unchanged".into())),
+                        ComposerEdit::Changed if !terminal.is_linear() => Some(Feedback::Transient(progress_text.into())),
                         ComposerEdit::Changed | ComposerEdit::Unchanged => None,
                     },
                 };
                 if let Some(notice) = notice {
-                    terminal.draw_busy(view, composer, Some(&notice))
+                    terminal.draw_busy_notice(view, composer, Some(notice.notice()))
                         .map_err(|error| error.to_string())?;
                 }
             }

@@ -404,38 +404,23 @@ impl RunConfig {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ReplayError> {
-        if self.provider.is_empty()
-            || self.provider.len() > 128
-            || self.model.is_empty()
-            || self.model.len() > 128
-            || self.provider.starts_with("custom:") != self.custom_profile_provenance.is_some()
-            || !crate::provider::valid_saved_api_account_id(
-                &self.provider,
-                self.saved_api_account_id,
-            )
-            || (self.provider == "chatgpt") != self.chatgpt_provenance.is_some()
-            || (self.provider == "chatgpt")
-                != (self.output_token_bound
-                    == crate::provider::OutputTokenBound::LocalAcceptanceOnly)
-            || self.provider == "chatgpt"
-                && (self.effort.is_none() || self.provider_concurrency != 1)
-            || self
-                .chatgpt_provenance
-                .as_ref()
-                .is_some_and(|provenance| !provenance.valid())
-            || self
-                .custom_profile_provenance
-                .as_ref()
-                .is_some_and(|provenance| {
-                    provenance.capability_evidence_version == 1 && self.effort.is_some()
-                })
+        if !(crate::provider::ProviderIdentity {
+            profile: &self.provider,
+            model: &self.model,
+            effort: self.effort,
+            concurrency: self.provider_concurrency,
+            custom_profile_provenance: self.custom_profile_provenance.as_ref(),
+            saved_api_account_id: self.saved_api_account_id,
+            chatgpt_provenance: self.chatgpt_provenance.as_ref(),
+            output_token_bound: self.output_token_bound,
+        })
+        .valid()
             || self.output_token_cap != 4096
             || self
                 .tool_policy
                 .as_ref()
                 .is_some_and(|policy| !policy.valid())
             || self.provider.starts_with("custom:") && self.tool_policy.is_some()
-            || !(1..=8).contains(&self.provider_concurrency)
             || self.include_digests.len() > 16
             || self.history_run_ids.len() > super::MAX_HISTORY_RUNS
             || self.compaction_event_sequence.is_some() != self.compaction_content_digest.is_some()
@@ -443,13 +428,6 @@ impl RunConfig {
                 .context_usage
                 .as_ref()
                 .is_some_and(|usage| !usage.valid())
-        {
-            return Err(ReplayError::InvalidPayload);
-        }
-        if self
-            .custom_profile_provenance
-            .as_ref()
-            .is_some_and(|provenance| !provenance.valid())
         {
             return Err(ReplayError::InvalidPayload);
         }

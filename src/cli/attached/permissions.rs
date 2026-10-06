@@ -4,25 +4,36 @@ use std::path::Path;
 
 pub(super) enum PermissionChoice {
     Selected(WorkspacePermissions),
-    Closed,
+    Closed(WorkspacePermissions),
     Exit,
 }
 
-pub(super) fn refresh_files(workspace: &Path, composer: &mut Composer) {
+pub(super) fn refresh_files(workspace: &Path, composer: &mut Composer) -> Option<String> {
     if !composer.file_query_changed() {
-        return;
+        return None;
     }
     let query = composer.file_query();
-    let entries = query
-        .as_deref()
-        .and_then(|query| {
+    let entries = query.as_deref().map_or_else(
+        || Ok(Vec::new()),
+        |query| {
             let (folder, prefix) = query
                 .strip_suffix('/')
                 .map_or(("", query), |folder| (folder, ""));
-            arany::list_workspace_entries(workspace, folder, prefix).ok()
-        })
-        .unwrap_or_default();
-    composer.set_file_candidates(query, entries);
+            arany::list_workspace_entries(workspace, folder, prefix)
+        },
+    );
+    match entries {
+        Ok(entries) => {
+            composer.set_file_candidates(query, entries);
+            None
+        }
+        Err(error) => {
+            composer.set_file_candidates(query, Vec::new());
+            Some(format!(
+                "File suggestions unavailable: {error}; type an exact @file path"
+            ))
+        }
+    }
 }
 
 pub(super) fn supports_tools(profile: Option<&str>) -> bool {
@@ -102,7 +113,7 @@ pub(super) async fn choose(
             }
             TerminalInput::Escape => {
                 terminal.restore_draft_input(composer.text().len())?;
-                return Ok(PermissionChoice::Closed);
+                return Ok(PermissionChoice::Closed(permissions));
             }
             TerminalInput::Interrupt | TerminalInput::EndOfInput => {
                 return Ok(PermissionChoice::Exit);

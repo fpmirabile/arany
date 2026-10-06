@@ -50,7 +50,7 @@ impl AgentInspectorModel {
                     AgentRole::Child => format!("child {}", agent.ordinal),
                 };
                 safe_truncate(
-                    &format!("Run {run_number}: {role}; {:?}", agent.status),
+                    &format!("Run {run_number}: {role}; {}", agent.status),
                     width.saturating_sub(2),
                 )
             })
@@ -80,7 +80,7 @@ impl AgentInspectorModel {
                 hidden_runs
             ),
         ];
-        lines.push(format!("Next Run: {:?}", view.defaults.policy));
+        lines.push(format!("Next Run: {}", view.defaults.policy));
         if locked {
             lines.push(
                 view.runs
@@ -89,7 +89,7 @@ impl AgentInspectorModel {
                     .and_then(|run| run.config.as_ref())
                     .map_or_else(
                         || "Current Run: admission in progress; topology locked".into(),
-                        |config| format!("Current Run: {:?}; topology locked", config.policy),
+                        |config| format!("Current Run: {}; topology locked", config.policy),
                     ),
             );
         } else {
@@ -132,7 +132,7 @@ fn agent_lines(
         AgentRole::Child => format!("child {}", agent.ordinal),
     };
     let mut lines = vec![
-        format!("Agent {}/{count}: {role}; {:?}", selected + 1, agent.status),
+        format!("Agent {}/{count}: {role}; {}", selected + 1, agent.status),
         format!("Session: {}", view.id),
         format!("Run: {}", run.id),
         format!("AgentRun: {}", agent.id),

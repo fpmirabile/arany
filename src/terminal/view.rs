@@ -13,7 +13,7 @@ use ratatui::{
     layout::{Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Wrap},
+    widgets::{HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap},
 };
 use std::io::{self, Stderr};
 use unicode_segmentation::UnicodeSegmentation;
@@ -1275,21 +1275,24 @@ pub(super) fn draw_quick_actions_frame(
     let first = selected
         .saturating_sub(visible.saturating_sub(1))
         .min(labels.len().saturating_sub(visible));
-    for (index, label) in labels.into_iter().enumerate().skip(first).take(visible) {
-        let marker = if index == selected { "> " } else { "  " };
-        frame.render_widget(
-            Paragraph::new(safe_truncate(
-                &format!("{marker}{label}"),
-                usize::from(area.width),
-            ))
-            .style(if index == selected {
-                palette.selection()
-            } else {
-                Style::default()
-            }),
-            Rect::new(area.x, area.y + 1 + (index - first) as u16, area.width, 1),
-        );
-    }
+    let items = labels.into_iter().map(|label| {
+        ListItem::new(safe_truncate(
+            label,
+            usize::from(area.width.saturating_sub(2)),
+        ))
+    });
+    let list = List::new(items)
+        .highlight_symbol("> ")
+        .highlight_spacing(HighlightSpacing::Always)
+        .highlight_style(palette.selection());
+    let mut state = ListState::default()
+        .with_offset(first)
+        .with_selected(Some(selected));
+    frame.render_stateful_widget(
+        list,
+        Rect::new(area.x, area.y + 1, area.width, visible as u16),
+        &mut state,
+    );
     if area.height >= 2 {
         let hint = if selected == 2 && has_draft {
             if area.width < 20 {

@@ -1,4 +1,4 @@
-use super::{CommandOutput, OutputArg, chatgpt, native_run_key_from_env, state_dir};
+use super::{CommandOutput, OutputArg, chatgpt, native_run_key_from_env};
 use arany::{
     AnthropicProvider, CollaborationPolicy, CustomProvider, Effort, Engine, OpenAiProvider,
     Provider, RunRequest, RunStatus, SessionId, StateRoot, Store, Telemetry, render_exec,
@@ -136,16 +136,8 @@ impl ExecArgs {
             .as_deref()
             .map(SessionId::from_str)
             .transpose()?;
-        let workspace = match &self.workspace {
-            Some(path) => path.clone(),
-            None => std::env::current_dir().map_err(|_| "Workspace unavailable")?,
-        };
-        let state_dir = state_dir(self.state_dir.clone())?;
-        let workspace_identity_path =
-            std::fs::canonicalize(&workspace).map_err(|_| "Workspace unavailable")?;
-        if state_dir.starts_with(&workspace_identity_path) {
-            return Err("state directory overlaps the Workspace");
-        }
+        let (workspace, state_dir) =
+            super::admit_workspace(self.workspace.clone(), self.state_dir.clone())?;
         Ok(Admission {
             state_dir,
             workspace,

@@ -108,7 +108,7 @@ const COMMANDS: [CommandSpec; 17] = [
         Some("[session-id]"),
         &[],
     ),
-    spec("fork", InteractiveCommand::Fork, Some("<session-id>"), &[]),
+    spec("fork", InteractiveCommand::Fork, Some("[session-id]"), &[]),
     spec("rename", InteractiveCommand::Rename, Some("<title>"), &[]),
     spec("compact", InteractiveCommand::Compact, None, &[]),
     spec(

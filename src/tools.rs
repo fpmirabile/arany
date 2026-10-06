@@ -15,6 +15,7 @@ use crate::session::{AgentRunId, RunId};
 use crate::store::StateRoot;
 pub use approval::{ApprovalInbox, ApprovalMode, ToolApproval, ToolApprovals};
 use config::Config;
+pub(crate) use skills::parse_json;
 pub use skills::{ProjectSkills, project_skills};
 pub use workspace::{WorkspacePermissions, mention_paths};
 pub fn configured_skill_names(state: &StateRoot) -> Result<Vec<String>, ToolError> {
@@ -85,6 +86,8 @@ pub enum ToolError {
     Uncertain,
     #[error("Guard rejected its {0} stage")]
     GuardRejected(&'static str),
+    #[error("Guard rejected at {0}")]
+    GuardBootstrap(guard::BootstrapFailure),
 }
 
 pub(crate) struct ToolRuntime {
@@ -213,6 +216,7 @@ impl ToolRuntime {
 
 pub(crate) fn failure_stage(error: &ToolError) -> &'static str {
     match error {
+        ToolError::GuardBootstrap(failure) => failure.failure_stage(),
         ToolError::GuardRejected("admission") | ToolError::Configuration => "admission",
         ToolError::GuardRejected("Workspace identity")
         | ToolError::ChangedInput

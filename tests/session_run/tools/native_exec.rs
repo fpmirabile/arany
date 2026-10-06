@@ -217,7 +217,26 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                 assert_eq!(context["history"], json!([]));
                 assert_eq!(context["includes"], json!([]));
                 assert!(context["workspace_guidance"].is_null());
-                let observations = context["tools"]["observations"].as_array().unwrap();
+                let observations: Vec<Value> = if profile == "openai" {
+                    assert!(context["tools"].get("observations").is_none());
+                    let items = body["input"].as_array().unwrap();
+                    assert_eq!(items.len(), 1 + step * 2);
+                    items[1..]
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .enumerate()
+                        .map(|(index, pair)| {
+                            assert_eq!(pair[0]["type"], "function_call");
+                            assert_eq!(pair[1]["type"], "function_call_output");
+                            assert_eq!(pair[0]["call_id"], format!("arany_action_{index}"));
+                            assert_eq!(pair[1]["call_id"], pair[0]["call_id"]);
+                            serde_json::from_str(pair[1]["output"].as_str().unwrap()).unwrap()
+                        })
+                        .collect()
+                } else {
+                    context["tools"]["observations"].as_array().unwrap().clone()
+                };
                 assert_eq!(observations.len(), step);
                 if step == 1 {
                     assert_eq!(observations[0]["disposition"], "succeeded");

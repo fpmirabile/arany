@@ -142,8 +142,8 @@ pub(super) async fn saved_defaults(
         }
     }
     let path = StateRoot::account_path().map_err(|error| error.to_string())?;
-    let (native, chatgpt) = match StateRoot::open_existing(&path) {
-        Ok(state) => (
+    let (native, chatgpt) = match crate::cli::open_optional_state(&path) {
+        Ok(Some(state)) => (
             state
                 .saved_account_record_present()
                 .map_err(|error| error.to_string())?,
@@ -151,12 +151,9 @@ pub(super) async fn saved_defaults(
                 .chatgpt_accounts_record_present()
                 .map_err(|error| error.to_string())?,
         ),
+        Ok(None) => (false, false),
         Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            match std::fs::symlink_metadata(&path) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                _ => return Err("private account state unavailable".into()),
-            }
-            (false, false)
+            return Err("private account state unavailable".into());
         }
         Err(error) => return Err(error.to_string()),
     };

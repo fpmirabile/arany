@@ -37,7 +37,7 @@ struct Ready {
     profile_digest: [u8; 32],
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum BootstrapStage {
     Admission,
@@ -61,10 +61,29 @@ impl BootstrapStage {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BootstrapFailure {
+pub struct BootstrapFailure {
     stage: BootstrapStage,
+}
+
+impl std::fmt::Display for BootstrapFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.stage.label())
+    }
+}
+
+impl BootstrapFailure {
+    pub(super) fn failure_stage(&self) -> &'static str {
+        match self.stage {
+            BootstrapStage::Admission => "admission",
+            BootstrapStage::Workspace => "pinned input",
+            BootstrapStage::Capabilities => "native protection",
+            BootstrapStage::Handshake => "handshake",
+            BootstrapStage::Payload => "execution",
+            BootstrapStage::Receipt => "receipt",
+        }
+    }
 }
 
 pub(super) fn check_available() -> Result<(), ToolError> {
@@ -580,7 +599,7 @@ async fn execute_inner(
         && let Ok(Ok(Ok(stderr))) = &drained
         && let Ok(failure) = serde_json::from_slice::<BootstrapFailure>(stderr)
     {
-        return Err(ToolError::GuardRejected(failure.stage.label()));
+        return Err(ToolError::GuardBootstrap(failure));
     }
     if !matches!(cleanup, Ok(Ok(()))) {
         return Err(ToolError::GuardRejected("process-unit cleanup"));

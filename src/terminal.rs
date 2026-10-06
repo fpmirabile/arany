@@ -85,28 +85,18 @@ impl ModelCatalogState {
     }
 }
 
-fn transient_notice(notice: &str) -> bool {
-    notice.starts_with("Draft retained: ")
-        || matches!(
-            notice,
-            "Model catalog closed"
-                | "Model catalog cancelled"
-                | "Agent inspection closed"
-                | "Session selection closed"
-                | "Setup closed"
-                | "Terminal resumed"
-                | "Preparing request... Ctrl+C cancels"
-                | "Stopping request..."
-                | "Cancelling Run..."
-                | "Compacting Session... Ctrl+C interrupts"
-                | "Automatically compacting Session... Ctrl+C interrupts"
-                | "Draft retained; press Enter after compaction to submit"
-                | "Draft retained; press Enter after this Run to submit"
-                | "Loading model catalog; Ctrl+C cancels"
-                | "Reading clipboard... draft retained"
-                | "Clipboard loading; press Enter after paste to submit"
-                | "Clipboard read cancelled; draft retained"
-        )
+#[derive(Clone, Copy)]
+pub enum TerminalNotice<'a> {
+    History(&'a str),
+    Transient(&'a str),
+}
+
+impl<'a> TerminalNotice<'a> {
+    fn text(self) -> &'a str {
+        match self {
+            Self::History(text) | Self::Transient(text) => text,
+        }
+    }
 }
 
 fn model_catalog_status(item: &ModelEntry, exact_custom: bool) -> String {
@@ -707,6 +697,15 @@ impl AttachedTerminal {
         composer: &Composer,
         notice: Option<&str>,
     ) -> Result<(), TerminalError> {
+        self.draw_notice(view, composer, notice.map(TerminalNotice::History))
+    }
+
+    pub fn draw_notice(
+        &mut self,
+        view: &SessionView,
+        composer: &Composer,
+        notice: Option<TerminalNotice<'_>>,
+    ) -> Result<(), TerminalError> {
         self.draw_snapshot(view, composer, notice, SnapshotState::Session, None)
     }
 
@@ -714,7 +713,7 @@ impl AttachedTerminal {
         &mut self,
         view: &SessionView,
         composer: &Composer,
-        notice: Option<&str>,
+        notice: Option<TerminalNotice<'_>>,
         state: SnapshotState,
         picker: Option<&ModelPicker<'_>>,
     ) -> Result<(), TerminalError> {
@@ -731,13 +730,17 @@ impl AttachedTerminal {
                     .map_err(TerminalError::Io)?;
             }
             return linear
-                .draw(view, notice, composer.approval_mode())
+                .draw(
+                    view,
+                    notice.map(TerminalNotice::text),
+                    composer.approval_mode(),
+                )
                 .map_err(TerminalError::Io);
         }
         let notice = notice.or_else(|| {
             self.clipboard
                 .as_ref()
-                .map(|_| "Reading clipboard... draft retained")
+                .map(|_| TerminalNotice::Transient("Reading clipboard... draft retained"))
         });
         let area = self.terminal.as_mut().expect("inline terminal").size()?;
         let mut model = match state {
@@ -771,7 +774,7 @@ impl AttachedTerminal {
         let history_height = history_height - history_top_padding(history_height);
         self.history
             .sync(view, usize::from(area.width), usize::from(history_height));
-        if let Some(notice) = notice.filter(|notice| !transient_notice(notice)) {
+        if let Some(notice) = notice {
             self.history.record_notice(notice);
         }
         let history_rows = self.history.visible(view);
@@ -785,7 +788,11 @@ impl AttachedTerminal {
                     frame,
                     &model,
                     composer,
-                    notice.filter(|notice| transient_notice(notice) || history_height == 0),
+                    notice
+                        .filter(|notice| {
+                            matches!(notice, TerminalNotice::Transient(_)) || history_height == 0
+                        })
+                        .map(TerminalNotice::text),
                     palette,
                     &history_rows,
                     history_status.as_deref(),
@@ -1040,9 +1047,9 @@ impl AttachedTerminal {
                 .last()
                 .is_some_and(|run| run.status == RunStatus::Active)
         {
-            return self.draw(view, composer, Some(notice));
+            return self.draw_notice(view, composer, Some(TerminalNotice::Transient(notice)));
         }
-        self.draw_busy(view, composer, Some(notice))
+        self.draw_busy_notice(view, composer, Some(TerminalNotice::Transient(notice)))
     }
 
     pub fn draw_busy(
@@ -1050,6 +1057,15 @@ impl AttachedTerminal {
         view: &SessionView,
         composer: &Composer,
         notice: Option<&str>,
+    ) -> Result<(), TerminalError> {
+        self.draw_busy_notice(view, composer, notice.map(TerminalNotice::History))
+    }
+
+    pub fn draw_busy_notice(
+        &mut self,
+        view: &SessionView,
+        composer: &Composer,
+        notice: Option<TerminalNotice<'_>>,
     ) -> Result<(), TerminalError> {
         self.draw_in_flight(view, composer, notice, SnapshotState::Busy)
     }
@@ -1060,8 +1076,19 @@ impl AttachedTerminal {
         composer: &Composer,
         notice: Option<&str>,
     ) -> Result<(), TerminalError> {
+        self.draw_preparing_notice(view, composer, notice.map(TerminalNotice::History))
+    }
+
+    pub fn draw_preparing_notice(
+        &mut self,
+        view: &SessionView,
+        composer: &Composer,
+        notice: Option<TerminalNotice<'_>>,
+    ) -> Result<(), TerminalError> {
         let notice = if self.is_linear() {
-            notice.or(Some("Preparing request... Ctrl+C cancels"))
+            notice.or(Some(TerminalNotice::Transient(
+                "Preparing request... Ctrl+C cancels",
+            )))
         } else {
             notice
         };
@@ -1072,7 +1099,7 @@ impl AttachedTerminal {
         &mut self,
         view: &SessionView,
         composer: &Composer,
-        notice: Option<&str>,
+        notice: Option<TerminalNotice<'_>>,
         state: SnapshotState,
     ) -> Result<(), TerminalError> {
         if let Some(selected) = self.help_selected {
@@ -1089,7 +1116,11 @@ impl AttachedTerminal {
             }
             let prompt_needed = linear.prompt_needed;
             linear.prompt_needed = false;
-            let result = linear.draw(view, notice, composer.approval_mode());
+            let result = linear.draw(
+                view,
+                notice.map(TerminalNotice::text),
+                composer.approval_mode(),
+            );
             linear.prompt_needed = prompt_needed;
             return result.map_err(TerminalError::Io);
         }

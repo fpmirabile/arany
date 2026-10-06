@@ -645,7 +645,7 @@ mod tests {
                  Permissions: read-only Workspace; Arany requests: selected Provider; OS TLS checks may connect separately; no Tools or sandbox\n\
                  Collaboration: auto; max children: 3\n\
                  Run: {run_id}\n\
-                 Agent: primary; state: working\n\
+                 Agent: primary; state: active\n\
                  Notice: Run in progress... Ctrl+C cancels\n",
                 view.id
             )
@@ -668,7 +668,7 @@ mod tests {
                 "Command: /new; New Session; during Run: locked\n",
                 "Command: /clear; New Session; during Run: locked\n",
                 "Command: /resume [session-id]; Resume Session; during Run: locked\n",
-                "Command: /fork <session-id>; Fork Session; during Run: locked\n",
+                "Command: /fork [session-id]; Fork Session; during Run: locked\n",
                 "Command: /rename <title>; Rename Session; during Run: locked\n",
                 "Command: /compact; Compact context; during Run: locked\n",
                 "Command: /agents <single|auto|team> [max-active-children]; Agent details; during Run: view-only\n",
@@ -736,9 +736,9 @@ mod tests {
             format!(
                 "Current Run: 1 agent; children: 0\n\
                  History: 1 agents in 1 recent Runs; 0 older Runs\n\
-                 Next Run: Auto {{ max_active_children: 3 }}\n\
+                 Next Run: auto · up to 3 children\n\
                  Current Run: admission in progress; topology locked\n\
-                 Agent 1/1: primary; Active\n\
+                 Agent 1/1: primary; active\n\
                  Session: {}\n\
                  Run: {run_id}\n\
                  AgentRun: {agent_id}\n\

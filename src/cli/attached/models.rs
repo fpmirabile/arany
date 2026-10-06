@@ -1,5 +1,5 @@
 use super::{Admission, controls};
-use crate::cli::{chatgpt, credentials};
+use crate::cli::{bounded_list, chatgpt, credentials};
 use arany::{
     AttachedTerminal, Composer, ComposerEdit, CustomProfile, Effort, ModelCatalogState, ModelEntry,
     ModelPicker, NativeApiCredentials, SessionId, SessionView, ShutdownSignal, StateRoot,
@@ -49,46 +49,19 @@ struct SavedModels {
 fn bounded_sources<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Vec<SavedModels>, D::Error> {
-    bounded_list::<D, SavedModels, MAX_PREFERENCE_SOURCES>(deserializer)
+    bounded_list::<D, SavedModels, MAX_PREFERENCE_SOURCES>(
+        deserializer,
+        "saved model preference limit exceeded",
+    )
 }
 
 fn bounded_models<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Vec<String>, D::Error> {
-    bounded_list::<D, String, MAX_CACHED_MODELS>(deserializer)
-}
-
-fn bounded_list<'de, D, T, const LIMIT: usize>(deserializer: D) -> Result<Vec<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    struct Visitor<T, const LIMIT: usize>(std::marker::PhantomData<T>);
-    impl<'de, T: Deserialize<'de>, const LIMIT: usize> serde::de::Visitor<'de> for Visitor<T, LIMIT> {
-        type Value = Vec<T>;
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(formatter, "at most {LIMIT} entries")
-        }
-        fn visit_seq<A: serde::de::SeqAccess<'de>>(
-            self,
-            mut sequence: A,
-        ) -> Result<Vec<T>, A::Error> {
-            let mut values = Vec::new();
-            while values.len() < LIMIT {
-                let Some(value) = sequence.next_element()? else {
-                    return Ok(values);
-                };
-                values.push(value);
-            }
-            if sequence.next_element::<serde::de::IgnoredAny>()?.is_some() {
-                return Err(serde::de::Error::custom(
-                    "saved model preference limit exceeded",
-                ));
-            }
-            Ok(values)
-        }
-    }
-    deserializer.deserialize_seq(Visitor::<T, LIMIT>(std::marker::PhantomData))
+    bounded_list::<D, String, MAX_CACHED_MODELS>(
+        deserializer,
+        "saved model preference limit exceeded",
+    )
 }
 
 fn read_preferences(root: &StateRoot) -> Result<ModelPreferences, String> {
@@ -162,16 +135,10 @@ pub(super) fn last_saved_defaults(
     workspace: &Path,
 ) -> Result<Option<arany::SessionDefaults>, String> {
     let path = StateRoot::account_path().map_err(|_| "saved selection unavailable")?;
-    let root = match StateRoot::open_existing(&path) {
-        Ok(root) => root,
-        Err(arany::StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            if matches!(std::fs::symlink_metadata(&path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
-            {
-                return Ok(None);
-            }
-            return Err("saved selection unavailable or unsafe".into());
-        }
-        Err(_) => return Err("saved selection unavailable or unsafe".into()),
+    let Some(root) = crate::cli::open_optional_state(&path)
+        .map_err(|_| "saved selection unavailable or unsafe")?
+    else {
+        return Ok(None);
     };
     root.with_account_replacement_lock(workspace, || {
         let preferences = read_preferences(&root)?;
@@ -362,7 +329,7 @@ fn write_preferences(
 }
 
 pub(super) enum ModelBrowse {
-    Notice(String),
+    Notice(super::Feedback),
     Shutdown(ShutdownSignal),
 }
 
@@ -383,7 +350,9 @@ pub(super) async fn browse(
     composer: &mut Composer,
 ) -> Result<ModelBrowse, String> {
     let Some(profile) = view.defaults.provider.as_deref() else {
-        return Ok(ModelBrowse::Notice("Select /provider first".into()));
+        return Ok(ModelBrowse::Notice(super::Feedback::History(
+            "Select /provider first".into(),
+        )));
     };
     composer.set_completion_selection(
         Some(profile),
@@ -403,9 +372,9 @@ pub(super) async fn browse(
     };
     composer.set_model_catalog(profile, &items, exact_custom);
     if items.is_empty() {
-        return Ok(ModelBrowse::Notice(
+        return Ok(ModelBrowse::Notice(super::Feedback::History(
             "No models available for the selected Provider".into(),
-        ));
+        )));
     }
     let selection = {
         let refresh = load_catalog(admission, view, profile);
@@ -442,12 +411,14 @@ pub(super) async fn browse(
         .restore_draft_input(composer.text().len())
         .map_err(|error| error.to_string())?;
     match selection? {
-        Choice::Closed => Ok(ModelBrowse::Notice("Model catalog closed".into())),
+        Choice::Closed => Ok(ModelBrowse::Notice(super::Feedback::Transient(
+            "Model catalog closed".into(),
+        ))),
         Choice::Shutdown(signal) => Ok(ModelBrowse::Shutdown(signal)),
         Choice::Selected { model, effort } => {
             controls::select_model(admission, session_id, view, &model, effort)
                 .await
-                .map(ModelBrowse::Notice)
+                .map(|notice| ModelBrowse::Notice(super::Feedback::History(notice)))
         }
     }
 }
@@ -578,7 +549,11 @@ async fn load_while_owned(
     profile: &str,
 ) -> Result<Result<(Vec<ModelEntry>, bool), ModelBrowse>, String> {
     terminal
-        .draw_busy(view, composer, Some(CATALOG_LOADING))
+        .draw_busy_notice(
+            view,
+            composer,
+            Some(arany::TerminalNotice::Transient(CATALOG_LOADING)),
+        )
         .map_err(|error| error.to_string())?;
     let query = load_catalog(admission, view, profile);
     tokio::pin!(query);
@@ -586,23 +561,23 @@ async fn load_while_owned(
         let at_input_boundary = terminal.input_boundary_ready();
         tokio::select! {
             result = &mut query, if at_input_boundary => break result.map_err(|error| {
-                ModelBrowse::Notice(format!("Error: Model catalog unavailable: {error}. Review the selected account or retry /model."))
+                ModelBrowse::Notice(super::Feedback::History(format!("Error: Model catalog unavailable: {error}. Review the selected account or retry /model.")))
             }),
             input = terminal.next_input() => {
                 match input.map_err(|error| error.to_string())? {
                     TerminalInput::ClipboardPaste => {
                         let notice = match terminal.request_clipboard_paste() {
-                            Ok(()) => "Reading clipboard... draft retained".to_owned(),
-                            Err(error) => format!("Error: {error}; draft unchanged; catalog loading"),
+                            Ok(()) => super::Feedback::Transient("Reading clipboard... draft retained".into()),
+                            Err(error) => super::Feedback::History(format!("Error: {error}; draft unchanged; catalog loading")),
                         };
-                        terminal.draw_busy(view, composer, Some(&notice)).map_err(|error| error.to_string())?;
+                        terminal.draw_busy_notice(view, composer, Some(notice.notice())).map_err(|error| error.to_string())?;
                     }
                     TerminalInput::Paste => {
                         let notice = match terminal.paste_into(composer) {
-                            Ok(_) => CATALOG_LOADING.to_owned(),
-                            Err(error) => format!("Error: {error}; draft unchanged; catalog loading"),
+                            Ok(_) => super::Feedback::Transient(CATALOG_LOADING.into()),
+                            Err(error) => super::Feedback::History(format!("Error: {error}; draft unchanged; catalog loading")),
                         };
-                        terminal.draw_busy(view, composer, Some(&notice)).map_err(|error| error.to_string())?;
+                        terminal.draw_busy_notice(view, composer, Some(notice.notice())).map_err(|error| error.to_string())?;
                     }
                     input @ (TerminalInput::Character(_)
                     | TerminalInput::Newline
@@ -618,24 +593,24 @@ async fn load_while_owned(
                     | TerminalInput::Home
                     | TerminalInput::End) => {
                         let notice = if composer.apply(input) == ComposerEdit::AtCapacity {
-                            Some("Error: message is too long; shorten it; draft unchanged; catalog loading")
+                            Some(arany::TerminalNotice::History("Error: message is too long; shorten it; draft unchanged; catalog loading"))
                         } else if terminal.is_linear() {
                             None
                         } else {
-                            Some(CATALOG_LOADING)
+                            Some(arany::TerminalNotice::Transient(CATALOG_LOADING))
                         };
-                        terminal.draw_busy(view, composer, notice).map_err(|error| error.to_string())?;
+                        terminal.draw_busy_notice(view, composer, notice).map_err(|error| error.to_string())?;
                     }
                     TerminalInput::Interrupt | TerminalInput::EndOfInput | TerminalInput::Escape => {
                         if !terminal.input_boundary_ready() {
                             terminal.discard_draft_input();
                         }
-                        break Err(ModelBrowse::Notice("Model catalog cancelled".into()));
+                        break Err(ModelBrowse::Notice(super::Feedback::Transient("Model catalog cancelled".into())));
                     }
                     TerminalInput::Shutdown(signal) => break Err(ModelBrowse::Shutdown(signal)),
                     TerminalInput::Suspend => {
                         terminal.suspend_and_resume(composer.text().len()).map_err(|error| error.to_string())?;
-                        terminal.draw_busy(view, composer, Some(CATALOG_LOADING)).map_err(|error| error.to_string())?;
+                        terminal.draw_busy_notice(view, composer, Some(arany::TerminalNotice::Transient(CATALOG_LOADING))).map_err(|error| error.to_string())?;
                     }
                     TerminalInput::LineRejected => {
                         terminal.draw_busy(view, composer, Some("Error: invalid or overlong terminal line; draft unchanged; catalog loading")).map_err(|error| error.to_string())?;
@@ -648,10 +623,10 @@ async fn load_while_owned(
                     }
                     TerminalInput::Submit => {
                         terminal.restore_draft_input(composer.text().len()).map_err(|error| error.to_string())?;
-                        terminal.draw_busy(view, composer, Some(CATALOG_LOADING)).map_err(|error| error.to_string())?;
+                        terminal.draw_busy_notice(view, composer, Some(arany::TerminalNotice::Transient(CATALOG_LOADING))).map_err(|error| error.to_string())?;
                     }
                     TerminalInput::Resize => {
-                        terminal.draw_busy(view, composer, Some(CATALOG_LOADING)).map_err(|error| error.to_string())?;
+                        terminal.draw_busy_notice(view, composer, Some(arany::TerminalNotice::Transient(CATALOG_LOADING))).map_err(|error| error.to_string())?;
                     }
                     _ => {}
                 }

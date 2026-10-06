@@ -38,6 +38,10 @@ pub struct SessionListItem {
     pub defaults: SessionDefaults,
 }
 
+pub(crate) fn placeholder_title(title: &str) -> bool {
+    matches!(title, "New Session" | "Forked Session")
+}
+
 pub(crate) fn title_preview(text: &str) -> String {
     use unicode_segmentation::UnicodeSegmentation;
     let mut title = String::new();

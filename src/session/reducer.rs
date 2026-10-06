@@ -200,10 +200,7 @@ impl SessionView {
                     view = Some(Self {
                         id,
                         title: title.clone(),
-                        title_is_explicit: !matches!(
-                            title.as_str(),
-                            "New Session" | "Forked Session"
-                        ),
+                        title_is_explicit: !crate::session::placeholder_title(title),
                         inherited_title: None,
                         workspace_identity: *workspace_identity,
                         defaults: SessionDefaults::default(),
@@ -225,10 +222,7 @@ impl SessionView {
                     view = Some(Self {
                         id,
                         title: title.clone(),
-                        title_is_explicit: !matches!(
-                            title.as_str(),
-                            "New Session" | "Forked Session"
-                        ),
+                        title_is_explicit: !crate::session::placeholder_title(title),
                         inherited_title: None,
                         workspace_identity: None,
                         defaults: SessionDefaults::default(),

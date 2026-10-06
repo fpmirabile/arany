@@ -10,7 +10,7 @@ mod lock;
 pub(crate) use lock::SessionRunLock;
 
 const PROVIDER_PROFILES_FILE: &str = "provider-profiles.json";
-const MAX_PROVIDER_PROFILES_BYTES: u64 = 64 * 1024;
+const MAX_PROVIDER_PROFILES_BYTES: usize = 64 * 1024;
 const SAVED_ACCOUNT_FILE: &str = "account-credentials.json";
 const PENDING_ACCOUNT_FILE: &str = "account-credentials.pending";
 const CHATGPT_REGISTRATION_FILE: &str = "chatgpt-registration.json";
@@ -201,33 +201,8 @@ impl StateRoot {
     }
 
     pub(crate) fn read_provider_profiles(&self) -> Result<Vec<u8>, StoreError> {
-        let mut options = OpenOptions::new();
-        options.read(true);
-        options.follow(FollowSymlinks::No);
-        #[cfg(unix)]
-        nonblocking(&mut options);
-        let file = self._dir.open_with(PROVIDER_PROFILES_FILE, &options)?;
-        let metadata = file.metadata()?;
-        if !metadata.is_file() || metadata.len() > MAX_PROVIDER_PROFILES_BYTES {
-            return Err(StoreError::StateNotPrivate);
-        }
-        #[cfg(unix)]
-        {
-            use cap_std::fs::MetadataExt;
-            if metadata.nlink() != 1
-                || metadata.uid() != rustix::process::geteuid().as_raw()
-                || metadata.mode() & 0o077 != 0
-            {
-                return Err(StoreError::StateNotPrivate);
-            }
-        }
-        let mut bytes = Vec::new();
-        file.take(MAX_PROVIDER_PROFILES_BYTES + 1)
-            .read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > MAX_PROVIDER_PROFILES_BYTES {
-            return Err(StoreError::StateNotPrivate);
-        }
-        Ok(bytes)
+        self.read_private_record(PROVIDER_PROFILES_FILE, MAX_PROVIDER_PROFILES_BYTES)?
+            .ok_or_else(|| StoreError::Io(io::ErrorKind::NotFound.into()))
     }
 
     pub fn read_saved_account_record(&self) -> Result<Option<Vec<u8>>, StoreError> {

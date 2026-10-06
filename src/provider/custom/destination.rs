@@ -1,5 +1,5 @@
 use super::{CustomProfile, CustomProfileError};
-use reqwest::{Client, Url, redirect::Policy};
+use reqwest::{Client, Url};
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     time::Duration,
@@ -75,18 +75,7 @@ impl PinnedDestination {
     }
 
     pub(super) fn client(&self) -> Result<Client, CustomProfileError> {
-        Client::builder()
-            .no_proxy()
-            .no_gzip()
-            .no_brotli()
-            .no_zstd()
-            .no_deflate()
-            .redirect(Policy::none())
-            .referer(false)
-            .retry(reqwest::retry::never())
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(CALL_DEADLINE)
-            .pool_max_idle_per_host(0)
+        super::super::http_client(CALL_DEADLINE)
             .resolve_to_addrs(&self.host, &self.addresses)
             .build()
             .map_err(|_| CustomProfileError::Unavailable)

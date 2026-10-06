@@ -1,5 +1,5 @@
 use super::*;
-use crate::provider::{ChildResult, HistoryTurn};
+use crate::provider::{AgentPhase, ChildResult, CompactionItem, HistoryTurn, UnansweredStatus};
 use crate::session::{AgentRunId, RunId, SessionId};
 
 fn run_request() -> ProviderRequest {

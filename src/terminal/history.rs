@@ -237,7 +237,10 @@ impl History {
         }
     }
 
-    pub(super) fn record_notice(&mut self, text: &str) {
+    pub(super) fn record_notice(&mut self, notice: super::TerminalNotice<'_>) {
+        let super::TerminalNotice::History(text) = notice else {
+            return;
+        };
         let (kind, text) = match text.strip_prefix("Error:") {
             Some(body) => (MessageKind::Error, body.trim_start()),
             None => (MessageKind::Notice, text),
@@ -763,7 +766,16 @@ mod tests {
         let mut view = session();
         let mut history = History::default();
         history.sync(&view, 40, 20);
-        history.record_notice("Error: Choose /setup\u{1b}[2J\nYour draft is retained");
+        history.record_notice(super::super::TerminalNotice::Transient(
+            "Error: temporary progress with changed copy",
+        ));
+        assert!(
+            history.visible(&view).is_empty(),
+            "transient copy must not enter reading history"
+        );
+        history.record_notice(super::super::TerminalNotice::History(
+            "Error: Choose /setup\u{1b}[2J\nYour draft is retained",
+        ));
         let rows = history.visible(&view);
         assert!(rows[0].heading);
         assert_eq!(rows[0].speaker, MessageKind::Error);
@@ -773,14 +785,18 @@ mod tests {
         let first_notice = history.messages[0].source;
         history.sync(&view, 40, 20);
         assert_eq!(history.visible(&view)[1].text, rows[1].text);
-        history.record_notice("Error: Choose /setup\u{1b}[2J\nYour draft is retained");
+        history.record_notice(super::super::TerminalNotice::History(
+            "Error: Choose /setup\u{1b}[2J\nYour draft is retained",
+        ));
         assert_eq!(history.notices.len(), 1, "repeated redraw is coalesced");
 
         let mut active = run("accepted objective", "committed answer");
         active.assistant_message = None;
         view.runs.push(active);
         history.sync(&view, 40, 20);
-        history.record_notice("Local recovery completed");
+        history.record_notice(super::super::TerminalNotice::History(
+            "Local recovery completed",
+        ));
         let second_notice = history.messages.last().expect("local notice").source;
         view.runs[0].assistant_message = Some("committed answer".into());
         history.sync(&view, 40, 20);
@@ -831,7 +847,9 @@ mod tests {
             .into_iter()
             .map(|row| row.text)
             .collect::<Vec<_>>();
-        history.record_notice("Another local notice");
+        history.record_notice(super::super::TerminalNotice::History(
+            "Another local notice",
+        ));
         assert_eq!(
             history
                 .visible(&view)
@@ -842,12 +860,16 @@ mod tests {
         );
 
         history.handle(super::super::TerminalInput::HistoryLive, &view);
-        history.record_notice(&"é".repeat(MAX_NOTICE_BYTES / 2 + 10));
+        history.record_notice(super::super::TerminalNotice::History(
+            &"é".repeat(MAX_NOTICE_BYTES / 2 + 10),
+        ));
         let bounded = &history.notices.back().expect("bounded notice").text;
         assert!(bounded.len() <= MAX_NOTICE_BYTES);
         assert!(bounded.ends_with('…'));
         for index in 0..MAX_NOTICES {
-            history.record_notice(&format!("Notice {index}"));
+            history.record_notice(super::super::TerminalNotice::History(&format!(
+                "Notice {index}"
+            )));
         }
         assert_eq!(history.notices.len(), MAX_NOTICES);
         assert!(
@@ -862,7 +884,7 @@ mod tests {
             .into_iter()
             .map(|row| row.text)
             .collect::<Vec<_>>();
-        history.record_notice("Newest notice");
+        history.record_notice(super::super::TerminalNotice::History("Newest notice"));
         assert_eq!(
             history
                 .visible(&view)
@@ -879,6 +901,14 @@ mod tests {
         history.sync(&session(), 24, 4);
         assert!(history.notices.is_empty());
         assert!(history.messages.is_empty());
+        history.record_notice(super::super::TerminalNotice::History("Terminal resumed"));
+        assert!(
+            history
+                .visible(&view)
+                .iter()
+                .any(|row| row.text.contains("Terminal resumed")),
+            "persistent category must survive wording formerly classified as transient"
+        );
     }
 
     #[test]

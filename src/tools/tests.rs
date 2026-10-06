@@ -7,6 +7,7 @@ fn config_value() -> Value {
     json!({"version":1,"workspace_paths":["src","Cargo.toml"],"write":false,"commands":[],"skills":[],"mcp":[]})
 }
 
+#[cfg(unix)]
 #[test]
 fn project_skill_discovery_preserves_grants_and_reports_missing_installation() {
     for layout in [
@@ -351,7 +352,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
     let mut reusable = intent;
     reusable.use_count = 2;
     assert!(!reusable.valid());
-    for error in [
+    let errors = vec![
         super::ToolError::MissingConfiguration,
         super::ToolError::Configuration,
         super::ToolError::ProtectionUnavailable,
@@ -375,7 +376,30 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         super::ToolError::GuardRejected("native manager"),
         super::ToolError::GuardRejected("bounded control protocol"),
         super::ToolError::GuardRejected("arbitrary text is not a durable diagnostic"),
+    ];
+    for (stage, label) in [
+        ("admission", "admission"),
+        ("workspace", "pinned input"),
+        ("capabilities", "native protection"),
+        ("handshake", "handshake"),
+        ("payload", "execution"),
+        ("receipt", "receipt"),
     ] {
+        let error = super::ToolError::GuardBootstrap(
+            serde_json::from_value(serde_json::json!({"stage": stage})).unwrap(),
+        );
+        let mut reserved = observation.intent.clone();
+        reserved.limits.result_bytes = 128;
+        let receipt = super::uncertain_observation(reserved, error);
+        assert_eq!(
+            receipt.output,
+            format!(
+                "Guard {label} unconfirmed; effects may have occurred. Do not retry automatically."
+            )
+        );
+        assert!(receipt.valid());
+    }
+    for error in errors {
         let mut reserved = observation.intent.clone();
         reserved.limits.result_bytes = 128;
         let uncertain = super::uncertain_observation(reserved, error);

@@ -351,7 +351,7 @@ async fn active_keyboard_stays_visible_with_near_cap_history() {
                     let text = String::from_utf8_lossy(&screen);
                     text.contains("History")
                         && text.contains("QWERT")
-                        && text.contains("child 1 · working")
+                        && text.contains("child 1 · active")
                 }) {
                     break;
                 }

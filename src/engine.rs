@@ -24,6 +24,17 @@ use progress::{ProgressPublisher, append_observed};
 pub use progress::{RunProgress, RunUpdate};
 use run_loop::{RunControls, RunIdentity, RunLoop};
 
+/// Checks bounded Workspace input before an attached draft becomes a saved Session.
+/// Run admission reads and validates the inputs again before disclosure.
+pub fn validate_workspace_inputs(
+    state: &StateRoot,
+    workspace: &std::path::Path,
+    include_paths: &[PathBuf],
+) -> Result<(), EngineError> {
+    WorkspaceInputs::load(workspace, state, include_paths)?;
+    Ok(())
+}
+
 const OUTPUT_TOKEN_CAP: u32 = 4096;
 
 #[derive(Debug, thiserror::Error)]
@@ -607,37 +618,17 @@ impl<P: Provider + 'static> Engine<P> {
             chatgpt_provenance: self.provider.chatgpt_provenance(),
             output_token_bound: self.provider.output_token_bound(),
         };
-        if selection.name.is_empty()
-            || selection.name.len() > 128
-            || selection.model.is_empty()
-            || selection.model.len() > 128
-            || selection.name.starts_with("custom:")
-                != selection.custom_profile_provenance.is_some()
-            || !crate::provider::valid_saved_api_account_id(
-                &selection.name,
-                selection.saved_api_account_id,
-            )
-            || (selection.name == "chatgpt") != selection.chatgpt_provenance.is_some()
-            || (selection.name == "chatgpt")
-                != (selection.output_token_bound
-                    == crate::provider::OutputTokenBound::LocalAcceptanceOnly)
-            || selection.name == "chatgpt"
-                && (selection.effort.is_none() || selection.concurrency != 1)
-            || selection
-                .chatgpt_provenance
-                .as_ref()
-                .is_some_and(|provenance| !provenance.valid())
-            || selection
-                .custom_profile_provenance
-                .as_ref()
-                .is_some_and(|provenance| {
-                    provenance.capability_evidence_version == 1 && selection.effort.is_some()
-                })
-            || selection
-                .custom_profile_provenance
-                .as_ref()
-                .is_some_and(|provenance| !provenance.valid())
-            || !(1..=8).contains(&selection.concurrency)
+        if !(crate::provider::ProviderIdentity {
+            profile: &selection.name,
+            model: &selection.model,
+            effort: selection.effort,
+            concurrency: selection.concurrency,
+            custom_profile_provenance: selection.custom_profile_provenance.as_ref(),
+            saved_api_account_id: selection.saved_api_account_id,
+            chatgpt_provenance: selection.chatgpt_provenance.as_ref(),
+            output_token_bound: selection.output_token_bound,
+        })
+        .valid()
         {
             return Err(EngineError::InvalidRequest);
         }

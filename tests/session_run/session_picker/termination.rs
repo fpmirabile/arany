@@ -1,7 +1,6 @@
 use super::{pump, tail};
-use crate::active_terminal::{ProductGuard, product_child_of_executable};
+use crate::active_terminal::{ProductGuard, product_child_of_executable, tty_settings};
 use crate::loopback::{ChildGuard, wait_product};
-use crate::process::BoundedOutput;
 use arany::{SessionView, StateRoot, Store, create_session};
 use rustix::{
     fs::{OFlags, fcntl_getfl, fcntl_setfl},
@@ -12,26 +11,10 @@ use rustix::{
 use std::{
     fs::File,
     io::{Read, Write},
-    process::{Command, Stdio},
+    process::Stdio,
     thread,
     time::{Duration, Instant},
 };
-
-fn tty_settings(pid: Pid) -> String {
-    let stdin =
-        File::open(format!("/proc/{}/fd/0", pid.as_raw_pid())).expect("active product PTY slave");
-    let output = Command::new("/usr/bin/stty")
-        .arg("-g")
-        .env_clear()
-        .stdin(Stdio::from(stdin))
-        .bounded_output_with_input()
-        .expect("read active PTY settings");
-    assert!(output.status.success(), "active PTY settings available");
-    String::from_utf8(output.stdout)
-        .expect("PTY settings UTF-8")
-        .trim()
-        .to_owned()
-}
 
 fn product_state(pid: Pid) -> char {
     let status = std::fs::read_to_string(format!("/proc/{}/status", pid.as_raw_pid()))

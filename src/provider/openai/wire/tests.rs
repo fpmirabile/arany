@@ -1,5 +1,5 @@
 use super::*;
-use crate::provider::{ChildResult, HistoryTurn};
+use crate::provider::{AgentPhase, ChildResult, CompactionItem, HistoryTurn, UnansweredStatus};
 use crate::session::{AgentRunId, RunId, SessionId};
 
 fn run_request() -> ProviderRequest {
@@ -517,10 +517,32 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
             input["tools"]["catalog"], catalog,
             "catalog must be structured task data"
         );
+        assert!(input["tools"].get("observations").is_none());
+        let projected = json!({"call":intent.call,"disposition":disposition,"output":output,"workspace_effect":effect});
+        let result: Value =
+            serde_json::from_str(body["input"][2]["output"].as_str().unwrap()).unwrap();
         assert_eq!(
-            input["tools"]["observations"][0],
-            json!({"call":intent.call,"disposition":disposition,"output":output,"workspace_effect":effect}),
-            "the model must receive the action and result without a journal envelope"
+            result, projected,
+            "the model receives the complete observation once"
+        );
+        let encoded = encode_request(&body).unwrap();
+        assert_eq!(
+            encoded
+                .windows(b"RESULT_CANARY".len())
+                .filter(|part| *part == b"RESULT_CANARY")
+                .count(),
+            1
+        );
+        let mut duplicated = body.clone();
+        let mut duplicate_input = input.clone();
+        duplicate_input["tools"]["observations"] = json!([projected]);
+        duplicated["input"][0]["content"] = json!(duplicate_input.to_string());
+        let duplicate_bytes = encode_request(&duplicated).unwrap();
+        assert!(encoded.len() < duplicate_bytes.len());
+        eprintln!(
+            "synthetic continuation bytes: duplicated={}, single={}",
+            duplicate_bytes.len(),
+            encoded.len()
         );
         assert_eq!(body["input"].as_array().unwrap().len(), 3);
         assert_eq!(body["input"][1]["type"], "function_call");
@@ -538,7 +560,7 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
         assert_eq!(body["input"][1]["arguments"], arguments.to_string());
         assert_eq!(
             body["input"][2],
-            json!({"type":"function_call_output","call_id":"arany_action_0","output":input["tools"]["observations"][0].to_string()})
+            json!({"type":"function_call_output","call_id":"arany_action_0","output":projected.to_string()})
         );
         assert_eq!(
             serde_json::to_value(&request.tools.as_ref().unwrap().observations[0]).unwrap(),

@@ -1,6 +1,6 @@
 # Arany
 
-Arany is a CLI-first runtime for durable conversations whose Runs execute bounded single-agent or team work through one reusable loop. The executable is `arany`; the repository directory name is not a product identifier. This glossary names only the concepts required by the beta.
+Arany is a CLI-first runtime for durable conversations whose Runs execute bounded single-agent or team work. The executable is `arany`; the repository directory name is not a product identifier. This glossary names only the concepts required by the beta.
 
 ## Language
 
@@ -37,7 +37,7 @@ The AgentRuns participating in one Run: one accountable primary and zero or more
 _Avoid_: Session, fixed worker pair, peer swarm
 
 **AgentRun**:
-One execution of the reusable agent loop within a Run. The primary AgentRun orchestrates; child AgentRuns perform bounded objectives.
+One accountable execution within a Run. The primary AgentRun owns the iterative Tool/delegation/synthesis loop; each child AgentRun makes one bounded read-only Provider call.
 _Avoid_: Agent, worker process, task
 
 **Event**:
@@ -53,7 +53,7 @@ The ordered Messages and Runs, active RunView, and compaction provenance reconst
 _Avoid_: Provider conversation, terminal transcript, mutable chat state
 
 **PresentationModel**:
-A bounded, width-independent semantic view derived purely from a SessionView and its active RunView for interactive and linear presentation.
+A bounded semantic view derived purely from a SessionView and its active RunView. Terminal presentation may select and clip semantic fields by available width; geometry remains outside Engine state.
 _Avoid_: UI state, terminal buffer, second projection store
 
 **Provider**:

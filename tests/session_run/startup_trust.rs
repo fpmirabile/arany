@@ -303,6 +303,38 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                     b"Ask Arany",
                 );
             }
+            if startup_escape {
+                let from = transcript.len();
+                input.write_all(b"Read-only question\r").unwrap();
+                wait(
+                    &mut output,
+                    &mut input,
+                    &mut transcript,
+                    &mut answered,
+                    from,
+                    b"unavailable",
+                );
+                assert!(
+                    !transcript[from..]
+                        .windows(b"Do you trust this folder?".len())
+                        .any(|part| part == b"Do you trust this folder?"),
+                    "Escape must admit ephemeral read-only chat without another trust prompt"
+                );
+                let from = from
+                    + transcript[from..]
+                        .windows(b"unavailable".len())
+                        .position(|part| part == b"unavailable")
+                        .unwrap()
+                    + b"unavailable".len();
+                wait(
+                    &mut output,
+                    &mut input,
+                    &mut transcript,
+                    &mut answered,
+                    from,
+                    b"\x1b[?25h",
+                );
+            }
             let from = transcript.len();
             input.write_all(b"/permissions\r").unwrap();
             wait(

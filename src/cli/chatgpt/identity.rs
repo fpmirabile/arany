@@ -273,33 +273,6 @@ where
     String::deserialize(deserializer).map(Some)
 }
 
-fn bounded_keys<'de, D>(deserializer: D) -> Result<Vec<Jwk>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    struct KeysVisitor;
-
-    impl<'de> de::Visitor<'de> for KeysVisitor {
-        type Value = Vec<Jwk>;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("a bounded JWKS key array")
-        }
-
-        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-        where
-            A: de::SeqAccess<'de>,
-        {
-            let mut keys = Vec::new();
-            while let Some(key) = sequence.next_element::<Jwk>()? {
-                if keys.len() == MAX_KEYS {
-                    return Err(de::Error::custom("too many keys"));
-                }
-                keys.push(key);
-            }
-            Ok(keys)
-        }
-    }
-
-    deserializer.deserialize_seq(KeysVisitor)
+fn bounded_keys<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Jwk>, D::Error> {
+    crate::cli::bounded_list::<D, Jwk, MAX_KEYS>(deserializer, "too many keys")
 }

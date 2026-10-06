@@ -1,6 +1,5 @@
-use super::active_terminal::ProductGuard;
+use super::active_terminal::{ProductGuard, tty_settings};
 use super::loopback::{ChildGuard, write_profile};
-use super::process::BoundedOutput;
 use super::session_picker::{pump, tail};
 use arany::{SessionId, StateRoot, Store, create_session, list_sessions};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
@@ -42,22 +41,6 @@ fn product_child_of(shell_pid: u32) -> Pid {
         );
         thread::yield_now();
     }
-}
-
-fn tty_settings(pid: Pid) -> String {
-    let stdin =
-        File::open(format!("/proc/{}/fd/0", pid.as_raw_pid())).expect("active product PTY slave");
-    let output = Command::new("/usr/bin/stty")
-        .arg("-g")
-        .env_clear()
-        .stdin(Stdio::from(stdin))
-        .bounded_output_with_input()
-        .expect("read active PTY settings");
-    assert!(output.status.success(), "active PTY settings available");
-    String::from_utf8(output.stdout)
-        .expect("PTY settings UTF-8")
-        .trim()
-        .to_owned()
 }
 
 #[test]

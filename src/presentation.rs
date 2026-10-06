@@ -12,6 +12,32 @@ pub(crate) use agents::AgentInspectorModel;
 pub(crate) use model::{DraftAction, PresentationModel};
 pub(crate) use model::{linear_session_lines, model_id_preview, safe_truncate};
 
+impl std::fmt::Display for crate::session::CollaborationPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Single => f.write_str("single"),
+            Self::Auto {
+                max_active_children,
+            } => write!(f, "auto · up to {max_active_children} children"),
+            Self::Team {
+                max_active_children,
+            } => write!(f, "team · up to {max_active_children} children"),
+        }
+    }
+}
+
+impl std::fmt::Display for RunStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(model::run_state_label(Some(*self)))
+    }
+}
+
+impl std::fmt::Display for AgentStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(model::agent_state_label(*self))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Output {
     Text,

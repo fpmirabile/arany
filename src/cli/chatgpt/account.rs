@@ -9,10 +9,9 @@ use crate::cli::credentials::{
 use arany::{Effort, StateRoot, validate_native_model_id};
 use aws_lc_rs::hmac;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use serde::{Deserialize, Deserializer, Serialize, de};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    fmt,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -22,7 +21,7 @@ const MAX_ACCOUNTS: usize = 8;
 const MAX_MODEL_CHECKS: usize = 64;
 const MODEL_CHECK_AGE_SECONDS: u64 = 24 * 60 * 60;
 const MODEL_CHECK_VERSION: &str = "chatgpt-strict-stream-conformance-v8";
-const ACCOUNT_ADMISSION_VERSION: &str = "chatgpt-consented-account-admission-v10";
+const ACCOUNT_ADMISSION_VERSION: &str = "chatgpt-consented-account-admission-v11";
 const REFRESH_EARLY_SECONDS: u64 = 300;
 pub(crate) const MAX_TOKEN_RECORD_BYTES: usize = 64 * 1024;
 
@@ -173,38 +172,23 @@ struct AccountIndex {
     model_checks: Vec<ModelCheck>,
 }
 
-fn bounded_model_checks<'de, D>(deserializer: D) -> Result<Vec<ModelCheck>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    struct ChecksVisitor;
-
-    impl<'de> de::Visitor<'de> for ChecksVisitor {
-        type Value = Vec<ModelCheck>;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("a bounded ChatGPT model-check array")
-        }
-
-        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-        where
-            A: de::SeqAccess<'de>,
-        {
-            let mut rows = Vec::new();
-            while let Some(row) = sequence.next_element::<ModelCheck>()? {
-                if rows.len() == MAX_MODEL_CHECKS {
-                    return Err(de::Error::custom("too many model checks"));
-                }
-                rows.push(row);
-            }
-            Ok(rows)
-        }
-    }
-
-    deserializer.deserialize_seq(ChecksVisitor)
+fn bounded_model_checks<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<ModelCheck>, D::Error> {
+    crate::cli::bounded_list::<D, ModelCheck, MAX_MODEL_CHECKS>(
+        deserializer,
+        "too many model checks",
+    )
 }
 
 impl AccountIndex {
+    fn account_position(&self, id: Uuid) -> Result<usize, AuthorizationError> {
+        self.accounts
+            .iter()
+            .position(|entry| entry.id == id)
+            .ok_or(AuthorizationError::InvalidIdentity)
+    }
+
     fn empty() -> Self {
         Self {
             schema: 1,
@@ -1084,11 +1068,7 @@ fn sign_out_at_with(
             let id = index
                 .selected
                 .ok_or(AuthorizationError::NoSelectedAccount)?;
-            let position = index
-                .accounts
-                .iter()
-                .position(|entry| entry.id == id)
-                .ok_or(AuthorizationError::InvalidIdentity)?;
+            let position = index.account_position(id)?;
             let entry = &index.accounts[position];
             let slot = keyring_slot(&entry.client_id);
             if entry.disconnected {
@@ -1217,12 +1197,9 @@ fn selected_id_at(state: &StateRoot) -> Result<Uuid, AuthorizationError> {
 
 fn open_account_state() -> Result<StateRoot, AuthorizationError> {
     let path = StateRoot::account_path().map_err(|_| AuthorizationError::Unavailable)?;
-    StateRoot::open_existing(&path).map_err(|error| match error {
-        arany::StoreError::Io(source) if source.kind() == std::io::ErrorKind::NotFound => {
-            AuthorizationError::NoSelectedAccount
-        }
-        _ => AuthorizationError::Unavailable,
-    })
+    crate::cli::open_optional_state(&path)
+        .map_err(|_| AuthorizationError::Unavailable)?
+        .ok_or(AuthorizationError::NoSelectedAccount)
 }
 
 async fn refresh_selected_at(
@@ -1257,11 +1234,7 @@ fn refresh_selected_with(
             if index.selected != Some(id) {
                 return Err(AuthorizationError::InvalidIdentity);
             }
-            let position = index
-                .accounts
-                .iter()
-                .position(|entry| entry.id == id)
-                .ok_or(AuthorizationError::InvalidIdentity)?;
+            let position = index.account_position(id)?;
             let entry = &index.accounts[position];
             if entry.disconnected {
                 return Err(if entry.plan_permission_missing {

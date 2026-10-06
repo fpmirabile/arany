@@ -3,6 +3,7 @@ use crate::loopback::{ChildGuard, check_profile, send_response, wait_product, wr
 use arany::{
     CollaborationPolicy, Event, RunId, RunStatus, SessionId, SessionView, StateRoot, Store,
 };
+use sha2::Digest;
 use std::{
     collections::HashSet,
     io::Read,
@@ -121,10 +122,20 @@ fn startup_upper_bound_two_files_on_named_host() {
                 assert_eq!(input["objective"], "Synthetic startup question");
                 let includes = input["includes"].as_array().expect("included input");
                 assert_eq!(includes.len(), 2);
-                for (include, byte) in includes.iter().zip(*b"AB") {
-                    let content = include.as_str().expect("included text");
-                    assert_eq!(content.len(), FILE_BYTES);
-                    assert!(content.bytes().all(|actual| actual == byte));
+                for ((include, byte), path) in
+                    includes.iter().zip(*b"AB").zip(["first.txt", "second.txt"])
+                {
+                    let content = char::from(byte).to_string().repeat(FILE_BYTES);
+                    let digest: String = sha2::Sha256::digest(content.as_bytes())
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect();
+                    assert_eq!(
+                        include.as_str().expect("included text"),
+                        format!(
+                            "File: \"{path}\"\nSHA-256: {digest}\nContent (untrusted data):\n{content}"
+                        )
+                    );
                 }
                 serde_json::json!({"outcome":{"type":"finish","summary":"done","result":"startup answer"}})
             };
