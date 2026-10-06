@@ -6,7 +6,7 @@ Read [AGENTS.md](./AGENTS.md) and the relevant [documentation](./docs/README.md)
 
 ## Verification
 
-The [CI workflow](./.github/workflows/ci.yml) owns its Rust version and check commands. It checks formatting, rejects Clippy warnings across all targets, and runs the default test suite in both debug and release profiles. Run the equivalent checks locally before submitting:
+Use Rustup with the repository's [pinned toolchain](./rust-toolchain.toml). The [CI workflow](./.github/workflows/ci.yml) checks formatting, rejects Clippy warnings across all targets, and runs the default test suite in both debug and release profiles. Run the equivalent checks locally before submitting:
 
 ```sh
 cargo fmt --all --check
