@@ -310,7 +310,7 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
     let transcript = String::from_utf8(output).expect("linear transcript UTF-8");
     assert!(transcript.contains("Objective: prior"));
     assert!(transcript.contains("Current Run: Auto { max_active_children: 3 }; topology locked"));
-    assert!(transcript.contains("Answer:\r\n  current answer"));
+    assert!(transcript.contains("Arany · Answer:\r\n  current answer"));
     assert!(!transcript.contains("OMITTED_CANARY"));
     assert!(!transcript.contains("test-key"));
     assert!(!transcript.contains("\x1b[?1000h"));

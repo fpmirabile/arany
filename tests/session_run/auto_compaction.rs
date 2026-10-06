@@ -382,9 +382,9 @@ fn run_attached_auto_compaction(case: CompactionCase) {
                 first_reported = true;
             }
             let compaction_marker = match case {
-                CompactionCase::Success => b"Notice: Compaction saved; 20 input / 10 output tokens; Draft retained: 14 bytes; Enter submits\r\nInput:\r\n".as_slice(),
-                CompactionCase::ProviderFailure => b"Notice: Error: Compaction failed: Provider unavailable; usage unavailable; Draft retained: 14 bytes; Enter submits\r\nInput:\r\n".as_slice(),
-                CompactionCase::Interrupted => b"Notice: Automatic compaction unavailable: Compaction interrupted; check Session history; history retained; Draft retained: 14 bytes; Enter submits\r\nInput:\r\n".as_slice(),
+                CompactionCase::Success => b"Notice: Compaction saved; 20 input / 10 output tokens; Draft retained: 14 characters; Enter submits\r\nInput:\r\n".as_slice(),
+                CompactionCase::ProviderFailure => b"Notice: Error: Compaction failed: Provider unavailable; usage unavailable; Draft retained: 14 characters; Enter submits\r\nInput:\r\n".as_slice(),
+                CompactionCase::Interrupted => b"Notice: Automatic compaction unavailable: Compaction interrupted; check Session history; history retained; Draft retained: 14 characters; Enter submits\r\nInput:\r\n".as_slice(),
             };
             if !compaction_reported
                 && bytes
@@ -403,7 +403,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
                 source_mismatch_reported = true;
             }
             let continuation =
-                b"Notice: Draft: 9 of 8192 bytes; Enter retains until compaction ends\r\n";
+                b"Notice: Draft: 9 characters; Enter retains until compaction ends\r\n";
             if !continuation_reported
                 && bytes
                     .windows(continuation.len())
@@ -437,7 +437,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
                 sender.send("draft cleared").expect("stage receiver");
                 clear_count = observed;
             }
-            let manual_marker = b"Notice: Error: Compaction failed: Provider rejected; usage unavailable; Draft retained: 6 bytes; Enter submits\r\nInput:\r\n";
+            let manual_marker = b"Notice: Error: Compaction failed: Provider rejected; usage unavailable; Draft retained: 6 characters; Enter submits\r\nInput:\r\n";
             if matches!(case, CompactionCase::ProviderFailure)
                 && !manual_reported
                 && bytes
@@ -611,7 +611,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
         .expect("visible committed compaction outcome");
     assert!(second_answer < warning && warning < compacted);
     if matches!(case, CompactionCase::ProviderFailure) {
-        let manual = "Notice: Error: Compaction failed: Provider rejected; usage unavailable; Draft retained: 6 bytes; Enter submits\r\nInput:\r\n";
+        let manual = "Notice: Error: Compaction failed: Provider rejected; usage unavailable; Draft retained: 6 characters; Enter submits\r\nInput:\r\n";
         assert!(
             compacted
                 < transcript

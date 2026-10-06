@@ -42,7 +42,7 @@ pub(super) async fn pick_quick_action(
                 let action = match selected {
                     0 => Selector::Models,
                     1 => Selector::Agents,
-                    2 => Selector::Sessions,
+                    2 => Selector::Resume,
                     _ => Selector::Setup,
                 };
                 return Ok(QuickChoice::Selected(action));
@@ -63,6 +63,7 @@ pub(super) async fn pick_quick_action(
 pub(super) async fn pick_session(
     terminal: &mut AttachedTerminal,
     admission: &Admission,
+    fallback: Option<&arany::SessionDefaults>,
 ) -> Result<PickerChoice, String> {
     let root = match StateRoot::open_existing(&admission.state_dir) {
         Ok(root) => root,
@@ -72,12 +73,30 @@ pub(super) async fn pick_session(
             ));
         }
     };
-    let items = match list_sessions(root, admission.workspace.clone()).await {
+    let mut items = match list_sessions(root, admission.workspace.clone()).await {
         Ok(items) => items,
         Err(error) => return Ok(PickerChoice::Unavailable(error.to_string())),
     };
     if items.is_empty() {
         return Ok(PickerChoice::Empty);
+    }
+    if items.iter().any(|item| item.defaults.provider.is_none()) {
+        let inherited = match fallback.filter(|defaults| defaults.provider.is_some()) {
+            Some(defaults) => Some(defaults.clone()),
+            None => match super::models::last_saved_defaults(&admission.workspace) {
+                Ok(defaults) => defaults,
+                Err(error) => return Ok(PickerChoice::Unavailable(error)),
+            },
+        };
+        if let Some(defaults) = inherited {
+            for item in &mut items {
+                if item.defaults.provider.is_none() {
+                    let policy = item.defaults.policy;
+                    item.defaults = defaults.clone();
+                    item.defaults.policy = policy;
+                }
+            }
+        }
     }
     let result = if terminal.is_linear() {
         pick_session_linear(terminal, &items).await

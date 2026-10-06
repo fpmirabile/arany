@@ -425,7 +425,10 @@ fn run_pty_with_gate(
         let catalog_busy = needle == b"Notice: Loading model catalog; Ctrl+C cancels"
             || needle.ends_with(b"catalog loading; Ctrl+C cancels")
             || needle.ends_with(b"draft unchanged; catalog loading");
-        if needle != b"Choose number, n next, p previous, or q close:" && !catalog_busy {
+        if needle != b"Choose number, n next, p previous, or q close:"
+            && needle != b"Choose number, exact ID, n next, p previous, or q close:"
+            && !catalog_busy
+        {
             wait_for_sanitized(
                 &mut output,
                 &mut input,
@@ -482,6 +485,10 @@ fn run_pty_with_gate(
         "screen-reader output has escapes"
     );
     let text = std::str::from_utf8(&transcript).expect("screen-reader UTF-8");
+    assert!(
+        !text.contains('─'),
+        "screen-reader output has decorative rules"
+    );
     let marker = |name: &str| {
         text.lines()
             .find_map(|line| line.trim_end_matches('\r').strip_prefix(name))
@@ -607,10 +614,10 @@ fn isolated_stage() {
     let turn_output = run_pty(
         TURN_SHELL,
         &[(b"Input:\r\n", b"offline objective\r")],
-        Some(b"Answer:\r\n  offline answer"),
+        Some("Arany · Answer:\r\n  offline answer".as_bytes()),
     );
     assert!(
-        String::from_utf8_lossy(&turn_output).contains("Answer:\r\n  offline answer"),
+        String::from_utf8_lossy(&turn_output).contains("Arany · Answer:\r\n  offline answer"),
         "direct turn output: {}",
         String::from_utf8_lossy(&turn_output)
             .replace(KEY, "[redacted]")
@@ -791,13 +798,13 @@ fn isolated_stage() {
     let output = run_pty_with_gate(
         LOADING_CATALOG_SHELL,
         &[
-            (b"Input:\r\n", b"/models\r"),
+            (b"Input:\r\n", b"/model\r"),
             (
                 b"Notice: Loading model catalog; Ctrl+C cancels",
                 b"catalog draft\x04",
             ),
             (
-                b"Notice: Draft: 13 of 8192 bytes; catalog loading; Ctrl+C cancels",
+                b"Notice: Draft: 13 characters; catalog loading; Ctrl+C cancels",
                 b"\x01\x04",
             ),
             (
@@ -805,7 +812,7 @@ fn isolated_stage() {
                 b"!\x04",
             ),
             (
-                b"Notice: Draft: 14 of 8192 bytes; catalog loading; Ctrl+C cancels",
+                b"Notice: Draft: 14 characters; catalog loading; Ctrl+C cancels",
                 b"\x03",
             ),
             (b"Notice: Model catalog cancelled", b"\x04"),
@@ -834,7 +841,7 @@ fn isolated_stage() {
     drop(server);
     let text = std::str::from_utf8(&output).expect("catalog-loading transcript");
     assert_eq!(
-        text.matches("Notice: Draft: 13 of 8192 bytes; catalog loading; Ctrl+C cancels\r\n")
+        text.matches("Notice: Draft: 13 characters; catalog loading; Ctrl+C cancels\r\n")
             .count(),
         1
     );
@@ -846,7 +853,7 @@ fn isolated_stage() {
         1
     );
     assert_eq!(
-        text.matches("Notice: Draft: 14 of 8192 bytes; catalog loading; Ctrl+C cancels\r\n")
+        text.matches("Notice: Draft: 14 characters; catalog loading; Ctrl+C cancels\r\n")
             .count(),
         1
     );

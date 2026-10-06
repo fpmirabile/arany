@@ -97,7 +97,7 @@ fn live_tail_layout(screen: &[u8], width: usize) -> bool {
     let composer = rows.iter().position(|row| row.contains("Ask Arany"));
     let status = rows.iter().position(|row| {
         let row = row.trim_start();
-        row.starts_with("idle") || row.starts_with("Session ")
+        row.starts_with("ready") || row.starts_with("Session ")
     });
     rows.iter().all(|row| row.chars().count() <= width)
         && matches!((composer, status), (Some(composer), Some(status)) if status == composer + 3 && status + 1 == rows.len())
@@ -145,7 +145,7 @@ fn idle_multiline_layout(screen: &[u8]) -> bool {
             .is_some_and(|row| row.contains("second"))
         && rows.get(composer + 4).is_some_and(|row| {
             let row = row.trim_start();
-            row.starts_with("idle") || row.starts_with("Session ")
+            row.starts_with("ready") || row.starts_with("Session ")
         })
 }
 
@@ -292,7 +292,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
         startup
             .lines()
             .last()
-            .is_some_and(|row| row.starts_with("idle · ") && row.contains("gpt-5.4")),
+            .is_some_and(|row| row.starts_with("ready · ") && row.contains("gpt-5.4")),
         "startup status prioritizes state and model"
     );
     let styled = server.run(&["capture-pane", "-p", "-e", "-t", "arany-test:0.0"]);
@@ -402,7 +402,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
                 loop {
                     if let Some(screen) = capture_pane(&server) {
                         let screen = String::from_utf8_lossy(&screen);
-                        if screen.contains("Commands 1/18")
+                        if screen.contains("Commands 1/16")
                             && screen.contains("> /help")
                             && screen.contains("Up/Dn Enter Esc")
                         {
@@ -418,7 +418,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
                 loop {
                     if let Some(screen) = capture_pane(&server) {
                         let screen = String::from_utf8_lossy(&screen);
-                        if screen.contains("Commands 18/18")
+                        if screen.contains("Commands 16/16")
                             && screen.contains("> /exit")
                             && screen.contains("Exit Session")
                         {
@@ -481,7 +481,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
             && rows[composer + 1] == format!("> {}", &draft[..38])
             && rows[composer + 2].trim_start() == &draft[38..]
             && rows[composer + 3].contains("Ctrl+O newline")
-            && rows[composer + 4].starts_with("idle")
+            && rows[composer + 4].starts_with("ready")
     };
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -673,7 +673,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
                         rows[5].contains(expected)
                     }
                     && rows[6].contains("Ctrl+O")
-                    && rows[7].starts_with("idle")
+                    && rows[7].starts_with("ready")
                     && position.status.success()
                     && position.stdout == cursor.as_bytes()
                 {
@@ -1078,7 +1078,7 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     loop {
         if capture_pane(&server).is_some_and(|screen| {
             let text = String::from_utf8_lossy(&screen);
-            text.contains("You:") && text.contains("  first") && text.contains("  second")
+            text.contains("You:") && text.contains("│ first") && text.contains("│ second")
         }) {
             break;
         }
@@ -1088,6 +1088,22 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
         );
         thread::yield_now();
     }
+    let first_turn = capture_pane(&server).expect("first committed user frame");
+    let first_turn = String::from_utf8(first_turn).expect("first frame UTF-8");
+    assert!(
+        first_turn
+            .lines()
+            .next()
+            .expect("top screen row")
+            .trim()
+            .is_empty(),
+        "the first speaker must remain visible below a one-row terminal overlay: {}",
+        redacted_tail(first_turn.as_bytes())
+    );
+    assert!(
+        first_turn.lines().skip(1).any(|row| row.contains("› You:")),
+        "first user heading remains visible below the top edge"
+    );
     assert!(
         server
             .run(&["send-keys", "-l", "-t", "arany-test:0.0", "/s"])
@@ -1136,13 +1152,13 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
         if capture_pane(&server).is_some_and(|screen| {
             let text = String::from_utf8_lossy(&screen);
             text.lines()
-                .any(|row| row.contains("Run Active · input ") && row.contains(" B"))
+                .any(|row| row.contains("Working · request ") && row.contains("% of local limit"))
         }) {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "40-column /status context missing"
+            "40-column request-size details missing"
         );
         thread::yield_now();
     }
@@ -1229,7 +1245,7 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     loop {
         if capture_pane(&server).is_some_and(|screen| {
             let text = String::from_utf8_lossy(&screen);
-            text.contains("Commands · 18 local controls")
+            text.contains("Commands · 16 local controls")
                 && text.contains("> /help")
                 && text.contains("Enter/Esc close")
         }) {
@@ -1357,11 +1373,15 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
                 .rposition(|row| row.contains("Ask Arany"))
                 .and_then(|composer| rows.get(composer + 4));
             active_layout_with_draft(&screen)
-                && status.is_some_and(|row| row.contains("input ") && row.contains(" B"))
+                && status.is_some_and(|row| {
+                    row.contains("working · custom:local/model-1")
+                        && !row.contains("context ")
+                        && !row.contains("% of local limit")
+                })
         }) {
             break;
         }
-        assert!(Instant::now() < deadline, "active context status missing");
+        assert!(Instant::now() < deadline, "quiet active status missing");
         thread::yield_now();
     }
     assert!(
@@ -1404,15 +1424,15 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
                 .is_some_and(|status| {
                     status.contains("History · Ctrl+L live")
                         && status.contains("working · custom:local/model-1")
-                        && status.contains("input ")
-                        && status.contains(" B")
+                        && !status.contains("context ")
+                        && !status.contains("% of local limit")
                 })
         }) {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "wide history lost model or context status"
+            "wide history lost model or quiet status"
         );
         thread::yield_now();
     }
@@ -1581,7 +1601,9 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
             let text = String::from_utf8_lossy(&screen);
             let rows: Vec<_> = text.lines().collect();
             rows.len() == 24
-                && rows[23].contains("finished")
+                && rows[23].starts_with("ready")
+                && rows[23].trim_end().ends_with("· ok")
+                && !rows[23].contains("New Session")
                 && text.contains("Arany:")
                 && text.contains("pending")
                 && text.contains("draft")
@@ -1593,6 +1615,8 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     }
     let pane = capture_pane(&server).expect("visible history pane");
     let pane = String::from_utf8(pane).expect("pane UTF-8");
+    assert!(pane.lines().next().expect("top row").trim().is_empty());
+    assert!(pane.lines().skip(1).any(|row| row.contains("› You:")));
     assert_eq!(
         pane.matches("You:").count(),
         1,
@@ -1626,7 +1650,7 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
                 && rows[3].contains("Ask Arany")
                 && rows[4].contains("pending")
                 && rows[5].contains("draft")
-                && rows[7].contains("finished")
+                && rows[7].starts_with("ready")
         }) {
             break;
         }

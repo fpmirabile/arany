@@ -1,15 +1,15 @@
+#[cfg(any(debug_assertions, target_os = "linux"))]
+use super::active_terminal::{ProductGuard, product_child_of_executable};
 #[cfg(debug_assertions)]
-use super::active_terminal::{
-    ProductGuard, product_child_of, product_child_of_executable, tty_settings, wait_stopped,
-};
+use super::active_terminal::{product_child_of, tty_settings, wait_stopped};
 use super::loopback::{ChildGuard, wait_product};
 use super::process::BoundedOutput;
 use super::session_picker::{pump, tail};
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, target_os = "linux"))]
 use arany::{SessionDefaults, create_session, set_session_defaults};
 use arany::{SessionView, StateRoot, Store};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, target_os = "linux"))]
 use rustix::process::{Signal, kill_process};
 #[cfg(target_os = "linux")]
 use std::os::unix::net::UnixListener;
@@ -2266,8 +2266,8 @@ fn narrow_no_color_setup_hides_key_and_restores_terminal_on_cancel() {
         let key_at = transcript.len();
         let deadline = Instant::now() + Duration::from_secs(10);
         while !transcript[key_at..]
-            .windows(b"10B Enter Esc".len())
-            .any(|part| part == b"10B Enter Esc")
+            .windows(b"10 chars".len())
+            .any(|part| part == b"10 chars")
         {
             pump(&mut output, &mut input, &mut transcript, &mut answered);
             assert!(
@@ -2311,8 +2311,8 @@ fn narrow_no_color_setup_hides_key_and_restores_terminal_on_cancel() {
         );
         assert!(
             !transcript[blocked_at..]
-                .windows(b"\x1b[7;2H1".len())
-                .any(|part| part == b"\x1b[7;2H1"),
+                .windows(b"\x1b[6;2H1".len())
+                .any(|part| part == b"\x1b[6;2H1"),
             "a byte entered the key while rejected input remained"
         );
         let corrected_at = transcript.len();
@@ -2325,7 +2325,7 @@ fn narrow_no_color_setup_hides_key_and_restores_terminal_on_cancel() {
             &mut transcript,
             &mut answered,
             corrected_at,
-            b"\x1b[7;2H1",
+            b"\x1b[6;2H1",
         );
         if explicit_workspace {
             let scope_at = transcript.len();
@@ -3199,7 +3199,7 @@ fn credential_helper_command(operation: &str, slot: &str, directory: &Path) -> C
     command
 }
 
-#[cfg(all(target_os = "linux", debug_assertions))]
+#[cfg(target_os = "linux")]
 #[test]
 fn stalled_credential_bus_does_not_strand_unconfigured_start() {
     let temp = tempfile::tempdir().expect("private test root");
@@ -3211,14 +3211,13 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
     listener
         .set_nonblocking(true)
         .expect("nonblocking synthetic bus");
-    let mut command = Command::new("/usr/bin/script");
+    let mut command = super::process::isolated_script(temp.path());
     command
         .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
+        .env("ARANY_TEST_EXE", "/arany")
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
         .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-        .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
         .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={}", socket.display()))
         .env("SHELL", "/bin/sh")
         .env("TERM", "dumb")
@@ -3294,8 +3293,8 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
         assert!(observed <= 4096, "bounded synthetic D-Bus handshake");
     }
 
-    let account_root =
-        StateRoot::admit(&temp.path().join("account-root")).expect("isolated account marker");
+    let account_path = temp.path().join("account-home/.local/state/arany");
+    let account_root = StateRoot::admit(&account_path).expect("isolated account marker");
     account_root
         .replace_saved_account_record(br#"{"schema":1,"storage":"keyring","account":null}"#)
         .expect("keyring marker without credential");
@@ -3323,24 +3322,50 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
             defaults.clone(),
         ))
         .expect("configured defaults");
-    let prefix = runtime.block_on(async {
-        let store = Store::open_read_only(StateRoot::open_existing(&state).expect("State"))
-            .expect("read-only prefix");
-        let events = store.load_session(session_id).await.expect("prefix Events");
-        store.close().await.expect("close prefix");
-        events
-    });
-    for linear in [true, false] {
+    for (linear, replaced) in [(true, false), (false, false), (true, true)] {
+        let executable = if replaced {
+            let executable = temp.path().join("mapped-arany");
+            std::fs::copy(env!("CARGO_BIN_EXE_arany"), &executable).expect("private product image");
+            executable
+        } else {
+            PathBuf::from("/arany")
+        };
+        let defaults = if replaced {
+            let account_id = prepare_selected_chatgpt_account_at(&account_path);
+            SessionDefaults {
+                provider: Some("chatgpt".into()),
+                model: Some("gpt-6.1-sol".into()),
+                effort: Some(arany::Effort::Low),
+                account_id: Some(account_id),
+                policy: Default::default(),
+            }
+        } else {
+            defaults.clone()
+        };
+        runtime
+            .block_on(set_session_defaults(
+                StateRoot::open_existing(&state).expect("resume State"),
+                workspace.clone(),
+                session_id,
+                defaults.clone(),
+            ))
+            .expect("resume selection");
+        let prefix = runtime.block_on(async {
+            let store = Store::open_read_only(StateRoot::open_existing(&state).expect("State"))
+                .expect("read-only prefix");
+            let events = store.load_session(session_id).await.expect("prefix Events");
+            store.close().await.expect("close prefix");
+            events
+        });
         let shell = "printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; stty cols 40 rows 12; if [ \"$ARANY_TEST_LINEAR\" = 1 ]; then set -- --screen-reader; else set -- --no-color; fi; \"$ARANY_TEST_EXE\" \"$@\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; stty \"$before\"; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
-        let mut command = Command::new("/usr/bin/script");
+        let mut command = super::process::isolated_script(temp.path());
         command
             .env_clear()
-            .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
+            .env("ARANY_TEST_EXE", &executable)
             .env("ARANY_TEST_STATE", &state)
             .env("ARANY_TEST_WORKSPACE", &workspace)
             .env("ARANY_TEST_SESSION", session_id.to_string())
             .env("ARANY_TEST_LINEAR", if linear { "1" } else { "0" })
-            .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
             .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
             .env(
                 "DBUS_SESSION_BUS_ADDRESS",
@@ -3374,8 +3399,29 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
             .expect("shell PID")
             .parse::<u32>()
             .expect("shell PID number");
-        let product_pid = product_child_of(shell_pid);
-        let _product = ProductGuard::new(product_pid, state.clone());
+        let product_pid = product_child_of_executable(shell_pid, &executable);
+        let _product = ProductGuard::for_executable(product_pid, state.clone(), executable.clone());
+        if replaced {
+            let replacement = temp.path().join("replacement-arany");
+            std::fs::write(&replacement, "#!/bin/sh\nexit 42\n").expect("replacement image");
+            std::fs::set_permissions(
+                &replacement,
+                std::fs::metadata(&executable)
+                    .expect("image metadata")
+                    .permissions(),
+            )
+            .expect("replacement permissions");
+            std::fs::rename(&replacement, &executable).expect("replace mapped product image");
+            assert!(
+                std::fs::read_link(format!("/proc/{}/exe", product_pid.as_raw_pid()))
+                    .expect("mapped executable")
+                    .as_os_str()
+                    .as_encoded_bytes()
+                    .ends_with(b" (deleted)"),
+                "replacement must leave the original process image mapped"
+            );
+        }
+        let submitted_start = transcript.len();
         input
             .write_all(b"synthetic credential-wait objective\r")
             .expect("submit objective");
@@ -3387,22 +3433,24 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
                     pump(&mut output, &mut input, &mut transcript, &mut answered);
                     assert!(
                         Instant::now() < deadline,
-                        "submission never reached credential wait"
+                        "submission never reached credential wait (replaced image: {replaced}): {}",
+                        tail(&transcript)
                     );
                     thread::yield_now();
                 }
                 Err(error) => panic!("synthetic admission bus accept failed: {error}"),
             }
         };
-        wait_for(
+        wait_for_after(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
+            submitted_start,
             if linear {
                 b"Notice: Preparing request... Ctrl+C cancels\r\n"
             } else {
-                "preparing · gpt-5.4".as_bytes()
+                b"\x1b[10;3H"
             },
         );
         let edited_start = transcript.len();
@@ -3416,15 +3464,15 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
             &mut answered,
             edited_start,
             if linear {
-                b"Notice: Draft: 8 of 8192 bytes; Enter retains until Run ends\r\n"
+                b"Notice: Draft: 8 characters; Enter retains until Run ends\r\n"
             } else {
                 b"\x1b[10;11H"
             },
         );
         if !linear {
             assert!(
-                !String::from_utf8_lossy(&transcript[edited_start..]).contains("idle"),
-                "editing must not restore idle during admission"
+                !String::from_utf8_lossy(&transcript[edited_start..]).contains("ready"),
+                "editing must not restore ready during admission"
             );
         }
         let interrupted_start = transcript.len();
@@ -3448,7 +3496,7 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
                 &mut transcript,
                 &mut answered,
                 interrupted_start,
-                b"Notice: Draft retained: 8 bytes; Enter submits\r\n",
+                b"Notice: Draft retained: 8 characters; Enter submits\r\n",
             );
             wait_for_after(
                 &mut output,
@@ -3479,7 +3527,7 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
             &mut answered,
             continuation_start,
             if linear {
-                b"Notice: Draft: 15 of 8192 bytes; Enter submits\r\n"
+                b"Notice: Draft: 15 characters; Enter submits\r\n"
             } else {
                 b"\x1b[10;18H"
             },

@@ -336,6 +336,11 @@ fn zero(value: &u32) -> bool {
 }
 
 impl ContextUsage {
+    pub fn utilization_percent(&self) -> u32 {
+        let budget = u64::from(self.budget_bytes).max(1);
+        ((u64::from(self.used_bytes) * 100 + budget / 2) / budget).min(100) as u32
+    }
+
     pub fn near_limit(&self) -> bool {
         u64::from(self.used_bytes) * 5 >= u64::from(self.budget_bytes) * 4
             && u64::from(self.compactable_bytes) * 10 >= u64::from(self.budget_bytes)

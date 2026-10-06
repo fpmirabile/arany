@@ -700,7 +700,7 @@ pub(super) fn accept_check_and_run(
         transcript,
         answered,
         turn_at,
-        format!("Answer:\r\n  {ANSWER}").as_bytes(),
+        format!("Arany · Answer:\r\n  {ANSWER}").as_bytes(),
         Some(signed),
     );
     wait_for_stage(
@@ -722,7 +722,7 @@ pub(super) fn accept_check_and_run(
         transcript,
         answered,
         followup_at,
-        format!("Answer:\r\n  {FOLLOWUP_ANSWER}").as_bytes(),
+        format!("Arany · Answer:\r\n  {FOLLOWUP_ANSWER}").as_bytes(),
         Some(signed),
     );
     wait_for_stage(
@@ -757,7 +757,7 @@ pub(super) fn accept_check_and_run(
         transcript,
         answered,
         third_at,
-        format!("Answer:\r\n  {TEAM_ANSWER}").as_bytes(),
+        format!("Arany · Answer:\r\n  {TEAM_ANSWER}").as_bytes(),
         Some(signed),
     );
     wait_for_stage(

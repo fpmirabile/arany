@@ -293,10 +293,10 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             patterns.push(b"pX");
         }
         if expect_resume {
-            patterns.push(b"Draft: 6000 of 8192 bytes; Enter retains until Run ends");
+            patterns.push(b"Draft: 6000 characters; Enter retains until Run ends");
             patterns.push(b"Presentation: screen-reader");
             patterns.push(b"Notice: Error: invalid or overlong terminal line; draft unchanged\r\n");
-            patterns.push(b"Draft: 8192 of 8192 bytes; Enter retains until Run ends");
+            patterns.push(b"Draft: 8192 characters; Enter retains until Run ends");
         }
         if expect_second_ctrl_c {
             patterns.push(b"Cancelling Run...");
@@ -307,7 +307,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             patterns.push(b"Notice: Error: Usage: /help\r\n");
             patterns.push(b"Notice: Error: Usage: /exit\r\n");
             patterns.push(b"Notice: Provider: custom:local; locked for this run\r\n");
-            patterns.push(b"Notice: Run Active \xc2\xb7 input ");
+            patterns.push(b"Notice: Working \xc2\xb7 request ");
             patterns.push(b"\r\n");
         }
         if expect_help {
@@ -330,7 +330,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             });
         }
         if expect_draft {
-            patterns.push(b"Draft retained: 6 bytes; Enter submits");
+            patterns.push(b"Draft retained: 6 characters; Enter submits");
         }
         if expect_idle {
             patterns.push(if inline { b"\x1b[?25h" } else { b"Input:" });
@@ -949,11 +949,11 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             .and_then(|config| config.context_usage.as_ref())
             .expect("current Run footprint");
         let status = format!(
-            "Notice: Run Active · input {}/{} B · 1 agents · Session {session_id} · Run {}\r\n",
-            usage.used_bytes, usage.budget_bytes, view.runs[0].id
+            "Notice: Working · request {}% of local limit · 1 agent. Includes chat, instructions, files and images; not model tokens. Details: /agents\r\n",
+            usage.utilization_percent(),
         );
         assert_eq!(transcript.matches(&status).count(), 1);
-        assert!(!transcript.contains("Run admission in progress"));
+        assert!(!transcript.contains("Notice: Preparing message · Ctrl+C cancels"));
     }
     if expect_failure {
         assert_eq!(

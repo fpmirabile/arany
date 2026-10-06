@@ -33,4 +33,29 @@ pub struct SessionListItem {
     pub id: SessionId,
     pub title: String,
     pub last_sequence: u64,
+    pub created_at: String,
+    pub last_activity_at: String,
+    pub defaults: SessionDefaults,
+}
+
+pub(crate) fn title_preview(text: &str) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut title = String::new();
+    'words: for word in text.split_whitespace() {
+        for grapheme in word.graphemes(true) {
+            if title.len() + grapheme.len() > 128 {
+                break 'words;
+            }
+            title.push_str(grapheme);
+        }
+        if title.len() == 128 {
+            break;
+        }
+        title.push(' ');
+    }
+    if title.trim().is_empty() {
+        "Empty conversation".into()
+    } else {
+        title.trim_end().to_owned()
+    }
 }

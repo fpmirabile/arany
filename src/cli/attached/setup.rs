@@ -125,6 +125,20 @@ pub(super) async fn saved_defaults(
     terminal: &mut AttachedTerminal,
     workspace: &Path,
 ) -> Result<SavedDefaults, String> {
+    if let Some(defaults) = super::models::last_saved_defaults(workspace)? {
+        let disconnected = if defaults.provider.as_deref() == Some("chatgpt") {
+            match chatgpt::selected_account_id() {
+                Ok(_) => false,
+                Err(chatgpt::AuthorizationError::NoSelectedAccount) => true,
+                Err(error) => return Err(error.to_string()),
+            }
+        } else {
+            false
+        };
+        if !disconnected {
+            return Ok(SavedDefaults::Selected(defaults));
+        }
+    }
     let path = StateRoot::account_path().map_err(|error| error.to_string())?;
     let (native, chatgpt) = match StateRoot::open_existing(&path) {
         Ok(state) => (
@@ -718,7 +732,7 @@ async fn configure_chatgpt(
             return Ok((
                 defaults,
                 Some(format!(
-                    "Model catalog failed; {}. Use /provider chatgpt then /models to retry: {error}",
+                    "Model catalog failed; {}. Use /provider chatgpt then /model to retry: {error}",
                     account.status()
                 )),
                 Vec::new(),
@@ -1019,7 +1033,7 @@ async fn read_api_key_hidden(
         terminal.draw_setup(
             3,
             "Enter API key",
-            "Input is hidden; up to 512 printable ASCII bytes",
+            "Hidden input; up to 512 ASCII characters",
             key.len(),
             notice.take(),
         )?;
@@ -1095,7 +1109,7 @@ async fn read_workspace_id(
     loop {
         terminal.draw_setup_text_input(
             "API workspace ID",
-            "From Claude Console; wrkspc_ followed by letters or digits, up to 128 bytes",
+            "From Claude Console; wrkspc_ followed by letters or digits, up to 128 characters",
             &draft,
             notice.take(),
         )?;
@@ -1280,7 +1294,7 @@ mod tests {
                 && defaults.model.is_none()
         ));
 
-        let failed_catalog = "Model catalog failed; retry /models".to_owned();
+        let failed_catalog = "Model catalog failed; retry /model".to_owned();
         for account in [
             ChatGptSetupAccount::Switched(account_id),
             ChatGptSetupAccount::Connected(account_id),

@@ -1,7 +1,8 @@
 use super::{ResolvedSession, StoreError, event_payload_limit};
 use crate::session::{
-    AgentRunId, Event, EventEnvelope, RunId, SessionId, SessionListItem, SessionView,
-    prefix_digest, validate_compaction_references,
+    AgentDisposition, AgentRole, AgentRunId, Event, EventEnvelope, RunConfig, RunDisposition,
+    RunId, SessionDefaults, SessionId, SessionListItem, SessionView, prefix_digest,
+    validate_compaction_references,
 };
 use rusqlite::{Connection, types::ValueRef};
 use std::collections::HashMap;
@@ -15,7 +16,17 @@ struct SessionHead {
     title: String,
     direct_identity: Option<(u64, u64)>,
     source_session_id: Option<SessionId>,
+    source_sequence: Option<u64>,
     last_sequence: u64,
+    created_at_ms: i64,
+    last_activity_at_ms: i64,
+    explicit_title: bool,
+    fallback_title: Option<(u64, String)>,
+    ai_title: Option<(u64, String)>,
+    primary: Option<(RunId, AgentRunId)>,
+    pending_title: Option<String>,
+    defaults: SessionDefaults,
+    run_defaults: SessionDefaults,
 }
 
 pub(super) fn load_session(
@@ -71,14 +82,37 @@ pub(super) fn list_session_items(
     connection: &Connection,
     workspace_identity: (u64, u64),
 ) -> Result<Vec<SessionListItem>, StoreError> {
-    let heads = scan_session_heads(connection)?;
+    let mut heads = scan_session_heads(connection)?;
+    inherit_fork_metadata(connection, &mut heads)?;
     let mut items = Vec::new();
+    let mut timestamp =
+        connection.prepare("SELECT strftime('%Y-%m-%d %H:%M:%S', ?1 / 1000, 'unixepoch')")?;
+    let mut format_timestamp = |millis: i64| -> Result<String, StoreError> {
+        Ok(timestamp
+            .query_row([millis], |row| row.get::<_, Option<String>>(0))?
+            .unwrap_or_else(|| "Unknown".into()))
+    };
     for (&id, head) in &heads {
         if discovered_identity(id, &heads, 0)? == Some(workspace_identity) {
             items.push(SessionListItem {
                 id,
-                title: head.title.clone(),
+                title: if head.explicit_title {
+                    head.title.clone()
+                } else {
+                    head.ai_title
+                        .as_ref()
+                        .map(|(_, title)| title.clone())
+                        .or_else(|| head.fallback_title.as_ref().map(|(_, title)| title.clone()))
+                        .unwrap_or_else(|| "Empty conversation".into())
+                },
                 last_sequence: head.last_sequence,
+                created_at: format_timestamp(head.created_at_ms)?,
+                last_activity_at: format_timestamp(head.last_activity_at_ms)?,
+                defaults: if head.defaults.provider.is_some() {
+                    head.defaults.clone()
+                } else {
+                    head.run_defaults.clone()
+                },
             });
         }
     }
@@ -100,6 +134,9 @@ fn scan_session_heads(
                 return Err(StoreError::InvalidHistory);
             }
             if let Event::RunStarted { config, .. } = &envelope.event {
+                head.primary = None;
+                head.pending_title = None;
+                head.run_defaults = selection_from_run(config);
                 let identity = (config.workspace_device, config.workspace_inode);
                 if head
                     .direct_identity
@@ -111,7 +148,46 @@ fn scan_session_heads(
             }
             if let Event::SessionRenamed { title } = &envelope.event {
                 head.title.clone_from(title);
+                head.explicit_title = true;
             }
+            match &envelope.event {
+                Event::SessionDefaultChanged { defaults } => head.defaults = defaults.clone(),
+                Event::MessageAccepted { text, .. } if head.fallback_title.is_none() => {
+                    head.fallback_title =
+                        Some((envelope.sequence, crate::session::title_preview(text)));
+                }
+                Event::AgentSpawned {
+                    run_id,
+                    agent_run_id,
+                    role: AgentRole::Primary,
+                    ..
+                } => {
+                    head.primary = Some((*run_id, *agent_run_id));
+                }
+                Event::AgentFinished {
+                    run_id,
+                    agent_run_id,
+                    disposition: AgentDisposition::Finished,
+                    summary: Some(summary),
+                    ..
+                } if head.primary == Some((*run_id, *agent_run_id)) && head.ai_title.is_none() => {
+                    head.pending_title = Some(crate::session::title_preview(summary));
+                }
+                Event::RunFinished {
+                    run_id,
+                    disposition: RunDisposition::Finished,
+                } if head
+                    .primary
+                    .is_some_and(|(primary_run, _)| primary_run == *run_id) =>
+                {
+                    if let Some(title) = head.pending_title.take() {
+                        head.ai_title = Some((envelope.sequence, title));
+                    }
+                }
+                Event::RunFinished { .. } => head.pending_title = None,
+                _ => {}
+            }
+            head.last_activity_at_ms = envelope.created_at_ms;
             head.last_sequence = envelope.sequence;
         } else {
             if heads.len() == MAX_DISCOVERED_SESSIONS {
@@ -132,7 +208,22 @@ fn scan_session_heads(
             heads.insert(
                 id,
                 SessionHead {
+                    explicit_title: !matches!(title.as_str(), "New Session" | "Forked Session"),
                     title,
+                    created_at_ms: envelope.created_at_ms,
+                    last_activity_at_ms: envelope.created_at_ms,
+                    fallback_title: None,
+                    ai_title: None,
+                    source_sequence: match &envelope.event {
+                        Event::SessionForked {
+                            source_sequence, ..
+                        } => Some(*source_sequence),
+                        _ => None,
+                    },
+                    primary: None,
+                    pending_title: None,
+                    defaults: SessionDefaults::default(),
+                    run_defaults: SessionDefaults::default(),
                     direct_identity,
                     source_session_id,
                     last_sequence: envelope.sequence,
@@ -142,6 +233,86 @@ fn scan_session_heads(
         Ok(())
     })?;
     Ok(heads)
+}
+
+fn selection_from_run(config: &RunConfig) -> SessionDefaults {
+    SessionDefaults {
+        provider: Some(config.provider.clone()),
+        model: Some(config.model.clone()),
+        effort: config.effort,
+        account_id: config.saved_api_account_id.or_else(|| {
+            config
+                .chatgpt_provenance
+                .as_ref()
+                .map(|source| source.account_id)
+        }),
+        policy: config.policy,
+    }
+}
+
+fn inherit_fork_metadata(
+    connection: &Connection,
+    heads: &mut HashMap<SessionId, SessionHead>,
+) -> Result<(), StoreError> {
+    let mut boundaries = heads
+        .iter()
+        .filter_map(|(&id, head)| Some((head.source_sequence?, head.source_session_id?, id)))
+        .collect::<Vec<_>>();
+    if boundaries.is_empty() {
+        return Ok(());
+    }
+    boundaries.sort_unstable_by_key(|(sequence, _, _)| *sequence);
+    let mut next = 0;
+    let mut selections = HashMap::<SessionId, SessionDefaults>::new();
+    let mut inherited = HashMap::<SessionId, (SessionDefaults, Option<(u64, String)>)>::new();
+    scan_all_events(connection, |envelope| {
+        match &envelope.event {
+            Event::RunStarted { config, .. } => {
+                selections.insert(envelope.session_id, selection_from_run(config));
+            }
+            Event::SessionForked { .. } => {
+                if let Some((selection, _)) = inherited.get(&envelope.session_id) {
+                    selections.insert(envelope.session_id, selection.clone());
+                }
+            }
+            _ => {}
+        }
+        while let Some(&(sequence, source, fork)) = boundaries.get(next) {
+            if sequence > envelope.sequence {
+                break;
+            }
+            let source_head = heads.get(&source).ok_or(StoreError::InvalidHistory)?;
+            let title = source_head
+                .ai_title
+                .as_ref()
+                .filter(|(title_sequence, _)| *title_sequence <= sequence)
+                .cloned()
+                .or_else(|| {
+                    source_head
+                        .fallback_title
+                        .as_ref()
+                        .filter(|(title_sequence, _)| *title_sequence <= sequence)
+                        .cloned()
+                })
+                .or_else(|| inherited.get(&source).and_then(|(_, title)| title.clone()));
+            inherited.insert(
+                fork,
+                (selections.get(&source).cloned().unwrap_or_default(), title),
+            );
+            next += 1;
+        }
+        Ok(())
+    })?;
+    for (id, (selection, title)) in inherited {
+        let head = heads.get_mut(&id).ok_or(StoreError::InvalidHistory)?;
+        if head.run_defaults.provider.is_none() {
+            head.run_defaults = selection;
+        }
+        if head.fallback_title.is_none() {
+            head.fallback_title = title;
+        }
+    }
+    Ok(())
 }
 
 fn discovered_identity(
@@ -237,6 +408,7 @@ fn resolve_view_with_mode(
         if prefix_digest(&source_events, lineage.source_sequence)? != lineage.prefix_digest {
             return Err(StoreError::InvalidHistory);
         }
+        current.inherited_title = Some(source.generated_title_through(lineage.source_sequence));
         let inherited: Vec<_> = source
             .runs
             .into_iter()

@@ -914,7 +914,10 @@ mod tests {
                     Ok("/exit\r\n/setup\x03\t".to_owned()),
                 ),
                 (vec![b'x'; MAX_DRAFT_BYTES], Ok("x".repeat(MAX_DRAFT_BYTES))),
-                (vec![b'x'; MAX_DRAFT_BYTES + 1], Err("paste exceeds 8 KiB")),
+                (
+                    vec![b'x'; MAX_DRAFT_BYTES + 1],
+                    Err("paste is too large; paste a smaller section"),
+                ),
                 (vec![0xff], Err("paste is not valid UTF-8")),
                 (
                     b"\x1b[20x\x1b\x1b[200~literal".to_vec(),

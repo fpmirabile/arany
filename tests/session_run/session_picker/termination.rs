@@ -1,5 +1,5 @@
 use super::{pump, tail};
-use crate::active_terminal::{ProductGuard, product_child_of};
+use crate::active_terminal::{ProductGuard, product_child_of_executable};
 use crate::loopback::{ChildGuard, wait_product};
 use crate::process::BoundedOutput;
 use arany::{SessionView, StateRoot, Store, create_session};
@@ -70,10 +70,10 @@ fn run_picker_signal_case(signal: Signal, suspend: bool, columns: u16, rows: u16
     let command = format!(
         "stty rows {rows} cols {columns}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
-    let mut attached = Command::new("/usr/bin/script");
+    let mut attached = crate::process::isolated_script(temp.path());
     attached
         .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
+        .env("ARANY_TEST_EXE", "/arany")
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
         .env("SHELL", "/bin/sh")
@@ -122,7 +122,7 @@ fn run_picker_signal_case(signal: Signal, suspend: bool, columns: u16, rows: u16
         .expect("initial terminal settings")
         .trim_end_matches('\r')
         .to_owned();
-    let product_pid = product_child_of(shell_pid);
+    let product_pid = product_child_of_executable(shell_pid, std::path::Path::new("/arany"));
     let _product_guard = ProductGuard::new(product_pid, state.clone());
     assert_ne!(
         tty_settings(product_pid),
@@ -310,10 +310,10 @@ fn run_picker_renderer_failure_case(columns: u16, rows: u16, attached_entry: boo
     let command = format!(
         "stty rows {rows} cols {columns}; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; exec 2>\"$ARANY_TEST_STDERR_PTY\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\""
     );
-    let mut attached = Command::new("/usr/bin/script");
+    let mut attached = crate::process::isolated_script(temp.path());
     attached
         .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
+        .env("ARANY_TEST_EXE", "/arany")
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
         .env("ARANY_TEST_STDERR_PTY", &slave_path)
@@ -380,14 +380,14 @@ fn run_picker_renderer_failure_case(columns: u16, rows: u16, attached_entry: boo
         .expect("initial terminal settings")
         .trim_end_matches('\r')
         .to_owned();
-    let product_pid = product_child_of(shell_pid);
+    let product_pid = product_child_of_executable(shell_pid, std::path::Path::new("/arany"));
     let _product_guard = ProductGuard::new(product_pid, state.clone());
     assert_ne!(tty_settings(product_pid), before, "picker owns raw mode");
 
     if attached_entry {
         let transitions: [(&[u8], &[u8], &[u8]); 2] = [
             (b"\r", b"\x1b[?1000l", b"\x1b[?25h"),
-            (b"/sessions\r", b"\x1b[?1000h", b"\x1b[?25l"),
+            (b"/resume\r", b"\x1b[?1000h", b"\x1b[?25l"),
         ];
         for (keys, capture, cursor) in transitions {
             let frame_at = stderr_bytes.len();

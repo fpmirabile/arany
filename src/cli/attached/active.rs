@@ -184,7 +184,7 @@ pub(super) async fn submit_objective(
                     | TerminalInput::End
                     | TerminalInput::Tab
                     | TerminalInput::Escape) => match composer.apply(input) {
-                        ComposerEdit::AtCapacity => Some("Error: input exceeds 8 KiB; draft unchanged".to_owned()),
+                        ComposerEdit::AtCapacity => Some("Error: message is too long; shorten it; draft unchanged".to_owned()),
                         ComposerEdit::Changed if !terminal.is_linear() => {
                             if draw_active_snapshot(terminal, view, composer, user_recorded, cancelling, None).is_err() {
                                 break "terminal rendering failed".to_owned();
@@ -198,7 +198,7 @@ pub(super) async fn submit_objective(
                         Some("Error: invalid or overlong terminal line; draft unchanged".to_owned())
                     }
                     TerminalInput::LineContinued => {
-                        Some(format!("Draft: {} of 8192 bytes; Enter retains until Run ends", composer.text().len()))
+                        Some(format!("Draft: {} characters; Enter retains until Run ends", composer.character_count()))
                     }
                     TerminalInput::QuickActions => {
                         Some("Quick actions are unavailable during a Run; /agents opens details".to_owned())
@@ -289,13 +289,19 @@ pub(super) async fn submit_objective(
         }
     };
     cancellation.cancel();
+    let linear = terminal.is_linear();
     let restored = terminal.restore();
     let mut reason = shutdown_reason;
     match tokio::time::timeout(SHUTDOWN_GRACE, future.as_mut()).await {
         Ok(Ok(outcome)) if restored.is_ok() => {
-            if emit_outcome(&admission.state_dir, &outcome, user_recorded)
-                .await
-                .is_err()
+            if emit_outcome(
+                &admission.state_dir,
+                &outcome,
+                user_recorded && linear,
+                !linear,
+            )
+            .await
+            .is_err()
             {
                 reason.push_str("; committed receipt unavailable; check Session history");
             }
@@ -461,15 +467,15 @@ pub(super) async fn compact_current(
                         "Error: invalid or overlong terminal line; draft unchanged".to_owned(),
                     ),
                     TerminalInput::LineContinued => Some(format!(
-                        "Draft: {} of 8192 bytes; Enter retains until compaction ends",
-                        composer.text().len(),
+                        "Draft: {} characters; Enter retains until compaction ends",
+                        composer.character_count(),
                     )),
                     TerminalInput::QuickActions => Some(
                         "Quick actions are unavailable during compaction; draft retained".to_owned(),
                     ),
                     input => match composer.apply(input) {
                         ComposerEdit::AtCapacity => Some(
-                            "Error: input exceeds 8 KiB; draft unchanged".to_owned(),
+                            "Error: message is too long; shorten it; draft unchanged".to_owned(),
                         ),
                         ComposerEdit::Changed if !terminal.is_linear() => Some(progress_text.to_owned()),
                         ComposerEdit::Changed | ComposerEdit::Unchanged => None,

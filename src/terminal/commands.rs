@@ -11,7 +11,6 @@ pub enum InteractiveCommand {
     Setup,
     Paste,
     Status,
-    Sessions,
     New,
     Resume,
     Fork,
@@ -20,7 +19,6 @@ pub enum InteractiveCommand {
     Agents,
     Provider,
     Model,
-    Models,
     Permissions,
     Quit,
 }
@@ -38,19 +36,13 @@ impl InteractiveCommand {
             return CommandAvailability::Available;
         }
         match self {
-            Self::Help | Self::Status | Self::Sessions | Self::Permissions => {
-                CommandAvailability::Available
-            }
+            Self::Help | Self::Status | Self::Permissions => CommandAvailability::Available,
             Self::Agents | Self::Provider | Self::Model | Self::Quit | Self::Paste => {
                 CommandAvailability::ViewOnly
             }
-            Self::Setup
-            | Self::New
-            | Self::Resume
-            | Self::Fork
-            | Self::Rename
-            | Self::Compact
-            | Self::Models => CommandAvailability::Locked,
+            Self::Setup | Self::New | Self::Resume | Self::Fork | Self::Rename | Self::Compact => {
+                CommandAvailability::Locked
+            }
         }
     }
 }
@@ -68,7 +60,7 @@ pub enum Submission<'a> {
 pub enum CommandParseError {
     #[error("empty input")]
     Empty,
-    #[error("input exceeds 8 KiB")]
+    #[error("message is too long; shorten it")]
     TooLong,
     #[error("unknown command")]
     Unknown { suggestion: Option<&'static str> },
@@ -98,18 +90,17 @@ const fn spec(
     }
 }
 
-const COMMANDS: [CommandSpec; 18] = [
+const COMMANDS: [CommandSpec; 16] = [
     spec("help", InteractiveCommand::Help, None, &[]),
     spec("setup", InteractiveCommand::Setup, None, &[]),
     spec("paste", InteractiveCommand::Paste, None, &[]),
     spec("status", InteractiveCommand::Status, None, &[]),
-    spec("sessions", InteractiveCommand::Sessions, None, &[]),
     spec("new", InteractiveCommand::New, None, &[]),
     spec("clear", InteractiveCommand::New, None, &[]),
     spec(
         "resume",
         InteractiveCommand::Resume,
-        Some("<session-id>"),
+        Some("[session-id]"),
         &[],
     ),
     spec("fork", InteractiveCommand::Fork, Some("<session-id>"), &[]),
@@ -133,7 +124,6 @@ const COMMANDS: [CommandSpec; 18] = [
         Some("<model-id> [effort|default]"),
         &[],
     ),
-    spec("models", InteractiveCommand::Models, None, &[]),
     spec("permissions", InteractiveCommand::Permissions, None, &[]),
     spec("quit", InteractiveCommand::Quit, None, &[]),
     spec("exit", InteractiveCommand::Quit, None, &[]),
@@ -157,7 +147,6 @@ pub(super) fn help_entry(index: usize) -> Option<HelpEntry> {
         InteractiveCommand::Setup => "Set up an account",
         InteractiveCommand::Paste => "Paste clipboard into draft",
         InteractiveCommand::Status => "Session status",
-        InteractiveCommand::Sessions => "Choose Session",
         InteractiveCommand::New => "New Session",
         InteractiveCommand::Resume => "Resume Session",
         InteractiveCommand::Fork => "Fork Session",
@@ -166,7 +155,6 @@ pub(super) fn help_entry(index: usize) -> Option<HelpEntry> {
         InteractiveCommand::Agents => "Agent details",
         InteractiveCommand::Provider => "Choose Provider",
         InteractiveCommand::Model => "Choose model",
-        InteractiveCommand::Models => "List models",
         InteractiveCommand::Permissions => "Show permissions",
         InteractiveCommand::Quit => "Exit Session",
     };
@@ -544,11 +532,11 @@ fn argument_hint(spec: &CommandSpec, _choices: &CommandChoices) -> Option<&'stat
 fn command_status(spec: &CommandSpec, choices: &CommandChoices) -> String {
     if spec.command == InteractiveCommand::Model {
         if !choices.catalog_loaded {
-            return "Command: /model <model-id> [effort|default]; run /models to load Tab choices"
+            return "Command: /model <model-id> [effort|default]; run /model to load Tab choices"
                 .into();
         }
         return format!(
-            "Command: /model <model-id> [effort|default]; {} selectable from last /models",
+            "Command: /model <model-id> [effort|default]; {} selectable from last /model",
             choices.catalog.len()
         );
     }
@@ -570,6 +558,9 @@ fn command_status(spec: &CommandSpec, choices: &CommandChoices) -> String {
 }
 
 fn suggest(name: &str) -> Option<&'static str> {
+    if name == "sessions" {
+        return Some("resume");
+    }
     if name.is_empty()
         || name.len() > MAX_COMMAND_NAME_BYTES
         || !name.bytes().all(|byte| byte.is_ascii_lowercase())
@@ -607,7 +598,7 @@ mod tests {
 
     #[test]
     fn closed_registry_aliases_completion_and_lifecycle_are_exact() {
-        assert_eq!(COMMANDS.len(), 18);
+        assert_eq!(COMMANDS.len(), 16);
         for spec in COMMANDS {
             assert_eq!(
                 parse_submission(&format!("/{}", spec.name)),
@@ -674,6 +665,24 @@ mod tests {
         assert_eq!(command_completions("/hel"), vec!["help"]);
         assert_eq!(command_completions("/set"), vec!["setup"]);
         assert_eq!(command_completions("/pas"), vec!["paste"]);
+        assert_eq!(command_completions("/mo"), vec!["model"]);
+        assert_eq!(
+            parse_submission("/models"),
+            Err(CommandParseError::Unknown {
+                suggestion: Some("model"),
+            })
+        );
+        assert_eq!(
+            parse_submission("/sessions"),
+            Err(CommandParseError::Unknown {
+                suggestion: Some("resume")
+            })
+        );
+        assert!(command_completions("/sessions").is_empty());
+        assert_eq!(
+            InteractiveCommand::Resume.availability(true),
+            CommandAvailability::Locked
+        );
         assert!(command_completions("/Help").is_empty());
         assert_eq!(
             InteractiveCommand::Provider.availability(true),
@@ -688,8 +697,8 @@ mod tests {
             CommandAvailability::Locked
         );
         assert_eq!(
-            InteractiveCommand::Models.availability(true),
-            CommandAvailability::Locked
+            InteractiveCommand::Model.availability(true),
+            CommandAvailability::ViewOnly
         );
         assert_eq!(
             InteractiveCommand::Help.availability(true),
@@ -762,7 +771,7 @@ mod tests {
             completion_suffix("/agents auto", &choices),
             Some(" ".into())
         );
-        assert_eq!(completion_suffix("/mo", &choices), None);
+        assert_eq!(completion_suffix("/mo", &choices), Some("del ".into()));
         assert_eq!(
             command_preview("/hel", &choices).unwrap().status,
             "Tab: /help"
@@ -834,7 +843,7 @@ mod tests {
             command_preview("/mo", &choices)
                 .unwrap()
                 .status
-                .contains("/model, /models")
+                .contains("/model")
         );
     }
 
@@ -851,7 +860,7 @@ mod tests {
             command_preview("/model ", &choices)
                 .unwrap()
                 .status
-                .contains("run /models")
+                .contains("run /model")
         );
         for (profile, model, default, allowed) in [
             ("chatgpt", "visible-chat-model", false, &Effort::ALL[..]),

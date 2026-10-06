@@ -637,23 +637,23 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         b"\x1b[22;3H",
     );
     let model_menu_at = transcript.len();
-    input.write_all(b"/mo").expect("ambiguous model prefix");
+    input.write_all(b"/s").expect("ambiguous Session prefix");
     wait_for_after(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         model_menu_at,
-        b"\x1b[22;6H",
+        b"\x1b[22;5H",
     );
-    input.write_all(b"\x1b[B").expect("focus models choice");
+    input.write_all(b"\x1b[B").expect("focus status choice");
     wait_for_after(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         model_menu_at,
-        b"> /models",
+        b"> /status",
     );
     let closed_at = transcript.len();
     input.write_all(b"\x1b").expect("dismiss completion menu");
@@ -666,7 +666,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         b"newline",
     );
     input
-        .write_all(b"del staged-model\r")
+        .write_all(b"\x7f\x7f/model staged-model\r")
         .expect("correct retained prefix with a literal model selection");
     wait_for_after(
         &mut output,
@@ -740,14 +740,14 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut transcript,
         &mut answered,
         rename_at,
-        b"UTF-8",
+        b"long;",
     );
     let notice_at = rename_at
         + transcript[rename_at..]
-            .windows(b"UTF-8".len())
-            .position(|part| part == b"UTF-8")
+            .windows(b"long;".len())
+            .position(|part| part == b"long;")
             .expect("rename rejection")
-        + b"UTF-8".len();
+        + b"long;".len();
     wait_for_after(
         &mut output,
         &mut input,
@@ -766,7 +766,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut transcript,
         &mut answered,
         corrected_at,
-        b"Renamed",
+        b"named Session:",
     );
     input
         .write_all(b"/quit\r")
@@ -1078,7 +1078,7 @@ fn session_picker_close_case(quick: bool) {
         before_picker = transcript.len();
         input.write_all(b"\x1b[B\x1b[B\r").expect("Session action");
     } else {
-        input.write_all(b"/sessions\r").expect("Session command");
+        input.write_all(b"/resume\r").expect("Session command");
     }
     wait_for_after(
         &mut output,
@@ -1475,7 +1475,7 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
         &mut transcript,
         &mut answered,
         rename_at,
-        b"Notice: Error: Title must contain 1 to 128 UTF-8 bytes\r\nInput:\r\n",
+        b"Notice: Error: Title is empty or too long; use a shorter title\r\nInput:\r\n",
     );
     let corrected_at = transcript.len();
     input
@@ -1863,14 +1863,14 @@ esac
                 "text/plain\n",
                 "success",
                 b"first\nsecond".as_slice(),
-                "Draft (not sent):\r\n  first\r\n  second\r\nDraft: 12 of 8192 bytes; Enter submits when idle; Ctrl+C clears when idle\r\nInput:\r\n",
+                "Draft (not sent):\r\n  first\r\n  second\r\nDraft: 12 characters; Enter submits when idle; Ctrl+C clears when idle\r\nInput:\r\n",
                 "types\npayload\n",
             ),
             (
                 "image/png\ntext/plain\n",
                 "success",
                 png.as_slice(),
-                "Draft (not sent):\r\n  \r\n  Image 1: PNG 1x1, 69 bytes\r\nDraft: 0 of 8192 bytes; Enter submits when idle; Ctrl+C clears when idle\r\nInput:\r\n",
+                "Draft (not sent):\r\n  \r\n  Image 1: PNG 1x1, 0.1 KB\r\nDraft: 0 characters; Enter submits when idle; Ctrl+C clears when idle\r\nInput:\r\n",
                 "types\npayload\n",
             ),
         ] {
@@ -2016,7 +2016,7 @@ esac
             .write_all(b"/paste\r")
             .expect("retain previous image after rejections");
         wait_for_after(&mut output, &mut input, &mut transcript, &mut answered, from,
-            b"Image 2: PNG 1x1, 69 bytes\r\nDraft: 0 of 8192 bytes; Enter submits when idle; Ctrl+C clears when idle\r\nInput:\r\n");
+            b"Image 2: PNG 1x1, 0.1 KB\r\nDraft: 0 characters; Enter submits when idle; Ctrl+C clears when idle\r\nInput:\r\n");
         let from = transcript.len();
         input.write_all(b"\x03").expect("clear images explicitly");
         wait_for_after(
@@ -2052,7 +2052,7 @@ esac
             &mut transcript,
             &mut answered,
             from,
-            b"Notice: Draft: 4 of 8192 bytes; Enter submits\r\nInput:\r\n",
+            b"Notice: Draft: 4 characters; Enter submits\r\nInput:\r\n",
         );
         let from = transcript.len();
         input
@@ -2095,7 +2095,7 @@ esac
             .write_all(b"/paste\r")
             .expect("verify process cleanup through next read");
         wait_for_after(&mut output, &mut input, &mut transcript, &mut answered, from,
-            b"Draft (not sent):\r\n  recovered\r\nDraft: 9 of 8192 bytes; Enter submits when idle; Ctrl+C clears when idle\r\nInput:\r\n");
+            b"Draft (not sent):\r\n  recovered\r\nDraft: 9 characters; Enter submits when idle; Ctrl+C clears when idle\r\nInput:\r\n");
         let from = transcript.len();
         input.write_all(b"\x03").expect("clear recovered text");
         wait_for_after(
@@ -2153,7 +2153,7 @@ esac
             &mut transcript,
             &mut answered,
             from,
-            format!("Notice: Resumed Session {session_id}\r\nInput:\r\n").as_bytes(),
+            b"Notice: Resumed: Empty conversation\r\nInput:\r\n",
         );
         let from = transcript.len();
         input
@@ -2187,7 +2187,7 @@ esac
         let from = transcript.len();
         input.write_all(b"/paste\r").expect("paste while preparing");
         wait_for_after(&mut output, &mut input, &mut transcript, &mut answered, from,
-            b"Draft (not sent):\r\n  \r\n  Image 1: PNG 1x1, 69 bytes\r\nDraft: 0 of 8192 bytes; Enter submits when idle; Ctrl+C clears when idle\r\n");
+            b"Draft (not sent):\r\n  \r\n  Image 1: PNG 1x1, 0.1 KB\r\nDraft: 0 characters; Enter submits when idle; Ctrl+C clears when idle\r\n");
         let pasted = String::from_utf8_lossy(&transcript[from..]);
         assert!(
             !pasted.contains("Error:"),

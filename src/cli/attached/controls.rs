@@ -105,7 +105,7 @@ pub(super) async fn select_model(
         effort.map_or("default", Effort::as_str)
     );
     if let Err(error) =
-        super::models::remember_models(&admission.workspace, &view.defaults, None).await
+        super::models::remember_models(&admission.workspace, &view.defaults, None, true).await
     {
         return Ok(format!(
             "{notice}; Error: {error}; selection saved for this Session only"
@@ -185,7 +185,7 @@ pub(super) fn validate_idle_command(
         InteractiveCommand::Rename
             if argument.is_some_and(|title| title.is_empty() || title.len() > 128) =>
         {
-            Err("Title must contain 1 to 128 UTF-8 bytes")
+            Err("Title is empty or too long; use a shorter title")
         }
         InteractiveCommand::Provider
             if argument.is_some_and(|profile| ProviderArg::from_str(profile).is_err()) =>
@@ -235,9 +235,23 @@ pub(super) async fn handle_command(
                 .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
             match resume_session(root, admission.workspace.clone(), id).await {
                 Ok(resumed) => {
+                    let resumed =
+                        match super::prepare_resume(admission, resumed, Some(&view.defaults)).await
+                        {
+                            Ok(resumed) => resumed,
+                            Err(error) => return Ok(format!("Error: {error}")),
+                        };
                     *session_id = id;
                     *view = resumed;
-                    format!("Resumed Session {id}")
+                    super::remembered_session_notice(
+                        admission,
+                        view,
+                        format!(
+                            "Resumed: {}",
+                            arany::escape_terminal(&view.conversation_title())
+                        ),
+                    )
+                    .await
                 }
                 Err(error) => format!("Error: {error}"),
             }
@@ -255,9 +269,24 @@ pub(super) async fn handle_command(
             match fork_session(root, admission.workspace.clone(), source_id, None).await {
                 Ok(id) => {
                     let forked = load_view(&admission.state_dir, id).await?;
+                    let forked = match super::prepare_resume(
+                        admission,
+                        forked,
+                        Some(&view.defaults),
+                    )
+                    .await
+                    {
+                        Ok(forked) => forked,
+                        Err(error) => return Ok(format!("Error: {error}")),
+                    };
                     *session_id = id;
                     *view = forked;
-                    format!("Forked Session {id}")
+                    super::remembered_session_notice(
+                        admission,
+                        view,
+                        format!("Forked Session {id}"),
+                    )
+                    .await
                 }
                 Err(error) => format!("Error: {error}"),
             }
@@ -380,34 +409,27 @@ pub(super) fn active_command_notice(
         .filter(|run| run.accepted_sequence > starting_sequence);
     match command {
         InteractiveCommand::Status => match run {
-            Some(run) => match run
-                .config
-                .as_ref()
-                .and_then(|config| config.context_usage.as_ref())
-                .filter(|_| run.status == arany::RunStatus::Active)
-            {
-                Some(usage) => format!(
-                    "Run {:?} · input {}/{} B · {} agents · Session {} · Run {}",
-                    run.status,
-                    usage.used_bytes,
-                    usage.budget_bytes,
+            Some(run) => {
+                let agents = format!(
+                    "{} agent{}",
                     run.agents.len(),
-                    view.id,
-                    run.id
-                ),
-                None => format!(
-                    "Session {} · Run {} · {:?} · {} agents",
-                    view.id,
-                    run.id,
-                    run.status,
-                    run.agents.len()
-                ),
-            },
-            None => format!("Session {} · Run admission in progress", view.id),
+                    if run.agents.len() == 1 { "" } else { "s" }
+                );
+                match run
+                    .config
+                    .as_ref()
+                    .and_then(|config| config.context_usage.as_ref())
+                    .filter(|_| run.status == arany::RunStatus::Active)
+                {
+                    Some(usage) => format!(
+                        "Working · request {}% of local limit · {agents}. Includes chat, instructions, files and images; not model tokens. Details: /agents",
+                        usage.utilization_percent(),
+                    ),
+                    None => format!("Task: {:?} · {agents} · details: /agents", run.status),
+                }
+            }
+            None => "Preparing message · Ctrl+C cancels".into(),
         },
-        InteractiveCommand::Sessions => {
-            format!("Current Session {}; switching locked for this run", view.id)
-        }
         InteractiveCommand::Agents => {
             "Collaboration locked for this run; /agents opens details".into()
         }
@@ -442,7 +464,7 @@ pub(super) fn active_command_notice(
                 .and_then(|run| run.config.as_ref())
                 .is_some_and(|config| config.tool_policy.is_some())
             {
-                "Primary has pinned guarded Tool grants: at most 16 Tool calls and 64 KiB of Tool context. Commands/MCP use a private selected-project copy without network or host credentials; their file changes are discarded. Children remain read-only. Arany requests: selected Provider; OS TLS checks may connect separately.".into()
+                "Primary has pinned guarded Tool grants: at most 16 Tool calls with bounded Tool context. Commands/MCP use a private selected-project copy without network or host credentials; their file changes are discarded. Children remain read-only. Arany requests: selected Provider; OS TLS checks may connect separately.".into()
             } else {
                 "Read-only Workspace; Arany requests: selected Provider; OS TLS checks may connect separately; no Tools or sandbox".into()
             }
@@ -491,6 +513,8 @@ mod tests {
         let mut view = SessionView {
             id: SessionId::new(),
             title: "Current".into(),
+            title_is_explicit: true,
+            inherited_title: None,
             workspace_identity: None,
             defaults: SessionDefaults::default(),
             created_sequence: 1,
@@ -533,7 +557,7 @@ mod tests {
         for (command, expected) in [
             ("/status unused", "Usage: /status"),
             ("/help unused", "Usage: /help"),
-            ("/models unused", "Usage: /models"),
+            ("/permissions unused", "Usage: /permissions"),
             ("/exit unused", "Usage: /exit"),
             ("/clear unused", "Usage: /clear"),
         ] {
@@ -613,7 +637,7 @@ mod tests {
         assert!(composer.is_empty());
         assert_eq!(view.defaults, SessionDefaults::default());
 
-        for command in ["/new", "/models"] {
+        for command in ["/new", "/compact"] {
             for character in command.chars() {
                 composer.apply(TerminalInput::Character(character));
             }
@@ -650,7 +674,7 @@ mod tests {
         });
         assert_eq!(
             active_command_notice(&view, InteractiveCommand::Status, starting_sequence),
-            format!("Session {} · Run {run_id} · Active · 1 agents", view.id)
+            "Task: Active · 1 agent · details: /agents"
         );
         view.runs.last_mut().expect("active Run").config = Some(RunConfig {
             provider: "openai".into(),
@@ -680,14 +704,15 @@ mod tests {
             tool_policy: None,
         });
         let notice = active_command_notice(&view, InteractiveCommand::Status, starting_sequence);
-        assert!(notice.starts_with("Run Active · input 32000/65536 B · 1 agents"));
-        assert!(notice.contains(&format!("Session {} · Run {run_id}", view.id)));
-        assert!("Run Active · input 32000/65536 B".chars().count() <= 40);
+        assert!(notice.starts_with("Working · request 49% of local limit · 1 agent."));
+        assert!(notice.contains("not model tokens"));
+        assert!(!notice.contains(&run_id.to_string()));
+        assert!("Working · request 49% of local limit".chars().count() <= 40);
         for status in [RunStatus::Finished, RunStatus::Failed, RunStatus::Cancelled] {
             view.runs.last_mut().expect("latest Run").status = status;
             assert_eq!(
                 active_command_notice(&view, InteractiveCommand::Status, starting_sequence),
-                format!("Session {} · Run {run_id} · {status:?} · 1 agents", view.id),
+                format!("Task: {status:?} · 1 agent · details: /agents"),
                 "current terminal facts remain visible without active context usage"
             );
             assert_eq!(
@@ -723,10 +748,7 @@ mod tests {
                 "/model",
                 "Model: claude-sonnet-5 · low; locked for this run".to_owned(),
             ),
-            (
-                "/status",
-                format!("Session {} · Run admission in progress", view.id),
-            ),
+            ("/status", "Preparing message · Ctrl+C cancels".to_owned()),
         ] {
             for character in command.chars() {
                 composer.apply(TerminalInput::Character(character));
@@ -802,6 +824,8 @@ mod tests {
         let mut view = SessionView {
             id: SessionId::new(),
             title: "Current".into(),
+            title_is_explicit: true,
+            inherited_title: None,
             workspace_identity: None,
             defaults: SessionDefaults::default(),
             created_sequence: 1,
@@ -831,17 +855,17 @@ mod tests {
             (
                 InteractiveCommand::Rename,
                 oversized_title.as_str(),
-                "Title must contain 1 to 128 UTF-8 bytes",
+                "Title is empty or too long; use a shorter title",
             ),
             (
                 InteractiveCommand::Rename,
                 "",
-                "Title must contain 1 to 128 UTF-8 bytes",
+                "Title is empty or too long; use a shorter title",
             ),
             (
                 InteractiveCommand::Rename,
                 oversized_unicode_title.as_str(),
-                "Title must contain 1 to 128 UTF-8 bytes",
+                "Title is empty or too long; use a shorter title",
             ),
         ] {
             assert_eq!(

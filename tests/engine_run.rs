@@ -509,6 +509,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         )
         .expect("engine");
         let mut first_request = request(&workspace, "First question");
+        first_request.title = None;
         first_request.images = vec![first_image.clone()];
         let first = engine
             .run(first_request)
@@ -644,7 +645,18 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 .iter()
                 .all(|run| run.status == RunStatus::Finished)
         );
+        let listed = list_sessions(StateRoot::open_existing(&state_path).unwrap(), workspace.clone()).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].title, "First summary", "second summary must not rename the conversation");
+        assert!(arany::render_session(&view, &events, arany::Output::Text).starts_with(&format!("Session: {}\nTitle: {}\n", view.id, listed[0].title)));
+        assert_eq!(listed[0].defaults.provider.as_deref(), Some("openai"));
+        assert_eq!(listed[0].defaults.model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(listed[0].defaults.account_id, Some(account_id));
+        assert_eq!(listed[0].defaults.effort, Some(Effort::Medium));
+        assert_eq!(listed[0].created_at.len(), 19);
+        assert_eq!(listed[0].last_activity_at.len(), 19);
         store.close().await.expect("store shutdown");
+
 
         let provider = ScriptedProvider::new(vec![
             ProviderOutcome::Delegate(Delegate { children: vec!["Inspect current image".into()] }),
@@ -835,6 +847,10 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         assert_eq!(store.load_view(first.session_id).await.unwrap().unwrap(), view);
         assert_eq!(store.load_view(fork_id).await.unwrap().unwrap(), fork);
         store.close().await.unwrap();
+        rename_session(StateRoot::admit(&state_path).unwrap(), workspace.clone(), first.session_id, "My conversation".into()).await.unwrap();
+        let listed = list_sessions(StateRoot::open_existing(&state_path).unwrap(), workspace.clone()).await.unwrap();
+        assert_eq!(listed[0].title, "My conversation");
+
     });
 }
 
@@ -1038,8 +1054,9 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
         .expect("fork in Session picker");
         assert_eq!(listed.iter().map(|item| item.id).collect::<Vec<_>>(), [fork_id, first.session_id]);
         assert_eq!(listed[0].title, "Branch");
+        assert_eq!(listed[0].defaults.model.as_deref(), Some("test-model"));
         let nested_id = engine
-            .fork_session(fork_id, workspace.clone(), Some("Nested branch".into()))
+            .fork_session(fork_id, workspace.clone(), None)
             .await
             .expect("fork of fork before a new Run");
 
@@ -1087,6 +1104,20 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
         assert_eq!(nested.runs.len(), 1);
         assert_eq!(nested.runs[0].id, first.run.id);
         store.close().await.expect("store shutdown");
+
+        let listed = list_sessions(StateRoot::open_existing(&state_path).unwrap(), workspace.clone()).await.unwrap();
+        let nested_item = listed.iter().find(|item| item.id == nested_id).unwrap();
+        assert_eq!(nested_item.title, "first", "later source summaries must not enter the fork preview");
+        assert_eq!(nested.inherited_title.as_deref(), Some(nested_item.title.as_str()));
+        assert!(arany::render_session(&nested, &[], arany::Output::Text).contains("\nTitle: first\n"));
+        assert_eq!(nested_item.defaults.model.as_deref(), Some("test-model"));
+        rename_session(StateRoot::open_existing(&state_path).unwrap(), workspace.clone(), nested_id, "New Session".into()).await.unwrap();
+        let renamed = resume_session(StateRoot::open_existing(&state_path).unwrap(), workspace.clone(), nested_id).await.unwrap();
+        assert!(renamed.title_is_explicit);
+        assert_eq!(renamed.conversation_title(), "New Session", "a manual placeholder-looking name remains explicit after reopen");
+        let relisted = list_sessions(StateRoot::open_existing(&state_path).unwrap(), workspace.clone()).await.unwrap();
+        assert_eq!(relisted.iter().find(|item| item.id == nested_id).unwrap().title, renamed.conversation_title());
+
 
         let connection = rusqlite::Connection::open(state_path.join("events.sqlite3"))
             .expect("fault injection connection");

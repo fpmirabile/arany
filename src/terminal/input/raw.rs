@@ -304,7 +304,7 @@ impl Decoder {
                 };
                 self.started = None;
                 Some(ReaderEvent::Paste(if paste.overflow {
-                    Err("paste exceeds 8 KiB")
+                    Err("paste is too large; paste a smaller section")
                 } else {
                     String::from_utf8(paste.bytes).map_err(|_| "paste is not valid UTF-8")
                 }))

@@ -43,7 +43,9 @@ fn invoke(
 ) -> Result<Option<Vec<u8>>, CredentialError> {
     admit_transport()?;
     let limit = slot_record_limit(slot).ok_or(CredentialError::InvalidAccount)?;
-    #[cfg(not(test))]
+    #[cfg(all(not(test), target_os = "linux"))]
+    let executable = std::path::Path::new("/proc/self/exe");
+    #[cfg(all(not(test), not(target_os = "linux")))]
     let executable = std::env::current_exe().map_err(|_| CredentialError::Unavailable)?;
     #[cfg(test)]
     let executable = std::env::var_os("ARANY_TEST_EXE")

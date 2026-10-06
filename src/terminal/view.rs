@@ -1,6 +1,6 @@
 use super::Composer;
 use super::commands::{Submission, help_entry, help_len, parse_submission};
-use super::history::{HistoryRow, MessageKind};
+use super::history::{HistoryRow, MAX_ROW_CELLS, MessageKind};
 use crate::presentation::{
     AgentInspectorModel, DraftAction, PresentationModel, model_id_preview, safe_truncate,
 };
@@ -80,6 +80,10 @@ pub(super) fn composer_height(composer: &Composer, area: Rect) -> u16 {
     (rows.lines.len().min(MAX_VISIBLE_DRAFT_ROWS) as u16)
         .saturating_add(2)
         .min(area.height.saturating_sub(1))
+}
+
+pub(super) fn history_top_padding(available_height: u16) -> u16 {
+    u16::from(available_height > 4)
 }
 
 pub(super) fn completion_height(composer: &Composer, available_height: u16) -> u16 {
@@ -179,7 +183,7 @@ pub(super) fn draw_setup_frame(
     step: u8,
     title: &str,
     instruction: &str,
-    input_bytes: usize,
+    input_chars: usize,
     notice: Option<&str>,
     palette: Palette,
 ) {
@@ -187,16 +191,16 @@ pub(super) fn draw_setup_frame(
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let status = if matches!(step, 0 | 4 | 6) {
+    let waiting = matches!(step, 0 | 4 | 6);
+    let narrow_input = area.width < 24 && !waiting;
+    let status = if waiting {
         "Please wait".to_owned()
-    } else if area.width < 16 {
-        format!("{input_bytes} B")
-    } else if area.width < 20 {
-        format!("{input_bytes}B Enter Esc")
+    } else if narrow_input {
+        format!("{input_chars} chars")
     } else if area.width < 50 {
-        format!("{input_bytes}B · Enter · Esc")
+        format!("{input_chars} chars · Enter · Esc")
     } else {
-        format!("Input: {input_bytes} bytes · Enter confirms · Esc cancels")
+        format!("Input: {input_chars} characters · Enter confirms · Esc cancels")
     };
     frame.render_widget(
         Paragraph::new(Line::styled("Arany setup", palette.accent())),
@@ -214,12 +218,28 @@ pub(super) fn draw_setup_frame(
     if area.height > 4 {
         frame.render_widget(
             Paragraph::new(safe_truncate(instruction, 240)).wrap(Wrap { trim: false }),
-            Rect::new(area.x, area.y + 2, area.width, area.height - 4),
+            Rect::new(
+                area.x,
+                area.y + 2,
+                area.width,
+                area.height - 4 - u16::from(narrow_input),
+            ),
         );
         frame.render_widget(
             Paragraph::new(safe_truncate(&status, usize::from(area.width))),
-            Rect::new(area.x, area.bottom() - 2, area.width, 1),
+            Rect::new(
+                area.x,
+                area.bottom() - 2 - u16::from(narrow_input),
+                area.width,
+                1,
+            ),
         );
+        if narrow_input {
+            frame.render_widget(
+                Paragraph::new("Enter · Esc"),
+                Rect::new(area.x, area.bottom() - 2, area.width, 1),
+            );
+        }
     }
     if let Some(notice) = notice {
         frame.render_widget(
@@ -548,25 +568,50 @@ pub(super) fn draw_frame_with_history(
     let activity_rows = menu_y
         .saturating_sub(area.y)
         .min(u16::try_from(model.activity_lines.len()).unwrap_or(u16::MAX));
-    let history_height = menu_y.saturating_sub(area.y + activity_rows);
+    let available_history = menu_y.saturating_sub(area.y + activity_rows);
+    let padding = history_top_padding(available_history);
+    let history_top = area.y + padding;
+    let history_height = available_history - padding;
     for (row, line) in history_rows
         .iter()
         .take(usize::from(history_height))
         .enumerate()
     {
-        frame.render_widget(
-            Paragraph::new(line.text.as_str()).style(if line.matched {
-                palette.selection()
+        let style = if line.matched {
+            palette.selection()
+        } else if line.heading {
+            match line.speaker {
+                MessageKind::User => Style::default().add_modifier(Modifier::BOLD),
+                MessageKind::Assistant => palette.selection(),
+                MessageKind::Notice => palette.accent().add_modifier(Modifier::BOLD),
+                MessageKind::Error => palette.error().add_modifier(Modifier::BOLD),
+            }
+        } else {
+            Style::default()
+        };
+        let marker = match (line.speaker, line.heading) {
+            (MessageKind::User, true) => Some("› "),
+            (MessageKind::Assistant, true) => Some("● "),
+            (MessageKind::User, false) if !line.text.is_empty() => Some("│ "),
+            _ => None,
+        };
+        let spans = if let Some(marker) = marker {
+            let width = usize::from(area.width).min(MAX_ROW_CELLS);
+            let text = if line.heading {
+                line.text.as_str()
             } else {
-                match line.speaker {
-                    Some(MessageKind::User) => Style::default().add_modifier(Modifier::BOLD),
-                    Some(MessageKind::Assistant) => palette.selection(),
-                    Some(MessageKind::Notice) => palette.accent().add_modifier(Modifier::BOLD),
-                    Some(MessageKind::Error) => palette.error().add_modifier(Modifier::BOLD),
-                    None => Style::default(),
-                }
-            }),
-            Rect::new(area.x, area.y + row as u16, area.width, 1),
+                line.text.strip_prefix("  ").unwrap_or(&line.text)
+            };
+            vec![
+                Span::styled(safe_truncate(marker, width), palette.accent()),
+                Span::styled(safe_truncate(text, width.saturating_sub(2)), style),
+            ]
+        } else {
+            vec![Span::styled(line.text.as_str(), style)]
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect::new(area.x, history_top + row as u16, area.width, 1),
         );
     }
     if history_rows.is_empty()
@@ -599,7 +644,7 @@ pub(super) fn draw_frame_with_history(
                 "/help commands · Ctrl+K actions · Ctrl+O newline",
             ]
         };
-        let top = area.y + history_height.saturating_sub(4);
+        let top = history_top + history_height.saturating_sub(4);
         for (index, text) in welcome
             .into_iter()
             .enumerate()
@@ -705,22 +750,17 @@ pub(super) fn draw_session_picker_frame(
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let header = format!("Sessions · {} in this Workspace", items.len());
+    let header = format!("Resume · {} in this Workspace", items.len());
     frame.render_widget(
         Paragraph::new(safe_truncate(&header, usize::from(area.width))).style(palette.selection()),
         Rect::new(area.x, area.y, area.width, 1),
     );
-    let rows = usize::from(area.height.saturating_sub(2));
+    let rows = usize::from(area.height.saturating_sub(6));
     let start = session_picker_start(selected, rows);
     for (row, item) in items.iter().skip(start).take(rows).enumerate() {
         let marker = if start + row == selected { "> " } else { "  " };
-        let id = item.id.to_string();
-        let suffix_len = if area.width < 20 { 8 } else { 12 };
-        let title = safe_truncate(
-            &item.title,
-            usize::from(area.width).saturating_sub(5 + suffix_len),
-        );
-        let line = format!("{marker}{title} · {}", &id[id.len() - suffix_len..]);
+        let title = safe_truncate(&item.title, usize::from(area.width).saturating_sub(2));
+        let line = format!("{marker}{title}");
         frame.render_widget(
             Paragraph::new(safe_truncate(&line, usize::from(area.width))).style(
                 if start + row == selected {
@@ -731,6 +771,46 @@ pub(super) fn draw_session_picker_frame(
             ),
             Rect::new(area.x, area.y + 1 + row as u16, area.width, 1),
         );
+    }
+    if area.height >= 6
+        && let Some(item) = items.get(selected)
+    {
+        let short = area.width < 40;
+        let created = if short {
+            item.created_at.get(..10).unwrap_or(&item.created_at)
+        } else {
+            &item.created_at
+        };
+        let used = if short {
+            item.last_activity_at
+                .get(..10)
+                .unwrap_or(&item.last_activity_at)
+        } else {
+            &item.last_activity_at
+        };
+        let details = [
+            if short {
+                format!("Made {created}")
+            } else {
+                format!("Created: {created} UTC")
+            },
+            if short {
+                format!("Used {used}")
+            } else {
+                format!("Last activity: {used} UTC")
+            },
+            crate::presentation::session_access_label(&item.defaults).to_owned(),
+            item.defaults
+                .model
+                .clone()
+                .unwrap_or_else(|| "Default model".into()),
+        ];
+        for (offset, detail) in details.iter().enumerate() {
+            frame.render_widget(
+                Paragraph::new(safe_truncate(detail, usize::from(area.width))),
+                Rect::new(area.x, area.bottom() - 5 + offset as u16, area.width, 1),
+            );
+        }
     }
     if area.height >= 2 {
         let hint = if area.width < 20 {
@@ -980,19 +1060,19 @@ pub(super) fn draw_quick_actions_frame(
     );
     let narrow = area.width < 40;
     let sessions = if has_draft && area.width < 20 {
-        "Sessions draft"
+        "Resume draft"
     } else if has_draft && area.width < 24 {
-        "Sessions · draft"
+        "Resume · draft"
     } else if has_draft && narrow {
-        "Sessions · draft first"
+        "Resume · draft first"
     } else if has_draft {
-        "Sessions · finish draft first"
+        "Resume · finish draft first"
     } else if area.width < 20 {
-        "Sessions: list"
+        "Resume: list"
     } else if narrow {
-        "Sessions · resume"
+        "Resume · choose"
     } else {
-        "Sessions · resume a Session"
+        "Resume · conversation"
     };
     let models = if area.width < 20 {
         "Models: choose"
@@ -1288,11 +1368,11 @@ pub(super) fn session_picker_index(
         || column < area.left()
         || column >= area.right()
         || row <= area.top()
-        || row >= area.bottom().saturating_sub(1)
+        || row >= area.bottom().saturating_sub(5)
     {
         return None;
     }
-    let visible_rows = usize::from(area.height.saturating_sub(2));
+    let visible_rows = usize::from(area.height.saturating_sub(6));
     let offset = usize::from(row - area.top() - 1);
     let index = session_picker_start(selected, visible_rows).saturating_add(offset);
     (index < count).then_some(index)

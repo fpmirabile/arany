@@ -88,10 +88,10 @@ fn screen_reader_model_catalog_selects_exact_profile_without_provider_egress() {
         .expect("unselected Session")
     });
 
-    let mut command = Command::new("/usr/bin/script");
+    let mut command = crate::process::isolated_script(temp.path());
     command
         .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
+        .env("ARANY_TEST_EXE", "/arany")
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
         .env("ARANY_TEST_SESSION", session_id.to_string())
@@ -115,7 +115,7 @@ fn screen_reader_model_catalog_selects_exact_profile_without_provider_egress() {
         let mut bytes = Vec::new();
         let stages: [&[u8]; 24] = [
             b"Input:", b"Command: /exit", b"Notice: Select /provider first",
-            b"Notice: Provider: custom:local; set /model", b"Notice: Error: Usage: /models",
+            b"Notice: Provider: custom:local; set /model", b"Notice: Error: Unknown command; did you mean /model?",
             b"Choose number [effort|default], n next, p previous, or q close:",
             b"Notice: invalid model or effort choice", b"Notice: Model: model-1",
             b"Choose number [effort|default], n next, p previous, or q close:",
@@ -164,20 +164,20 @@ fn screen_reader_model_catalog_selects_exact_profile_without_provider_egress() {
     input.write_all(b"/help\n").expect("complete linear help");
     stage(1);
     for (keys, expected) in [
-        (&b"/models\n"[..], 1),
+        (&b"/model\n"[..], 1),
         (&b"/provider custom:local\n"[..], 2),
-        (&b"/models extra\n"[..], 3),
+        (&b"/models\n"[..], 3),
         (&b"/model\n"[..], 4),
         (&b"1 max\n"[..], 5),
         (&b"1 high\n"[..], 6),
-        (&b"/models\n"[..], 7),
+        (&b"/model\n"[..], 7),
         (&b"q\n"[..], 8),
         (&b"/provider openai\n"[..], 9),
         (&b"/model gpt-linear-guard\n"[..], 10),
         (&b"/model gpt-linear-guard high\n"[..], 11),
         (&b"unaccepted physical objective\n"[..], 12),
         (&b"/model gpt-6-astra high\n"[..], 13),
-        (&b"/models\n"[..], 14),
+        (&b"/model\n"[..], 14),
     ] {
         input.write_all(keys).expect("linear model journey");
         stage(expected + 1);
@@ -211,13 +211,13 @@ fn screen_reader_model_catalog_selects_exact_profile_without_provider_egress() {
     rustix::fs::flock(&held, rustix::fs::FlockOperation::NonBlockingLockExclusive)
         .expect("held catalog operation");
     let before = prefix();
-    input.write_all(b"/models\n").expect("busy catalog");
+    input.write_all(b"/model\n").expect("busy catalog");
     stage(18);
     input.write_all(b"1 low\n").expect("busy atomic selection");
     stage(19);
     assert_eq!(prefix(), before);
     rustix::fs::flock(&held, rustix::fs::FlockOperation::Unlock).expect("release catalog");
-    input.write_all(b"/models\n").expect("reopen catalog");
+    input.write_all(b"/model\n").expect("reopen catalog");
     stage(20);
     input.write_all(b"1 low\n").expect("choice after unlock");
     stage(21);
@@ -264,7 +264,7 @@ fn screen_reader_model_catalog_selects_exact_profile_without_provider_egress() {
     ));
     assert!(!text.contains("Setup: Choose model effort"));
     assert_eq!(
-        text.matches("Notice: Error: Model catalog unavailable: Provider unavailable. Review the selected account or retry /models.\r\n")
+        text.matches("Notice: Error: Model catalog unavailable: Provider unavailable. Review the selected account or retry /model.\r\n")
             .count(),
         1,
         "catalog failure needs a textual error and recovery: {}",
@@ -403,17 +403,9 @@ fn inline_model_catalog_at_width(width: u16) {
     input
         .write_all(b"note\x0b")
         .expect("draft and quick actions");
-    let menu_ready: &[u8] = if width < 20 {
-        b"Esc"
-    } else if width < 40 {
-        b"Enter:open"
-    } else {
-        b"return"
-    };
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !transcript[before_menu..]
-        .windows(menu_ready.len())
-        .any(|part| part == menu_ready)
+    while frame_marker_end(&transcript[before_menu..], b"Quick actions").is_none()
+        || frame_marker_end(&transcript[before_menu..], b"\x1b[?25l").is_none()
     {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
         assert!(
@@ -810,7 +802,7 @@ fn run_model_catalog_cancel_then_sigterm_case(columns: u16, rows: u16) {
     } else {
         b"model-1"
     };
-    input.write_all(b"/models\r").expect("open first catalog");
+    input.write_all(b"/model\r").expect("open first catalog");
     let deadline = Instant::now() + Duration::from_secs(10);
     while !frame_marker_end(&transcript, catalog_marker).is_some_and(|end| {
         transcript[end..]
@@ -860,7 +852,7 @@ fn run_model_catalog_cancel_then_sigterm_case(columns: u16, rows: u16) {
     );
 
     let reopen_at = transcript.len();
-    input.write_all(b"/models\r").expect("open second catalog");
+    input.write_all(b"/model\r").expect("open second catalog");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         pump(&mut output, &mut input, &mut transcript, &mut answered);

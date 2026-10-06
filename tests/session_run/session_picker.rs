@@ -1,11 +1,11 @@
-use super::active_terminal::{ProductGuard, product_child_of};
+use super::active_terminal::{ProductGuard, product_child_of_executable};
 use super::loopback::{ChildGuard, wait_product};
 use arany::{SessionView, StateRoot, Store, create_session};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use std::{
     io::{Read, Write},
     os::unix::fs::PermissionsExt,
-    process::{Command, Stdio},
+    process::Stdio,
     thread,
     time::{Duration, Instant},
 };
@@ -94,10 +94,10 @@ fn run_picker_case(
     let command = format!(
         "stty rows 24 cols {width}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" {no_color}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
-    let mut attached = Command::new("/usr/bin/script");
+    let mut attached = crate::process::isolated_script(temp.path());
     attached
         .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
+        .env("ARANY_TEST_EXE", "/arany")
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
         .env("SHELL", "/bin/sh")
@@ -133,17 +133,12 @@ fn run_picker_case(
         .expect("picker shell PID")
         .parse()
         .expect("numeric picker shell PID");
-    let _product = ProductGuard::new(product_child_of(shell_pid), state.clone());
+    let _product = ProductGuard::new(
+        product_child_of_executable(shell_pid, std::path::Path::new("/arany")),
+        state.clone(),
+    );
     if width < 20 {
-        let older_id = older.to_string();
-        let newer_id = newer.to_string();
-        let cues: [&[u8]; 5] = [
-            b"Up/Dn",
-            b"Enter",
-            b"Esc",
-            &older_id.as_bytes()[older_id.len() - 8..],
-            &newer_id.as_bytes()[newer_id.len() - 8..],
-        ];
+        let cues: [&[u8]; 5] = [b"Up/Dn", b"Enter", b"Esc", b"Older", b"Newer"];
         let deadline = Instant::now() + Duration::from_secs(10);
         while !cues
             .iter()
@@ -184,7 +179,7 @@ fn run_picker_case(
             .expect("make fixture State unsafe");
         let rejected_at = transcript.len();
         input
-            .write_all(b"/sessions\r")
+            .write_all(b"/resume\r")
             .expect("reject unsafe listing");
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -213,9 +208,7 @@ fn run_picker_case(
             tail(&transcript[rejected_at..(rejected_at + 512).min(transcript.len())])
         );
         let open_at = transcript.len();
-        input
-            .write_all(b"/sessions\r")
-            .expect("open attached picker");
+        input.write_all(b"/resume\r").expect("open attached picker");
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             pump(&mut output, &mut input, &mut transcript, &mut answered);
@@ -364,10 +357,10 @@ fn screen_reader_entry(
     let shell = format!(
         "before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" {entry}; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
-    let mut command = Command::new("/usr/bin/script");
+    let mut command = crate::process::isolated_script(state.parent().expect("fixture root"));
     command
         .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
+        .env("ARANY_TEST_EXE", "/arany")
         .env("ARANY_TEST_STATE", state)
         .env("ARANY_TEST_WORKSPACE", workspace)
         .env("SHELL", "/bin/sh")
@@ -402,7 +395,7 @@ fn screen_reader_entry(
             .expect("make fixture State unsafe");
         let rejected_at = transcript.len();
         input
-            .write_all(b"/sessions\r")
+            .write_all(b"/resume\r")
             .expect("reject unsafe listing");
         let expected = b"Notice: Error: state directory unavailable or unsafe\r\nInput:\r\n";
         let deadline = Instant::now() + Duration::from_secs(10);

@@ -20,7 +20,7 @@ pub struct ImageAttachment {
 impl ImageAttachment {
     pub fn from_png(bytes: &[u8]) -> Result<Self, &'static str> {
         if bytes.len() > MAX_IMAGE_BYTES {
-            return Err("image exceeds the 192 KiB limit");
+            return Err("image is too large; choose a smaller PNG");
         }
         let (width, height) = png_dimensions(bytes).ok_or("invalid or unsupported PNG image")?;
         Ok(Self {

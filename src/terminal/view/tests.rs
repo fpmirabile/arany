@@ -71,7 +71,7 @@ fn setup_step_stays_centered_and_borderless_without_echoing_input() {
                     frame,
                     3,
                     "Enter API key",
-                    "Input is hidden; up to 512 printable ASCII bytes",
+                    "Hidden input; up to 512 ASCII characters",
                     12,
                     Some("Invalid key; try again"),
                     Palette { color: false },
@@ -98,7 +98,7 @@ fn setup_step_stays_centered_and_borderless_without_echoing_input() {
         );
         assert!(
             rows.iter()
-                .any(|row| row.contains("12B") || row.contains("12 bytes"))
+                .any(|row| row.contains("12 chars") || row.contains("12 characters"))
         );
         assert!(rows.iter().any(|row| row.contains("Invalid")));
         assert!(!rows.join("").contains(['┌', '┐', '└', '┘', '│']));
@@ -305,7 +305,7 @@ fn setup_choices_remain_visible_at_narrow_widths_without_color() {
                 frame,
                 3,
                 "Enter API key",
-                "Input is hidden; up to 512 printable ASCII bytes",
+                "Hidden input; up to 512 ASCII characters",
                 512,
                 Some("Invalid or overlong API key"),
                 Palette { color: false },
@@ -319,7 +319,8 @@ fn setup_choices_remain_visible_at_narrow_widths_without_color() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(visible.contains("512B Enter Esc"));
+    assert!(visible.contains("512 chars"));
+    assert!(visible.contains("Enter · Esc"));
     assert!(visible.contains("Invalid"));
 }
 
@@ -489,7 +490,8 @@ fn empty_session_has_a_quiet_welcome_without_obscuring_the_composer() {
                     Palette { color: false },
                     &[HistoryRow {
                         text: "You:".into(),
-                        speaker: Some(MessageKind::User),
+                        speaker: MessageKind::User,
+                        heading: true,
                         matched: false,
                     }],
                     None,
@@ -501,6 +503,7 @@ fn empty_session_has_a_quiet_welcome_without_obscuring_the_composer() {
             .flat_map(|y| (0..width).map(move |x| buffer[(x, y)].symbol()))
             .collect::<String>();
         assert!(screen.contains("You:"));
+        assert!(screen.contains("› You:"));
         assert!(!screen.contains("Describe a task"));
         assert!(!screen.contains("Describe a task"));
     }
@@ -745,17 +748,20 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
     let rows = vec![
         HistoryRow {
             text: "You:".into(),
-            speaker: Some(MessageKind::User),
+            speaker: MessageKind::User,
+            heading: true,
             matched: false,
         },
         HistoryRow {
             text: "  committed objective".into(),
-            speaker: None,
+            speaker: MessageKind::User,
+            heading: false,
             matched: false,
         },
         HistoryRow {
             text: "Arany:".into(),
-            speaker: Some(MessageKind::Assistant),
+            speaker: MessageKind::Assistant,
+            heading: true,
             matched: false,
         },
     ];
@@ -774,20 +780,27 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
         .expect("history frame");
     let buffer = terminal.backend().buffer();
     let row = |y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>();
-    assert!(row(0).contains("You:"));
-    assert!(row(2).contains("Arany:"));
+    assert!(
+        row(0).trim().is_empty(),
+        "top edge stays clear of speaker labels"
+    );
+    assert!(row(1).contains("You:"));
+    assert!(row(3).contains("Arany:"));
+    assert_eq!(row(1), format!("› You:{}", " ".repeat(34)));
+    assert_eq!(row(3), format!("● Arany:{}", " ".repeat(32)));
+    assert!(row(2).starts_with("│ committed objective"));
     assert!(row(7).contains("primary · working"));
     assert!(row(8).contains("Ask Arany"));
     assert!(row(11).contains("History · Ctrl+L live"));
     assert!(!row(11).contains("working · model"));
-    assert!(buffer[(0, 0)].modifier.contains(Modifier::BOLD));
-    assert!(buffer[(0, 2)].modifier.contains(Modifier::BOLD));
-    assert!(!buffer[(2, 1)].modifier.contains(Modifier::BOLD));
-    assert_eq!(buffer[(0, 0)].fg, Color::Reset);
-    assert_eq!(buffer[(0, 2)].fg, Color::Reset);
+    assert!(buffer[(2, 1)].modifier.contains(Modifier::BOLD));
+    assert!(buffer[(2, 3)].modifier.contains(Modifier::BOLD));
+    assert!(!buffer[(2, 2)].modifier.contains(Modifier::BOLD));
+    assert_eq!(buffer[(2, 1)].fg, Color::Reset);
+    assert_eq!(buffer[(0, 3)].fg, Color::Reset);
 
     let wide_model = PresentationModel {
-        status_line: "working · openai/model · input 12/100 B".into(),
+        status_line: "working · openai/model · Safe conversation".into(),
         activity_lines: vec!["primary · working".into()],
         setup_required: false,
         draft_action: DraftAction::InspectRun,
@@ -797,12 +810,14 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
         let mut feedback_rows = rows.clone();
         feedback_rows.push(HistoryRow {
             text: "Arany · error:".into(),
-            speaker: Some(MessageKind::Error),
+            speaker: MessageKind::Error,
+            heading: true,
             matched: false,
         });
         feedback_rows.push(HistoryRow {
             text: "  Retry /setup; your draft is retained".into(),
-            speaker: None,
+            speaker: MessageKind::Error,
+            heading: false,
             matched: false,
         });
         wide.draw(|frame| {
@@ -821,7 +836,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
             .map(|x| wide.backend().buffer()[(x, 11)].symbol())
             .collect::<String>();
         assert!(
-            status.contains("History · Ctrl+L live · working · openai/model · input 12/100 B"),
+            status.contains("History · Ctrl+L live · working · openai/model · Safe conversation"),
             "{status}"
         );
 
@@ -845,12 +860,12 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
             "{status}"
         );
         let buffer = wide.backend().buffer();
-        let chat_error = (0..80).map(|x| buffer[(x, 3)].symbol()).collect::<String>();
-        let chat_body = (0..80).map(|x| buffer[(x, 4)].symbol()).collect::<String>();
+        let chat_error = (0..80).map(|x| buffer[(x, 4)].symbol()).collect::<String>();
+        let chat_body = (0..80).map(|x| buffer[(x, 5)].symbol()).collect::<String>();
         assert!(chat_error.starts_with("Arany · error:"));
         assert!(chat_body.contains("Retry /setup; your draft is retained"));
         assert_eq!(
-            buffer[(0, 3)].fg,
+            buffer[(0, 4)].fg,
             if color { Color::Red } else { Color::Reset }
         );
     }
@@ -869,36 +884,108 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
         })
         .expect("colored history frame");
     let buffer = terminal.backend().buffer();
-    assert_eq!(buffer[(0, 0)].fg, Color::Reset);
-    assert_eq!(buffer[(0, 2)].fg, Color::Cyan);
-    assert!(buffer[(0, 0)].modifier.contains(Modifier::BOLD));
-    assert!(buffer[(0, 2)].modifier.contains(Modifier::BOLD));
+    assert_eq!(buffer[(2, 1)].fg, Color::Reset);
+    assert_eq!(buffer[(0, 3)].fg, Color::Cyan);
+    assert!(buffer[(2, 1)].modifier.contains(Modifier::BOLD));
+    assert!(buffer[(2, 3)].modifier.contains(Modifier::BOLD));
 
-    for color in [false, true] {
-        let mut narrow = Terminal::new(TestBackend::new(16, 8)).expect("narrow terminal");
-        narrow
-            .draw(|frame| {
-                draw_frame_with_history(
-                    frame,
-                    &model,
-                    &Composer::default(),
-                    None,
-                    Palette { color },
-                    &rows,
-                    None,
-                );
-            })
-            .expect("narrow history frame");
-        let buffer = narrow.backend().buffer();
-        assert_eq!(buffer[(0, 0)].symbol(), "Y");
-        assert_eq!(buffer[(0, 2)].symbol(), "A");
-        assert!(buffer[(0, 0)].modifier.contains(Modifier::BOLD));
-        assert!(buffer[(0, 2)].modifier.contains(Modifier::BOLD));
-        assert_eq!(buffer[(0, 0)].fg, Color::Reset);
-        assert_eq!(
-            buffer[(0, 2)].fg,
-            if color { Color::Cyan } else { Color::Reset }
-        );
+    for (height, top) in [(8, 0), (9, 0), (10, 1)] {
+        for color in [false, true] {
+            let mut narrow = Terminal::new(TestBackend::new(16, height)).expect("narrow terminal");
+            narrow
+                .draw(|frame| {
+                    draw_frame_with_history(
+                        frame,
+                        &model,
+                        &Composer::default(),
+                        None,
+                        Palette { color },
+                        &rows,
+                        None,
+                    );
+                })
+                .expect("narrow history frame");
+            let buffer = narrow.backend().buffer();
+            assert_eq!(buffer[(0, top)].symbol(), "›");
+            assert_eq!(buffer[(0, top + 2)].symbol(), "●");
+            assert_eq!(buffer[(5, top)].symbol(), ":");
+            assert_eq!(buffer[(7, top + 2)].symbol(), ":");
+            assert_eq!(buffer[(15, top)].symbol(), " ");
+            assert_eq!(buffer[(15, top + 2)].symbol(), " ");
+            assert!(buffer[(2, top)].modifier.contains(Modifier::BOLD));
+            assert!(buffer[(2, top + 2)].modifier.contains(Modifier::BOLD));
+            assert_eq!(buffer[(2, top)].fg, Color::Reset);
+            assert_eq!(
+                buffer[(0, top + 2)].fg,
+                if color { Color::Cyan } else { Color::Reset }
+            );
+        }
+    }
+
+    let mut conversation = rows[..2].to_vec();
+    conversation[1].text = "  e\u{301}👩‍💻".into();
+    conversation.extend([
+        HistoryRow {
+            text: "  continued".into(),
+            speaker: MessageKind::User,
+            heading: false,
+            matched: true,
+        },
+        HistoryRow {
+            text: String::new(),
+            speaker: MessageKind::User,
+            heading: false,
+            matched: false,
+        },
+        rows[2].clone(),
+        HistoryRow {
+            text: "  You: is quoted".into(),
+            speaker: MessageKind::Assistant,
+            heading: false,
+            matched: false,
+        },
+    ]);
+    for width in [16, 40, 80] {
+        for color in [false, true] {
+            let mut terminal =
+                Terminal::new(TestBackend::new(width, 12)).expect("conversation terminal");
+            terminal
+                .draw(|frame| {
+                    draw_frame_with_history(
+                        frame,
+                        &model,
+                        &Composer::default(),
+                        None,
+                        Palette { color },
+                        &conversation,
+                        None,
+                    );
+                })
+                .expect("conversation frame");
+            let buffer = terminal.backend().buffer();
+            let row = |y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            };
+            assert!(row(0).trim().is_empty());
+            assert!(row(1).starts_with("› You:"));
+            assert!(row(2).starts_with("│ e\u{301}👩‍💻"));
+            assert!(row(3).starts_with("│ continued"));
+            assert!(row(4).trim().is_empty());
+            assert!(row(5).starts_with("● Arany:"));
+            assert!(row(6).starts_with("  You:"));
+            assert_eq!(
+                buffer[(0, 2)].fg,
+                if color { Color::Cyan } else { Color::Reset }
+            );
+            assert_eq!(buffer[(2, 2)].fg, Color::Reset);
+            assert!(buffer[(2, 2)].modifier.is_empty());
+            assert!(buffer[(2, 3)].modifier.contains(Modifier::BOLD));
+            assert_eq!(buffer[(2, 6)].fg, Color::Reset);
+            assert!(buffer[(2, 6)].modifier.is_empty());
+            assert!(buffer.content().iter().all(|cell| cell.bg == Color::Reset));
+        }
     }
 }
 
@@ -1030,7 +1117,7 @@ fn multiline_frame_keeps_activity_draft_caret_and_status_in_order() {
             let preparing = PresentationModel {
                 status_line: safe_truncate("preparing · model", width as usize),
                 activity_lines: vec![safe_truncate(
-                    "Preparing request · admission",
+                    "Preparing message · Ctrl+C cancels",
                     width as usize,
                 )],
                 setup_required: false,
@@ -1246,15 +1333,14 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
                         .map(|x| buffer[(x, y)].symbol())
                         .collect::<String>()
                 };
-                assert!(row(height - 7).contains("/setup"));
-                assert!(row(height - 6).contains("> /status"));
-                assert!(row(height - 5).contains("/sessions"));
+                assert!(row(height - 6).contains("/setup"));
+                assert!(row(height - 5).contains("> /status"));
                 assert!(row(height - 3).contains("> /s"));
                 assert!(row(height - 1).starts_with("Tab/Enter: /sta"));
                 assert!(row(height - 2).contains("Tab/Enter"));
-                assert!(buffer[(0, height - 6)].modifier.contains(Modifier::BOLD));
+                assert!(buffer[(0, height - 5)].modifier.contains(Modifier::BOLD));
                 assert_eq!(
-                    buffer[(0, height - 6)].fg,
+                    buffer[(0, height - 5)].fg,
                     if color { Color::Cyan } else { Color::Reset },
                 );
                 assert_eq!(composer.text(), "/s");
@@ -1724,6 +1810,13 @@ fn session_picker_keeps_selection_visible_and_titles_inert() {
                 format!("Session {index}")
             },
             last_sequence: index,
+            created_at: "2026-10-06 12:00:00".into(),
+            last_activity_at: "2026-10-06 12:05:00".into(),
+            defaults: crate::SessionDefaults {
+                provider: Some("chatgpt".into()),
+                model: Some("gpt-6.1-sol".into()),
+                ..crate::SessionDefaults::default()
+            },
         })
         .collect::<Vec<_>>();
     for width in [16, 20, 24, 40, 50, 80] {
@@ -1738,23 +1831,17 @@ fn session_picker_keeps_selection_visible_and_titles_inert() {
                 .map(|x| buffer[(x, y)].symbol())
                 .collect::<String>()
         };
-        assert!(row(0).contains("Sessions · 15"));
-        if width < 20 {
-            assert!(row(10).starts_with("> Ho… · "));
-            let id = items[14].id.to_string();
-            assert!(row(10).contains(&id[id.len() - 8..]));
-        } else if width < 24 {
-            assert!(row(10).starts_with("> Ho"));
-        } else if width < 40 {
-            assert!(row(10).starts_with("> Hostil"));
-        } else {
-            assert!(row(10).starts_with("> Hostile\\u{001b}[31m"));
-        }
+        assert!(row(0).contains("Resume · 15"));
+        assert!(row(6).starts_with("> Hostile"));
         if width == 80 {
-            assert!(row(10).contains("\\u{202e}"));
+            assert!(row(6).contains("\\u{202e}"));
         }
-        assert!(!row(10).contains('\u{1b}'));
-        assert!(!row(10).contains('\u{202e}'));
+        assert!(!row(6).contains('\u{1b}'));
+        assert!(!row(6).contains('\u{202e}'));
+        assert!(row(7).contains("2026-10-06"));
+        assert!(row(8).contains("2026-10-06"));
+        assert!(row(9).contains("ChatGPT plan"));
+        assert!(row(10).contains("gpt-6.1-sol"));
         assert!(row(11).contains(if width < 20 {
             "Up/Dn Enter Esc"
         } else if width < 24 {
@@ -1765,19 +1852,21 @@ fn session_picker_keeps_selection_visible_and_titles_inert() {
             "Enter resume"
         }));
         let area = Rect::new(0, 0, width, 12);
-        assert_eq!(session_picker_index(area, 0, 1, 14, 15), Some(5));
-        assert_eq!(session_picker_index(area, 0, 10, 14, 15), Some(14));
+        assert_eq!(session_picker_index(area, 0, 1, 14, 15), Some(9));
+        assert_eq!(session_picker_index(area, 0, 6, 14, 15), Some(14));
         assert_eq!(session_picker_index(area, 0, 0, 14, 15), None);
-        assert_eq!(session_picker_index(area, 0, 11, 14, 15), None);
+        for row in 7..12 {
+            assert_eq!(session_picker_index(area, 0, row, 14, 15), None);
+        }
         assert_eq!(session_picker_index(area, width, 10, 14, 15), None);
         assert_eq!(session_picker_index(area, 0, 2, 0, 1), None);
-        assert_eq!(buffer[(0, 10)].fg, Color::Reset);
-        assert!(buffer[(0, 10)].modifier.contains(Modifier::BOLD));
+        assert_eq!(buffer[(0, 6)].fg, Color::Reset);
+        assert!(buffer[(0, 6)].modifier.contains(Modifier::BOLD));
         terminal
             .draw(|frame| draw_session_picker_frame(frame, &items, 14, Palette { color: true }))
             .expect("colored picker frame");
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(0, 10)].fg, Color::Cyan);
+        assert_eq!(buffer[(0, 6)].fg, Color::Cyan);
         assert_eq!(buffer[(0, 9)].fg, Color::Reset);
     }
 }
@@ -1787,8 +1876,7 @@ fn quick_actions_keep_focus_and_draft_guard_visible_without_color() {
     for width in [16, 20, 24, 40, 50, 80] {
         for height in [4, 6, 7, 8] {
             for color in [false, true] {
-                for (selected, name) in
-                    [(0, "Models"), (1, "Agents"), (2, "Sessions"), (3, "Setup")]
+                for (selected, name) in [(0, "Models"), (1, "Agents"), (2, "Resume"), (3, "Setup")]
                 {
                     for has_draft in [false, true] {
                         let mut terminal =

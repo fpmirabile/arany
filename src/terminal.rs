@@ -1,5 +1,6 @@
 use crate::presentation::{
-    AgentInspectorModel, DraftAction, PresentationModel, image_message_lines, user_message_lines,
+    AgentInspectorModel, DraftAction, PresentationModel, image_message_lines, render_answer,
+    user_message_lines,
 };
 use crate::provider::{Effort, ModelEntry};
 use crate::session::{RunStatus, SessionListItem, SessionView};
@@ -42,7 +43,7 @@ use view::{
     composer_height, draw_agent_inspector_frame, draw_frame_with_history, draw_help_frame,
     draw_model_catalog_frame, draw_quick_actions_frame, draw_session_picker_frame,
     draw_setup_choices_frame, draw_setup_frame, draw_setup_text_frame, draw_setup_warning_frame,
-    screen_terminal, session_picker_index,
+    history_top_padding, screen_terminal, session_picker_index,
 };
 
 const MIN_INTERACTIVE_HEIGHT: u16 = 8;
@@ -528,7 +529,7 @@ impl AttachedTerminal {
         }
         let text = self.take_paste()?;
         match composer.insert_paste(&text)? {
-            ComposerEdit::AtCapacity => Err("paste exceeds the 8 KiB draft limit"),
+            ComposerEdit::AtCapacity => Err("paste is too large; paste a smaller section"),
             edit => {
                 self.input
                     .as_mut()
@@ -655,11 +656,10 @@ impl AttachedTerminal {
         let above_composer = above_composer - completion_height(composer, above_composer);
         let activity_height =
             above_composer.min(u16::try_from(model.activity_lines.len()).unwrap_or(u16::MAX));
-        self.history.sync(
-            view,
-            usize::from(area.width),
-            usize::from(above_composer - activity_height),
-        );
+        let history_height = above_composer - activity_height;
+        let history_height = history_height - history_top_padding(history_height);
+        self.history
+            .sync(view, usize::from(area.width), usize::from(history_height));
         if let Some(notice) = notice.filter(|notice| !transient_notice(notice)) {
             self.history.record_notice(notice);
         }
@@ -674,9 +674,7 @@ impl AttachedTerminal {
                     frame,
                     &model,
                     composer,
-                    notice.filter(|notice| {
-                        transient_notice(notice) || above_composer == activity_height
-                    }),
+                    notice.filter(|notice| transient_notice(notice) || history_height == 0),
                     palette,
                     &history_rows,
                     history_status.as_deref(),
@@ -714,15 +712,29 @@ impl AttachedTerminal {
     }
 
     pub fn print_user_message(objective: &str) -> Result<(), TerminalError> {
+        Self::print_user_message_with_heading(objective, "\n› You:")
+    }
+
+    fn print_user_message_with_heading(
+        objective: &str,
+        heading: &str,
+    ) -> Result<(), TerminalError> {
         let mut writer = io::stderr();
-        for line in user_message_lines(objective, 80) {
+        writeln!(writer, "{heading}")?;
+        for line in user_message_lines(objective, 80).into_iter().skip(1) {
             writeln!(writer, "{line}")?;
         }
         writer.flush().map_err(TerminalError::Io)
     }
 
-    pub fn print_user_run(run: &crate::session::RunView) -> Result<(), TerminalError> {
-        Self::print_user_message(&run.objective)?;
+    pub fn print_user_run(
+        run: &crate::session::RunView,
+        inline: bool,
+    ) -> Result<(), TerminalError> {
+        Self::print_user_message_with_heading(
+            &run.objective,
+            if inline { "\n› You:" } else { "You:" },
+        )?;
         let mut writer = io::stderr();
         for line in image_message_lines(&run.images, 80) {
             writeln!(writer, "{line}")?;
@@ -730,12 +742,18 @@ impl AttachedTerminal {
         writer.flush().map_err(TerminalError::Io)
     }
 
+    pub fn print_assistant_run(run: &crate::session::RunView) -> Result<(), TerminalError> {
+        io::stdout()
+            .write_all(render_answer(run, "Arany · Answer:").as_bytes())
+            .map_err(TerminalError::Io)
+    }
+
     pub fn draw_setup(
         &mut self,
         step: u8,
         title: &str,
         instruction: &str,
-        input_bytes: usize,
+        input_chars: usize,
         notice: Option<&str>,
     ) -> Result<(), TerminalError> {
         self.cancel_clipboard_paste();
@@ -754,7 +772,7 @@ impl AttachedTerminal {
                     step,
                     title,
                     instruction,
-                    input_bytes,
+                    input_chars,
                     notice,
                     palette,
                 )

@@ -121,6 +121,8 @@ impl RunView {
 pub struct SessionView {
     pub id: SessionId,
     pub title: String,
+    pub title_is_explicit: bool,
+    pub inherited_title: Option<String>,
     pub workspace_identity: Option<(u64, u64)>,
     pub defaults: SessionDefaults,
     pub created_sequence: u64,
@@ -131,6 +133,36 @@ pub struct SessionView {
 }
 
 impl SessionView {
+    pub fn conversation_title(&self) -> String {
+        if self.title_is_explicit {
+            self.title.clone()
+        } else {
+            self.generated_title_through(self.last_sequence)
+        }
+    }
+
+    pub(crate) fn generated_title_through(&self, sequence: u64) -> String {
+        let direct = || {
+            self.runs.iter().filter(|run| {
+                run.accepted_sequence > self.created_sequence && run.accepted_sequence <= sequence
+            })
+        };
+        direct()
+            .filter(|run| {
+                run.status == RunStatus::Finished
+                    && run.finished_sequence.is_some_and(|end| end <= sequence)
+            })
+            .find_map(|run| run.primary().and_then(|agent| agent.summary.as_deref()))
+            .map(super::title_preview)
+            .or_else(|| {
+                direct()
+                    .next()
+                    .map(|run| super::title_preview(&run.objective))
+            })
+            .or_else(|| self.inherited_title.clone())
+            .unwrap_or_else(|| "Empty conversation".into())
+    }
+
     pub fn replay(id: SessionId, events: &[EventEnvelope]) -> Result<Option<Self>, ReplayError> {
         Self::replay_prefix(id, events, true)
     }
@@ -168,6 +200,11 @@ impl SessionView {
                     view = Some(Self {
                         id,
                         title: title.clone(),
+                        title_is_explicit: !matches!(
+                            title.as_str(),
+                            "New Session" | "Forked Session"
+                        ),
+                        inherited_title: None,
                         workspace_identity: *workspace_identity,
                         defaults: SessionDefaults::default(),
                         created_sequence: prior,
@@ -188,6 +225,11 @@ impl SessionView {
                     view = Some(Self {
                         id,
                         title: title.clone(),
+                        title_is_explicit: !matches!(
+                            title.as_str(),
+                            "New Session" | "Forked Session"
+                        ),
+                        inherited_title: None,
                         workspace_identity: None,
                         defaults: SessionDefaults::default(),
                         created_sequence: prior,
@@ -241,6 +283,7 @@ impl SessionView {
             }
             Event::SessionRenamed { title } => {
                 current.title = title.clone();
+                current.title_is_explicit = true;
             }
             Event::SessionDefaultChanged { defaults } => {
                 current.defaults = defaults.clone();

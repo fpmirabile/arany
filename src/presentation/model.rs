@@ -37,7 +37,7 @@ impl PresentationModel {
         let state = if preparing {
             "preparing"
         } else {
-            run_state_label(run.map(|run| run.status))
+            chat_state_label(run.map(|run| run.status))
         };
         let pinned = run
             .filter(|run| run.status == RunStatus::Active)
@@ -72,13 +72,10 @@ impl PresentationModel {
             }
         }
         if width >= 80 {
-            if let Some(usage) = pinned.and_then(|config| config.context_usage.as_ref()) {
-                fields.push(format!(
-                    "input {}/{} B",
-                    usage.used_bytes, usage.budget_bytes
-                ));
-            }
-            let title = safe_truncate(&view.title, if width >= 120 { 32 } else { 12 });
+            let title = safe_truncate(
+                &view.conversation_title(),
+                if width >= 120 { 32 } else { 12 },
+            );
             let occupied = UnicodeWidthStr::width(fields.join(" · ").as_str());
             if occupied + 3 + UnicodeWidthStr::width(title.as_str()) <= width {
                 fields.push(title);
@@ -148,7 +145,7 @@ impl PresentationModel {
             })
             .unwrap_or_default();
         if preparing {
-            activity_lines.push(safe_truncate("Preparing request · admission", width));
+            activity_lines.push(safe_truncate("Preparing message · Ctrl+C cancels", width));
         }
         Self {
             status_line,
@@ -181,8 +178,11 @@ pub(crate) fn linear_session_lines(view: &SessionView) -> Vec<String> {
     let policy = pinned.map_or(view.defaults.policy, |config| config.policy);
     let mut lines = vec![
         format!("Session: {}", view.id),
-        format!("Title: {}", safe_truncate(&view.title, MAX_ROW_CELLS)),
-        format!("State: {}", run_state_label(run.map(|run| run.status))),
+        format!(
+            "Title: {}",
+            safe_truncate(&view.conversation_title(), MAX_ROW_CELLS)
+        ),
+        format!("State: {}", chat_state_label(run.map(|run| run.status))),
         format!("Provider: {}", safe_truncate(provider, MAX_ROW_CELLS)),
         format!("Model: {}", safe_truncate(model, MAX_ROW_CELLS)),
     ];
@@ -202,6 +202,18 @@ pub(crate) fn linear_session_lines(view: &SessionView) -> Vec<String> {
         } => format!("Collaboration: team; max children: {max_active_children}"),
     });
     if let Some(run) = run {
+        if !matches!(run.status, RunStatus::Pending | RunStatus::Active) {
+            lines.push(format!("Last task: {}", run_state_label(Some(run.status))));
+        }
+        if let Some(usage) = pinned.and_then(|config| config.context_usage.as_ref()) {
+            lines.push(format!(
+                "Request size: {}% of Arany's local limit",
+                usage.utilization_percent()
+            ));
+            lines.push(
+                "Includes chat, instructions, files and images; not the model's token limit".into(),
+            );
+        }
         lines.push(format!("Run: {}", run.id));
         for agent in &run.agents {
             let role = match agent.role {
@@ -220,6 +232,14 @@ pub(crate) fn linear_session_lines(view: &SessionView) -> Vec<String> {
 fn requires_setup(view: &SessionView, status: Option<RunStatus>) -> bool {
     view.defaults.provider.is_none()
         && !matches!(status, Some(RunStatus::Pending | RunStatus::Active))
+}
+
+fn chat_state_label(status: Option<RunStatus>) -> &'static str {
+    match status {
+        Some(RunStatus::Pending) => "starting",
+        Some(RunStatus::Active) => "working",
+        _ => "ready",
+    }
 }
 
 fn run_state_label(status: Option<RunStatus>) -> &'static str {
@@ -308,6 +328,8 @@ mod tests {
         SessionView {
             id: SessionId::new(),
             title: "work\u{1b}[31m\nSession: forged".into(),
+            title_is_explicit: true,
+            inherited_title: None,
             workspace_identity: None,
             defaults: Default::default(),
             created_sequence: 1,
@@ -326,7 +348,7 @@ mod tests {
             linear[1],
             "Title: work\\u{001b}[31m\\u{000a}Session: forged"
         );
-        assert_eq!(linear[2], "State: idle");
+        assert_eq!(linear[2], "State: ready");
         assert_eq!(linear[3], "Provider: unset");
         assert!(
             linear
@@ -427,7 +449,41 @@ mod tests {
         let model = PresentationModel::from_session(&view, 80);
         assert_eq!(model.draft_action, DraftAction::InspectRun);
         assert!(model.status_line.contains("anthropic/claude-sonnet-5"));
-        assert!(model.status_line.contains("input 32000/65536 B"));
+        assert!(!model.status_line.contains("context "));
+        for (used, budget, percent) in [(0, 65_536, 0), (1, 2, 50), (65_536, 65_536, 100)] {
+            let usage = view
+                .runs
+                .last_mut()
+                .unwrap()
+                .config
+                .as_mut()
+                .unwrap()
+                .context_usage
+                .as_mut()
+                .unwrap();
+            usage.used_bytes = used;
+            usage.budget_bytes = budget;
+            usage.compactable_bytes = used.min(20_000);
+            assert!(
+                !PresentationModel::from_session(&view, 80)
+                    .status_line
+                    .contains("context "),
+                "request-size details stay out of ordinary status at {percent}%"
+            );
+        }
+        let usage = view
+            .runs
+            .last_mut()
+            .unwrap()
+            .config
+            .as_mut()
+            .unwrap()
+            .context_usage
+            .as_mut()
+            .unwrap();
+        usage.used_bytes = 32_000;
+        usage.budget_bytes = 65_536;
+        usage.compactable_bytes = 20_000;
         assert!(
             PresentationModel::from_session(&view, 50)
                 .status_line
@@ -448,11 +504,42 @@ mod tests {
         assert!(linear.contains(&"Model: claude-sonnet-5".to_owned()));
         assert!(linear.contains(&"Collaboration: team; max children: 8".to_owned()));
         assert!(linear.contains(&"Agent: child 1; state: failed".to_owned()));
+        view.title = "New Session".into();
+        view.title_is_explicit = false;
         view.runs.last_mut().expect("Run").status = RunStatus::Finished;
-        let after = PresentationModel::from_session(&view, 80);
+        view.runs.last_mut().unwrap().finished_sequence = Some(10);
+        view.last_sequence = 10;
+        view.runs.last_mut().unwrap().agents[0].status = AgentStatus::Finished;
+        view.runs.last_mut().unwrap().agents[0].summary = Some("Recognizable conversation".into());
+        let after = PresentationModel::from_session(&view, 120);
+        assert!(after.status_line.starts_with("ready · "));
+        assert!(after.status_line.contains("Recognizable conversation"));
+        assert!(!after.status_line.contains("New Session"));
         assert_eq!(after.draft_action, DraftAction::Submit);
         assert!(after.status_line.contains("openai/gpt-5.4"));
-        assert!(!after.status_line.contains("input "));
+        assert!(!after.status_line.contains("context "));
+        view.title_is_explicit = true;
+        assert_eq!(
+            view.conversation_title(),
+            "New Session",
+            "explicit placeholder rename wins"
+        );
+        view.title_is_explicit = false;
+        for status in [
+            RunStatus::Active,
+            RunStatus::Failed,
+            RunStatus::Cancelled,
+            RunStatus::Interrupted,
+        ] {
+            view.runs.last_mut().unwrap().status = status;
+            assert_eq!(
+                view.conversation_title(),
+                "task",
+                "unaccepted summaries cannot name a conversation"
+            );
+        }
+        view.runs.last_mut().unwrap().status = RunStatus::Finished;
+
         for status in [RunStatus::Active, RunStatus::Finished, RunStatus::Failed] {
             view.runs.last_mut().expect("previous Run").status = status;
             for width in [16, 40, 50, 80, 120] {
@@ -462,7 +549,7 @@ mod tests {
                 assert_eq!(preparing.draft_action, DraftAction::Retain);
                 assert_eq!(preparing.activity_lines.len(), 1);
                 assert!(preparing.activity_lines[0].starts_with("Preparing"));
-                assert!(!preparing.status_line.contains("input "));
+                assert!(!preparing.status_line.contains("context "));
                 assert!(!preparing.status_line.contains("claude"));
                 assert!(!preparing.activity_lines[0].contains("primary"));
                 if width >= 40 {

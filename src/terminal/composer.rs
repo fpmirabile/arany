@@ -34,6 +34,10 @@ impl Composer {
         &self.text
     }
 
+    pub fn character_count(&self) -> usize {
+        self.text.graphemes(true).count()
+    }
+
     pub fn cursor_byte_offset(&self) -> usize {
         self.cursor
     }
@@ -54,7 +58,7 @@ impl Composer {
             + image.byte_len()
             > MAX_IMAGE_BYTES
         {
-            return Err("draft images exceed the 192 KiB limit; submit or clear them first");
+            return Err("draft images are too large; remove one or use smaller PNGs");
         }
         self.images.push(image);
         Ok(())
@@ -647,8 +651,7 @@ mod tests {
         let mut composer = Composer::default();
         for (prefix, navigation, expected) in [
             ("/s", TerminalInput::Down, "status"),
-            ("/s", TerminalInput::Up, "sessions"),
-            ("/mo", TerminalInput::Down, "models"),
+            ("/s", TerminalInput::Up, "status"),
             ("/", TerminalInput::Up, "exit"),
         ] {
             for accept in [TerminalInput::Tab, TerminalInput::Submit] {
@@ -682,11 +685,12 @@ mod tests {
         assert_eq!(composer.text(), "/s");
         assert_eq!(composer.cursor_byte_offset(), cursor);
         assert_eq!(composer.apply(TerminalInput::Down), ComposerEdit::Unchanged);
-        composer.apply(TerminalInput::Character('e'));
+        composer.apply(TerminalInput::Character('t'));
+        composer.apply(TerminalInput::Backspace);
         let (names, selected) = composer
             .completion_menu()
             .expect("edited prefix reopens choices");
-        assert_eq!(names, ["setup", "sessions"]);
+        assert_eq!(names, ["setup", "status"]);
         assert_eq!(selected, 0);
         composer.apply(TerminalInput::Left);
         assert!(composer.completion_menu().is_none());
@@ -696,7 +700,7 @@ mod tests {
         composer.apply(TerminalInput::Newline);
         assert!(composer.completion_menu().is_none());
         assert_eq!(composer.apply(TerminalInput::Tab), ComposerEdit::Unchanged);
-        assert_eq!(composer.text(), "/se\n");
+        assert_eq!(composer.text(), "/s\n");
         assert_eq!(composer.apply(TerminalInput::Up), ComposerEdit::Changed);
         assert_eq!(composer.cursor_byte_offset(), 0);
         composer.clear();
@@ -844,7 +848,7 @@ mod tests {
                         .command_preview()
                         .expect("model preview")
                         .status
-                        .contains("run /models")
+                        .contains("run /model")
                 );
                 composer.set_model_catalog(
                     profile,

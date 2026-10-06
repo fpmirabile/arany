@@ -9,8 +9,6 @@ use std::io::{self, Write};
 
 use super::CommandAvailability;
 use super::commands::{help_entry, help_len};
-#[cfg(unix)]
-use super::input::MAX_LINEAR_LINE_BYTES;
 
 pub(super) struct LinearState {
     mode_label: &'static str,
@@ -95,8 +93,8 @@ impl LinearState {
         }
         writeln!(
             writer,
-            "Draft: {} of 8192 bytes; Enter submits when idle; Ctrl+C clears when idle",
-            composer.text().len()
+            "Draft: {} characters; Enter submits when idle; Ctrl+C clears when idle",
+            composer.character_count()
         )?;
         self.prompt_needed = true;
         writer.flush()
@@ -243,8 +241,7 @@ impl LinearState {
             #[cfg(unix)]
             writeln!(
                 writer,
-                "Input: Enter submits; Ctrl+D after text continues (8 KiB max, {} bytes per line); empty Ctrl+D exits",
-                MAX_LINEAR_LINE_BYTES
+                "Input: Enter submits; Ctrl+D after text continues; empty Ctrl+D exits",
             )?;
             writeln!(
                 writer,
@@ -287,14 +284,30 @@ impl LinearState {
         if self.last_picker_page == Some(start) {
             return Ok(());
         }
-        writeln!(writer, "Sessions: {} in this Workspace", items.len())?;
+        writeln!(writer, "Resume: {} in this Workspace", items.len())?;
         for (index, item) in items.iter().skip(start).take(10).enumerate() {
             writeln!(
                 writer,
-                "Choice {}: {}; ID: {}",
+                "Choice {}: {}",
                 index + 1,
-                safe_truncate(&item.title, 240),
-                item.id
+                safe_truncate(&item.title, 240)
+            )?;
+            writeln!(
+                writer,
+                "Created: {} UTC; last activity: {} UTC",
+                item.created_at, item.last_activity_at
+            )?;
+            writeln!(
+                writer,
+                "Access: {}; model: {}",
+                safe_truncate(
+                    crate::presentation::session_access_label(&item.defaults),
+                    240
+                ),
+                safe_truncate(
+                    item.defaults.model.as_deref().unwrap_or("Default model"),
+                    240
+                )
             )?;
         }
         writeln!(
@@ -438,7 +451,7 @@ mod tests {
             .expect("pasted draft preview");
         assert_eq!(
             pasted,
-            "\nDraft (not sent):\n  alpha\\u{0009}beta\n  🙂\nDraft: 15 of 8192 bytes; Enter submits when idle; Ctrl+C clears when idle\n".as_bytes()
+            "\nDraft (not sent):\n  alpha\\u{0009}beta\n  🙂\nDraft: 12 characters; Enter submits when idle; Ctrl+C clears when idle\n".as_bytes()
         );
         assert_eq!(composer.text(), "alpha\tbeta\n🙂");
         assert!(!pasted.contains(&0x1b));
@@ -452,7 +465,14 @@ mod tests {
         linear
             .write_clipboard_draft(&mut with_image, &composer)
             .unwrap();
-        assert_eq!(with_image, "Draft (not sent):\n  alpha\\u{0009}beta\n  🙂\n  Image 1: PNG 1x1, 69 bytes\nDraft: 15 of 8192 bytes; Enter submits when idle; Ctrl+C clears when idle\n".as_bytes());
+        assert_eq!(with_image, "Draft (not sent):\n  alpha\\u{0009}beta\n  🙂\n  Image 1: PNG 1x1, 0.1 KB\nDraft: 12 characters; Enter submits when idle; Ctrl+C clears when idle\n".as_bytes());
+        composer.clear();
+        composer.insert_paste("e\u{301}👩‍💻").unwrap();
+        let mut graphemes = Vec::new();
+        linear
+            .write_clipboard_draft(&mut graphemes, &composer)
+            .unwrap();
+        assert_eq!(graphemes, "Draft (not sent):\n  e\u{301}👩‍💻\nDraft: 2 characters; Enter submits when idle; Ctrl+C clears when idle\n".as_bytes());
     }
 
     #[cfg(unix)]
@@ -461,6 +481,8 @@ mod tests {
         let mut view = SessionView {
             id: SessionId::new(),
             title: "bad\u{1b}[31m\nSession: forged".into(),
+            title_is_explicit: true,
+            inherited_title: None,
             workspace_identity: None,
             defaults: SessionDefaults::default(),
             created_sequence: 1,
@@ -481,11 +503,11 @@ mod tests {
             String::from_utf8(output.clone()).expect("UTF-8"),
             format!(
                 "Presentation: screen-reader\n\
-                 Input: Enter submits; Ctrl+D after text continues (8 KiB max, {} bytes per line); empty Ctrl+D exits\n\
+                 Input: Enter submits; Ctrl+D after text continues; empty Ctrl+D exits\n\
                  Commands: /help lists local controls; type arguments literally; Tab and Ctrl+O are inline-only\n\
                  Session: {}\n\
                  Title: bad\\u{{001b}}[31m\\u{{000a}}Session: forged\n\
-                 State: idle\n\
+                 State: ready\n\
                  Provider: unset\n\
                  Model: unset\n\
                  Setup: type /setup to choose an account\n\
@@ -493,7 +515,7 @@ mod tests {
                  Collaboration: auto; max children: 3\n\
                  Notice: ready\\u{{001b}}[2J\n\
                  Input:\n",
-                MAX_LINEAR_LINE_BYTES, view.id
+                view.id
             )
         );
         assert!(!output.contains(&b'\r'));
@@ -576,17 +598,15 @@ mod tests {
                 "Command: /setup; Set up an account; during Run: locked\n",
                 "Command: /paste; Paste clipboard into draft; during Run: view-only\n",
                 "Command: /status; Session status; during Run: available\n",
-                "Command: /sessions; Choose Session; during Run: available\n",
                 "Command: /new; New Session; during Run: locked\n",
                 "Command: /clear; New Session; during Run: locked\n",
-                "Command: /resume <session-id>; Resume Session; during Run: locked\n",
+                "Command: /resume [session-id]; Resume Session; during Run: locked\n",
                 "Command: /fork <session-id>; Fork Session; during Run: locked\n",
                 "Command: /rename <title>; Rename Session; during Run: locked\n",
                 "Command: /compact; Compact context; during Run: locked\n",
                 "Command: /agents <single|auto|team> [max-active-children]; Agent details; during Run: view-only\n",
                 "Command: /provider <provider>; Choose Provider; during Run: view-only\n",
                 "Command: /model <model-id> [effort|default]; Choose model; during Run: view-only\n",
-                "Command: /models; List models; during Run: locked\n",
                 "Command: /permissions; Show permissions; during Run: available\n",
                 "Command: /quit; Exit Session; during Run: view-only\n",
                 "Command: /exit; Exit Session; during Run: view-only\n",
@@ -605,6 +625,9 @@ mod tests {
             id: view.id,
             title: view.title.clone(),
             last_sequence: view.last_sequence,
+            created_at: "2026-10-06 12:00:00".into(),
+            last_activity_at: "2026-10-06 12:05:00".into(),
+            defaults: view.defaults.clone(),
         }];
         let mut picker = Vec::new();
         linear
@@ -615,11 +638,12 @@ mod tests {
             .expect("unchanged picker page does not repeat");
         assert_eq!(
             String::from_utf8(picker.clone()).expect("UTF-8 picker"),
-            format!(
-                "Sessions: 1 in this Workspace\n\
-                 Choice 1: bad\\u{{001b}}[31m\\u{{000a}}Session: forged; ID: {}\n\
-                 Choose number, exact ID, n next, p previous, or q close:\n",
-                view.id
+            concat!(
+                "Resume: 1 in this Workspace\n",
+                "Choice 1: bad\\u{001b}[31m\\u{000a}Session: forged\n",
+                "Created: 2026-10-06 12:00:00 UTC; last activity: 2026-10-06 12:05:00 UTC\n",
+                "Access: User default; model: Default model\n",
+                "Choose number, exact ID, n next, p previous, or q close:\n",
             )
         );
         assert!(!picker.contains(&b'\r'));

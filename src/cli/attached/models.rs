@@ -22,8 +22,17 @@ const MAX_CACHED_MODELS: usize = 4096;
 #[serde(deny_unknown_fields)]
 struct ModelPreferences {
     version: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selected: Option<SavedSelection>,
     #[serde(deserialize_with = "bounded_sources")]
     sources: Vec<SavedModels>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SavedSelection {
+    profile: String,
+    account_id: uuid::Uuid,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -89,6 +98,7 @@ fn read_preferences(root: &StateRoot) -> Result<ModelPreferences, String> {
     else {
         return Ok(ModelPreferences {
             version: 1,
+            selected: None,
             sources: Vec::new(),
         });
     };
@@ -128,6 +138,13 @@ fn validate_preferences(preferences: ModelPreferences) -> Result<ModelPreference
             return Err("invalid saved model preferences".into());
         }
     }
+    if preferences.selected.as_ref().is_some_and(|selected| {
+        !preferences.sources.iter().any(|source| {
+            source.profile == selected.profile && source.account_id == selected.account_id
+        })
+    }) {
+        return Err("invalid saved model preferences".into());
+    }
     Ok(preferences)
 }
 
@@ -139,6 +156,42 @@ fn matching_source<'a>(
         Some(source.profile.as_str()) == defaults.provider.as_deref()
             && Some(source.account_id) == defaults.account_id
     })
+}
+
+pub(super) fn last_saved_defaults(
+    workspace: &Path,
+) -> Result<Option<arany::SessionDefaults>, String> {
+    let path = StateRoot::account_path().map_err(|_| "saved selection unavailable")?;
+    let root = match StateRoot::open_existing(&path) {
+        Ok(root) => root,
+        Err(arany::StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            if matches!(std::fs::symlink_metadata(&path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+            {
+                return Ok(None);
+            }
+            return Err("saved selection unavailable or unsafe".into());
+        }
+        Err(_) => return Err("saved selection unavailable or unsafe".into()),
+    };
+    root.with_account_replacement_lock(workspace, || {
+        let preferences = read_preferences(&root)?;
+        Ok(preferences
+            .selected
+            .as_ref()
+            .and_then(|selected| {
+                preferences.sources.iter().find(|source| {
+                    source.profile == selected.profile && source.account_id == selected.account_id
+                })
+            })
+            .map(|source| arany::SessionDefaults {
+                provider: Some(source.profile.clone()),
+                model: source.model.clone(),
+                effort: source.effort,
+                account_id: Some(source.account_id),
+                ..arany::SessionDefaults::default()
+            }))
+    })
+    .map_err(|_| "saved selection unavailable".to_owned())?
 }
 
 pub(super) async fn restore_saved_models(
@@ -189,7 +242,7 @@ pub(super) async fn restore_saved_models(
                 {
                     defaults.model = previous.defaults.model;
                     defaults.effort = previous.defaults.effort;
-                    remember_models(workspace, defaults, None).await?;
+                    remember_models(workspace, defaults, None, true).await?;
                 }
                 Ok(_) | Err(arany::EngineError::NoSessionForWorkspace) => {}
                 Err(_) => return Err("previous model selection unavailable; choose /model".into()),
@@ -203,6 +256,7 @@ pub(super) async fn remember_models(
     workspace: &Path,
     defaults: &arany::SessionDefaults,
     catalog: Option<&[ModelEntry]>,
+    remember_selection: bool,
 ) -> Result<(), String> {
     let Some(account_id) = defaults.account_id else {
         return Ok(());
@@ -233,7 +287,7 @@ pub(super) async fn remember_models(
         )
         .map_err(|_| "model preferences unavailable")?;
         root.with_account_replacement_lock(&workspace, || {
-            write_preferences(&root, source, replace_catalog)
+            write_preferences(&root, source, replace_catalog, remember_selection)
         })
         .map_err(|_| "model preferences unavailable")?
     })
@@ -245,6 +299,7 @@ fn write_preferences(
     root: &StateRoot,
     source: SavedModels,
     replace_catalog: bool,
+    remember_selection: bool,
 ) -> Result<(), String> {
     let mut preferences = read_preferences(root)?;
     let mut source = source;
@@ -257,14 +312,29 @@ fn write_preferences(
         if !replace_catalog {
             source.catalog = old.catalog;
         }
-        if source.model.is_none() || (replace_catalog && old.model.is_some()) {
+        if source.model.is_none() || (!remember_selection && old.model.is_some()) {
             source.model = old.model;
             source.effort = old.effort;
         }
     }
+    if remember_selection {
+        preferences.selected = Some(SavedSelection {
+            profile: source.profile.clone(),
+            account_id: source.account_id,
+        });
+    }
     preferences.sources.push(source);
     while preferences.sources.len() > MAX_PREFERENCE_SOURCES {
-        preferences.sources.remove(0);
+        let index = preferences
+            .sources
+            .iter()
+            .position(|source| {
+                preferences.selected.as_ref().is_none_or(|selected| {
+                    source.profile != selected.profile || source.account_id != selected.account_id
+                })
+            })
+            .unwrap_or(0);
+        preferences.sources.remove(index);
     }
     preferences = validate_preferences(preferences)?;
     loop {
@@ -278,7 +348,16 @@ fn write_preferences(
         if preferences.sources.len() == 1 {
             return Err("model catalog exceeds saved preference limit".into());
         }
-        preferences.sources.remove(0);
+        let index = preferences
+            .sources
+            .iter()
+            .position(|source| {
+                preferences.selected.as_ref().is_none_or(|selected| {
+                    source.profile != selected.profile || source.account_id != selected.account_id
+                })
+            })
+            .unwrap_or(0);
+        preferences.sources.remove(index);
     }
 }
 
@@ -474,7 +553,7 @@ async fn load_catalog(
         }
     };
     if let Ok((items, false)) = &result {
-        remember_models(&admission.workspace, &view.defaults, Some(items)).await?;
+        remember_models(&admission.workspace, &view.defaults, Some(items), false).await?;
     }
     result
 }
@@ -495,7 +574,7 @@ async fn load_while_owned(
         let at_input_boundary = terminal.input_boundary_ready();
         tokio::select! {
             result = &mut query, if at_input_boundary => break result.map_err(|error| ModelBrowse::Notice(format!(
-                "Error: Model catalog unavailable: {error}. Review the selected account or retry /models."
+                "Error: Model catalog unavailable: {error}. Review the selected account or retry /model."
             ))),
             input = terminal.next_input() => {
                 match input.map_err(|error| error.to_string())? {
@@ -527,7 +606,7 @@ async fn load_while_owned(
                     | TerminalInput::Home
                     | TerminalInput::End) => {
                         let notice = if composer.apply(input) == ComposerEdit::AtCapacity {
-                            Some("Error: input exceeds 8 KiB; draft unchanged; catalog loading")
+                            Some("Error: message is too long; shorten it; draft unchanged; catalog loading")
                         } else if terminal.is_linear() {
                             None
                         } else {
@@ -551,8 +630,8 @@ async fn load_while_owned(
                     }
                     TerminalInput::LineContinued => {
                         terminal.draw_busy(view, composer, Some(&format!(
-                            "Draft: {} of 8192 bytes; catalog loading; Ctrl+C cancels",
-                            composer.text().len()
+                            "Draft: {} characters; catalog loading; Ctrl+C cancels",
+                            composer.character_count()
                         ))).map_err(|error| error.to_string())?;
                     }
                     TerminalInput::Submit => {
@@ -904,6 +983,20 @@ mod preference_tests {
         });
         let document = json!({"version": 1, "sources": [source.clone()]});
         let mut cases = vec![(document.clone(), true)];
+        for (profile, account_id, accepted) in [
+            ("chatgpt", id, true),
+            ("openai", id, false),
+            ("chatgpt", uuid::Uuid::now_v7(), false),
+        ] {
+            let mut changed = document.clone();
+            changed["selected"] = json!({"profile": profile, "account_id": account_id});
+            cases.push((changed, accepted));
+        }
+        let mut absent_model = document.clone();
+        absent_model["selected"] = json!({"profile": "chatgpt", "account_id": id});
+        absent_model["sources"][0]["model"] = json!(null);
+        absent_model["sources"][0]["effort"] = json!(null);
+        cases.push((absent_model, true));
         for (field, value) in [
             ("profile", json!("custom:host")),
             ("account_id", json!("2e664d00-3f9a-40c3-adeb-c6447313a871")),
@@ -970,18 +1063,31 @@ mod preference_tests {
         let mut choice = original.clone();
         choice.effort = Some(Effort::High);
         choice.catalog.clear();
-        write_preferences(&root, choice, false).unwrap();
+        write_preferences(&root, choice, false, true).unwrap();
         let mut stale_refresh = original.clone();
         stale_refresh.catalog = vec!["fresh-model".into()];
-        write_preferences(&root, stale_refresh, true).unwrap();
+        write_preferences(&root, stale_refresh, true, false).unwrap();
         let reopened = StateRoot::open_existing(root.path()).unwrap();
         let current = read_preferences(&reopened).unwrap();
         assert_eq!(current.sources[0].effort, Some(Effort::High));
         assert_eq!(current.sources[0].catalog, ["fresh-model"]);
+        assert_eq!(current.selected.as_ref().unwrap().account_id, id);
+        let mut other_refresh = original.clone();
+        other_refresh.account_id = uuid::Uuid::now_v7();
+        write_preferences(&root, other_refresh, true, false).unwrap();
+        assert_eq!(
+            read_preferences(&root)
+                .unwrap()
+                .selected
+                .unwrap()
+                .account_id,
+            id,
+            "catalog completion cannot choose the billing source"
+        );
         for _ in 0..MAX_PREFERENCE_SOURCES {
             let mut other = original.clone();
             other.account_id = uuid::Uuid::now_v7();
-            write_preferences(&root, other, true).unwrap();
+            write_preferences(&root, other, true, true).unwrap();
         }
         let current = read_preferences(&reopened).unwrap();
         assert_eq!(current.sources.len(), MAX_PREFERENCE_SOURCES);
@@ -990,9 +1096,9 @@ mod preference_tests {
         large.catalog = (0..MAX_CACHED_MODELS)
             .map(|index| format!("{index:04}{}", "x".repeat(124)))
             .collect();
-        write_preferences(&root, large.clone(), true).unwrap();
+        write_preferences(&root, large.clone(), true, true).unwrap();
         large.account_id = uuid::Uuid::now_v7();
-        write_preferences(&root, large.clone(), true).unwrap();
+        write_preferences(&root, large.clone(), true, true).unwrap();
         let current = read_preferences(&reopened).unwrap();
         assert_eq!(current.sources.len(), 1, "byte quota evicts older sources");
         assert_eq!(current.sources[0].account_id, large.account_id);

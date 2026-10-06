@@ -8,7 +8,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 const MAX_FIND_BYTES: usize = 64;
-const MAX_ROW_CELLS: usize = 4096;
+pub(super) const MAX_ROW_CELLS: usize = 4096;
 const MAX_NOTICES: usize = 32;
 const MAX_NOTICE_BYTES: usize = 8192;
 
@@ -49,7 +49,8 @@ struct MessageRow {
 #[derive(Clone)]
 pub(super) struct HistoryRow {
     pub(super) text: String,
-    pub(super) speaker: Option<MessageKind>,
+    pub(super) speaker: MessageKind,
+    pub(super) heading: bool,
     pub(super) matched: bool,
 }
 
@@ -451,7 +452,8 @@ impl History {
                 let row = message.start + offset;
                 if row >= self.top && row < end {
                     visible.push(HistoryRow {
-                        speaker: (offset == 0).then_some(message.kind),
+                        speaker: message.kind,
+                        heading: offset == 0,
                         matched: self.matched_row == Some(row),
                         text: line.text,
                     });
@@ -644,6 +646,8 @@ mod tests {
         SessionView {
             id: SessionId::new(),
             title: "History".into(),
+            title_is_explicit: true,
+            inherited_title: None,
             workspace_identity: None,
             defaults: SessionDefaults::default(),
             created_sequence: 1,
@@ -678,22 +682,20 @@ mod tests {
         let mut full_history = History::default();
         full_history.sync(&view, 80, 20);
         let full_rows = full_history.visible(&view);
-        assert!(
-            full_rows
-                .iter()
-                .any(|row| row.text == "  Image 1: PNG 1x1, 69 bytes")
-        );
+        assert!(full_rows.iter().any(|row| {
+            row.text == "  Image 1: PNG 1x1, 0.1 KB"
+                && row.speaker == MessageKind::User
+                && !row.heading
+        }));
         assert!(!full_rows.iter().any(|row| row.text.contains("iVBOR")));
         assert!(
-            full_rows
-                .iter()
-                .any(|row| { row.text == "You:" && row.speaker == Some(MessageKind::User) })
+            full_rows.iter().any(|row| {
+                row.text == "You:" && row.heading && row.speaker == MessageKind::User
+            })
         );
-        assert!(
-            full_rows
-                .iter()
-                .any(|row| { row.text == "Arany:" && row.speaker == Some(MessageKind::Assistant) })
-        );
+        assert!(full_rows.iter().any(|row| {
+            row.text == "Arany:" && row.heading && row.speaker == MessageKind::Assistant
+        }));
         let mut history = History::default();
         history.sync(&view, 16, 4);
         assert!(
@@ -763,7 +765,8 @@ mod tests {
         history.sync(&view, 40, 20);
         history.record_notice("Error: Choose /setup\u{1b}[2J\nYour draft is retained");
         let rows = history.visible(&view);
-        assert_eq!(rows[0].speaker, Some(MessageKind::Error));
+        assert!(rows[0].heading);
+        assert_eq!(rows[0].speaker, MessageKind::Error);
         assert_eq!(rows[0].text, "Arany · error:");
         assert_eq!(rows[1].text, "  Choose /setup\\u{001b}[2J");
         assert_eq!(rows[2].text, "  Your draft is retained");

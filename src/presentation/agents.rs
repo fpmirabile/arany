@@ -122,6 +122,16 @@ fn agent_lines(
             agent.objective.as_deref().unwrap_or(&run.objective)
         ),
     ];
+    if let Some(call) = agent.provider_calls.last() {
+        let input = call
+            .input_tokens
+            .map_or_else(|| "unknown".into(), |value| value.to_string());
+        let output = call
+            .output_tokens
+            .map_or_else(|| "unknown".into(), |value| value.to_string());
+        lines.push(format!("Last call input tokens: {input}"));
+        lines.push(format!("Last call output tokens: {output}"));
+    }
     if agent.status == AgentStatus::Failed
         && let Some(reason) = agent
             .provider_calls
@@ -153,6 +163,8 @@ mod tests {
         SessionView {
             id: SessionId::new(),
             title: "Session".into(),
+            title_is_explicit: true,
+            inherited_title: None,
             workspace_identity: None,
             defaults: SessionDefaults {
                 policy: CollaborationPolicy::Single,
@@ -225,6 +237,45 @@ mod tests {
         );
         let prior = AgentInspectorModel::from_session(&view, 2, 120, false);
         assert!(prior.lines.iter().any(|line| line.contains("Run 16")));
+        for (input, output) in [
+            (Some(12), Some(8)),
+            (Some(12), None),
+            (None, Some(8)),
+            (None, None),
+            (Some(u32::MAX), Some(u32::MAX)),
+        ] {
+            let first = crate::session::ProviderCallRecord {
+                phase: crate::provider::AgentPhase::RootPlan,
+                disposition: crate::session::ProviderCallDisposition::Delegated,
+                response_id: None,
+                input_tokens: Some(111),
+                output_tokens: Some(222),
+                wire_provenance: None,
+                failure_reason: None,
+            };
+            let last = crate::session::ProviderCallRecord {
+                phase: crate::provider::AgentPhase::RootSynthesis,
+                disposition: crate::session::ProviderCallDisposition::Finished,
+                input_tokens: input,
+                output_tokens: output,
+                ..first.clone()
+            };
+            view.runs.last_mut().unwrap().agents[0].provider_calls = vec![first, last];
+            let inspector = AgentInspectorModel::from_session(&view, 0, 40, false);
+            for (label, count) in [("input", input), ("output", output)] {
+                let expected = count.map_or_else(|| "unknown".into(), |value| value.to_string());
+                assert!(
+                    inspector
+                        .lines
+                        .contains(&format!("Last call {label} tokens: {expected}"))
+                );
+            }
+            assert!(
+                !inspector
+                    .lines
+                    .contains(&"Last call input tokens: 111".to_owned())
+            );
+        }
     }
 
     #[test]

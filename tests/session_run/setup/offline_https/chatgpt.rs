@@ -991,6 +991,47 @@ fn isolated_stage(checked_turn: bool) {
         assert_eq!(second.defaults.account_id, Some(account_id));
         assert_eq!(second.defaults.model, view.defaults.model);
         assert_eq!(second.defaults.effort, view.defaults.effort);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let empty_id = runtime
+            .block_on(arany::create_session(
+                StateRoot::admit(Path::new("/root/state-resume-empty")).unwrap(),
+                Path::new("/root/workspace").to_path_buf(),
+                None,
+            ))
+            .unwrap();
+        let resume_shell = BARE_SHELL
+            .replace("/root/state-two", "/root/state-resume-empty")
+            .replace("--screen-reader", "--screen-reader --resume");
+        let resumed_output = run_pty(
+            &resume_shell,
+            &[(
+                b"Choose number, exact ID, n next, p previous, or q close:",
+                b"1\r",
+            )],
+            None,
+        );
+        let resumed_text = String::from_utf8_lossy(&resumed_output);
+        assert!(resumed_text.contains("Resume: 1 in this Workspace"));
+        assert!(resumed_text.contains("Choice 1: Empty conversation"));
+        assert!(resumed_text.contains("Created:") && resumed_text.contains("last activity:"));
+        assert!(resumed_text.contains("Access: ChatGPT plan; model: gpt-6.1-sol"));
+        assert!(!resumed_text.contains("Choose saved access"));
+        let resumed = session("/root/state-resume-empty");
+        assert_eq!(resumed.id, empty_id);
+        assert_eq!(resumed.defaults.provider, second.defaults.provider);
+        assert_eq!(resumed.defaults.model, second.defaults.model);
+        assert_eq!(resumed.defaults.effort, second.defaults.effort);
+        assert_eq!(resumed.defaults.account_id, second.defaults.account_id);
+        assert!(resumed.runs.is_empty());
+        for secret in [ACCESS, REFRESH, signed.as_str()] {
+            assert!(
+                !resumed_output
+                    .windows(secret.len())
+                    .any(|part| part == secret.as_bytes())
+            );
+        }
         let preferences = account_root
             .read_model_preferences_record()
             .unwrap()

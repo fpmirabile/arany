@@ -952,6 +952,15 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
         let (workspace_device, workspace_inode) =
             view.workspace_identity.expect("pinned Workspace identity");
         store.close().await.expect("closed read-only store");
+        let connection = rusqlite::Connection::open(state_path.join("events.sqlite3")).unwrap();
+        connection.execute("UPDATE events SET created_at_ms=CASE WHEN sequence=1 THEN 1791198000000 ELSE 1791288000000 END", []).unwrap();
+        drop(connection);
+        let listed = list_sessions(StateRoot::open_existing(&state_path).unwrap(), workspace.clone()).await.unwrap();
+        assert_eq!(listed[0].title, "Empty conversation");
+        assert_eq!(listed[0].created_at, "2026-10-05 11:00:00");
+        assert_eq!(listed[0].last_activity_at, "2026-10-06 12:00:00");
+        assert_eq!(listed[0].defaults, defaults);
+
         let invalid = set_session_defaults(
             StateRoot::admit(&state_path).expect("state"),
             workspace.clone(),
@@ -1543,6 +1552,25 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
         .expect("runtime");
     runtime.block_on(async {
         let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let identity_state = temp.path().join("identity");
+        let identity_id = create_session(
+            StateRoot::admit(&identity_state).unwrap(),
+            workspace.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        let identity = resume_session(
+            StateRoot::open_existing(&identity_state).unwrap(),
+            workspace.clone(),
+            identity_id,
+        )
+        .await
+        .unwrap()
+        .workspace_identity
+        .unwrap();
         for (prefix_len, cold, defaults_first) in [
             (2, false, false),
             (2, true, true),
@@ -1566,8 +1594,8 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                 policy: CollaborationPolicy::Single,
                 output_token_cap: 4096,
                 provider_concurrency: 1,
-                workspace_device: 1,
-                workspace_inode: 1,
+                workspace_device: identity.0,
+                workspace_inode: identity.1,
                 instruction_digest: None,
                 include_digests: Vec::new(),
                 history_run_ids: Vec::new(),
@@ -1581,7 +1609,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                 Store::open(StateRoot::admit(&state_path).expect("private state")).expect("store");
             let prefix = [
                 Event::SessionStarted {
-                    title: "Session".into(),
+                    title: "New Session".into(),
                     workspace_identity: None,
                 },
                 Event::MessageAccepted {
@@ -1644,7 +1672,22 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                 .expect("valid prefix")
                 .expect("Session");
             assert_eq!(view.runs[0].status, RunStatus::Interrupted);
-            assert_eq!(view.workspace_identity, (prefix_len > 2).then_some((1, 1)));
+            assert_eq!(
+                view.workspace_identity,
+                (prefix_len > 2).then_some(identity)
+            );
+            if prefix_len > 2 {
+                let listed = list_sessions(
+                    StateRoot::open_existing(&state_path).unwrap(),
+                    workspace.clone(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    listed[0].title, "Question",
+                    "unfinished primary summary must not supply an AI title"
+                );
+            }
             let interrupted = view.runs[0].clone();
             if prefix_len > 2 {
                 assert_eq!(

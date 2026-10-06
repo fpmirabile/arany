@@ -1,9 +1,9 @@
 use super::{chatgpt, exec::ProviderArg, state_dir};
 use arany::{
     AttachedTerminal, CollaborationPolicy, Composer, ComposerEdit, Effort, InteractiveCommand,
-    Output, RunOutcome, RunStatus, SessionDefaults, SessionId, SessionView, StateRoot, Store,
-    Submission, Telemetry, TerminalInput, continue_session, create_session, fork_session,
-    parse_submission, render_exec, render_run_feedback, resume_session, set_session_defaults,
+    RunOutcome, RunStatus, SessionDefaults, SessionId, SessionView, StateRoot, Store, Submission,
+    Telemetry, TerminalInput, continue_session, create_session, fork_session, parse_submission,
+    render_run_feedback, resume_session, set_session_defaults,
 };
 use clap::Args;
 use std::{
@@ -72,7 +72,7 @@ enum EntryMode {
 enum Selector {
     Models,
     Agents,
-    Sessions,
+    Resume,
     Setup,
 }
 
@@ -284,7 +284,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         }
     }
     if matches!(admission.entry, EntryMode::PickSession) {
-        let id = match pick_session(&mut terminal, &admission).await? {
+        let id = match pick_session(&mut terminal, &admission, None).await? {
             PickerChoice::Selected(id) => id,
             PickerChoice::Unavailable(error) => return Err(error),
             PickerChoice::Empty => return Err("No Sessions for this Workspace".into()),
@@ -319,7 +319,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                     .defaults
                     .model
                     .as_deref()
-                    .ok_or("a prompt requires a selected model; run arany and use /models")?,
+                    .ok_or("a prompt requires a selected model; run arany and use /model")?,
                 effort: admission.defaults.effort,
                 account_id: admission.defaults.account_id,
             },
@@ -344,11 +344,17 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
             Err(error) => setup_notice = Some(format!("Error: {error}; cached models unavailable")),
         }
     }
-    if admission.setup_requested
+    if (admission.setup_requested
+        || reuse_saved_selection
+        || matches!(
+            admission.entry,
+            EntryMode::Resume(_) | EntryMode::Continue | EntryMode::Fork(_)
+        ))
         && let Err(error) = models::remember_models(
             &admission.workspace,
             &view.defaults,
             setup_catalog.as_deref(),
+            true,
         )
         .await
     {
@@ -445,7 +451,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
             | TerminalInput::Tab
             | TerminalInput::Escape) => {
                 if composer.apply(input) == ComposerEdit::AtCapacity {
-                    notice = Some("Error: input exceeds 8 KiB; draft unchanged".into());
+                    notice = Some("Error: message is too long; shorten it; draft unchanged".into());
                 }
                 empty_interrupt = None;
             }
@@ -455,8 +461,8 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
             }
             TerminalInput::LineContinued => {
                 notice = Some(format!(
-                    "Draft: {} of 8192 bytes; Enter submits",
-                    composer.text().len()
+                    "Draft: {} characters; Enter submits",
+                    composer.character_count()
                 ));
                 empty_interrupt = None;
             }
@@ -464,7 +470,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                 match pick_quick_action(&mut terminal, &composer, view.defaults.provider.is_none())
                     .await?
                 {
-                    QuickChoice::Selected(Selector::Sessions) if !composer.is_empty() => {
+                    QuickChoice::Selected(Selector::Resume) if !composer.is_empty() => {
                         notice =
                             Some("Submit or clear this draft before switching Sessions".into());
                     }
@@ -529,7 +535,6 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 InteractiveCommand::New
                                     | InteractiveCommand::Resume
                                     | InteractiveCommand::Fork
-                                    | InteractiveCommand::Sessions
                             )
                         {
                             notice = Some("Error: Submit or clear image attachments before switching Sessions".into());
@@ -559,8 +564,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                         continue;
                     }
                     Ok(Submission::Objective(_)) if view.defaults.model.is_none() => {
-                        let missing_model =
-                            "Choose a model with /models or /model before submitting";
+                        let missing_model = "Choose a model with /model before submitting";
                         notice = Some(
                             match view
                                 .defaults
@@ -661,8 +665,8 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                     format!("Error: {error}")
                                 } else {
                                     format!(
-                                        "Error: {error}; draft retained ({} bytes)",
-                                        composer.text().len()
+                                        "Error: {error}; draft retained ({} characters)",
+                                        composer.character_count()
                                     )
                                 });
                                 view = load_view(&admission.state_dir, session_id).await?;
@@ -691,12 +695,10 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                             );
                         } else if command == InteractiveCommand::Help {
                             terminal.open_help().map_err(|error| error.to_string())?;
-                        } else if command == InteractiveCommand::Sessions
-                            || command == InteractiveCommand::Resume && argument.is_none()
-                        {
+                        } else if command == InteractiveCommand::Resume && argument.is_none() {
                             notice = Some(
                                 run_selector(
-                                    Selector::Sessions,
+                                    Selector::Resume,
                                     &mut terminal,
                                     &mut admission,
                                     &mut session_id,
@@ -732,9 +734,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                         } else if argument.is_none()
                             && matches!(
                                 command,
-                                InteractiveCommand::Model
-                                    | InteractiveCommand::Models
-                                    | InteractiveCommand::Agents
+                                InteractiveCommand::Model | InteractiveCommand::Agents
                             )
                         {
                             let selector = if command == InteractiveCommand::Agents {
@@ -831,17 +831,32 @@ async fn run_selector(
             Some(signal) => Err(format!("terminated by {}", signal.name())),
             None => Ok("Agent inspection closed".into()),
         },
-        Selector::Sessions => {
-            let choice = pick_session(terminal, admission).await?;
+        Selector::Resume => {
+            let choice = pick_session(terminal, admission, Some(&view.defaults)).await?;
             match choice {
                 PickerChoice::Selected(id) => {
                     let root = StateRoot::open_existing(&admission.state_dir)
                         .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
                     match resume_session(root, admission.workspace.clone(), id).await {
                         Ok(selected) => {
+                            let selected =
+                                match prepare_resume(admission, selected, Some(&view.defaults))
+                                    .await
+                                {
+                                    Ok(selected) => selected,
+                                    Err(error) => return Ok(format!("Error: {error}")),
+                                };
                             *session_id = id;
                             *view = selected;
-                            Ok(format!("Resumed Session {id}"))
+                            Ok(remembered_session_notice(
+                                admission,
+                                view,
+                                format!(
+                                    "Resumed: {}",
+                                    arany::escape_terminal(&view.conversation_title())
+                                ),
+                            )
+                            .await)
                         }
                         Err(error) => Ok(format!("Error: {error}")),
                     }
@@ -892,7 +907,7 @@ async fn configure_account(
     *view = load_view(&admission.state_dir, session_id).await?;
     seed_setup_catalog(composer, &view.defaults, Some(&catalog));
     if let Err(error) =
-        models::remember_models(&admission.workspace, &view.defaults, Some(&catalog)).await
+        models::remember_models(&admission.workspace, &view.defaults, Some(&catalog), true).await
     {
         return Ok(format!(
             "{notice}; Error: {error}; selection saved for this Session only"
@@ -919,8 +934,8 @@ fn seed_setup_catalog(
 fn retained_draft_notice(composer: &Composer) -> Option<String> {
     (!composer.is_empty()).then(|| {
         format!(
-            "Draft retained: {} bytes; Enter submits",
-            composer.text().len()
+            "Draft retained: {} characters; Enter submits",
+            composer.character_count()
         )
     })
 }
@@ -953,9 +968,16 @@ async fn finish_submission(
         outcome.run.config.as_ref().filter(|config| {
             outcome.run.status == RunStatus::Finished && config.auto_compaction_due()
         });
-    let preview_already_printed = user_recorded && terminal.is_linear();
+    let linear = terminal.is_linear();
+    let preview_already_printed = user_recorded && linear;
     terminal.restore().map_err(|error| error.to_string())?;
-    emit_outcome(&admission.state_dir, outcome, preview_already_printed).await?;
+    emit_outcome(
+        &admission.state_dir,
+        outcome,
+        preview_already_printed,
+        !linear,
+    )
+    .await?;
     if automatic.is_some() {
         writeln!(
             std::io::stderr(),
@@ -1041,7 +1063,7 @@ async fn start_session(admission: &Admission) -> Result<(SessionId, SessionView)
             if admission.defaults != SessionDefaults::default() {
                 persist_defaults(admission, id, admission.defaults.clone()).await?;
             }
-            Ok((id, load_view(&admission.state_dir, id).await?))
+            finish_existing_start(admission, load_view(&admission.state_dir, id).await?).await
         }
         EntryMode::Continue => {
             let root = StateRoot::open_existing(&admission.state_dir)
@@ -1055,10 +1077,71 @@ async fn start_session(admission: &Admission) -> Result<(SessionId, SessionView)
     }
 }
 
+async fn remembered_session_notice(
+    admission: &Admission,
+    view: &SessionView,
+    notice: String,
+) -> String {
+    match models::remember_models(&admission.workspace, &view.defaults, None, true).await {
+        Ok(()) => notice,
+        Err(error) => format!("{notice}; Error: {error}; selection saved for this Session only"),
+    }
+}
+
+async fn prepare_resume(
+    admission: &Admission,
+    mut view: SessionView,
+    fallback: Option<&SessionDefaults>,
+) -> Result<SessionView, String> {
+    let mut defaults = view.defaults.clone();
+    if defaults.provider.is_none() {
+        let selection =
+            if let Some(config) = view.runs.iter().rev().find_map(|run| run.config.as_ref()) {
+                Some(SessionDefaults {
+                    provider: Some(config.provider.clone()),
+                    model: Some(config.model.clone()),
+                    effort: config.effort,
+                    account_id: config.saved_api_account_id.or_else(|| {
+                        config
+                            .chatgpt_provenance
+                            .as_ref()
+                            .map(|source| source.account_id)
+                    }),
+                    policy: defaults.policy,
+                })
+            } else if let Some(fallback) = fallback.filter(|defaults| defaults.provider.is_some()) {
+                Some(fallback.clone())
+            } else {
+                models::last_saved_defaults(&admission.workspace)?
+            };
+        if let Some(mut selection) = selection {
+            selection.policy = defaults.policy;
+            defaults = selection;
+        }
+    }
+    if defaults.model.is_none() && defaults.account_id.is_some() {
+        models::restore_saved_models(
+            &admission.workspace,
+            &admission.state_dir,
+            &mut defaults,
+            true,
+        )
+        .await?;
+    }
+    if defaults != view.defaults {
+        persist_defaults(admission, view.id, defaults).await?;
+        view = load_view(&admission.state_dir, view.id).await?;
+    }
+    Ok(view)
+}
+
 async fn finish_existing_start(
     admission: &Admission,
     mut view: SessionView,
 ) -> Result<(SessionId, SessionView), String> {
+    if admission.defaults.provider.is_none() {
+        view = prepare_resume(admission, view, None).await?;
+    }
     let id = view.id;
     let mut defaults = view.defaults.clone();
     if let Some(provider) = &admission.defaults.provider {
@@ -1116,6 +1199,7 @@ async fn emit_outcome(
     state_dir: &Path,
     outcome: &RunOutcome,
     user_recorded: bool,
+    inline: bool,
 ) -> Result<(), String> {
     let view = load_view(state_dir, outcome.session_id).await?;
     let run = view
@@ -1123,7 +1207,6 @@ async fn emit_outcome(
         .iter()
         .find(|run| run.id == outcome.run.id && *run == &outcome.run)
         .ok_or_else(|| "Run history unavailable or invalid".to_owned())?;
-    let output = render_exec(run, &[], Output::Text, false);
     let status = match run.status {
         RunStatus::Finished => "finished",
         RunStatus::Failed => "failed",
@@ -1131,11 +1214,9 @@ async fn emit_outcome(
         _ => return Err("Run did not reach a terminal state".into()),
     };
     if !user_recorded {
-        AttachedTerminal::print_user_run(run).map_err(|_| "output failed".to_owned())?;
+        AttachedTerminal::print_user_run(run, inline).map_err(|_| "output failed".to_owned())?;
     }
-    std::io::stdout()
-        .write_all(output.as_bytes())
-        .map_err(|_| "output failed".to_owned())?;
+    AttachedTerminal::print_assistant_run(run).map_err(|_| "output failed".to_owned())?;
     write!(
         std::io::stderr(),
         "Session: {}\nRun: {}\nStatus: {status}\n{}",
@@ -1289,6 +1370,29 @@ mod tests {
         let (latest_id, latest_view) = start_session(&continued).await.expect("continued Session");
         assert_eq!(latest_id, original_id);
         assert_eq!(latest_view.defaults.model.as_deref(), Some("gpt-5.4-mini"));
+
+        let empty_id = create_session(
+            StateRoot::admit(&state_dir).unwrap(),
+            workspace.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        let empty = load_view(&state_dir, empty_id).await.unwrap();
+        let inherited = prepare_resume(&continued, empty, Some(&resumed_view.defaults))
+            .await
+            .unwrap();
+        let mut expected = resumed_view.defaults.clone();
+        expected.policy = SessionDefaults::default().policy;
+        assert_eq!(inherited.defaults, expected);
+        assert_eq!(
+            load_view(&state_dir, empty_id).await.unwrap().defaults,
+            expected
+        );
+        let preserved = prepare_resume(&continued, original, Some(&resumed_view.defaults))
+            .await
+            .unwrap();
+        assert_eq!(preserved.defaults, defaults);
 
         let forked = Admission {
             telemetry: Telemetry::disabled(),

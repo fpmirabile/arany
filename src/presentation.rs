@@ -148,7 +148,7 @@ pub fn render_session(view: &SessionView, events: &[EventEnvelope], output: Outp
         rendered.push_str(&format!(
             "Session: {}\nTitle: {}\n",
             view.id,
-            escape_terminal(&view.title)
+            escape_terminal(&view.conversation_title())
         ));
     }
     for envelope in events {
@@ -181,18 +181,7 @@ pub fn render_exec(
     new_session: bool,
 ) -> String {
     match output {
-        Output::Text => {
-            let Some(message) = &run.assistant_message else {
-                return String::new();
-            };
-            let mut rendered = String::from("Answer:\n");
-            for line in message.split('\n') {
-                rendered.push_str("  ");
-                rendered.push_str(&escape_terminal(line));
-                rendered.push('\n');
-            }
-            rendered
-        }
+        Output::Text => render_answer(run, "Answer:"),
         Output::Jsonl => {
             let mut rendered = String::new();
             for envelope in events {
@@ -205,6 +194,19 @@ pub fn render_exec(
             rendered
         }
     }
+}
+
+pub(crate) fn render_answer(run: &RunView, heading: &str) -> String {
+    let Some(message) = &run.assistant_message else {
+        return String::new();
+    };
+    let mut rendered = format!("{heading}\n");
+    for line in message.split('\n') {
+        rendered.push_str("  ");
+        rendered.push_str(&escape_terminal(line));
+        rendered.push('\n');
+    }
+    rendered
 }
 
 pub(crate) fn user_message_lines(objective: &str, width: usize) -> Vec<String> {
@@ -232,7 +234,7 @@ pub(crate) fn image_message_text<'a>(
         if !text.is_empty() {
             text.push('\n');
         }
-        text.push_str(&image.description(index));
+        text.push_str(&image_description(image, index));
     }
     Cow::Owned(text)
 }
@@ -244,8 +246,19 @@ pub(crate) fn image_message_lines(
     images
         .iter()
         .enumerate()
-        .map(|(index, image)| safe_truncate(&format!("  {}", image.description(index)), width))
+        .map(|(index, image)| {
+            safe_truncate(&format!("  {}", image_description(image, index)), width)
+        })
         .collect()
+}
+
+fn image_description(image: &crate::provider::ImageAttachment, index: usize) -> String {
+    let (width, height) = image.dimensions();
+    format!(
+        "Image {}: PNG {width}x{height}, {:.1} KB",
+        index + 1,
+        image.byte_len() as f64 / 1_000.0
+    )
 }
 
 fn append_jsonl(rendered: &mut String, envelope: &EventEnvelope) {
@@ -315,6 +328,16 @@ fn unsafe_display_character(character: char) -> bool {
             character as u32,
             0x202a..=0x202e | 0x2066..=0x2069 | 0x061c | 0x200e | 0x200f | 0x2028 | 0x2029
         )
+}
+
+pub(crate) fn session_access_label(defaults: &crate::session::SessionDefaults) -> &str {
+    match defaults.provider.as_deref() {
+        Some("chatgpt") => "ChatGPT plan",
+        Some("openai") => "OpenAI API",
+        Some("anthropic") => "Anthropic API",
+        Some(profile) => profile,
+        None => "User default",
+    }
 }
 
 #[cfg(test)]

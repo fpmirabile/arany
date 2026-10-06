@@ -5,6 +5,56 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(target_os = "linux")]
+pub fn isolated_script(root: &std::path::Path) -> Command {
+    use std::os::unix::fs::PermissionsExt;
+    let home = root.join("account-home");
+    std::fs::create_dir_all(&home).expect("isolated account home");
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let user = nix::unistd::User::from_uid(nix::unistd::geteuid())
+        .unwrap()
+        .unwrap();
+    let mut command = Command::new("/usr/bin/bwrap");
+    command
+        .args([
+            "--unshare-user",
+            "--unshare-net",
+            "--die-with-parent",
+            "--tmpfs",
+            "/",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--symlink",
+            "usr/bin",
+            "/bin",
+            "--symlink",
+            "usr/lib",
+            "/lib",
+            "--symlink",
+            "usr/lib",
+            "/lib64",
+        ])
+        .args(["--ro-bind", env!("CARGO_BIN_EXE_arany"), "/arany"])
+        .args(["--ro-bind", "/etc/passwd", "/etc/passwd"])
+        .arg("--bind")
+        .arg(root)
+        .arg(root)
+        .arg("--bind")
+        .arg(home)
+        .arg(user.dir)
+        .args([
+            "--proc",
+            "/proc",
+            "--dev-bind",
+            "/dev",
+            "/dev",
+            "--",
+            "/usr/bin/script",
+        ]);
+    command
+}
+
 pub trait BoundedOutput {
     fn bounded_output(&mut self) -> io::Result<Output>;
     fn bounded_output_for(&mut self, duration: Duration, cap: usize) -> io::Result<Output>;

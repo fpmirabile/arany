@@ -33,7 +33,7 @@ fn resumed_tail_layout(screen: &[u8]) -> bool {
             .is_some_and(|row| row.contains("Enter sends") && row.contains("Ctrl+O newline"))
         && rows
             .last()
-            .is_some_and(|row| row.starts_with("finished · custom:local/model-1"))
+            .is_some_and(|row| row.starts_with("ready · custom:local/model-1"))
 }
 
 async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> SessionId {
