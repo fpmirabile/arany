@@ -17,7 +17,7 @@ cap-std = { version = "4.0.3", default-features = false }
 clap = { version = "4.6.7", features = ["derive"] }
 crossterm = { version = "=0.29.0", default-features = false, features = ["events"] }
 directories = "6.0.0"
-getrandom = { version = "=0.3.4", default-features = false }
+getrandom = { version = "=0.4.3", default-features = false }
 keyring = { version = "=4.2.0", default-features = false, features = ["v1"] }
 opentelemetry = { version = "=0.33.0", default-features = false, features = ["trace"] }
 opentelemetry-http = { version = "=0.33.0", default-features = false, features = ["reqwest"] }
