@@ -1468,7 +1468,8 @@ impl AttachedTerminal {
         }
         if let Some(mut terminal) = self.terminal.take() {
             for result in [
-                terminal.clear(),
+                // Cleanup must not query input after stopping its reader.
+                ratatui::backend::Backend::clear(terminal.backend_mut()),
                 terminal.show_cursor(),
                 terminal.backend_mut().flush(),
             ] {

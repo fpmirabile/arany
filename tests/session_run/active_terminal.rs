@@ -782,6 +782,17 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     assert_eq!(result.status.success(), expect_idle, "attached exit class");
     assert_eq!(result.stderr, b"");
     let transcript = String::from_utf8(output).expect("PTY transcript UTF-8");
+    if inline && matches!(exit, ActiveExit::Signal(_, _)) {
+        assert_eq!(
+            transcript
+                .as_bytes()
+                .windows(4)
+                .filter(|part| *part == b"\x1b[6n")
+                .count(),
+            1,
+            "terminal restoration must not query input after stopping its reader"
+        );
+    }
     assert_eq!(
         transcript_field(&transcript, "TTY_BEFORE:"),
         transcript_field(&transcript, "TTY_AFTER:"),
