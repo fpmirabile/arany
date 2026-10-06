@@ -40,7 +40,8 @@ fn wait_for_after(
         pump(output, input, transcript, answered);
         assert!(
             Instant::now() < deadline,
-            "PTY stage missing: {}",
+            "PTY stage missing {}: {}",
+            tail(needle),
             tail(transcript)
         );
         thread::yield_now();
@@ -82,6 +83,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
     let temp = tempfile::tempdir().expect("private test root");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
+    std::fs::write(workspace.join("skills-lock.json"), b"unparsed lock data").unwrap();
     let state = temp.path().join("state");
     let saved_id = saved_conversation(&state, &workspace, SessionDefaults::default());
     let shell = "printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4 --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
@@ -121,7 +123,52 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
     .parse::<u32>()
     .expect("shell PID");
     let _product = ProductGuard::new(product_child_of(shell_pid), state.clone());
+    let settings_at = transcript.len();
+    input
+        .write_all(b"/settings\r")
+        .expect("linear settings choices");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        settings_at,
+        b"empty Enter selects Tabs\r\nInput:\r\n",
+    );
+    let invalid_at = transcript.len();
+    input
+        .write_all(b"other\r")
+        .expect("reject unknown linear choice");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        invalid_at,
+        b"Notice: Type tabs or combined; q closes\r\nInput:\r\n",
+    );
+    let selected_at = transcript.len();
+    input
+        .write_all(b"combined\r")
+        .expect("linear combined selection");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        selected_at,
+        b"Notice: Slash menu: combined \xc2\xb7 saved\r\nInput:\r\n",
+    );
+    assert_eq!(
+        StateRoot::open_existing(&state)
+            .unwrap()
+            .read_ui_preferences_record()
+            .unwrap()
+            .unwrap(),
+        br#"{"version":1,"completion":"combined"}"#
+    );
     for (command, feedback) in [
+        ("/settings tabs", "Slash menu: tabs · saved"),
         ("/provider anthropic", "Provider: anthropic; set /model"),
         ("/model claude-sonnet-5", "Model: claude-sonnet-5 · low"),
         (
@@ -314,6 +361,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
     assert!(result.stderr.is_empty());
     assert_eq!(answered, 0);
     let text = String::from_utf8(transcript).expect("linear transcript UTF-8");
+    assert!(text.contains("Run npx skills install in this project: .agents/skills is missing and skills-lock.json exists."));
     assert!(!text.contains('\u{1b}'));
     assert_eq!(text.matches("Notice: Error:").count(), 5);
     assert_eq!(
@@ -497,15 +545,13 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
     let saved_id = saved_conversation(&state, &workspace, SessionDefaults::default());
-    use sha2::Digest;
-    let skill = temp.path().join("skill");
-    std::fs::create_dir(&skill).unwrap();
+    let skill = workspace.join(".agents/skills/review");
+    std::fs::create_dir_all(&skill).unwrap();
     let guidance =
         b"---\nname: review\ndescription: Synthetic review\n---\nReview only the selected task.\n";
     std::fs::write(skill.join("SKILL.md"), guidance).unwrap();
     let config = serde_json::json!({"version":1,"workspace_paths":["."],"write":false,
-        "commands":[],"mcp":[],"skills":[{"name":"review","description":"Synthetic review",
-        "directory":skill,"files":{"SKILL.md":sha2::Sha256::digest(guidance).iter().map(|byte| format!("{byte:02x}")).collect::<String>()}}]});
+        "commands":[],"mcp":[],"skills":[]});
     std::fs::write(
         state.join("tools.json"),
         serde_json::to_vec(&config).unwrap(),
@@ -516,7 +562,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         std::fs::Permissions::from_mode(0o600),
     )
     .unwrap();
-    let shell = "stty rows 24 cols 40; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider anthropic --tools --no-color; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
+    let shell = "stty rows 24 cols 40; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider anthropic --tools --no-color; first_code=$?; printf 'SETTINGS_RESTART\n'; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider openai --tools --no-color; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; test \"$first_code\" -eq 0 || exit \"$first_code\"; exit \"$exit_code\"";
     let mut command = Command::new("/usr/bin/script");
     command
         .env_clear()
@@ -552,6 +598,11 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         .parse::<u32>()
         .expect("numeric shell PID");
     let _product_guard = ProductGuard::new(product_child_of(shell_pid), state.clone());
+    let tty_before = super::active_terminal::transcript_field(
+        &String::from_utf8_lossy(&transcript),
+        "TTY_BEFORE:",
+    )
+    .to_owned();
     let paste_at = transcript.len();
     input
         .write_all(b"\x1b[200~first\r\nsecond\x1b[201~")
@@ -614,10 +665,28 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut transcript,
         &mut answered,
         clear_at,
-        b"\x1b[22;3H",
+        b"\x1b[?25h\x1b[22;3H",
+    );
+    let tabs_at = transcript.len();
+    input.write_all(b"/").expect("open default Commands tab");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        tabs_at,
+        b"[Commands]",
+    );
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        tabs_at,
+        b"\x1b[4;4H",
     );
     let skill_at = transcript.len();
-    input.write_all(b"/rev").expect("configured Skill prefix");
+    input.write_all(b"\x1b[C").expect("switch to Skills");
     wait_for_after(
         &mut output,
         &mut input,
@@ -625,6 +694,36 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut answered,
         skill_at,
         b"> Skill /review",
+    );
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        skill_at,
+        b"\x1b[20;4H",
+    );
+    let commands_at = transcript.len();
+    input.write_all(b"\x1b[D").expect("return to Commands");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        commands_at,
+        b"\x1b[4;4H",
+    );
+    let skill_at = transcript.len();
+    input
+        .write_all(b"\x1b[Crev")
+        .expect("filter Skills locally");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        skill_at,
+        b"\x1b[20;7H",
     );
     let skill_accept_at = transcript.len();
     input.write_all(b"\t").expect("choose Skill as a draft");
@@ -644,7 +743,45 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut transcript,
         &mut answered,
         skill_clear_at,
-        b"\x1b[22;3H",
+        b"\x1b[?25h\x1b[22;3H",
+    );
+    let settings_at = transcript.len();
+    input
+        .write_all(b"/settings\r")
+        .expect("open display settings");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        settings_at,
+        b"closes",
+    );
+    let saved_at = transcript.len();
+    input.write_all(b"\x1b[B\r").expect("save combined menu");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        saved_at,
+        b"combined",
+    );
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        saved_at,
+        b"\x1b[?25h\x1b[22;3H",
+    );
+    assert_eq!(
+        StateRoot::open_existing(&state)
+            .unwrap()
+            .read_ui_preferences_record()
+            .unwrap()
+            .unwrap(),
+        br#"{"version":1,"completion":"combined"}"#
     );
     let menu_at = transcript.len();
     input.write_all(b"/resum").expect("single command prefix");
@@ -699,7 +836,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut transcript,
         &mut answered,
         menu_at,
-        b"\x1b[22;5H",
+        b"\x1b[18;5H",
     );
     input.write_all(b"\x1b[B").expect("focus status choice");
     wait_for(
@@ -747,7 +884,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut transcript,
         &mut answered,
         newline_at,
-        b"\x1b[22;3H",
+        b"\x1b[?25h\x1b[22;3H",
     );
     let clear_at = transcript.len();
     input.write_all(b"\x03").expect("clear multiline draft");
@@ -757,7 +894,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut transcript,
         &mut answered,
         clear_at,
-        b"\x1b[22;3H",
+        b"\x1b[?25h\x1b[22;3H",
     );
     let model_menu_at = transcript.len();
     input.write_all(b"/s").expect("ambiguous Session prefix");
@@ -767,7 +904,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut transcript,
         &mut answered,
         model_menu_at,
-        b"\x1b[22;5H",
+        b"\x1b[18;5H",
     );
     input.write_all(b"\x1b[B").expect("focus status choice");
     wait_for_after(
@@ -786,7 +923,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut transcript,
         &mut answered,
         closed_at,
-        b"newline",
+        b"\x1b[22;5H",
     );
     input
         .write_all(b"\x7f\x7f/model staged-model\r")
@@ -799,6 +936,8 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         closed_at,
         b"Model:",
     );
+    transcript.clear();
+    answered = 0;
     let unknown_at = transcript.len();
     input.write_all(b"/provder\r").expect("unknown command");
     wait_for(
@@ -891,9 +1030,155 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         corrected_at,
         b"named Session:",
     );
+    transcript.clear();
+    answered = 0;
     input
         .write_all(b"/quit\r")
         .expect("quit after corrected rename");
+    let restart_at = transcript.len();
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        restart_at,
+        b"SETTINGS_RESTART",
+    );
+    let restart_at = restart_at
+        + transcript[restart_at..]
+            .windows(b"SETTINGS_RESTART".len())
+            .position(|part| part == b"SETTINGS_RESTART")
+            .unwrap()
+        + b"SETTINGS_RESTART".len();
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        restart_at,
+        b"Ask Arany",
+    );
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        restart_at,
+        b"\x1b[?25h\x1b[22;3H",
+    );
+    let _restarted_product = ProductGuard::new(product_child_of(shell_pid), state.clone());
+    let combined_at = transcript.len();
+    input
+        .write_all(b"/")
+        .expect("remembered combined menu in fresh process");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        combined_at,
+        b"\x1b[3;4H",
+    );
+    let selected_at = transcript.len();
+    input
+        .write_all(b"rev\t")
+        .expect("remembered combined mode exposes Skills without switching tabs");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        selected_at,
+        b"\x1b[22;11H",
+    );
+    let clear_at = transcript.len();
+    input.write_all(b"\x03").expect("clear menu without a Run");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        clear_at,
+        b"\x1b[?25h\x1b[22;3H",
+    );
+    let pending = state.join("ui-preferences.pending");
+    let outside = temp.path().join("outside-preference-canary");
+    std::fs::write(&outside, b"unchanged").unwrap();
+    std::os::unix::fs::symlink(&outside, &pending).unwrap();
+    let rejected_at = transcript.len();
+    input
+        .write_all(b"/settings tabs\r")
+        .expect("unsafe replacement must retain current display");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        rejected_at,
+        b"\x1b[?25h\x1b[22;3H",
+    );
+    assert_eq!(
+        StateRoot::open_existing(&state)
+            .unwrap()
+            .read_ui_preferences_record()
+            .unwrap()
+            .unwrap(),
+        br#"{"version":1,"completion":"combined"}"#
+    );
+    assert_eq!(std::fs::read(&outside).unwrap(), b"unchanged");
+    assert!(
+        String::from_utf8_lossy(&transcript[rejected_at..]).contains("error"),
+        "unsafe save gives visible failure feedback: {}",
+        String::from_utf8_lossy(&transcript[rejected_at..])
+            .chars()
+            .take(4096)
+            .flat_map(char::escape_default)
+            .collect::<String>()
+    );
+    let unchanged_at = transcript.len();
+    input
+        .write_all(b"/rev\t")
+        .expect("failed save leaves combined display");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        unchanged_at,
+        b"\x1b[22;11H",
+    );
+    let clear_at = transcript.len();
+    input.write_all(b"\x03").expect("clear retained display");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        clear_at,
+        b"\x1b[?25h\x1b[22;3H",
+    );
+    std::fs::remove_file(pending).unwrap();
+    let tabs_at = transcript.len();
+    input
+        .write_all(b"/settings tabs\r")
+        .expect("typed display selection");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        tabs_at,
+        b"\x1b[?25h\x1b[22;3H",
+    );
+    assert_eq!(
+        StateRoot::open_existing(&state)
+            .unwrap()
+            .read_ui_preferences_record()
+            .unwrap()
+            .unwrap(),
+        br#"{"version":1,"completion":"tabs"}"#
+    );
+    input.write_all(b"/quit\r").expect("quit fresh process");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
@@ -913,7 +1198,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
             .expect("TTY marker")
             .to_owned()
     };
-    assert_eq!(marker("TTY_BEFORE:"), marker("TTY_AFTER:"));
+    assert_eq!(tty_before, marker("TTY_AFTER:"));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("read-only runtime");
@@ -1051,7 +1336,7 @@ fn inline_quick_selector_returns_to_the_same_draft_and_caret() {
         &mut input,
         &mut transcript,
         &mut answered,
-        b"Agents: 0 in 0 recent Runs",
+        b"No Runs yet",
     );
     let after_inspector = transcript.len();
     input.write_all(b"\x1b").expect("close inspector");

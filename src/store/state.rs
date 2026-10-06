@@ -234,6 +234,19 @@ impl StateRoot {
         self.read_private_record(SAVED_ACCOUNT_FILE, Self::MAX_ACCOUNT_RECORD_BYTES)
     }
 
+    pub fn read_ui_preferences_record(&self) -> Result<Option<Vec<u8>>, StoreError> {
+        self.read_private_record("ui-preferences.json", 1024)
+    }
+
+    pub fn replace_ui_preferences_record(&self, record: &[u8]) -> Result<(), StoreError> {
+        self.replace_private_record(
+            "ui-preferences.json",
+            "ui-preferences.pending",
+            record,
+            1024,
+        )
+    }
+
     pub fn read_model_preferences_record(&self) -> Result<Option<Vec<u8>>, StoreError> {
         self.read_private_record("model-preferences.json", Self::MAX_MODEL_PREFERENCES_BYTES)
     }
@@ -896,6 +909,7 @@ mod tests {
             CHATGPT_ACCOUNTS_FILE,
             PROVIDER_PROFILES_FILE,
             "model-preferences.json",
+            "ui-preferences.json",
         ] {
             mkfifoat(CWD, path.join(name), Mode::RUSR | Mode::WUSR).expect("test FIFO");
         }
@@ -928,6 +942,11 @@ mod tests {
             Err(StoreError::StateNotPrivate)
         ));
 
+        assert!(matches!(
+            state.read_ui_preferences_record(),
+            Err(StoreError::StateNotPrivate)
+        ));
+        std::fs::remove_file(path.join("ui-preferences.json")).unwrap();
         std::fs::remove_file(path.join(SAVED_ACCOUNT_FILE)).expect("remove account FIFO");
         std::fs::remove_file(path.join("model-preferences.json")).expect("remove preference FIFO");
         for name in [
@@ -936,6 +955,7 @@ mod tests {
             PENDING_CHATGPT_ACCOUNTS_FILE,
             "account-credentials.lock",
             "model-preferences.pending",
+            "ui-preferences.pending",
         ] {
             mkfifoat(CWD, path.join(name), Mode::RUSR | Mode::WUSR).expect("test FIFO");
         }
@@ -960,6 +980,10 @@ mod tests {
             Err(StoreError::StateNotPrivate)
         ));
 
+        assert!(matches!(
+            state.replace_ui_preferences_record(b"synthetic"),
+            Err(StoreError::StateNotPrivate)
+        ));
         drop(state);
         std::fs::remove_file(path.join(DATABASE_FILE)).expect("remove database");
         mkfifoat(CWD, path.join(DATABASE_FILE), Mode::RUSR | Mode::WUSR).expect("test FIFO");

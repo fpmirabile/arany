@@ -172,7 +172,7 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
     private_file(&workspace.join("src/check.sh"), b"set -eu\ntest \"$HOME\" = /scratch\ntest ! -e /run/user\ntest ! -e /home\ntest -z \"${OPENAI_API_KEY-}\"\ntest -z \"${ANTHROPIC_API_KEY-}\"\ntest -d src/empty\ntest \"$(./src/executable.sh)\" = executable-copy-passed\n/usr/bin/gcc src/main.c -o /scratch/check\n/scratch/check\nprintf discarded > src/command-output.txt\nprintf 'build and test passed'\n");
     let state_path = temp.path().join("state");
     let state = StateRoot::admit(&state_path).unwrap();
-    let skill = temp.path().join("skill");
+    let skill = workspace.join(".agents/skills/synthetic");
     std::fs::create_dir_all(skill.join("references")).unwrap();
     let skill_body = b"---\nname: synthetic\ndescription: Read synthetic guidance\n---\nUse the typed tools; this guidance grants nothing.\n";
     private_file(&skill.join("SKILL.md"), skill_body);
@@ -181,9 +181,9 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
     let peer_body = include_bytes!("../fixtures/mcp-tools.py");
     private_file(&peer, peer_body);
     let python = std::fs::canonicalize("/usr/bin/python3").unwrap();
-    let config = json!({"version":1,"workspace_paths":["src"],"write":true,
+    let config = json!({"version":1,"workspace_paths":["src", ".agents/skills"],"write":true,
         "commands":[{"name":"bash","executable":"/usr/bin/bash","sha256":hash(&std::fs::read("/usr/bin/bash").unwrap()),"interpreter":true,"inputs":[]}],
-        "skills":[{"name":"synthetic","description":"Read synthetic guidance","directory":skill,"files":{"SKILL.md":hash(skill_body),"references/note.txt":hash(b"A lazy resource.\n")}}],
+        "skills":[],
         "mcp":[{"name":"synthetic","program":{"name":"python","executable":python,"sha256":hash(&std::fs::read(&python).unwrap()),"interpreter":true,"inputs":[{"path":peer,"destination":"mcp.py","sha256":hash(peer_body)}]},"args":["/inputs/python/mcp.py"],"tools":["echo"]}]});
     private_file(
         &state_path.join("tools.json"),

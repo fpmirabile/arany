@@ -18,6 +18,14 @@ pub enum ComposerEdit {
     AtCapacity,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionLayout {
+    #[default]
+    Tabs,
+    Combined,
+}
+
 #[derive(Default)]
 pub struct Composer {
     text: String,
@@ -27,6 +35,8 @@ pub struct Composer {
     choices: CommandChoices,
     completion_index: usize,
     completion_hidden: bool,
+    completion_layout: CompletionLayout,
+    skills_tab: bool,
     file_query: Option<String>,
     file_candidates: Vec<String>,
     skills: Vec<String>,
@@ -34,6 +44,49 @@ pub struct Composer {
 }
 
 impl Composer {
+    pub fn completion_layout(&self) -> CompletionLayout {
+        self.completion_layout
+    }
+
+    pub fn set_completion_layout(&mut self, layout: CompletionLayout) {
+        self.completion_layout = layout;
+        self.skills_tab = false;
+        self.completion_index = 0;
+        self.completion_hidden = false;
+    }
+
+    pub(super) fn completion_header(&self) -> Option<&'static str> {
+        self.completion_menu()?;
+        Some(match (self.completion_layout, self.skills_tab) {
+            (CompletionLayout::Combined, _) => "Commands + Skills",
+            (CompletionLayout::Tabs, false) => "[Commands]  Skills · Left/Right",
+            (CompletionLayout::Tabs, true) => "Commands  [Skills] · Left/Right",
+        })
+    }
+
+    pub(super) fn completion_skills_selected(&self) -> bool {
+        self.skills_tab
+    }
+
+    pub(super) fn completion_description(&self, row: &str) -> String {
+        if let Some(name) = row.strip_prefix("Skill /") {
+            return format!("Insert ${name} into your task");
+        }
+        let name = row.strip_prefix("Cmd /").unwrap_or(row);
+        (0..super::commands::help_len())
+            .filter_map(super::commands::help_entry)
+            .find(|entry| entry.name == name)
+            .map_or_else(String::new, |entry| entry.description.to_owned())
+    }
+
+    pub(super) fn empty_completion_notice(&self) -> &'static str {
+        if self.skills_tab && self.skills.is_empty() {
+            "No Skills · use /permissions for .agents/skills"
+        } else {
+            "No matches · edit the query or switch tabs"
+        }
+    }
+
     pub fn approval_mode(&self) -> Option<crate::tools::ApprovalMode> {
         self.approval_mode
     }
@@ -41,7 +94,7 @@ impl Composer {
     pub fn set_runtime_skills(&mut self, names: &[String]) {
         self.skills = names
             .iter()
-            .take(32)
+            .take(crate::tools::MAX_SKILLS)
             .filter(|name| crate::tools::types::valid_name(name))
             .map(|name| format!("${name}"))
             .collect();
@@ -203,6 +256,7 @@ impl Composer {
     }
 
     pub fn clear(&mut self) {
+        self.skills_tab = false;
         self.text.clear();
         self.images.clear();
         self.cursor = 0;
@@ -212,6 +266,7 @@ impl Composer {
     }
 
     pub fn take(&mut self) -> String {
+        self.skills_tab = false;
         self.cursor = 0;
         self.vertical_grapheme_column = None;
         self.completion_index = 0;
@@ -253,6 +308,13 @@ impl Composer {
             });
         }
         if let Some((names, selected)) = self.completion_menu() {
+            if names.is_empty() {
+                return Some(CommandPreview {
+                    ghost: String::new(),
+                    ghost_is_placeholder: false,
+                    status: self.empty_completion_notice().to_owned(),
+                });
+            }
             return Some(CommandPreview {
                 ghost: String::new(),
                 ghost_is_placeholder: false,
@@ -285,16 +347,21 @@ impl Composer {
         if !prefix.is_empty() && !crate::tools::types::valid_name(prefix) {
             return None;
         }
-        names.extend(
-            self.skills
-                .iter()
-                .filter(|name| name[1..].starts_with(prefix))
-                .map(String::as_str),
-        );
-        if names.is_empty() {
+        if self.completion_layout == CompletionLayout::Tabs && self.skills_tab {
+            names.clear();
+        }
+        if self.completion_layout == CompletionLayout::Combined || self.skills_tab {
+            names.extend(
+                self.skills
+                    .iter()
+                    .filter(|name| name[1..].starts_with(prefix))
+                    .map(String::as_str),
+            );
+        }
+        if names.is_empty() && self.completion_layout == CompletionLayout::Combined {
             return None;
         }
-        let selected = self.completion_index.min(names.len() - 1);
+        let selected = self.completion_index.min(names.len().saturating_sub(1));
         Some((names, selected))
     }
 
@@ -345,6 +412,28 @@ impl Composer {
             }
         }
         if let Some((names, selected)) = self.completion_menu() {
+            if matches!(input, TerminalInput::Left | TerminalInput::Right)
+                && self.completion_layout == CompletionLayout::Tabs
+            {
+                self.skills_tab = !self.skills_tab;
+                self.completion_index = 0;
+                return ComposerEdit::Changed;
+            }
+            if names.is_empty()
+                && matches!(
+                    input,
+                    TerminalInput::Tab
+                        | TerminalInput::Submit
+                        | TerminalInput::Up
+                        | TerminalInput::Down
+                )
+            {
+                return if input == TerminalInput::Submit && !self.skills_tab && self.text != "/" {
+                    ComposerEdit::Unchanged
+                } else {
+                    ComposerEdit::Changed
+                };
+            }
             match input {
                 TerminalInput::Up => {
                     self.completion_index = (selected + names.len() - 1) % names.len();
@@ -890,6 +979,42 @@ mod tests {
     #[test]
     fn slash_skills_are_distinct_bounded_task_drafts_not_local_commands() {
         let mut composer = Composer::default();
+        composer.insert_paste("/").unwrap();
+        let cursor = composer.cursor_byte_offset();
+        assert!(
+            composer
+                .completion_header()
+                .unwrap()
+                .starts_with("[Commands]")
+        );
+        composer.apply(TerminalInput::Right);
+        assert_eq!(composer.completion_rows().unwrap().0, Vec::<String>::new());
+        assert!(
+            composer
+                .command_preview()
+                .unwrap()
+                .status
+                .starts_with("No Skills")
+        );
+        composer.apply(TerminalInput::Submit);
+        assert_eq!(composer.text(), "/");
+        assert_eq!(composer.cursor_byte_offset(), cursor);
+        composer.set_runtime_skills(&["review".into()]);
+        composer.apply(TerminalInput::Character('r'));
+        assert_eq!(composer.completion_rows().unwrap().0, ["Skill /review"]);
+        composer.apply(TerminalInput::Left);
+        assert_eq!(composer.text(), "/r");
+        assert_eq!(
+            composer.completion_rows().unwrap().0,
+            ["Cmd /resume", "Cmd /rename"]
+        );
+        composer.apply(TerminalInput::Right);
+        composer.apply(TerminalInput::Escape);
+        composer.apply(TerminalInput::Left);
+        assert_eq!(composer.cursor_byte_offset(), 1);
+        assert!(composer.completion_menu().is_none());
+        composer.clear();
+        composer.set_completion_layout(CompletionLayout::Combined);
         composer.set_runtime_skills(&[
             "review".into(),
             "help".into(),
@@ -941,8 +1066,8 @@ mod tests {
         composer.set_runtime_skills(&[]);
         composer.apply(TerminalInput::End);
         assert!(composer.completion_menu().is_none());
-        composer.set_runtime_skills(&(0..40).map(|i| format!("skill-{i}")).collect::<Vec<_>>());
-        assert_eq!(composer.skills.len(), 32);
+        composer.set_runtime_skills(&(0..80).map(|i| format!("skill-{i}")).collect::<Vec<_>>());
+        assert_eq!(composer.skills.len(), crate::tools::MAX_SKILLS);
         composer.clear();
         composer.insert_paste("/skill-1").unwrap();
         assert!(composer.completion_menu().is_some());
@@ -953,6 +1078,7 @@ mod tests {
     #[test]
     fn tab_completion_changes_only_real_draft_bytes() {
         let mut composer = Composer::default();
+        composer.set_completion_layout(CompletionLayout::Combined);
         for (prefix, completed) in [("/resum", "/resume "), ("/prov", "/provider ")] {
             for accept in [TerminalInput::Tab, TerminalInput::Submit] {
                 composer.clear();
@@ -972,7 +1098,7 @@ mod tests {
         }
         for (prefix, navigation, expected) in [
             ("/s", TerminalInput::Down, "status"),
-            ("/s", TerminalInput::Up, "status"),
+            ("/s", TerminalInput::Up, "settings"),
             ("/", TerminalInput::Up, "exit"),
         ] {
             for accept in [TerminalInput::Tab, TerminalInput::Submit] {
@@ -987,7 +1113,13 @@ mod tests {
                 assert_eq!(composer.text(), prefix);
                 assert_eq!(composer.cursor_byte_offset(), cursor);
                 assert_eq!(composer.apply(accept), ComposerEdit::Changed);
-                assert_eq!(composer.text(), format!("/{expected}"));
+                assert_eq!(
+                    composer.text(),
+                    format!(
+                        "/{expected}{}",
+                        if expected == "settings" { " " } else { "" }
+                    )
+                );
                 assert!(composer.completion_menu().is_none());
                 assert_eq!(
                     composer.apply(TerminalInput::Submit),
@@ -1011,7 +1143,7 @@ mod tests {
         let (names, selected) = composer
             .completion_menu()
             .expect("edited prefix reopens choices");
-        assert_eq!(names, ["setup", "status"]);
+        assert_eq!(names, ["setup", "status", "settings"]);
         assert_eq!(selected, 0);
         composer.apply(TerminalInput::Left);
         assert!(composer.completion_menu().is_none());

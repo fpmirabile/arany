@@ -1,9 +1,213 @@
 use super::ToolError;
+use super::config::Skill;
+use super::fs;
+use super::types::{MAX_SKILLS, MAX_SNAPSHOT_BYTES, valid_name, valid_relative};
 use super::types::{MAX_TOOL_RESULT_BYTES, hex_digest};
+use cap_std::fs::Dir;
 use serde::de::{DeserializeSeed, Error, MapAccess, SeqAccess, Visitor};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt;
+use std::path::Path;
+
+pub struct ProjectSkills {
+    pub names: Vec<String>,
+    pub installation_missing: bool,
+}
+
+pub fn project_skills(workspace: &Path) -> Result<ProjectSkills, ToolError> {
+    let root = fs::open_directory(workspace)?;
+    let Some(directory) = project_directory(&root)? else {
+        return Ok(ProjectSkills {
+            names: Vec::new(),
+            installation_missing: optional_metadata(&root, "skills-lock.json")?
+                .is_some_and(|metadata| metadata.is_file()),
+        });
+    };
+    let mut names = Vec::new();
+    for (index, entry) in directory
+        .entries()
+        .map_err(|_| ToolError::Path)?
+        .enumerate()
+    {
+        if index == MAX_SKILLS * 4 {
+            return Err(ToolError::Limit);
+        }
+        let entry = entry.map_err(|_| ToolError::Path)?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| ToolError::Path)?;
+        if !valid_name(&name) {
+            continue;
+        }
+        let metadata = directory
+            .symlink_metadata(&name)
+            .map_err(|_| ToolError::Path)?;
+        if metadata.is_symlink() {
+            return Err(ToolError::Path);
+        }
+        if !metadata.is_dir() {
+            continue;
+        }
+        let skill = Dir::from_std_file(fs::open_file(&directory, &name)?);
+        if optional_metadata(&skill, "SKILL.md")?.is_some() {
+            let file = fs::open_file(&skill, "SKILL.md")?;
+            let metadata = file.metadata().map_err(|_| ToolError::Path)?;
+            if !metadata.is_file() {
+                return Err(ToolError::Path);
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if metadata.nlink() != 1 {
+                    return Err(ToolError::Path);
+                }
+            }
+            if metadata.len() > MAX_TOOL_RESULT_BYTES as u64 {
+                return Err(ToolError::Limit);
+            }
+            names.push(name);
+            if names.len() > MAX_SKILLS {
+                return Err(ToolError::Limit);
+            }
+        }
+    }
+    names.sort();
+    Ok(ProjectSkills {
+        names,
+        installation_missing: false,
+    })
+}
+
+fn optional_metadata(root: &Dir, name: &str) -> Result<Option<cap_std::fs::Metadata>, ToolError> {
+    match root.symlink_metadata(name) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(ToolError::Path),
+    }
+}
+
+fn project_directory(root: &Dir) -> Result<Option<Dir>, ToolError> {
+    if optional_metadata(root, ".agents")?.is_none() {
+        return Ok(None);
+    }
+    let agents = Dir::from_std_file(fs::open_file(root, ".agents")?);
+    if optional_metadata(&agents, "skills")?.is_none() {
+        return Ok(None);
+    }
+    let skills = Dir::from_std_file(fs::open_file(&agents, "skills")?);
+    if !skills.dir_metadata().map_err(|_| ToolError::Path)?.is_dir() {
+        return Err(ToolError::Path);
+    }
+    Ok(Some(skills))
+}
+
+pub(super) fn discover(workspace: &Path, admitted: &mut Vec<Skill>) -> Result<(), ToolError> {
+    let candidates = project_skills(workspace)?;
+    let root = fs::open_directory(workspace)?;
+    let Some(directory) = project_directory(&root)? else {
+        if !candidates.names.is_empty() {
+            return Err(ToolError::ChangedInput);
+        }
+        return Ok(());
+    };
+    let mut budget = DiscoveryBudget::default();
+    for name in candidates.names {
+        if admitted.iter().any(|skill| skill.name == name) {
+            continue;
+        }
+        if admitted.len() == MAX_SKILLS {
+            return Err(ToolError::Limit);
+        }
+        let dir = Dir::from_std_file(fs::open_file(&directory, &name)?);
+        let mut files = BTreeMap::new();
+        pin_files(&dir, "", &mut files, &mut budget)?;
+        if !files.contains_key("SKILL.md") {
+            return Err(ToolError::ChangedInput);
+        }
+        let bytes = fs::read_regular(fs::open_file(&dir, "SKILL.md")?, MAX_TOOL_RESULT_BYTES)?;
+        if files["SKILL.md"] != hex_digest(&bytes) {
+            return Err(ToolError::ChangedInput);
+        }
+        let text = std::str::from_utf8(&bytes).map_err(|_| ToolError::Configuration)?;
+        let preview = frontmatter(text)
+            .unwrap_or_default()
+            .chars()
+            .map(|ch| if ch.is_control() { ' ' } else { ch })
+            .take(192)
+            .collect::<String>();
+        admitted.push(Skill {
+            name: name.clone(),
+            description: if preview.trim().is_empty() {
+                format!("Project Skill {name}")
+            } else {
+                preview
+            },
+            directory: workspace
+                .join(".agents/skills")
+                .join(&name)
+                .to_str()
+                .ok_or(ToolError::Path)?
+                .to_owned(),
+            files,
+        });
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct DiscoveryBudget {
+    entries: usize,
+    bytes: usize,
+}
+
+fn pin_files(
+    root: &Dir,
+    prefix: &str,
+    files: &mut BTreeMap<String, String>,
+    budget: &mut DiscoveryBudget,
+) -> Result<(), ToolError> {
+    for entry in root.entries().map_err(|_| ToolError::Path)? {
+        budget.entries += 1;
+        if budget.entries > 8192 {
+            return Err(ToolError::Limit);
+        }
+        let entry = entry.map_err(|_| ToolError::Path)?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| ToolError::Path)?;
+        let path = format!("{prefix}{name}");
+        if !valid_relative(&path, false) {
+            continue;
+        }
+        if path.split('/').count() > 16 {
+            return Err(ToolError::Limit);
+        }
+        let file = fs::open_file(root, &name)?;
+        if file.metadata().map_err(|_| ToolError::Path)?.is_dir() {
+            pin_files(
+                &Dir::from_std_file(file),
+                &format!("{path}/"),
+                files,
+                budget,
+            )?;
+        } else {
+            if files.len() == 32 {
+                return Err(ToolError::Limit);
+            }
+            let bytes = fs::read_regular(file, MAX_TOOL_RESULT_BYTES)?;
+            budget.bytes += bytes.len();
+            if budget.bytes > MAX_SNAPSHOT_BYTES {
+                return Err(ToolError::Limit);
+            }
+            files.insert(path, hex_digest(&bytes));
+        }
+    }
+    Ok(())
+}
 
 struct Budget {
     nodes: usize,
@@ -117,20 +321,7 @@ pub(super) fn metadata(expected_name: &str, bytes: &[u8]) -> Result<Value, ToolE
         return Err(ToolError::Limit);
     }
     let text = std::str::from_utf8(bytes).map_err(|_| ToolError::Configuration)?;
-    let text = text
-        .strip_prefix("---\n")
-        .or_else(|| text.strip_prefix("---\r\n"))
-        .ok_or(ToolError::Configuration)?;
-    let boundary = text
-        .split_inclusive('\n')
-        .scan(0, |offset, line| {
-            let start = *offset;
-            *offset += line.len();
-            Some((start, line.trim_end_matches(['\r', '\n'])))
-        })
-        .find_map(|(offset, line)| (line == "---").then_some(offset))
-        .ok_or(ToolError::Configuration)?;
-    let yaml = &text[..boundary];
+    let yaml = frontmatter(text).ok_or(ToolError::Configuration)?;
     let mut documents = yaml_serde::Deserializer::from_str(yaml);
     let mut budget = Budget {
         nodes: 0,
@@ -158,6 +349,21 @@ pub(super) fn metadata(expected_name: &str, bytes: &[u8]) -> Result<Value, ToolE
     Ok(
         json!({"name":expected_name,"description":description,"sha256":hex_digest(bytes),"behavioral_fields":"guidance only; no permissions, interpolation, installation or fork activation"}),
     )
+}
+
+fn frontmatter(text: &str) -> Option<&str> {
+    let text = text
+        .strip_prefix("---\n")
+        .or_else(|| text.strip_prefix("---\r\n"))?;
+    let boundary = text
+        .split_inclusive('\n')
+        .scan(0, |offset, line| {
+            let start = *offset;
+            *offset += line.len();
+            Some((start, line.trim_end_matches(['\r', '\n'])))
+        })
+        .find_map(|(offset, line)| (line == "---").then_some(offset))?;
+    Some(&text[..boundary])
 }
 
 pub(super) fn parse_json(bytes: &[u8], max_bytes: usize) -> Result<Value, ToolError> {

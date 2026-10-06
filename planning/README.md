@@ -33,4 +33,4 @@ Read [PLANNING.md](./PLANNING.md) before writing a plan and start from [TEMPLATE
 
 ## Lifecycle
 
-Delete a completed plan in the final implementation change unless the user explicitly wants it retained. Preserve durable outcomes in current architecture, module rules, ADRs, or public documentation; git history preserves the execution artifact.
+Completed implementation moves into the owning domain spec; delete its execution plan in the same change, including when the implementation is still local and uncommitted. Keep architecture, rationale and editing rules at their respective owners, dated evidence in existing verification records, and deferred user checks in `NEXT_STEPS.md`. Update inbound links and retain only plans with remaining execution work, unless the user explicitly requests a historical record. Git history preserves committed execution artifacts.

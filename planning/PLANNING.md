@@ -12,7 +12,7 @@ Rules for maintained execution plans. [README.md](./README.md) defines the folde
 - Each branch or PR should be describable in one sentence and leave the repository coherent.
 - Change status to `In progress` when implementation starts.
 - For multi-PR plans, update the change log with shipped work before starting the next slice.
-- Remove the plan when its final slice lands unless the user requests a historical record.
+- Close completed implementation using the [planning lifecycle](./README.md#lifecycle), including local uncommitted work.
 - Cite adjacent rules and research instead of restating them.
 - For behavior work, link the owning spec or unmigrated contract and its existing evidence owner. Describe proposed changes with successful and meaningful rejection/failure/recovery scenarios before implementation. Review contract impact after each planning pass using [the spec workflow](../docs/specs/README.md), which owns acceptance, updates, extraction and evidence status.
 

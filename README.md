@@ -1,6 +1,6 @@
 # Arany
 
-Arany is a Rust-first, CLI-only agent harness. It keeps Sessions and Runs in a local SQLite journal, supports bounded direct read-only child agents, and makes Provider and model selection explicit. Opt-in local coding tools add guarded file operations, bounded offline commands, portable Skills and stdio MCP to the primary agent. The beta is still in development; the [beta plan](./planning/arany-beta/README.md) and [coding-base plan](./planning/effectful-beta-base/README.md) track scoped evidence, and [next steps](./NEXT_STEPS.md) separates final user-owned checks from beta 2 and broader release work.
+Arany is a Rust-first, CLI-only agent harness. It keeps Sessions and Runs in a local SQLite journal, supports bounded direct read-only child agents, and makes Provider and model selection explicit. Opt-in local coding tools add guarded file operations, bounded offline commands, portable Skills and stdio MCP to the primary agent. The beta is still in development; the [beta plan](./planning/arany-beta/README.md) tracks remaining execution, the [Tool contract](./docs/specs/tools.md) defines current behavior, and [next steps](./NEXT_STEPS.md) separates final user-owned checks from beta 2 and broader release work.
 
 ## Try the current build
 

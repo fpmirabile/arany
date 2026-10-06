@@ -728,11 +728,11 @@ fn inline_frame_keeps_composer_and_status_in_the_viewport() {
                             })
                             .expect("busy completion frame");
                         let buffer = terminal.backend().buffer();
-                        let footer = (0..width)
-                            .map(|x| buffer[(x, 6)].symbol())
-                            .collect::<String>();
                         assert!(
-                            footer.contains("Enter keeps"),
+                            (0..8).any(|y| (0..width)
+                                .map(|x| buffer[(x, y)].symbol())
+                                .collect::<String>()
+                                .contains("Enter keeps")),
                             "busy completion does not imply execution"
                         );
                         assert_eq!(composer.text(), "/s");
@@ -1335,6 +1335,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
     }
     composer.apply(TerminalInput::Down);
     let cursor = composer.cursor_byte_offset();
+    composer.set_completion_layout(super::super::CompletionLayout::Combined);
     composer.set_runtime_skills(&["review".into(), "help".into()]);
     for (prefix, focused, category) in [
         ("/rev", "review", "Skill"),
@@ -1361,31 +1362,138 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
                             .map(|x| buffer[(x, y)].symbol())
                             .collect::<String>()
                     };
-                    if prefix == "/s" {
-                        assert!(row(height - 6).contains("/setup"));
-                    }
-                    assert!(row(height - 5).contains(&safe_truncate(
-                        &format!("> {category} /{focused}"),
-                        usize::from(width)
-                    )));
-                    assert!(row(height - 3).contains(&format!("> {prefix}")));
+                    let menu_height = completion_height(&composer, height.saturating_sub(4));
+                    let input_y = height - 3 - menu_height;
+                    let focused_y = (0..height)
+                        .find(|y| {
+                            row(*y).contains(&safe_truncate(
+                                &format!("> {category} /{focused}"),
+                                usize::from(width),
+                            ))
+                        })
+                        .expect("focused completion visible");
+                    assert!(focused_y > input_y, "completion stays below input");
+                    assert!(row(input_y).contains(&format!("> {prefix}")));
                     assert!(row(height - 1).starts_with(if category == "Skill" {
                         "Tab/Enter: $"
                     } else {
                         "Tab/Enter: /"
                     }));
-                    assert!(row(height - 2).contains("Tab/Enter"));
-                    assert!(buffer[(0, height - 5)].modifier.contains(Modifier::BOLD));
+                    assert!(row(input_y + 1).contains("Tab/Enter"));
+                    assert!(buffer[(0, focused_y)].modifier.contains(Modifier::BOLD));
                     assert_eq!(
-                        buffer[(0, height - 5)].fg,
-                        if color { Color::Cyan } else { Color::Reset },
+                        buffer[(0, focused_y)].fg,
+                        if color { Color::Cyan } else { Color::Reset }
                     );
                     assert_eq!(composer.text(), prefix);
                     assert_eq!(composer.cursor_byte_offset(), cursor);
                     assert_eq!(
                         terminal.get_cursor_position().expect("completion cursor").y,
-                        height - 3
+                        input_y
                     );
+                }
+            }
+        }
+    }
+    for (layout, skill_count, skills_tab, last) in [
+        (super::super::CompletionLayout::Tabs, 64, false, false),
+        (super::super::CompletionLayout::Tabs, 64, true, true),
+        (super::super::CompletionLayout::Tabs, 0, true, false),
+        (super::super::CompletionLayout::Combined, 64, false, true),
+    ] {
+        for width in [16, 40, 50, 79, 80, 120] {
+            for height in [8, 24] {
+                for color in [false, true] {
+                    let mut draft = Composer::default();
+                    draft.set_completion_layout(layout);
+                    draft.set_runtime_skills(
+                        &(0..skill_count)
+                            .map(|i| format!("skill-{i:02}"))
+                            .collect::<Vec<_>>(),
+                    );
+                    draft.insert_paste("/").unwrap();
+                    if skills_tab {
+                        draft.apply(TerminalInput::Right);
+                    }
+                    if last {
+                        draft.apply(TerminalInput::Up);
+                    }
+                    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                    terminal
+                        .draw(|frame| draw_frame(frame, &model, &draft, None, Palette { color }))
+                        .unwrap();
+                    let caret = terminal.get_cursor_position().unwrap();
+                    let buffer = terminal.backend().buffer();
+                    let row = |y| {
+                        (0..width)
+                            .map(|x| buffer[(x, y)].symbol())
+                            .collect::<String>()
+                    };
+                    assert!(row(caret.y).starts_with("> /"));
+                    let labels = (caret.y + 2..height - 1).map(row).collect::<Vec<_>>();
+                    assert!(!labels.is_empty());
+                    assert!(labels[0].contains(
+                        if layout == super::super::CompletionLayout::Combined {
+                            if width < 20 {
+                                "Commands +"
+                            } else {
+                                "Commands + Skills"
+                            }
+                        } else if skills_tab {
+                            "[Skills]"
+                        } else if width < 40 {
+                            "[Cmd]"
+                        } else {
+                            "[Commands]"
+                        }
+                    ));
+                    if layout == super::super::CompletionLayout::Tabs {
+                        let selected_x = labels[0].find('[').unwrap() as u16;
+                        assert!(
+                            buffer[(selected_x, caret.y + 2)]
+                                .modifier
+                                .contains(Modifier::REVERSED)
+                        );
+                        assert!(
+                            buffer[(selected_x, caret.y + 2)]
+                                .modifier
+                                .contains(Modifier::BOLD)
+                        );
+                        let inactive_x = if skills_tab {
+                            0
+                        } else {
+                            labels[0].find("Skills").unwrap() as u16
+                        };
+                        assert!(
+                            !buffer[(inactive_x, caret.y + 2)]
+                                .modifier
+                                .contains(Modifier::REVERSED)
+                        );
+                    }
+                    assert!(labels.len() <= 21);
+                    if skill_count == 0 {
+                        assert!(labels.iter().any(|row| row.starts_with("No Skills")));
+                    }
+                    if last {
+                        assert!(labels.iter().any(|row| row.starts_with("> Skill /skill-")));
+                    }
+                    if width >= 79 && height == 24 && !skills_tab && !last {
+                        assert_eq!(
+                            labels.len(),
+                            18,
+                            "large Commands list includes the entire registry"
+                        );
+                        assert!(
+                            labels
+                                .iter()
+                                .any(|row| row.contains("Choose slash menu display"))
+                        );
+                    }
+                    if !color {
+                        assert!(buffer.content().iter().all(|cell| cell.fg == Color::Reset));
+                    }
+                    assert_eq!(draft.text(), "/");
+                    assert_eq!(draft.cursor_byte_offset(), 1);
                 }
             }
         }
@@ -2178,11 +2286,12 @@ fn agent_inspector_keeps_details_and_keyboard_help_in_viewport() {
         let model = AgentInspectorModel {
             selected: 1,
             choices: vec![
-                "Agent 1/2: primary; Finished".into(),
-                "Agent 2/2: child 1; Failed".into(),
+                "Run 1: primary; Finished".into(),
+                "Run 1: child 1; Failed".into(),
             ],
             lines: vec![
-                "Agents: 2 in 1 recent Run".into(),
+                "Last Run: 2 agents; children: 1".into(),
+                "History: 2 agents in 1 recent Runs".into(),
                 "Next Run: Single".into(),
                 "Agent 2/2: child 1; Failed".into(),
                 "Objective: hostile\\u{001b}[31m".into(),
@@ -2198,11 +2307,11 @@ fn agent_inspector_keeps_details_and_keyboard_help_in_viewport() {
                 .map(|x| buffer[(x, y)].symbol())
                 .collect::<String>()
         };
-        assert!(row(0).contains("Agents: 2"));
+        assert!(row(0).contains("Last Run: 2 agents; children: 1"));
         assert!(row(1).contains("primary; Finished"));
-        assert!(row(2).starts_with("> Agent 2/2: child 1; Failed"));
-        assert!(row(4).contains("child 1; Failed"));
-        assert!(row(5).contains("hostile\\u{001b}[31m"));
+        assert!(row(2).starts_with("> Run 1: child 1; Failed"));
+        assert!(row(5).contains("child 1; Failed"));
+        assert!(row(6).contains("hostile\\u{001b}[31m"));
         assert!(row(13).contains("Esc close"));
         let area = Rect::new(0, 0, width, 14);
         assert_eq!(agent_picker_index(area, 0, 1, 1, 2), Some(0));
@@ -2222,9 +2331,9 @@ fn agent_inspector_keeps_details_and_keyboard_help_in_viewport() {
     let mut terminal = Terminal::new(TestBackend::new(16, 14)).expect("narrow terminal");
     let model = AgentInspectorModel {
         selected: 0,
-        choices: vec!["Agent 1/1: primary; Finished".into()],
+        choices: vec!["Run 1: primary; Finished".into()],
         lines: vec![
-            "Agents: 1 in 1 recent Run".into(),
+            "Last Run: 1 agent; children: 0".into(),
             "Next Run: Single".into(),
         ],
     };

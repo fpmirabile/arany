@@ -10,6 +10,8 @@ pub const MAX_TOOL_ARGUMENT_BYTES: usize = 16 * 1024;
 pub const MAX_TOOL_RESULT_BYTES: usize = 16 * 1024;
 pub const MAX_TOOL_CONTEXT_BYTES: usize = 64 * 1024;
 pub const MAX_MODEL_STEPS: usize = 32;
+pub const MAX_SKILLS: usize = 64;
+pub(crate) const MAX_TOOL_CATALOG_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_FILE_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_SNAPSHOT_BYTES: usize = 32 * 1024 * 1024;
 pub(crate) const MAX_SNAPSHOT_FILES: usize = 2048;
@@ -384,7 +386,7 @@ pub struct ToolContext {
 
 impl ToolContext {
     pub(crate) fn model_input(&self) -> Value {
-        let catalog = super::skills::parse_json(self.catalog.as_bytes(), 8 * 1024)
+        let catalog = super::skills::parse_json(self.catalog.as_bytes(), MAX_TOOL_CATALOG_BYTES)
             .unwrap_or_else(|_| json!(self.catalog));
         let observations: Vec<_> = self
             .observations
@@ -411,8 +413,8 @@ impl ToolContext {
     }
 
     pub(crate) fn outcome_branch(&self) -> Value {
-        let catalog =
-            super::skills::parse_json(self.catalog.as_bytes(), 8 * 1024).unwrap_or(Value::Null);
+        let catalog = super::skills::parse_json(self.catalog.as_bytes(), MAX_TOOL_CATALOG_BYTES)
+            .unwrap_or(Value::Null);
         let mut branch = outcome_branch();
         branch["properties"]["call"]["anyOf"]
             .as_array_mut()
@@ -421,7 +423,7 @@ impl ToolContext {
                 let (key, field, cap) = match call["properties"]["operation"]["enum"][0].as_str() {
                     Some("write" | "edit" | "mkdir") => return catalog["write"] == true,
                     Some("command") => ("commands", "program", 8),
-                    Some("skill") => ("skills", "name", 32),
+                    Some("skill") => ("skills", "name", MAX_SKILLS),
                     Some("mcp_list" | "mcp_call") => ("mcp_servers", "server", 4),
                     _ => return true,
                 };

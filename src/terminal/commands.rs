@@ -9,6 +9,7 @@ const MAX_CATALOG_MODELS: usize = 4096;
 pub enum InteractiveCommand {
     Help,
     Setup,
+    Settings,
     Paste,
     Status,
     New,
@@ -40,9 +41,13 @@ impl InteractiveCommand {
             Self::Agents | Self::Provider | Self::Model | Self::Quit | Self::Paste => {
                 CommandAvailability::ViewOnly
             }
-            Self::Setup | Self::New | Self::Resume | Self::Fork | Self::Rename | Self::Compact => {
-                CommandAvailability::Locked
-            }
+            Self::Setup
+            | Self::Settings
+            | Self::New
+            | Self::Resume
+            | Self::Fork
+            | Self::Rename
+            | Self::Compact => CommandAvailability::Locked,
         }
     }
 }
@@ -90,7 +95,7 @@ const fn spec(
     }
 }
 
-const COMMANDS: [CommandSpec; 16] = [
+const COMMANDS: [CommandSpec; 17] = [
     spec("help", InteractiveCommand::Help, None, &[]),
     spec("setup", InteractiveCommand::Setup, None, &[]),
     spec("paste", InteractiveCommand::Paste, None, &[]),
@@ -125,6 +130,12 @@ const COMMANDS: [CommandSpec; 16] = [
         &[],
     ),
     spec("permissions", InteractiveCommand::Permissions, None, &[]),
+    spec(
+        "settings",
+        InteractiveCommand::Settings,
+        Some("[tabs|combined]"),
+        &["tabs", "combined"],
+    ),
     spec("quit", InteractiveCommand::Quit, None, &[]),
     spec("exit", InteractiveCommand::Quit, None, &[]),
 ];
@@ -145,6 +156,7 @@ pub(super) fn help_entry(index: usize) -> Option<HelpEntry> {
     let description = match spec.command {
         InteractiveCommand::Help => "List commands",
         InteractiveCommand::Setup => "Set up an account",
+        InteractiveCommand::Settings => "Choose slash menu display",
         InteractiveCommand::Paste => "Paste clipboard into draft",
         InteractiveCommand::Status => "Session status",
         InteractiveCommand::New => "New Session",
@@ -598,7 +610,7 @@ mod tests {
 
     #[test]
     fn closed_registry_aliases_completion_and_lifecycle_are_exact() {
-        assert_eq!(COMMANDS.len(), 16);
+        assert_eq!(COMMANDS.len(), 17);
         for spec in COMMANDS {
             assert_eq!(
                 parse_submission(&format!("/{}", spec.name)),
@@ -663,7 +675,7 @@ mod tests {
         assert_eq!(parse_submission("/exit"), parse_submission("/quit"));
         assert_eq!(command_completions("/stat"), vec!["status"]);
         assert_eq!(command_completions("/hel"), vec!["help"]);
-        assert_eq!(command_completions("/set"), vec!["setup"]);
+        assert_eq!(command_completions("/set"), vec!["setup", "settings"]);
         assert_eq!(command_completions("/pas"), vec!["paste"]);
         assert_eq!(command_completions("/mo"), vec!["model"]);
         assert_eq!(

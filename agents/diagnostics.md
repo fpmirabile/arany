@@ -1,6 +1,6 @@
 # Development diagnostics
 
-Load for `src/diagnostics.rs`, local debug-log admission or Provider failure instrumentation. [security.md](./security.md) owns secret exclusion; [store.md](./store.md) owns private file admission. User operation is documented in [development diagnostics](../docs/development-diagnostics.md).
+Load for `src/diagnostics.rs`, local debug-log admission or Provider failure instrumentation. [security.md](./security.md) owns secret exclusion; [store.md](./store.md) owns private file admission. Read the [diagnostic spec](../docs/specs/diagnostics.md) for activation, privacy, limits and acceptance scenarios. User operation is documented in [development diagnostics](../docs/development-diagnostics.md).
 
 - Enable the concrete diagnostic owner only after ordinary attached Session or `exec` admission. Help/version, read-only inspection and internal helpers keep their existing side-effect and channel contracts. Optimized builds leave it disabled.
 - Record compiled failure stages and numeric counters, never arbitrary strings, upstream errors, bodies, headers, identifiers, requests or conversation data. Stack frames omit source locations and controls; a local call stack is not an upstream or async causal stack.

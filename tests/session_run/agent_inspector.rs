@@ -97,7 +97,8 @@ fn screen_reader_agent_inspector_opens_and_closes_without_provider_access() {
     }
     let output = reader.join().expect("PTY output reader");
     let text = String::from_utf8_lossy(&output);
-    assert!(text.contains("Agents: 0 in 0 recent Runs; 0 older Runs"));
+    assert!(text.contains("No Runs yet"));
+    assert!(text.contains("History: 0 agents in 0 recent Runs; 0 older Runs"));
     assert!(text.contains("No AgentRuns yet"));
     assert!(text.contains("Next Run: Auto { max_active_children: 3 }"));
     assert!(text.contains("Agent inspection closed"));

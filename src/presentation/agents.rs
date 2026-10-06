@@ -32,35 +32,54 @@ impl AgentInspectorModel {
             .iter()
             .rev()
             .take(MAX_RECENT_RUNS)
-            .flat_map(|run| {
+            .enumerate()
+            .flat_map(|(index, run)| {
                 run.agents
                     .iter()
                     .take(MAX_AGENTS_PER_RUN)
-                    .map(move |agent| (run, agent))
+                    .map(move |agent| (view.runs.len() - index, run, agent))
             })
             .collect::<Vec<_>>();
         let count = entries.len();
         let selected = selected.min(count.saturating_sub(1));
         let choices = entries
             .iter()
-            .enumerate()
-            .map(|(index, (_, agent))| {
+            .map(|(run_number, _, agent)| {
                 let role = match agent.role {
                     AgentRole::Primary => "primary".to_owned(),
                     AgentRole::Child => format!("child {}", agent.ordinal),
                 };
                 safe_truncate(
-                    &format!("Agent {}/{count}: {role}; {:?}", index + 1, agent.status),
+                    &format!("Run {run_number}: {role}; {:?}", agent.status),
                     width.saturating_sub(2),
                 )
             })
             .collect();
         let hidden_runs = view.runs.len().saturating_sub(MAX_RECENT_RUNS);
-        let mut lines = vec![format!(
-            "Agents: {count} in {} recent Runs; {} older Runs",
-            view.runs.len().min(MAX_RECENT_RUNS),
-            hidden_runs
-        )];
+        let mut lines = vec![
+            match view.runs.last() {
+                Some(run) => format!(
+                    "{} Run: {} agent{}; children: {}",
+                    if run.status == RunStatus::Active {
+                        "Current"
+                    } else {
+                        "Last"
+                    },
+                    run.agents.len(),
+                    if run.agents.len() == 1 { "" } else { "s" },
+                    run.agents
+                        .iter()
+                        .filter(|agent| agent.role == AgentRole::Child)
+                        .count()
+                ),
+                None => "No Runs yet".into(),
+            },
+            format!(
+                "History: {count} agents in {} recent Runs; {} older Runs",
+                view.runs.len().min(MAX_RECENT_RUNS),
+                hidden_runs
+            ),
+        ];
         lines.push(format!("Next Run: {:?}", view.defaults.policy));
         if locked {
             lines.push(
@@ -76,7 +95,7 @@ impl AgentInspectorModel {
         } else {
             lines.push("Set next Run: /agents single|auto N|team N".into());
         }
-        if let Some((run, agent)) = entries.get(selected) {
+        if let Some((_, run, agent)) = entries.get(selected) {
             lines.extend(agent_lines(view, run, agent, selected, count));
         } else if view.runs.last().is_some_and(|run| run.agents.is_empty()) {
             lines.push("Run admission in progress; no AgentRuns yet".into());
@@ -86,7 +105,7 @@ impl AgentInspectorModel {
         if hidden_runs > 0
             || entries
                 .iter()
-                .any(|(run, _)| run.agents.len() > MAX_AGENTS_PER_RUN)
+                .any(|(_, run, _)| run.agents.len() > MAX_AGENTS_PER_RUN)
         {
             lines.push("Older history: use arany show SESSION_ID".into());
         }
@@ -223,7 +242,10 @@ mod tests {
         assert_eq!(first.choices.len(), 32);
         assert!(first.choices[0].contains("primary"));
         assert!(first.choices[1].contains("child 1"));
-        assert!(first.lines[0].contains("2 older Runs"));
+        assert_eq!(first.lines[0], "Last Run: 2 agents; children: 1");
+        assert!(first.lines[1].contains("2 older Runs"));
+        assert!(first.choices[0].starts_with("Run 18:"));
+        assert!(first.choices[2].starts_with("Run 17:"));
         assert!(first.lines.iter().any(|line| line.contains("primary")));
         assert!(first.lines.iter().any(|line| line.contains("Run 17")));
         assert!(!first.lines.iter().any(|line| line == "Objective: Run 1"));

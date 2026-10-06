@@ -73,7 +73,7 @@ impl Config {
                 !valid_relative(path, false) && !(path == "." && self.workspace_paths.len() == 1)
             })
             || self.commands.len() > 8
-            || self.skills.len() > 32
+            || self.skills.len() > MAX_SKILLS
             || self.mcp.len() > 4
         {
             return Err(ToolError::Configuration);
@@ -152,6 +152,27 @@ impl Config {
                     .chain(program.inputs.iter().map(|input| input.path.as_str()))
             })
             .chain(self.skills.iter().map(|skill| skill.directory.as_str()))
+    }
+
+    pub(super) fn discover_skills(&mut self, workspace: &std::path::Path) -> Result<(), ToolError> {
+        if !self.permits_project_skills() {
+            return Ok(());
+        }
+        super::skills::discover(workspace, &mut self.skills)?;
+        if serde_json::to_vec(self)
+            .map_err(|_| ToolError::Configuration)?
+            .len()
+            > 64 * 1024
+        {
+            return Err(ToolError::Limit);
+        }
+        self.validate()
+    }
+
+    pub(super) fn permits_project_skills(&self) -> bool {
+        self.workspace_paths
+            .iter()
+            .any(|path| path == "." || std::path::Path::new(".agents/skills").starts_with(path))
     }
 
     pub(crate) fn digest(&self) -> [u8; 32] {

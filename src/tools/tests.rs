@@ -8,6 +8,156 @@ fn config_value() -> Value {
 }
 
 #[test]
+fn project_skill_discovery_preserves_grants_and_reports_missing_installation() {
+    for layout in [
+        "absent",
+        "lock",
+        "empty",
+        "installed",
+        "many-installed",
+        "linked-directory",
+        "linked-file",
+        "linked-resource",
+        "oversized",
+        "too-many",
+        "too-many-resources",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        for ignored in [
+            "agents/skills/ignored",
+            ".claude/skills/ignored",
+            ".codex/skills/ignored",
+        ] {
+            std::fs::create_dir_all(workspace.join(ignored)).unwrap();
+            std::fs::write(workspace.join(ignored).join("SKILL.md"), b"ignored").unwrap();
+        }
+        if layout != "absent" {
+            std::fs::write(workspace.join("skills-lock.json"), b"unparsed lock data").unwrap();
+        }
+        let folder = workspace.join(".agents/skills");
+        if !matches!(layout, "absent" | "lock") {
+            std::fs::create_dir_all(&folder).unwrap();
+        }
+        if !matches!(layout, "absent" | "lock" | "empty") {
+            let count = if layout == "too-many" {
+                MAX_SKILLS + 1
+            } else if layout == "many-installed" {
+                MAX_SKILLS
+            } else {
+                1
+            };
+            for index in 0..count {
+                let name = format!("skill-{index:02}");
+                let dir = folder.join(&name);
+                std::fs::create_dir_all(dir.join("references")).unwrap();
+                let guidance =
+                    format!("---\nname: {name}\ndescription: Useful project guidance\n---\nBody\n");
+                std::fs::write(dir.join("SKILL.md"), guidance).unwrap();
+                std::fs::write(dir.join("references/note.txt"), b"A pinned resource").unwrap();
+                if layout == "linked-directory" {
+                    std::os::unix::fs::symlink(&dir, folder.join("linked")).unwrap();
+                } else if layout == "linked-file" {
+                    std::fs::create_dir(folder.join("linked")).unwrap();
+                    std::os::unix::fs::symlink(
+                        dir.join("SKILL.md"),
+                        folder.join("linked/SKILL.md"),
+                    )
+                    .unwrap();
+                } else if layout == "linked-resource" {
+                    std::os::unix::fs::symlink(
+                        dir.join("SKILL.md"),
+                        dir.join("references/linked.txt"),
+                    )
+                    .unwrap();
+                } else if layout == "oversized" {
+                    std::fs::write(dir.join("SKILL.md"), vec![b'x'; MAX_TOOL_RESULT_BYTES + 1])
+                        .unwrap();
+                } else if layout == "too-many-resources" {
+                    for resource in 0..32 {
+                        std::fs::write(dir.join(format!("references/{resource}.txt")), b"extra")
+                            .unwrap();
+                    }
+                }
+            }
+        }
+        let discovery = super::project_skills(&workspace);
+        if matches!(
+            layout,
+            "linked-directory" | "linked-file" | "oversized" | "too-many"
+        ) {
+            assert!(discovery.is_err(), "{layout}");
+            continue;
+        }
+        let discovery = discovery.unwrap();
+        assert_eq!(discovery.installation_missing, layout == "lock", "{layout}");
+        let mut value = config_value();
+        value["workspace_paths"] = json!(["."]);
+        let mut config: Config = serde_json::from_value(value).unwrap();
+        let pinned = config.discover_skills(&workspace);
+        if matches!(layout, "linked-resource" | "too-many-resources") {
+            assert!(pinned.is_err(), "{layout}");
+            continue;
+        }
+        pinned.unwrap();
+        let expected = if layout == "many-installed" {
+            MAX_SKILLS
+        } else {
+            usize::from(layout == "installed")
+        };
+        assert_eq!(config.skills.len(), expected, "{layout}");
+        if matches!(layout, "installed" | "many-installed") {
+            assert_eq!(discovery.names.len(), expected);
+            assert_eq!(discovery.names[0], "skill-00");
+            assert_eq!(
+                config.skills[0].files["references/note.txt"],
+                hex_digest(b"A pinned resource")
+            );
+            let read = ToolCall::Skill {
+                name: "skill-00".into(),
+                resource: Some("references/note.txt".into()),
+            };
+            assert!(config.allows(&read));
+            config.skills[0].description = "Private grant takes precedence".into();
+            config.discover_skills(&workspace).unwrap();
+            assert_eq!(config.skills.len(), expected);
+            assert_eq!(
+                config.skills[0].description,
+                "Private grant takes precedence"
+            );
+            let mut narrow: Config = serde_json::from_value(config_value()).unwrap();
+            narrow.discover_skills(&workspace).unwrap();
+            assert!(narrow.skills.is_empty());
+            assert!(!narrow.allows(&read));
+            let catalog = json!({"skills":config.skills.iter().map(|skill| json!({"name":skill.name,"description":"x".repeat(150)})).collect::<Vec<_>>()}).to_string();
+            if layout == "many-installed" {
+                assert!(catalog.len() > 8 * 1024);
+            }
+            let context = ToolContext {
+                catalog,
+                observations: Vec::new(),
+            };
+            assert!(context.model_input()["catalog"].is_object());
+            let branch = context.outcome_branch();
+            let skill = branch["properties"]["call"]["anyOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|call| call["properties"]["operation"]["enum"][0] == "skill")
+                .unwrap();
+            assert_eq!(
+                skill["properties"]["name"]["enum"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                expected
+            );
+        }
+    }
+}
+
+#[test]
 fn tool_admission_corpus_is_closed_and_restrict_only() {
     let value = config_value();
     let config: Config = serde_json::from_value(value.clone()).unwrap();

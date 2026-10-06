@@ -185,7 +185,12 @@ pub(super) fn history_top_padding(available_height: u16) -> u16 {
 
 pub(super) fn completion_height(composer: &Composer, available_height: u16) -> u16 {
     composer.completion_rows().map_or(0, |(names, _)| {
-        (names.len().min(3) as u16).min(available_height.saturating_sub(1))
+        let height = if composer.completion_header().is_some() {
+            names.len().clamp(1, 20) as u16 + 1
+        } else {
+            names.len().min(3) as u16
+        };
+        height.min(available_height.saturating_sub(1))
     })
 }
 
@@ -652,13 +657,13 @@ pub(super) fn draw_frame_with_history(
     let composer_height = (draft_rows.lines.len().min(MAX_VISIBLE_DRAFT_ROWS) as u16)
         .saturating_add(2)
         .min(area.height.saturating_sub(1));
-    let composer_y = area.bottom().saturating_sub(1 + composer_height);
-    let menu_height = completion_height(composer, composer_y.saturating_sub(area.y));
-    let menu_y = composer_y.saturating_sub(menu_height);
-    let activity_rows = menu_y
+    let menu_height = completion_height(composer, area.height.saturating_sub(1 + composer_height));
+    let menu_y = area.bottom().saturating_sub(1 + menu_height);
+    let composer_y = menu_y.saturating_sub(composer_height);
+    let activity_rows = composer_y
         .saturating_sub(area.y)
         .min(u16::try_from(model.activity_lines.len()).unwrap_or(u16::MAX));
-    let available_history = menu_y.saturating_sub(area.y + activity_rows);
+    let available_history = composer_y.saturating_sub(area.y + activity_rows);
     let padding = history_top_padding(available_history);
     let history_top = area.y + padding;
     let history_height = available_history - padding;
@@ -756,30 +761,112 @@ pub(super) fn draw_frame_with_history(
                 safe_truncate(line, usize::from(area.width)),
                 palette,
             )),
-            Rect::new(area.x, menu_y - activity_rows + row, area.width, 1),
+            Rect::new(area.x, composer_y - activity_rows + row, area.width, 1),
         );
     }
     if menu_height > 0
         && let Some((names, selected)) = composer.completion_rows()
     {
-        let rows = usize::from(menu_height);
+        let header = composer.completion_header();
+        let header_rows = u16::from(header.is_some());
+        let rows = usize::from(menu_height.saturating_sub(header_rows));
         let start = selected
             .saturating_sub(rows / 2)
             .min(names.len().saturating_sub(rows));
+        if let Some(header) = header {
+            let header = if area.width < 40 {
+                match header {
+                    "[Commands]  Skills · Left/Right" => "[Cmd] Skills ↔",
+                    "Commands  [Skills] · Left/Right" => "Cmd [Skills] ↔",
+                    _ => "Commands + Skills",
+                }
+            } else {
+                header
+            };
+            let range = if names.len() > rows {
+                format!(
+                    " · {}-{}/{}",
+                    start + 1,
+                    (start + rows).min(names.len()),
+                    names.len()
+                )
+            } else {
+                String::new()
+            };
+            let header_line = if composer.completion_layout() == super::CompletionLayout::Tabs {
+                let commands = if area.width < 40 { "Cmd" } else { "Commands" };
+                let selected = palette.selection().add_modifier(Modifier::REVERSED);
+                let skills_selected = composer.completion_skills_selected();
+                let tabs = [(commands, !skills_selected), ("Skills", skills_selected)];
+                let mut spans = Vec::new();
+                for (index, (label, focused)) in tabs.into_iter().enumerate() {
+                    if index > 0 {
+                        spans.push(Span::raw("  "));
+                    }
+                    spans.push(Span::styled(
+                        if focused {
+                            format!("[{label}]")
+                        } else {
+                            label.to_owned()
+                        },
+                        if focused { selected } else { palette.subtle() },
+                    ));
+                }
+                spans.push(Span::styled(
+                    if area.width < 40 {
+                        " ↔"
+                    } else {
+                        " · Left/Right"
+                    },
+                    palette.subtle(),
+                ));
+                spans.push(Span::styled(range, palette.subtle()));
+                Line::from(spans)
+            } else {
+                Line::styled(
+                    safe_truncate(&format!("{header}{range}"), usize::from(area.width)),
+                    palette.accent(),
+                )
+            };
+            frame.render_widget(
+                Paragraph::new(header_line),
+                Rect::new(area.x, menu_y, area.width, 1),
+            );
+            if names.is_empty() && rows > 0 {
+                frame.render_widget(
+                    Paragraph::new(safe_truncate(
+                        composer.empty_completion_notice(),
+                        usize::from(area.width),
+                    ))
+                    .style(palette.subtle()),
+                    Rect::new(area.x, menu_y + 1, area.width, 1),
+                );
+            }
+        }
         for (row, name) in names.iter().enumerate().skip(start).take(rows) {
             let focused = row == selected;
             let marker = if focused { "> " } else { "  " };
+            let line = if header.is_some() && area.width >= 40 {
+                let name_width = usize::from(area.width / 3).clamp(18, 32);
+                let label = safe_truncate(name, name_width);
+                let padding = name_width.saturating_sub(UnicodeWidthStr::width(label.as_str()));
+                let description = composer.completion_description(name);
+                format!("{marker}{label}{}  {description}", " ".repeat(padding))
+            } else {
+                format!("{marker}{name}")
+            };
             frame.render_widget(
-                Paragraph::new(safe_truncate(
-                    &format!("{marker}{name}"),
-                    usize::from(area.width),
-                ))
-                .style(if focused {
+                Paragraph::new(safe_truncate(&line, usize::from(area.width))).style(if focused {
                     palette.selection()
                 } else {
                     Style::default()
                 }),
-                Rect::new(area.x, menu_y + (row - start) as u16, area.width, 1),
+                Rect::new(
+                    area.x,
+                    menu_y + header_rows + (row - start) as u16,
+                    area.width,
+                    1,
+                ),
             );
         }
     }

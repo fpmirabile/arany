@@ -1,6 +1,6 @@
 # Engine Run coordination
 
-Load for `src/engine.rs` changes to Run admission, Provider calls, budgets, or terminal dispositions. Session transitions and context policy remain in [session.md](./session.md); Workspace and Provider trust rules remain in [security.md](./security.md) and [provider.md](./provider.md).
+Load for `src/engine.rs` changes to Run admission, Provider calls, budgets, or terminal dispositions. Read the [execution spec](../docs/specs/execution.md) for coordination, strict outcomes and capacity scenarios. Session transitions and context policy remain in [session.md](./session.md); Workspace and Provider trust rules remain in [security.md](./security.md) and [provider.md](./provider.md).
 
 `src/engine/lifecycle.rs` owns private Session create, resume, discovery, defaults, rename, and fork orchestration; `engine.rs` re-exports its existing interface and retains Run admission.
 

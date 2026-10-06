@@ -246,7 +246,12 @@ impl LinearState {
             self.line_open = false;
         }
         if !unchanged {
-            writeln!(writer, "Setup: {}", safe_truncate(title, 160))?;
+            writeln!(
+                writer,
+                "{}: {}",
+                if step == 0 { "Settings" } else { "Setup" },
+                safe_truncate(title, 160)
+            )?;
             let displayed_instruction = if instruction_limit > 240 {
                 if instruction.len() > instruction_limit
                     || !instruction
@@ -670,6 +675,7 @@ mod tests {
                 "Command: /provider <provider>; Choose Provider; during Run: view-only\n",
                 "Command: /model <model-id> [effort|default]; Choose model; during Run: view-only\n",
                 "Command: /permissions; Folder trust and approval settings; during Run: available\n",
+                "Command: /settings [tabs|combined]; Choose slash menu display; during Run: locked\n",
                 "Command: /quit; Exit Session; during Run: view-only\n",
                 "Command: /exit; Exit Session; during Run: view-only\n",
             ).as_bytes()
@@ -728,7 +734,8 @@ mod tests {
         assert_eq!(
             String::from_utf8(detail.clone()).expect("UTF-8 agent details"),
             format!(
-                "Agents: 1 in 1 recent Runs; 0 older Runs\n\
+                "Current Run: 1 agent; children: 0\n\
+                 History: 1 agents in 1 recent Runs; 0 older Runs\n\
                  Next Run: Auto {{ max_active_children: 3 }}\n\
                  Current Run: admission in progress; topology locked\n\
                  Agent 1/1: primary; Active\n\
@@ -747,7 +754,7 @@ mod tests {
         inspector
             .write_agents(&mut refreshed, &model, false)
             .expect("progress redraw after partial choice");
-        assert!(refreshed.starts_with(b"\nAgents:"));
+        assert!(refreshed.starts_with(b"\nCurrent Run:"));
 
         view.runs.clear();
         view.created_sequence = 0;

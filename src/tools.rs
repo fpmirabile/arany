@@ -15,6 +15,7 @@ use crate::session::{AgentRunId, RunId};
 use crate::store::StateRoot;
 pub use approval::{ApprovalInbox, ApprovalMode, ToolApproval, ToolApprovals};
 use config::Config;
+pub use skills::{ProjectSkills, project_skills};
 pub use workspace::{WorkspacePermissions, mention_paths};
 pub fn configured_skill_names(state: &StateRoot) -> Result<Vec<String>, ToolError> {
     Ok(Config::load(state)?
@@ -22,6 +23,29 @@ pub fn configured_skill_names(state: &StateRoot) -> Result<Vec<String>, ToolErro
         .into_iter()
         .map(|skill| skill.name)
         .collect())
+}
+
+pub fn runtime_skill_names(state: &StateRoot, workspace: &Path) -> Result<Vec<String>, ToolError> {
+    let config = Config::load(state)?;
+    let project = if config.permits_project_skills() {
+        project_skills(workspace)?.names
+    } else {
+        Vec::new()
+    };
+    let mut names = config
+        .skills
+        .into_iter()
+        .map(|skill| skill.name)
+        .collect::<Vec<_>>();
+    for name in project {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    if names.len() > MAX_SKILLS {
+        return Err(ToolError::Limit);
+    }
+    Ok(names)
 }
 
 pub fn list_workspace_entries(
@@ -34,8 +58,8 @@ pub fn list_workspace_entries(
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 pub use types::{
-    EffectIntent, GuardReceipt, NetworkGrant, ToolCall, ToolContext, ToolDisposition, ToolLimits,
-    ToolObservation, ToolPolicyReceipt,
+    EffectIntent, GuardReceipt, MAX_SKILLS, NetworkGrant, ToolCall, ToolContext, ToolDisposition,
+    ToolLimits, ToolObservation, ToolPolicyReceipt,
 };
 pub(crate) use types::{MAX_MODEL_STEPS, MAX_TOOL_CALLS, MAX_TOOL_CONTEXT_BYTES};
 
@@ -79,7 +103,7 @@ impl ToolRuntime {
         self.config.allows(call)
     }
     pub(crate) fn admit(
-        config: Config,
+        mut config: Config,
         workspace: &Path,
         state: &StateRoot,
         guard_executable: PathBuf,
@@ -97,6 +121,10 @@ impl ToolRuntime {
             fs::reject_overlap(Path::new(guard::RUNTIME_ROOT), protected)?;
         }
         let workspace_identity = fs::identity(&root)?;
+        config.discover_skills(workspace)?;
+        if fs::identity(&fs::open_directory(workspace)?)? != workspace_identity {
+            return Err(ToolError::ChangedInput);
+        }
         for program in config
             .commands
             .iter()
@@ -122,7 +150,7 @@ impl ToolRuntime {
     }
 
     pub(crate) fn context(&self) -> Result<ToolContext, ToolError> {
-        let skill_rows: Vec<_> = self.config.skills.iter().map(|skill| serde_json::json!({"name":skill.name,"description":skill.description,"sha256":skill.files["SKILL.md"]})).collect();
+        let skill_rows: Vec<_> = self.config.skills.iter().map(|skill| serde_json::json!({"name":skill.name,"description":skill.description.chars().take(96).collect::<String>()})).collect();
         let catalog = serde_json::json!({
             "host_clock": {"unix_ms": now_ms(), "timezone":"UTC"},
             "workspace_paths": self.config.workspace_paths,
@@ -133,7 +161,7 @@ impl ToolRuntime {
             "skills": skill_rows,
             "mcp_servers": self.config.mcp.iter().map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":"2025-11-25 stdio; use mcp_list before mcp_call"})).collect::<Vec<_>>(),
         }).to_string();
-        if catalog.len() > 8 * 1024 {
+        if catalog.len() > types::MAX_TOOL_CATALOG_BYTES {
             return Err(ToolError::Limit);
         }
         Ok(ToolContext {

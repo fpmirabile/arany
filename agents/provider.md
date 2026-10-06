@@ -2,7 +2,7 @@
 
 Load when changing Provider selection, model configuration, endpoint profiles, credentials, request/response mapping, structured outcomes, routing, usage, privacy provenance, or provider conformance.
 
-The capability/routing evidence lives in `docs/research/beta-multi-provider-routing-and-adapters.md`; the current ChatGPT-plan decision and its weaker output-bound trade-off live in `docs/research/next-step-decision-register.md` (D-18). Keep this file as the working Provider contract.
+The capability/routing evidence lives in `docs/research/beta-multi-provider-routing-and-adapters.md`; the current ChatGPT-plan decision and its weaker output-bound trade-off live in `docs/research/next-step-decision-register.md` (D-18). This file retains account/profile admission and adapter editing constraints; the [execution spec](../docs/specs/execution.md#accepted-outcomes) owns accepted Run outcomes and their scenarios.
 
 ## Beta contract
 

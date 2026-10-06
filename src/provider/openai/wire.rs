@@ -272,13 +272,18 @@ fn run_body_inner(request: &ProviderRequest, effort: Option<Effort>) -> Value {
         input["tools"] = tools.model_input();
     }
     let schema = crate::provider::restrict_outcome_schema(outcome_schema(), request);
-    let mut body = response_body(
-        &request.model,
+    let instructions = format!(
+        "{} {}",
         if request.tools.is_some() {
             TOOL_INSTRUCTIONS
         } else {
             INSTRUCTIONS
         },
+        crate::provider::COLLABORATION_INSTRUCTIONS
+    );
+    let mut body = response_body(
+        &request.model,
+        &instructions,
         input,
         request.max_output_tokens,
         effort,

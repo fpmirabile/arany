@@ -7,8 +7,11 @@ A spec is the maintained contract for one product domain: what a user or caller 
 | Domain | Contract | Editing rules |
 |---|---|---|
 | Attached terminal, interactive controls, accessibility and deterministic output | [Terminal](./terminal.md) | [Terminal](../../agents/terminal.md), [CLI](../../agents/cli.md), [history](../../agents/history.md) |
+| Tool grants, guarded file effects, commands, runtime Skills and local MCP | [Tools](./tools.md) | [Tools](../../agents/tools.md), [security](../../agents/security.md) |
+| Bounded Run coordination, delegation, strict outcomes and history-capacity admission | [Execution](./execution.md) | [Engine](../../agents/engine.md), [Session](../../agents/session.md), [Provider](../../agents/provider.md), [Store](../../agents/store.md) |
+| Local development failure diagnostics, privacy and retention | [Diagnostics](./diagnostics.md) | [Diagnostics](../../agents/diagnostics.md), [security](../../agents/security.md) |
 
-Only terminal has migrated. Other domains retain their current authoritative owners in [the documentation map](../README.md#find-the-owner-for-a-task). Create another spec when a real behavior change or an overloaded contract earns the extraction; avoid empty domain files.
+Unmigrated behavior, including full Session lifecycle, account/profile admission and telemetry, retains its current authoritative owner in [the documentation map](../README.md#find-the-owner-for-a-task). Create another spec when a real behavior change or an overloaded contract earns the extraction; avoid empty domain files.
 
 ## Maintain a contract
 
@@ -17,6 +20,7 @@ Only terminal has migrated. Other domains retain their current authoritative own
 3. After each planning pass and before closing any implementation, including work without a plan, compare the accepted decisions and resulting behavior with the owning contract. Update it when agreed behavior, limits, compatibility, recovery or scenario coverage changes or is missing. A bug fix that restores an adequately specified behavior needs no spec edit; add a missing regression scenario when the contract does not cover the case. A refactor with unchanged behavior needs no spec edit. For an unmigrated domain, extract a spec when the behavior change or overloaded contract warrants it, replacing the relevant normative copies with links. If accepted behavior remains unimplemented, label that gap and link its task. Keep unaccepted proposals in `planning/`, and current verification debt in `NEXT_STEPS.md`.
 4. Reuse the owning test scenario or corpus. Link the spec's acceptance scenarios to that owner; [testing rules](../../agents/testing.md) decide when a new test is justified. Acceptance scenarios describe requirements, not a mandatory one-test-per-row layout.
 5. Preserve security-critical editing constraints, architecture ownership and decision rationale in their respective homes. When extracting a spec, update the domain index, module loading trigger and inbound links together.
+   Close the execution artifact according to [planning lifecycle](../../planning/README.md#lifecycle); a completed plan does not remain the contract owner.
 6. Check local links and anchors, changed prose and preservation of the contract. For behavior changes, run the repository checks required by the owning rules. Documentation-only changes need document/link review; they do not create new runtime evidence. In the existing plan, PR or final handoff, identify the owning contract and relevant evidence, and state what changed or why the contract remains adequate. For work with no observable impact, state that conclusion; no separate review log is required.
 
 When contract, code and evidence disagree, name the discrepancy and resolve it at its owner. Neither an old research recommendation nor current faulty behavior silently overrides an agreed spec. If authoritative documents conflict and the decision is not recoverable from recorded user decisions, surface the uncertainty before changing the contract.

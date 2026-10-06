@@ -43,13 +43,13 @@ pub use session::{
 pub use store::{StateRoot, Store, StoreError};
 pub use telemetry::{Telemetry, TelemetryConfigError};
 pub use terminal::{
-    AttachedTerminal, CommandAvailability, CommandParseError, Composer, ComposerEdit,
-    InteractiveCommand, ModelCatalogState, ModelPicker, ShutdownSignal, Submission, TerminalError,
-    TerminalInput, command_completions, parse_submission,
+    AttachedTerminal, CommandAvailability, CommandParseError, CompletionLayout, Composer,
+    ComposerEdit, InteractiveCommand, ModelCatalogState, ModelPicker, ShutdownSignal, Submission,
+    TerminalError, TerminalInput, command_completions, parse_submission,
 };
 pub use tools::{
-    ApprovalInbox, ApprovalMode, EffectIntent, GuardReceipt, NetworkGrant, ToolApproval,
-    ToolApprovals, ToolCall, ToolContext, ToolDisposition, ToolError, ToolLimits, ToolObservation,
-    ToolPolicyReceipt, WorkspacePermissions, configured_skill_names, list_workspace_entries,
-    mention_paths, tool_guard_main,
+    ApprovalInbox, ApprovalMode, EffectIntent, GuardReceipt, MAX_SKILLS, NetworkGrant,
+    ProjectSkills, ToolApproval, ToolApprovals, ToolCall, ToolContext, ToolDisposition, ToolError,
+    ToolLimits, ToolObservation, ToolPolicyReceipt, WorkspacePermissions, configured_skill_names,
+    list_workspace_entries, mention_paths, project_skills, runtime_skill_names, tool_guard_main,
 };

@@ -2,7 +2,7 @@
 
 Load when changing Session lifecycle, resume/fork/rename, compaction, context reconstruction, collaboration policy, agent topology, queued input, or per-Run budgets.
 
-The evidence and rationale live in `docs/research/beta-sessions-teams-terminal-providers-and-license.md` and `docs/research/context-memory-and-compaction.md`. Keep this file as the working contract.
+The evidence and rationale live in `docs/research/beta-sessions-teams-terminal-providers-and-license.md` and `docs/research/context-memory-and-compaction.md`. This file retains the unmigrated Session lifecycle/context contract and editing constraints; the [execution spec](../docs/specs/execution.md) owns bounded Run coordination and delegation.
 
 ## Domain boundaries
 

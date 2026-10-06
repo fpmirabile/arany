@@ -205,6 +205,9 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
             let temp = tempfile::tempdir().unwrap();
             let workspace = temp.path().join("project");
             std::fs::create_dir(&workspace).unwrap();
+            let skill = workspace.join(".agents/skills/review");
+            std::fs::create_dir_all(&skill).unwrap();
+            std::fs::write(skill.join("SKILL.md"), b"---\nname: review\ndescription: Synthetic review\n---\nReview the current task.\n").unwrap();
             let state = temp.path().join("state");
             let shell = "before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; stty rows 24 cols 80; /arany $ARANY_TEST_MODE --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" $ARANY_TEST_SELECTION; code=$?; after=$(stty -g); printf '\\nTTY_AFTER:%s\\n' \"$after\"; exit \"$code\"";
             let mut command = super::process::isolated_script(temp.path());
@@ -323,6 +326,28 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                     from,
                     if linear { b"Input:" } else { b"Ask Arany" },
                 );
+                if !linear {
+                    let from = transcript.len();
+                    input.write_all(b"/rev\x1b[C").unwrap();
+                    wait(
+                        &mut output,
+                        &mut input,
+                        &mut transcript,
+                        &mut answered,
+                        from,
+                        b"Skill /review",
+                    );
+                    let from = transcript.len();
+                    input.write_all(b"\x03").unwrap();
+                    wait(
+                        &mut output,
+                        &mut input,
+                        &mut transcript,
+                        &mut answered,
+                        from,
+                        b"\x1b[22;3H",
+                    );
+                }
                 let from = transcript.len();
                 input.write_all(b"/permissions\r").unwrap();
                 wait(

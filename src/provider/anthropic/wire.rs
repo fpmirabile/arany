@@ -87,13 +87,18 @@ pub(super) fn run_body(request: &ProviderRequest, effort: Effort) -> Value {
         input["tools"] = tools.model_input();
     }
     let schema = crate::provider::restrict_outcome_schema(outcome_schema(), request);
-    let mut body = message_body(
-        &request.model,
+    let instructions = format!(
+        "{} {}",
         if request.tools.is_some() {
             TOOL_INSTRUCTIONS
         } else {
             INSTRUCTIONS
         },
+        crate::provider::COLLABORATION_INSTRUCTIONS
+    );
+    let mut body = message_body(
+        &request.model,
+        &instructions,
         input,
         request.max_output_tokens,
         effort,

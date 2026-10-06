@@ -62,7 +62,7 @@ pub(crate) fn open_absolute(path: &str) -> Result<File, ToolError> {
     )
 }
 
-fn open_file(root: &Dir, path: &str) -> Result<File, ToolError> {
+pub(super) fn open_file(root: &Dir, path: &str) -> Result<File, ToolError> {
     #[cfg(target_os = "linux")]
     {
         use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};

@@ -1,11 +1,186 @@
 use super::{Admission, load_view, recover_defaults_change, update_defaults};
 use crate::cli::{chatgpt, exec::ProviderArg};
 use arany::{
-    CollaborationPolicy, CommandAvailability, CommandParseError, Composer, CustomProfile, Effort,
-    InteractiveCommand, SessionId, SessionView, StateRoot, Submission, fork_session,
-    rename_session, resume_session, validate_native_model_id,
+    AttachedTerminal, CollaborationPolicy, CommandAvailability, CommandParseError,
+    CompletionLayout, Composer, CustomProfile, Effort, InteractiveCommand, SessionId, SessionView,
+    StateRoot, Submission, TerminalInput, fork_session, rename_session, resume_session,
+    validate_native_model_id,
 };
 use std::str::FromStr;
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct UiPreferences {
+    version: u8,
+    completion: CompletionLayout,
+}
+
+fn settings_argument(argument: &str) -> Result<CompletionLayout, &'static str> {
+    match argument {
+        "tabs" => Ok(CompletionLayout::Tabs),
+        "combined" => Ok(CompletionLayout::Combined),
+        _ => Err("Usage: /settings [tabs|combined]"),
+    }
+}
+
+pub(super) async fn restore_settings(admission: &Admission) -> Result<CompletionLayout, String> {
+    let path = admission.state_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        let root = match StateRoot::open_existing(&path) {
+            Ok(root) => root,
+            Err(arany::StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                if matches!(std::fs::symlink_metadata(&path), Err(error) if error.kind() == std::io::ErrorKind::NotFound) {
+                    return Ok(CompletionLayout::default());
+                }
+                return Err("display settings unavailable or unsafe".into());
+            }
+            Err(_) => return Err("display settings unavailable or unsafe".into()),
+        };
+        read_settings(&root)
+    })
+    .await
+    .map_err(|_| "display settings unavailable".to_owned())?
+}
+
+fn read_settings(root: &StateRoot) -> Result<CompletionLayout, String> {
+    let Some(record) = root
+        .read_ui_preferences_record()
+        .map_err(|_| "display settings unavailable or unsafe")?
+    else {
+        return Ok(CompletionLayout::default());
+    };
+    let preferences: UiPreferences = serde_json::from_slice(&record)
+        .map_err(|_| "invalid display settings; use /settings to replace them")?;
+    if preferences.version != 1 {
+        return Err("unsupported display settings; use /settings to replace them".into());
+    }
+    Ok(preferences.completion)
+}
+
+async fn save_settings(admission: &Admission, layout: CompletionLayout) -> Result<(), String> {
+    let path = admission.state_dir.clone();
+    let workspace = admission.workspace.clone();
+    tokio::task::spawn_blocking(move || {
+        let root = StateRoot::admit(&path).map_err(|_| "display settings unavailable or unsafe")?;
+        let record = serde_json::to_vec(&UiPreferences {
+            version: 1,
+            completion: layout,
+        })
+        .map_err(|_| "display settings unavailable")?;
+        root.with_account_replacement_lock(&workspace, || {
+            root.replace_ui_preferences_record(&record)
+        })
+        .map_err(|_| "display settings busy or unsafe")?
+        .map_err(|_| "could not save display settings")
+    })
+    .await
+    .map_err(|_| "display settings unavailable".to_owned())?
+    .map_err(str::to_owned)
+}
+
+pub(super) async fn settings(
+    terminal: &mut AttachedTerminal,
+    admission: &Admission,
+    composer: &mut Composer,
+    argument: Option<&str>,
+) -> Result<String, String> {
+    let layout = if let Some(argument) = argument {
+        settings_argument(argument).map_err(str::to_owned)?
+    } else {
+        let mut selected = usize::from(composer.completion_layout() == CompletionLayout::Combined);
+        let mut answer = Composer::default();
+        let mut invalid = false;
+        loop {
+            terminal
+                .draw_setup_choices(
+                    0,
+                    "Slash menu display",
+                    "Tabs: Commands / Skills; Combined: one list",
+                    &[(1, "Tabs"), (2, "Combined")],
+                    selected,
+                    invalid.then_some("Type tabs or combined; q closes"),
+                )
+                .map_err(|error| error.to_string())?;
+            match terminal
+                .next_input()
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                TerminalInput::Up | TerminalInput::Down | TerminalInput::Tab
+                    if !terminal.is_linear() =>
+                {
+                    selected = 1 - selected
+                }
+                TerminalInput::Character(character) if terminal.is_linear() => {
+                    answer.apply(TerminalInput::Character(character));
+                }
+                TerminalInput::Backspace if terminal.is_linear() => {
+                    answer.apply(TerminalInput::Backspace);
+                }
+                TerminalInput::Submit => {
+                    if terminal.is_linear() {
+                        let value = answer.take().trim().to_ascii_lowercase();
+                        match value.as_str() {
+                            "" => {}
+                            "tabs" | "1" => selected = 0,
+                            "combined" | "2" => selected = 1,
+                            "q" => {
+                                terminal
+                                    .restore_draft_input(composer.text().len())
+                                    .map_err(|error| error.to_string())?;
+                                return Ok("Display settings unchanged".into());
+                            }
+                            _ => {
+                                invalid = true;
+                                continue;
+                            }
+                        }
+                    }
+                    break if selected == 0 {
+                        CompletionLayout::Tabs
+                    } else {
+                        CompletionLayout::Combined
+                    };
+                }
+                TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
+                    terminal
+                        .restore_draft_input(composer.text().len())
+                        .map_err(|error| error.to_string())?;
+                    return Ok("Display settings unchanged".into());
+                }
+                TerminalInput::Suspend => terminal
+                    .suspend_and_resume(answer.text().len())
+                    .map_err(|error| error.to_string())?,
+                TerminalInput::Shutdown(signal) => {
+                    return Err(format!("terminated by {}", signal.name()));
+                }
+                TerminalInput::LineRejected => {
+                    answer.clear();
+                    invalid = true;
+                }
+                _ => {}
+            }
+        }
+    };
+    let notice = match save_settings(admission, layout).await {
+        Ok(()) => {
+            composer.set_completion_layout(layout);
+            format!(
+                "Slash menu: {} · saved",
+                if layout == CompletionLayout::Tabs {
+                    "tabs"
+                } else {
+                    "combined"
+                }
+            )
+        }
+        Err(error) => format!("Error: {error}; current display kept"),
+    };
+    terminal
+        .restore_draft_input(composer.text().len())
+        .map_err(|error| error.to_string())?;
+    Ok(notice)
+}
 
 fn parse_model_argument(argument: &str) -> Result<(&str, Option<Option<Effort>>), &'static str> {
     let mut parts = argument.split_ascii_whitespace();
@@ -172,6 +347,9 @@ pub(super) fn validate_idle_command(
     argument: Option<&str>,
 ) -> Result<(), &'static str> {
     match command {
+        InteractiveCommand::Settings if argument.is_some() => {
+            settings_argument(argument.expect("settings argument")).map(|_| ())
+        }
         InteractiveCommand::Resume
             if argument.is_some_and(|id| SessionId::from_str(id).is_err()) =>
         {
@@ -644,7 +822,7 @@ mod tests {
         assert!(composer.is_empty());
         assert_eq!(view.defaults, SessionDefaults::default());
 
-        for command in ["/new", "/compact"] {
+        for command in ["/new", "/compact", "/settings", "/settings combined"] {
             for character in command.chars() {
                 composer.apply(TerminalInput::Character(character));
             }
@@ -845,6 +1023,16 @@ mod tests {
         let oversized_unicode_title = "é".repeat(65);
         for (command, argument, expected) in [
             (
+                InteractiveCommand::Settings,
+                "other",
+                "Usage: /settings [tabs|combined]",
+            ),
+            (
+                InteractiveCommand::Settings,
+                "tabs extra",
+                "Usage: /settings [tabs|combined]",
+            ),
+            (
                 InteractiveCommand::Provider,
                 "other",
                 "Provider must be openai, anthropic, chatgpt, or custom:NAME",
@@ -920,6 +1108,99 @@ mod tests {
         assert!(validate_idle_command(&view, InteractiveCommand::Quit, None).is_ok());
         for title in ["x".repeat(128), "é".repeat(64)] {
             assert!(validate_idle_command(&view, InteractiveCommand::Rename, Some(&title)).is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn display_settings_reopen_without_session_authority_and_reject_unsafe_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let admission = Admission {
+            telemetry: arany::Telemetry::disabled(),
+            state_dir: temp.path().join("state"),
+            workspace,
+            include_paths: Vec::new(),
+            tools: false,
+            workspace_permissions: None,
+            defaults: SessionDefaults::default(),
+            screen_reader: false,
+            no_color: false,
+            setup_requested: false,
+            entry: EntryMode::New,
+            prompt: None,
+        };
+        assert_eq!(
+            restore_settings(&admission).await.unwrap(),
+            CompletionLayout::Tabs
+        );
+        assert!(
+            !admission.state_dir.exists(),
+            "reading defaults creates no State"
+        );
+        for layout in [CompletionLayout::Combined, CompletionLayout::Tabs] {
+            save_settings(&admission, layout).await.unwrap();
+            assert_eq!(restore_settings(&admission).await.unwrap(), layout);
+            assert_eq!(
+                std::fs::metadata(admission.state_dir.join("events.sqlite3"))
+                    .unwrap()
+                    .len(),
+                0
+            );
+        }
+        let root = StateRoot::open_existing(&admission.state_dir).unwrap();
+        for document in [
+            br#"{"version":2,"completion":"tabs"}"#.as_slice(),
+            br#"{"version":1,"completion":"unknown"}"#.as_slice(),
+            br#"{"version":1,"completion":"tabs","tools":true}"#.as_slice(),
+            br#"{"version":1}"#.as_slice(),
+            b"malformed",
+        ] {
+            root.replace_ui_preferences_record(document).unwrap();
+            assert!(restore_settings(&admission).await.is_err());
+            assert_eq!(
+                root.read_ui_preferences_record().unwrap().unwrap(),
+                document
+            );
+        }
+        save_settings(&admission, CompletionLayout::Combined)
+            .await
+            .unwrap();
+        let original = root.read_ui_preferences_record().unwrap().unwrap();
+        assert!(
+            root.replace_ui_preferences_record(&vec![b'x'; 1025])
+                .is_err()
+        );
+        assert_eq!(
+            root.read_ui_preferences_record().unwrap().unwrap(),
+            original
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{PermissionsExt, symlink};
+            let pending = admission.state_dir.join("ui-preferences.pending");
+            let outside = temp.path().join("outside");
+            std::fs::write(&outside, b"unchanged").unwrap();
+            symlink(&outside, &pending).unwrap();
+            assert!(
+                save_settings(&admission, CompletionLayout::Tabs)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                restore_settings(&admission).await.unwrap(),
+                CompletionLayout::Combined
+            );
+            assert_eq!(std::fs::read(&outside).unwrap(), b"unchanged");
+            std::fs::remove_file(pending).unwrap();
+            let file = admission.state_dir.join("ui-preferences.json");
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(restore_settings(&admission).await.is_err());
+            assert!(
+                save_settings(&admission, CompletionLayout::Tabs)
+                    .await
+                    .is_err()
+            );
         }
     }
 

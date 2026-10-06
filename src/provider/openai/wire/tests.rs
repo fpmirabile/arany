@@ -35,6 +35,12 @@ fn outbound_documents_pin_privacy_schema_and_scope() {
     let request = run_request();
     let body = run_body(&request);
     assert_eq!(body["model"], "gpt-5.4");
+    assert!(
+        body["instructions"]
+            .as_str()
+            .unwrap()
+            .contains(crate::provider::COLLABORATION_INSTRUCTIONS)
+    );
     assert_eq!(body["store"], false);
     assert_eq!(body["truncation"], "disabled");
     assert_eq!(body["max_output_tokens"], 4096);
@@ -342,6 +348,12 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
         observations: Vec::new(),
     });
     let body = run_body_with_effort(&request, Effort::Low);
+    assert!(
+        body["instructions"]
+            .as_str()
+            .unwrap()
+            .contains(crate::provider::COLLABORATION_INSTRUCTIONS)
+    );
     let input: Value = serde_json::from_str(body["input"][0]["content"].as_str().unwrap()).unwrap();
     assert_eq!(input["tools"]["catalog"], "UNTRUSTED_TOOL_CATALOG_CANARY");
     assert!(!body["instructions"].as_str().unwrap().contains("CANARY"));

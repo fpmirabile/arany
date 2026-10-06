@@ -1,5 +1,7 @@
 # Store
 
+The [execution spec](../docs/specs/execution.md#admission-persistence-and-recovery) owns observable Run/fork/compaction capacity rejection. This file retains persistence and editing invariants.
+
 Load when changing private state admission, the SQLite owner thread, Event schema, migration, append, or replay.
 
 `src/store.rs` owns the journal interface and SQLite thread. `src/store/journal.rs` contains SQLite setup and writes; `src/store/replay.rs` validates and resolves history. `src/store/state.rs` contains filesystem admission; `src/store/state/lock.rs` owns private per-Session operation locks inside that boundary.

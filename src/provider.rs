@@ -31,6 +31,7 @@ pub use openai::{ChatGptProvider, OpenAiProvider, probe_chatgpt_model};
 
 pub(crate) const MAX_REPORTED_INPUT_TOKENS: u32 = 1_000_000;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+pub(super) const COLLABORATION_INSTRUCTIONS: &str = "Choose collaboration from the current task and pinned policy, not previous teams or Skill instructions. In auto mode, handle routine file edits, direct questions and tightly coupled work with the primary alone. Delegate only substantial independent read-only reasoning whose benefit exceeds the extra model calls and duplicated context. Use the smallest useful team, supply the evidence children need, and give each a distinct concrete assignment. Never spawn a child just to repeat the primary task, perform a routine confirmation, or satisfy a historical pattern. In single mode do not delegate; explicit team mode retains its required delegation. The primary remains accountable for inspecting and editing files and completing the task.";
 pub const MAX_NATIVE_API_KEY_BYTES: usize = 512;
 pub const MAX_ANTHROPIC_WORKSPACE_ID_BYTES: usize = 128;
 

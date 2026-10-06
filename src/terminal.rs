@@ -33,7 +33,7 @@ pub use commands::{
     CommandAvailability, CommandParseError, InteractiveCommand, Submission, command_completions,
     parse_submission,
 };
-pub use composer::{Composer, ComposerEdit};
+pub use composer::{CompletionLayout, Composer, ComposerEdit};
 use history::History;
 use input::TerminalReader;
 pub use input::{ShutdownSignal, TerminalInput};

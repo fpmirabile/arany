@@ -35,6 +35,12 @@ fn outbound_messages_pin_schema_cap_and_disclosure_scope() {
     let request = run_request();
     let body = run_body(&request, Effort::Max);
     assert_eq!(body["model"], "claude-sonnet-5");
+    assert!(
+        body["system"]
+            .as_str()
+            .unwrap()
+            .contains(crate::provider::COLLABORATION_INSTRUCTIONS)
+    );
     assert_eq!(body["max_tokens"], 4096);
     assert_eq!(body["stream"], false);
     assert_eq!(body["output_config"]["format"]["type"], "json_schema");
@@ -229,6 +235,12 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
         observations: Vec::new(),
     });
     let body = run_body(&request, Effort::Low);
+    assert!(
+        body["system"]
+            .as_str()
+            .unwrap()
+            .contains(crate::provider::COLLABORATION_INSTRUCTIONS)
+    );
     let input: Value =
         serde_json::from_str(body["messages"][0]["content"].as_str().unwrap()).unwrap();
     assert_eq!(input["tools"]["catalog"], "UNTRUSTED_TOOL_CATALOG_CANARY");

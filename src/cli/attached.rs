@@ -331,6 +331,10 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         .await?;
     }
     let mut composer = Composer::default();
+    match controls::restore_settings(&admission).await {
+        Ok(layout) => composer.set_completion_layout(layout),
+        Err(error) => append_notice(&mut setup_notice, &format!("Error: {error}; using tabs")),
+    }
     if ordinary_entry
         && matches!(admission.entry, EntryMode::New)
         && permissions::supports_tools(admission.defaults.provider.as_deref())
@@ -773,6 +777,16 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 Ok(()) => "Reading clipboard... draft retained".into(),
                                 Err(error) => format!("Error: {error}; draft unchanged"),
                             });
+                        } else if command == InteractiveCommand::Settings {
+                            notice = Some(
+                                controls::settings(
+                                    &mut terminal,
+                                    &admission,
+                                    &mut composer,
+                                    argument,
+                                )
+                                .await?,
+                            );
                         } else if command == InteractiveCommand::Permissions {
                             let access = permissions::choose(
                                 &mut terminal,
@@ -799,7 +813,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                             });
                             admission.workspace_permissions = Some(access);
                             admission.tools = false;
-                            composer.set_runtime_skills(&[]);
+                            refresh_runtime_skills(&admission, &mut composer, &mut notice);
                         } else if command == InteractiveCommand::Setup {
                             notice = Some(
                                 configure_account(
@@ -1210,24 +1224,55 @@ fn refresh_runtime_skills(
     composer: &mut Composer,
     notice: &mut Option<String>,
 ) {
-    if !admission.tools {
-        composer.set_runtime_skills(&[]);
-        return;
+    let project = arany::project_skills(&admission.workspace);
+    if let Ok(project) = &project
+        && project.installation_missing
+    {
+        append_notice(
+            notice,
+            "Run npx skills install in this project: .agents/skills is missing and skills-lock.json exists.",
+        );
     }
-    let skills = StateRoot::open_existing(&admission.state_dir)
-        .map_err(|_| "Tool configuration unavailable".to_owned())
-        .and_then(|root| arany::configured_skill_names(&root).map_err(|error| error.to_string()));
+    let skills = if admission.tools {
+        StateRoot::open_existing(&admission.state_dir)
+            .map_err(|_| "Tool configuration unavailable".to_owned())
+            .and_then(|root| {
+                arany::runtime_skill_names(&root, &admission.workspace)
+                    .map_err(|error| error.to_string())
+            })
+    } else if admission
+        .workspace_permissions
+        .as_ref()
+        .is_some_and(|permissions| permissions.is_trusted())
+    {
+        project
+            .map(|project| project.names)
+            .map_err(|error| error.to_string())
+    } else {
+        Ok(Vec::new())
+    };
     match skills {
         Ok(names) => composer.set_runtime_skills(&names),
         Err(error) => {
             composer.set_runtime_skills(&[]);
-            let message = format!("Error: {error}; runtime Skills unavailable; review tools.json");
-            *notice = Some(match notice.take() {
-                Some(previous) => format!("{previous}; {message}"),
-                None => message,
-            });
+            let recovery = if admission.tools {
+                "review tools.json and .agents/skills"
+            } else {
+                "review .agents/skills"
+            };
+            append_notice(
+                notice,
+                &format!("Error: {error}; runtime Skills unavailable; {recovery}"),
+            );
         }
     }
+}
+
+fn append_notice(notice: &mut Option<String>, message: &str) {
+    *notice = Some(match notice.take() {
+        Some(previous) => format!("{message}; {previous}"),
+        None => message.to_owned(),
+    });
 }
 
 fn new_conversation(defaults: SessionDefaults) -> SessionView {
