@@ -339,7 +339,8 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
             Ok(permissions::PermissionChoice::Selected(access)) => {
                 admission.workspace_permissions = Some(access)
             }
-            Ok(permissions::PermissionChoice::Closed | permissions::PermissionChoice::Exit) => {
+            Ok(permissions::PermissionChoice::Closed) => {}
+            Ok(permissions::PermissionChoice::Exit) => {
                 return Ok(());
             }
             Err(setup::SetupError::Recoverable(error)) => {
@@ -362,7 +363,8 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
             Ok(permissions::PermissionChoice::Selected(access)) => {
                 admission.workspace_permissions = Some(access)
             }
-            Ok(permissions::PermissionChoice::Closed | permissions::PermissionChoice::Exit) => {
+            Ok(permissions::PermissionChoice::Closed) => {}
+            Ok(permissions::PermissionChoice::Exit) => {
                 return Ok(());
             }
             Err(setup::SetupError::Recoverable(error)) => {
@@ -406,6 +408,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
             "Error: {error}; selection kept for this conversation only"
         ));
     }
+    refresh_runtime_skills(&admission, &mut composer, &mut setup_notice);
     seed_setup_catalog(&mut composer, &view.defaults, setup_catalog.as_deref());
     let mut notice = if setup_notice.is_some() {
         setup_notice
@@ -796,6 +799,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                             });
                             admission.workspace_permissions = Some(access);
                             admission.tools = false;
+                            composer.set_runtime_skills(&[]);
                         } else if command == InteractiveCommand::Setup {
                             notice = Some(
                                 configure_account(
@@ -1198,6 +1202,31 @@ async fn start_session(admission: &Admission) -> Result<(SessionId, SessionView)
             finish_existing_start(admission, view).await
         }
         EntryMode::PickSession => Err("Session selection was not resolved".into()),
+    }
+}
+
+fn refresh_runtime_skills(
+    admission: &Admission,
+    composer: &mut Composer,
+    notice: &mut Option<String>,
+) {
+    if !admission.tools {
+        composer.set_runtime_skills(&[]);
+        return;
+    }
+    let skills = StateRoot::open_existing(&admission.state_dir)
+        .map_err(|_| "Tool configuration unavailable".to_owned())
+        .and_then(|root| arany::configured_skill_names(&root).map_err(|error| error.to_string()));
+    match skills {
+        Ok(names) => composer.set_runtime_skills(&names),
+        Err(error) => {
+            composer.set_runtime_skills(&[]);
+            let message = format!("Error: {error}; runtime Skills unavailable; review tools.json");
+            *notice = Some(match notice.take() {
+                Some(previous) => format!("{previous}; {message}"),
+                None => message,
+            });
+        }
     }
 }
 

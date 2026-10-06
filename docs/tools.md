@@ -81,6 +81,8 @@ Each `skills` entry contains an explicit name, reviewed discovery description, a
 
 The model initially sees only configured names/descriptions, then can request the pinned `SKILL.md` and listed resources lazily. `SKILL.md` needs YAML frontmatter with the matching string `name` and a nonempty string `description`, followed by the Markdown body. Quoted/folded scalars and CRLF are supported; ambiguous/duplicate or excessive metadata rejects. Local executable YAML tags reject; global YAML tags may be ignored inertly. Behavioral fields such as `allowed-tools`, hooks, shell directives, forks and installation instructions are guidance only, never grants. Skill scripts require an ordinary approved command/interpreter; requesting a Skill executes none of its body.
 
+With explicit `--tools`, the inline `/` completion menu includes configured runtime Skills alongside local commands, labeled `Skill` and `Cmd`. Tab or the first Enter inserts `$NAME ` as an ordinary task draft; a later Enter sends it. The selected model loads the pinned `SKILL.md` through the Skill Tool before following its guidance. Exact command names keep command behavior, even when a Skill shares the name; choose the Skill from a shorter prefix. Installed development-agent Skills are not automatically granted. Folder trust alone grants no Skills. Restart after changing the configured names; Run admission still revalidates the actual configuration and resources.
+
 YAML parsing occurs only inside the killable Guard, not the credential-owning Engine. Skills are mounted read-only under `/skills/SKILL_ID`; unlisted resources cannot be loaded by the Skill tool.
 
 ## Local MCP

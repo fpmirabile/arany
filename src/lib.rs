@@ -50,6 +50,6 @@ pub use terminal::{
 pub use tools::{
     ApprovalInbox, ApprovalMode, EffectIntent, GuardReceipt, NetworkGrant, ToolApproval,
     ToolApprovals, ToolCall, ToolContext, ToolDisposition, ToolError, ToolLimits, ToolObservation,
-    ToolPolicyReceipt, WorkspacePermissions, list_workspace_entries, mention_paths,
-    tool_guard_main,
+    ToolPolicyReceipt, WorkspacePermissions, configured_skill_names, list_workspace_entries,
+    mention_paths, tool_guard_main,
 };

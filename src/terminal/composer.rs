@@ -29,12 +29,25 @@ pub struct Composer {
     completion_hidden: bool,
     file_query: Option<String>,
     file_candidates: Vec<String>,
+    skills: Vec<String>,
     approval_mode: Option<crate::tools::ApprovalMode>,
 }
 
 impl Composer {
     pub fn approval_mode(&self) -> Option<crate::tools::ApprovalMode> {
         self.approval_mode
+    }
+
+    pub fn set_runtime_skills(&mut self, names: &[String]) {
+        self.skills = names
+            .iter()
+            .take(32)
+            .filter(|name| crate::tools::types::valid_name(name))
+            .map(|name| format!("${name}"))
+            .collect();
+        self.skills.sort();
+        self.skills.dedup();
+        self.completion_index = 0;
     }
 
     pub fn set_approval_mode(&mut self, mode: Option<crate::tools::ApprovalMode>) {
@@ -96,7 +109,13 @@ impl Composer {
         }
         self.completion_menu().map(|(names, selected)| {
             (
-                names.iter().map(|name| format!("/{name}")).collect(),
+                names
+                    .iter()
+                    .map(|name| match name.strip_prefix('$') {
+                        Some(name) => format!("Skill /{name}"),
+                        None => format!("Cmd /{name}"),
+                    })
+                    .collect(),
                 selected,
             )
         })
@@ -238,8 +257,12 @@ impl Composer {
                 ghost: String::new(),
                 ghost_is_placeholder: false,
                 status: format!(
-                    "Tab/Enter: /{} · Up/Down choose · Esc close",
-                    names[selected]
+                    "Tab/Enter: {} · Up/Down choose · Esc close",
+                    if names[selected].starts_with('$') {
+                        format!("{} (Skill)", names[selected])
+                    } else {
+                        format!("/{}", names[selected])
+                    }
                 ),
             });
         }
@@ -250,12 +273,25 @@ impl Composer {
         }
     }
 
-    pub(super) fn completion_menu(&self) -> Option<(Vec<&'static str>, usize)> {
+    pub(super) fn completion_menu(&self) -> Option<(Vec<&str>, usize)> {
         if self.completion_hidden || self.cursor != self.text.len() {
             return None;
         }
-        let names = command_completions(&self.text);
-        if names.is_empty() || names.contains(&self.text.strip_prefix('/').unwrap_or("")) {
+        let prefix = self.text.strip_prefix('/')?;
+        let mut names = command_completions(&self.text);
+        if names.contains(&prefix) {
+            return None;
+        }
+        if !prefix.is_empty() && !crate::tools::types::valid_name(prefix) {
+            return None;
+        }
+        names.extend(
+            self.skills
+                .iter()
+                .filter(|name| name[1..].starts_with(prefix))
+                .map(String::as_str),
+        );
+        if names.is_empty() {
             return None;
         }
         let selected = self.completion_index.min(names.len() - 1);
@@ -319,10 +355,21 @@ impl Composer {
                     return ComposerEdit::Changed;
                 }
                 TerminalInput::Tab | TerminalInput::Submit => {
-                    self.text = format!("/{}", names[selected]);
-                    if let Some(suffix) = completion_suffix(&self.text, &self.choices) {
-                        self.text.push_str(&suffix);
+                    let name = names[selected];
+                    let mut completed = if name.starts_with('$') {
+                        format!("{name} ")
+                    } else {
+                        format!("/{name}")
+                    };
+                    if !name.starts_with('$')
+                        && let Some(suffix) = completion_suffix(&completed, &self.choices)
+                    {
+                        completed.push_str(&suffix);
                     }
+                    if completed.len() > MAX_DRAFT_BYTES {
+                        return ComposerEdit::AtCapacity;
+                    }
+                    self.text = completed;
                     self.cursor = self.text.len();
                     self.vertical_grapheme_column = None;
                     self.completion_index = 0;
@@ -838,6 +885,69 @@ mod tests {
             }
             assert!(composer.file_query().is_none(), "{text}");
         }
+    }
+
+    #[test]
+    fn slash_skills_are_distinct_bounded_task_drafts_not_local_commands() {
+        let mut composer = Composer::default();
+        composer.set_runtime_skills(&[
+            "review".into(),
+            "help".into(),
+            "review".into(),
+            "../unsafe".into(),
+            "bad\u{1b}name".into(),
+        ]);
+        for accept in [TerminalInput::Tab, TerminalInput::Submit] {
+            composer.clear();
+            composer.insert_paste("/rev").unwrap();
+            assert_eq!(
+                composer.completion_rows().unwrap(),
+                (vec!["Skill /review".into()], 0)
+            );
+            assert_eq!(composer.apply(accept), ComposerEdit::Changed);
+            assert_eq!(composer.text(), "$review ");
+            assert_eq!(composer.cursor_byte_offset(), composer.text().len());
+            assert_eq!(composer.submission(), Ok(Submission::Objective("$review ")));
+            assert_eq!(
+                composer.apply(TerminalInput::Submit),
+                ComposerEdit::Unchanged
+            );
+        }
+        composer.clear();
+        composer.insert_paste("/he").unwrap();
+        assert_eq!(
+            composer.completion_rows().unwrap().0,
+            ["Cmd /help", "Skill /help"]
+        );
+        composer.apply(TerminalInput::Down);
+        composer.apply(TerminalInput::Submit);
+        assert_eq!(composer.text(), "$help ");
+        composer.clear();
+        composer.insert_paste("/help").unwrap();
+        assert!(composer.completion_menu().is_none());
+        assert!(matches!(
+            composer.submission(),
+            Ok(Submission::Command { .. })
+        ));
+        composer.clear();
+        composer.insert_paste("/revi").unwrap();
+        composer.apply(TerminalInput::Escape);
+        assert_eq!(composer.text(), "/revi");
+        assert!(composer.completion_menu().is_none());
+        composer.apply(TerminalInput::Backspace);
+        assert!(composer.completion_menu().is_some());
+        composer.apply(TerminalInput::Left);
+        assert!(composer.completion_menu().is_none());
+        composer.set_runtime_skills(&[]);
+        composer.apply(TerminalInput::End);
+        assert!(composer.completion_menu().is_none());
+        composer.set_runtime_skills(&(0..40).map(|i| format!("skill-{i}")).collect::<Vec<_>>());
+        assert_eq!(composer.skills.len(), 32);
+        composer.clear();
+        composer.insert_paste("/skill-1").unwrap();
+        assert!(composer.completion_menu().is_some());
+        composer.apply(TerminalInput::Newline);
+        assert!(composer.completion_menu().is_none());
     }
 
     #[test]

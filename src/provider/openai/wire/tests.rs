@@ -619,12 +619,19 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
     for (name, arguments) in [
         ("arany_finish", json!({"summary":"done","result":"applied"})),
         (
+            "arany_finish",
+            json!({"summary":"done","result":"\"".repeat(12 * 1024)}),
+        ),
+        (
             "arany_delegate",
             json!({"children":["review supplied data"]}),
         ),
     ] {
         let fixture = response("completed", json!([function_call(name, &arguments)]));
         assert!(decode_tool_run(&serde_json::to_vec(&fixture).unwrap(), "gpt-5.4").is_ok());
+        let streamed =
+            serde_json::to_vec(&json!({"type":"response.completed","response":fixture})).unwrap();
+        assert!(decode_streamed_tool_run(&streamed, "gpt-5.4").is_ok());
         assert!(
             decode_run(&serde_json::to_vec(&fixture).unwrap(), "gpt-5.4").is_err(),
             "read-only encoding must not accept functions"

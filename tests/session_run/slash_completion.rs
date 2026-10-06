@@ -497,7 +497,26 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
     let saved_id = saved_conversation(&state, &workspace, SessionDefaults::default());
-    let shell = "stty rows 24 cols 40; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider anthropic --no-color; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
+    use sha2::Digest;
+    let skill = temp.path().join("skill");
+    std::fs::create_dir(&skill).unwrap();
+    let guidance =
+        b"---\nname: review\ndescription: Synthetic review\n---\nReview only the selected task.\n";
+    std::fs::write(skill.join("SKILL.md"), guidance).unwrap();
+    let config = serde_json::json!({"version":1,"workspace_paths":["."],"write":false,
+        "commands":[],"mcp":[],"skills":[{"name":"review","description":"Synthetic review",
+        "directory":skill,"files":{"SKILL.md":sha2::Sha256::digest(guidance).iter().map(|byte| format!("{byte:02x}")).collect::<String>()}}]});
+    std::fs::write(
+        state.join("tools.json"),
+        serde_json::to_vec(&config).unwrap(),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        state.join("tools.json"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let shell = "stty rows 24 cols 40; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider anthropic --tools --no-color; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
     let mut command = Command::new("/usr/bin/script");
     command
         .env_clear()
@@ -597,6 +616,36 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         clear_at,
         b"\x1b[22;3H",
     );
+    let skill_at = transcript.len();
+    input.write_all(b"/rev").expect("configured Skill prefix");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        skill_at,
+        b"> Skill /review",
+    );
+    let skill_accept_at = transcript.len();
+    input.write_all(b"\t").expect("choose Skill as a draft");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        skill_accept_at,
+        b"\x1b[22;11H",
+    );
+    let skill_clear_at = transcript.len();
+    input.write_all(b"\x03").expect("clear unsent Skill draft");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        skill_clear_at,
+        b"\x1b[22;3H",
+    );
     let menu_at = transcript.len();
     input.write_all(b"/resum").expect("single command prefix");
     wait_for_after(
@@ -605,7 +654,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut transcript,
         &mut answered,
         menu_at,
-        b"> /resume",
+        b"> Cmd /resume",
     );
     let completed_at = transcript.len();
     input
@@ -658,7 +707,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut input,
         &mut transcript,
         &mut answered,
-        b"> /status",
+        b"> Cmd /status",
     );
     let status_at = transcript.len();
     input
@@ -727,7 +776,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut transcript,
         &mut answered,
         model_menu_at,
-        b"> /status",
+        b"> Cmd /status",
     );
     let closed_at = transcript.len();
     input.write_all(b"\x1b").expect("dismiss completion menu");
@@ -779,7 +828,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut input,
         &mut transcript,
         &mut answered,
-        b"> /provider",
+        b"> Cmd /provider",
     );
     input
         .write_all(b"\topenai\r")

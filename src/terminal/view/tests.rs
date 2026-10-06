@@ -1335,10 +1335,13 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
     }
     composer.apply(TerminalInput::Down);
     let cursor = composer.cursor_byte_offset();
-    for (prefix, focused) in [
-        ("/resum", "resume"),
-        ("/permissio", "permissions"),
-        ("/s", "status"),
+    composer.set_runtime_skills(&["review".into(), "help".into()]);
+    for (prefix, focused, category) in [
+        ("/rev", "review", "Skill"),
+        ("/he", "help", "Skill"),
+        ("/resum", "resume", "Cmd"),
+        ("/permissio", "permissions", "Cmd"),
+        ("/s", "status", "Cmd"),
     ] {
         composer.clear();
         composer.insert_paste(prefix).expect("command prefix");
@@ -1361,9 +1364,16 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
                     if prefix == "/s" {
                         assert!(row(height - 6).contains("/setup"));
                     }
-                    assert!(row(height - 5).contains(&format!("> /{focused}")));
+                    assert!(row(height - 5).contains(&safe_truncate(
+                        &format!("> {category} /{focused}"),
+                        usize::from(width)
+                    )));
                     assert!(row(height - 3).contains(&format!("> {prefix}")));
-                    assert!(row(height - 1).starts_with("Tab/Enter: /"));
+                    assert!(row(height - 1).starts_with(if category == "Skill" {
+                        "Tab/Enter: $"
+                    } else {
+                        "Tab/Enter: /"
+                    }));
                     assert!(row(height - 2).contains("Tab/Enter"));
                     assert!(buffer[(0, height - 5)].modifier.contains(Modifier::BOLD));
                     assert_eq!(
@@ -1390,7 +1400,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
         (0..40)
             .map(|x| buffer[(x, y)].symbol())
             .collect::<String>()
-            .contains("> /status")
+            .contains("> Cmd /status")
     }));
     assert_eq!(
         terminal.get_cursor_position().expect("retained cursor").y,

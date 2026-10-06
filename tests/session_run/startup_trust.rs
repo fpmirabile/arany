@@ -198,18 +198,44 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
     use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
     use std::io::Write;
     for linear in [false, true] {
-        for trust in [false, true] {
+        for (trust, startup_escape) in [(false, false), (true, false), (false, true)] {
+            if linear && startup_escape {
+                continue;
+            }
             let temp = tempfile::tempdir().unwrap();
             let workspace = temp.path().join("project");
             std::fs::create_dir(&workspace).unwrap();
             let state = temp.path().join("state");
-            let shell = "before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; stty rows 24 cols 80; /arany $ARANY_TEST_MODE --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4; code=$?; after=$(stty -g); printf '\\nTTY_AFTER:%s\\n' \"$after\"; exit \"$code\"";
+            let shell = "before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; stty rows 24 cols 80; /arany $ARANY_TEST_MODE --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" $ARANY_TEST_SELECTION; code=$?; after=$(stty -g); printf '\\nTTY_AFTER:%s\\n' \"$after\"; exit \"$code\"";
             let mut command = super::process::isolated_script(temp.path());
+            if startup_escape {
+                let account =
+                    StateRoot::admit(&temp.path().join("account-home/.local/state/arany")).unwrap();
+                account
+                    .replace_saved_account_record(
+                        &serde_json::to_vec(&serde_json::json!({
+                            "schema":1,"storage":"private_file","account":{
+                                "schema":1,"id":uuid::Uuid::now_v7(),"provider":"openai",
+                                "model":"gpt-5.4","effort":null,"api_key":"synthetic-never-sent-key"
+                            }
+                        }))
+                        .unwrap(),
+                    )
+                    .unwrap();
+            }
             command
                 .env_clear()
                 .env(
                     "ARANY_TEST_MODE",
                     if linear { "--screen-reader" } else { "" },
+                )
+                .env(
+                    "ARANY_TEST_SELECTION",
+                    if startup_escape {
+                        ""
+                    } else {
+                        "--provider openai --model gpt-5.4"
+                    },
                 )
                 .env("ARANY_TEST_STATE", &state)
                 .env("ARANY_TEST_WORKSPACE", &workspace)
@@ -254,8 +280,26 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                 &mut transcript,
                 &mut answered,
                 0,
-                if linear { b"Input:" } else { b"Ask Arany" },
+                if startup_escape {
+                    b"Do you trust this folder?"
+                } else if linear {
+                    b"Input:"
+                } else {
+                    b"Ask Arany"
+                },
             );
+            let from = transcript.len();
+            if startup_escape {
+                input.write_all(b"\x1b").unwrap();
+                wait(
+                    &mut output,
+                    &mut input,
+                    &mut transcript,
+                    &mut answered,
+                    from,
+                    b"Ask Arany",
+                );
+            }
             let from = transcript.len();
             input.write_all(b"/permissions\r").unwrap();
             wait(

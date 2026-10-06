@@ -16,6 +16,14 @@ use crate::store::StateRoot;
 pub use approval::{ApprovalInbox, ApprovalMode, ToolApproval, ToolApprovals};
 use config::Config;
 pub use workspace::{WorkspacePermissions, mention_paths};
+pub fn configured_skill_names(state: &StateRoot) -> Result<Vec<String>, ToolError> {
+    Ok(Config::load(state)?
+        .skills
+        .into_iter()
+        .map(|skill| skill.name)
+        .collect())
+}
+
 pub fn list_workspace_entries(
     workspace: &Path,
     folder: &str,

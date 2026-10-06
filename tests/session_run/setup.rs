@@ -263,6 +263,7 @@ fn bare_start_with_both_accounts_requires_an_explicit_billing_route() {
             .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
             .env("ARANY_TEST_STATE", &state)
             .env("ARANY_TEST_WORKSPACE", &workspace)
+            .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
             .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
             .env(
                 "DBUS_SESSION_BUS_ADDRESS",
@@ -443,6 +444,7 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
             .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
             .env("ARANY_TEST_STATE", &state)
             .env("ARANY_TEST_WORKSPACE", &workspace)
+            .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
             .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
             .env(
                 "DBUS_SESSION_BUS_ADDRESS",
@@ -596,6 +598,7 @@ fn saved_chatgpt_picker_lists_account_ids_and_cancels_cleanly() {
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
+        .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
         .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
         .env(
             "DBUS_SESSION_BUS_ADDRESS",
@@ -849,6 +852,7 @@ fn screen_reader_chatgpt_consent_defaults_to_back_before_browser_or_account_stat
             .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
             .env("ARANY_TEST_STATE", &state)
             .env("ARANY_TEST_WORKSPACE", &workspace)
+            .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
             .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
             .env(
                 "DBUS_SESSION_BUS_ADDRESS",
@@ -1612,6 +1616,7 @@ fn narrow_no_color_chatgpt_warning_pages_before_acceptance_and_restores_terminal
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
+        .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
         .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
         .env(
             "DBUS_SESSION_BUS_ADDRESS",

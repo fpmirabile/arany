@@ -2054,7 +2054,12 @@ impl Provider for ApprovalJourney {
                 ProviderOutcome::Finish(Finish {
                     summary: "Synthetic decision".into(),
                     result: if review {
-                        self.review.into()
+                        if self.review == "over-cap" {
+                            "approve"
+                        } else {
+                            self.review
+                        }
+                        .into()
                     } else {
                         "Action completed".into()
                     },
@@ -2062,7 +2067,11 @@ impl Provider for ApprovalJourney {
             },
             response_id: None,
             input_tokens: Some(3),
-            output_tokens: Some(1),
+            output_tokens: Some(if review && self.review == "over-cap" {
+                257
+            } else {
+                1
+            }),
             wire_provenance: None,
         })
     }
@@ -2087,6 +2096,7 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
         ("ai-approve", ApprovalMode::Auto, "approve", "none", false),
         ("ai-ask", ApprovalMode::Auto, "ask", "allow", false),
         ("ai-malformed", ApprovalMode::Auto, "maybe", "deny", false),
+        ("ai-over-cap", ApprovalMode::Auto, "over-cap", "deny", false),
         ("ai-error", ApprovalMode::Auto, "error", "allow", false),
         ("ai-error-deny", ApprovalMode::Auto, "error", "deny", false),
     ] {
@@ -2252,11 +2262,13 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
                 calls[1].disposition,
                 if matches!(review, "error" | "maybe") {
                     ProviderCallDisposition::InvalidResponse
+                } else if review == "over-cap" {
+                    ProviderCallDisposition::OutputLimit
                 } else {
                     ProviderCallDisposition::Finished
                 }
             );
-            if review != "error" {
+            if !matches!(review, "error" | "over-cap") {
                 assert_eq!(calls[1].input_tokens, Some(3));
                 assert_eq!(calls[1].output_tokens, Some(1));
             }

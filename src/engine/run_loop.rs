@@ -1,5 +1,5 @@
 use super::progress::{ProgressPublisher, append_observed};
-use super::{EngineError, OUTPUT_TOKEN_CAP, RunCancellation};
+use super::{EngineError, RunCancellation};
 use crate::provider::{
     AgentPhase, Finish, MAX_REPORTED_INPUT_TOKENS, Provider, ProviderFailureClass,
     ProviderFailureReason, ProviderOutcome, ProviderRequest, ProviderResponse,
@@ -423,6 +423,7 @@ async fn invoke_bounded<P: Provider>(
         return CallResult::Failed(CallFailure::Timeout);
     }
     let timeout = CALL_DEADLINE.min(remaining);
+    let output_cap = request.max_output_tokens;
     tokio::select! {
         biased;
         () = cancellation.cancelled() => CallResult::Cancelled,
@@ -430,7 +431,7 @@ async fn invoke_bounded<P: Provider>(
             Ok(Ok(response)) if response.input_tokens.is_some_and(|count| count > MAX_REPORTED_INPUT_TOKENS) => {
                 CallResult::Failed(CallFailure::InvalidResponse(None))
             }
-            Ok(Ok(response)) if response.output_tokens.is_some_and(|count| count > OUTPUT_TOKEN_CAP) => {
+            Ok(Ok(response)) if response.output_tokens.is_some_and(|count| count > output_cap) => {
                 CallResult::Failed(CallFailure::OutputLimit)
             }
             Ok(Ok(response)) if response.response_id.as_ref().is_some_and(|id| {
