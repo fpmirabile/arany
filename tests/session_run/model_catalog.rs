@@ -131,8 +131,13 @@ fn screen_reader_model_catalog_selects_exact_profile_without_provider_egress() {
                     .windows(stages[next].len())
                     .position(|part| part == stages[next])
             {
+                let after_marker = start + position + stages[next].len();
+                let Some(line_end) = bytes[after_marker..].iter().position(|byte| *byte == b'\n')
+                else {
+                    break;
+                };
                 sender.send(next).expect("stage receiver");
-                start += position + stages[next].len();
+                start = after_marker + line_end + 1;
                 next += 1;
             }
         }

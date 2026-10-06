@@ -38,4 +38,4 @@ Architecture and security boundaries: [system overview](./docs/architecture/syst
 
 Linux terminal test fixtures use util-linux `script` and Bubblewrap with enabled user/network namespaces to isolate effective-user preferences in both build profiles.
 
-For development, start with [the documentation map](./docs/README.md) and [AGENTS.md](./AGENTS.md). [Product specs](./docs/specs/README.md) define agreed observable behavior and point to its evidence owners; [planning](./planning/README.md) holds proposed changes and execution work.
+For development, start with [the contribution guide](./CONTRIBUTING.md), [the documentation map](./docs/README.md) and [AGENTS.md](./AGENTS.md). [Product specs](./docs/specs/README.md) define agreed observable behavior and point to its evidence owners; [planning](./planning/README.md) holds proposed changes and execution work.
