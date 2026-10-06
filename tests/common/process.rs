@@ -31,8 +31,8 @@ pub fn isolated_script(root: &std::path::Path) -> Command {
             "--symlink",
             "usr/lib",
             "/lib",
-            "--symlink",
-            "usr/lib",
+            "--ro-bind",
+            "/lib64",
             "/lib64",
         ])
         .args(["--ro-bind", env!("CARGO_BIN_EXE_arany"), "/arany"])
