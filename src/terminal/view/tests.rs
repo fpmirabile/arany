@@ -329,7 +329,7 @@ fn setup_warning_pages_every_line_before_showing_acceptance_actions() {
     let warning = "abcdefghijklmnop".repeat(20);
     for (width, height) in [(16, 8), (40, 12), (80, 24)] {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
-        let body_height = height.min(16) - 4;
+        let body_height = height.min(16) - 5;
         let body_top = (height - height.min(16)) / 2 + 1;
         let body_left = (width - width.min(72)) / 2;
         let mut rendered = String::new();
@@ -362,11 +362,12 @@ fn setup_warning_pages_every_line_before_showing_acceptance_actions() {
                 })
                 .collect::<Vec<_>>()
                 .join(" ");
-            assert_eq!(visible.contains(">[Back] [Accept]"), !has_more);
+            assert_eq!(visible.contains("› Back"), !has_more);
+            assert_eq!(visible.contains("  Accept"), !has_more);
             assert!(!visible.contains("I ACCEPT"));
             assert!(visible.contains("Esc cancels"));
             if width == 16 && page == 0 {
-                assert!(visible.contains("Page 1/5 Enter"));
+                assert!(visible.contains("Page 1/7 Enter"));
             }
             if !has_more {
                 assert!(visible.contains("Tab/Enter"));
@@ -411,11 +412,17 @@ fn setup_warning_pages_every_line_before_showing_acceptance_actions() {
                     .iter()
                     .map(|cell| cell.symbol())
                     .collect::<String>();
-                assert!(visible.contains(if accept {
-                    "[Back] >[Accept]"
-                } else {
-                    ">[Back] [Accept]"
-                }));
+                let top = (height - height.min(16)) / 2;
+                let left = (width - width.min(72)) / 2;
+                for (index, label) in ["Back", "Accept"].iter().enumerate() {
+                    let row = (left..left + width.min(72))
+                        .map(|x| buffer[(x, top + height.min(16) - 4 + index as u16)].symbol())
+                        .collect::<String>();
+                    assert!(row.starts_with(&format!(
+                        "{} {label}",
+                        if accept == (index == 1) { "›" } else { " " }
+                    )));
+                }
                 assert!(visible.contains("Tab/Enter") && visible.contains("Esc cancels"));
                 if !color {
                     assert!(
@@ -1310,8 +1317,17 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
         .expect("command preview frame");
     let buffer = terminal.backend().buffer();
     let row = (0..80).map(|x| buffer[(x, 1)].symbol()).collect::<String>();
-    assert!(row.contains("/prov[ider <provider>]"));
+    assert!(row.contains("/prov"));
+    assert!(!row.contains("[ider"));
     assert_eq!(composer.text(), "/prov");
+    composer.apply(TerminalInput::Submit);
+    terminal
+        .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
+        .expect("completed command argument frame");
+    let buffer = terminal.backend().buffer();
+    let row = (0..80).map(|x| buffer[(x, 1)].symbol()).collect::<String>();
+    assert!(row.contains("/provider <provider>"));
+    assert_eq!(composer.text(), "/provider ");
 
     composer.clear();
     for character in "/s".chars() {
@@ -1319,36 +1335,48 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
     }
     composer.apply(TerminalInput::Down);
     let cursor = composer.cursor_byte_offset();
-    for width in [16, 20, 40, 50, 80] {
-        for height in [8, 24] {
-            for color in [false, true] {
-                let mut terminal = Terminal::new(TestBackend::new(width, height))
-                    .expect("completion choices terminal");
-                terminal
-                    .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color }))
-                    .expect("completion choices frame");
-                let buffer = terminal.backend().buffer();
-                let row = |y| {
-                    (0..width)
-                        .map(|x| buffer[(x, y)].symbol())
-                        .collect::<String>()
-                };
-                assert!(row(height - 6).contains("/setup"));
-                assert!(row(height - 5).contains("> /status"));
-                assert!(row(height - 3).contains("> /s"));
-                assert!(row(height - 1).starts_with("Tab/Enter: /sta"));
-                assert!(row(height - 2).contains("Tab/Enter"));
-                assert!(buffer[(0, height - 5)].modifier.contains(Modifier::BOLD));
-                assert_eq!(
-                    buffer[(0, height - 5)].fg,
-                    if color { Color::Cyan } else { Color::Reset },
-                );
-                assert_eq!(composer.text(), "/s");
-                assert_eq!(composer.cursor_byte_offset(), cursor);
-                assert_eq!(
-                    terminal.get_cursor_position().expect("completion cursor").y,
-                    height - 3
-                );
+    for (prefix, focused) in [
+        ("/resum", "resume"),
+        ("/permissio", "permissions"),
+        ("/s", "status"),
+    ] {
+        composer.clear();
+        composer.insert_paste(prefix).expect("command prefix");
+        composer.apply(TerminalInput::Down);
+        let cursor = composer.cursor_byte_offset();
+        for width in [16, 20, 40, 50, 80] {
+            for height in [8, 24] {
+                for color in [false, true] {
+                    let mut terminal = Terminal::new(TestBackend::new(width, height))
+                        .expect("completion choices terminal");
+                    terminal
+                        .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color }))
+                        .expect("completion choices frame");
+                    let buffer = terminal.backend().buffer();
+                    let row = |y| {
+                        (0..width)
+                            .map(|x| buffer[(x, y)].symbol())
+                            .collect::<String>()
+                    };
+                    if prefix == "/s" {
+                        assert!(row(height - 6).contains("/setup"));
+                    }
+                    assert!(row(height - 5).contains(&format!("> /{focused}")));
+                    assert!(row(height - 3).contains(&format!("> {prefix}")));
+                    assert!(row(height - 1).starts_with("Tab/Enter: /"));
+                    assert!(row(height - 2).contains("Tab/Enter"));
+                    assert!(buffer[(0, height - 5)].modifier.contains(Modifier::BOLD));
+                    assert_eq!(
+                        buffer[(0, height - 5)].fg,
+                        if color { Color::Cyan } else { Color::Reset },
+                    );
+                    assert_eq!(composer.text(), prefix);
+                    assert_eq!(composer.cursor_byte_offset(), cursor);
+                    assert_eq!(
+                        terminal.get_cursor_position().expect("completion cursor").y,
+                        height - 3
+                    );
+                }
             }
         }
     }
@@ -2197,4 +2225,83 @@ fn agent_inspector_keeps_details_and_keyboard_help_in_viewport() {
         .map(|x| terminal.backend().buffer()[(x, 13)].symbol())
         .collect::<String>();
     assert!(footer.contains("Esc Up/Dn Pg"));
+}
+
+#[test]
+fn permission_choices_are_vertical_and_complete_before_selection() {
+    let lines =
+        crate::presentation::workspace_permission_lines(std::path::Path::new("/projects/example"));
+    for (width, height) in [(16, 8), (40, 12), (80, 24)] {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut rendered = String::new();
+        for page in 0..100 {
+            let mut more = true;
+            terminal
+                .draw(|frame| {
+                    more = draw_permission_frame(
+                        frame,
+                        &lines,
+                        ("Read only", "Trust folder"),
+                        page,
+                        false,
+                        "↑↓ Enter ^C exit",
+                        Palette { color: false },
+                    );
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let panel_width = width
+                .saturating_sub(if width >= 40 { 4 } else { 0 })
+                .min(76);
+            let left = (width - panel_width) / 2;
+            let rows = (0..height)
+                .map(|y| {
+                    (left..left + panel_width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>();
+            if more {
+                assert!(
+                    !rows
+                        .iter()
+                        .any(|row| row.contains("Read only") || row.contains("Trust folder"))
+                );
+            } else {
+                let deny = rows
+                    .iter()
+                    .position(|row| row.starts_with("› Read only"))
+                    .unwrap();
+                assert!(rows[deny + 1].starts_with("  Trust folder"));
+                assert!(rows.iter().any(|row| row.contains("^C exit")));
+            }
+            for row in &rows {
+                if row.contains("Page ")
+                    || row.contains("Read only")
+                    || row.contains("Trust folder")
+                    || row.contains("^C exit")
+                {
+                    continue;
+                }
+                rendered.push_str(row);
+            }
+            if !more {
+                if width == 80 {
+                    println!("{}", rows.join("\n"));
+                }
+                break;
+            }
+        }
+        assert_eq!(
+            rendered
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect::<String>(),
+            lines
+                .join("")
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect::<String>()
+        );
+    }
 }

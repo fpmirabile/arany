@@ -27,9 +27,80 @@ pub struct Composer {
     choices: CommandChoices,
     completion_index: usize,
     completion_hidden: bool,
+    file_query: Option<String>,
+    file_candidates: Vec<String>,
+    approval_mode: Option<crate::tools::ApprovalMode>,
 }
 
 impl Composer {
+    pub fn approval_mode(&self) -> Option<crate::tools::ApprovalMode> {
+        self.approval_mode
+    }
+
+    pub fn set_approval_mode(&mut self, mode: Option<crate::tools::ApprovalMode>) {
+        self.approval_mode = mode;
+    }
+
+    pub fn file_query(&self) -> Option<String> {
+        if self.cursor < self.text.len()
+            && !self.text[self.cursor..].chars().next()?.is_whitespace()
+        {
+            return None;
+        }
+        if self.completion_hidden || self.text.starts_with('/') {
+            return None;
+        }
+        let start = self.text[..self.cursor].rfind('@')?;
+        if start > 0 && !self.text[..start].chars().next_back()?.is_whitespace() {
+            return None;
+        }
+        let query = &self.text[start + 1..self.cursor];
+        if let Some(quoted) = query.strip_prefix('"') {
+            if quoted.contains(['"', '\\']) {
+                return None;
+            }
+            return Some(quoted.to_owned());
+        }
+        (!query.chars().any(char::is_whitespace)).then(|| query.to_owned())
+    }
+
+    pub fn set_file_candidates(&mut self, query: Option<String>, items: Vec<String>) {
+        if self.file_query != query {
+            self.completion_index = 0;
+        }
+        self.file_query = query;
+        self.file_candidates = items;
+    }
+
+    pub fn file_query_changed(&self) -> bool {
+        self.file_query != self.file_query()
+    }
+
+    fn file_menu(&self) -> Option<(&[String], usize)> {
+        if self.file_candidates.is_empty() || self.file_query.as_ref() != self.file_query().as_ref()
+        {
+            return None;
+        }
+        Some((
+            &self.file_candidates,
+            self.completion_index.min(self.file_candidates.len() - 1),
+        ))
+    }
+
+    pub(super) fn completion_rows(&self) -> Option<(Vec<String>, usize)> {
+        if let Some((items, selected)) = self.file_menu() {
+            return Some((
+                items.iter().map(|item| format!("@{item}")).collect(),
+                selected,
+            ));
+        }
+        self.completion_menu().map(|(names, selected)| {
+            (
+                names.iter().map(|name| format!("/{name}")).collect(),
+                selected,
+            )
+        })
+    }
     pub fn text(&self) -> &str {
         &self.text
     }
@@ -147,6 +218,21 @@ impl Composer {
     }
 
     pub(super) fn command_preview(&self) -> Option<CommandPreview> {
+        if let Some((items, selected)) = self.file_menu() {
+            return Some(CommandPreview {
+                ghost: String::new(),
+                ghost_is_placeholder: false,
+                status: format!(
+                    "{}: @{} · Up/Down choose · Esc close",
+                    if items[selected].ends_with('/') {
+                        "Enter reference · Tab browse"
+                    } else {
+                        "Tab/Enter"
+                    },
+                    items[selected],
+                ),
+            });
+        }
         if let Some((names, selected)) = self.completion_menu() {
             return Some(CommandPreview {
                 ghost: String::new(),
@@ -169,7 +255,7 @@ impl Composer {
             return None;
         }
         let names = command_completions(&self.text);
-        if names.len() < 2 || names.contains(&self.text.strip_prefix('/').unwrap_or("")) {
+        if names.is_empty() || names.contains(&self.text.strip_prefix('/').unwrap_or("")) {
             return None;
         }
         let selected = self.completion_index.min(names.len() - 1);
@@ -177,6 +263,51 @@ impl Composer {
     }
 
     pub fn apply(&mut self, input: TerminalInput) -> ComposerEdit {
+        if let Some((items, selected)) = self.file_menu() {
+            let count = items.len();
+            match input {
+                TerminalInput::Up => {
+                    self.completion_index = (selected + count - 1) % count;
+                    return ComposerEdit::Changed;
+                }
+                TerminalInput::Down => {
+                    self.completion_index = (selected + 1) % count;
+                    return ComposerEdit::Changed;
+                }
+                TerminalInput::Escape => {
+                    self.completion_hidden = true;
+                    return ComposerEdit::Changed;
+                }
+                TerminalInput::Tab | TerminalInput::Submit => {
+                    let path = &items[selected];
+                    let directory = path.ends_with('/');
+                    let browse = directory && input == TerminalInput::Tab;
+                    let replacement = if browse && !path.chars().any(char::is_whitespace) {
+                        format!("@{path}")
+                    } else if browse {
+                        format!("@\"{path}")
+                    } else {
+                        format!(
+                            "@{} ",
+                            serde_json::to_string(path).expect("file name is serializable")
+                        )
+                    };
+                    let start = self.text[..self.cursor]
+                        .rfind('@')
+                        .expect("file menu query");
+                    if self.text.len() - (self.cursor - start) + replacement.len() > MAX_DRAFT_BYTES
+                    {
+                        return ComposerEdit::AtCapacity;
+                    }
+                    self.text.replace_range(start..self.cursor, &replacement);
+                    self.cursor = start + replacement.len();
+                    self.vertical_grapheme_column = None;
+                    self.completion_index = 0;
+                    return ComposerEdit::Changed;
+                }
+                _ => {}
+            }
+        }
         if let Some((names, selected)) = self.completion_menu() {
             match input {
                 TerminalInput::Up => {
@@ -647,8 +778,88 @@ mod tests {
     }
 
     #[test]
+    fn file_completion_preserves_draft_and_quotes_selected_paths() {
+        for (prefix, candidate, expected) in [
+            ("Edit @REA", "README.md", "Edit @\"README.md\" "),
+            (
+                "Edit @docs/",
+                "docs/hello world.md",
+                "Edit @\"docs/hello world.md\" ",
+            ),
+            ("Edit @", "中 é.md", "Edit @\"中 é.md\" "),
+            ("Edit @d", "docs/", "Edit @docs/"),
+            (
+                "Inspect @hello",
+                "docs/hello world/",
+                "Inspect @\"docs/hello world/",
+            ),
+            (
+                "Edit @hwd",
+                "docs/hello world.md",
+                "Edit @\"docs/hello world.md\" ",
+            ),
+        ] {
+            for accept in [TerminalInput::Tab, TerminalInput::Submit] {
+                let mut composer = Composer::default();
+                for character in prefix.chars() {
+                    composer.apply(TerminalInput::Character(character));
+                }
+                let query = composer.file_query();
+                assert!(query.is_some());
+                composer.set_file_candidates(query, vec![candidate.into()]);
+                let cursor = composer.cursor_byte_offset();
+                composer.set_approval_mode(Some(crate::tools::ApprovalMode::Request));
+                assert_eq!(composer.text(), prefix);
+                assert_eq!(composer.cursor_byte_offset(), cursor);
+                assert_eq!(composer.apply(accept), ComposerEdit::Changed);
+                let expected = if candidate.ends_with('/') && accept == TerminalInput::Submit {
+                    format!(
+                        "{}@{} ",
+                        prefix.rsplit_once('@').unwrap().0,
+                        serde_json::to_string(candidate).unwrap()
+                    )
+                } else {
+                    expected.to_owned()
+                };
+                assert_eq!(composer.text(), expected);
+                assert_eq!(composer.cursor_byte_offset(), expected.len());
+                assert!(composer.file_menu().is_none());
+            }
+        }
+        for text in [
+            "user@example.com",
+            "/model @",
+            "Edit @@",
+            "Edit @README.md done",
+        ] {
+            let mut composer = Composer::default();
+            for character in text.chars() {
+                composer.apply(TerminalInput::Character(character));
+            }
+            assert!(composer.file_query().is_none(), "{text}");
+        }
+    }
+
+    #[test]
     fn tab_completion_changes_only_real_draft_bytes() {
         let mut composer = Composer::default();
+        for (prefix, completed) in [("/resum", "/resume "), ("/prov", "/provider ")] {
+            for accept in [TerminalInput::Tab, TerminalInput::Submit] {
+                composer.clear();
+                composer.insert_paste(prefix).expect("command prefix");
+                let (names, selected) = composer
+                    .completion_menu()
+                    .expect("unique choice stays visible");
+                assert_eq!(names[selected], completed.trim().trim_start_matches('/'));
+                assert_eq!(composer.apply(accept), ComposerEdit::Changed);
+                assert_eq!(composer.text(), completed);
+                assert!(composer.completion_menu().is_none());
+                assert_eq!(
+                    composer.apply(TerminalInput::Submit),
+                    ComposerEdit::Unchanged
+                );
+            }
+        }
         for (prefix, navigation, expected) in [
             ("/s", TerminalInput::Down, "status"),
             ("/s", TerminalInput::Up, "status"),

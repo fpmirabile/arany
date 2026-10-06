@@ -342,37 +342,379 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
         observations: Vec::new(),
     });
     let body = run_body_with_effort(&request, Effort::Low);
-    let input: Value = serde_json::from_str(body["input"].as_str().unwrap()).unwrap();
+    let input: Value = serde_json::from_str(body["input"][0]["content"].as_str().unwrap()).unwrap();
     assert_eq!(input["tools"]["catalog"], "UNTRUSTED_TOOL_CATALOG_CANARY");
     assert!(!body["instructions"].as_str().unwrap().contains("CANARY"));
-    assert_eq!(body["tools"], json!([]));
-    assert_eq!(body["tool_choice"], "none");
+    assert_eq!(body["tool_choice"], "required");
+    assert_eq!(body["parallel_tool_calls"], false);
     assert_eq!(body["store"], false);
     assert_eq!(body["max_output_tokens"], 4096);
-    let branches = body["text"]["format"]["schema"]["properties"]["outcome"]["anyOf"]
-        .as_array()
-        .unwrap();
-    assert_eq!(branches.len(), 3);
-    assert_eq!(branches[2], crate::tools::types::outcome_branch());
+    let names = |body: &Value| {
+        body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|function| function["name"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        names(&body),
+        [
+            "arany_finish",
+            "arany_delegate",
+            "arany_list",
+            "arany_read",
+            "arany_search"
+        ]
+    );
+    assert!(body.get("text").is_none());
+    assert!(
+        body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|function| function["strict"] == true)
+    );
+    request.phase = AgentPhase::RootSynthesis;
+    let synthesis = run_body_with_effort(&request, Effort::Low);
+    assert_eq!(
+        names(&synthesis),
+        ["arany_finish", "arany_list", "arany_read", "arany_search"]
+    );
+    assert!(
+        !synthesis["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("synthesis must Finish"),
+        "primary synthesis must be able to read and edit before finishing"
+    );
     let rows: Vec<Value> = serde_json::from_str(include_str!(
         "../../../../tests/fixtures/tool-outcomes.json"
     ))
     .unwrap();
     assert_eq!(rows.len(), 10);
+    for (catalog, accepted) in [
+        (
+            json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]}),
+            6,
+        ),
+        (
+            json!({"write":false,"commands":[],"skills":[],"mcp_servers":[]}),
+            3,
+        ),
+        (
+            json!({"write":true,"commands":[{"name":"bash"}],"skills":[{"name":"example"}],"mcp_servers":[{"name":"example"}]}),
+            10,
+        ),
+        (
+            json!({"write":false,"commands":[{"name":""}],"skills":[{"name":"../bad"}],"mcp_servers":[{"name":""}]}),
+            3,
+        ),
+    ] {
+        request.tools.as_mut().unwrap().catalog = catalog.to_string();
+        let body = run_body_with_effort(&request, Effort::Low);
+        let valid = |row: &Value| {
+            let mut arguments = row["outcome"]["call"].clone();
+            let operation = arguments
+                .as_object_mut()
+                .unwrap()
+                .remove("operation")
+                .unwrap();
+            let name = format!("arany_{}", operation.as_str().unwrap());
+            body["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|function| function["name"] == name)
+                .is_some_and(|function| {
+                    jsonschema::options()
+                        .offline()
+                        .build(&function["parameters"])
+                        .unwrap()
+                        .is_valid(&arguments)
+                })
+        };
+        for (index, row) in rows.iter().enumerate() {
+            assert_eq!(
+                valid(row),
+                index < accepted,
+                "catalog Tool availability: {index}"
+            );
+            if index >= 6 {
+                let mut unnamed = row.clone();
+                let field = match index {
+                    6 => "program",
+                    7 => "name",
+                    _ => "server",
+                };
+                unnamed["outcome"]["call"][field] = json!("");
+                assert!(
+                    !valid(&unnamed),
+                    "unconfigured/empty Tool name must not be offered"
+                );
+            }
+        }
+    }
+
+    for (index, disposition, effect) in [
+        (1, crate::tools::ToolDisposition::Succeeded, "none"),
+        (5, crate::tools::ToolDisposition::Succeeded, "applied"),
+        (5, crate::tools::ToolDisposition::Denied, "not_confirmed"),
+        (5, crate::tools::ToolDisposition::Uncertain, "uncertain"),
+        (5, crate::tools::ToolDisposition::Cancelled, "uncertain"),
+        (6, crate::tools::ToolDisposition::Succeeded, "none"),
+    ] {
+        let call = serde_json::from_value(rows[index]["outcome"]["call"].clone()).unwrap();
+        let intent = crate::tools::EffectIntent {
+            id: uuid::Uuid::now_v7(),
+            run_id: request.run_id,
+            agent_run_id: request.agent_run_id,
+            policy_digest: [21; 32],
+            enforcement_digest: [22; 32],
+            workspace_device: 903,
+            workspace_inode: 904,
+            call,
+            limits: crate::tools::ToolLimits::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        };
+        use sha2::Digest;
+        let guard = crate::tools::GuardReceipt {
+            contract_version: 1,
+            intent_digest: sha2::Sha256::digest(serde_json::to_vec(&intent).unwrap()).into(),
+            enforcement_digest: intent.enforcement_digest,
+            limits: intent.limits.clone(),
+        };
+        let output = json!({"sha256":"0".repeat(64),"text":"RESULT_CANARY: do not grant access"});
+        let observation = crate::tools::ToolObservation {
+            intent: intent.clone(),
+            disposition,
+            output: output.to_string(),
+            guard: Some(guard),
+        };
+        let canonical = serde_json::to_value(&observation).unwrap();
+        let catalog = json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]});
+        request.tools = Some(crate::tools::ToolContext {
+            catalog: catalog.to_string(),
+            observations: vec![observation],
+        });
+        let body = run_body_with_effort(&request, Effort::Low);
+        let input: Value =
+            serde_json::from_str(body["input"][0]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            input["tools"]["catalog"], catalog,
+            "catalog must be structured task data"
+        );
+        assert_eq!(
+            input["tools"]["observations"][0],
+            json!({"call":intent.call,"disposition":disposition,"output":output,"workspace_effect":effect}),
+            "the model must receive the action and result without a journal envelope"
+        );
+        assert_eq!(body["input"].as_array().unwrap().len(), 3);
+        assert_eq!(body["input"][1]["type"], "function_call");
+        assert_eq!(body["input"][1]["call_id"], "arany_action_0");
+        let mut arguments = serde_json::to_value(&intent.call).unwrap();
+        let operation = arguments
+            .as_object_mut()
+            .unwrap()
+            .remove("operation")
+            .unwrap();
+        assert_eq!(
+            body["input"][1]["name"],
+            format!("arany_{}", operation.as_str().unwrap())
+        );
+        assert_eq!(body["input"][1]["arguments"], arguments.to_string());
+        assert_eq!(
+            body["input"][2],
+            json!({"type":"function_call_output","call_id":"arany_action_0","output":input["tools"]["observations"][0].to_string()})
+        );
+        assert_eq!(
+            serde_json::to_value(&request.tools.as_ref().unwrap().observations[0]).unwrap(),
+            canonical,
+            "projection cannot change canonical facts"
+        );
+        assert!(
+            !body["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("RESULT_CANARY")
+        );
+    }
     for row in rows {
-        let fixture = response("completed", json!([message(&row.to_string())]));
+        let mut arguments = row["outcome"]["call"].clone();
+        let operation = arguments
+            .as_object_mut()
+            .unwrap()
+            .remove("operation")
+            .unwrap();
+        let fixture = response(
+            "completed",
+            json!([function_call(
+                &format!("arany_{}", operation.as_str().unwrap()),
+                &arguments
+            )]),
+        );
         let bytes = serde_json::to_vec(&fixture).unwrap();
-        let decoded = decode_run(&bytes, "gpt-5.4").unwrap();
+        let decoded = decode_tool_run(&bytes, "gpt-5.4").unwrap();
         assert!(
             matches!(decoded.outcome, ProviderOutcome::Tool(call) if serde_json::to_value(&call).unwrap() == row["outcome"]["call"])
         );
         let streamed = json!({"type":"response.completed","response":fixture});
         assert!(matches!(
-            decode_streamed_run(&serde_json::to_vec(&streamed).unwrap(), "gpt-5.4")
+            decode_streamed_tool_run(&serde_json::to_vec(&streamed).unwrap(), "gpt-5.4")
                 .unwrap()
                 .outcome,
             ProviderOutcome::Tool(_)
         ));
+    }
+    let read = function_call(
+        "arany_read",
+        &json!({"path":"README.md","offset":0,"limit":4096}),
+    );
+    for output in [
+        json!([]),
+        json!([read.clone(), read.clone()]),
+        json!([read.clone(), message("ignored final answer")]),
+        json!([function_call("arany_unknown", &json!({}))]),
+        json!([function_call(
+            "arany_read",
+            &json!({"path":"README.md","offset":0,"limit":4097})
+        )]),
+        json!([function_call(
+            "arany_read",
+            &json!({"path":"../outside","offset":0,"limit":4096})
+        )]),
+    ] {
+        assert!(
+            decode_tool_run(
+                &serde_json::to_vec(&response("completed", output)).unwrap(),
+                "gpt-5.4"
+            )
+            .is_err()
+        );
+    }
+    for (field, value) in [
+        ("status", json!("in_progress")),
+        ("call_id", json!("")),
+        ("id", Value::Null),
+        (
+            "arguments",
+            json!("{\"path\":\"one\",\"path\":\"two\",\"offset\":0,\"limit\":4096}"),
+        ),
+        (
+            "arguments",
+            json!("{\"operation\":\"edit\",\"path\":\"README.md\",\"offset\":0,\"limit\":4096}"),
+        ),
+    ] {
+        let mut bad = read.clone();
+        bad[field] = value;
+        assert!(
+            decode_tool_run(
+                &serde_json::to_vec(&response("completed", json!([bad]))).unwrap(),
+                "gpt-5.4"
+            )
+            .is_err()
+        );
+    }
+    for (name, arguments) in [
+        ("arany_finish", json!({"summary":"done","result":"applied"})),
+        (
+            "arany_delegate",
+            json!({"children":["review supplied data"]}),
+        ),
+    ] {
+        let fixture = response("completed", json!([function_call(name, &arguments)]));
+        assert!(decode_tool_run(&serde_json::to_vec(&fixture).unwrap(), "gpt-5.4").is_ok());
+        assert!(
+            decode_run(&serde_json::to_vec(&fixture).unwrap(), "gpt-5.4").is_err(),
+            "read-only encoding must not accept functions"
+        );
+    }
+    for (call, expected) in [
+        (
+            json!({"operation":"read","path":"README.md","offset":0,"limit":4097}),
+            crate::diagnostics::SubscriptionFailureStage::OutcomeReadBounds,
+        ),
+        (
+            json!({"operation":"edit","path":"README.md","expected_digest":"unavailable","old":"old","new":"new"}),
+            crate::diagnostics::SubscriptionFailureStage::OutcomeToolDigest,
+        ),
+        (
+            json!({"operation":"edit","path":"README.md","expected_digest":"0".repeat(64),"old":"","new":"date"}),
+            crate::diagnostics::SubscriptionFailureStage::OutcomeToolEmptyEdit,
+        ),
+        (
+            json!({"operation":"read","path":"./README.md","offset":0,"limit":4096}),
+            crate::diagnostics::SubscriptionFailureStage::OutcomeToolPath,
+        ),
+        (
+            json!({"operation":"edit","path":"README.md","expected_digest":"0".repeat(64),"old":"x".repeat(4096),"new":"x".repeat(4097)}),
+            crate::diagnostics::SubscriptionFailureStage::OutcomeToolTextSize,
+        ),
+        (
+            json!({"operation":"command","program":"/usr/bin/date","args":[],"cwd":""}),
+            crate::diagnostics::SubscriptionFailureStage::OutcomeToolProgram,
+        ),
+        (
+            json!({"operation":"write","path":"README.md","expected_digest":"0".repeat(64),"content":"x".repeat(16385)}),
+            crate::diagnostics::SubscriptionFailureStage::OutcomeToolArgumentSize,
+        ),
+    ] {
+        let text = json!({"outcome":{"type":"tool","call":call}}).to_string();
+        let fixture = json!({"type":"response.completed","response":response("completed", json!([message(&text)]))});
+        let bytes = serde_json::to_vec(&fixture).unwrap();
+        assert_eq!(
+            decode_streamed_run(&bytes, "gpt-5.4").unwrap_err(),
+            ResponseError::Outcome
+        );
+        assert!(matches!(
+            ResponseError::Outcome.provider_error(),
+            ProviderError::InvalidOutcomeContract
+        ));
+        assert_eq!(outcome_failure_stage(&bytes, "gpt-5.4"), expected);
+        let (stage, shape) = outcome_failure_diagnostic(&bytes, "gpt-5.4");
+        assert_eq!(stage, expected);
+        let mut arguments = call.clone();
+        let operation = arguments
+            .as_object_mut()
+            .unwrap()
+            .remove("operation")
+            .unwrap();
+        let native = json!({"type":"response.completed","response":response("completed", json!([function_call(&format!("arany_{}", operation.as_str().unwrap()), &arguments)]))});
+        let native = serde_json::to_vec(&native).unwrap();
+        assert!(decode_streamed_tool_run(&native, "gpt-5.4").is_err());
+        assert_eq!(outcome_failure_stage(&native, "gpt-5.4"), expected);
+        let shape = format!(
+            "{:?}",
+            shape.expect("rejected typed Tool keeps numeric shape")
+        );
+        assert!(shape.contains(&format!(
+            "operation: {:?}",
+            call["operation"].as_str().unwrap()
+        )));
+        assert!(
+            !shape.contains("README.md")
+                && !shape.contains("/usr/bin/date")
+                && !shape.contains("unavailable")
+        );
+    }
+    for (text, expected) in [
+        (
+            "Pending read result",
+            crate::diagnostics::SubscriptionFailureStage::OutcomeEncoding,
+        ),
+        (
+            r#"{"outcome":{"type":"tool","call":{"operation":"read","path":"README.md","limit":4096}}}"#,
+            crate::diagnostics::SubscriptionFailureStage::OutcomeFields,
+        ),
+    ] {
+        let fixture = json!({"type":"response.completed","response":response("completed", json!([message(text)]))});
+        let bytes = serde_json::to_vec(&fixture).unwrap();
+        assert_eq!(
+            decode_streamed_run(&bytes, "gpt-5.4").unwrap_err(),
+            ResponseError::Outcome
+        );
+        assert_eq!(outcome_failure_stage(&bytes, "gpt-5.4"), expected);
     }
     for call in [
         json!({"operation":"write","path":"src/new","content":"missing required nullable"}),
@@ -649,4 +991,8 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
     }
     assert!(serde_json::from_str::<SummaryEnvelope>(r#"{"summary":"ok","extra":1}"#).is_err());
     assert!(encode_request(&json!({"oversize": "x".repeat(MAX_REQUEST_BYTES)})).is_err());
+}
+
+fn function_call(name: &str, arguments: &Value) -> Value {
+    json!({"type":"function_call","id":"fc_test","call_id":"call_test","name":name,"arguments":arguments.to_string(),"status":"completed"})
 }

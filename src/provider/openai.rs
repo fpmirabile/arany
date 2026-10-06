@@ -268,7 +268,20 @@ impl Provider for OpenAiProvider {
         let response = self
             .send(wire::run_body_with_effort(&request, self.effort))
             .await?;
-        self.decode_run(&response, request.max_output_tokens)
+        if request.tools.is_some() {
+            let decoded = wire::decode_tool_run(&response, &self.model)?;
+            if !valid_usage(
+                decoded.input_tokens,
+                decoded.output_tokens,
+                request.max_output_tokens,
+            ) || decoded.reflects_secret(&self.key)
+            {
+                return Err(ProviderError::InvalidOutcome);
+            }
+            Ok(decoded)
+        } else {
+            self.decode_run(&response, request.max_output_tokens)
+        }
     }
 
     async fn compact(

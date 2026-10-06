@@ -156,6 +156,26 @@ fn subscription_body_is_streaming_and_omits_unsupported_remote_cap() {
     for forbidden in ["max_output_tokens", "truncation", "previous_response_id"] {
         assert!(value.get(forbidden).is_none(), "{forbidden}");
     }
+    let mut coding = request();
+    coding.tools = Some(crate::tools::ToolContext {
+        catalog: json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]}).to_string(),
+        observations: Vec::new(),
+    });
+    let coding: Value =
+        serde_json::from_slice(&subscription_body(&coding, Effort::Medium).unwrap()).unwrap();
+    assert_eq!(coding["tool_choice"], "required");
+    assert_eq!(coding["parallel_tool_calls"], false);
+    assert!(coding.get("text").is_none());
+    assert!(
+        coding["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "arany_edit" && tool["strict"] == true)
+    );
+    for forbidden in ["max_output_tokens", "truncation", "previous_response_id"] {
+        assert!(coding.get(forbidden).is_none());
+    }
     {
         use crate::provider::{ImageAttachment, ImageOrigin, ProviderImage};
         use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -621,6 +641,33 @@ fn client() -> Client {
 
 #[tokio::test]
 async fn streaming_transport_accepts_only_final_usage_within_local_cap() {
+    let mut coding = request();
+    coding.tools = Some(crate::tools::ToolContext {
+        catalog: json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]}).to_string(),
+        observations: Vec::new(),
+    });
+    let response = json!({"id":"resp_function","status":"completed","model":"model-a","output":[{"type":"function_call","id":"fc_function","call_id":"call_function","name":"arany_read","arguments":json!({"path":"README.md","offset":0,"limit":4096}).to_string(),"status":"completed"}],"usage":{"input_tokens":12,"output_tokens":12}});
+    let stream = format!(
+        "data: {}\n\n",
+        json!({"type":"response.completed","response":response})
+    );
+    let reply = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{stream}", stream.len()).into_bytes();
+    let (endpoint, server) = serve(reply).await;
+    let decoded = invoke_at(&client(), endpoint, TOKEN, &coding, Effort::Medium)
+        .await
+        .unwrap();
+    assert!(matches!(
+        decoded.outcome,
+        ProviderOutcome::Tool(crate::tools::ToolCall::Read {
+            offset: 0,
+            limit: 4096,
+            ..
+        })
+    ));
+    let wire_request = server.await.unwrap();
+    let body: Value = serde_json::from_str(wire_request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(body["tool_choice"], "required");
+    assert_eq!(body["parallel_tool_calls"], false);
     let stream = String::from_utf8(completed(Some(12)))
         .unwrap()
         .split_inclusive('\n')

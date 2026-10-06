@@ -1,9 +1,11 @@
+mod approval;
 pub(crate) mod config;
 mod fs;
 mod guard;
 mod mcp;
 mod skills;
 pub(crate) mod types;
+mod workspace;
 
 #[cfg(test)]
 mod tests;
@@ -11,7 +13,16 @@ mod tests;
 use crate::engine::RunCancellation;
 use crate::session::{AgentRunId, RunId};
 use crate::store::StateRoot;
+pub use approval::{ApprovalInbox, ApprovalMode, ToolApproval, ToolApprovals};
 use config::Config;
+pub use workspace::{WorkspacePermissions, mention_paths};
+pub fn list_workspace_entries(
+    workspace: &Path,
+    folder: &str,
+    prefix: &str,
+) -> Result<Vec<String>, ToolError> {
+    fs::workspace_entries(workspace, folder, prefix)
+}
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 pub use types::{
@@ -53,6 +64,12 @@ pub(crate) struct ToolRuntime {
 }
 
 impl ToolRuntime {
+    pub(crate) fn workspace_identity(&self) -> (u64, u64) {
+        self.workspace_identity
+    }
+    pub(crate) fn allows(&self, call: &ToolCall) -> bool {
+        self.config.allows(call)
+    }
     pub(crate) fn admit(
         config: Config,
         workspace: &Path,
@@ -99,9 +116,10 @@ impl ToolRuntime {
     pub(crate) fn context(&self) -> Result<ToolContext, ToolError> {
         let skill_rows: Vec<_> = self.config.skills.iter().map(|skill| serde_json::json!({"name":skill.name,"description":skill.description,"sha256":skill.files["SKILL.md"]})).collect();
         let catalog = serde_json::json!({
+            "host_clock": {"unix_ms": now_ms(), "timezone":"UTC"},
             "workspace_paths": self.config.workspace_paths,
             "write": self.config.write,
-            "file_tools": "list, read (UTF-8, byte offset/limit, sha256), search (literal), mkdir (new directory; parent must exist), write (null digest only creates), edit (unique literal match, expected sha256)",
+            "file_tools": "list (directory entries), read (UTF-8, zero-based byte offset, limit 1..4096, whole-file sha256), search (literal UTF-8 content in a file or directory; use Read or an include for edit sha256), mkdir (new directory; parent must exist), write (null digest only creates), edit (unique literal match, expected sha256)",
             "commands": self.config.commands.iter().map(|program| serde_json::json!({"name":program.name,"interpreter":program.interpreter,"inputs":program.inputs.iter().map(|input| format!("/inputs/{}/{}", program.name, input.destination)).collect::<Vec<_>>()})).collect::<Vec<_>>(),
             "command_contract": "Explicit argv only. Private writable selected-project snapshot at /workspace; /scratch is bounded. No network, host home, credentials or state. Subprocess file changes are discarded, not applied to host. Use typed write/edit to integrate source. Skills available at /skills/NAME.",
             "skills": skill_rows,
@@ -157,8 +175,8 @@ impl ToolRuntime {
     }
 }
 
-fn uncertain_observation(intent: EffectIntent, error: ToolError) -> ToolObservation {
-    let stage = match error {
+pub(crate) fn failure_stage(error: &ToolError) -> &'static str {
+    match error {
         ToolError::GuardRejected("admission") | ToolError::Configuration => "admission",
         ToolError::GuardRejected("Workspace identity")
         | ToolError::ChangedInput
@@ -177,7 +195,25 @@ fn uncertain_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
         ToolError::GuardRejected("bounded control protocol") => "control protocol",
         ToolError::Limit => "resource limit",
         _ => "execution",
-    };
+    }
+}
+
+fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservation {
+    crate::diagnostics::guard_failure(&error);
+    ToolObservation {
+        intent,
+        disposition: ToolDisposition::Failed,
+        output: format!(
+            "Guard {} unavailable before dispatch; no operation was dispatched.",
+            failure_stage(&error)
+        ),
+        guard: None,
+    }
+}
+
+fn uncertain_observation(intent: EffectIntent, error: ToolError) -> ToolObservation {
+    crate::diagnostics::guard_failure(&error);
+    let stage = failure_stage(&error);
     ToolObservation {
         intent,
         disposition: ToolDisposition::Uncertain,

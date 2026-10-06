@@ -187,6 +187,19 @@ impl StateRoot {
         self.read_private_record("tools.json", 64 * 1024)
     }
 
+    pub(crate) fn read_workspace_permissions(&self) -> Result<Option<Vec<u8>>, StoreError> {
+        self.read_private_record("workspace-permissions.json", 64 * 1024)
+    }
+
+    pub(crate) fn replace_workspace_permissions(&self, record: &[u8]) -> Result<(), StoreError> {
+        self.replace_private_record(
+            "workspace-permissions.json",
+            "workspace-permissions.pending",
+            record,
+            64 * 1024,
+        )
+    }
+
     pub(crate) fn read_provider_profiles(&self) -> Result<Vec<u8>, StoreError> {
         let mut options = OpenOptions::new();
         options.read(true);

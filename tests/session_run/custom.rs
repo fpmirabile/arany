@@ -468,6 +468,31 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
         )
         .as_bytes()
     );
+    let diagnostic_path = state_path.join("development.log");
+    if cfg!(debug_assertions) {
+        let log = std::fs::read_to_string(&diagnostic_path).expect("automatic development log");
+        assert!(log.contains("runtime stage=DiagnosticsEnabled"));
+        assert!(log.contains("provider phase=RootPlan disposition=InvalidResponse"));
+        assert!(log.contains("run disposition=Failed"));
+        for forbidden in [
+            "test-key",
+            "OMITTED_WORKSPACE_CANARY",
+            "EXPECTED_WORKSPACE_GUIDANCE",
+            "verified answer",
+            "team answer",
+            "model-1",
+        ] {
+            assert!(
+                !log.contains(forbidden),
+                "sensitive data entered development log"
+            );
+        }
+    } else {
+        assert!(
+            !diagnostic_path.exists(),
+            "optimized process must not create debug log"
+        );
+    }
     let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state reopen"))
         .expect("read-only Store");
     let runtime = tokio::runtime::Builder::new_current_thread()

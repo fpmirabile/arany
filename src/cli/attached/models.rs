@@ -501,6 +501,18 @@ async fn load_catalog(
     view: &SessionView,
     profile: &str,
 ) -> Result<(Vec<ModelEntry>, bool), String> {
+    load_catalog_inner(admission, view, profile)
+        .await
+        .inspect_err(|_| {
+            arany::record_development_failure(arany::DevelopmentFailure::ModelCatalog);
+        })
+}
+
+async fn load_catalog_inner(
+    admission: &Admission,
+    view: &SessionView,
+    profile: &str,
+) -> Result<(Vec<ModelEntry>, bool), String> {
     let result = match profile {
         "openai" | "anthropic" => {
             let key = match view.defaults.account_id {
@@ -573,9 +585,9 @@ async fn load_while_owned(
     let outcome = loop {
         let at_input_boundary = terminal.input_boundary_ready();
         tokio::select! {
-            result = &mut query, if at_input_boundary => break result.map_err(|error| ModelBrowse::Notice(format!(
-                "Error: Model catalog unavailable: {error}. Review the selected account or retry /model."
-            ))),
+            result = &mut query, if at_input_boundary => break result.map_err(|error| {
+                ModelBrowse::Notice(format!("Error: Model catalog unavailable: {error}. Review the selected account or retry /model."))
+            }),
             input = terminal.next_input() => {
                 match input.map_err(|error| error.to_string())? {
                     TerminalInput::ClipboardPaste => {

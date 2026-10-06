@@ -87,7 +87,7 @@ impl RunView {
             "output":tool.observation.as_ref().map(|observation| &observation.output),
             "execution":if tool.observation.is_none() { "uncertain; never replay" } else { "observed; never replay" },
         })).collect();
-        serde_json::json!({"run_status":format!("{:?}", self.status),"tool_records":records})
+        serde_json::json!({"scope":"historical Run; no pending Tool in the current Run; never replay intents or approvals; fresh inspection may establish present state", "run_status":format!("{:?}", self.status),"tool_records":records})
             .to_string()
     }
 }
@@ -406,15 +406,13 @@ impl SessionView {
                     && agent.provider_calls.last().is_some_and(|call| {
                         call.disposition == ProviderCallDisposition::ToolRequested
                             && call.phase == record.phase
+                            || call.phase == crate::provider::AgentPhase::ToolReview
+                                && record.phase == crate::provider::AgentPhase::RootPlan
                     })
                     && run.tools.last().is_some_and(|tool| {
-                        tool.observation.as_ref().is_some_and(|observation| {
-                            !matches!(
-                                observation.disposition,
-                                crate::tools::ToolDisposition::Uncertain
-                                    | crate::tools::ToolDisposition::Cancelled
-                            )
-                        })
+                        tool.observation
+                            .as_ref()
+                            .is_some_and(|observation| !observation.stops_run())
                     })
                     && run.tools.len()
                         == agent
@@ -437,7 +435,18 @@ impl SessionView {
                         .iter()
                         .skip(1)
                         .all(|child| child.status == AgentStatus::Finished);
+                let tool_review = tools_enabled
+                    && agent.role == AgentRole::Primary
+                    && record.phase == crate::provider::AgentPhase::ToolReview
+                    && agent.provider_calls.last().is_some_and(|call| {
+                        call.disposition == ProviderCallDisposition::ToolRequested
+                    })
+                    && run
+                        .tools
+                        .last()
+                        .is_some_and(|tool| tool.observation.is_none());
                 let valid = tool_continuation
+                    || tool_review
                     || delegated
                     || match (agent.role, agent.provider_calls.as_slice(), record.phase) {
                         (AgentRole::Primary, [], AgentPhase::RootPlan) => true,
@@ -457,7 +466,9 @@ impl SessionView {
                 if agent.status != AgentStatus::Active
                     || !valid
                     || record.disposition == ProviderCallDisposition::ToolRequested
-                        && (!tools_enabled || agent.role != AgentRole::Primary)
+                        && (!tools_enabled
+                            || agent.role != AgentRole::Primary
+                            || record.phase == crate::provider::AgentPhase::ToolReview)
                     || tools_enabled && agent.provider_calls.len() >= crate::tools::MAX_MODEL_STEPS
                     || (record.phase != AgentPhase::RootPlan
                         && record.disposition == ProviderCallDisposition::Delegated)
@@ -565,22 +576,19 @@ impl SessionView {
                 if *disposition == AgentDisposition::Finished
                     && run.tools.iter().any(|tool| {
                         tool.observation.is_none()
-                            || tool.observation.as_ref().is_some_and(|observation| {
-                                matches!(
-                                    observation.disposition,
-                                    crate::tools::ToolDisposition::Uncertain
-                                        | crate::tools::ToolDisposition::Cancelled
-                                )
-                            })
+                            || tool
+                                .observation
+                                .as_ref()
+                                .is_some_and(|observation| observation.stops_run())
                     })
                 {
                     return Err(ReplayError::InvalidTransition);
                 }
                 if *disposition == AgentDisposition::Finished
-                    && run.agents[index]
-                        .provider_calls
-                        .last()
-                        .is_some_and(|call| call.disposition != ProviderCallDisposition::Finished)
+                    && run.agents[index].provider_calls.last().is_some_and(|call| {
+                        call.disposition != ProviderCallDisposition::Finished
+                            || call.phase == crate::provider::AgentPhase::ToolReview
+                    })
                 {
                     return Err(ReplayError::InvalidTransition);
                 }

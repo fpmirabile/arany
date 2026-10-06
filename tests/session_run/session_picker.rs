@@ -352,7 +352,7 @@ fn screen_reader_entry(
     let entry = if resume {
         "--continue"
     } else {
-        "--provider openai --model gpt-5.4"
+        "--continue --provider openai --model gpt-5.4"
     };
     let shell = format!(
         "before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" {entry}; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
@@ -377,9 +377,11 @@ fn screen_reader_entry(
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking stdout pipe");
     let mut transcript = Vec::new();
     let mut answered = 0;
+    let mut declined = false;
     let deadline = Instant::now() + Duration::from_secs(10);
     while !transcript.windows(8).any(|part| part == b"Input:\r\n") {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
+        super::process::decline_workspace_consent(&mut input, &transcript, &mut declined);
         assert!(
             Instant::now() < deadline,
             "screen-reader input not ready: {}",
@@ -444,6 +446,11 @@ fn screen_reader_continue_reopens_the_empty_workspace_session() {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
+    super::slash_completion::saved_conversation(
+        &state,
+        &workspace,
+        arany::SessionDefaults::default(),
+    );
 
     let created = screen_reader_entry(&state, &workspace, false);
     let continued = screen_reader_entry(&state, &workspace, true);

@@ -69,10 +69,9 @@ impl Config {
         if self.version != 1
             || self.workspace_paths.is_empty()
             || self.workspace_paths.len() > 32
-            || self
-                .workspace_paths
-                .iter()
-                .any(|path| !valid_relative(path, false))
+            || self.workspace_paths.iter().any(|path| {
+                !valid_relative(path, false) && !(path == "." && self.workspace_paths.len() == 1)
+            })
             || self.commands.len() > 8
             || self.skills.len() > 32
             || self.mcp.len() > 4
@@ -202,7 +201,8 @@ impl Config {
             }
         };
         let path = path.expect("file operation has path");
-        path.is_empty() && !call.mutates()
+        (path.is_empty() || path == ".") && !call.mutates()
+            || self.workspace_paths == ["."]
             || self
                 .workspace_paths
                 .iter()

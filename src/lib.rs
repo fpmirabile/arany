@@ -10,7 +10,9 @@ mod telemetry;
 mod terminal;
 mod tools;
 
-pub use diagnostics::enable_development_diagnostics;
+pub use diagnostics::{
+    DevelopmentFailure, enable_development_diagnostics, record_development_failure,
+};
 pub use engine::{
     Engine, EngineError, RunCancellation, RunOutcome, RunProgress, RunRequest, RunUpdate,
     continue_session, create_session, fork_session, list_sessions, rename_session, resume_session,
@@ -46,6 +48,8 @@ pub use terminal::{
     TerminalInput, command_completions, parse_submission,
 };
 pub use tools::{
-    EffectIntent, GuardReceipt, NetworkGrant, ToolCall, ToolContext, ToolDisposition, ToolError,
-    ToolLimits, ToolObservation, ToolPolicyReceipt, tool_guard_main,
+    ApprovalInbox, ApprovalMode, EffectIntent, GuardReceipt, NetworkGrant, ToolApproval,
+    ToolApprovals, ToolCall, ToolContext, ToolDisposition, ToolError, ToolLimits, ToolObservation,
+    ToolPolicyReceipt, WorkspacePermissions, list_workspace_entries, mention_paths,
+    tool_guard_main,
 };

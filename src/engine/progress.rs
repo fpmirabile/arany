@@ -109,6 +109,7 @@ pub(super) async fn append_observed(
         _ => return Err(EngineError::CoordinatorFailed),
     };
     let committed = store.append(session_id, event).await?;
+    crate::diagnostics::event_failure(&committed.event);
     if let Some(trace) = trace {
         trace.event_committed(committed.sequence, kind);
     }

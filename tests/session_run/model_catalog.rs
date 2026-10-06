@@ -111,7 +111,9 @@ fn screen_reader_model_catalog_selects_exact_profile_without_provider_egress() {
     let mut input = child.child().stdin.take().expect("PTY input");
     let mut output = child.child().stdout.take().expect("PTY output");
     let (sender, receiver) = mpsc::channel();
+    let mut consent_input = std::fs::File::from(rustix::io::dup(&input).unwrap());
     let reader = thread::spawn(move || {
+        let mut declined = false;
         let mut bytes = Vec::new();
         let stages: [&[u8]; 24] = [
             b"Input:", b"Command: /exit", b"Notice: Select /provider first",
@@ -140,6 +142,7 @@ fn screen_reader_model_catalog_selects_exact_profile_without_provider_egress() {
             }
             assert!(bytes.len() + count <= 32 * 1024, "bounded PTY output");
             bytes.extend_from_slice(&chunk[..count]);
+            super::process::decline_workspace_consent(&mut consent_input, &bytes, &mut declined);
             while next < stages.len()
                 && let Some(position) = bytes[start..]
                     .windows(stages[next].len())
@@ -350,6 +353,11 @@ fn inline_model_catalog_at_width(width: u16) {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
+    let saved_id = super::slash_completion::saved_conversation(
+        &state,
+        &workspace,
+        arany::SessionDefaults::default(),
+    );
     write_profile(&state, 9321);
     let profile_path = state.join("provider-profiles.json");
     let mut profile: serde_json::Value =
@@ -363,7 +371,7 @@ fn inline_model_catalog_at_width(width: u16) {
     )
     .expect("updated profile file");
     let command = format!(
-        "stty rows 24 cols {width}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --no-color --provider custom:local --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
+        "stty rows 24 cols {width}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --no-color --provider custom:local --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
     let mut attached = Command::new("/usr/bin/script");
     attached
@@ -371,6 +379,7 @@ fn inline_model_catalog_at_width(width: u16) {
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
+        .env("ARANY_TEST_SESSION", saved_id.to_string())
         .env("OPENAI_API_KEY", NATIVE_TEST_KEY)
         .env("SHELL", "/bin/sh")
         .env("TERM", "xterm")
@@ -916,18 +925,9 @@ fn run_model_catalog_cancel_then_sigterm_case(columns: u16, rows: u16) {
         )
         .await
         .expect("canonical Session list");
-        assert_eq!(sessions.len(), 1);
-        let store = Store::open_read_only(StateRoot::open_existing(&state).expect("state reopen"))
-            .expect("read-only Store");
-        let view = store
-            .load_view(sessions[0].id)
-            .await
-            .expect("valid Session replay")
-            .expect("Session exists");
-        assert_eq!(view.defaults.provider.as_deref(), Some("custom:local"));
-        assert_eq!(view.defaults.model, None);
-        assert_eq!(view.defaults.effort, None);
-        assert!(view.runs.is_empty());
-        store.close().await.expect("close Store");
+        assert!(
+            sessions.is_empty(),
+            "cancelled model navigation saves no empty conversation"
+        );
     });
 }

@@ -283,7 +283,10 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                     outcome: ProviderOutcome::Tool(call),
                     ..
                 }) if valid_response => {
-                    if !self.execute_tool(root_request, call, deadline).await? {
+                    if !self
+                        .execute_tool(root_request, call, deadline, false, &primary)
+                        .await?
+                    {
                         return self.fail_primary(primary).await;
                     }
                 }

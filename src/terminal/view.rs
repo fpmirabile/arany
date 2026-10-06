@@ -21,6 +21,103 @@ use unicode_width::UnicodeWidthStr;
 
 const MAX_VISIBLE_DRAFT_ROWS: usize = 4;
 
+pub(super) fn draw_permission_frame(
+    frame: &mut Frame,
+    lines: &[String],
+    choices: (&str, &str),
+    page: usize,
+    allow: bool,
+    footer: &str,
+    palette: Palette,
+) -> bool {
+    let full = frame.area();
+    let width = full
+        .width
+        .saturating_sub(if full.width >= 40 { 4 } else { 0 })
+        .min(76);
+    if width == 0 || full.height < 8 {
+        return true;
+    }
+    let mut rows = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let mut current = String::new();
+        let mut cells = 0;
+        for grapheme in line.graphemes(true) {
+            let count = UnicodeWidthStr::width(grapheme);
+            if cells + count > usize::from(width) && !current.is_empty() {
+                rows.push(Line::styled(
+                    std::mem::take(&mut current),
+                    if index == 0 {
+                        palette.selection()
+                    } else {
+                        Style::default()
+                    },
+                ));
+                cells = 0;
+            }
+            current.push_str(grapheme);
+            cells += count;
+        }
+        rows.push(Line::styled(
+            current,
+            if index == 0 {
+                palette.selection()
+            } else {
+                Style::default()
+            },
+        ));
+    }
+    let height = full
+        .height
+        .min(u16::try_from(rows.len().saturating_add(5)).unwrap_or(u16::MAX))
+        .min(20);
+    let area = Rect::new(
+        full.x + (full.width - width) / 2,
+        full.y + (full.height - height) / 2,
+        width,
+        height,
+    );
+    let body_height = usize::from(height - 5);
+    let pages = rows.len().div_ceil(body_height).max(1);
+    let page = page.min(pages - 1);
+    let more = page + 1 < pages;
+    let start = page * body_height;
+    frame.render_widget(
+        Paragraph::new(rows[start..rows.len().min(start + body_height)].to_vec()),
+        Rect::new(area.x, area.y, width, body_height as u16),
+    );
+    let options_y = area.bottom() - 4;
+    if more {
+        let prompt = if width < 24 {
+            format!("Page {}/{} Enter", page + 1, pages)
+        } else {
+            format!("Page {}/{} · Enter/PgDn continues", page + 1, pages)
+        };
+        frame.render_widget(
+            Paragraph::new(safe_truncate(&prompt, usize::from(width))).style(palette.attention()),
+            Rect::new(area.x, options_y, width, 1),
+        );
+    } else {
+        for (index, choice) in [choices.0, choices.1].iter().enumerate() {
+            let focused = allow == (index == 1);
+            let label = format!("{} {}", if focused { "›" } else { " " }, choice);
+            frame.render_widget(
+                Paragraph::new(safe_truncate(&label, usize::from(width))).style(if focused {
+                    palette.selection()
+                } else {
+                    Style::default()
+                }),
+                Rect::new(area.x, options_y + index as u16, width, 1),
+            );
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(safe_truncate(footer, usize::from(width))),
+        Rect::new(area.x, area.bottom() - 1, width, 1),
+    );
+    more
+}
+
 struct ComposerRows {
     lines: Vec<String>,
     cursor_row: usize,
@@ -87,7 +184,7 @@ pub(super) fn history_top_padding(available_height: u16) -> u16 {
 }
 
 pub(super) fn completion_height(composer: &Composer, available_height: u16) -> u16 {
-    composer.completion_menu().map_or(0, |(names, _)| {
+    composer.completion_rows().map_or(0, |(names, _)| {
         (names.len().min(3) as u16).min(available_height.saturating_sub(1))
     })
 }
@@ -436,7 +533,7 @@ pub(super) fn draw_setup_warning_frame(
         width,
         height,
     );
-    let body_height = height - 4;
+    let body_height = height - 5;
     let lines = wrap_ascii_setup_warning(warning, usize::from(width));
     let pages = lines.len().div_ceil(usize::from(body_height));
     let page = page.min(pages - 1);
@@ -460,33 +557,26 @@ pub(super) fn draw_setup_warning_frame(
     } else {
         String::new()
     };
-    let actions = if !has_more {
-        let accept = accept_selected;
-        Line::from(vec![
-            Span::styled(
-                if accept { "[Back] " } else { ">[Back] " },
-                if accept {
-                    Style::default()
-                } else {
-                    palette.selection()
-                },
-            ),
-            Span::styled(
-                if accept { ">[Accept]" } else { "[Accept]" },
-                if accept {
-                    palette.selection()
-                } else {
-                    Style::default()
-                },
-            ),
-        ])
+    if has_more {
+        frame.render_widget(
+            Paragraph::new(safe_truncate(&prompt, usize::from(width))),
+            Rect::new(area.x, area.bottom() - 4, width, 1),
+        );
     } else {
-        Line::raw(safe_truncate(&prompt, usize::from(width)))
-    };
-    frame.render_widget(
-        Paragraph::new(actions),
-        Rect::new(area.x, area.bottom() - 3, width, 1),
-    );
+        for (index, label) in ["Back", "Accept"].iter().enumerate() {
+            let focused = accept_selected == (index == 1);
+            frame.render_widget(
+                Paragraph::new(format!("{} {label}", if focused { "›" } else { " " })).style(
+                    if focused {
+                        palette.selection()
+                    } else {
+                        Style::default()
+                    },
+                ),
+                Rect::new(area.x, area.bottom() - 4 + index as u16, width, 1),
+            );
+        }
+    }
     frame.render_widget(
         Paragraph::new(if has_more {
             "Read all pages"
@@ -670,7 +760,7 @@ pub(super) fn draw_frame_with_history(
         );
     }
     if menu_height > 0
-        && let Some((names, selected)) = composer.completion_menu()
+        && let Some((names, selected)) = composer.completion_rows()
     {
         let rows = usize::from(menu_height);
         let start = selected
@@ -681,7 +771,7 @@ pub(super) fn draw_frame_with_history(
             let marker = if focused { "> " } else { "  " };
             frame.render_widget(
                 Paragraph::new(safe_truncate(
-                    &format!("{marker}/{name}"),
+                    &format!("{marker}{name}"),
                     usize::from(area.width),
                 ))
                 .style(if focused {

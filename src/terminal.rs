@@ -302,6 +302,104 @@ pub struct AttachedTerminal {
 }
 
 impl AttachedTerminal {
+    pub fn draw_workspace_permissions(
+        &mut self,
+        id: uuid::Uuid,
+        workspace: &std::path::Path,
+        page: usize,
+        trust: bool,
+    ) -> Result<bool, TerminalError> {
+        self.cancel_clipboard_paste();
+        let lines = crate::presentation::workspace_permission_lines(workspace);
+        if let Some(linear) = &mut self.linear {
+            linear
+                .draw_permission_prompt(
+                    id,
+                    &lines,
+                    "1. Continue read only\n2. Trust this folder\nType trust or read only; empty Enter selects read only. Ctrl+C exits:",
+                )
+                .map_err(TerminalError::Io)?;
+            return Ok(false);
+        }
+        let palette = self.palette();
+        let mut more = true;
+        self.terminal
+            .as_mut()
+            .expect("inline terminal")
+            .draw(|frame| {
+                if frame.area().width >= 16 && frame.area().height >= 8 {
+                    more = view::draw_permission_frame(
+                        frame,
+                        &lines,
+                        if frame.area().width < 24 {
+                            ("Read only", "Trust folder")
+                        } else {
+                            ("Continue read only", "Trust this folder")
+                        },
+                        page,
+                        trust,
+                        if frame.area().width < 24 {
+                            "↑↓ Enter ^C exit"
+                        } else if frame.area().width < 50 {
+                            "↑↓ Enter · Ctrl+C exits"
+                        } else {
+                            "↑↓ choose · Enter confirm · Ctrl+C exit"
+                        },
+                        palette,
+                    );
+                } else {
+                    frame.render_widget(
+                        ratatui::widgets::Paragraph::new("Resize to review; Ctrl+C exits"),
+                        frame.area(),
+                    );
+                }
+            })?;
+        Ok(more)
+    }
+    pub fn draw_tool_approval(
+        &mut self,
+        intent: &crate::tools::EffectIntent,
+        page: usize,
+        allow: bool,
+    ) -> Result<bool, TerminalError> {
+        self.cancel_clipboard_paste();
+        if let Some(linear) = &mut self.linear {
+            linear
+                .draw_tool_approval(intent)
+                .map_err(TerminalError::Io)?;
+            return Ok(false);
+        }
+        let palette = self.palette();
+        let mut more = true;
+        self.terminal
+            .as_mut()
+            .expect("inline terminal")
+            .draw(|frame| {
+                if frame.area().width >= 16 && frame.area().height >= 8 {
+                    more = view::draw_permission_frame(
+                        frame,
+                        &crate::presentation::tool_approval_lines(intent),
+                        ("Deny", "Allow once"),
+                        page,
+                        allow,
+                        if frame.area().width < 24 {
+                            "↑↓ Enter Esc"
+                        } else if frame.area().width < 50 {
+                            "↑↓ Enter · Esc denies"
+                        } else {
+                            "↑↓ choose · Enter confirm · Esc denies"
+                        },
+                        palette,
+                    );
+                } else {
+                    frame.render_widget(
+                        ratatui::widgets::Paragraph::new("Resize to review; Esc denies"),
+                        frame.area(),
+                    );
+                }
+            })?;
+        Ok(more)
+    }
     pub fn acquire() -> Result<Self, TerminalError> {
         Self::acquire_with_preference(false)
     }
@@ -632,7 +730,9 @@ impl AttachedTerminal {
                     .write_clipboard_draft(&mut io::stderr(), composer)
                     .map_err(TerminalError::Io)?;
             }
-            return linear.draw(view, notice).map_err(TerminalError::Io);
+            return linear
+                .draw(view, notice, composer.approval_mode())
+                .map_err(TerminalError::Io);
         }
         let notice = notice.or_else(|| {
             self.clipboard
@@ -650,6 +750,17 @@ impl AttachedTerminal {
         }
         if self.clipboard.is_some() {
             model.draft_action = DraftAction::Retain;
+        }
+        if let Some(mode) = composer.approval_mode() {
+            let permissions = if area.width >= 64 {
+                format!("{} · Shift+Tab", mode.label())
+            } else {
+                mode.label().to_owned()
+            };
+            model.status_line = crate::presentation::safe_truncate(
+                &format!("{permissions} · {}", model.status_line),
+                usize::from(area.width),
+            );
         }
         let composer_height = composer_height(composer, area.into());
         let above_composer = area.height.saturating_sub(1 + composer_height);
@@ -978,7 +1089,7 @@ impl AttachedTerminal {
             }
             let prompt_needed = linear.prompt_needed;
             linear.prompt_needed = false;
-            let result = linear.draw(view, notice);
+            let result = linear.draw(view, notice, composer.approval_mode());
             linear.prompt_needed = prompt_needed;
             return result.map_err(TerminalError::Io);
         }

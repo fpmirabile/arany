@@ -71,6 +71,7 @@ pub enum TerminalInput {
     Home,
     End,
     Tab,
+    CycleApprovalMode,
     QuickActions,
     HistoryFind,
     HistoryLive,
@@ -524,6 +525,10 @@ fn map_key(key: KeyEvent) -> Option<TerminalInput> {
         KeyCode::PageDown => Some(TerminalInput::PageDown),
         KeyCode::Home => Some(TerminalInput::Home),
         KeyCode::End => Some(TerminalInput::End),
+        KeyCode::BackTab => Some(TerminalInput::CycleApprovalMode),
+        KeyCode::Tab if key.modifiers == KeyModifiers::SHIFT => {
+            Some(TerminalInput::CycleApprovalMode)
+        }
         KeyCode::Tab => Some(TerminalInput::Tab),
         KeyCode::Enter if key.modifiers == KeyModifiers::SHIFT => Some(TerminalInput::Newline),
         KeyCode::Enter => Some(TerminalInput::Submit),
@@ -658,6 +663,14 @@ mod tests {
     #[test]
     fn key_mapping_keeps_control_input_local_and_ignores_unowned_events() {
         let cases = [
+            (
+                Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)),
+                Some(TerminalInput::CycleApprovalMode),
+            ),
+            (
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)),
+                Some(TerminalInput::CycleApprovalMode),
+            ),
             (
                 Event::Key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)),
                 Some(TerminalInput::Character('/')),
@@ -825,6 +838,10 @@ mod tests {
                     .collect::<Vec<_>>()
             };
             for (bytes, expected) in [
+                (
+                    b"\x1b[Z\x1b[9;2u".as_slice(),
+                    vec![TerminalInput::CycleApprovalMode; 2],
+                ),
                 (
                     b"/\r\x0f\x03\x17".as_slice(),
                     vec![

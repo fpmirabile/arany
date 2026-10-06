@@ -741,6 +741,7 @@ impl TraceEventKind {
 fn phase_name(phase: AgentPhase) -> &'static str {
     match phase {
         AgentPhase::RootPlan => "primary_plan",
+        AgentPhase::ToolReview => "tool_review",
         AgentPhase::ChildWork => "child_work",
         AgentPhase::RootSynthesis => "primary_synthesis",
     }

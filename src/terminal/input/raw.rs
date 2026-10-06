@@ -436,6 +436,7 @@ fn sequence_event(bytes: &[u8]) -> Option<ReaderEvent> {
         return None;
     }
     let code = match end {
+        b'Z' if first.is_empty() && third.is_none() => KeyCode::BackTab,
         b'A' | b'B' | b'C' | b'D' | b'H' | b'F' if matches!(first, "" | "1") && third.is_none() => {
             match end {
                 b'A' => KeyCode::Up,

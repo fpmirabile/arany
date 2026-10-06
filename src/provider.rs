@@ -143,6 +143,7 @@ pub(crate) fn raw_reflects_secret(bytes: &[u8], secret: &str) -> bool {
 #[serde(rename_all = "snake_case")]
 pub enum AgentPhase {
     RootPlan,
+    ToolReview,
     ChildWork,
     RootSynthesis,
 }
@@ -212,8 +213,8 @@ pub(crate) fn restrict_outcome_schema(
             _ => false,
         },
     );
-    if request.tools.is_some() {
-        branches.push(crate::tools::types::outcome_branch());
+    if let Some(tools) = &request.tools {
+        branches.push(tools.outcome_branch());
     }
     schema
 }

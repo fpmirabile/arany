@@ -49,7 +49,7 @@ impl Provider for Journey {
             .as_ref()
             .ok_or(ProviderError::InvalidOutcome)?;
         let call = match step {
-            0 => ToolCall::List { path: "src".into() },
+            0 => ToolCall::List { path: ".".into() },
             1 => ToolCall::Read {
                 path: "src/main.c".into(),
                 offset: 0,
@@ -638,10 +638,52 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         replay(all.clone()).unwrap().unwrap().runs[0].status,
         RunStatus::Finished
     );
+    let mut review = record(ProviderCallDisposition::Finished);
+    if let Event::ProviderCallRecorded { record, .. } = &mut review {
+        record.phase = AgentPhase::ToolReview;
+        record.input_tokens = Some(3);
+        record.output_tokens = Some(1);
+    }
+    let mut reviewed = all.clone();
+    reviewed.insert(6, review.clone());
+    let view = replay(reviewed.clone()).unwrap().unwrap();
+    assert_eq!(view.runs[0].status, RunStatus::Finished);
+    assert_eq!(
+        view.runs[0].agents[0].provider_calls[1].input_tokens,
+        Some(3)
+    );
+    for case in 0..6 {
+        let mut row = reviewed.clone();
+        match case {
+            0 => {
+                row.remove(6);
+                row.insert(5, review.clone());
+            }
+            1 => {
+                row.remove(6);
+                row.insert(7, review.clone());
+            }
+            2 => row.insert(7, review.clone()),
+            3 => {
+                row.remove(8);
+            }
+            4 | 5 => {
+                if let Event::ProviderCallRecorded { record, .. } = &mut row[6] {
+                    record.disposition = if case == 4 {
+                        ProviderCallDisposition::ToolRequested
+                    } else {
+                        ProviderCallDisposition::Delegated
+                    };
+                }
+            }
+            _ => unreachable!(),
+        }
+        assert!(replay(row).is_err(), "invalid review transition {case}");
+    }
     let interrupted = replay(prefix[..6].to_vec()).unwrap().unwrap();
     assert_eq!(interrupted.runs[0].status, RunStatus::Interrupted);
     assert!(interrupted.runs[0].tools[0].observation.is_none());
-    for case in 0..10 {
+    for case in 0..11 {
         let mut row = all.clone();
         match case {
             0 => {
@@ -694,10 +736,66 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                     config.tool_policy = None;
                 }
             }
+            10 => {
+                if let Event::ToolFinished { observation, .. } = &mut row[6] {
+                    observation.disposition = ToolDisposition::Failed;
+                    observation.guard = None;
+                }
+            }
             _ => unreachable!(),
         }
         assert!(replay(row).is_err(), "Tool journal transition {case}");
     }
+    for (guarded, later_failure) in [(true, true), (false, true), (false, false)] {
+        let mut denied = prefix.to_vec();
+        if let Event::ToolFinished { observation, .. } = &mut denied[6] {
+            observation.disposition = ToolDisposition::Denied;
+            observation.output = "UNTRUSTED_TOOL_ERROR_CANARY".into();
+            if !guarded {
+                observation.guard = None;
+            }
+        }
+        if later_failure {
+            let mut failure = record(ProviderCallDisposition::InvalidResponse);
+            if let Event::ProviderCallRecorded { record, .. } = &mut failure {
+                record.failure_reason = Some(arany::ProviderFailureReason::OutcomeContract);
+            }
+            denied.push(failure);
+        }
+        denied.extend([
+            Event::AgentFinished {
+                run_id: run,
+                agent_run_id: primary,
+                disposition: AgentDisposition::Failed,
+                summary: None,
+                result: None,
+            },
+            Event::RunFinished {
+                run_id: run,
+                disposition: RunDisposition::Failed,
+            },
+        ]);
+        let view = replay(denied).unwrap().unwrap();
+        let feedback = arany::render_run_feedback(&view.runs[0]).unwrap();
+        if later_failure {
+            assert!(
+                feedback.contains("structured outcome contract"),
+                "recoverable denial must not mask the later Provider failure"
+            );
+            assert!(!feedback.contains("approval expired"));
+        } else {
+            assert!(feedback.contains("Action denied or approval expired"));
+        }
+        assert!(!feedback.contains("CANARY"));
+    }
+    let mut observed_failure = all.clone();
+    if let Event::ToolFinished { observation, .. } = &mut observed_failure[6] {
+        observation.disposition = ToolDisposition::Failed;
+    }
+    assert!(
+        replay(observed_failure).is_ok(),
+        "an attested ordinary failure can continue"
+    );
     for (count, output, accepted) in [
         (16, "", true),
         (17, "", false),
@@ -872,22 +970,65 @@ impl Provider for BoundedLoop {
         let mut requests = self.requests.lock().unwrap();
         let outcome = if self.team {
             match requests.len() {
-                0 | 3 => ProviderOutcome::Tool(ToolCall::Read {
+                0 => ProviderOutcome::Tool(ToolCall::Search {
+                    path: "src/current.txt".into(),
+                    query: "current".into(),
+                }),
+                3 => ProviderOutcome::Tool(ToolCall::Read {
                     path: "src/current.txt".into(),
                     offset: 0,
                     limit: 4096,
                 }),
-                1 => ProviderOutcome::Delegate(arany::Delegate {
-                    children: vec!["Review the stated task without effects".into()],
-                }),
+                1 => {
+                    let observation = &request.tools.as_ref().unwrap().observations[0];
+                    assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+                    let search: Value = serde_json::from_str(&observation.output).unwrap();
+                    assert_eq!(
+                        search["entries"],
+                        json!([{"path":"src/current.txt","line":1,"text":"current"}])
+                    );
+                    ProviderOutcome::Delegate(arany::Delegate {
+                        children: vec!["Review the stated task without effects".into()],
+                    })
+                }
                 2 => ProviderOutcome::Finish(Finish {
                     summary: "Child reasoning".into(),
                     result: "Read-only child result".into(),
                 }),
-                4 => ProviderOutcome::Finish(Finish {
-                    summary: "Finished team".into(),
-                    result: "Primary used Tools; child only reasoned.".into(),
-                }),
+                4 => {
+                    let observation = request.tools.as_ref().unwrap().observations.last().unwrap();
+                    assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+                    assert!(
+                        matches!(&observation.intent.call, ToolCall::Read { path, .. } if path == "src/current.txt")
+                    );
+                    let read: serde_json::Value =
+                        serde_json::from_str(&observation.output).unwrap();
+                    assert_eq!(read["text"], "current");
+                    ProviderOutcome::Tool(ToolCall::Edit {
+                        path: "src/current.txt".into(),
+                        expected_digest: read["sha256"].as_str().unwrap().into(),
+                        old: "current".into(),
+                        new: "current\n2026-10-06\n".into(),
+                    })
+                }
+                5 => {
+                    assert_eq!(
+                        request
+                            .tools
+                            .as_ref()
+                            .unwrap()
+                            .observations
+                            .last()
+                            .unwrap()
+                            .disposition,
+                        ToolDisposition::Succeeded
+                    );
+                    ProviderOutcome::Finish(Finish {
+                        summary: "Finished team".into(),
+                        result: "Appended 2026-10-06 after reading the file; child only reasoned."
+                            .into(),
+                    })
+                }
                 _ => return Err(ProviderError::InvalidOutcome),
             }
         } else {
@@ -915,12 +1056,74 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src")).unwrap();
     private_file(&workspace.join("src/current.txt"), b"current");
-    for team in [false, true] {
+    for team in [true, false] {
         let state_path = temp
             .path()
             .join(if team { "state-team" } else { "state-budget" });
         let state = StateRoot::admit(&state_path).unwrap();
         basic_config(&state_path);
+        if team {
+            let mut config: Value =
+                serde_json::from_slice(&std::fs::read(state_path.join("tools.json")).unwrap())
+                    .unwrap();
+            config["workspace_paths"] = json!(["."]);
+            private_file(
+                &state_path.join("tools.json"),
+                &serde_json::to_vec(&config).unwrap(),
+            );
+        }
+        let previous = if team {
+            let failed_requests = Arc::new(Mutex::new(Vec::new()));
+            let mut failed = Engine::open(
+                state,
+                Proposal {
+                    call: ToolCall::Edit {
+                        path: "src/current.txt".into(),
+                        expected_digest: hash(b"current"),
+                        old: "current".into(),
+                        new: "must not run".into(),
+                    },
+                    requests: failed_requests.clone(),
+                },
+            )
+            .unwrap();
+            failed.enable_tools("/usr/bin/false".into()).unwrap();
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(15),
+                failed.run(proposal_request(&workspace)),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            failed.close().await.unwrap();
+            assert_eq!(outcome.run.status, RunStatus::Failed);
+            let observation = outcome.run.tools[0].observation.as_ref().unwrap();
+            assert_eq!(
+                observation.disposition,
+                ToolDisposition::Failed,
+                "a helper that never receives GO cannot edit the file"
+            );
+            assert!(observation.guard.is_none());
+            assert!(observation.output.contains("no operation was dispatched"));
+            assert_eq!(
+                failed_requests.lock().unwrap().len(),
+                1,
+                "no automatic retry after failed bootstrap"
+            );
+            assert_eq!(
+                std::fs::read(workspace.join("src/current.txt")).unwrap(),
+                b"current"
+            );
+            assert!(
+                arany::render_run_feedback(&outcome.run)
+                    .unwrap()
+                    .contains("before the action started")
+            );
+            Some(outcome)
+        } else {
+            None
+        };
+        let state = StateRoot::open_existing(&state_path).unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let mut engine = Engine::open(
             state,
@@ -930,11 +1133,16 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
             },
         )
         .unwrap();
+        let (approvals, _inbox) = arany::ToolApprovals::new(arany::ApprovalMode::AutoEdits);
+        engine.set_tool_approvals(approvals);
         engine
             .enable_tools(env!("CARGO_BIN_EXE_arany").into())
             .unwrap();
         let mut request = proposal_request(&workspace);
         if team {
+            request.session_id = Some(previous.as_ref().unwrap().session_id);
+            request.title = None;
+            request.include_paths = vec!["src/current.txt".into()];
             request.policy = CollaborationPolicy::Team {
                 max_active_children: 1,
             };
@@ -947,7 +1155,11 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
         let requests = requests.lock().unwrap().clone();
         if team {
             assert_eq!(outcome.run.status, RunStatus::Finished);
-            assert_eq!(requests.len(), 5);
+            assert_eq!(
+                std::fs::read_to_string(workspace.join("src/current.txt")).unwrap(),
+                "current\n2026-10-06\n"
+            );
+            assert_eq!(requests.len(), 6);
             for (index, request) in requests.iter().enumerate() {
                 assert_eq!(
                     request.phase,
@@ -956,26 +1168,54 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
                         AgentPhase::RootPlan,
                         AgentPhase::ChildWork,
                         AgentPhase::RootSynthesis,
+                        AgentPhase::RootSynthesis,
                         AgentPhase::RootSynthesis
                     ][index]
                 );
                 assert_eq!(request.model, "guard-model");
                 assert_eq!(request.max_output_tokens, 4096);
+                if let Some(tools) = &request.tools {
+                    let catalog: Value = serde_json::from_str(&tools.catalog).unwrap();
+                    assert_eq!(catalog["host_clock"]["timezone"], "UTC");
+                    let timestamp = catalog["host_clock"]["unix_ms"].as_u64().unwrap();
+                    let current = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64;
+                    assert!(timestamp <= current && current - timestamp < 20_000);
+                }
                 assert!(
                     request.instructions.is_none()
-                        && request.includes.is_empty()
                         && request.images.is_empty()
-                        && request.history.is_empty()
                         && request.context_summary.is_none()
                 );
+                assert_eq!(
+                    request.includes,
+                    vec![format!(
+                        "File: \"src/current.txt\"\nSHA-256: {}\nContent (untrusted data):\ncurrent",
+                        hash(b"current")
+                    )]
+                );
                 if index == 2 {
+                    assert!(request.history.is_empty());
                     assert_eq!(request.objective, "Review the stated task without effects");
                     assert!(request.tools.is_none() && request.child_results.is_empty());
                 } else {
+                    assert_eq!(request.history.len(), 1);
+                    let history: Value =
+                        serde_json::from_str(&request.history[0].assistant).unwrap();
+                    assert!(
+                        history["scope"]
+                            .as_str()
+                            .unwrap()
+                            .contains("historical Run")
+                    );
+                    assert_eq!(history["run_status"], "Failed");
+                    assert_eq!(history["tool_records"][0]["disposition"], "failed");
                     assert_eq!(request.objective, "Guard corpus");
                     assert_eq!(
                         request.tools.as_ref().unwrap().observations.len(),
-                        [0, 1, 0, 1, 2][index]
+                        [0, 1, 0, 1, 2, 3][index]
                     );
                     assert_eq!(request.child_results.len(), usize::from(index >= 3));
                     if index >= 3 {
@@ -983,12 +1223,17 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
                     }
                 }
             }
-            assert_eq!(outcome.run.tools.len(), 2);
+            assert_eq!(outcome.run.tools.len(), 3);
         } else {
             assert_eq!(outcome.run.status, RunStatus::Failed);
             assert_eq!(outcome.run.tools.len(), 16);
             assert!(outcome.run.assistant_message.is_none());
             assert_proposal_requests(&requests, 17);
+            assert!(
+                !arany::render_run_feedback(&outcome.run)
+                    .unwrap()
+                    .contains("approval expired")
+            );
             assert!(
                 outcome
                     .run
@@ -1006,9 +1251,22 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
                 .await
                 .unwrap()
                 .unwrap()
-                .runs[0],
-            outcome.run
+                .runs
+                .last()
+                .unwrap(),
+            &outcome.run
         );
+        if let Some(previous) = previous {
+            assert_eq!(
+                store
+                    .load_view(previous.session_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .runs[0],
+                previous.run
+            );
+        }
         store.close().await.unwrap();
     }
 }
@@ -1071,10 +1329,37 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
         offset: 0,
         limit: 4096,
     };
+    let search = |path: &str| ToolCall::Search {
+        path: path.into(),
+        query: "OUTSIDE_GUARD_CANARY".into(),
+    };
+    let deep_path = format!("deep/{}note.txt", "d/".repeat(16));
+    std::fs::create_dir_all(workspace.join(&deep_path).parent().unwrap()).unwrap();
+    private_file(&workspace.join(&deep_path), b"OUTSIDE_GUARD_CANARY");
     let rows = [
         ("symlink", read("src/link"), ToolDisposition::Denied),
         ("hardlink", read("src/hardlink"), ToolDisposition::Denied),
         ("fifo", read("src/fifo"), ToolDisposition::Denied),
+        (
+            "root-search-symlink",
+            search("src/link"),
+            ToolDisposition::Denied,
+        ),
+        (
+            "root-search-hardlink",
+            search("src/hardlink"),
+            ToolDisposition::Denied,
+        ),
+        (
+            "root-search-fifo",
+            search("src/fifo"),
+            ToolDisposition::Denied,
+        ),
+        (
+            "root-search-depth",
+            search(&deep_path),
+            ToolDisposition::Denied,
+        ),
         ("scope", read("unselected.txt"), ToolDisposition::Denied),
         (
             "parent",
@@ -1125,6 +1410,16 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
         let state_path = temp.path().join(format!("state-{name}"));
         let state = StateRoot::admit(&state_path).unwrap();
         basic_config(&state_path);
+        if name.starts_with("root-search-") {
+            let mut config: Value =
+                serde_json::from_slice(&std::fs::read(state_path.join("tools.json")).unwrap())
+                    .unwrap();
+            config["workspace_paths"] = json!(["."]);
+            private_file(
+                &state_path.join("tools.json"),
+                &serde_json::to_vec(&config).unwrap(),
+            );
+        }
         let requests = Arc::new(Mutex::new(Vec::new()));
         let mut engine = Engine::open(
             state,
@@ -1156,6 +1451,16 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
             "case {name}"
         );
         assert_proposal_requests(&requests.lock().unwrap(), 2);
+        if name.starts_with("root-search-") {
+            assert!(
+                !outcome.run.tools[0]
+                    .observation
+                    .as_ref()
+                    .unwrap()
+                    .output
+                    .contains("OUTSIDE_GUARD_CANARY")
+            );
+        }
         if expected == ToolDisposition::Succeeded {
             let observation = outcome.run.tools[0].observation.as_ref().unwrap();
             assert!(observation.output.len() <= 128);
@@ -1527,6 +1832,7 @@ async fn resource_quotas_apply_to_payload_descendants_and_oom_is_uncertain() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src")).unwrap();
+    private_file(&workspace.join("src/current.txt"), b"current");
     private_file(
         &workspace.join("src/quotas.c"),
         include_bytes!("../fixtures/tool-quotas.c"),
@@ -1658,5 +1964,323 @@ async fn resource_quotas_apply_to_payload_descendants_and_oom_is_uncertain() {
             outcome.run
         );
         store.close().await.unwrap();
+        if mode == "memory" {
+            let fresh_requests = Arc::new(Mutex::new(Vec::new()));
+            let mut resumed = Engine::open(
+                StateRoot::open_existing(&state_path).unwrap(),
+                BoundedLoop {
+                    requests: fresh_requests.clone(),
+                    team: true,
+                },
+            )
+            .unwrap();
+            resumed
+                .enable_tools(env!("CARGO_BIN_EXE_arany").into())
+                .unwrap();
+            let mut next = proposal_request(&workspace);
+            next.session_id = Some(outcome.session_id);
+            next.title = None;
+            next.include_paths = vec!["src/current.txt".into()];
+            next.policy = CollaborationPolicy::Team {
+                max_active_children: 1,
+            };
+            let fresh = tokio::time::timeout(Duration::from_secs(20), resumed.run(next))
+                .await
+                .unwrap()
+                .unwrap();
+            resumed.close().await.unwrap();
+            assert_eq!(fresh.run.status, RunStatus::Finished);
+            assert_eq!(
+                std::fs::read(workspace.join("src/current.txt")).unwrap(),
+                b"current\n2026-10-06\n"
+            );
+            {
+                let calls = fresh_requests.lock().unwrap();
+                assert_eq!(calls.len(), 6);
+                assert!(calls[0].tools.as_ref().unwrap().observations.is_empty());
+                let historical: Value =
+                    serde_json::from_str(&calls[0].history[0].assistant).unwrap();
+                assert!(
+                    historical["scope"]
+                        .as_str()
+                        .unwrap()
+                        .contains("historical Run")
+                );
+                assert_eq!(historical["tool_records"][0]["disposition"], "uncertain");
+                assert!(fresh.run.tools.iter().all(|tool| !matches!(
+                    tool.intent.call,
+                    ToolCall::Command { .. }
+                )
+                    && tool.observation.as_ref().unwrap().disposition
+                        == ToolDisposition::Succeeded));
+            }
+            let store =
+                Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+            let view = store.load_view(outcome.session_id).await.unwrap().unwrap();
+            assert_eq!(view.runs, vec![outcome.run, fresh.run]);
+            store.close().await.unwrap();
+        }
+    }
+}
+
+struct ApprovalJourney {
+    requests: Arc<Mutex<Vec<ProviderRequest>>>,
+    call: ToolCall,
+    review: &'static str,
+}
+
+impl Provider for ApprovalJourney {
+    fn profile_name(&self) -> &str {
+        "scripted"
+    }
+    fn model_name(&self) -> &str {
+        "guard-model"
+    }
+    fn max_concurrent_calls(&self) -> u8 {
+        1
+    }
+    async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        let mut requests = self.requests.lock().unwrap();
+        let first = requests.is_empty();
+        let review = request.phase == AgentPhase::ToolReview;
+        requests.push(request);
+        if review && self.review == "error" {
+            return Err(ProviderError::InvalidOutcome);
+        }
+        Ok(ProviderResponse {
+            outcome: if first {
+                ProviderOutcome::Tool(self.call.clone())
+            } else {
+                ProviderOutcome::Finish(Finish {
+                    summary: "Synthetic decision".into(),
+                    result: if review {
+                        self.review.into()
+                    } else {
+                        "Action completed".into()
+                    },
+                })
+            },
+            response_id: None,
+            input_tokens: Some(3),
+            output_tokens: Some(1),
+            wire_provenance: None,
+        })
+    }
+    async fn compact(&self, _: CompactionRequest) -> Result<CompactionResponse, ProviderError> {
+        Err(ProviderError::InvalidOutcome)
+    }
+}
+
+#[tokio::test]
+#[ignore = "native Linux Guard approval and AI review gate"]
+async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() {
+    use arany::{
+        ApprovalMode, ProviderCallDisposition, RunCancellation, RunProgress, ToolApprovals,
+    };
+    for (name, mode, review, decision, command) in [
+        ("request-allow", ApprovalMode::Request, "", "allow", false),
+        ("request-deny", ApprovalMode::Request, "", "deny", false),
+        ("request-drop", ApprovalMode::Request, "", "drop", false),
+        ("request-cancel", ApprovalMode::Request, "", "cancel", false),
+        ("auto-edit", ApprovalMode::AutoEdits, "", "none", false),
+        ("auto-command", ApprovalMode::AutoEdits, "", "allow", true),
+        ("ai-approve", ApprovalMode::Auto, "approve", "none", false),
+        ("ai-ask", ApprovalMode::Auto, "ask", "allow", false),
+        ("ai-malformed", ApprovalMode::Auto, "maybe", "deny", false),
+        ("ai-error", ApprovalMode::Auto, "error", "allow", false),
+        ("ai-error-deny", ApprovalMode::Auto, "error", "deny", false),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("project");
+        std::fs::create_dir(&workspace).unwrap();
+        let state_path = temp.path().join("state");
+        let state = StateRoot::admit(&state_path).unwrap();
+        let config = json!({"version":1,"workspace_paths":["."],"write":true,"commands":[{"name":"bash","executable":"/usr/bin/bash","sha256":hash(&std::fs::read("/usr/bin/bash").unwrap()),"interpreter":true,"inputs":[]}],"skills":[],"mcp":[]});
+        private_file(
+            &state_path.join("tools.json"),
+            &serde_json::to_vec(&config).unwrap(),
+        );
+        let call = if command {
+            ToolCall::Command {
+                program: "bash".into(),
+                args: vec![
+                    "-c".into(),
+                    "printf discarded > command-output.txt; printf approval-command-passed".into(),
+                ],
+                cwd: "".into(),
+            }
+        } else {
+            ToolCall::Write {
+                path: "README.md".into(),
+                expected_digest: None,
+                content: "2026-10-06\n".into(),
+            }
+        };
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut engine = Engine::open(
+            state,
+            ApprovalJourney {
+                requests: requests.clone(),
+                call: call.clone(),
+                review,
+            },
+        )
+        .unwrap();
+        engine
+            .enable_tools(env!("CARGO_BIN_EXE_arany").into())
+            .unwrap();
+        let (controls, mut inbox) = ToolApprovals::new(mode);
+        engine.set_tool_approvals(controls);
+        let cancellation = RunCancellation::new();
+        let pending = cancellation.clone();
+        let approve = async {
+            if decision == "none" {
+                return;
+            }
+            let action = inbox.next().await.expect("one exact pending intent");
+            assert_eq!(action.intent.call, call);
+            match decision {
+                "allow" => action.decide(true),
+                "deny" => action.decide(false),
+                "drop" => drop(action),
+                "cancel" => {
+                    pending.cancel();
+                    drop(action);
+                }
+                _ => unreachable!(),
+            }
+        };
+        let (outcome, ()) = tokio::time::timeout(Duration::from_secs(30), async {
+            tokio::join!(
+                engine.run_with_progress(
+                    proposal_request(&workspace),
+                    cancellation,
+                    RunProgress::new()
+                ),
+                approve
+            )
+        })
+        .await
+        .expect("bounded approval journey");
+        let outcome = outcome.unwrap();
+        engine.close().await.unwrap();
+        let allowed = decision == "allow" || decision == "none";
+        assert_eq!(
+            outcome.run.status,
+            if decision == "cancel" {
+                RunStatus::Cancelled
+            } else if allowed {
+                RunStatus::Finished
+            } else {
+                RunStatus::Failed
+            },
+            "{name}: {:?}",
+            outcome.run
+        );
+        assert_eq!(
+            workspace.join("README.md").exists(),
+            allowed && !command,
+            "{name}"
+        );
+        if allowed && !command {
+            assert_eq!(
+                std::fs::read(workspace.join("README.md")).unwrap(),
+                b"2026-10-06\n"
+            );
+        }
+        assert!(!workspace.join("command-output.txt").exists());
+        let observed = requests.lock().unwrap().clone();
+        let review_count = usize::from(mode == ApprovalMode::Auto);
+        assert_eq!(
+            observed.len(),
+            1 + review_count + usize::from(allowed),
+            "{name}"
+        );
+        assert_eq!(observed[0].phase, AgentPhase::RootPlan);
+        assert_eq!(observed[0].objective, "Guard corpus");
+        assert!(observed[0].tools.is_some());
+        if review_count == 1 {
+            let request = &observed[1];
+            assert_eq!(request.phase, AgentPhase::ToolReview);
+            assert_eq!(request.max_output_tokens, 256);
+            assert!(
+                request.tools.is_none()
+                    && request.includes.is_empty()
+                    && request.images.is_empty()
+                    && request.history.is_empty()
+                    && request.child_results.is_empty()
+                    && request.context_summary.is_none()
+            );
+            let payload: Value = serde_json::from_str(&request.objective).unwrap();
+            assert_eq!(payload["user_request"], "Guard corpus");
+            assert_eq!(
+                payload["proposed_action"]["call"],
+                serde_json::to_value(&call).unwrap()
+            );
+        }
+        if allowed {
+            let continuation = observed.last().unwrap();
+            assert_eq!(continuation.phase, AgentPhase::RootPlan);
+            let observations = &continuation.tools.as_ref().unwrap().observations;
+            assert_eq!(observations.len(), 1);
+            assert_eq!(observations[0].intent.call, call);
+            assert_eq!(
+                observations[0].disposition,
+                ToolDisposition::Succeeded,
+                "{name}"
+            );
+            if command {
+                assert_eq!(
+                    serde_json::from_str::<Value>(&observations[0].output).unwrap(),
+                    json!({"exit_code":0,"stderr":"","stdout":"approval-command-passed","workspace_changes":"discarded"})
+                );
+            }
+        }
+        let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+        let events = store.load_session(outcome.session_id).await.unwrap();
+        store.close().await.unwrap();
+        let replay = SessionView::replay(outcome.session_id, &events)
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay.runs[0].status, outcome.run.status);
+        assert_eq!(replay.runs[0].tools, outcome.run.tools);
+        let calls = &replay.runs[0].agents[0].provider_calls;
+        assert_eq!(calls.len(), 1 + review_count + usize::from(allowed));
+        if review_count == 1 {
+            assert_eq!(calls[1].phase, AgentPhase::ToolReview);
+            assert_eq!(
+                calls[1].disposition,
+                if matches!(review, "error" | "maybe") {
+                    ProviderCallDisposition::InvalidResponse
+                } else {
+                    ProviderCallDisposition::Finished
+                }
+            );
+            if review != "error" {
+                assert_eq!(calls[1].input_tokens, Some(3));
+                assert_eq!(calls[1].output_tokens, Some(1));
+            }
+        }
+        assert_eq!(
+            replay.runs[0].assistant_message.as_deref(),
+            allowed.then_some("Action completed")
+        );
+        if outcome.run.status == RunStatus::Failed {
+            assert!(
+                arany::render_run_feedback(&replay.runs[0])
+                    .unwrap()
+                    .contains("Action denied or approval expired"),
+                "{name}: a failed optional review must not hide the human denial"
+            );
+        }
+        assert!(
+            replay.runs[0].tools[0]
+                .observation
+                .as_ref()
+                .unwrap()
+                .guard
+                .is_some()
+                == allowed
+        );
     }
 }

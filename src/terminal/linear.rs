@@ -4,7 +4,7 @@ use crate::presentation::{
 };
 #[cfg(test)]
 use crate::provider::ModelEntry;
-use crate::session::{SessionId, SessionListItem, SessionView};
+use crate::session::{SessionDefaults, SessionId, SessionListItem, SessionView};
 use std::io::{self, Write};
 
 use super::CommandAvailability;
@@ -14,30 +14,79 @@ pub(super) struct LinearState {
     mode_label: &'static str,
     announced: bool,
     last_view: Option<(SessionId, u64)>,
+    last_unsaved: Option<(SessionDefaults, String)>,
     pub(super) prompt_needed: bool,
     pub(super) last_picker_page: Option<usize>,
     pub(super) last_model_page: Option<(usize, super::ModelCatalogState)>,
     last_setup: Option<(u8, String, String)>,
+    last_approval: Option<uuid::Uuid>,
+    permission_mode: Option<crate::tools::ApprovalMode>,
     pub(super) line_open: bool,
     pub(super) newline_pending: bool,
 }
 
 impl LinearState {
+    pub(super) fn draw_tool_approval(
+        &mut self,
+        intent: &crate::tools::EffectIntent,
+    ) -> io::Result<()> {
+        self.draw_permission_prompt(
+            intent.id,
+            &crate::presentation::tool_approval_lines(intent),
+            "Type allow or deny; empty Enter denies:",
+        )
+    }
+
+    pub(super) fn draw_permission_prompt(
+        &mut self,
+        id: uuid::Uuid,
+        lines: &[String],
+        prompt: &str,
+    ) -> io::Result<()> {
+        if self.last_approval == Some(id) {
+            return Ok(());
+        }
+        let mut writer = io::stderr();
+        if self.newline_pending || self.line_open {
+            writeln!(writer)?;
+        }
+        for line in lines {
+            writeln!(writer, "{line}")?;
+        }
+        writeln!(writer, "{prompt}")?;
+        self.newline_pending = false;
+        self.line_open = true;
+        self.prompt_needed = false;
+        self.last_approval = Some(id);
+        writer.flush()
+    }
     pub(super) fn new(mode_label: &'static str) -> Self {
         Self {
             mode_label,
             announced: false,
             last_view: None,
+            last_unsaved: None,
             prompt_needed: true,
             last_picker_page: None,
             last_model_page: None,
             last_setup: None,
+            last_approval: None,
+            permission_mode: None,
             line_open: false,
             newline_pending: false,
         }
     }
 
-    pub(super) fn draw(&mut self, view: &SessionView, notice: Option<&str>) -> io::Result<()> {
+    pub(super) fn draw(
+        &mut self,
+        view: &SessionView,
+        notice: Option<&str>,
+        mode: Option<crate::tools::ApprovalMode>,
+    ) -> io::Result<()> {
+        if self.permission_mode != mode {
+            self.permission_mode = mode;
+            self.last_view = None;
+        }
         self.write_view(&mut io::stderr(), view, notice)
     }
 
@@ -250,11 +299,24 @@ impl LinearState {
             self.announced = true;
         }
         let identity = (view.id, view.last_sequence);
-        if self.last_view != Some(identity) {
+        let unsaved = (view.created_sequence == 0)
+            .then(|| (view.defaults.clone(), view.conversation_title()));
+        if self.last_view != Some(identity) || self.last_unsaved != unsaved {
             for line in linear_session_lines(view) {
-                writeln!(writer, "{line}")?;
+                if line.starts_with("Permissions:")
+                    && let Some(mode) = self.permission_mode
+                {
+                    writeln!(
+                        writer,
+                        "Permissions: {} for this folder; commands run offline in an isolated copy",
+                        mode.label()
+                    )?;
+                } else {
+                    writeln!(writer, "{line}")?;
+                }
             }
             self.last_view = Some(identity);
+            self.last_unsaved = unsaved;
         }
         if let Some(notice) = notice {
             writeln!(writer, "Notice: {}", safe_truncate(notice, 240))?;
@@ -607,7 +669,7 @@ mod tests {
                 "Command: /agents <single|auto|team> [max-active-children]; Agent details; during Run: view-only\n",
                 "Command: /provider <provider>; Choose Provider; during Run: view-only\n",
                 "Command: /model <model-id> [effort|default]; Choose model; during Run: view-only\n",
-                "Command: /permissions; Show permissions; during Run: available\n",
+                "Command: /permissions; Folder trust and approval settings; during Run: available\n",
                 "Command: /quit; Exit Session; during Run: view-only\n",
                 "Command: /exit; Exit Session; during Run: view-only\n",
             ).as_bytes()
@@ -686,6 +748,32 @@ mod tests {
             .write_agents(&mut refreshed, &model, false)
             .expect("progress redraw after partial choice");
         assert!(refreshed.starts_with(b"\nAgents:"));
+
+        view.runs.clear();
+        view.created_sequence = 0;
+        view.last_sequence = 0;
+        let mut unsaved = LinearState::new("screen-reader");
+        let mut output = Vec::new();
+        unsaved
+            .write_view(&mut output, &view, None)
+            .expect("unsaved frame");
+        let text = String::from_utf8(output.clone()).expect("UTF-8");
+        assert!(text.contains("Conversation: new · not saved\n"));
+        assert!(!text.contains(&format!("Session: {}", view.id)));
+        let boundary = output.len();
+        unsaved
+            .write_view(&mut output, &view, None)
+            .expect("quiet unsaved redraw");
+        assert_eq!(output.len(), boundary);
+        view.defaults.model = Some("selected-model".into());
+        view.title = "Local title".into();
+        view.title_is_explicit = true;
+        unsaved
+            .write_view(&mut output, &view, None)
+            .expect("local selection redraw");
+        let changed = std::str::from_utf8(&output[boundary..]).expect("UTF-8");
+        assert!(changed.contains("Model: selected-model\n"));
+        assert!(changed.contains("Title: Local title\n"));
     }
 
     #[test]

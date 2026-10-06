@@ -256,8 +256,25 @@ async fn invoke_at(
     }
     let body = subscription_body(request, effort)?;
     let (completed, counts) = completed_at(client, endpoint, access_token, body).await?;
-    let result = wire::decode_streamed_run(&completed, &request.model)
-        .map_err(|error| response_failure(error, counts))?;
+    let decoded = if request.tools.is_some() {
+        wire::decode_streamed_tool_run(&completed, &request.model)
+    } else {
+        wire::decode_streamed_run(&completed, &request.model)
+    };
+    let result = decoded.map_err(|error| {
+        if cfg!(debug_assertions) && error == wire::ResponseError::Outcome {
+            let (stage, shape) = wire::outcome_failure_diagnostic(&completed, &request.model);
+            return failure(
+                stage,
+                error.provider_error(),
+                StreamCounts {
+                    tool_arguments: shape,
+                    ..counts
+                },
+            );
+        }
+        response_failure(error, counts)
+    })?;
     if result.reflects_secret(access_token) {
         return Err(failure(
             Stage::CredentialReflection,
@@ -773,6 +790,7 @@ impl<'a> StreamDecoder<'a> {
             events: self.events,
             http_status: Some(200),
             response_shape: Some(self.response_shape),
+            tool_arguments: None,
         }
     }
 }

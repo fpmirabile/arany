@@ -17,6 +17,7 @@ mod active;
 mod agents;
 mod controls;
 mod models;
+mod permissions;
 mod picker;
 mod run;
 mod setup;
@@ -82,6 +83,7 @@ struct Admission {
     workspace: PathBuf,
     include_paths: Vec<PathBuf>,
     tools: bool,
+    workspace_permissions: Option<arany::WorkspacePermissions>,
     defaults: SessionDefaults,
     screen_reader: bool,
     no_color: bool,
@@ -196,6 +198,7 @@ impl AttachedArgs {
             workspace,
             include_paths: self.include_paths,
             tools: self.tools,
+            workspace_permissions: None,
             defaults,
             screen_reader: self.screen_reader
                 || std::env::var("ARANY_SCREEN_READER").ok().as_deref() == Some("1"),
@@ -209,6 +212,7 @@ impl AttachedArgs {
 
 pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), String> {
     let mut admission = args.admit(telemetry)?;
+    let ordinary_entry = admission.defaults.provider.is_none() && !admission.tools;
     let mut terminal = AttachedTerminal::acquire_with_preference(admission.screen_reader)
         .map_err(|error| error.to_string())?;
     if admission.no_color {
@@ -326,11 +330,51 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         )
         .await?;
     }
+    let mut composer = Composer::default();
+    if ordinary_entry
+        && matches!(admission.entry, EntryMode::New)
+        && permissions::supports_tools(admission.defaults.provider.as_deref())
+    {
+        match permissions::admit(&mut terminal, &admission.workspace, &mut composer).await {
+            Ok(permissions::PermissionChoice::Selected(access)) => {
+                admission.workspace_permissions = Some(access)
+            }
+            Ok(permissions::PermissionChoice::Closed | permissions::PermissionChoice::Exit) => {
+                return Ok(());
+            }
+            Err(setup::SetupError::Recoverable(error)) => {
+                setup_notice = Some(format!(
+                    "Error: {error}; read only; use /permissions to retry"
+                ))
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
     let (mut session_id, mut view) = start_session(&admission).await?;
     if let Ok(root) = StateRoot::open_existing(&admission.state_dir) {
         arany::enable_development_diagnostics(&root);
     }
-    let mut composer = Composer::default();
+    if ordinary_entry
+        && !matches!(admission.entry, EntryMode::New)
+        && permissions::supports_tools(view.defaults.provider.as_deref())
+    {
+        match permissions::admit(&mut terminal, &admission.workspace, &mut composer).await {
+            Ok(permissions::PermissionChoice::Selected(access)) => {
+                admission.workspace_permissions = Some(access)
+            }
+            Ok(permissions::PermissionChoice::Closed | permissions::PermissionChoice::Exit) => {
+                return Ok(());
+            }
+            Err(setup::SetupError::Recoverable(error)) => {
+                setup_notice = Some(format!(
+                    "Error: {error}; read only; use /permissions to retry"
+                ))
+            }
+            Err(error) => return Err(error.into()),
+        }
+    } else if admission.tools {
+        composer.set_approval_mode(Some(arany::ApprovalMode::AutoEdits));
+    }
     if setup_catalog.is_none() {
         match models::restore_saved_models(
             &admission.workspace,
@@ -359,7 +403,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         .await
     {
         setup_notice = Some(format!(
-            "Error: {error}; selection saved for this Session only"
+            "Error: {error}; selection kept for this conversation only"
         ));
     }
     seed_setup_catalog(&mut composer, &view.defaults, setup_catalog.as_deref());
@@ -371,11 +415,17 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
     {
         Some("ChatGPT account saved; use /model to select a model and effort".into())
     } else {
-        (terminal.is_linear() || admission.prompt.is_some())
-            .then(|| format!("Session {session_id} · /help for commands"))
+        (terminal.is_linear() || admission.prompt.is_some()).then(|| {
+            if view.created_sequence == 0 {
+                "New conversation · /help for commands".into()
+            } else {
+                format!("Session {session_id} · /help for commands")
+            }
+        })
     };
     let mut empty_interrupt = None::<Instant>;
     if let Some(prompt) = admission.prompt.clone() {
+        materialize_session(&admission, &mut session_id, &mut view).await?;
         terminal
             .draw_progress(&view, notice.as_deref().expect("startup notice exists"))
             .map_err(|error| error.to_string())?;
@@ -399,6 +449,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         }
     }
     loop {
+        permissions::refresh_files(&admission.workspace, &mut composer);
         composer.set_completion_selection(
             view.defaults.provider.as_deref(),
             view.defaults.model.as_deref(),
@@ -422,6 +473,10 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
             continue;
         }
         match input {
+            TerminalInput::CycleApprovalMode => {
+                notice = Some(permissions::cycle(&mut composer));
+                empty_interrupt = None;
+            }
             TerminalInput::ClipboardPaste => {
                 notice = Some(match terminal.request_clipboard_paste() {
                     Ok(()) => "Reading clipboard... draft retained".into(),
@@ -588,6 +643,15 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                         continue;
                     }
                     Ok(Submission::Objective(_)) => {
+                        if let Err(error) = arany::mention_paths(composer.text()) {
+                            notice = Some(format!(
+                                "Error: {error}; check the @file mention; draft unchanged"
+                            ));
+                            if terminal.is_linear() {
+                                composer.take();
+                            }
+                            continue;
+                        }
                         if !composer.images().is_empty()
                             && view
                                 .defaults
@@ -620,6 +684,29 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                             empty_interrupt = None;
                             continue;
                         }
+                        if ordinary_entry
+                            && admission.workspace_permissions.is_none()
+                            && permissions::supports_tools(view.defaults.provider.as_deref())
+                        {
+                            let access = permissions::choose(
+                                &mut terminal,
+                                &admission.workspace,
+                                &mut composer,
+                            )
+                            .await?;
+                            match access {
+                                permissions::PermissionChoice::Selected(access) => {
+                                    admission.workspace_permissions = Some(access)
+                                }
+                                permissions::PermissionChoice::Closed => {
+                                    notice = Some(
+                                        "Choose /permissions before sending; draft retained".into(),
+                                    );
+                                    continue;
+                                }
+                                permissions::PermissionChoice::Exit => return Ok(()),
+                            }
+                        }
                     }
                 }
                 let line = composer.take();
@@ -631,6 +718,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                 };
                 match submission {
                     Submission::Objective(objective) => {
+                        materialize_session(&admission, &mut session_id, &mut view).await?;
                         match submit_objective(
                             &mut terminal,
                             &admission,
@@ -682,6 +770,32 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 Ok(()) => "Reading clipboard... draft retained".into(),
                                 Err(error) => format!("Error: {error}; draft unchanged"),
                             });
+                        } else if command == InteractiveCommand::Permissions {
+                            let access = permissions::choose(
+                                &mut terminal,
+                                &admission.workspace,
+                                &mut composer,
+                            )
+                            .await?;
+                            let access = match access {
+                                permissions::PermissionChoice::Selected(access) => access,
+                                permissions::PermissionChoice::Closed => {
+                                    notice = Some("Permissions unchanged".into());
+                                    continue;
+                                }
+                                permissions::PermissionChoice::Exit => return Ok(()),
+                            };
+                            notice = Some(if access.is_trusted() {
+                                format!(
+                                    "Folder trusted · {} · Shift+Tab changes mode",
+                                    access.mode().label()
+                                )
+                            } else {
+                                "Read only · /permissions can enable guarded edits and commands"
+                                    .into()
+                            });
+                            admission.workspace_permissions = Some(access);
+                            admission.tools = false;
                         } else if command == InteractiveCommand::Setup {
                             notice = Some(
                                 configure_account(
@@ -708,6 +822,11 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 .await?,
                             );
                         } else if command == InteractiveCommand::Compact {
+                            if view.created_sequence == 0 {
+                                notice =
+                                    Some("No messages to compact; send a message first".into());
+                                continue;
+                            }
                             let maintenance = match compact_current(
                                 &mut terminal,
                                 &admission,
@@ -805,7 +924,13 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         }
     }
     drop(terminal);
-    writeln!(std::io::stderr(), "Session: {session_id}").map_err(|_| "output failed".to_owned())?;
+    if view.created_sequence != 0 {
+        writeln!(std::io::stderr(), "Session: {session_id}")
+            .map_err(|_| "output failed".to_owned())?;
+    } else {
+        writeln!(std::io::stderr(), "No conversation saved.")
+            .map_err(|_| "output failed".to_owned())?;
+    }
     Ok(())
 }
 
@@ -902,15 +1027,14 @@ async fn configure_account(
             Err(setup::SetupError::Recoverable(error)) => return Ok(format!("Error: {error}")),
             Err(error) => return Err(error.into()),
         };
-    persist_defaults(admission, session_id, defaults.clone()).await?;
+    update_defaults(admission, session_id, view, defaults.clone()).await?;
     admission.defaults = defaults;
-    *view = load_view(&admission.state_dir, session_id).await?;
     seed_setup_catalog(composer, &view.defaults, Some(&catalog));
     if let Err(error) =
         models::remember_models(&admission.workspace, &view.defaults, Some(&catalog), true).await
     {
         return Ok(format!(
-            "{notice}; Error: {error}; selection saved for this Session only"
+            "{notice}; Error: {error}; selection kept for this conversation only"
         ));
     }
     Ok(notice)
@@ -1038,13 +1162,13 @@ async fn start_session(admission: &Admission) -> Result<(SessionId, SessionView)
         EntryMode::New => {
             let root = StateRoot::admit(&admission.state_dir)
                 .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
-            let id = create_session(root, admission.workspace.clone(), None)
+            let store = Store::open(root).map_err(|_| "state store unavailable".to_owned())?;
+            store
+                .close()
                 .await
-                .map_err(|error| error.to_string())?;
-            if admission.defaults != SessionDefaults::default() {
-                persist_defaults(admission, id, admission.defaults.clone()).await?;
-            }
-            Ok((id, load_view(&admission.state_dir, id).await?))
+                .map_err(|_| "store shutdown failed".to_owned())?;
+            let view = new_conversation(admission.defaults.clone());
+            Ok((view.id, view))
         }
         EntryMode::Resume(id) => {
             let root = StateRoot::open_existing(&admission.state_dir)
@@ -1077,6 +1201,61 @@ async fn start_session(admission: &Admission) -> Result<(SessionId, SessionView)
     }
 }
 
+fn new_conversation(defaults: SessionDefaults) -> SessionView {
+    SessionView {
+        id: SessionId::new(),
+        title: "New Session".into(),
+        title_is_explicit: false,
+        inherited_title: None,
+        workspace_identity: None,
+        defaults,
+        created_sequence: 0,
+        last_sequence: 0,
+        lineage: None,
+        runs: Vec::new(),
+        compactions: Vec::new(),
+    }
+}
+
+async fn materialize_session(
+    admission: &Admission,
+    session_id: &mut SessionId,
+    view: &mut SessionView,
+) -> Result<(), String> {
+    if view.created_sequence != 0 {
+        return Ok(());
+    }
+    let root = StateRoot::admit(&admission.state_dir)
+        .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+    let title = view.title_is_explicit.then(|| view.title.clone());
+    let id = create_session(root, admission.workspace.clone(), title)
+        .await
+        .map_err(|error| error.to_string())?;
+    let defaults = view.defaults.clone();
+    *view = load_view(&admission.state_dir, id).await?;
+    *session_id = id;
+    update_defaults(admission, id, view, defaults)
+        .await
+        .map_err(String::from)
+}
+
+async fn update_defaults(
+    admission: &Admission,
+    session_id: SessionId,
+    view: &mut SessionView,
+    defaults: SessionDefaults,
+) -> Result<(), DefaultsError> {
+    if view.created_sequence == 0 {
+        view.defaults = defaults;
+        return Ok(());
+    }
+    persist_defaults(admission, session_id, defaults).await?;
+    *view = load_view(&admission.state_dir, session_id)
+        .await
+        .map_err(DefaultsError::Reload)?;
+    Ok(())
+}
+
 async fn remembered_session_notice(
     admission: &Admission,
     view: &SessionView,
@@ -1084,7 +1263,9 @@ async fn remembered_session_notice(
 ) -> String {
     match models::remember_models(&admission.workspace, &view.defaults, None, true).await {
         Ok(()) => notice,
-        Err(error) => format!("{notice}; Error: {error}; selection saved for this Session only"),
+        Err(error) => {
+            format!("{notice}; Error: {error}; selection kept for this conversation only")
+        }
     }
 }
 
@@ -1242,6 +1423,8 @@ enum DefaultsError {
     StateAdmission,
     #[error("{0}")]
     Operation(arany::EngineError),
+    #[error("{0}")]
+    Reload(String),
 }
 
 impl From<DefaultsError> for String {
@@ -1320,6 +1503,7 @@ mod tests {
             workspace: workspace.clone(),
             include_paths: Vec::new(),
             tools: false,
+            workspace_permissions: None,
             defaults: defaults.clone(),
             screen_reader: false,
             no_color: false,
@@ -1327,8 +1511,21 @@ mod tests {
             entry: EntryMode::New,
             prompt: None,
         };
-        let (original_id, original) = start_session(&new).await.expect("new Session");
+        let (mut original_id, mut original) = start_session(&new).await.expect("new Session");
         assert_eq!(original.defaults, defaults);
+        assert!(
+            arany::list_sessions(
+                StateRoot::open_existing(&state_dir).unwrap(),
+                workspace.clone()
+            )
+            .await
+            .expect("empty history")
+            .is_empty(),
+            "opening the composer must not save an empty conversation"
+        );
+        materialize_session(&new, &mut original_id, &mut original)
+            .await
+            .expect("first submission saves the conversation");
 
         let resumed = Admission {
             telemetry: Telemetry::disabled(),
@@ -1336,6 +1533,7 @@ mod tests {
             workspace: workspace.clone(),
             include_paths: Vec::new(),
             tools: false,
+            workspace_permissions: None,
             defaults: SessionDefaults {
                 provider: None,
                 model: Some("gpt-5.4-mini".into()),
@@ -1360,6 +1558,7 @@ mod tests {
             workspace: workspace.clone(),
             include_paths: Vec::new(),
             tools: false,
+            workspace_permissions: None,
             defaults: SessionDefaults::default(),
             screen_reader: false,
             no_color: false,
@@ -1400,6 +1599,7 @@ mod tests {
             workspace,
             include_paths: Vec::new(),
             tools: false,
+            workspace_permissions: None,
             defaults: SessionDefaults::default(),
             screen_reader: false,
             no_color: false,

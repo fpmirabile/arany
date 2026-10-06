@@ -18,9 +18,131 @@ pub enum Output {
     Jsonl,
 }
 
+pub(crate) fn tool_approval_lines(intent: &crate::tools::EffectIntent) -> Vec<String> {
+    use crate::tools::ToolCall;
+    let mut lines = vec!["Approve this action?".to_owned()];
+    match &intent.call {
+        ToolCall::Write {
+            path,
+            expected_digest,
+            content,
+        } => {
+            lines.push(format!(
+                "{} {}",
+                if expected_digest.is_some() {
+                    "Replace"
+                } else {
+                    "Create"
+                },
+                escape_terminal(path)
+            ));
+            lines.push("Content:".into());
+            lines.extend(
+                content
+                    .split('\n')
+                    .map(|line| format!("  {}", escape_terminal(line))),
+            );
+        }
+        ToolCall::Edit { path, old, new, .. } => {
+            lines.push(format!(
+                "Edit {} · only if the file is unchanged",
+                escape_terminal(path)
+            ));
+            lines.push("Remove:".into());
+            lines.extend(
+                old.split('\n')
+                    .map(|line| format!("- {}", escape_terminal(line))),
+            );
+            lines.push("Insert:".into());
+            lines.extend(
+                new.split('\n')
+                    .map(|line| format!("+ {}", escape_terminal(line))),
+            );
+        }
+        ToolCall::Mkdir { path } => lines.push(format!("Create folder {}", escape_terminal(path))),
+        ToolCall::Command { program, args, cwd } => {
+            lines.push(format!(
+                "Run {} in {}",
+                escape_terminal(program),
+                if cwd.is_empty() {
+                    "project root".into()
+                } else {
+                    escape_terminal(cwd)
+                }
+            ));
+            lines.push("Offline isolated copy · command changes are discarded".into());
+            for (index, argument) in args.iter().enumerate() {
+                lines.push(format!(
+                    "Argument {}: {}",
+                    index + 1,
+                    escape_terminal(&serde_json::to_string(argument).expect("argument string"))
+                ));
+            }
+        }
+        ToolCall::McpCall {
+            server,
+            tool,
+            arguments,
+            ..
+        } => {
+            lines.push(format!(
+                "Call {} / {}",
+                escape_terminal(server),
+                escape_terminal(tool)
+            ));
+            lines.push(format!("Arguments: {}", escape_terminal(arguments)));
+        }
+        _ => lines.push(escape_terminal(
+            &serde_json::to_string(&intent.call).expect("typed action"),
+        )),
+    }
+    lines.push(String::new());
+    lines.push("Allow once for this exact action · expires within one minute".into());
+    lines
+}
+
+pub(crate) fn workspace_permission_lines(path: &std::path::Path) -> Vec<String> {
+    vec![
+        "Do you trust this folder?".into(),
+        escape_terminal(&path.to_string_lossy()),
+        String::new(),
+        "Arany can read and automatically edit this project.".into(),
+        "Commands run offline in an isolated copy and ask first.".into(),
+        "Trust is remembered for this folder. Shift+Tab changes approval mode.".into(),
+    ]
+}
+
 pub fn render_run_feedback(run: &RunView) -> Option<String> {
     match run.status {
         RunStatus::Failed => {
+            let reason = run
+                .agents
+                .iter()
+                .filter(|agent| agent.status == AgentStatus::Failed)
+                .filter_map(|agent| agent.provider_calls.last())
+                .filter(|call| call.phase != crate::provider::AgentPhase::ToolReview)
+                .find_map(provider_failure_notice);
+            if let Some(reason) = reason {
+                return Some(format!(
+                    "Error: Run failed. {reason} No answer was committed. Use /agents to inspect this Run."
+                ));
+            }
+            if run.tools.last().is_some_and(|tool| {
+                tool.observation.as_ref().is_some_and(|observation| {
+                    observation.disposition == crate::tools::ToolDisposition::Failed
+                        && observation.guard.is_none()
+                })
+            }) {
+                return Some("Error: Native Tool protection failed before the action started. That action did not run; earlier completed actions remain. Use /agents to inspect the Guard stage before submitting again.".into());
+            }
+            if run.tools.last().is_some_and(|tool| {
+                tool.observation.as_ref().is_some_and(|observation| {
+                    observation.disposition == crate::tools::ToolDisposition::Denied
+                        && observation.guard.is_none()
+                })
+            }) {
+                return Some("Action denied or approval expired. No further action ran; earlier completed actions remain. Use /permissions or Shift+Tab to review approval settings.".into());
+            }
             if let Some(tool) = run.tools.last()
                 && tool.observation.as_ref().is_none_or(|observation| {
                     matches!(
@@ -32,19 +154,13 @@ pub fn render_run_feedback(run: &RunView) -> Option<String> {
             {
                 return Some("Error: Tool completion is uncertain. Files or effects may have changed; inspect them before retrying. No answer was committed.".into());
             }
-            let reason = run
-                .agents
-                .iter()
-                .filter(|agent| agent.status == AgentStatus::Failed)
-                .filter_map(|agent| agent.provider_calls.last())
-                .find_map(provider_failure_notice);
-            if reason.is_none() && run.primary_tool_limit_reached() {
+            if run.primary_tool_limit_reached() {
                 return Some("Error: Tool continuation budget exhausted. No answer was committed; completed Tool observations remain in the Session.".into());
             }
-            Some(reason.map_or_else(
-                || "Error: Run failed. No answer was committed. Use /agents to inspect this Run.".to_owned(),
-                |reason| format!("Error: Run failed. {reason} No answer was committed. Use /agents to inspect this Run."),
-            ))
+            Some(
+                "Error: Run failed. No answer was committed. Use /agents to inspect this Run."
+                    .into(),
+            )
         }
         RunStatus::Cancelled => {
             Some("Run cancelled. No answer was committed. You can submit a new task.".to_owned())

@@ -24,8 +24,9 @@ impl<P: Provider + 'static> Engine<P> {
         workspace: PathBuf,
     ) -> Result<CompactionRecord, EngineError> {
         self.compact_session_inner(session_id, workspace, None)
-            .await?
-            .ok_or(EngineError::CompactionInputEmpty)
+            .await
+            .and_then(|record| record.ok_or(EngineError::CompactionInputEmpty))
+            .inspect_err(crate::diagnostics::engine_failure)
     }
 
     /// Returns `None` when the expected Run is no longer latest or its boundary was already attempted.
@@ -37,6 +38,7 @@ impl<P: Provider + 'static> Engine<P> {
     ) -> Result<Option<CompactionRecord>, EngineError> {
         self.compact_session_inner(session_id, workspace, Some(expected_run_id))
             .await
+            .inspect_err(crate::diagnostics::engine_failure)
     }
 
     async fn compact_session_inner(
@@ -186,6 +188,7 @@ impl<P: Provider + 'static> Engine<P> {
                 },
             )
             .await?;
+        crate::diagnostics::event_failure(&committed.event);
         trace.event_committed(committed.sequence);
         trace.finish(trace_outcome);
         Ok(Some(record))

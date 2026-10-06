@@ -175,6 +175,8 @@ pub struct Engine<P: Provider> {
     provider: Arc<P>,
     telemetry: Telemetry,
     tools: Option<(crate::tools::config::Config, PathBuf)>,
+    workspace_permissions: Option<crate::tools::WorkspacePermissions>,
+    tool_approvals: Option<crate::tools::ToolApprovals>,
 }
 
 impl<P: Provider + 'static> Engine<P> {
@@ -221,6 +223,8 @@ impl<P: Provider + 'static> Engine<P> {
             provider: Arc::new(provider),
             telemetry,
             tools: None,
+            workspace_permissions: None,
+            tool_approvals: None,
         })
     }
 
@@ -232,6 +236,24 @@ impl<P: Provider + 'static> Engine<P> {
     pub fn enable_tools(&mut self, guard_executable: PathBuf) -> Result<(), EngineError> {
         let config = crate::tools::config::Config::load(&self.state)?;
         self.tools = Some((config, guard_executable));
+        self.workspace_permissions = None;
+        Ok(())
+    }
+
+    pub fn set_tool_approvals(&mut self, approvals: crate::tools::ToolApprovals) {
+        self.tool_approvals = Some(approvals);
+    }
+
+    pub fn enable_trusted_workspace(
+        &mut self,
+        permissions: crate::tools::WorkspacePermissions,
+        workspace: &std::path::Path,
+        guard_executable: PathBuf,
+        approvals: crate::tools::ToolApprovals,
+    ) -> Result<(), EngineError> {
+        self.tools = Some((permissions.config(workspace)?, guard_executable));
+        self.workspace_permissions = Some(permissions);
+        self.tool_approvals = Some(approvals);
         Ok(())
     }
 
@@ -260,7 +282,9 @@ impl<P: Provider + 'static> Engine<P> {
         request: RunRequest,
         cancellation: RunCancellation,
     ) -> Result<RunOutcome, EngineError> {
-        self.run_inner(request, cancellation, None).await
+        self.run_inner(request, cancellation, None)
+            .await
+            .inspect_err(crate::diagnostics::engine_failure)
     }
 
     pub async fn run_with_progress(
@@ -269,7 +293,9 @@ impl<P: Provider + 'static> Engine<P> {
         cancellation: RunCancellation,
         progress: RunProgress,
     ) -> Result<RunOutcome, EngineError> {
-        self.run_inner(request, cancellation, Some(progress)).await
+        self.run_inner(request, cancellation, Some(progress))
+            .await
+            .inspect_err(crate::diagnostics::engine_failure)
     }
 
     async fn run_inner(
@@ -311,7 +337,7 @@ impl<P: Provider + 'static> Engine<P> {
         let children = usize::from(request.policy.max_children());
         let lifecycle_slots = if children == 0 { 7 } else { 8 + 3 * children };
         let tool_slots = if self.tools.is_some() {
-            3 * crate::tools::MAX_TOOL_CALLS
+            (if self.tool_approvals.is_some() { 4 } else { 3 }) * crate::tools::MAX_TOOL_CALLS
         } else {
             0
         };
@@ -321,6 +347,9 @@ impl<P: Provider + 'static> Engine<P> {
                 lifecycle_slots + tool_slots + usize::from(request.session_id.is_none()),
             )
             .await?;
+        if let Some(permissions) = &self.workspace_permissions {
+            permissions.verify(&request.workspace)?;
+        }
         let tools = self
             .tools
             .as_ref()
@@ -333,12 +362,24 @@ impl<P: Provider + 'static> Engine<P> {
                 )
             })
             .transpose()?;
+        if let (Some(permissions), Some(runtime)) = (&self.workspace_permissions, &tools)
+            && !permissions.matches_identity(runtime.workspace_identity())
+        {
+            return Err(crate::tools::ToolError::ChangedInput.into());
+        }
         let tool_context = tools
             .as_ref()
             .map(crate::tools::ToolRuntime::context)
             .transpose()?;
-        let inputs =
-            WorkspaceInputs::load(&request.workspace, &self.state, &request.include_paths)?;
+        let inputs = match &tools {
+            Some(runtime) => WorkspaceInputs::load_pinned(
+                &request.workspace,
+                &self.state,
+                &request.include_paths,
+                Some(runtime.workspace_identity()),
+            )?,
+            None => WorkspaceInputs::load(&request.workspace, &self.state, &request.include_paths)?,
+        };
         let (workspace_device, workspace_inode) = inputs.root_identity()?;
         if let Some(view) = &history {
             ensure_session_workspace(view, workspace_device, workspace_inode)?;
@@ -489,7 +530,7 @@ impl<P: Provider + 'static> Engine<P> {
             includes: inputs
                 .includes
                 .into_iter()
-                .map(|snapshot| snapshot.content)
+                .map(|snapshot| snapshot.model_include())
                 .collect(),
             history: context.history,
             context_summary: context.summary,
@@ -510,6 +551,7 @@ impl<P: Provider + 'static> Engine<P> {
                 concurrency: selection.concurrency,
                 cancellation,
                 tools: tools.as_ref(),
+                approvals: self.tool_approvals.as_ref(),
             },
             publisher.as_ref(),
             &trace,

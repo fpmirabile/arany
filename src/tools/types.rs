@@ -175,7 +175,7 @@ impl ToolCall {
 }
 
 pub(crate) fn valid_relative(value: &str, root: bool) -> bool {
-    if value.is_empty() {
+    if value.is_empty() || value == "." {
         return root;
     }
     value.len() <= 512
@@ -356,6 +356,13 @@ pub struct ToolObservation {
 }
 
 impl ToolObservation {
+    pub(crate) fn stops_run(&self) -> bool {
+        matches!(
+            self.disposition,
+            ToolDisposition::Uncertain | ToolDisposition::Cancelled
+        ) || (self.disposition == ToolDisposition::Failed && self.guard.is_none())
+    }
+
     pub(crate) fn valid(&self) -> bool {
         self.intent.valid()
             && self.output.len() <= self.intent.limits.result_bytes as usize
@@ -375,6 +382,67 @@ pub struct ToolContext {
     pub observations: Vec<ToolObservation>,
 }
 
+impl ToolContext {
+    pub(crate) fn model_input(&self) -> Value {
+        let catalog = super::skills::parse_json(self.catalog.as_bytes(), 8 * 1024)
+            .unwrap_or_else(|_| json!(self.catalog));
+        let observations: Vec<_> = self
+            .observations
+            .iter()
+            .map(|observation| {
+                let output = super::skills::parse_json(
+                    observation.output.as_bytes(),
+                    MAX_TOOL_RESULT_BYTES,
+                )
+                .unwrap_or_else(|_| json!(observation.output));
+                let effect = if !observation.intent.call.mutates() {
+                    "none"
+                } else {
+                    match observation.disposition {
+                        ToolDisposition::Succeeded if observation.guard.as_ref().is_some_and(|guard| guard.valid_for(&observation.intent)) => "applied",
+                        ToolDisposition::Uncertain | ToolDisposition::Cancelled => "uncertain",
+                        _ => "not_confirmed",
+                    }
+                };
+                json!({"call":observation.intent.call,"disposition":observation.disposition,"output":output,"workspace_effect":effect})
+            })
+            .collect();
+        json!({"catalog":catalog,"observations":observations})
+    }
+
+    pub(crate) fn outcome_branch(&self) -> Value {
+        let catalog =
+            super::skills::parse_json(self.catalog.as_bytes(), 8 * 1024).unwrap_or(Value::Null);
+        let mut branch = outcome_branch();
+        branch["properties"]["call"]["anyOf"]
+            .as_array_mut()
+            .expect("compiled Tool branches")
+            .retain_mut(|call| {
+                let (key, field, cap) = match call["properties"]["operation"]["enum"][0].as_str() {
+                    Some("write" | "edit" | "mkdir") => return catalog["write"] == true,
+                    Some("command") => ("commands", "program", 8),
+                    Some("skill") => ("skills", "name", 32),
+                    Some("mcp_list" | "mcp_call") => ("mcp_servers", "server", 4),
+                    _ => return true,
+                };
+                let names: Vec<_> = catalog[key]
+                    .as_array()
+                    .filter(|rows| rows.len() <= cap)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|row| row["name"].as_str())
+                    .filter(|name| valid_name(name))
+                    .collect();
+                if names.is_empty() {
+                    return false;
+                }
+                call["properties"][field]["enum"] = json!(names);
+                true
+            });
+        branch
+    }
+}
+
 pub(crate) fn outcome_branch() -> Value {
     let string = json!({"type": "string"});
     let nullable = json!({"type": ["string", "null"]});
@@ -385,8 +453,14 @@ pub(crate) fn outcome_branch() -> Value {
             "read",
             vec![
                 ("path", string.clone()),
-                ("offset", json!({"type":"integer"})),
-                ("limit", json!({"type":"integer"})),
+                (
+                    "offset",
+                    json!({"type":"integer", "description":"Zero-based byte offset, 0 through 4294967295. Start at 0; page using the returned next offset."}),
+                ),
+                (
+                    "limit",
+                    json!({"type":"integer", "description":"Number of UTF-8 bytes to read: integer 1 through 4096 inclusive. Use 4096 for a normal page; never request the whole file with a larger limit."}),
+                ),
             ],
         ),
         (
@@ -405,9 +479,18 @@ pub(crate) fn outcome_branch() -> Value {
             "edit",
             vec![
                 ("path", string.clone()),
-                ("expected_digest", string.clone()),
-                ("old", string.clone()),
-                ("new", string.clone()),
+                (
+                    "expected_digest",
+                    json!({"type":"string", "description":"Exact lowercase 64-character SHA-256 from the file include or a successful Read. Never invent it."}),
+                ),
+                (
+                    "old",
+                    json!({"type":"string", "description":"Non-empty exact literal text occurring once in the current file. To append, select a unique ending and include that ending plus the appended text in new."}),
+                ),
+                (
+                    "new",
+                    json!({"type":"string", "description":"Replacement literal text. Combined old and new UTF-8 size must be at most 8192 bytes."}),
+                ),
             ],
         ),
         (

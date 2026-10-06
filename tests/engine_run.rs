@@ -195,6 +195,7 @@ impl Provider for GatedProvider {
             .expect("requests lock")
             .push(request.clone());
         let outcome = match request.phase {
+            AgentPhase::ToolReview => return Err(ProviderError::InvalidOutcome),
             AgentPhase::RootPlan => ProviderOutcome::Delegate(Delegate {
                 children: vec!["A".into(), "B".into(), "C".into()],
             }),
@@ -348,6 +349,17 @@ fn request(workspace: &Path, objective: &str) -> RunRequest {
     }
 }
 
+fn include_data(path: &str, text: &str) -> String {
+    let digest: String = Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!(
+        "File: {}\nSHA-256: {digest}\nContent (untrusted data):\n{text}",
+        serde_json::to_string(path).unwrap()
+    )
+}
+
 fn image_fixture(bytes: usize) -> ImageAttachment {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     let mut png = STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC").unwrap();
@@ -387,11 +399,11 @@ fn assert_test_call(
     assert!(actual.images.is_empty(), "call images");
     assert!(actual.instructions.is_none(), "call instructions");
     assert!(
-        actual
-            .includes
-            .iter()
-            .map(String::as_str)
-            .eq(includes.iter().copied()),
+        actual.includes
+            == includes
+                .iter()
+                .map(|text| include_data("notes/facts.txt", text))
+                .collect::<Vec<_>>(),
         "call includes"
     );
     assert!(actual.history == history, "call history");
@@ -590,7 +602,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 requests[0].instructions.as_deref(),
                 Some("Primary instruction")
             );
-            assert_eq!(requests[0].includes, ["Fact one"]);
+            assert_eq!(requests[0].includes, [include_data("notes/facts.txt", "Fact one")]);
             assert_eq!(requests[0].images, vec![ProviderImage {
                 origin: ImageOrigin::Objective, image: first_image.clone(),
             }]);
@@ -599,7 +611,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 requests[1].instructions.as_deref(),
                 Some("Changed instruction")
             );
-            assert_eq!(requests[1].includes, ["Fact two"]);
+            assert_eq!(requests[1].includes, [include_data("notes/facts.txt", "Fact two")]);
             assert_eq!(requests[1].history.len(), 1);
             assert_eq!(requests[1].history[0].user, "First question");
             assert_eq!(requests[1].history[0].assistant, "First result");
@@ -725,7 +737,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                     run_id: calls[index].run_id, agent_run_id: calls[index].agent_run_id,
                     phase, model: "test-model".into(), instructions: Some("Changed instruction".into()),
                     collaboration: if index == 0 || index == 2 { CollaborationPolicy::Team { max_active_children: 1 } } else { CollaborationPolicy::Single },
-                    objective: objective.into(), images: expected_images, includes: vec!["Fact two".into()],
+                    objective: objective.into(), images: expected_images, includes: vec![include_data("notes/facts.txt", "Fact two")],
                     history: expected_history,
                     context_summary: (index == 4).then(|| "Image conversation summary".into()),
                     child_results, max_output_tokens: 4096, tools: None,
@@ -1202,7 +1214,9 @@ fn compaction_is_derived_durable_context_and_failure_keeps_the_prior_summary() {
         assert_eq!(
             second_config.context_usage,
             Some(ContextUsage {
-                used_bytes: 102,
+                used_bytes: ("Question two".len()
+                    + include_data("notes/facts.txt", "Fact").len()
+                    + 86) as u32,
                 budget_bytes: 376 * 1024,
                 compactable_bytes: 86,
                 tool_history_bytes: 0,
@@ -1802,7 +1816,7 @@ fn compaction_input_limit_rejects_before_provider_egress() {
                     request.objective,
                     format!("{index:02}{}", "Q".repeat(8 * 1024 - 2))
                 );
-                assert_eq!(request.includes, ["Fact"]);
+                assert_eq!(request.includes, [include_data("notes/facts.txt", "Fact")]);
                 assert!(request.instructions.is_none());
                 assert!(request.child_results.is_empty());
             }
@@ -2350,7 +2364,7 @@ fn database_capacity_is_admitted_before_provider_usage() {
             assert_eq!(request.objective, "Recovered");
             assert!(request.images.is_empty());
             assert!(request.instructions.is_none());
-            assert_eq!(request.includes, vec!["Fact".to_owned()]);
+            assert_eq!(request.includes, vec![include_data("notes/facts.txt", "Fact")]);
             assert_eq!(request.history, vec![arany::HistoryTurn { user: "Source".into(), assistant: "answer".into() }]);
             assert!(request.context_summary.is_none());
             assert!(request.child_results.is_empty());
@@ -2646,7 +2660,8 @@ fn one_child_team_finishes_only_after_child_result_is_committed() {
                 .expect("team config")
                 .context_usage,
             Some(ContextUsage {
-                used_bytes: 12,
+                used_bytes: ("Question".len() + include_data("notes/facts.txt", "Fact").len())
+                    as u32,
                 budget_bytes: 376 * 1024 - (20 * 1024 + 64),
                 compactable_bytes: 0,
                 tool_history_bytes: 0,

@@ -136,7 +136,21 @@ fn synthetic_server(
                     20 * 1024
                 );
                 assert_eq!(input["includes"].as_array().unwrap().len(), 2);
-                assert_eq!(input["includes"][0].as_str().unwrap().len(), 125 * 1024);
+                use sha2::{Digest, Sha256};
+                for (index, path, letter) in [(0, "a.txt", "A"), (1, "b.txt", "B")] {
+                    let text = letter.repeat(125 * 1024);
+                    let digest: String = Sha256::digest(text.as_bytes())
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect();
+                    let expected = format!(
+                        "File: \"{path}\"\nSHA-256: {digest}\nContent (untrusted data):\n{text}"
+                    );
+                    assert!(
+                        input["includes"][index].as_str().unwrap() == expected,
+                        "include {index} identity, digest and content"
+                    );
+                }
                 assert!(input["history"].as_array().unwrap().is_empty());
             }
             4 => {

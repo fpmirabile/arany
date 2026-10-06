@@ -7,6 +7,13 @@ use arany::{
 use std::path::Path;
 use uuid::Uuid;
 
+#[derive(Clone, Copy)]
+pub(super) struct ToolAccess<'a> {
+    pub configured: bool,
+    pub permissions: Option<&'a arany::WorkspacePermissions>,
+    pub approvals: &'a arany::ToolApprovals,
+}
+
 enum SelectedProvider {
     OpenAi(OpenAiProvider),
     Anthropic(AnthropicProvider),
@@ -63,7 +70,7 @@ pub(super) async fn run_selected(
     request: RunRequest,
     cancellation: RunCancellation,
     progress: RunProgress,
-    tools: bool,
+    tools: ToolAccess<'_>,
 ) -> Result<RunOutcome, RunAttemptError> {
     let mut admission_cancellation = cancellation.clone();
     let provider = tokio::select! {
@@ -186,6 +193,17 @@ async fn select_provider(
     state_dir: &Path,
     selection: Selection<'_>,
 ) -> Result<SelectedProvider, String> {
+    select_provider_inner(state_dir, selection)
+        .await
+        .inspect_err(|_| {
+            arany::record_development_failure(arany::DevelopmentFailure::ProviderAdmission);
+        })
+}
+
+async fn select_provider_inner(
+    state_dir: &Path,
+    selection: Selection<'_>,
+) -> Result<SelectedProvider, String> {
     validate_local_selection(selection)?;
     match selection.profile {
         "openai" => {
@@ -270,19 +288,39 @@ async fn run_with_provider<P: Provider + 'static>(
     request: RunRequest,
     cancellation: RunCancellation,
     progress: RunProgress,
-    tools: bool,
+    tools: ToolAccess<'_>,
 ) -> Result<RunOutcome, String> {
     let root = StateRoot::admit(state_dir)
         .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
     let mut engine = Engine::open_with_telemetry(root, provider, telemetry.clone())
         .map_err(|_| "state store unavailable".to_owned())?;
-    if tools {
+    if tools.configured {
         engine
             .enable_tools(
                 std::env::current_exe().map_err(|_| "Guard executable unavailable".to_owned())?,
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                arany::record_development_failure(arany::DevelopmentFailure::ToolAdmission);
+                error.to_string()
+            })?;
     }
+    if let Some(permissions) = tools
+        .permissions
+        .filter(|permissions| permissions.is_trusted())
+    {
+        engine
+            .enable_trusted_workspace(
+                permissions.clone(),
+                &request.workspace,
+                std::env::current_exe().map_err(|_| "Guard executable unavailable".to_owned())?,
+                tools.approvals.clone(),
+            )
+            .map_err(|error| {
+                arany::record_development_failure(arany::DevelopmentFailure::ToolAdmission);
+                error.to_string()
+            })?;
+    }
+    engine.set_tool_approvals(tools.approvals.clone());
     let result = engine
         .run_with_progress(request, cancellation, progress)
         .await;

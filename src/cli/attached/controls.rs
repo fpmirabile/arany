@@ -1,9 +1,9 @@
-use super::{Admission, load_view, persist_defaults, recover_defaults_change};
+use super::{Admission, load_view, recover_defaults_change, update_defaults};
 use crate::cli::{chatgpt, exec::ProviderArg};
 use arany::{
     CollaborationPolicy, CommandAvailability, CommandParseError, Composer, CustomProfile, Effort,
-    InteractiveCommand, SessionId, SessionView, StateRoot, Submission, create_session,
-    fork_session, rename_session, resume_session, validate_native_model_id,
+    InteractiveCommand, SessionId, SessionView, StateRoot, Submission, fork_session,
+    rename_session, resume_session, validate_native_model_id,
 };
 use std::str::FromStr;
 
@@ -96,10 +96,9 @@ pub(super) async fn select_model(
     let mut defaults = view.defaults.clone();
     defaults.model = Some(model.to_owned());
     defaults.effort = effort;
-    if let Err(error) = persist_defaults(admission, session_id, defaults).await {
+    if let Err(error) = update_defaults(admission, session_id, view, defaults).await {
         return recover_defaults_change(error);
     }
-    *view = load_view(&admission.state_dir, session_id).await?;
     let notice = format!(
         "Model: {model} · {}",
         effort.map_or("default", Effort::as_str)
@@ -108,7 +107,7 @@ pub(super) async fn select_model(
         super::models::remember_models(&admission.workspace, &view.defaults, None, true).await
     {
         return Ok(format!(
-            "{notice}; Error: {error}; selection saved for this Session only"
+            "{notice}; Error: {error}; selection kept for this conversation only"
         ));
     }
     Ok(notice)
@@ -214,18 +213,10 @@ pub(super) async fn handle_command(
     let notice = match command {
         InteractiveCommand::New => {
             let defaults = view.defaults.clone();
-            let root = StateRoot::admit(&admission.state_dir)
-                .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
-            let new_id = create_session(root, admission.workspace.clone(), None)
-                .await
-                .map_err(|error| error.to_string())?;
-            if defaults != arany::SessionDefaults::default() {
-                persist_defaults(admission, new_id, defaults).await?;
-            }
-            let new_view = load_view(&admission.state_dir, new_id).await?;
-            *session_id = new_id;
+            let new_view = super::new_conversation(defaults);
+            *session_id = new_view.id;
             *view = new_view;
-            format!("New Session {session_id}")
+            "New conversation · send a message to save it".into()
         }
         InteractiveCommand::Resume => {
             let Some(id) = argument.and_then(|value| SessionId::from_str(value).ok()) else {
@@ -257,6 +248,9 @@ pub(super) async fn handle_command(
             }
         }
         InteractiveCommand::Fork => {
+            if argument.is_none() && view.created_sequence == 0 {
+                return Ok("Send a message before forking this conversation".into());
+            }
             let source_id = match argument {
                 Some(value) => match SessionId::from_str(value) {
                     Ok(id) => id,
@@ -295,6 +289,14 @@ pub(super) async fn handle_command(
             let Some(title) = argument else {
                 return Ok("Usage: /rename TITLE".into());
             };
+            if title.is_empty() || title.len() > 128 {
+                return Ok("Error: invalid Run request".into());
+            }
+            if view.created_sequence == 0 {
+                view.title = title.to_owned();
+                view.title_is_explicit = true;
+                return Ok(format!("Renamed conversation: {title}"));
+            }
             let root = StateRoot::open_existing(&admission.state_dir)
                 .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
             match rename_session(
@@ -337,10 +339,11 @@ pub(super) async fn handle_command(
                     defaults.model = None;
                     defaults.effort = None;
                     defaults.account_id = account_id;
-                    if let Err(error) = persist_defaults(admission, *session_id, defaults).await {
+                    if let Err(error) =
+                        update_defaults(admission, *session_id, view, defaults).await
+                    {
                         return recover_defaults_change(error);
                     }
-                    *view = load_view(&admission.state_dir, *session_id).await?;
                 }
                 if view.defaults.model.is_none() {
                     format!("Provider: {profile}; set /model")
@@ -369,16 +372,20 @@ pub(super) async fn handle_command(
                 Ok(policy) => {
                     let mut defaults = view.defaults.clone();
                     defaults.policy = policy;
-                    if let Err(error) = persist_defaults(admission, *session_id, defaults).await {
+                    if let Err(error) =
+                        update_defaults(admission, *session_id, view, defaults).await
+                    {
                         return recover_defaults_change(error);
                     }
-                    *view = load_view(&admission.state_dir, *session_id).await?;
                     format!("Next-Run collaboration: {policy:?}")
                 }
                 Err(error) => error.into(),
             },
             None => format!("Next-Run collaboration: {:?}", view.defaults.policy),
         },
+        InteractiveCommand::Status if view.created_sequence == 0 => {
+            "New conversation · not saved · 0 Runs".into()
+        }
         InteractiveCommand::Status => format!("Session {session_id} · {} Runs", view.runs.len()),
         InteractiveCommand::Help => {
             return Err("Help requires the terminal command registry".into());
@@ -502,10 +509,10 @@ fn parse_policy(argument: &str) -> Result<CollaborationPolicy, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::attached::EntryMode;
+    use crate::cli::attached::{EntryMode, persist_defaults};
     use arany::{
         AgentRole, AgentRunId, AgentStatus, AgentView, ContextUsage, RunConfig, RunId, RunStatus,
-        RunView, SessionDefaults, Store, TerminalInput,
+        RunView, SessionDefaults, Store, TerminalInput, create_session,
     };
 
     #[test]
@@ -927,6 +934,7 @@ mod tests {
             workspace,
             include_paths: Vec::new(),
             tools: false,
+            workspace_permissions: None,
             defaults: SessionDefaults::default(),
             screen_reader: false,
             no_color: false,
@@ -1311,7 +1319,7 @@ mod tests {
             .await
             .expect("fresh conversation");
             assert_ne!(session_id, source_id);
-            assert_eq!(notice, format!("New Session {session_id}"));
+            assert_eq!(notice, "New conversation · send a message to save it");
             assert_eq!(view.title, "New Session");
             assert_eq!(view.defaults, defaults);
             assert!(view.runs.is_empty() && view.compactions.is_empty());
@@ -1334,27 +1342,35 @@ mod tests {
             assert_eq!(reopened_source.title, source_view.title);
             assert_eq!(reopened_source.defaults, source_view.defaults);
             let events = store.load_session(session_id).await.expect("new prefix");
-            assert_eq!(
-                events.len(),
-                1 + usize::from(defaults != SessionDefaults::default())
-            );
+            assert!(events.is_empty(), "new/clear must leave no empty history");
             assert!(
-                events
-                    .iter()
-                    .all(|event| event.run_id.is_none() && event.agent_run_id.is_none())
+                store
+                    .load_view(session_id)
+                    .await
+                    .expect("unsaved lookup")
+                    .is_none()
             );
-            assert!(matches!(
-                events[0].event,
-                arany::Event::SessionStarted { .. }
-            ));
-            let reopened = store
-                .load_view(session_id)
-                .await
-                .expect("new replay")
-                .expect("new Session");
-            assert_eq!(reopened.defaults, defaults);
-            assert!(reopened.runs.is_empty() && reopened.compactions.is_empty());
             store.close().await.expect("close replay Store");
+            handle_command(
+                &admission,
+                &mut session_id,
+                &mut view,
+                InteractiveCommand::Rename,
+                Some("Local title"),
+            )
+            .await
+            .expect("local title");
+            assert_eq!(view.created_sequence, 0);
+            super::super::materialize_session(&admission, &mut session_id, &mut view)
+                .await
+                .expect("first submission");
+            let reopened = load_view(&admission.state_dir, session_id)
+                .await
+                .expect("new replay");
+            assert_eq!(reopened.defaults, defaults);
+            assert_eq!(reopened.title, "Local title");
+            assert!(reopened.title_is_explicit);
+            assert!(reopened.runs.is_empty() && reopened.compactions.is_empty());
         }
     }
 }

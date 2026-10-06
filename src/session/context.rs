@@ -48,7 +48,7 @@ impl CompiledContext {
             + inputs
                 .includes
                 .iter()
-                .map(|value| value.content.len())
+                .map(|value| value.model_include().len())
                 .sum::<usize>();
         if used > budget {
             return Err(ContextTooLarge);

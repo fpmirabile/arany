@@ -155,7 +155,9 @@ impl Provider for GatedFailureProvider {
                     result: "done".into(),
                 })
             }
-            AgentPhase::RootSynthesis => return Err(ProviderError::InvalidOutcome),
+            AgentPhase::RootSynthesis | AgentPhase::ToolReview => {
+                return Err(ProviderError::InvalidOutcome);
+            }
         };
         Ok(ProviderResponse {
             outcome,

@@ -191,3 +191,160 @@ fn hostile_repository_startup_does_not_activate_git_or_disclose_omitted_inputs()
         }
     }
 }
+
+#[test]
+#[ignore = "native Linux PTY workspace consent and restoration gate"]
+fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_trust() {
+    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+    use std::io::Write;
+    for linear in [false, true] {
+        for trust in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let workspace = temp.path().join("project");
+            std::fs::create_dir(&workspace).unwrap();
+            let state = temp.path().join("state");
+            let shell = "before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; stty rows 24 cols 80; /arany $ARANY_TEST_MODE --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4; code=$?; after=$(stty -g); printf '\\nTTY_AFTER:%s\\n' \"$after\"; exit \"$code\"";
+            let mut command = super::process::isolated_script(temp.path());
+            command
+                .env_clear()
+                .env(
+                    "ARANY_TEST_MODE",
+                    if linear { "--screen-reader" } else { "" },
+                )
+                .env("ARANY_TEST_STATE", &state)
+                .env("ARANY_TEST_WORKSPACE", &workspace)
+                .env("OPENAI_API_KEY", "synthetic-never-sent-key")
+                .env("SHELL", "/bin/sh")
+                .env("TERM", if linear { "dumb" } else { "xterm-256color" })
+                .current_dir(&workspace)
+                .args(["-q", "-e", "-c", shell, "/dev/null"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null());
+            let mut child = super::loopback::ChildGuard::new(command.spawn().unwrap());
+            let mut input = child.child().stdin.take().unwrap();
+            let mut output = child.child().stdout.take().unwrap();
+            let flags = fcntl_getfl(&output).unwrap();
+            fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
+            let mut transcript = Vec::new();
+            let mut answered = 0;
+            let wait = |output: &mut std::process::ChildStdout,
+                        input: &mut std::process::ChildStdin,
+                        transcript: &mut Vec<u8>,
+                        answered: &mut usize,
+                        from: usize,
+                        needle: &[u8]| {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !transcript[from..]
+                    .windows(needle.len())
+                    .any(|part| part == needle)
+                {
+                    super::session_picker::pump(output, input, transcript, answered);
+                    assert!(
+                        Instant::now() < deadline,
+                        "consent stage missing: {}",
+                        super::session_picker::tail(transcript)
+                    );
+                    thread::yield_now();
+                }
+            };
+            wait(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                0,
+                if linear { b"Input:" } else { b"Ask Arany" },
+            );
+            let from = transcript.len();
+            input.write_all(b"/permissions\r").unwrap();
+            wait(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                from,
+                b"Do you trust this folder?",
+            );
+            if trust {
+                let from = transcript.len();
+                input
+                    .write_all(if linear { b"trust\r" } else { b"\x1b[B\r" })
+                    .unwrap();
+                wait(
+                    &mut output,
+                    &mut input,
+                    &mut transcript,
+                    &mut answered,
+                    from,
+                    if linear { b"Input:" } else { b"Ask Arany" },
+                );
+                let from = transcript.len();
+                input.write_all(b"/permissions\r").unwrap();
+                wait(
+                    &mut output,
+                    &mut input,
+                    &mut transcript,
+                    &mut answered,
+                    from,
+                    b"Do you trust this folder?",
+                );
+            }
+            input.write_all(b"\x03").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let status = loop {
+                super::session_picker::pump(
+                    &mut output,
+                    &mut input,
+                    &mut transcript,
+                    &mut answered,
+                );
+                if let Some(status) = child.child().try_wait().unwrap() {
+                    break status;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "Ctrl+C did not exit: {}",
+                    super::session_picker::tail(&transcript)
+                );
+                thread::yield_now();
+            };
+            super::session_picker::pump(&mut output, &mut input, &mut transcript, &mut answered);
+            assert!(
+                status.success(),
+                "consent exit: {}",
+                super::session_picker::tail(&transcript)
+            );
+            let text = String::from_utf8_lossy(&transcript);
+            let before = super::active_terminal::transcript_field(&text, "TTY_BEFORE:");
+            let after = super::active_terminal::transcript_field(&text, "TTY_AFTER:");
+            assert_eq!(before, after, "terminal must be restored");
+            let record = temp
+                .path()
+                .join("account-home/.local/state/arany/workspace-permissions.json");
+            assert_eq!(record.exists(), trust, "Ctrl+C must never persist a choice");
+            if trust {
+                let value: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+                assert_eq!(value["version"], 1);
+                assert_eq!(value["workspaces"].as_array().unwrap().len(), 1);
+                assert_eq!(value["workspaces"][0]["path"], workspace.to_str().unwrap());
+                assert_eq!(
+                    std::fs::metadata(record).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+            let connection = rusqlite::Connection::open(state.join("events.sqlite3")).unwrap();
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM events WHERE kind = 'run_started'",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                0
+            );
+        }
+    }
+}

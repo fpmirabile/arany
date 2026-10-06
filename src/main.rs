@@ -90,6 +90,7 @@ fn run_cli(cli: Cli, telemetry: Telemetry) -> ExitCode {
         return match runtime.block_on(cli::attached::run(cli.attached, telemetry)) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
+                arany::record_development_failure(arany::DevelopmentFailure::AttachedExit);
                 eprintln!("error: {error}");
                 ExitCode::FAILURE
             }
@@ -108,6 +109,7 @@ fn run_cli(cli: Cli, telemetry: Telemetry) -> ExitCode {
                     .write_all(output.stderr.as_bytes())
                     .is_err()
             {
+                arany::record_development_failure(arany::DevelopmentFailure::Output);
                 eprintln!("error: output failed");
                 ExitCode::FAILURE
             } else if output.success {
@@ -117,6 +119,7 @@ fn run_cli(cli: Cli, telemetry: Telemetry) -> ExitCode {
             }
         }
         Err(error) => {
+            arany::record_development_failure(arany::DevelopmentFailure::ExecExit);
             eprintln!("error: {error}");
             ExitCode::FAILURE
         }

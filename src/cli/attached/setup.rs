@@ -19,12 +19,14 @@ pub(super) enum SetupError {
 
 impl From<String> for SetupError {
     fn from(message: String) -> Self {
+        arany::record_development_failure(arany::DevelopmentFailure::Setup);
         Self::Recoverable(message)
     }
 }
 
 impl From<&str> for SetupError {
     fn from(message: &str) -> Self {
+        arany::record_development_failure(arany::DevelopmentFailure::Setup);
         Self::Recoverable(message.to_owned())
     }
 }

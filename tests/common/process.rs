@@ -154,3 +154,25 @@ fn drain(pipe: &mut Option<impl Read>, bytes: &mut Vec<u8>, cap: usize, channel:
         }
     }
 }
+
+#[cfg(target_os = "linux")]
+pub fn decline_workspace_consent(
+    input: &mut impl std::io::Write,
+    transcript: &[u8],
+    declined: &mut bool,
+) {
+    let prompt = b"Type trust or read only; empty Enter selects read only. Ctrl+C exits:";
+    if !*declined
+        && let Some(start) = transcript
+            .windows(prompt.len())
+            .rposition(|part| part == prompt)
+        && !transcript[start + prompt.len()..]
+            .windows(b"Input:".len())
+            .any(|part| part == b"Input:")
+    {
+        input
+            .write_all(b"read only\r")
+            .expect("explicit read-only fixture decision");
+        *declined = true;
+    }
+}

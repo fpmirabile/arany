@@ -239,7 +239,35 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
         .as_array()
         .unwrap();
     assert_eq!(branches.len(), 3);
-    assert_eq!(branches[2], crate::tools::types::outcome_branch());
+    assert_eq!(
+        branches[2]["properties"]["call"]["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|call| call["properties"]["operation"]["enum"][0].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["list", "read", "search"]
+    );
+    request.phase = AgentPhase::RootSynthesis;
+    let synthesis = run_body(&request, Effort::Low);
+    let branches = synthesis["output_config"]["format"]["schema"]["properties"]["outcome"]["anyOf"]
+        .as_array()
+        .unwrap();
+    assert_eq!(branches.len(), 2);
+    assert_eq!(
+        branches[1]["properties"]["call"]["anyOf"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert!(
+        !synthesis["system"]
+            .as_str()
+            .unwrap()
+            .contains("synthesis must Finish"),
+        "primary synthesis must be able to read and edit before finishing"
+    );
     let rows: Vec<Value> = serde_json::from_str(include_str!(
         "../../../../tests/fixtures/tool-outcomes.json"
     ))

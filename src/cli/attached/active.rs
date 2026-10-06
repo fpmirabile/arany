@@ -41,13 +41,25 @@ pub(super) async fn submit_objective(
     let starting_sequence = view.last_sequence;
     let cancellation = RunCancellation::new();
     let mut progress = RunProgress::new();
+    let (approvals, mut inbox) =
+        arany::ToolApprovals::new(composer.approval_mode().unwrap_or_default());
+    let mut pending: Option<arany::ToolApproval> = None;
+    let mut approval_page = 0usize;
+    let mut approval_allow = false;
+    let mut approval_answer = Composer::default();
+    let mut include_paths = admission.include_paths.clone();
+    for path in arany::mention_paths(&objective).map_err(|error| error.to_string())? {
+        if !include_paths.contains(&path) {
+            include_paths.push(path);
+        }
+    }
     let request = RunRequest {
         session_id: Some(view.id),
         title: None,
         objective,
         images: composer.take_images(),
         workspace: admission.workspace.clone(),
-        include_paths: admission.include_paths.clone(),
+        include_paths,
         policy: view.defaults.policy,
     };
     draw_active_snapshot(terminal, view, composer, false, false, None)
@@ -65,14 +77,31 @@ pub(super) async fn submit_objective(
         request,
         cancellation.clone(),
         progress.clone(),
-        admission.tools,
+        run::ToolAccess {
+            configured: admission.tools,
+            permissions: admission.workspace_permissions.as_ref(),
+            approvals: &approvals,
+        },
     );
     tokio::pin!(future);
     let mut cancelling = false;
     let mut user_recorded = false;
     let shutdown_reason = loop {
+        let approval_more = match &pending {
+            Some(approval) => terminal
+                .draw_tool_approval(&approval.intent, approval_page, approval_allow)
+                .map_err(|error| error.to_string())?,
+            None => false,
+        };
         tokio::select! {
+            approval = inbox.next(), if pending.is_none() => {
+                pending = approval;
+                approval_page = 0;
+                approval_allow = false;
+                approval_answer.clear();
+            }
             result = &mut future => {
+                composer.set_file_candidates(None, Vec::new());
                 if terminal.close_agents_at_run_end().is_err() {
                     return Ok(RunSubmission::Shutdown(
                         "terminal input cleanup failed; Run may have committed; check Session history".into(),
@@ -116,6 +145,43 @@ pub(super) async fn submit_objective(
                     Ok(input) => input,
                     Err(_) => break "terminal input failed".to_owned(),
                 };
+                if pending.is_some() && !matches!(input, TerminalInput::Interrupt | TerminalInput::Shutdown(_)) {
+                    match input {
+                        TerminalInput::CycleApprovalMode => {
+                            let _ = super::permissions::cycle(composer);
+                            approvals.set_mode(composer.approval_mode().unwrap_or_default());
+                        }
+                        TerminalInput::Escape | TerminalInput::EndOfInput => {
+                            pending.take().expect("pending action").decide(false);
+                            terminal.restore_draft_input(composer.text().len()).map_err(|error| error.to_string())?;
+                        }
+                        TerminalInput::Tab if !approval_more => approval_allow = !approval_allow,
+                        TerminalInput::Up if !approval_more => approval_allow = false,
+                        TerminalInput::Down if !approval_more => approval_allow = true,
+                        TerminalInput::Down | TerminalInput::PageDown if approval_more => approval_page += 1,
+                        TerminalInput::Up | TerminalInput::PageUp => { approval_page = approval_page.saturating_sub(1); approval_allow = false; }
+                        TerminalInput::Resize => { approval_page = 0; approval_allow = false; }
+                        TerminalInput::Suspend => {
+                            terminal.suspend_and_resume(composer.text().len()).map_err(|error| error.to_string())?;
+                            approval_page = 0;
+                            approval_allow = false;
+                        }
+                        TerminalInput::Character(character) if terminal.is_linear() => { approval_answer.apply(TerminalInput::Character(character)); }
+                        TerminalInput::Backspace if terminal.is_linear() => { approval_answer.apply(TerminalInput::Backspace); }
+                        TerminalInput::Submit if approval_more => approval_page += 1,
+                        TerminalInput::Submit => {
+                            let answer = approval_answer.text().trim().to_ascii_lowercase();
+                            if terminal.is_linear() {
+                                approval_allow = matches!(answer.as_str(), "allow" | "yes");
+                                if !matches!(answer.as_str(), "" | "deny" | "no" | "allow" | "yes") { approval_answer.clear(); continue; }
+                            }
+                            pending.take().expect("pending action").decide(approval_allow);
+                            terminal.restore_draft_input(composer.text().len()).map_err(|error| error.to_string())?;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
                 if terminal.help_open() {
                     match input {
                         TerminalInput::Interrupt => terminal.close_help(),
@@ -155,6 +221,11 @@ pub(super) async fn submit_objective(
                     continue;
                 }
                 let notice = match input {
+                    TerminalInput::CycleApprovalMode => {
+                        let notice = super::permissions::cycle(composer);
+                        approvals.set_mode(composer.approval_mode().unwrap_or_default());
+                        Some(notice)
+                    }
                     TerminalInput::ClipboardPaste => Some(match terminal.request_clipboard_paste() {
                         Ok(()) => "Reading clipboard... draft retained".to_owned(),
                         Err(error) => format!("Error: {error}; draft unchanged"),

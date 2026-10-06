@@ -177,7 +177,11 @@ pub(crate) fn linear_session_lines(view: &SessionView) -> Vec<String> {
         .unwrap_or("unset");
     let policy = pinned.map_or(view.defaults.policy, |config| config.policy);
     let mut lines = vec![
-        format!("Session: {}", view.id),
+        if view.created_sequence == 0 {
+            "Conversation: new · not saved".into()
+        } else {
+            format!("Session: {}", view.id)
+        },
         format!(
             "Title: {}",
             safe_truncate(&view.conversation_title(), MAX_ROW_CELLS)

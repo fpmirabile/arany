@@ -144,6 +144,7 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
         let workspace = root.join(format!("workspace-{profile}"));
         std::fs::create_dir_all(workspace.join("src")).unwrap();
         private_file(&workspace.join("src/check.sh"), b"set -eu\ntest -z \"${LD_PRELOAD-}\"\ntest -z \"${OPENAI_API_KEY-}\"\ntest -z \"${ANTHROPIC_API_KEY-}\"\nprintf 'native command passed'\n");
+        private_file(&workspace.join("src/note.txt"), b"native note\n");
         let state = root.join(format!("state-{profile}"));
         StateRoot::admit(&state).unwrap();
         basic_config(&state);
@@ -184,7 +185,7 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                 "claude-sonnet-5"
             };
             let mut contexts = Vec::new();
-            for step in 0..2 {
+            for step in 0..4 {
                 let bytes = request(&mut output);
                 let end = bytes
                     .windows(4)
@@ -205,7 +206,7 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                 let body: Value = serde_json::from_slice(&bytes[end..]).unwrap();
                 assert_eq!(body["model"], model);
                 let context: Value = serde_json::from_str(if profile == "openai" {
-                    body["input"].as_str().unwrap()
+                    body["input"][0]["content"].as_str().unwrap()
                 } else {
                     body["messages"][0]["content"].as_str().unwrap()
                 })
@@ -219,21 +220,54 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                 let observations = context["tools"]["observations"].as_array().unwrap();
                 assert_eq!(observations.len(), step);
                 if step == 1 {
-                    let command: Value =
-                        serde_json::from_str(observations[0]["output"].as_str().unwrap()).unwrap();
+                    assert_eq!(observations[0]["disposition"], "succeeded");
+                    assert_eq!(observations[0]["workspace_effect"], "none");
+                    assert!(
+                        observations[0].get("intent").is_none()
+                            && observations[0].get("guard").is_none()
+                    );
+                    let command = observations[0]["output"].clone();
                     assert_eq!(
                         command,
                         json!({"exit_code":0,"stdout":"native command passed","stderr":"","workspace_changes":"discarded"})
                     );
                 }
-                contexts.push(context);
-                let outcome = if step == 0 {
-                    json!({"outcome":{"type":"tool","call":{"operation":"command","program":"bash","args":["src/check.sh"],"cwd":""}}})
-                } else {
-                    json!({"outcome":{"type":"finish","summary":"command complete","result":"Native command passed."}})
+                assert_eq!(context["tools"]["catalog"]["write"], true);
+                let outcome = match step {
+                    0 => {
+                        json!({"outcome":{"type":"tool","call":{"operation":"command","program":"bash","args":["src/check.sh"],"cwd":""}}})
+                    }
+                    1 => {
+                        json!({"outcome":{"type":"tool","call":{"operation":"read","path":"src/note.txt","offset":0,"limit":4096}}})
+                    }
+                    2 => {
+                        assert_eq!(observations[1]["call"]["operation"], "read");
+                        assert_eq!(observations[1]["workspace_effect"], "none");
+                        assert_eq!(observations[1]["output"]["text"], "native note\n");
+                        assert_eq!(observations[1]["output"]["sha256"], hash(b"native note\n"));
+                        json!({"outcome":{"type":"tool","call":{"operation":"edit","path":"src/note.txt","expected_digest":observations[1]["output"]["sha256"],"old":"native note\n","new":"native note\n2026-10-06\n"}}})
+                    }
+                    3 => {
+                        assert_eq!(observations[2]["call"]["operation"], "edit");
+                        assert_eq!(observations[2]["disposition"], "succeeded");
+                        assert_eq!(observations[2]["workspace_effect"], "applied");
+                        assert_eq!(
+                            observations[2]["output"]["sha256"],
+                            hash(b"native note\n2026-10-06\n")
+                        );
+                        json!({"outcome":{"type":"finish","summary":"command and edit complete","result":"Native command and edit passed."}})
+                    }
+                    _ => unreachable!(),
                 };
+                contexts.push(context);
                 let response = if profile == "openai" {
-                    json!({"id":format!("resp_native_{step}"),"status":"completed","model":model,"output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":outcome.to_string()}]}],"usage":{"input_tokens":12,"output_tokens":8}})
+                    assert_eq!(body["tool_choice"], "required");
+                    assert_eq!(body["parallel_tool_calls"], false);
+                    assert_eq!(body["input"].as_array().unwrap().len(), 1 + step*2);
+                    let mut arguments = if outcome["outcome"]["type"] == "tool" { outcome["outcome"]["call"].clone() } else { outcome["outcome"].clone() };
+                    let key = if outcome["outcome"]["type"] == "tool" { "operation" } else { "type" };
+                    let operation = arguments.as_object_mut().unwrap().remove(key).unwrap();
+                    json!({"id":format!("resp_native_{step}"),"status":"completed","model":model,"output":[{"type":"function_call","id":format!("fc_native_{step}"),"call_id":format!("call_native_{step}"),"name":format!("arany_{}", operation.as_str().unwrap()),"arguments":arguments.to_string(),"status":"completed"}],"usage":{"input_tokens":12,"output_tokens":8}})
                 } else {
                     json!({"id":format!("msg_native_{step}"),"type":"message","role":"assistant","model":model,"stop_reason":"end_turn","stop_sequence":null,"content":[{"type":"text","text":outcome.to_string()}],"usage":{"input_tokens":12,"output_tokens":8}})
                 }.to_string();
@@ -320,15 +354,21 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
             assert_eq!(run.status, RunStatus::Finished);
             assert_eq!(
                 run.assistant_message.as_deref(),
-                Some("Native command passed.")
+                Some("Native command and edit passed.")
             );
-            assert_eq!(run.tools.len(), 1);
+            assert_eq!(run.tools.len(), 3);
+            assert!(
+                run.tools
+                    .iter()
+                    .all(|tool| tool.observation.as_ref().unwrap().disposition
+                        == ToolDisposition::Succeeded)
+            );
             assert_eq!(
-                run.tools[0].observation.as_ref().unwrap().disposition,
-                ToolDisposition::Succeeded
+                std::fs::read(workspace.join("src/note.txt")).unwrap(),
+                b"native note\n2026-10-06\n"
             );
-            assert_eq!(contexts.len(), 2);
-            assert_eq!(run.agents[0].provider_calls.len(), 2);
+            assert_eq!(contexts.len(), 4);
+            assert_eq!(run.agents[0].provider_calls.len(), 4);
             assert_eq!(
                 output.stdout,
                 arany::render_exec(&run, &events, arany::Output::Jsonl, true).into_bytes()

@@ -94,9 +94,11 @@ fn wait_for(
     answered: &mut usize,
     needle: &[u8],
 ) {
+    let mut declined = false;
     let deadline = Instant::now() + Duration::from_secs(10);
     while !transcript.windows(needle.len()).any(|part| part == needle) {
         pump(output, input, transcript, answered);
+        super::process::decline_workspace_consent(input, transcript, &mut declined);
         assert!(
             Instant::now() < deadline,
             "setup PTY stage missing: {}",
@@ -114,12 +116,14 @@ fn wait_for_after(
     start: usize,
     needle: &[u8],
 ) {
+    let mut declined = false;
     let deadline = Instant::now() + Duration::from_secs(10);
     while !transcript[start..]
         .windows(needle.len())
         .any(|part| part == needle)
     {
         pump(output, input, transcript, answered);
+        super::process::decline_workspace_consent(input, transcript, &mut declined);
         assert!(
             Instant::now() < deadline,
             "setup PTY stage missing: {}",
@@ -136,7 +140,7 @@ fn bare_start_reuses_private_file_account_without_setup_or_run() {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
-    let account_id = prepare_test_file_account(temp.path());
+    prepare_test_file_account(temp.path());
     let shell = "printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
     let mut command = Command::new("/usr/bin/script");
     command
@@ -208,19 +212,10 @@ fn bare_start_reuses_private_file_account_without_setup_or_run() {
         )
         .await
         .expect("Workspace Sessions");
-        assert_eq!(sessions.len(), 1);
-        let store = Store::open_read_only(StateRoot::open_existing(&state).expect("state reopen"))
-            .expect("read-only Store");
-        let events = store.load_session(sessions[0].id).await.expect("Events");
-        let view = SessionView::replay(sessions[0].id, &events)
-            .expect("strict replay")
-            .expect("Session");
-        assert_eq!(events.len(), 2);
-        assert!(view.runs.is_empty(), "bare start submitted no Run");
-        assert_eq!(view.defaults.provider.as_deref(), Some("openai"));
-        assert_eq!(view.defaults.model.as_deref(), Some("gpt-5.4"));
-        assert_eq!(view.defaults.account_id, Some(account_id));
-        store.close().await.expect("close Store");
+        assert!(
+            sessions.is_empty(),
+            "startup, local rejection and setup navigation save no empty conversation"
+        );
     });
 }
 
@@ -240,8 +235,8 @@ fn bare_start_with_both_accounts_requires_an_explicit_billing_route() {
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).expect("Workspace");
         let state = temp.path().join("state");
-        let native_id = prepare_test_file_account(temp.path());
-        let chatgpt_id = prepare_selected_chatgpt_account(temp.path());
+        prepare_test_file_account(temp.path());
+        prepare_selected_chatgpt_account(temp.path());
         if corrupt_native {
             StateRoot::open_existing(&temp.path().join("account-root"))
                 .expect("account root")
@@ -375,7 +370,7 @@ fn bare_start_with_both_accounts_requires_an_explicit_billing_route() {
                 .expect("unchanged ChatGPT record")
                 == chatgpt_before
         );
-        if let Some(provider) = provider {
+        if provider.is_some() {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .expect("read-only runtime");
@@ -384,25 +379,10 @@ fn bare_start_with_both_accounts_requires_an_explicit_billing_route() {
                 let sessions = arany::list_sessions(root, workspace.clone())
                     .await
                     .expect("Workspace Sessions");
-                assert_eq!(sessions.len(), 1);
-                let store =
-                    Store::open_read_only(StateRoot::open_existing(&state).expect("state reopen"))
-                        .expect("read-only Store");
-                let events = store.load_session(sessions[0].id).await.expect("Events");
-                let view = SessionView::replay(sessions[0].id, &events)
-                    .expect("strict replay")
-                    .expect("Session");
-                assert!(view.runs.is_empty(), "no Run was submitted");
-                assert_eq!(view.defaults.provider.as_deref(), Some(provider));
-                assert_eq!(
-                    view.defaults.account_id,
-                    Some(if provider == "chatgpt" {
-                        chatgpt_id
-                    } else {
-                        native_id
-                    })
+                assert!(
+                    sessions.is_empty(),
+                    "startup, local rejection and setup navigation save no empty conversation"
                 );
-                store.close().await.expect("close Store");
             });
         } else {
             assert!(
@@ -847,17 +827,10 @@ fn bare_start_without_account_keeps_chat_input_and_offers_named_setup_choices() 
         )
         .await
         .expect("Workspace Sessions");
-        assert_eq!(sessions.len(), 1);
-        let store = Store::open_read_only(StateRoot::open_existing(&state).expect("State reopen"))
-            .expect("read-only Store");
-        let events = store.load_session(sessions[0].id).await.expect("Events");
-        let view = SessionView::replay(sessions[0].id, &events)
-            .expect("strict replay")
-            .expect("Session");
-        assert_eq!(events.len(), 1, "rejected draft changed canonical State");
-        assert!(view.runs.is_empty(), "rejected draft began a Run");
-        assert_eq!(view.defaults, SessionDefaults::default());
-        store.close().await.expect("close Store");
+        assert!(
+            sessions.is_empty(),
+            "startup, local rejection and setup navigation save no empty conversation"
+        );
     });
 }
 
@@ -1097,7 +1070,13 @@ fn release_bare_session(
     name: &str,
     access_choice: Option<&str>,
     private_values: &[&str],
-) -> Option<SessionView> {
+) -> Option<String> {
+    if access_choice.is_some() {
+        StateRoot::open_existing(&private_home.join(".local/state/arany"))
+            .expect("fixture account root")
+            .replace_model_preferences_record(br#"{"version":1,"sources":[]}"#)
+            .expect("mixed-access fixture without a remembered route");
+    }
     let workspace = private_home.join("workspace");
     let state = private_home.join(name);
     let environment_home = format!("{name}-home");
@@ -1218,25 +1197,15 @@ fn release_bare_session(
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("read-only runtime");
-    Some(runtime.block_on(async {
-        let sessions = arany::list_sessions(
-            StateRoot::open_existing(&state).expect("existing State"),
-            workspace,
-        )
-        .await
-        .expect("Workspace Sessions");
-        assert_eq!(sessions.len(), 1, "one Session per StateRoot");
-        let store = Store::open_read_only(StateRoot::open_existing(&state).expect("state reopen"))
-            .expect("read-only Store");
-        let events = store.load_session(sessions[0].id).await.expect("Events");
-        let view = SessionView::replay(sessions[0].id, &events)
-            .expect("strict replay")
-            .expect("Session");
-        assert_eq!(events.len(), 2, "startup Events");
-        assert!(view.runs.is_empty(), "bare start submitted a Run");
-        store.close().await.expect("close Store");
-        view
-    }))
+    runtime.block_on(async {
+        let sessions =
+            arany::list_sessions(StateRoot::open_existing(&state).expect("State"), workspace)
+                .await
+                .expect("Workspace Sessions");
+        assert!(sessions.is_empty(), "bare startup saves no empty Session");
+    });
+    assert!(text.contains("Conversation: new · not saved"));
+    Some(text)
 }
 
 #[cfg(all(target_os = "linux", not(debug_assertions)))]
@@ -1256,9 +1225,8 @@ fn release_saved_file_account_is_shared_across_session_roots() {
     let temp = tempfile::tempdir().expect("private test root");
     let private_home = temp.path().join("home");
     std::fs::create_dir_all(private_home.join("workspace")).expect("private Workspace");
-    let account_id = prepare_test_file_account_at(&private_home.join(".local/state/arany"));
+    prepare_test_file_account_at(&private_home.join(".local/state/arany"));
     let passwd_home = release_passwd_home();
-    let mut previous_session = None;
     for name in ["state-one", "state-two"] {
         let view = release_bare_session(
             &private_home,
@@ -1268,13 +1236,7 @@ fn release_saved_file_account_is_shared_across_session_roots() {
             &["synthetic-existing-key"],
         )
         .expect("native Session");
-        assert_eq!(view.defaults.provider.as_deref(), Some("openai"));
-        assert_eq!(view.defaults.model.as_deref(), Some("gpt-5.4"));
-        assert_eq!(view.defaults.account_id, Some(account_id));
-        if let Some(previous_session) = previous_session {
-            assert_ne!(view.id, previous_session);
-        }
-        previous_session = Some(view.id);
+        assert!(view.contains("Provider: openai\r\nModel: gpt-5.4\r\n"));
     }
 }
 
@@ -1285,9 +1247,8 @@ fn release_selected_chatgpt_account_starts_without_keyring_or_run() {
     let temp = tempfile::tempdir().expect("private test root");
     let private_home = temp.path().join("home");
     std::fs::create_dir_all(private_home.join("workspace")).expect("private Workspace");
-    let account_id = prepare_selected_chatgpt_account_at(&private_home.join(".local/state/arany"));
+    prepare_selected_chatgpt_account_at(&private_home.join(".local/state/arany"));
     let passwd_home = release_passwd_home();
-    let mut previous_session = None;
     for name in ["state-one", "state-two"] {
         let view = release_bare_session(
             &private_home,
@@ -1297,14 +1258,7 @@ fn release_selected_chatgpt_account_starts_without_keyring_or_run() {
             &["synthetic-subject"],
         )
         .expect("ChatGPT Session");
-        assert_eq!(view.defaults.provider.as_deref(), Some("chatgpt"));
-        assert_eq!(view.defaults.model, None);
-        assert_eq!(view.defaults.effort, None);
-        assert_eq!(view.defaults.account_id, Some(account_id));
-        if let Some(previous_session) = previous_session {
-            assert_ne!(view.id, previous_session);
-        }
-        previous_session = Some(view.id);
+        assert!(view.contains("Provider: chatgpt\r\nModel: unset\r\n"));
     }
 }
 
@@ -1316,7 +1270,7 @@ fn release_mixed_access_prompts_each_start_without_reading_the_other_record() {
     let private_home = temp.path().join("home");
     std::fs::create_dir_all(private_home.join("workspace")).expect("private Workspace");
     let account_path = private_home.join(".local/state/arany");
-    let native_id = prepare_test_file_account_at(&account_path);
+    prepare_test_file_account_at(&account_path);
     prepare_selected_chatgpt_account_at(&account_path);
     let account = StateRoot::open_existing(&account_path).expect("private account root");
     account
@@ -1334,11 +1288,9 @@ fn release_mixed_access_prompts_each_start_without_reading_the_other_record() {
         ],
     )
     .expect("explicit native Session");
-    assert_eq!(api.defaults.provider.as_deref(), Some("openai"));
-    assert_eq!(api.defaults.model.as_deref(), Some("gpt-5.4"));
-    assert_eq!(api.defaults.account_id, Some(native_id));
+    assert!(api.contains("Provider: openai\r\nModel: gpt-5.4\r\n"));
 
-    let chatgpt_id = prepare_selected_chatgpt_account_at(&account_path);
+    prepare_selected_chatgpt_account_at(&account_path);
     account
         .replace_saved_account_record(b"invalid-unselected-native-canary")
         .expect("unselected API fixture");
@@ -1350,11 +1302,7 @@ fn release_mixed_access_prompts_each_start_without_reading_the_other_record() {
         &["synthetic-subject", "invalid-unselected-native-canary"],
     )
     .expect("explicit ChatGPT Session");
-    assert_ne!(api.id, chatgpt.id);
-    assert_eq!(chatgpt.defaults.provider.as_deref(), Some("chatgpt"));
-    assert!(chatgpt.defaults.model.is_none());
-    assert!(chatgpt.defaults.effort.is_none());
-    assert_eq!(chatgpt.defaults.account_id, Some(chatgpt_id));
+    assert!(chatgpt.contains("Provider: chatgpt\r\nModel: unset\r\n"));
     account
         .replace_chatgpt_accounts_record(b"invalid-unselected-chatgpt-canary")
         .expect("both invalid fixture");
@@ -1505,26 +1453,17 @@ fn release_saved_account_is_private_across_os_users() {
             )
             .await
             .expect("Workspace Sessions");
-            assert_eq!(sessions.len(), 1);
-            let store =
-                Store::open_read_only(StateRoot::open_existing(&state).expect("State reopen"))
-                    .expect("read-only Store");
-            let events = store.load_session(sessions[0].id).await.expect("Events");
-            let view = SessionView::replay(sessions[0].id, &events)
-                .expect("strict replay")
-                .expect("Session");
-            assert_eq!(
-                events.len(),
-                if expected_account.is_some() { 2 } else { 1 },
-                "startup Events"
+            assert!(
+                sessions.is_empty(),
+                "bare startup saves no empty conversation"
             );
-            assert!(view.runs.is_empty(), "bare start submitted a Run");
-            assert_eq!(view.defaults.account_id, expected_account);
-            assert_eq!(
-                view.defaults.provider.as_deref(),
-                expected_account.map(|_| "openai")
-            );
-            store.close().await.expect("close Store");
+            assert!(std::str::from_utf8(&transcript).expect("UTF-8").contains(
+                if expected_account.is_some() {
+                    "Provider: openai\r\nModel: gpt-5.4\r\n"
+                } else {
+                    "Provider: unset\r\nModel: unset\r\n"
+                }
+            ));
         });
         if expected_account.is_none() {
             assert!(!Path::new("/other/.local/state/arany").exists());
@@ -1730,7 +1669,7 @@ fn narrow_no_color_chatgpt_warning_pages_before_acceptance_and_restores_terminal
         &mut input,
         &mut transcript,
         &mut answered,
-        b"Page 1/",
+        b"ChatGPT plan con",
     );
     assert!(!state.exists(), "pre-consent flow created a Session");
     let next_page = transcript.len();
@@ -1741,7 +1680,7 @@ fn narrow_no_color_chatgpt_warning_pages_before_acceptance_and_restores_terminal
         &mut transcript,
         &mut answered,
         next_page,
-        b"limit. Arany",
+        b"\x1b[5;6H2",
     );
     let ignored = transcript.len();
     input
@@ -2024,17 +1963,10 @@ fn unconfigured_inline_composer_shows_draft_and_setup_selection_at_narrow_widths
             )
             .await
             .expect("Workspace Sessions");
-            assert_eq!(sessions.len(), 1);
-            let store =
-                Store::open_read_only(StateRoot::open_existing(&state).expect("State reopen"))
-                    .expect("read-only Store");
-            let events = store.load_session(sessions[0].id).await.expect("Events");
-            let view = SessionView::replay(sessions[0].id, &events)
-                .expect("strict replay")
-                .expect("Session");
-            assert_eq!(events.len(), 1);
-            assert!(view.runs.is_empty(), "unconfigured objective began a Run");
-            store.close().await.expect("close Store");
+            assert!(
+                sessions.is_empty(),
+                "startup, local rejection and setup navigation save no empty conversation"
+            );
         });
     }
 }
@@ -2691,7 +2623,7 @@ fn setup_signals_after_hidden_key_segment_restore_echo_and_preserve_defaults() {
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).expect("Workspace");
         let state = temp.path().join("state");
-        let account_id = prepare_test_file_account(temp.path());
+        prepare_test_file_account(temp.path());
         let account_path = temp.path().join("account-root/account-credentials.json");
         let account_before = std::fs::read(&account_path).expect("original account record");
         let shell = if attached {
@@ -2875,20 +2807,10 @@ fn setup_signals_after_hidden_key_segment_restore_echo_and_preserve_defaults() {
                 )
                 .await
                 .expect("Workspace Sessions");
-                assert_eq!(sessions.len(), 1, "shutdown created another Session");
-                let store =
-                    Store::open_read_only(StateRoot::open_existing(&state).expect("State reopen"))
-                        .expect("read-only Store");
-                let events = store.load_session(sessions[0].id).await.expect("Events");
-                let view = SessionView::replay(sessions[0].id, &events)
-                    .expect("strict replay")
-                    .expect("Session");
-                assert_eq!(events.len(), 2, "shutdown changed canonical defaults");
-                assert_eq!(view.defaults.account_id, Some(account_id));
-                assert_eq!(view.defaults.provider.as_deref(), Some("openai"));
-                assert_eq!(view.defaults.model.as_deref(), Some("gpt-5.4"));
-                assert!(view.runs.is_empty(), "shutdown started a Run");
-                store.close().await.expect("close Store");
+                assert!(
+                    sessions.is_empty(),
+                    "startup, local rejection and setup navigation save no empty conversation"
+                );
             });
         } else {
             assert!(!state.exists(), "signaled pre-Session setup created State");
@@ -3266,16 +3188,10 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
         let sessions = arany::list_sessions(root, workspace.clone())
             .await
             .expect("Workspace Sessions");
-        assert_eq!(sessions.len(), 1);
-        let store = Store::open_read_only(StateRoot::open_existing(&state).expect("State reopen"))
-            .expect("read-only Store");
-        let events = store.load_session(sessions[0].id).await.expect("Events");
-        let view = SessionView::replay(sessions[0].id, &events)
-            .expect("strict replay")
-            .expect("Session");
-        assert!(view.runs.is_empty(), "unconfigured start began a Run");
-        assert_eq!(view.defaults, SessionDefaults::default());
-        store.close().await.expect("close Store");
+        assert!(
+            sessions.is_empty(),
+            "startup, local rejection and setup navigation save no empty conversation"
+        );
     });
     connection
         .set_read_timeout(Some(Duration::from_secs(1)))
@@ -3385,6 +3301,28 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
         fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
         let mut transcript = Vec::new();
         let mut answered = 0;
+        if !linear {
+            wait_for(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                b"Do you trust this folder?",
+            );
+            let page_start = transcript.len();
+            input.write_all(b"\r").expect("review second consent page");
+            wait_for_after(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                page_start,
+                b"\x1b[?25l",
+            );
+            input
+                .write_all(b"\r")
+                .expect("explicit read-only fixture choice");
+        }
         wait_for(
             &mut output,
             &mut input,

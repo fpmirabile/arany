@@ -155,7 +155,7 @@ pub(super) fn help_entry(index: usize) -> Option<HelpEntry> {
         InteractiveCommand::Agents => "Agent details",
         InteractiveCommand::Provider => "Choose Provider",
         InteractiveCommand::Model => "Choose model",
-        InteractiveCommand::Permissions => "Show permissions",
+        InteractiveCommand::Permissions => "Folder trust and approval settings",
         InteractiveCommand::Quit => "Exit Session",
     };
     Some(HelpEntry {

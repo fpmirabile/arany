@@ -165,8 +165,12 @@ fn command(args: &[&str]) -> std::process::Output {
 }
 
 pub(super) fn stage() {
+    let read_only: (&[u8], &[u8]) = (
+        b"Type trust or read only; empty Enter selects read only. Ctrl+C exits:",
+        b"read only\r",
+    );
     let mut server = start_response_server(NativeReplies::ScopedAnthropic);
-    run_pty(
+    let setup_output = run_pty(
         &SETUP_SHELL.replace("state-one", "state-scoped"),
         &[
             (b"type a choice name: API key or ChatGPT plan", b"API key\r"),
@@ -181,6 +185,7 @@ pub(super) fn stage() {
                 b"Choose API workspace\r",
             ),
             (b"Setup: API workspace ID", b"wrkspc_Selected123\r"),
+            read_only,
         ],
         None,
     );
@@ -205,12 +210,11 @@ pub(super) fn stage() {
         .expect("account ID")
         .parse()
         .expect("UUID");
-    let setup = session("/root/state-scoped");
-    assert_eq!(setup.defaults.provider.as_deref(), Some("anthropic"));
-    assert_eq!(setup.defaults.model.as_deref(), Some(MODEL));
-    assert_eq!(setup.defaults.effort, Some(Effort::Low));
-    assert_eq!(setup.defaults.account_id, Some(id));
-    assert!(setup.runs.is_empty(), "workspace setup started a Run");
+    unsaved("/root/state-scoped");
+    assert!(
+        String::from_utf8_lossy(&setup_output)
+            .contains(&format!("Provider: anthropic\r\nModel: {MODEL}\r\n"))
+    );
 
     let models = command(&["provider", "models", "anthropic", "--saved-account"]);
     assert_eq!(models.stdout, "Provider: anthropic\nModels: 2\nclaude-offline-new · availability only; choose effort; compatibility check optional\nclaude-sonnet-5 · reviewed metadata; effort low, medium, high, xhigh, max\n".as_bytes());
@@ -218,6 +222,7 @@ pub(super) fn stage() {
     let output = run_pty(
         &TURN_SHELL.replace("state-three", "state-scoped-run"),
         &[
+            read_only,
             (b"Input:\r\n", b"scoped offline objective\r"),
             (b"Answer:\r\n  scoped answer", b"/compact\r"),
         ],
@@ -225,7 +230,10 @@ pub(super) fn stage() {
     );
     assert!(!String::from_utf8_lossy(&output).contains("scoped compacted"));
     let direct = session("/root/state-scoped-run");
-    assert_eq!(direct.defaults, setup.defaults);
+    assert_eq!(direct.defaults.provider.as_deref(), Some("anthropic"));
+    assert_eq!(direct.defaults.model.as_deref(), Some(MODEL));
+    assert_eq!(direct.defaults.effort, Some(Effort::Low));
+    assert_eq!(direct.defaults.account_id, Some(id));
     assert_eq!(direct.runs.len(), 1);
     assert_eq!(direct.compactions.len(), 1);
     let compact = &direct.compactions[0].record;
@@ -245,6 +253,7 @@ pub(super) fn stage() {
     run_pty(
         &CHECK_SHELL.replace("state-four", "state-scoped-check"),
         &[
+            read_only,
             (b"Input:\r\n", b"/model claude-offline-new high\r"),
             (
                 b"Notice: Model: claude-offline-new",

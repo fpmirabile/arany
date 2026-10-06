@@ -338,7 +338,20 @@ impl Drop for Unit {
 pub(super) async fn execute(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
+    cancellation: RunCancellation,
+) -> Result<ToolObservation, ToolError> {
+    let mut dispatched = false;
+    match execute_inner(runtime, intent, cancellation, &mut dispatched).await {
+        Err(error) if !dispatched => Ok(super::unstarted_observation(intent.clone(), error)),
+        result => result,
+    }
+}
+
+async fn execute_inner(
+    runtime: &ToolRuntime,
+    intent: &EffectIntent,
     mut cancellation: RunCancellation,
+    dispatched: &mut bool,
 ) -> Result<ToolObservation, ToolError> {
     let deadline = tokio::time::Instant::now()
         + Duration::from_millis(u64::from(intent.limits.runtime_ms))
@@ -515,6 +528,7 @@ pub(super) async fn execute(
         unit.admit()
             .await
             .map_err(|_| ToolError::GuardRejected("resource attestation"))?;
+        *dispatched = true;
         stdin
             .write_all(b"GO\n")
             .await

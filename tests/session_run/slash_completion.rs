@@ -3,7 +3,7 @@ use super::{
     loopback::ChildGuard,
     session_picker::{pump, tail},
 };
-use arany::{CollaborationPolicy, StateRoot, Store, list_sessions};
+use arany::{CollaborationPolicy, SessionDefaults, SessionId, StateRoot, Store, list_sessions};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::process::{Signal, kill_process};
 use std::{
@@ -47,19 +47,51 @@ fn wait_for_after(
     }
 }
 
+pub(super) fn saved_conversation(
+    state: &std::path::Path,
+    workspace: &std::path::Path,
+    defaults: SessionDefaults,
+) -> SessionId {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("fixture runtime")
+        .block_on(async {
+            let id = arany::create_session(
+                StateRoot::admit(state).expect("State"),
+                workspace.to_owned(),
+                None,
+            )
+            .await
+            .expect("explicit existing Session");
+            if defaults != SessionDefaults::default() {
+                arany::set_session_defaults(
+                    StateRoot::open_existing(state).expect("State"),
+                    workspace.to_owned(),
+                    id,
+                    defaults,
+                )
+                .await
+                .expect("existing defaults");
+            }
+            id
+        })
+}
+
 #[test]
 fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
     let temp = tempfile::tempdir().expect("private test root");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
-    let shell = "printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
+    let saved_id = saved_conversation(&state, &workspace, SessionDefaults::default());
+    let shell = "printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4 --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
     let mut command = Command::new("/usr/bin/script");
     command
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
+        .env("ARANY_TEST_SESSION", saved_id.to_string())
         .env("OPENAI_API_KEY", "synthetic-test-key")
         .env("SHELL", "/bin/sh")
         .env("TERM", "dumb")
@@ -124,7 +156,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         ))
         .expect("initial Session");
     assert_eq!(initial.len(), 1);
-    let mut current_id = initial[0].id;
+    let current_id = initial[0].id;
     let held = std::fs::File::open(state.join(format!("session-{current_id}.lock")))
         .expect("existing Session operation lock");
     rustix::fs::flock(&held, rustix::fs::FlockOperation::NonBlockingLockExclusive)
@@ -193,8 +225,20 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
             .expect("accepted source message");
         store.close().await.expect("close interrupted source Store");
     });
-    let mut sources = Vec::new();
+    let mut source_prefix = Vec::new();
     for (command, title) in [("/new", "Before new"), ("/clear", "Before clear")] {
+        let from = transcript.len();
+        input
+            .write_all(format!("/resume {current_id}\r").as_bytes())
+            .expect("resume original");
+        wait_for_after(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            from,
+            b"Input:\r\n",
+        );
         let from = transcript.len();
         input
             .write_all(format!("/rename {title}\r").as_bytes())
@@ -214,7 +258,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
             store.close().await.expect("close source Store");
             events
         });
-        sources.push((current_id, prefix, title));
+        source_prefix = prefix;
         let from = transcript.len();
         input
             .write_all(format!("{command}\r").as_bytes())
@@ -227,16 +271,29 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
             from,
             b"Input:\r\n",
         );
-        current_id = String::from_utf8_lossy(&transcript[from..])
-            .lines()
-            .find_map(|line| {
-                line.trim_end_matches('\r')
-                    .strip_prefix("Notice: New Session ")
-            })
-            .expect("confirmed new Session notice")
-            .parse()
-            .expect("new Session ID");
-        assert!(sources.iter().all(|(id, _, _)| *id != current_id));
+        assert!(String::from_utf8_lossy(&transcript[from..]).contains("New conversation"));
+        runtime.block_on(async {
+            let store = Store::open_read_only(StateRoot::open_existing(&state).expect("State"))
+                .expect("source Store");
+            assert_eq!(
+                store
+                    .load_session(current_id)
+                    .await
+                    .expect("unchanged history"),
+                source_prefix
+            );
+            store.close().await.expect("close Store");
+            assert_eq!(
+                list_sessions(
+                    StateRoot::open_existing(&state).expect("State"),
+                    workspace.clone()
+                )
+                .await
+                .expect("history")
+                .len(),
+                1
+            );
+        });
         let from = transcript.len();
         input
             .write_all(b"/provider\r")
@@ -276,10 +333,14 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         let sessions = list_sessions(StateRoot::open_existing(&state).expect("State"), workspace)
             .await
             .expect("closed Sessions");
-        assert_eq!(sessions.len(), 3);
+        assert_eq!(
+            sessions.len(),
+            1,
+            "new/clear without messages saves no Sessions"
+        );
         let store = Store::open_read_only(StateRoot::open_existing(&state).expect("State"))
             .expect("closed Store");
-        for (id, prefix, title) in sources {
+        for (id, prefix, title) in [(current_id, source_prefix, "Before clear")] {
             assert_eq!(
                 store.load_session(id).await.expect("source history"),
                 prefix
@@ -292,28 +353,11 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
             assert_eq!(view.title, title);
             assert_eq!(view.defaults, expected);
             assert!(view.compactions.is_empty());
-            if title == "Before new" {
-                assert_eq!(view.runs.len(), 1);
-                assert_eq!(view.runs[0].status, arany::RunStatus::Interrupted);
-                assert_eq!(view.runs[0].objective, "Prior accepted objective");
-                assert!(view.runs[0].agents.is_empty());
-            } else {
-                assert!(view.runs.is_empty());
-            }
+            assert_eq!(view.runs.len(), 1);
+            assert_eq!(view.runs[0].status, arany::RunStatus::Interrupted);
+            assert_eq!(view.runs[0].objective, "Prior accepted objective");
+            assert!(view.runs[0].agents.is_empty());
         }
-        let events = store
-            .load_session(current_id)
-            .await
-            .expect("last new history");
-        assert_eq!(events.len(), 2);
-        let view = store
-            .load_view(current_id)
-            .await
-            .expect("last replay")
-            .expect("last Session");
-        assert_eq!(view.title, "New Session");
-        assert_eq!(view.defaults, expected);
-        assert!(view.runs.is_empty() && view.compactions.is_empty());
         store.close().await.expect("close replay Store");
     });
 }
@@ -439,27 +483,10 @@ fn narrow_help_signal_restores_terminal_without_starting_a_run() {
         let sessions = list_sessions(root, workspace.clone())
             .await
             .expect("listed Sessions");
-        assert_eq!(sessions.len(), 1);
-        let root = StateRoot::open_existing(&state).expect("existing State");
-        let store = Store::open_read_only(root).expect("read-only Store");
-        let events = store
-            .load_session(sessions[0].id)
-            .await
-            .expect("valid history");
-        assert_eq!(
-            events.len(),
-            2,
-            "help and signal add no Events beyond Session setup"
+        assert!(
+            sessions.is_empty(),
+            "help and shutdown save no empty conversation"
         );
-        let view = store
-            .load_view(sessions[0].id)
-            .await
-            .expect("valid view")
-            .expect("Session");
-        assert_eq!(view.defaults.provider.as_deref(), Some("openai"));
-        assert_eq!(view.defaults.model.as_deref(), Some("gpt-5.4"));
-        assert!(view.runs.is_empty());
-        store.close().await.expect("close Store");
     });
 }
 
@@ -469,13 +496,15 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
-    let shell = "stty rows 24 cols 40; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider anthropic --no-color; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
+    let saved_id = saved_conversation(&state, &workspace, SessionDefaults::default());
+    let shell = "stty rows 24 cols 40; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider anthropic --no-color; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
     let mut command = Command::new("/usr/bin/script");
     command
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
+        .env("ARANY_TEST_SESSION", saved_id.to_string())
         .env("SHELL", "/bin/sh")
         .env("TERM", "xterm")
         .current_dir(&workspace)
@@ -567,6 +596,51 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut answered,
         clear_at,
         b"\x1b[22;3H",
+    );
+    let menu_at = transcript.len();
+    input.write_all(b"/resum").expect("single command prefix");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        menu_at,
+        b"> /resume",
+    );
+    let completed_at = transcript.len();
+    input
+        .write_all(b"\r")
+        .expect("complete resume without executing");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        completed_at,
+        b"[session-id]",
+    );
+    assert!(!String::from_utf8_lossy(&transcript[completed_at..]).contains("Resume · 1"));
+    let picker_at = transcript.len();
+    input
+        .write_all(b"\r")
+        .expect("execute resume without an argument");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        picker_at,
+        b"Resume",
+    );
+    let closed_at = transcript.len();
+    input.write_all(b"\x1b").expect("dismiss resume picker");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        closed_at,
+        b"closed",
     );
     let menu_at = transcript.len();
     input.write_all(b"/s").expect("ambiguous command prefix");
@@ -705,7 +779,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut input,
         &mut transcript,
         &mut answered,
-        b"<provider>",
+        b"> /provider",
     );
     input
         .write_all(b"\topenai\r")
@@ -1018,16 +1092,10 @@ fn inline_quick_selector_returns_to_the_same_draft_and_caret() {
         let sessions = list_sessions(root, workspace.clone())
             .await
             .expect("listed Sessions");
-        assert_eq!(sessions.len(), 1);
-        let root = StateRoot::open_existing(&state).expect("existing State");
-        let store = Store::open_read_only(root).expect("read-only Store");
-        let view = store
-            .load_view(sessions[0].id)
-            .await
-            .expect("valid history")
-            .expect("Session");
-        assert!(view.runs.is_empty());
-        store.close().await.expect("close Store");
+        assert!(
+            sessions.is_empty(),
+            "selector navigation and retained drafts save no conversation"
+        );
     });
 }
 
@@ -1036,6 +1104,7 @@ fn session_picker_close_case(quick: bool) {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
+    let saved_id = saved_conversation(&state, &workspace, SessionDefaults::default());
     let shell = "stty rows 24 cols 40; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --no-color; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
     let mut command = Command::new("/usr/bin/script");
     command
@@ -1147,6 +1216,21 @@ fn session_picker_close_case(quick: bool) {
             .to_owned()
     };
     assert_eq!(marker("TTY_BEFORE:"), marker("TTY_AFTER:"));
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("replay runtime")
+        .block_on(async {
+            let sessions =
+                list_sessions(StateRoot::open_existing(&state).expect("State"), workspace)
+                    .await
+                    .expect("closed history");
+            assert_eq!(
+                sessions.len(),
+                1,
+                "opening and closing resume must not save the empty composer"
+            );
+            assert_eq!(sessions[0].id, saved_id);
+        });
 }
 
 #[test]
@@ -1165,13 +1249,15 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
-    let shell = "before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider anthropic; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
+    let saved_id = saved_conversation(&state, &workspace, SessionDefaults::default());
+    let shell = "before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider anthropic; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
     let mut command = Command::new("/usr/bin/script");
     command
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
+        .env("ARANY_TEST_SESSION", saved_id.to_string())
         .env("SHELL", "/bin/sh")
         .env("TERM", "xterm")
         .current_dir(&workspace)
@@ -1717,7 +1803,11 @@ esac
         .expect("held clipboard FIFO");
         let png = STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC")
             .expect("synthetic PNG");
-        let shell = "trap ':' INT; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; /arany --screen-reader --provider openai --model gpt-5.4 --state-dir /data/state --workspace /data/workspace; code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$code\"";
+        let saved_id =
+            saved_conversation(&dir.join("state"), &workspace, SessionDefaults::default());
+        let shell = format!(
+            "trap ':' INT; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; /arany --screen-reader --provider openai --model gpt-5.4 --resume {saved_id} --state-dir /data/state --workspace /data/workspace; code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$code\""
+        );
         let mut command = Command::new("/usr/bin/bwrap");
         command
             .env_clear()
@@ -1834,7 +1924,7 @@ esac
                 "-q",
                 "-e",
                 "-c",
-                shell,
+                &shell,
                 "/dev/null",
             ])
             .stdin(Stdio::piped())

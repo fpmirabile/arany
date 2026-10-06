@@ -678,6 +678,18 @@ fn isolated_stage(checked_turn: bool) {
         callback(&authorization, returning, unfinished);
         previous_authorization = Some(authorization);
         signed_tokens.push(signed.clone());
+        wait_for_stage(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            0,
+            b"Type trust or read only; empty Enter selects read only. Ctrl+C exits:\r\n",
+            Some(&signed),
+        );
+        input
+            .write_all(b"read only\r")
+            .expect("explicit fixture folder choice");
         if permission_disabled {
             wait_for_stage(
                 &mut output,
@@ -734,10 +746,8 @@ fn isolated_stage(checked_turn: bool) {
                     .windows(b"Plan-consuming check".len())
                     .any(|part| part == b"Plan-consuming check")
             );
-            let ready = session(state);
-            assert_eq!(ready.defaults.model.as_deref(), Some("gpt-6.1-sol"));
-            assert_eq!(ready.defaults.effort, Some(arany::Effort::Low));
-            assert!(ready.runs.is_empty(), "setup must not start a Run");
+            unsaved(state);
+            assert!(String::from_utf8_lossy(&transcript).contains("Model: gpt-6.1-sol\r\n"));
             if checked_turn {
                 checked_turn::accept_check_and_run(
                     &mut output,
@@ -870,23 +880,22 @@ fn isolated_stage(checked_turn: bool) {
         } else {
             assert!(registration["issued_client_id"].is_null());
         }
-        let view = session(state);
         if checked_turn {
+            let view = session(state);
             checked_turn::assert_runs(&view, account_id, &checks[0]);
             assert!(!text.contains(checked_turn::FAILURE_BODY_CANARY));
-        } else {
-            assert!(view.runs.is_empty(), "setup started a Run");
-        }
-        assert_eq!(view.defaults.provider.as_deref(), Some("chatgpt"));
-        assert_eq!(view.defaults.account_id, Some(account_id));
-        if checked_turn {
+            assert_eq!(view.defaults.provider.as_deref(), Some("chatgpt"));
+            assert_eq!(view.defaults.account_id, Some(account_id));
             assert_eq!(view.defaults.model.as_deref(), Some("gpt-6.1-sol"));
             assert_eq!(view.defaults.effort, Some(arany::Effort::Medium));
-        } else if permission_disabled {
-            assert!(view.defaults.model.is_none() && view.defaults.effort.is_none());
         } else {
-            assert_eq!(view.defaults.model.as_deref(), Some("gpt-6.1-sol"));
-            assert_eq!(view.defaults.effort, Some(arany::Effort::Low));
+            unsaved(state);
+            assert!(text.contains("Provider: chatgpt\r\n"));
+            assert!(text.contains(if permission_disabled {
+                "Model: unset\r\n"
+            } else {
+                "Model: gpt-6.1-sol\r\n"
+            }));
         }
         let journal =
             std::fs::read(Path::new(state).join("events.sqlite3")).expect("journal bytes");
@@ -954,10 +963,7 @@ fn isolated_stage(checked_turn: bool) {
                         .any(|part| part == secret.as_bytes())
                 );
             }
-            let unconfigured = session("/root/state-after-logout");
-            assert!(unconfigured.runs.is_empty());
-            assert!(unconfigured.defaults.provider.is_none());
-            assert!(unconfigured.defaults.account_id.is_none());
+            unsaved("/root/state-after-logout");
             account_root
                 .replace_chatgpt_registration_record(
                     &serde_json::to_vec(&serde_json::json!({
@@ -974,7 +980,14 @@ fn isolated_stage(checked_turn: bool) {
             );
             continue;
         }
-        let second_output = run_pty(BARE_SHELL, &[], None);
+        let second_output = run_pty(
+            BARE_SHELL,
+            &[(
+                b"Type trust or read only; empty Enter selects read only. Ctrl+C exits:",
+                b"read only\r",
+            )],
+            None,
+        );
         assert!(!String::from_utf8_lossy(&second_output).contains("Choose access method"));
         for secret in [ACCESS, REFRESH, signed.as_str()] {
             assert!(
@@ -984,13 +997,11 @@ fn isolated_stage(checked_turn: bool) {
                 "reopened Session exposed a credential"
             );
         }
-        let second = session("/root/state-two");
-        assert_ne!(view.id, second.id);
-        assert!(second.runs.is_empty(), "bare restart started a Run");
-        assert_eq!(second.defaults.provider.as_deref(), Some("chatgpt"));
-        assert_eq!(second.defaults.account_id, Some(account_id));
-        assert_eq!(second.defaults.model, view.defaults.model);
-        assert_eq!(second.defaults.effort, view.defaults.effort);
+        unsaved("/root/state-two");
+        assert!(
+            String::from_utf8_lossy(&second_output)
+                .contains("Provider: chatgpt\r\nModel: gpt-6.1-sol\r\n")
+        );
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
@@ -1006,10 +1017,16 @@ fn isolated_stage(checked_turn: bool) {
             .replace("--screen-reader", "--screen-reader --resume");
         let resumed_output = run_pty(
             &resume_shell,
-            &[(
-                b"Choose number, exact ID, n next, p previous, or q close:",
-                b"1\r",
-            )],
+            &[
+                (
+                    b"Choose number, exact ID, n next, p previous, or q close:",
+                    b"1\r",
+                ),
+                (
+                    b"Type trust or read only; empty Enter selects read only. Ctrl+C exits:",
+                    b"read only\r",
+                ),
+            ],
             None,
         );
         let resumed_text = String::from_utf8_lossy(&resumed_output);
@@ -1020,10 +1037,17 @@ fn isolated_stage(checked_turn: bool) {
         assert!(!resumed_text.contains("Choose saved access"));
         let resumed = session("/root/state-resume-empty");
         assert_eq!(resumed.id, empty_id);
-        assert_eq!(resumed.defaults.provider, second.defaults.provider);
-        assert_eq!(resumed.defaults.model, second.defaults.model);
-        assert_eq!(resumed.defaults.effort, second.defaults.effort);
-        assert_eq!(resumed.defaults.account_id, second.defaults.account_id);
+        assert_eq!(resumed.defaults.provider.as_deref(), Some("chatgpt"));
+        assert_eq!(resumed.defaults.model.as_deref(), Some("gpt-6.1-sol"));
+        assert_eq!(
+            resumed.defaults.effort,
+            Some(if checked_turn {
+                arany::Effort::Medium
+            } else {
+                arany::Effort::Low
+            })
+        );
+        assert_eq!(resumed.defaults.account_id, Some(account_id));
         assert!(resumed.runs.is_empty());
         for secret in [ACCESS, REFRESH, signed.as_str()] {
             assert!(
@@ -1045,8 +1069,11 @@ fn isolated_stage(checked_turn: bool) {
             .find(|source| source["account_id"] == account_id.to_string())
             .unwrap();
         assert_eq!(source["profile"], "chatgpt");
-        assert_eq!(source["model"], view.defaults.model.as_deref().unwrap());
-        assert_eq!(source["effort"], view.defaults.effort.unwrap().as_str());
+        assert_eq!(source["model"], "gpt-6.1-sol");
+        assert_eq!(
+            source["effort"],
+            if checked_turn { "medium" } else { "low" }
+        );
         assert_eq!(
             source["catalog"],
             if checked_turn {
@@ -1113,10 +1140,7 @@ fn isolated_stage(checked_turn: bool) {
             checked_turn::assert_runs(&view, account_id, &checks[0]);
             let after_logout = run_pty(SIGNED_OUT_SHELL, &[], None);
             assert!(!String::from_utf8_lossy(&after_logout).contains("Choose saved access"));
-            let unconfigured = session("/root/state-after-logout");
-            assert!(unconfigured.runs.is_empty());
-            assert!(unconfigured.defaults.provider.is_none());
-            assert!(unconfigured.defaults.account_id.is_none());
+            unsaved("/root/state-after-logout");
         }
     }
     drop(api);

@@ -427,6 +427,7 @@ fn run_pty_with_gate(
             || needle.ends_with(b"draft unchanged; catalog loading");
         if needle != b"Choose number, n next, p previous, or q close:"
             && needle != b"Choose number, exact ID, n next, p previous, or q close:"
+            && needle != b"Type trust or read only; empty Enter selects read only. Ctrl+C exits:"
             && !catalog_busy
         {
             wait_for_sanitized(
@@ -530,7 +531,29 @@ fn session(state: &str) -> SessionView {
     })
 }
 
+fn unsaved(state: &str) {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("replay runtime")
+        .block_on(async {
+            let sessions = arany::list_sessions(
+                StateRoot::open_existing(Path::new(state)).expect("State"),
+                PathBuf::from("/root/workspace"),
+            )
+            .await
+            .expect("Workspace Sessions");
+            assert!(
+                sessions.is_empty(),
+                "setup and startup must not save an empty conversation"
+            );
+        });
+}
+
 fn isolated_stage() {
+    let read_only: (&[u8], &[u8]) = (
+        b"Type trust or read only; empty Enter selects read only. Ctrl+C exits:",
+        b"read only\r",
+    );
     assert_eq!(nix::unistd::geteuid().as_raw(), 0);
     assert_eq!(
         StateRoot::account_path().unwrap(),
@@ -559,6 +582,7 @@ fn isolated_stage() {
             ),
             (b"type a choice name: OpenAI or Anthropic", b"OpenAI\r"),
             (b"Setup: Enter API key", b"synthetic-offline-api-key\r"),
+            read_only,
         ],
         None,
     );
@@ -594,26 +618,20 @@ fn isolated_stage() {
     let metadata = std::fs::metadata(account_root.path().join("account-credentials.json"))
         .expect("account file metadata");
     assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
-    let first = session("/root/state-one");
-    assert!(first.runs.is_empty(), "setup started a Run");
-    assert_eq!(first.defaults.provider.as_deref(), Some("openai"));
-    assert_eq!(first.defaults.model.as_deref(), Some("gpt-5.4"));
-    assert_eq!(first.defaults.effort, Some(arany::Effort::Low));
-    assert_eq!(first.defaults.account_id, Some(account_id));
+    unsaved("/root/state-one");
+    assert!(setup_text.contains("Provider: openai\r\nModel: gpt-5.4\r\n"));
 
-    let second_output = run_pty(BARE_SHELL, &[], None);
+    let second_output = run_pty(BARE_SHELL, &[read_only], None);
     assert!(!String::from_utf8_lossy(&second_output).contains("Choose access method"));
-    let second = session("/root/state-two");
-    assert!(second.runs.is_empty(), "bare startup started a Run");
-    assert_ne!(first.id, second.id);
-    assert_eq!(second.defaults.provider.as_deref(), Some("openai"));
-    assert_eq!(second.defaults.model.as_deref(), Some("gpt-5.4"));
-    assert_eq!(second.defaults.account_id, Some(account_id));
+    unsaved("/root/state-two");
+    assert!(
+        String::from_utf8_lossy(&second_output).contains("Provider: openai\r\nModel: gpt-5.4\r\n")
+    );
 
     let server = start_response_server(NativeReplies::Direct);
     let turn_output = run_pty(
         TURN_SHELL,
-        &[(b"Input:\r\n", b"offline objective\r")],
+        &[read_only, (b"Input:\r\n", b"offline objective\r")],
         Some("Arany · Answer:\r\n  offline answer".as_bytes()),
     );
     assert!(
@@ -653,6 +671,7 @@ fn isolated_stage() {
     let output = run_pty(
         CHECK_SHELL,
         &[
+            read_only,
             (b"Input:\r\n", b"/model gpt-offline-new high\r"),
             (b"Notice: Model: gpt-offline-new", b"offline objective\r"),
         ],
@@ -749,6 +768,7 @@ fn isolated_stage() {
     run_pty(
         EMPTY_CATALOG_SHELL,
         &[
+            read_only,
             (b"Input:\r\n", b"/setup\r"),
             (b"type a choice name: API key or ChatGPT plan", b"API key\r"),
             (
@@ -769,10 +789,7 @@ fn isolated_stage() {
         record == account_after,
         "empty catalog changed saved account"
     );
-    let empty = session("/root/state-five");
-    assert_eq!(empty.defaults, checked.defaults);
-    assert!(empty.runs.is_empty(), "empty catalog started a Run");
-    assert_eq!(empty.last_sequence, empty.created_sequence + 1);
+    unsaved("/root/state-five");
 
     let mut preferences: serde_json::Value = serde_json::from_slice(
         &account_root
@@ -798,6 +815,7 @@ fn isolated_stage() {
     let output = run_pty_with_gate(
         LOADING_CATALOG_SHELL,
         &[
+            read_only,
             (b"Input:\r\n", b"/model\r"),
             (
                 b"Notice: Loading model catalog; Ctrl+C cancels",
@@ -858,10 +876,8 @@ fn isolated_stage() {
         1
     );
     assert!(!text.contains("Notice: Catalog loading; draft retained; Ctrl+C cancels"));
-    let loading = session("/root/state-six");
-    assert_eq!(loading.defaults, checked.defaults);
-    assert!(loading.runs.is_empty(), "catalog draft started a Run");
-    assert_eq!(loading.last_sequence, loading.created_sequence + 1);
+    unsaved("/root/state-six");
+    assert!(text.contains("Provider: openai\r\nModel: gpt-offline-new\r\n"));
     assert!(
         record
             == account_root

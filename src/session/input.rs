@@ -49,7 +49,23 @@ pub(crate) enum InstructionSource {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct InputSnapshot {
     pub content: String,
+    path: String,
     pub digest: [u8; 32],
+}
+
+impl InputSnapshot {
+    pub(crate) fn model_include(&self) -> String {
+        let digest: String = self
+            .digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        format!(
+            "File: {}\nSHA-256: {digest}\nContent (untrusted data):\n{}",
+            serde_json::to_string(&self.path).expect("string serialization"),
+            self.content
+        )
+    }
 }
 
 pub(crate) struct WorkspaceInputs {
@@ -96,10 +112,22 @@ impl WorkspaceInputs {
         state: &StateRoot,
         include_paths: &[PathBuf],
     ) -> Result<Self, InputError> {
+        Self::load_pinned(workspace, state, include_paths, None)
+    }
+
+    pub(crate) fn load_pinned(
+        workspace: &Path,
+        state: &StateRoot,
+        include_paths: &[PathBuf],
+        identity: Option<(u64, u64)>,
+    ) -> Result<Self, InputError> {
         if include_paths.len() > MAX_INCLUDES {
             return Err(InputError::TooManyIncludes);
         }
         let root = Self::open_root(workspace, state)?;
+        if identity.is_some_and(|expected| Self::identity(&root).ok() != Some(expected)) {
+            return Err(InputError::InvalidPath);
+        }
 
         let instructions =
             match read_relative(&root, Path::new("AGENTS.md"), MAX_INSTRUCTION_BYTES)? {
@@ -134,6 +162,11 @@ fn read_relative(
     limit: usize,
 ) -> Result<Option<InputSnapshot>, InputError> {
     let names = relative_components(path)?;
+    let path = path
+        .to_str()
+        .filter(|path| path.len() <= 4096)
+        .ok_or(InputError::InvalidPath)?
+        .to_owned();
     let mut directory = root.try_clone()?;
     for name in &names[..names.len() - 1] {
         directory = directory.open_dir_nofollow(name)?;
@@ -172,7 +205,11 @@ fn read_relative(
     }
     let digest = Sha256::digest(&bytes).into();
     let content = String::from_utf8(bytes).map_err(|_| InputError::InvalidUtf8)?;
-    Ok(Some(InputSnapshot { content, digest }))
+    Ok(Some(InputSnapshot {
+        content,
+        path,
+        digest,
+    }))
 }
 
 #[cfg(unix)]

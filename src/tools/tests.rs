@@ -17,7 +17,7 @@ fn tool_admission_corpus_is_closed_and_restrict_only() {
         json!([]),
         json!(["src", "src/child"]),
         json!(["src", "src"]),
-        json!(["."]),
+        json!([".", "src"]),
         json!(["../outside"]),
         json!(["src/.env"]),
         json!(["/absolute"]),
@@ -31,6 +31,36 @@ fn tool_admission_corpus_is_closed_and_restrict_only() {
                 .is_err()
         );
     }
+    let mut root_value = value.clone();
+    root_value["workspace_paths"] = json!(["."]);
+    let root_config: Config = serde_json::from_value(root_value.clone()).unwrap();
+    root_config.validate().unwrap();
+    assert!(root_config.allows(&ToolCall::List { path: ".".into() }));
+    assert!(!root_config.allows(&ToolCall::Mkdir { path: ".".into() }));
+    for (path, expected) in [
+        ("README.md", true),
+        ("nested/source.rs", true),
+        (".git/config", false),
+        (".env.local", false),
+        ("../outside", false),
+    ] {
+        assert_eq!(
+            root_config.allows(&ToolCall::Read {
+                path: path.into(),
+                offset: 0,
+                limit: 1
+            }),
+            expected,
+            "root grant: {path}"
+        );
+    }
+    root_value["version"] = json!(2);
+    assert!(
+        serde_json::from_value::<Config>(root_value)
+            .unwrap()
+            .validate()
+            .is_err()
+    );
     let duplicate = br#"{"version":1,"version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}"#;
     assert!(parse_json(duplicate, 64 * 1024).is_err());
     let mut unknown = value.clone();
