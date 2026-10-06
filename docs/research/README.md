@@ -17,7 +17,7 @@ The earlier conversational `P0`/`P1`/`P2` shorthand is retired. It mixed researc
 
 | Report | Primary decision area | Status |
 |---|---|---|
-| [Agent instructions and product specifications](./agent-instructions-and-product-specs-2026-10.md) | Conditional instruction loading, focused behavior specs, ADRs, Skills and evidence ownership | Proposed incremental documentation split; no instruction or runtime migration applied |
+| [Agent instructions and product specifications](./agent-instructions-and-product-specs-2026-10.md) | Conditional instruction loading, focused behavior specs, ADRs, Skills and evidence ownership | Adopted incremental split; [terminal spec](../specs/terminal.md), documentation map and scenario-first workflow implemented; runtime discovery unchanged |
 | [Clean Architecture principles](./clean-architecture-principles-2026-10.md) | Martin's dependency rule and SOLID, interpreted against Arany's real ownership and privilege seams | Three-reviewer application and dispositions in the [architecture review](../architecture/clean-architecture-review-2026-10.md) |
 | [Current harness effect loops](./effectful-harness-tool-loops-2026-10.md) | Codex, Claude Code, Pi and OpenCode proposal/observation/recovery ownership | Implemented strict semantic primary continuation; native function-call migration is not required for the local base |
 | [MCP and runtime Skills](./mcp-and-runtime-skills-2026-10.md) | Current MCP versions, complete legacy tools flow, portable progressive Skills, bounded parser choices | Implemented pinned local 2025-11-25 stdio profile and progressive resources; newer stateless/remote profiles remain separate |
@@ -70,4 +70,4 @@ The subject reports remain design evidence, not a scaffold list. Daemon, other C
 
 ## Handoff
 
-Research claims and implementation decisions are complete enough to write the first implementation plan. That plan must import the V1 claim/non-claim and P0 controls from the security report plus the evidence owners and admission rule from the testing report before code starts. Product guarantees are intentionally not claimed until the corresponding gates in the decision register, subject reports, and architecture document pass.
+The initial architecture research is complete and the local implementation now has scoped synthetic evidence. [The documentation map](../README.md) locates current contract owners; [next steps](../../NEXT_STEPS.md) owns open defects, deferred functionality and final checks. New work follows [planning](../../planning/PLANNING.md), the [spec workflow](../specs/README.md), security controls and the existing testing admission rule. A research recommendation or accepted requirement is not evidence that its implementation or release gate passed.

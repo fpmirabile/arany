@@ -1,6 +1,6 @@
 # Arany
 
-Rust-first, CLI-only agent harness. The product and executable are named Arany and `arany`; the repository directory name is not part of the public contract. The current physical architecture and data model live in [docs/architecture/system-overview.md](./docs/architecture/system-overview.md); broader research remains indexed under [docs/research/README.md](./docs/research/README.md). This file contains rules, not duplicated project context.
+Rust-first, CLI-only agent harness. The product and executable are named Arany and `arany`; the repository directory name is not part of the public contract. [Documentation map](./docs/README.md) locates contracts and their owners; [system overview](./docs/architecture/system-overview.md) owns physical architecture and data model. This file contains development rules.
 
 ## Rules to load before editing
 
@@ -18,6 +18,7 @@ Rust-first, CLI-only agent harness. The product and executable are named Arany a
 - Beta 1 goal continuation, unavailable test prerequisites or final verification handoff, behavior changes, defect fixes, tests, fixtures, user-visible output, or correctness and release claims → [agents/testing.md](./agents/testing.md)
 - Architecture, codebase shape, data model, or a proposed new seam → [docs/architecture/system-overview.md](./docs/architecture/system-overview.md)
 - Creating or changing an implementation plan → [planning/PLANNING.md](./planning/PLANNING.md)
+- Planning or implementing product behavior, defect fixes, acceptance scenarios, or documentation ownership → [spec workflow](./docs/specs/README.md) and the owning contract; unmigrated domains retain their current owners
 - Engine Run coordination, budgets, or Provider outcome handling → [agents/engine.md](./agents/engine.md)
 - Model-driven Tools, commands, runtime Skills, MCP, or Guard enforcement → [agents/tools.md](./agents/tools.md)
 - Work inside a module → its file under `agents/<module>.md`
@@ -51,6 +52,7 @@ Route each learning to its narrowest authoritative home:
 
 - Agent behavior shared across the repository → `AGENTS.md` or `agents/*.md`
 - Module-specific invariant or workflow → `agents/<module>.md`
+- Agreed observable product behavior, limits and recovery → its domain spec under `docs/specs/`; follow the [extraction workflow](./docs/specs/README.md) for unmigrated domains
 - Architecture or product decision → an ADR or architecture document under `docs/`
 - Repeatable procedure → a skill
 - Commands, dependencies, and configuration already encoded by the repository → keep the repository as the source of truth; do not cache them in prose
@@ -68,6 +70,7 @@ Create a new module only after its implementation gains depth. Create a crate on
 Before non-trivial work:
 
 - Read the relevant module rules and design documents.
+- For behavior work, identify the owning contract and acceptance scenarios before implementation; follow the [spec workflow](./docs/specs/README.md) for proposals, agreed changes and evidence.
 - Propose a concrete plan for multi-module or public-interface changes.
 - Ask before deleting files, renaming public APIs, restructuring modules, or changing CI and shared infrastructure.
 - Keep visual review artifacts under `.lavish/`; they are local and gitignored.
@@ -79,6 +82,8 @@ Every implementation plan includes:
 - A security pass when a trigger in [agents/security.md](./agents/security.md) applies.
 - A final formatting, linting, test, and diff review using the checks declared by the repository.
 - An auto-learning pass that updates the authoritative document when the work produced a durable conclusion.
+
+After each planning pass and before closing any implementation, including work without a plan, review contract impact using the [spec workflow](./docs/specs/README.md). Update the owning contract when requirements or scenario coverage change or are missing; an adequate unchanged contract needs no edit.
 
 ## Maintaining these instructions
 

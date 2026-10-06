@@ -1,6 +1,6 @@
 # Terminal history
 
-Load for `src/terminal/history.rs` or its callers. [Terminal presentation](./terminal.md) owns the user-visible modes and keys; this file owns only the private history invariant.
+Load for `src/terminal/history.rs` or its callers. Read [the terminal spec](../docs/specs/terminal.md#conversation-progress-and-history) for user-visible history behavior and [terminal editing rules](./terminal.md) for lifecycle constraints; this file owns the private history invariant.
 
 - Derive rows from the caller's already-loaded committed `SessionView`. Never read State, Workspace, credentials, or Providers while indexing, searching, or drawing. A Run objective enters history only after its committed snapshot; an answer enters only after its committed terminal outcome.
 - Index message row counts and source-byte positions without retaining a second full transcript. Materialize only messages intersecting the visible window, sanitize before cell measurement, and keep one message's temporary rows bounded by the existing Event size. The find query is at most 64 UTF-8 bytes; rendered row width is capped at 4,096 cells. An unmatched query remains editable and cannot enter the composer or canonical Events.

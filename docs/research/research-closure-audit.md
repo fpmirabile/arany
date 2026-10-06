@@ -1,11 +1,11 @@
 # Arany research closure audit
 
 **Status:** architecture research closed; implementation evidence pending
-**Audit date:** 2026-09-29  
+**Initial audit:** 2026-09-29; current ownership reconciled 2026-10-06  
 **Canonical architecture:** [system-overview.md](../architecture/system-overview.md)
 **Canonical decisions:** [next-step-decision-register.md](./next-step-decision-register.md)
 
-This audit answers one question: is any additional architecture research required before writing the first implementation plan? The answer is **no**. The human review activated durable Sessions, generic bounded teams, the familiar bottom-terminal layout, transient mouse inside panels, exact custom Provider profiles, OTLP as the final beta slice, and Apache-2.0 plus NOTICE. All remaining uncertainty is executable evidence, release metadata, or named triggered scope.
+The initial audit found no missing architecture research before implementation. Later user decisions admitted the consented ChatGPT-plan route and guarded local coding base. [The documentation map](../README.md) locates current contracts; [next steps](../../NEXT_STEPS.md) owns demonstrated defects, missing functionality and unperformed checks. This research closure is not implementation or release clearance.
 
 ## 1. Status vocabulary
 
@@ -20,7 +20,7 @@ Implementation evidence is not missing research. Reading more cannot prove termi
 
 ### Product and lifecycle
 
-- Product and binary are Arany/`arany`; Linux and macOS are the beta platforms.
+- Product and binary are Arany/`arany`; personal beta 1 targets Linux. Native macOS and redistribution evidence belong to the broader release, as recorded in decision D-19.
 - Bare `arany` owns a durable multi-Run Session. `--continue`, `--resume`, and `--fork` are explicit; directory matching never resumes implicitly.
 - One accepted user Message creates one Run. Resume preserves Session identity; fork creates a new Session at a committed boundary; compaction remains derived context.
 - `exec` is deterministic one-Run automation; `show` is deterministic Session-or-Run replay.
@@ -30,15 +30,12 @@ Implementation evidence is not missing research. Reading more cannot prove termi
 - Every Run has one accountable primary AgentRun and ordered `0..N` direct read-only children.
 - Policies are `single`, `auto(N)`, and `team(N)`. Default `auto` allows three active children; the beta hard ceiling is eight.
 - Children do not create nested teams. The primary owns the final answer and must join all required successful children before synthesis.
-- Direct completion is one Provider call; `k` children require `k + 2`; no automatic retry or hidden fallback exists.
+- Read-only direct completion is one Provider call; `k` children require `k + 2`. Opt-in primary Tool continuation has separate aggregate limits in [local tools](../tools.md); no automatic retry or hidden fallback exists.
 
 ### Terminal
 
-- Native scrollback is canonical; Arany never owns an alternate-screen transcript.
-- The bottom region is composer, compact status row, and conditional activity shelf.
-- Single-agent work has no empty team dashboard. `/agents` opens full details and collaboration controls; there is no separate `/team` spelling.
-- Keyboard access is complete. Mouse reporting is transient only inside open command/Session/agent panels and is restored on every exit path.
-- The closed registry includes Session lifecycle, `/agents`, Provider/model, status, permissions, and exit commands. Approval/sandbox controls remain absent until enforcement exists.
+- [The terminal spec](../specs/terminal.md) owns modes, channels, keys, primary-screen history, conditional activity, selectors and accessibility. [Terminal rules](../../agents/terminal.md) own editing/lifecycle constraints; the compiled registry owns exact command syntax.
+- D-09/D-10 retain the reason for explicit machine modes and keyboard-complete primary-screen interaction. This report does not maintain another copy of the current contract.
 
 ### Provider and authentication
 
@@ -47,7 +44,7 @@ Implementation evidence is not missing research. Reading more cannot prove termi
 - Exact custom protocol/origin/model profiles are beta scope only after data-free conformance proves strict outcomes, server-side output limits, route identity, bounded behavior, cancellation, and safe provenance.
 - “OpenAI-shaped” is not a compatibility claim. Unverified profiles cannot receive Workspace data.
 - A built-in OpenRouter profile is triggered scope behind broker route/privacy gates; Z.AI remains unadmitted while strict output is unavailable.
-- Authentication is API-key only. OpenAI plan login remains blocked by the remote output-cap invariant; Anthropic subscription login requires prior approval.
+- Native API-key adapters and exact verified custom routes retain strict remote output bounds. The separately consented ChatGPT-plan route accepts only a local output cap and has synthetic implementation evidence; the real turn failure remains open in next steps. Native Anthropic subscription access remains user-deferred behind its recorded authorization/route gate. The [subscription recheck](./subscription-provider-routes-2026-10.md) owns dated provider-source evidence.
 
 ### State, context, and instructions
 
@@ -60,10 +57,10 @@ Implementation evidence is not missing research. Reading more cannot prove termi
 ### Security and observability
 
 - Trusted user/CLI configuration, private state, ProviderProfile, Workspace capability, and budgets are fixed before project input.
-- The read-only beta has no shell, subprocess, write-capable Tool, arbitrary fetch, MCP, plugin runtime, callback listener, or sandbox claim.
+- Default Runs remain read-only. Explicit `--tools` admits private grants through typed one-use intents, restrict-only Policy and a separately enforcing native Linux Guard. [Local tools](../tools.md) owns the bounded offline command/Skill/stdio-MCP subset; unsupported enforcement rejects. ChatGPT sign-in has its separately admitted bounded callback. Arbitrary fetch, remote MCP and runtime plugins remain outside this base.
 - Every Run owns finite aggregate call/token/byte/time/agent/concurrency budgets.
 - OTLP trace export ships last in beta, remains opt-in at runtime, uses dynamic bounded Session/Run/Agent spans, and sends content-free fields only to a numeric-loopback Collector.
-- The first effectful Tool activates typed effects, deterministic Policy, digest-bound approval, a separate Guard, and attestation.
+- Local effects already use digest-bound host grants and native attestation; no per-effect approval UI or universal same-user/host isolation is claimed.
 
 ### Distribution and testing
 
@@ -109,7 +106,7 @@ The plan must turn these into executable evidence:
 
 | Trigger | Future addition |
 |---|---|
-| First effectful Tool | EffectIntent, Policy, approval proof, separate Guard, containment suite |
+| Local effects exceed the implemented Linux base | Reviewed runtime/cache/artifact or native-platform adapters and their enforcement evidence |
 | Direct children need delegation | Bounded recursive supervision and depth budgets |
 | Concurrent writes | Isolated Workspace views and integration owner |
 | Dependencies/ownership transfer | Assignment DAG, attempts, leases, fencing |
@@ -141,7 +138,7 @@ Subject reports retain their historical analysis but carry amendments pointing t
 
 ## 7. What research cannot prove
 
-The following claims remain false until their gates pass:
+Research alone does not establish the following claims. Their executable owners and current evidence records determine the proved scope:
 
 - local overhead is negligible;
 - acknowledged Events are never lost under the claimed faults;
@@ -160,9 +157,9 @@ Research hands off one vertical beta proof:
 1. trusted startup, private state, Workspace snapshots, Session-scoped Events, reducers, and deterministic output;
 2. create/exit/resume/multi-Run/fork/compaction behavior with the scripted Provider;
 3. single and bounded N-child Runs under one aggregate budget with cancellation;
-4. native-scrollback composer/footer/shelf, Session/agent pickers, accessibility, and transient mouse restoration;
+4. primary-screen history/composer/status/activity, Session/agent pickers, accessibility, and transient mouse restoration;
 5. native OpenAI and Anthropic API-key adapters;
 6. exact custom `openai-responses` profiles and data-free admission; and
 7. OTLP as the final runtime-opt-in beta slice.
 
-No other architecture research must precede the implementation plan.
+The initial vertical proof has expanded to the admitted ChatGPT account flow and guarded local coding base. Their current implementation, live failure and verification debt are tracked by the existing plans and next steps, not inferred from this audit. No new general architecture research is required to continue that implementation.

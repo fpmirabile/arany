@@ -20,6 +20,16 @@ Describe the observable outcome in one short paragraph.
 - Record verified facts about the repository, behavior, and environment.
 - Link the relevant research, ADRs, module rules, and interfaces.
 
+## Product contract and acceptance scenarios
+
+- Owning spec or unmigrated contract:
+- Agreed behavior and proposed change:
+- Successful path and meaningful rejection/failure/recovery scenarios:
+- Existing evidence owner and deferred checks:
+- Contract review: required updates or why the existing contract covers the work:
+
+For work with no observable behavior impact, replace this section with that conclusion. Use the [spec workflow](../docs/specs/README.md) for contract review and changes.
+
 ## Ownership and seams
 
 | Responsibility or state | Owning module | Interface | Seam category | Adapters |

@@ -2,7 +2,8 @@
 
 **Status:** research closure for the first implementation
 **Date:** 2026-09-29  
-**Canonical design:** [Arany beta architecture](../architecture/system-overview.md)
+**Canonical design:** [Arany beta architecture](../architecture/system-overview.md)  
+**Contract owners:** [documentation map](../README.md); migrated behavior lives in [product specs](../specs/README.md), not duplicated decision summaries
 
 Every item has one of three statuses:
 
@@ -123,50 +124,27 @@ Before `RunStarted`, reserve the selected policy's maximum call/output/resource 
 
 ### D-09 — CLI and Session commands
 
-**Beta decision:** expose:
+**Decision:** keep attached Session work and deterministic machine modes explicit, with a compiled local command registry. This preserves familiar chat operation while preventing project/model text from becoming command authority or headless input from changing interpretation. Session selection is explicit and never inferred from a matching directory.
 
-```text
-arany [GLOBAL_OPTIONS] [PROMPT]
-arany --continue
-arany --resume [SESSION_ID]
-arany --fork SESSION_ID
-arany exec [GLOBAL_OPTIONS] --output text|jsonl PROMPT
-arany show [--state-dir DIR] --output text|jsonl SESSION_OR_RUN_ID
-arany provider check PROFILE
-```
-
-Bare `arany` creates a persistent Session; with a prompt it starts the first Run and remains interactive. `--continue`, `--resume`, and `--fork` are explicit; directory matching never resumes implicitly. `exec` creates a single-Run Session by default and requires an explicit Session ID to append. There is no `run` alias.
-
-The closed slash set is `/help`, `/status`, `/sessions`, `/new`, `/clear`, `/resume`, `/fork`, `/rename`, `/compact`, `/agents`, `/provider`, `/model`, `/permissions`, `/quit`, and `/exit`. `/clear` aliases `/new`; it does not delete history. `/agents` inspects AgentRuns and configures next-Run `single|auto|team` plus `N`. Provider/model/collaboration changes are locked during a Run. Commands are local and never Provider input; `//` escapes a leading slash. Machine modes interpret prefixes literally.
-
-Approval/sandbox controls remain absent until effectful Tools and enforcement exist.
+[The terminal spec](../specs/terminal.md#entry-modes-and-channels) owns current modes, channels and interactive command behavior; [Session rules](../../agents/session.md#session-commands) own lifecycle semantics. The compiled registry owns exact syntax/availability. [CLI rules](../../agents/cli.md) own composition and admission.
 
 ### D-10 — Terminal contract
 
-**Beta decision:** use a bounded inline Ratatui viewport in normal terminal flow:
+**Decision:** use the primary screen with a bottom composer/status and conditional activity, complete keyboard access and transient picker-only mouse. Arany owns navigable committed history rather than treating emulator scrollback as the full Session. This keeps ordinary single-agent work compact while making bounded-team work inspectable.
 
-1. committed transcript in native scrollback;
-2. composer;
-3. compact status row below input; and
-4. conditional activity shelf.
-
-The single-agent case gets one active row, not empty team chrome. Multiple/attention agents use at most three rows plus `+N more`; `/agents` opens full details. The footer prioritizes Session, pinned/next Provider and model, permission profile, collaboration mode, and context remaining.
-
-Keyboard behavior is complete. Normal mode does not enable mouse reporting. Open command/Session/agent pickers may enable it transiently; every action has a keyboard equivalent and the RAII owner disables mouse on close, signal, suspension, panic, cancellation, render failure, or lost ownership. Never enter alternate screen or enable focus, title/clipboard OSC, or global mouse capture.
-
-Screen-reader mode is append-only and control-free. `exec` and `show` never initialize terminal state. The command, not TTY detection, selects behavior.
+[The terminal spec](../specs/terminal.md) owns current layout, keys, accessibility, restoration and acceptance scenarios. [Architecture](../architecture/system-overview.md#8-terminal-presentation) owns physical responsibility; [terminal rules](../../agents/terminal.md) own implementation constraints.
 
 ### D-11 — Configuration, credentials, and custom endpoints
 
 **Beta decision:** resolve CLI selections over trusted user config/Session defaults. State/config roots are platform user locations outside the Workspace and admitted before project input. Custom Provider profiles are configuration, not repository data.
 
-The current CLI retains explicit API-key environment references for `exec`, custom profiles, and flag-selected attached use. Bare new attached mode can select one native API account from the OS credential store; first-run setup writes one versioned record containing its key and selected Provider/model/effort, and Session defaults pin only the account UUID. Replacing the record makes older saved-account Sessions fail closed. A Provider Account belongs to the current OS user across that user's Sessions and StateRoots, not to the whole machine or one Session. The current fixed keyring slot crosses StateRoots while its marker and replacement lock do not; [that mismatch](../security/findings/default-account-slot-cross-root.md) must be repaired before claiming this account scope. Linux uses the standard Secret Service interface, not a KDE-specific contract; KDE Wallet is one test backend, not a product prerequisite. Setup prefers the OS keyring and may use a user-confirmed private-file fallback when unavailable; `0600`/`0700` do not encrypt or exclude other same-user processes. Never accept keys in arguments, profile files, Events, terminal output, or telemetry. Do not load `.env` or run credential commands.
+The current CLI retains explicit API-key environment references for `exec`, custom profiles, and flag-selected attached use. Bare new attached mode can select one native API account from the OS credential store; first-run setup writes one versioned record containing its key and selected Provider/model/effort, and Session defaults pin only the account UUID. Replacing the record makes older saved-account Sessions fail closed. A Provider Account belongs to the current OS user across that user's Sessions and StateRoots, not to the whole machine or one Session. On Linux, the account root and replacement lock are shared across Session StateRoots; [the account-scope finding](../security/findings/default-account-slot-cross-root.md) owns remaining native keyring evidence. Linux uses the standard Secret Service interface, not a KDE-specific contract; KDE Wallet is one test backend, not a product prerequisite. Setup prefers the OS keyring and may use a user-confirmed private-file fallback when unavailable; `0600`/`0700` do not encrypt or exclude other same-user processes. Never accept keys in arguments, profile files, Events, terminal output, or telemetry. Do not load `.env` or run credential commands.
 
 Native origins are compiled. Custom non-loopback origins require HTTPS; numeric loopback may use explicit HTTP. Normalize and pin origin/base path, disable redirects/cookies/ambient proxies, reject metadata/link-local/multicast and route drift, and bind one credential to one origin.
 
 ### D-12 — Cancellation, errors, and retries
 
-**Beta decision:** the first Ctrl-C cancels the active Run and every child but leaves the Session durable. A second press or two-second drain deadline aborts/reaps remaining tasks; the supervisor persists the strongest honest terminal prefix. Store failure returns operational exit 1 rather than false durable cancellation. Process death replays as `Interrupted`.
+**Decision:** cancellation preserves an honest durable prefix rather than promising remote rollback. [The terminal interruption contract](../specs/terminal.md#interruption-suspension-and-restoration) owns state-dependent keys and shutdown bounds; Engine/Session own whole-Run cleanup and interrupted replay. Store failure must not be presented as durable cancellation.
 
 Provider/Engine errors are typed safe classes. No credentials, headers, prompts, Messages, includes, response bodies, or raw stored payloads enter diagnostics. Automatic retries, provider/model fallback, and broker fallback are zero; a sent request may already be billable.
 
@@ -220,7 +198,7 @@ Use **Apache-2.0 plus a project NOTICE** attributed to `fpmirabile`. This is the
 
 **Context:** bare `arany` previously preferred a saved native API account even when a ChatGPT-plan account was also selected. That could surprise the user with a different billing route, and the old lookup loaded the API key before deciding.
 
-**Decision (2026-10-02, approved and implemented offline):** when both protected access records exist, prompt for `API key` or `ChatGPT plan` on every new attached start without explicit Provider flags. Do not remember a preference, infer one from Session history or timestamps, or fall back when the chosen account is invalid. Cancelling creates no Session. Probe only checked record presence before the choice, then read the chosen route's record and pin its selected account UUID. The ChatGPT index may contain multiple private-file tokens and is read as a whole; this decision prevents reading the other billing route's record, not every unselected token in the chosen index. Explicit Provider flags and resumed Sessions retain their own admission rules. If multiple ChatGPT registrations are already saved, `/setup` may switch to one only after checking its current consented credential under the OS-user account lock; an unchecked model remains unavailable.
+**Decision (2026-10-02, approved and implemented offline):** when both protected access records exist, prompt for `API key` or `ChatGPT plan` on every new attached start without explicit Provider flags. Do not remember a preference, infer one from Session history or timestamps, or fall back when the chosen account is invalid. Cancelling creates no Session. Probe only checked record presence before the choice, then read the chosen route's record and pin its selected account UUID. The ChatGPT index may contain multiple private-file tokens and is read as a whole; this decision prevents reading the other billing route's record, not every unselected token in the chosen index. Explicit Provider flags and resumed Sessions retain their own admission rules. If multiple ChatGPT registrations are already saved, `/setup` may switch to one only after checking its current consented credential under the OS-user account lock; model visibility and optional diagnostic checks do not replace current Run account/consent admission or strict actual-response validation.
 
 **Reason and trade-off:** a repeated one-step choice costs an interaction but makes account and billing intent explicit without adding another secret-adjacent preference record. Presence is a routing hint, not proof that either account can run; the selected record is still validated before use. Offline Linux process and Store tests pass. Native macOS, full writable-keyring setup, and a real paid subscription turn remain unverified; no commit was made.
 
@@ -228,7 +206,7 @@ Use **Apache-2.0 plus a project NOTICE** attributed to `fpmirabile`. This is the
 
 | Trigger | Introduce | Evidence already available |
 |---|---|---|
-| First effectful Tool | Typed effects, Policy, approval proof, separate Guard | Security/protection reports |
+| Local effects exceed the implemented Linux base | Reviewed runtime/cache/artifact or native-platform adapters | [Local tools](../tools.md), Security/protection reports |
 | Children need nested delegation | Recursive supervision and depth budgets | Multi-agent report |
 | Concurrent writes | Isolated Workspace views and integration owner | Multi-agent report |
 | Dependencies/ownership transfer | Assignment DAG, attempts, leases, fencing | Multi-agent report |
@@ -255,4 +233,4 @@ Use **Apache-2.0 plus a project NOTICE** attributed to `fpmirabile`. This is the
 10. Keep Anthropic subscription integration pending an official authorization or published route while preserving its independently billed API-key adapter. Complete the local Linux correctness, security, and dependency checks needed for a usable beta 1 executable.
 11. After beta 1, recheck OTLP with the new routes and pursue portable release packaging, native macOS and accessibility evidence, and additional named-host performance gates.
 
-No daemon, process protocol, Guard, Tool runtime, cross-Session Memory, Artifact store, nested team, Assignment DAG, search index, automatic Provider router, built-in OpenRouter, evaluation service, web API, direct remote telemetry, OTLP logs, or OTLP metrics precedes that proof.
+The initial read-only proof preceded the Guard/Tool runtime. The user subsequently included the implemented local coding base in beta 1; [local tools](../tools.md) owns its supported subset. Daemon, additional Clients, cross-Session Memory, Artifact store, nested teams, Assignment DAG, search indexes, automatic routing, built-in OpenRouter, evaluation service, web API, direct remote telemetry, OTLP logs and metrics retain their named future triggers.

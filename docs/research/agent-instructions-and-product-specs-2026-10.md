@@ -1,7 +1,7 @@
 # Agent instructions and product specifications
 
 **Date:** 2026-10-04  
-**Scope:** primary-source guidance and a proposed documentation split; no instruction discovery, runtime behavior, or documentation migration is implemented by this note.
+**Scope:** primary-source guidance for separating development instructions and product contracts. The user accepted incremental adoption on 2026-10-06; [the documentation map](../README.md) and [spec workflow](../specs/README.md) now implement the terminal pilot. Source retrieval dates remain unchanged. No runtime instruction discovery or outbound-content expansion is introduced.
 
 ## Established patterns
 
@@ -22,7 +22,7 @@ Claude Code's current AGENTS.md support depends on version and competing CLAUDE.
 
 The Agent Skills standard explicitly describes progressive loading: metadata first, the selected skill body next, supporting resources as needed. Merely moving a large rule file into a skill would not make its body smaller once activated. [Agent Skills specification](https://agentskills.io/specification#progressive-disclosure).
 
-## Recommendation for Arany — inference
+## Adopted direction for Arany
 
 The repository already has the right partial separation: [AGENTS.md](../../AGENTS.md) routes to module instructions and identifies [the architecture overview](../architecture/system-overview.md) as canonical context. Refine this organization rather than installing a new framework or replacing every rule with a giant spec.
 
@@ -30,18 +30,16 @@ The repository already has the right partial separation: [AGENTS.md](../../AGENT
 |---|---|---|
 | Repository-wide guardrails and task routing | `AGENTS.md` | How an agent works and when to read more |
 | Module-specific editing constraints and recurring gotchas | `agents/<module>.md` | What a developer must preserve while changing that module |
-| Durable product behavior | Proposed `docs/specs/<domain>.md` | Successful behavior, rejection behavior, bounds, recovery, and non-claims |
+| Durable product behavior | `docs/specs/<domain>.md`, with terminal migrated first | Successful behavior, rejection behavior, bounds, recovery, and non-claims |
 | Physical ownership and dependency structure | Existing `docs/architecture/` | How the implementation is organized |
 | Consequential trade-offs and rejected alternatives | Existing decision register; focused ADRs when needed | Why an architectural decision was made |
 | Repeatable development procedures | Existing development Skills | How to perform a particular task |
 | Temporary tasks and verification handoff | Existing `planning/` and `NEXT_STEPS.md` | What remains to be done |
 
-Begin with one overloaded topic, such as terminal behavior. Classify each paragraph before moving it: agent workflow stays in module rules; product guarantees move to a focused spec; rationale belongs in an existing architecture document or ADR; historical test results stay evidence rather than instructions. Keep an explicit trigger in the module rule pointing to its spec. Move each meaning once, replacing the old copy with a pointer; relocating text without pruning duplication only creates two sources of truth.
+The terminal pilot extracts product modes, interaction, recovery and public bounds into [the terminal spec](../specs/terminal.md), with links to the existing evidence owners. Terminal rules retain privilege/lifecycle/input invariants, and architecture retains physical responsibility. Root/module pointers and planning now reach the contract explicitly. Other domains retain their current owners until a substantive extraction earns another spec.
 
-A small spec needs scope, agreed behavior, important failure scenarios, resource limits, compatibility boundaries, and links to the existing verification owners. Distinguish the agreed contract from its implementation and verification status: a documented requirement is not proof that it works, and an old passing test is not a timeless release guarantee. Do not duplicate code/configuration constants unless the specification establishes their public meaning.
-
-Preserve security-critical editing constraints and Arany's rule that Markdown guidance grants no execution authority. Reuse the [decision register](./next-step-decision-register.md) initially rather than creating ADRs for every existing choice.
+[The spec workflow](../specs/README.md) owns the maintained procedure and acceptance criteria. Proposals stay in plans; accepted behavior and its implementation change together, with explicit gaps when incomplete. Security-critical editing constraints and runtime authority remain unchanged. The existing decision register retains rationale rather than creating ADRs for every choice.
 
 This proposal concerns development-agent documentation. Arany itself snapshots the exact Workspace-root `AGENTS.md`, with exact root `CLAUDE.md` only as an absence fallback; that is a separate contract from Codex or Claude Code discovery. Moving guidance into specs does not make the executable automatically follow links, `@` imports, or nested instructions. A migration must not expand included outbound content, Provider admission, credential access, Policy, or Guard authority. [Current Arany architecture](../architecture/system-overview.md#1-what-the-beta-must-prove).
 
-Use word/token volume and relevance, not line count alone, to assess the result. Validate a small migration with representative tasks: a harmless text fix should not load unrelated contracts; a Provider or persistence change must still reach all relevant boundaries and tests. Adopt framework automation only if manual spec/change maintenance becomes a demonstrated problem. No framework, file movement, or authoritative rule change is required to answer this research question.
+The migration uses plain Markdown and existing plans/tests. Its verification is document/link review and representative loading routes, not new runtime or live-account evidence. Framework automation remains unnecessary unless maintenance becomes a demonstrated problem.
