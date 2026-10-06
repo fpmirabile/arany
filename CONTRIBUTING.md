@@ -20,3 +20,5 @@ Run `cargo fetch --locked` first when the locked dependencies are not already av
 ## Pull requests
 
 Changes reach `main` through pull requests. Resolve review conversations and pass the required checks before merging. External contributors do not need repository write access. GitHub may require a maintainer to approve CI for a first-time contributor; fork pull requests receive no repository secrets and use a read-only token.
+
+[Dependabot configuration](./.github/dependabot.yml) owns the version-update schedule and open-PR limits for Cargo and GitHub Actions. Review proposed dependency changes and pass the required checks before merging.
