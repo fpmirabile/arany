@@ -136,7 +136,7 @@ dependencies = [
  "clap",
  "crossterm",
  "directories",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "jsonschema",
  "keyring",
  "mio",
