@@ -393,10 +393,10 @@ mod tests {
         let attempt =
             AuthorizationAttempt::from_random(super::super::fixture_host_id(), port, [7; 96])
                 .expect("attempt");
-        let receiver = tokio::spawn(listener.receive(attempt));
         let _stream = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port)))
             .await
             .expect("connect");
+        let receiver = tokio::spawn(listener.receive(attempt));
         tokio::task::yield_now().await;
         tokio::time::advance(CALLBACK_DEADLINE).await;
         assert!(matches!(
@@ -405,9 +405,9 @@ mod tests {
         ));
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[tokio::test]
-    #[ignore = "native Linux callback connection-deadline release gate"]
+    #[ignore = "native Unix callback connection-deadline release gate"]
     async fn stalled_connection_expires_then_valid_callback_succeeds() {
         let listener = CallbackListener::bind(
             super::super::consent::RiskPrompt::new(AccountStorage::Keyring)

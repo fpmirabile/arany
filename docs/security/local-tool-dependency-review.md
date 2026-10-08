@@ -18,7 +18,7 @@ The package manifests inspected were cached published sources matching the locke
 
 ## Selected compiler-host delta
 
-The current normal/build graph contains 36 custom-build packages on Linux and 33 on either macOS architecture, versus the prior reviewed 33/29 baseline. The additional Linux entrypoints inspected in full are:
+At the 2026-10-04 review, the normal/build graph contained 36 custom-build packages on Linux and 33 on either macOS architecture, versus the prior reviewed 33/29 baseline. The additional Linux entrypoints inspected in full were:
 
 - `ahash 0.8.12/build.rs`: fixed target/compiler-version feature probes and emitted cfg directives; the selected `version_check` helper is still a compiler-host dependency, not attested compiler identity.
 - `ref-cast 1.0.27/build.rs`: `RUSTC --version`, fixed capability directives and `OUT_DIR/private.rs` generated from a fixed template and Cargo's package patch version.
@@ -27,6 +27,12 @@ The current normal/build graph contains 36 custom-build packages on Linux and 33
 macOS also newly selects the previously inspected `num-traits 0.2.19` compiler probe. These observations do not clear transitive build dependencies, generated output, compiler/wrapper/PATH integrity, or a native macOS artifact. The [build review](./beta-build-script-source-review.md) retains the earlier entrypoint evidence.
 
 The only new selected procedural-macro package is `ref-cast-impl 1.0.27`, bringing the totals to 25 Linux and 19 macOS. It enters through `jsonschema → referencing → fluent-uri → ref-cast`. Source inspection identified generated unsafe reference casts and the representation/field checks around their emitters; the complete macro implementation and exact release-feature expansion are not cleared. Selected `fluent-uri 0.4.1` sources use `RefCastCustom`/`ref_cast_custom` on transparent `Scheme(str)` and `EStr` with `PhantomData` plus `str`. This identifies invariant/expansion review targets, not proof of soundness. [Published macro source](https://docs.rs/crate/ref-cast-impl/1.0.27/source/src/lib.rs), [selected URI types](https://docs.rs/crate/fluent-uri/0.4.1/source/src/component.rs). Existing macro findings remain in the [macro review](./beta-proc-macro-source-review.md).
+
+## Native macOS dependency selection (2026-10-08)
+
+The native account-root correction selects the already locked `nix` dependency on Unix rather than Linux alone; production enables user lookup, while Unix test builds also enable the safe POSIX FIFO and PTY wrappers. Neither the dependency version nor the lockfile changed. Cached published manifest and selected source inspection found the MIT license, a declared Rust minimum below Arany's, and the existing `cfg_aliases` build dependency. The full build script emits fixed platform aliases without process execution, network access or generated source.
+
+The selected safe `User::from_uid` wrapper calls `getpwuid_r`, sizes its initial buffer from the OS with a fixed fallback and caps retry growth at 1 MiB; lookup failure or an absent user propagates to account-path rejection. The safe `mkfifo` wrapper is confined to synthetic private-state rejection fixtures. The test-only safe `openpty` wrapper initializes both descriptors, checks the native return code and transfers successful handles into owned descriptors; the macOS attached fixture passes no custom termios or size and owns its directly spawned test process through bounded capture and kill/reap cleanup. It uses no `forkpty`, pre-exec hook or application unsafe. These wrappers contain dependency FFI/unsafe, not application unsafe. This scoped review and the [native baseline](../research/testing-strategy-for-rust-cli-harness.md#native-macos-baseline-2026-10-08) do not establish transitive soundness or release provenance. Fresh advisory and dependency-policy checks remain pending because `cargo-audit` and `cargo-deny` are unavailable on this host.
 
 ## Effective enforcement and evidence
 

@@ -637,6 +637,9 @@ fn loopback_export_is_protobuf_with_a_minimal_resource() {
             }
         };
         stream
+            .set_nonblocking(false)
+            .expect("blocking accepted stream");
+        stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .expect("request timeout");
         let mut request = Vec::new();

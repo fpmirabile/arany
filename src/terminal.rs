@@ -143,6 +143,21 @@ struct RawMode {
     active: bool,
 }
 
+struct TerminalOutput(Option<Stderr>);
+
+impl Write for TerminalOutput {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        match self.0.as_mut() {
+            Some(output) => output.write(bytes),
+            None => Ok(bytes.len()),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.as_mut().map_or(Ok(()), Write::flush)
+    }
+}
+
 impl RawMode {
     fn acquire() -> io::Result<Self> {
         enable_raw_mode()?;
@@ -262,7 +277,7 @@ impl Drop for BracketedPaste {
 }
 
 pub struct AttachedTerminal {
-    terminal: Option<Terminal<CrosstermBackend<Stderr>>>,
+    terminal: Option<Terminal<CrosstermBackend<TerminalOutput>>>,
     history: History,
     input: Option<TerminalReader>,
     _raw_mode: Option<RawMode>,
@@ -298,15 +313,25 @@ impl AttachedTerminal {
         workspace: &std::path::Path,
         page: usize,
         trust: bool,
+        configured: bool,
     ) -> Result<bool, TerminalError> {
         self.cancel_clipboard_paste();
-        let lines = crate::presentation::workspace_permission_lines(workspace);
+        let mut lines = crate::presentation::workspace_permission_lines(workspace);
+        if configured {
+            lines.push(
+                "--tools is selected. Continue with its private configuration or remember folder trust; the explicit configuration keeps precedence.".into(),
+            );
+        }
         if let Some(linear) = &mut self.linear {
             linear
                 .draw_permission_prompt(
                     id,
                     &lines,
-                    "1. Continue read only\n2. Trust this folder\nType trust or read only; empty Enter selects read only. Ctrl+C exits:",
+                    if configured {
+                        "1. Use explicit Tool config\n2. Trust this folder\nType trust or config; empty Enter uses explicit config. Ctrl+C exits:"
+                    } else {
+                        "1. Continue read only\n2. Trust this folder\nType trust or read only; empty Enter selects read only. Ctrl+C exits:"
+                    },
                 )
                 .map_err(TerminalError::Io)?;
             return Ok(false);
@@ -321,7 +346,11 @@ impl AttachedTerminal {
                     more = view::draw_permission_frame(
                         frame,
                         &lines,
-                        if frame.area().width < 24 {
+                        if configured && frame.area().width < 24 {
+                            ("Use config", "Trust folder")
+                        } else if configured {
+                            ("Use explicit config", "Trust this folder")
+                        } else if frame.area().width < 24 {
                             ("Read only", "Trust folder")
                         } else {
                             ("Continue read only", "Trust this folder")
@@ -1477,6 +1506,8 @@ impl AttachedTerminal {
                     first_error.get_or_insert(error);
                 }
             }
+            // Ratatui's Drop prints to stderr if cursor restoration fails.
+            *terminal.backend_mut() = CrosstermBackend::new(TerminalOutput(None));
         }
         if self.linear.take().is_some_and(|linear| linear.line_open)
             && let Err(error) = writeln!(io::stderr())

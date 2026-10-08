@@ -359,7 +359,7 @@ fn wait_for_sanitized(
     output: &mut impl Read,
     input: &mut impl Write,
     transcript: &mut Vec<u8>,
-    answered: &mut usize,
+    answered: &mut crate::session_picker::PtyResponses,
     start: usize,
     needle: &[u8],
 ) -> usize {
@@ -411,7 +411,7 @@ fn run_pty_with_gate(
     let flags = fcntl_getfl(&output).expect("stdout flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
     let mut transcript = Vec::new();
-    let mut answered = 0;
+    let mut answered = crate::session_picker::PtyResponses::default();
     let mut after_answer = 0;
     for &(needle, answer) in answers {
         let stage_at = wait_for_sanitized(
@@ -427,7 +427,6 @@ fn run_pty_with_gate(
             || needle.ends_with(b"draft unchanged; catalog loading");
         if needle != b"Choose number, n next, p previous, or q close:"
             && needle != b"Choose number, exact ID, n next, p previous, or q close:"
-            && needle != b"Type trust or read only; empty Enter selects read only. Ctrl+C exits:"
             && !catalog_busy
         {
             wait_for_sanitized(
@@ -474,7 +473,10 @@ fn run_pty_with_gate(
     let result = wait_product(child.take());
     pump(&mut output, &mut input, &mut transcript, &mut answered);
     assert!(result.status.success(), "offline setup product exit");
-    assert_eq!(answered, 0, "screen-reader mode queried the cursor");
+    assert_eq!(
+        answered.cursor_queries, 0,
+        "screen-reader mode queried the cursor"
+    );
     assert!(
         !transcript
             .windows(KEY.len())
@@ -550,10 +552,6 @@ fn unsaved(state: &str) {
 }
 
 fn isolated_stage() {
-    let read_only: (&[u8], &[u8]) = (
-        b"Type trust or read only; empty Enter selects read only. Ctrl+C exits:",
-        b"read only\r",
-    );
     assert_eq!(nix::unistd::geteuid().as_raw(), 0);
     assert_eq!(
         StateRoot::account_path().unwrap(),
@@ -582,7 +580,6 @@ fn isolated_stage() {
             ),
             (b"type a choice name: OpenAI or Anthropic", b"OpenAI\r"),
             (b"Setup: Enter API key", b"synthetic-offline-api-key\r"),
-            read_only,
         ],
         None,
     );
@@ -621,7 +618,7 @@ fn isolated_stage() {
     unsaved("/root/state-one");
     assert!(setup_text.contains("Provider: openai\r\nModel: gpt-5.4\r\n"));
 
-    let second_output = run_pty(BARE_SHELL, &[read_only], None);
+    let second_output = run_pty(BARE_SHELL, &[], None);
     assert!(!String::from_utf8_lossy(&second_output).contains("Choose access method"));
     unsaved("/root/state-two");
     assert!(
@@ -631,7 +628,7 @@ fn isolated_stage() {
     let server = start_response_server(NativeReplies::Direct);
     let turn_output = run_pty(
         TURN_SHELL,
-        &[read_only, (b"Input:\r\n", b"offline objective\r")],
+        &[(b"Input:\r\n", b"offline objective\r")],
         Some("Arany · Answer:\r\n  offline answer".as_bytes()),
     );
     assert!(
@@ -671,7 +668,6 @@ fn isolated_stage() {
     let output = run_pty(
         CHECK_SHELL,
         &[
-            read_only,
             (b"Input:\r\n", b"/model gpt-offline-new high\r"),
             (b"Notice: Model: gpt-offline-new", b"offline objective\r"),
         ],
@@ -768,7 +764,6 @@ fn isolated_stage() {
     run_pty(
         EMPTY_CATALOG_SHELL,
         &[
-            read_only,
             (b"Input:\r\n", b"/setup\r"),
             (b"type a choice name: API key or ChatGPT plan", b"API key\r"),
             (
@@ -815,7 +810,6 @@ fn isolated_stage() {
     let output = run_pty_with_gate(
         LOADING_CATALOG_SHELL,
         &[
-            read_only,
             (b"Input:\r\n", b"/model\r"),
             (
                 b"Notice: Loading model catalog; Ctrl+C cancels",

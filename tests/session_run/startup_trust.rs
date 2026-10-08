@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(target_os = "linux")]
 use std::{
     net::TcpListener,
     os::unix::fs::PermissionsExt,
@@ -9,6 +10,7 @@ use std::{
 };
 
 #[test]
+#[cfg(target_os = "linux")]
 fn hostile_repository_startup_does_not_activate_git_or_disclose_omitted_inputs() {
     const OMITTED: [&[u8]; 5] = [
         b"PARENT_INSTRUCTION_CANARY",
@@ -193,13 +195,19 @@ fn hostile_repository_startup_does_not_activate_git_or_disclose_omitted_inputs()
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 #[ignore = "native Linux PTY workspace consent and restoration gate"]
 fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_trust() {
     use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
     use std::io::Write;
     for linear in [false, true] {
-        for (trust, startup_escape) in [(false, false), (true, false), (false, true)] {
-            if linear && startup_escape {
+        for (trust, startup_escape, unconfigured) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (true, false, true),
+        ] {
+            if linear && (startup_escape || unconfigured) {
                 continue;
             }
             let temp = tempfile::tempdir().unwrap();
@@ -234,7 +242,7 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                 )
                 .env(
                     "ARANY_TEST_SELECTION",
-                    if startup_escape {
+                    if startup_escape || unconfigured {
                         ""
                     } else {
                         "--provider openai --model gpt-5.4"
@@ -256,11 +264,11 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
             let flags = fcntl_getfl(&output).unwrap();
             fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
             let mut transcript = Vec::new();
-            let mut answered = 0;
+            let mut answered = crate::session_picker::PtyResponses::manual_consent();
             let wait = |output: &mut std::process::ChildStdout,
                         input: &mut std::process::ChildStdin,
                         transcript: &mut Vec<u8>,
-                        answered: &mut usize,
+                        answered: &mut crate::session_picker::PtyResponses,
                         from: usize,
                         needle: &[u8]| {
                 let deadline = Instant::now() + Duration::from_secs(10);
@@ -283,24 +291,46 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                 &mut transcript,
                 &mut answered,
                 0,
-                if startup_escape {
-                    b"Do you trust this folder?"
-                } else if linear {
-                    b"Input:"
-                } else {
-                    b"Ask Arany"
-                },
+                b"Do you trust this folder?",
             );
             let from = transcript.len();
-            if startup_escape {
-                input.write_all(b"\x1b").unwrap();
+            input
+                .write_all(if unconfigured {
+                    b"\x1b[B\r"
+                } else if linear {
+                    b"read only\r"
+                } else {
+                    b"\x1b"
+                })
+                .unwrap();
+            wait(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                from,
+                if linear { b"Input:" } else { b"Ask Arany" },
+            );
+            if unconfigured {
+                let from = transcript.len();
+                input.write_all(b"/provider openai\r").unwrap();
                 wait(
                     &mut output,
                     &mut input,
                     &mut transcript,
                     &mut answered,
                     from,
-                    b"Ask Arany",
+                    b"Auto edits",
+                );
+                let from = transcript.len();
+                input.write_all(b"\x1b[Z").unwrap();
+                wait(
+                    &mut output,
+                    &mut input,
+                    &mut transcript,
+                    &mut answered,
+                    from,
+                    b"Request approvals",
                 );
             }
             if startup_escape {
@@ -391,6 +421,10 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                     b"Do you trust this folder?",
                 );
             }
+            let record = temp
+                .path()
+                .join("account-home/.local/state/arany/workspace-permissions.json");
+            let before_cancel = std::fs::read(&record).ok();
             input.write_all(b"\x03").unwrap();
             let deadline = Instant::now() + Duration::from_secs(10);
             let status = loop {
@@ -423,7 +457,11 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
             let record = temp
                 .path()
                 .join("account-home/.local/state/arany/workspace-permissions.json");
-            assert_eq!(record.exists(), trust, "Ctrl+C must never persist a choice");
+            assert_eq!(
+                std::fs::read(&record).ok(),
+                before_cancel,
+                "Ctrl+C must never persist a choice"
+            );
             if trust {
                 let value: serde_json::Value =
                     serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
@@ -448,4 +486,163 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
             );
         }
     }
+}
+
+#[cfg(all(target_os = "macos", debug_assertions))]
+#[test]
+fn folder_consent_precedes_setup_and_remembers_only_the_exact_trusted_directory() {
+    use rustix::process::{Pid, Signal, kill_process};
+    use std::{
+        io::Write,
+        os::unix::fs::{MetadataExt, PermissionsExt},
+        process::Stdio,
+        time::Duration,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("project");
+    let account = temp.path().join("account");
+    let state = temp.path().join("state");
+    std::fs::create_dir(&workspace).unwrap();
+    let probe = |args: &[&str], expect_prompt: bool, choice: Option<&[u8]>| {
+        let pty = nix::pty::openpty(None, None).unwrap();
+        let slave = std::fs::File::from(pty.slave);
+        let master = std::fs::File::from(pty.master);
+        let mut input = master.try_clone().unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
+        command
+            .env_clear()
+            .env("ARANY_TEST_ACCOUNT_ROOT", &account)
+            .env("HOME", temp.path().join("legacy-home"))
+            .env("XDG_STATE_HOME", temp.path().join("legacy-state"))
+            .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+            .env("TERM", "dumb")
+            .current_dir(&workspace)
+            .args(["--screen-reader", "--no-color", "--workspace"])
+            .arg(&workspace)
+            .arg("--state-dir")
+            .arg(&state)
+            .args(args)
+            .stdin(Stdio::from(slave.try_clone().unwrap()))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::from(slave));
+        let mut child = loopback::ChildGuard::new(command.spawn().unwrap());
+        drop(command);
+        let pid = Pid::from_raw(child.child().id().try_into().unwrap()).unwrap();
+        let mut consent_seen = false;
+        let mut stopped = false;
+        let output = process::capture_terminal(
+            child.child(),
+            master,
+            Duration::from_secs(15),
+            64 * 1024,
+            |bytes| {
+                let text = String::from_utf8_lossy(bytes).replace("\r\n", "\n");
+                if !consent_seen
+                    && (text.contains(
+                        "Type trust or read only; empty Enter selects read only. Ctrl+C exits:\n",
+                    ) || text.contains(
+                        "Type trust or config; empty Enter uses explicit config. Ctrl+C exits:\n",
+                    ))
+                {
+                    assert!(expect_prompt, "remembered trust must skip consent");
+                    assert!(
+                        !text.contains("Setup:"),
+                        "folder consent must precede setup"
+                    );
+                    assert!(!text.contains("Presentation:"), "consent must precede chat");
+                    consent_seen = true;
+                    if let Some(choice) = choice {
+                        input.write_all(choice).unwrap();
+                    } else {
+                        kill_process(pid, Signal::INT).unwrap();
+                        stopped = true;
+                    }
+                }
+                if !stopped
+                    && text.contains("Setup: Choose access method\n")
+                    && text.ends_with("Input:\n")
+                {
+                    assert_eq!(
+                        consent_seen, expect_prompt,
+                        "folder consent must precede setup"
+                    );
+                    kill_process(pid, Signal::INT).unwrap();
+                    stopped = true;
+                }
+            },
+        );
+        assert!(stopped, "expected startup boundary was not reached");
+        assert_eq!(consent_seen, expect_prompt);
+        assert!(
+            output.status.success(),
+            "startup failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stdout.is_empty(), "cancelled startup has no answer");
+        assert!(
+            !state.exists(),
+            "startup cancellation must precede Session admission"
+        );
+        for entry in std::fs::read_dir(&account).unwrap() {
+            let name = entry.unwrap().file_name();
+            assert!(
+                name == "workspace-permissions.json"
+                    || name == "account-credentials.lock"
+                    || name == "events.sqlite3",
+                "startup must not create account metadata: {name:?}"
+            );
+            if name == "events.sqlite3" {
+                assert_eq!(std::fs::metadata(account.join(name)).unwrap().len(), 0);
+            }
+        }
+        String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n")
+    };
+    for args in [
+        &["--setup"][..],
+        &[][..],
+        &["--provider", "openai", "--model", "gpt-5.4"][..],
+        &["--tools"][..],
+        &["--resume", "01900000-0000-7000-8000-000000000001"][..],
+    ] {
+        let transcript = probe(args, true, None);
+        if args.contains(&"--tools") {
+            assert!(transcript.contains("1. Use explicit Tool config"));
+            assert!(transcript.contains("the explicit configuration keeps precedence"));
+            assert!(!transcript.contains("1. Continue read only"));
+        }
+        assert!(
+            !account.join("workspace-permissions.json").exists(),
+            "Ctrl+C must save no choice"
+        );
+    }
+    probe(&["--setup"], true, Some(b"read only\n"));
+    let untrusted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(account.join("workspace-permissions.json")).unwrap())
+            .unwrap();
+    assert_eq!(untrusted["workspaces"], serde_json::json!([]));
+    probe(&["--setup"], true, Some(b"trust\n"));
+    let record = account.join("workspace-permissions.json");
+    let remembered = std::fs::read(&record).unwrap();
+    let trusted: serde_json::Value = serde_json::from_slice(&remembered).unwrap();
+    assert_eq!(trusted["workspaces"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        trusted["workspaces"][0]["path"],
+        workspace.to_str().unwrap()
+    );
+    let identity = std::fs::metadata(&workspace).unwrap();
+    assert_eq!(trusted["workspaces"][0]["device"], identity.dev());
+    assert_eq!(trusted["workspaces"][0]["inode"], identity.ino());
+    assert_eq!(
+        std::fs::metadata(&record).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let transcript = probe(&["--setup"], false, None);
+    assert!(!transcript.contains("Do you trust this folder?"));
+    assert_eq!(std::fs::read(&record).unwrap(), remembered);
+    std::fs::rename(&workspace, temp.path().join("old-project")).unwrap();
+    std::fs::create_dir(&workspace).unwrap();
+    assert_ne!(std::fs::metadata(&workspace).unwrap().ino(), identity.ino());
+    probe(&["--setup"], true, None);
+    assert_eq!(std::fs::read(&record).unwrap(), remembered);
 }

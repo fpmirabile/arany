@@ -311,7 +311,8 @@ fn run_attached_auto_compaction(case: CompactionCase) {
     } else {
         "printf 'ARANY_TEST_SHELL_PID:%s\n' \"$$\"; exec \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 --include a.txt --include b.txt \"$ARANY_TEST_FIRST_OBJECTIVE\""
     };
-    let mut attached = Command::new("/usr/bin/script");
+    let mut attached =
+        crate::process::account_isolated_script(state.parent().expect("fixture root"));
     attached
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -336,7 +337,10 @@ fn run_attached_auto_compaction(case: CompactionCase) {
     let (sender, receiver) = mpsc::channel();
     let (resume_output, output_resume) = mpsc::channel();
     let (pid_sender, pid_ready) = mpsc::sync_channel(1);
+    let mut consent_input =
+        std::fs::File::from(rustix::io::dup(&input).expect("owned fixture input"));
     let reader = thread::spawn(move || {
+        let mut declined = false;
         let mut bytes = Vec::new();
         let mut first_reported = false;
         let mut compaction_reported = false;
@@ -357,6 +361,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
             }
             assert!(bytes.len() + count <= 128 * 1024, "bounded PTY output");
             bytes.extend_from_slice(&chunk[..count]);
+            crate::process::decline_workspace_consent(&mut consent_input, &bytes, &mut declined);
             if !pid_reported {
                 for line in bytes.split(|byte| *byte == b'\n').rev().skip(1) {
                     if let Some(pid) = std::str::from_utf8(line)

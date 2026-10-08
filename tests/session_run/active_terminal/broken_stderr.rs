@@ -12,7 +12,7 @@ use std::{
     fs::File,
     io::{Read, Write},
     net::TcpListener,
-    process::{Command, Stdio},
+    process::Stdio,
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -151,7 +151,8 @@ fn run_broken_stderr_case(compaction: bool) {
     fcntl_setfl(&stderr_master, flags | OFlags::NONBLOCK).expect("nonblocking stderr master");
 
     let command = "stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; exec 2>\"$ARANY_TEST_STDERR_PTY\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 cancel; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
-    let mut attached = Command::new("/usr/bin/script");
+    let mut attached =
+        crate::process::account_isolated_script(state.parent().expect("fixture root"));
     attached
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -173,12 +174,14 @@ fn run_broken_stderr_case(compaction: bool) {
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking stdout pipe");
     let mut stdout_bytes = Vec::new();
     let mut stderr_bytes = Vec::new();
+    let mut declined = false;
     let mut answered_queries = 0;
     let mut compaction_sent = false;
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         collect_nonblocking(&mut output, &mut stdout_bytes, 64 * 1024);
         collect_nonblocking(&mut stderr_master, &mut stderr_bytes, 64 * 1024);
+        crate::process::decline_workspace_consent(&mut input, &stderr_bytes, &mut declined);
         let queries = stdout_bytes
             .windows(4)
             .chain(stderr_bytes.windows(4))

@@ -18,7 +18,7 @@ fn wait_for(
     output: &mut impl Read,
     input: &mut impl Write,
     transcript: &mut Vec<u8>,
-    answered: &mut usize,
+    answered: &mut crate::session_picker::PtyResponses,
     needle: &[u8],
 ) {
     wait_for_after(output, input, transcript, answered, 0, needle);
@@ -28,7 +28,7 @@ fn wait_for_after(
     output: &mut impl Read,
     input: &mut impl Write,
     transcript: &mut Vec<u8>,
-    answered: &mut usize,
+    answered: &mut crate::session_picker::PtyResponses,
     from: usize,
     needle: &[u8],
 ) {
@@ -87,7 +87,8 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
     let state = temp.path().join("state");
     let saved_id = saved_conversation(&state, &workspace, SessionDefaults::default());
     let shell = "printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4 --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
-    let mut command = Command::new("/usr/bin/script");
+    let mut command =
+        crate::process::account_isolated_script(state.parent().expect("fixture root"));
     command
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -108,7 +109,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
     let flags = fcntl_getfl(&output).expect("stdout flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
     let mut transcript = Vec::new();
-    let mut answered = 0;
+    let mut answered = crate::session_picker::PtyResponses::default();
     wait_for(
         &mut output,
         &mut input,
@@ -359,9 +360,9 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
     pump(&mut output, &mut input, &mut transcript, &mut answered);
     assert!(result.status.success());
     assert!(result.stderr.is_empty());
-    assert_eq!(answered, 0);
+    assert_eq!(answered.cursor_queries, 0);
     let text = String::from_utf8(transcript).expect("linear transcript UTF-8");
-    assert!(text.contains("Run npx skills install in this project: .agents/skills is missing and skills-lock.json exists."));
+    assert!(text.contains("Run npx --yes skills@1.7.0 experimental_install in this project: .agents/skills is missing and skills-lock.json exists."));
     assert!(!text.contains('\u{1b}'));
     assert_eq!(text.matches("Notice: Error:").count(), 5);
     assert_eq!(
@@ -417,7 +418,8 @@ fn narrow_help_signal_restores_terminal_without_starting_a_run() {
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
     let shell = "stty rows 8 cols 16; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
-    let mut command = Command::new("/usr/bin/script");
+    let mut command =
+        crate::process::account_isolated_script(state.parent().expect("fixture root"));
     command
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -437,7 +439,7 @@ fn narrow_help_signal_restores_terminal_without_starting_a_run() {
     let flags = fcntl_getfl(&output).expect("stdout flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
     let mut transcript = Vec::new();
-    let mut answered = 0;
+    let mut answered = crate::session_picker::PtyResponses::default();
     wait_for(
         &mut output,
         &mut input,
@@ -563,7 +565,8 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     )
     .unwrap();
     let shell = "stty rows 24 cols 40; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider anthropic --tools --no-color; first_code=$?; printf 'SETTINGS_RESTART\n'; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider openai --tools --no-color; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; test \"$first_code\" -eq 0 || exit \"$first_code\"; exit \"$exit_code\"";
-    let mut command = Command::new("/usr/bin/script");
+    let mut command =
+        crate::process::account_isolated_script(state.parent().expect("fixture root"));
     command
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -583,7 +586,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     let flags = fcntl_getfl(&output).expect("stdout flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
     let mut transcript = Vec::new();
-    let mut answered = 0;
+    let mut answered = crate::session_picker::PtyResponses::default();
     wait_for(
         &mut output,
         &mut input,
@@ -937,7 +940,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         b"Model:",
     );
     transcript.clear();
-    answered = 0;
+    answered = crate::session_picker::PtyResponses::default();
     let unknown_at = transcript.len();
     input.write_all(b"/provder\r").expect("unknown command");
     wait_for(
@@ -1031,7 +1034,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         b"named Session:",
     );
     transcript.clear();
-    answered = 0;
+    answered = crate::session_picker::PtyResponses::default();
     input
         .write_all(b"/quit\r")
         .expect("quit after corrected rename");
@@ -1290,7 +1293,8 @@ fn inline_quick_selector_returns_to_the_same_draft_and_caret() {
         } else {
             String::new()
         };
-        let mut command = Command::new("/usr/bin/script");
+        let mut command =
+            crate::process::account_isolated_script(state.parent().expect("fixture root"));
         command
             .env_clear()
             .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -1311,7 +1315,7 @@ fn inline_quick_selector_returns_to_the_same_draft_and_caret() {
         let flags = fcntl_getfl(&output).expect("stdout flags");
         fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
         let mut transcript = Vec::new();
-        let mut answered = 0;
+        let mut answered = crate::session_picker::PtyResponses::default();
         wait_for(
             &mut output,
             &mut input,
@@ -1480,7 +1484,8 @@ fn inline_quick_selector_returns_to_the_same_draft_and_caret() {
             "ignored modal paste entered the draft"
         );
         assert!(
-            !text.contains("Do you trust this folder?"),
+            !text[text.find("Ask Arany").expect("initial composer")..]
+                .contains("Do you trust this folder?"),
             "invalid inputs must be rejected before trust or Run admission"
         );
         if state.join("events.sqlite3").exists() {
@@ -1523,7 +1528,8 @@ fn session_picker_close_case(quick: bool) {
     let state = temp.path().join("state");
     let saved_id = saved_conversation(&state, &workspace, SessionDefaults::default());
     let shell = "stty rows 24 cols 40; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --no-color; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
-    let mut command = Command::new("/usr/bin/script");
+    let mut command =
+        crate::process::account_isolated_script(state.parent().expect("fixture root"));
     command
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -1542,7 +1548,7 @@ fn session_picker_close_case(quick: bool) {
     let flags = fcntl_getfl(&output).expect("stdout flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
     let mut transcript = Vec::new();
-    let mut answered = 0;
+    let mut answered = crate::session_picker::PtyResponses::default();
     wait_for(
         &mut output,
         &mut input,
@@ -1668,7 +1674,8 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
     let state = temp.path().join("state");
     let saved_id = saved_conversation(&state, &workspace, SessionDefaults::default());
     let shell = "before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider anthropic; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
-    let mut command = Command::new("/usr/bin/script");
+    let mut command =
+        crate::process::account_isolated_script(state.parent().expect("fixture root"));
     command
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -1693,7 +1700,7 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
     let flags = fcntl_getfl(&output).expect("stdout flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
     let mut transcript = Vec::new();
-    let mut answered = 0;
+    let mut answered = crate::session_picker::PtyResponses::default();
     wait_for(
         &mut output,
         &mut input,
@@ -2383,7 +2390,7 @@ esac
         )
         .expect("nonblocking output");
         let mut transcript = Vec::new();
-        let mut answered = 0;
+        let mut answered = crate::session_picker::PtyResponses::default();
         wait_for(
             &mut output,
             &mut input,

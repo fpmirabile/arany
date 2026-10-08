@@ -19,7 +19,8 @@ fn screen_reader_agent_inspector_opens_and_closes_without_provider_access() {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
-    let mut command = Command::new("/usr/bin/script");
+    let mut command =
+        crate::process::account_isolated_script(state.parent().expect("fixture root"));
     command
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -41,7 +42,10 @@ fn screen_reader_agent_inspector_opens_and_closes_without_provider_access() {
     let mut input = child.child().stdin.take().expect("PTY input");
     let mut output = child.child().stdout.take().expect("PTY output");
     let (sender, receiver) = mpsc::channel();
+    let mut consent_input =
+        std::fs::File::from(rustix::io::dup(&input).expect("owned fixture input"));
     let reader = thread::spawn(move || {
+        let mut declined = false;
         let mut bytes = Vec::new();
         let stages: [&[u8]; 3] = [
             b"Input:",
@@ -57,6 +61,7 @@ fn screen_reader_agent_inspector_opens_and_closes_without_provider_access() {
             }
             assert!(bytes.len() + count <= 32 * 1024, "bounded PTY output");
             bytes.extend_from_slice(&chunk[..count]);
+            crate::process::decline_workspace_consent(&mut consent_input, &bytes, &mut declined);
             if next < stages.len()
                 && bytes
                     .windows(stages[next].len())
@@ -211,7 +216,8 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
         .find_map(|id| id.parse::<SessionId>().ok())
         .expect("Session ID");
 
-    let mut attached = Command::new("/usr/bin/script");
+    let mut attached =
+        crate::process::account_isolated_script(state.parent().expect("fixture root"));
     attached
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -235,7 +241,10 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
     let mut input = attached.child().stdin.take().expect("PTY input");
     let mut output = attached.child().stdout.take().expect("PTY output");
     let (stage_sender, stages) = mpsc::channel();
+    let mut consent_input =
+        std::fs::File::from(rustix::io::dup(&input).expect("owned fixture input"));
     let reader = thread::spawn(move || {
+        let mut declined = false;
         let mut bytes = Vec::new();
         let patterns: [&[u8]; 7] = [
             b"Agent: primary; state: active",
@@ -256,6 +265,7 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
             }
             assert!(bytes.len() + count <= 64 * 1024, "bounded PTY output");
             bytes.extend_from_slice(&chunk[..count]);
+            crate::process::decline_workspace_consent(&mut consent_input, &bytes, &mut declined);
             while next < patterns.len() {
                 let Some(offset) = bytes[search_from..]
                     .windows(patterns[next].len())
@@ -346,7 +356,7 @@ fn wait_for_pty(
     output: &mut impl Read,
     input: &mut impl Write,
     transcript: &mut Vec<u8>,
-    answered: &mut usize,
+    answered: &mut crate::session_picker::PtyResponses,
     after: usize,
     pattern: &[u8],
 ) {
@@ -378,7 +388,8 @@ fn inline_inspector(
     let command = format!(
         "stty rows 24 cols {width}; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" {no_color}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
-    let mut command_line = Command::new("/usr/bin/script");
+    let mut command_line =
+        crate::process::account_isolated_script(state.parent().expect("fixture root"));
     command_line
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -398,7 +409,7 @@ fn inline_inspector(
     let flags = fcntl_getfl(&output).expect("stdout flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
     let mut transcript = Vec::new();
-    let mut answered = 0;
+    let mut answered = crate::session_picker::PtyResponses::default();
     wait_for_pty(
         &mut output,
         &mut input,

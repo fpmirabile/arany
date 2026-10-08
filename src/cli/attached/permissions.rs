@@ -1,5 +1,8 @@
 use super::setup::SetupError;
-use arany::{ApprovalMode, AttachedTerminal, Composer, TerminalInput, WorkspacePermissions};
+use arany::{
+    ApprovalMode, AttachedTerminal, Composer, TerminalInput, WorkspacePermissions,
+    native_protection_supported,
+};
 use std::path::Path;
 
 pub(super) enum PermissionChoice {
@@ -7,6 +10,9 @@ pub(super) enum PermissionChoice {
     Closed(WorkspacePermissions),
     Exit,
 }
+
+pub(super) const UNAVAILABLE_NOTICE: &str =
+    "Native Tool protection is unavailable on this OS; chat is read only.";
 
 pub(super) fn refresh_files(workspace: &Path, composer: &mut Composer) -> Option<String> {
     if !composer.file_query_changed() {
@@ -37,22 +43,43 @@ pub(super) fn refresh_files(workspace: &Path, composer: &mut Composer) -> Option
 }
 
 pub(super) fn supports_tools(profile: Option<&str>) -> bool {
-    matches!(profile, Some("openai" | "anthropic" | "chatgpt"))
+    native_protection_supported() && matches!(profile, Some("openai" | "anthropic" | "chatgpt"))
+}
+
+pub(super) fn refresh_mode(
+    composer: &mut Composer,
+    profile: Option<&str>,
+    configured: bool,
+    permissions: Option<&WorkspacePermissions>,
+) {
+    if !supports_tools(profile)
+        || (!configured && !permissions.is_some_and(WorkspacePermissions::is_trusted))
+    {
+        composer.set_approval_mode(None);
+    } else if composer.approval_mode().is_none() {
+        composer.set_approval_mode(Some(if configured {
+            ApprovalMode::AutoEdits
+        } else {
+            permissions.expect("trusted permissions").mode()
+        }));
+    }
 }
 
 pub(super) async fn admit(
     terminal: &mut AttachedTerminal,
     workspace: &Path,
     composer: &mut Composer,
+    configured: bool,
 ) -> Result<PermissionChoice, SetupError> {
+    composer.set_approval_mode(None);
     let access = WorkspacePermissions::open(workspace).map_err(|error| {
         SetupError::Recoverable(format!("Could not load folder trust: {error}"))
     })?;
     if access.is_trusted() {
-        composer.set_approval_mode(Some(access.mode()));
+        composer.set_approval_mode(native_protection_supported().then_some(access.mode()));
         Ok(PermissionChoice::Selected(access))
     } else {
-        choose(terminal, workspace, composer).await
+        choose(terminal, workspace, composer, configured).await
     }
 }
 
@@ -60,6 +87,7 @@ pub(super) async fn choose(
     terminal: &mut AttachedTerminal,
     workspace: &Path,
     composer: &mut Composer,
+    configured: bool,
 ) -> Result<PermissionChoice, SetupError> {
     let mut permissions = WorkspacePermissions::open(workspace).map_err(|error| {
         SetupError::Recoverable(format!("Could not load folder trust: {error}"))
@@ -69,7 +97,8 @@ pub(super) async fn choose(
     let id = uuid::Uuid::now_v7();
     let mut answer = Composer::default();
     loop {
-        let more = terminal.draw_workspace_permissions(id, workspace, page, selected == 1)?;
+        let more =
+            terminal.draw_workspace_permissions(id, workspace, page, selected == 1, configured)?;
         match terminal.next_input().await? {
             TerminalInput::Up if !more => selected = selected.saturating_sub(1),
             TerminalInput::Down if !more => selected = (selected + 1).min(1),
@@ -94,7 +123,7 @@ pub(super) async fn choose(
                 let value = answer.text().trim().to_ascii_lowercase();
                 if terminal.is_linear() {
                     selected = match value.as_str() {
-                        "" | "1" | "read only" | "no" => 0,
+                        "" | "1" | "read only" | "no" | "config" | "use config" => 0,
                         "2" | "trust" | "trust and remember" | "yes" => 1,
                         _ => {
                             answer.clear();
@@ -107,7 +136,10 @@ pub(super) async fn choose(
                     .map_err(|error| {
                         SetupError::Recoverable(format!("Could not remember folder trust: {error}"))
                     })?;
-                composer.set_approval_mode(permissions.is_trusted().then_some(permissions.mode()));
+                composer.set_approval_mode(
+                    (native_protection_supported() && permissions.is_trusted())
+                        .then_some(permissions.mode()),
+                );
                 terminal.restore_draft_input(composer.text().len())?;
                 return Ok(PermissionChoice::Selected(permissions));
             }
@@ -132,6 +164,9 @@ pub(super) async fn choose(
 }
 
 pub(super) fn cycle(composer: &mut Composer) -> String {
+    if !native_protection_supported() {
+        return UNAVAILABLE_NOTICE.into();
+    }
     let Some(mode) = composer.approval_mode() else {
         return "Read only · use /permissions to trust this folder".into();
     };

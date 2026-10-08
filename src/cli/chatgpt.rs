@@ -6,7 +6,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use uuid::{Uuid, Variant, Version};
 
 mod account;
@@ -37,12 +37,19 @@ pub(crate) async fn selected_models(
     Ok((selected.id, models))
 }
 
-pub(crate) fn selected_account_id() -> Result<Uuid, AuthorizationError> {
-    account::selected_id()
+pub(crate) fn selected_account_id(workspace: &Path) -> Result<Uuid, AuthorizationError> {
+    account::selected_id(workspace)
 }
 
-pub(crate) fn selected_registration() -> Result<(Uuid, bool), AuthorizationError> {
-    account::selected_registration()
+pub(crate) fn selected_keyring_slot(
+    workspace: &Path,
+    expected_id: Uuid,
+) -> Result<Option<String>, AuthorizationError> {
+    account::selected_keyring_slot(workspace, expected_id)
+}
+
+pub(crate) fn selected_registration(workspace: &Path) -> Result<(Uuid, bool), AuthorizationError> {
+    account::selected_registration(workspace)
 }
 
 pub(crate) async fn sign_out_selected(
@@ -51,8 +58,8 @@ pub(crate) async fn sign_out_selected(
     account::sign_out_selected(workspace).await
 }
 
-pub(crate) fn saved_account_ids() -> Result<(Uuid, Vec<Uuid>), AuthorizationError> {
-    account::saved_ids()
+pub(crate) fn saved_account_ids(workspace: &Path) -> Result<(Uuid, Vec<Uuid>), AuthorizationError> {
+    account::saved_ids(workspace)
 }
 
 pub(crate) async fn select_saved_account(
@@ -64,9 +71,10 @@ pub(crate) async fn select_saved_account(
 }
 
 pub(crate) fn selected_reauthorization_target(
+    workspace: &Path,
     expected_id: Uuid,
 ) -> Result<ReauthorizationTarget, AuthorizationError> {
-    account::selected_reauthorization_target(expected_id)
+    account::selected_reauthorization_target(workspace, expected_id)
 }
 
 pub(crate) async fn check_selected_model(
@@ -238,7 +246,7 @@ pub(crate) enum AuthorizationError {
     IdentityRejected(identity::IdentityFailure),
     #[error("selected ChatGPT account changed; restart /setup")]
     SelectedAccountChanged,
-    #[error("ChatGPT registrations in different state roots conflict")]
+    #[error("ChatGPT account state in different roots conflicts")]
     RegistrationConflict,
     #[error(
         "ChatGPT plan permission was not granted; use /setup to enable the plan or explicitly choose an API account"

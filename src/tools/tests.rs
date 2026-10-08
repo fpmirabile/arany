@@ -7,6 +7,122 @@ fn config_value() -> Value {
     json!({"version":1,"workspace_paths":["src","Cargo.toml"],"write":false,"commands":[],"skills":[],"mcp":[]})
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn checked_tool_files_reject_links_traversal_and_special_objects() {
+    use nix::{sys::stat::Mode, unistd::mkfifo};
+    let temp = tempfile::tempdir().unwrap();
+    let root_path = temp.path().join("project");
+    std::fs::create_dir_all(root_path.join("nested")).unwrap();
+    std::fs::write(root_path.join("nested/file"), b"admitted").unwrap();
+    let root = super::fs::open_directory(&root_path).unwrap();
+    std::os::unix::fs::symlink("nested", root_path.join("linked")).unwrap();
+    std::os::unix::fs::symlink("file", root_path.join("nested/link")).unwrap();
+    std::fs::hard_link(root_path.join("nested/file"), root_path.join("hardlink")).unwrap();
+    mkfifo(&root_path.join("fifo"), Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
+    for path in [
+        "linked/file",
+        "nested/link",
+        "hardlink",
+        "fifo",
+        "../outside",
+        "nested/../nested/file",
+        "/etc/passwd",
+    ] {
+        assert!(
+            super::fs::open_file(&root, path)
+                .and_then(|file| super::fs::read_regular(file, 32))
+                .is_err(),
+            "hostile file case {path}"
+        );
+    }
+    std::fs::remove_file(root_path.join("hardlink")).unwrap();
+    assert_eq!(
+        super::fs::read_regular(super::fs::open_file(&root, "nested/file").unwrap(), 32).unwrap(),
+        b"admitted"
+    );
+    assert!(
+        super::fs::open_file(&root, ".")
+            .unwrap()
+            .metadata()
+            .unwrap()
+            .is_dir()
+    );
+    let config: Config = serde_json::from_value(json!({
+        "version":1,"workspace_paths":["."],"write":true,
+        "commands":[],"skills":[],"mcp":[]
+    }))
+    .unwrap();
+    let write = ToolCall::Write {
+        path: "nested/created".into(),
+        expected_digest: None,
+        content: "created".into(),
+    };
+    let result = super::fs::native(&root_path, &write, &config).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&result).unwrap(),
+        json!({"sha256":hex_digest(b"created"),"bytes":7})
+    );
+    assert!(super::fs::native(&root_path, &write, &config).is_err());
+    let original = super::fs::open_file(&root, "nested/file").unwrap();
+    let edit = ToolCall::Edit {
+        path: "nested/file".into(),
+        expected_digest: hex_digest(b"admitted"),
+        old: "admitted".into(),
+        new: "replaced".into(),
+    };
+    super::fs::native(&root_path, &edit, &config).unwrap();
+    let mut old_bytes = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(original, 32), &mut old_bytes).unwrap();
+    assert_eq!(
+        old_bytes, b"admitted",
+        "atomic publication preserves the opened original inode"
+    );
+    assert_eq!(
+        std::fs::read(root_path.join("nested/file")).unwrap(),
+        b"replaced"
+    );
+    assert!(
+        super::fs::native(&root_path, &edit, &config).is_err(),
+        "stale digest cannot repeat a mutation"
+    );
+    for path in ["linked/file", "nested/link", "fifo", "../outside"] {
+        let denied = ToolCall::Write {
+            path: path.into(),
+            expected_digest: Some(hex_digest(b"replaced")),
+            content: "not admitted".into(),
+        };
+        assert!(
+            super::fs::native(&root_path, &denied, &config).is_err(),
+            "hostile mutation case {path}"
+        );
+    }
+    let mut pinned = super::config::Program {
+        name: "sh".into(),
+        executable: std::fs::canonicalize(if cfg!(target_os = "macos") {
+            "/bin/sh"
+        } else {
+            "/usr/bin/sh"
+        })
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .into(),
+        sha256: String::new(),
+        interpreter: true,
+        inputs: Vec::new(),
+    };
+    let bytes = super::fs::read_regular(
+        super::fs::open_absolute(&pinned.executable).unwrap(),
+        MAX_SNAPSHOT_BYTES,
+    )
+    .unwrap();
+    pinned.sha256 = hex_digest(&bytes);
+    pinned.verify().unwrap();
+    pinned.sha256 = "0".repeat(64);
+    assert!(pinned.verify().is_err(), "changed executable pin rejects");
+}
+
 #[cfg(unix)]
 #[test]
 fn project_skill_discovery_preserves_grants_and_reports_missing_installation() {
@@ -84,6 +200,25 @@ fn project_skill_discovery_preserves_grants_and_reports_missing_installation() {
             }
         }
         let discovery = super::project_skills(&workspace);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        if !matches!(layout, "absent" | "lock") {
+            assert!(
+                matches!(&discovery, Err(super::ToolError::ProtectionUnavailable)),
+                "{layout}: {:?}",
+                discovery.as_ref().err()
+            );
+            let mut value = config_value();
+            value["workspace_paths"] = json!(["."]);
+            let mut config: Config = serde_json::from_value(value).unwrap();
+            assert!(
+                matches!(
+                    config.discover_skills(&workspace),
+                    Err(super::ToolError::ProtectionUnavailable)
+                ),
+                "{layout}"
+            );
+            continue;
+        }
         if matches!(
             layout,
             "linked-directory" | "linked-file" | "oversized" | "too-many"
@@ -327,6 +462,34 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         use_count: 1,
     };
     assert!(intent.valid());
+    let legacy_limits = json!({
+        "result_bytes": MAX_TOOL_RESULT_BYTES,
+        "runtime_ms": 60_000,
+        "memory_bytes": MEMORY_BYTES,
+        "max_processes": MAX_PROCESSES,
+        "scratch_bytes": SCRATCH_BYTES,
+        "network": "none"
+    });
+    let legacy: ToolLimits = serde_json::from_value(legacy_limits.clone()).unwrap();
+    assert_eq!(legacy.resource_profile, ToolResourceProfile::LinuxKernel);
+    assert_eq!(serde_json::to_value(&legacy).unwrap(), legacy_limits);
+    assert_eq!(serde_json::to_vec(&legacy).unwrap(),
+        br#"{"result_bytes":16384,"runtime_ms":60000,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"network":"none"}"#,
+        "historical serialized limits preserve digest bytes");
+    let mut native = intent.clone();
+    native.limits = legacy.clone();
+    let legacy_intent = native.digest();
+    native.limits.resource_profile = ToolResourceProfile::MacosSupervised;
+    assert!(native.valid());
+    assert_ne!(
+        native.digest(),
+        legacy_intent,
+        "resource semantics bind the intent"
+    );
+    assert_eq!(
+        serde_json::from_value::<EffectIntent>(serde_json::to_value(&native).unwrap()).unwrap(),
+        native
+    );
     let guard = GuardReceipt {
         contract_version: 1,
         intent_digest: intent.digest(),
@@ -340,6 +503,22 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         guard: Some(guard),
     };
     assert!(observation.valid());
+    let mut profile_mismatch = observation.clone();
+    profile_mismatch
+        .guard
+        .as_mut()
+        .unwrap()
+        .limits
+        .resource_profile =
+        if intent.limits.resource_profile == ToolResourceProfile::MacosSupervised {
+            ToolResourceProfile::LinuxKernel
+        } else {
+            ToolResourceProfile::MacosSupervised
+        };
+    assert!(
+        !profile_mismatch.valid(),
+        "receipt cannot relabel resource guarantees"
+    );
     let mut missing = observation.clone();
     missing.guard = None;
     assert!(!missing.valid());

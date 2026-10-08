@@ -537,6 +537,115 @@ The implementation plan should turn these claims into a small set of scenario/ta
 | local performance | release measurement on named host | release evidence, not ordinary test |
 | OTLP privacy/topology/failure | separate runtime-opt-in scenario | only when the final beta telemetry slice ships |
 
+### Native macOS baseline (2026-10-08)
+
+The user resumed native macOS work on an Apple Silicon host running macOS 26.6.2 and Rust 1.98.1. The initial test build failed on the Unix corpus's Linux-only FIFO constructor. The account-path owner then reproduced environment-selected `HOME` changing macOS account scope. The implementation now reuses the pinned POSIX effective-user lookup with macOS's existing account suffix; the owner moved into the existing product test target and uses its bounded subprocess capture. Absolute debug fixtures, relative rejection and optimized override rejection are covered without opening the user's account root or Keychain.
+
+Native baseline corrections preserve actual private FIFO rejection, the platform-specific consent warning and explicit refusal of unsupported guarded reads. The Collector and custom-provider fixtures reset accepted sockets to blocking mode before timeout-bounded reads: macOS inherits listener nonblocking state. The process-global diagnostic privacy owner now runs in an exact filtered subprocess through the existing bounded capture, excluding unrelated tests' legitimate log contention/rotation. The paused callback owner establishes its connection before starting the receiver's virtual deadline. No product bound, account warning, outcome schema or Guard capability was relaxed.
+
+Astra's complete review found that the account-root correction could strand a saved ChatGPT index at the previous environment-selected root. The new preservation row in the existing registration-migration owner failed before the correction. That owner now migrates registration and the validated matching index under both account locks before saved-account access, with destination/host preflight and old-root tombstones only after durable copies. Its corpus passes private-file tokens, token-free keyring metadata, pending/disconnected/permission-disabled state and model evidence, identical partial copies, an already copied registration, conflicts, missing/malformed identity, unsafe pending-file recovery and both busy locks. The existing setup owner proves old-root presence can reach billing choice without parsing either credential body. The subsequent complete Astra review returned `No findings`; it is defect-review evidence, not native Keychain lifecycle proof.
+
+The user's subsequent ChatGPT greeting reproduced unavailable Tool protection after remembered folder trust. The attached permission owner now reports unsupported native enforcement before loading trust, retaining read-only chat; explicit Tool configuration still rejects. Its native PTY/scripted-Provider owner reproduced the exact error before correction and now proves direct and resumed greetings for all three native profiles, complete supplied request semantics, closed SQLite replay, absent Tool context/Events, unchanged trust/draft and explicit Tool rejection before inference. Repeat review corrected supervision of a `script` descendant: the fixture now uses the pinned safe Nix PTY wrapper and directly owns its exact test process through bounded capture and kill/reap cleanup.
+
+The first full debug rerun exposed a P1 fixture-isolation incident: the existing catalog owner isolated only its stable account root. Cleared HOME/XDG fell back to the real legacy root, migration tombstoned live registration/index metadata, and panic cleanup removed the temporary copy after a credential-helper deadline. This supersedes the earlier no-live-account/Keychain-access assertion for this continuation. Migration performs no Keychain deletion and no live inference was confirmed, but the lost metadata requires an external backup or fresh sign-in. [The finding](../security/findings/account-fixture-legacy-root.md) owns impact and recovery limits. All affected launches now isolate both roots, and debug default-path admission refuses an ambient legacy root outside the fixture parent before opening it. The existing account-path owner proves confined roots and ambient rejection. Automatic approval review initially refused another broad suite; targeted isolation evidence and the new admission guard earned approval for the corrected reruns.
+
+Local recovery preserved only the two exact 33-byte markers in a private same-root backup under the existing account lock, after no-follow/type/owner/mode/link/identity checks. Astra reviewed the one-off procedure; synthetic success/refusal fixtures and a real read-only check passed before automatic approval allowed it. Post-operation checks confirmed the original paths absent and both marker bytes preserved. No Keychain item or Session history was changed by recovery. This makes fresh setup available; it does not reconstruct the lost metadata or prove successful reauthorization.
+
+Final native locked offline workspace suites after the setup-redraw correction executed 249 tests in debug and 248 in optimized release, with zero failures and 11 explicitly ignored gates per profile. Formatting, strict all-target Clippy in both profiles and the optimized executable build passed. The activated native callback owner separately completed exactly one test in each profile before the greeting correction: a stalled local connection expired and a subsequent valid synthetic callback succeeded. Fixture commands used physical `TMPDIR=/private/tmp`; ordinary `/tmp` or `/var` aliases still reject through production no-follow admission. Loopback fixtures required execution outside the development environment's network restriction. No user clipboard was accessed.
+
+The user's clarified consent contract is identical on macOS and Linux: every attached entry asks before account or Session work until exact folder trust is remembered. The new native macOS shipped-process linear PTY row failed before the startup correction and now proves setup/explicit-flag ordering, cancellation before saved-account/setup or Session work, read-only re-entry, remembered exact-identity reuse and directory replacement. It also verifies explicit `--tools` is accurately described as retaining private configuration. This startup row is debug-only because optimized account overrides reject; optimized actual-product startup isolation remains unverified. The scripted attached greeting/replay/refusal owner passes in both profiles and opens the same permission prompt in debug. No real account, Keychain or inference was used in this consent correction. Linux PTY readers now isolate passwd home and legacy roots, handle the first decision once, and retain selected release-binary visibility for tmux; their native compilation and execution remain pending. Repeated Astra review fixed fixture type/lint/ordering issues and Provider/mode/Skill eligibility inconsistencies; its final complete review returned `No findings`.
+
+The reported post-ChatGPT-setup renderer failure exposed a shared Unix descriptor bug: setting inherited stdin nonblocking also changes duplicated terminal output. Native macOS inspection reproduced `WouldBlock` after a partial write, and the new terminal-owner process row failed before correction on its inherited-output flag assertion. Both readers now own an independently opened nonblocking handle with no-follow/no-controlling-terminal acquisition and device/inode/rdev validation. The native process owner passes in both profiles: synthetic setup returns to a complete chat redraw, two input submissions straddle release/reacquisition, inherited flags remain unchanged and exact terminal settings restore in inline and linear modes. Its directly owned bounded child opens no account, credential, browser or network. The Linux signal observer now checks the owned reader descriptor; native Linux execution and the actual browser-login return remain unverified. Astra's focused implementation review returned `No findings` by inspection.
+
+The selected-credential startup correction moves OS-store access before chat and credential-bearing Provider preflight, including resume/continue with an initial objective. A fixed service/validated slot and helper-side native UUID/Provider check constrain the status-only authorization; it returns no credential. The interactive supervisor waits up to two minutes, supports future-drop cancellation and kills/reaps the helper. Native discovery without preferences uses the same interactive bound for its existing bounded read, discarding the key before chat; ordinary operations retain five-second deadlines and write/deletion uncertainty. Unconfigured startup no longer probes the OS store. The native debug attached-process corpus uses isolated current/legacy roots and an immediate or held synthetic helper, proving selected item/protocol, authorization before input, missing/denied/invalid response handling, cached/native discovery, private-file/unconfigured bypass, unchanged closed resume/continue Event prefixes, Ctrl+C exit before Session work, exact terminal restoration, helper EOF and positive PID disappearance. The helper protocol/cancellation corpus runs in both profiles. The explicitly activated six-second latency owner failed with the old five-second authorization deadline and passed with the correction in debug and release; the routine write-timeout/uncertainty/reaping owner passed on macOS debug. Final full native suites pass 253 debug and 251 release tests with 14 ignored gates each; format, strict all-target lint in both profiles, optimized executable build and diff checks pass. Astra's final review returned `No findings` after fixing initial preflight ordering, native identity checks and the Linux stalled-bus fixture. Its Linux adaptation explicitly declines synthetic startup access before exercising a later user-submitted admission/cancellation; native Linux execution remains unverified. This correction used no real Keychain item, user credential, sign-in, Provider or clipboard. Per-item native Keychain dialog/ACL behavior remains an isolated synthetic-store/manual gate, and Allow Once can require a subsequent prompt.
+
+The requested continuation adds native descriptor-based ACL admission for private roots, record/pending/database files and account/Session locks. The real ACL corpus keeps private mode bits while adding broad allow grants, proving that mode-only admission misses the defect; deny-only ancestor ACLs remain valid. The dedicated FFI review checked the macOS SDK's enum/permission ABI, absent-ACL/end-of-entry errors, borrowed descriptor lifetime, validated allocation, bounded traversal and single native free. Only this narrow Store adapter allows local unsafe code; the library otherwise denies it and the executable still forbids it. No same-UID or privileged exclusion is claimed.
+
+The macOS helper now uses the already locked Security framework directly for the exact user-domain Keychain/service/slot, inserting only after item-not-found rather than after a denied read. Its debug-only fixed-file fixture checks a private StateRoot and rejects malformed paths; optimized helper/supervisor overrides reject before native access. The explicitly activated isolated owner passes production-supervisor save/read, replacement, selected UUID/Provider checks, locked read/write rejection without a backend/item change, ChatGPT token save/read/deletion and preservation after another executable's denied deletion. It creates a privately named disposable Keychain and observes unchanged user default/search-list preferences before and after; no login-Keychain item or real credential is used. The native framework was promoted from an existing transitive dependency, adding no packages. Human dialogs, optimized lifecycle and cross-user scope remain unverified.
+
+Clipboard transport now uses the checked system JavaScript/AppKit bridge in the existing cleared-environment, killable process owner. A uniquely named synthetic pasteboard gate passes PNG-over-text selection, exact text/PNG bytes, malformed PNG, unsupported TIFF with a text fallback, and oversized PNG/text rejection in debug and release. Type count/name length, pasteboard generation and payload bounds are checked before returning the closed typed frame; ordinary image/text admission remains authoritative. The user's general clipboard was never accessed. Existing draft/modal/cancellation/replay owners retain their scope; general-pasteboard UX and live vision are separate checks.
+
+Handle-relative macOS file admission now rejects component links, traversal, hard links, special objects and device crossings while admitting checked nested files. The shared hostile file-discovery and installed-Skill corpora execute their successful/rejection paths on macOS. Discovery is not Guard dispatch. Native debug active-process PTYs exercise both linear and inline TERM, HUP, Ctrl+C, suspension/resumption and failed-call restoration, with independently captured empty stdout, closed cancelled/failed replay and no accepted assistant message. The fixture owns its session/controlling terminal and close-on-exec descriptors. It exposed fullscreen startup's cursor-preserving clear querying stdout and timing out when stdout is piped; startup now clears stderr directly. Shared restoration observation normalizes only Darwin's kernel-maintained PENDIN bit and compares every other field. The tiny child pre-exec exception was reviewed separately for owned fd 0, allocation-free native syscalls and failure propagation.
+
+The native active-process corpus also passes physical controlling-PTY loss and independently disconnected stderr in both presentations. It checks actual socket closure, empty stdout and cancelled closed replay, and compares surviving terminal settings. Darwin returns `ENOTTY` for the disconnected controlling slave; this is positive loss evidence, not restoration proof. The dead-stderr row reproduced a product panic with exit 101 after cancellation: main's `eprintln!` attempted to report the failure through the dead sink. Shared CLI error reporting now uses fallible writes and preserves exit 1. Split-PTY fixtures must drain controlling-input echo during cleanup; holding a slave prevents EOF, and leaving echo undrained can stall Darwin's process exit. The stalled fixture and its exact child were terminated and positively observed absent before rerunning the corrected owner. Linux startup and panic owners now gate on consent/acquired ownership instead of waiting for the removed cursor query; native Linux execution remains pending.
+
+Native Guard investigation retains host execution of macOS binaries; the user excludes a Linux VM. A harmless default-denial Seatbelt probe that permits execution, fork, reads and sysctl still succeeds at `setpgid` and child `setsid`, so a process group alone cannot own these descendants. The installed Darwin `sys/event.h` explicitly marks `NOTE_TRACK`, `NOTE_TRACKERR` and `NOTE_CHILD` unsupported since 10.5. A minimal native process reports 445,746,364,416 virtual bytes and 1,310,720 resident bytes before a 512-MiB `RLIMIT_AS` request returns `EINVAL`; virtual address size cannot substitute for the aggregate physical-memory contract. Apple's [resource implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_resource.c) applies that limit to the current VM map. Its [coalition syscall](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/sys_coalition.c) requires privileged coalition membership, and [memorystatus controls](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_memorystatus.c) require root or an entitlement for memory-limit configuration. These observations reject the simple Seatbelt/process-group/rlimit design; they do not prove every native enforcement design impossible or authorize weaker resource guarantees.
+
+The user subsequently accepted the explicit macOS supervision contract now owned
+by the Tool spec: nominal 10-ms aggregate memory/task observation and a hard
+15-second per-process CPU-time limit, with overshoot, swap and aggregate-CPU
+non-claims. Intents and receipts identify the profile; the existing typed corpus
+checks profile mismatch and exact legacy serialized bytes. Guard admission also
+rejects a resource profile different from its native implementation. No macOS
+dispatch is enabled by this encoding change.
+
+A stronger native Seatbelt diagnostic rejects direct `setsid` and `setpgid` with
+`EPERM` through syscall denial. A separately waited `posix_spawn` child still
+enters its own group through spawn attributes; adding `SYS_posix_spawn` to the
+denial rejects that path while the tested fork still succeeds. Apple's
+[spawn implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_exec.c)
+applies these attributes inside the kernel. This is candidate-control evidence,
+not complete descendant attestation. Under that denial, a cleared-environment
+Rust `std::process::Command` probe returns `EPERM`, while the fixed `/bin/sh`
+probe can still launch its tested child. The user requires ordinary native
+child-launch compatibility and rejected the fork/exec-only profile. Resource
+supervision acceptance remains unchanged; no compatible descendant mechanism
+has been selected. A private 64-MiB case-sensitive HFS+ image
+reported 65,536 KiB capacity and returned `ENOSPC` after 65,011,712 written bytes.
+It was positively observed detached, then its image and private directories were
+removed. The storage primitive is proven locally; the Guard's mount lifecycle,
+isolation and recovery are not implemented or attested.
+
+The existing file corpus now executes native exclusive creation and digest-bound
+atomic replacement on macOS through Rustix's already installed `renameat_with`
+adapter, without new unsafe code. It proves fresh-inode publication, stale-digest
+and unsafe-object rejection, and native Mach-O executable pin admission. A retained
+original descriptor has link count zero after publication, so the fixture reads
+its already validated finite bytes directly rather than treating it as a newly
+admissible linked file. File primitives remain independent of Guard dispatch.
+The shared terminal-reader corpus passes deliberate inline/linear unwind in debug
+and release, with actual acquired settings, exact restoration and one positively
+observed failed child test; no account store is opened. Linux acquisition, active
+suspension and panic owners no longer wait for removed cursor queries, but native
+Linux execution remains pending.
+
+The native consent fault corpus passes twelve debug shipped-process cases across
+linear and inline presentations: input Ctrl+C, INT, TERM, HUP, and separately
+disconnected stderr before or after the completed consent prompt. It checks
+actual acquired settings, exact surviving restoration, positive `EIO`, intended
+exit classes, empty stdout, absent setup and Session state, and unchanged
+synthetic account metadata. Reading folder trust may admit its empty private
+account root/lock/database; this is not account setup. Inline frames compress
+spaces with cursor movement, so both native and Linux consent observers use the
+existing visible-frame detector without sending its suggested response. A
+linear invalid response need not redraw the same cached prompt; the disconnected
+consent sink case uses TERM to prove shutdown/error reporting without advancing
+to setup. The active native fourteen-case owner also passes without any cursor
+reply, rejecting a reintroduced query. Optimized product isolation and arbitrary
+partial-acquisition/picker/tmux faults remain outside these claims.
+
+A finite Seatbelt identity diagnostic using Apple's installed `same-sandbox`
+signal filter permits signal 0 to its forked child, denies it to the outside
+parent, and retains the observed file-permission profile after a rejected nested
+`sandbox_init`. Forked `setsid` and a spawned new process group still succeed.
+This distinguishes sandbox membership from a mutable group for these cases; it
+does not attest a complete supervisor, recovery after guardian death, identity
+enumeration, or safe whole-unit cleanup. No broadcast terminating signal was
+sent. A separate CPU diagnostic inherits soft/hard `RLIMIT_CPU` values of 15,
+rejects widening with `EPERM`, and normally terminates through `SIGXCPU` near
+15 seconds. Ignoring that signal allows 17 CPU seconds before the diagnostic
+exits itself; its waited parent reports normal exit rather than kernel kill.
+Apple's [resource implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_resource.c)
+sets the CPU virtual timer from the soft value and sends `SIGXCPU`. This rejects
+that API alone as the accepted hard CPU boundary. Neither the agreed CPU
+requirement nor ordinary spawn compatibility has been weakened.
+
+The existing explicitly activated TLS owner passes valid chain/name, wrong-name rejection and unrelated-chain rejection in debug and release using generated certificates, loopback-bound OpenSSL 3 servers and a client-local test anchor. It changes no OS trust settings and does not prove default system-trust or actual compiled-endpoint HTTPS journeys on macOS.
+
+Final locked offline native suites execute 258 debug and 255 release tests, with zero failures and 17/16 explicitly ignored gates respectively. Formatting, strict all-target Clippy in both profiles and diff checks pass. The isolated Keychain gate completes exactly one parent/child test in debug; the named-pasteboard and TLS gates each complete exactly one activated owner in both profiles. These checks use physical TMPDIR=/private/tmp and synthetic current/legacy account roots; native loopback and OS-service gates require execution outside the development sandbox. Cargo audit/deny remain unavailable, so no fresh advisory/license-policy pass is inferred.
+
+Full granted file/command/runtime-Skill/MCP enforcement remains an implementation gap: no native profile attests the accepted resource guarantees, storage isolation and complete descendant ownership. macOS effects still fail closed. Optimized active-CLI/account setup needs isolated effective-user roots; remaining acquisition/picker/tmux faults, actual compiled-endpoint/default-trust TLS, Keychain setup/refresh/logout/cross-user scope, VoiceOver, Linux re-verification and distribution provenance remain separate. [Next steps](../../NEXT_STEPS.md#beta-2-and-broader-release) and [the active native plan](../../planning/native-macos/README.md) retain the unresolved isolation design and remaining evidence without a complete macOS support claim.
+
 ## 19. Decisions that supersede or sharpen earlier research
 
 The existing CLI and architecture research is directionally correct but its “smallest verification matrix” can be misread as dozens of individual tests. This report sharpens it as follows:

@@ -1,5 +1,8 @@
 use super::approval::ApprovalMode;
-use super::config::{Config, Program};
+use super::config::Config;
+#[cfg(not(target_os = "macos"))]
+use super::config::Program;
+#[cfg(not(target_os = "macos"))]
 use super::types::{MAX_SNAPSHOT_BYTES, hex_digest};
 use super::{ToolError, fs};
 use crate::store::StateRoot;
@@ -192,24 +195,31 @@ impl WorkspacePermissions {
         if !self.trusted {
             return Err(ToolError::Configuration);
         }
-        let executable =
-            std::fs::canonicalize("/usr/bin/sh").map_err(|_| ToolError::ProtectionUnavailable)?;
-        if !executable.starts_with("/usr") {
-            return Err(ToolError::ProtectionUnavailable);
-        }
-        let executable = executable.to_str().ok_or(ToolError::Path)?.to_owned();
-        let bytes = fs::read_regular(fs::open_absolute(&executable)?, MAX_SNAPSHOT_BYTES)?;
-        let config = Config {
-            version: 1,
-            workspace_paths: vec![".".into()],
-            write: true,
-            commands: vec![Program {
+        #[cfg(not(target_os = "macos"))]
+        let commands = {
+            let (shell, root) = ("/usr/bin/sh", "/usr");
+            let executable =
+                std::fs::canonicalize(shell).map_err(|_| ToolError::ProtectionUnavailable)?;
+            if !executable.starts_with(root) {
+                return Err(ToolError::ProtectionUnavailable);
+            }
+            let executable = executable.to_str().ok_or(ToolError::Path)?.to_owned();
+            let bytes = fs::read_regular(fs::open_absolute(&executable)?, MAX_SNAPSHOT_BYTES)?;
+            vec![Program {
                 name: "sh".into(),
                 executable,
                 sha256: hex_digest(&bytes),
                 interpreter: true,
                 inputs: Vec::new(),
-            }],
+            }]
+        };
+        #[cfg(target_os = "macos")]
+        let commands = Vec::new();
+        let config = Config {
+            version: 1,
+            workspace_paths: vec![".".into()],
+            write: true,
+            commands,
             skills: Vec::new(),
             mcp: Vec::new(),
         };
@@ -264,79 +274,94 @@ mod tests {
         std::fs::write(workspace.join(".env"), "synthetic excluded fixture").unwrap();
         std::os::unix::fs::symlink(temp.path(), workspace.join("outside")).unwrap();
         std::fs::hard_link(workspace.join("README.md"), workspace.join("linked.md")).unwrap();
-        assert_eq!(
-            fs::workspace_entries(&workspace, "", "").unwrap(),
-            vec!["docs/"]
-        );
-        assert_eq!(
-            fs::workspace_entries(&workspace, "docs", "hello").unwrap(),
-            vec!["docs/hello world.md"]
-        );
-        for query in ["world", "HELLO", "docs/hello", "hwd"] {
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
             assert_eq!(
-                fs::workspace_entries(&workspace, "", query).unwrap(),
-                vec!["docs/hello world.md"],
-                "nested file query {query}"
+                fs::workspace_entries(&workspace, "", "").unwrap(),
+                vec!["docs/"]
+            );
+            let nested = fs::workspace_entries(&workspace, "docs", "hello");
+            assert!(
+                matches!(&nested, Err(ToolError::ProtectionUnavailable)),
+                "{nested:?}"
             );
         }
-        std::fs::create_dir_all(workspace.join("docs/guide")).unwrap();
-        std::fs::write(workspace.join("docs/guide/intro.md"), "synthetic file").unwrap();
-        std::fs::write(workspace.join("guide"), "synthetic file").unwrap();
-        std::fs::write(
-            workspace.join("target/guide.md"),
-            "synthetic excluded fixture",
-        )
-        .unwrap();
-        assert_eq!(
-            fs::workspace_entries(&workspace, "", "guide").unwrap(),
-            vec!["guide", "docs/guide/", "docs/guide/intro.md"]
-        );
-        assert!(
-            fs::workspace_entries(&workspace, "", "README")
-                .unwrap()
-                .is_empty()
-        );
-        for query in ["../outside", ".env", "docs/../../outside", "bad\\path"] {
-            assert!(fs::workspace_entries(&workspace, "", query).is_err());
-        }
-        for index in 0..70 {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            assert_eq!(
+                fs::workspace_entries(&workspace, "", "").unwrap(),
+                vec!["docs/"]
+            );
+            assert_eq!(
+                fs::workspace_entries(&workspace, "docs", "hello").unwrap(),
+                vec!["docs/hello world.md"]
+            );
+            for query in ["world", "HELLO", "docs/hello", "hwd"] {
+                assert_eq!(
+                    fs::workspace_entries(&workspace, "", query).unwrap(),
+                    vec!["docs/hello world.md"],
+                    "nested file query {query}"
+                );
+            }
+            std::fs::create_dir_all(workspace.join("docs/guide")).unwrap();
+            std::fs::write(workspace.join("docs/guide/intro.md"), "synthetic file").unwrap();
+            std::fs::write(workspace.join("guide"), "synthetic file").unwrap();
             std::fs::write(
-                workspace.join(format!("entry-{index:03}.md")),
+                workspace.join("target/guide.md"),
+                "synthetic excluded fixture",
+            )
+            .unwrap();
+            assert_eq!(
+                fs::workspace_entries(&workspace, "", "guide").unwrap(),
+                vec!["guide", "docs/guide/", "docs/guide/intro.md"]
+            );
+            assert!(
+                fs::workspace_entries(&workspace, "", "README")
+                    .unwrap()
+                    .is_empty()
+            );
+            for query in ["../outside", ".env", "docs/../../outside", "bad\\path"] {
+                assert!(fs::workspace_entries(&workspace, "", query).is_err());
+            }
+            for index in 0..70 {
+                std::fs::write(
+                    workspace.join(format!("entry-{index:03}.md")),
+                    "synthetic file",
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                fs::workspace_entries(&workspace, "", "entry-").unwrap(),
+                (0..64)
+                    .map(|index| format!("entry-{index:03}.md"))
+                    .collect::<Vec<_>>()
+            );
+            let large = workspace.join("large");
+            std::fs::create_dir(&large).unwrap();
+            for index in 0..8193 {
+                std::fs::write(large.join(format!("item-{index:05}.md")), b"synthetic").unwrap();
+            }
+            let partial = fs::workspace_entries(&workspace, "large", "").unwrap();
+            assert_eq!(partial.len(), 64);
+            assert!(partial.windows(2).all(|pair| pair[0] < pair[1]));
+            assert!(partial.iter().all(|path| path.starts_with("large/item-")));
+            let deep = std::iter::repeat_n("level", 16)
+                .collect::<Vec<_>>()
+                .join("/");
+            std::fs::create_dir_all(workspace.join(&deep)).unwrap();
+            std::fs::write(
+                workspace.join(&deep).join("depth-canary.md"),
                 "synthetic file",
             )
             .unwrap();
-        }
-        assert_eq!(
-            fs::workspace_entries(&workspace, "", "entry-").unwrap(),
-            (0..64)
-                .map(|index| format!("entry-{index:03}.md"))
-                .collect::<Vec<_>>()
-        );
-        let large = workspace.join("large");
-        std::fs::create_dir(&large).unwrap();
-        for index in 0..8193 {
-            std::fs::write(large.join(format!("item-{index:05}.md")), b"synthetic").unwrap();
-        }
-        let partial = fs::workspace_entries(&workspace, "large", "").unwrap();
-        assert_eq!(partial.len(), 64);
-        assert!(partial.windows(2).all(|pair| pair[0] < pair[1]));
-        assert!(partial.iter().all(|path| path.starts_with("large/item-")));
-        let deep = std::iter::repeat_n("level", 16)
-            .collect::<Vec<_>>()
-            .join("/");
-        std::fs::create_dir_all(workspace.join(&deep)).unwrap();
-        std::fs::write(
-            workspace.join(&deep).join("depth-canary.md"),
-            "synthetic file",
-        )
-        .unwrap();
-        assert!(
-            fs::workspace_entries(&workspace, "", "depth-canary")
-                .unwrap()
-                .is_empty()
-        );
-        for folder in ["../", "outside", ".git", ".env"] {
-            assert!(fs::workspace_entries(&workspace, folder, "").is_err());
+            assert!(
+                fs::workspace_entries(&workspace, "", "depth-canary")
+                    .unwrap()
+                    .is_empty()
+            );
+            for folder in ["../", "outside", ".git", ".env"] {
+                assert!(fs::workspace_entries(&workspace, folder, "").is_err());
+            }
         }
     }
 
@@ -349,6 +374,13 @@ mod tests {
         let mut access = WorkspacePermissions::load(&path, &root).unwrap();
         assert!(!access.is_trusted());
         access.save(&root, true, ApprovalMode::AutoEdits).unwrap();
+        #[cfg(target_os = "macos")]
+        {
+            let config = access.config(&path).unwrap();
+            assert!(config.write);
+            assert_eq!(config.workspace_paths, ["."]);
+            assert!(config.commands.is_empty() && config.mcp.is_empty());
+        }
         let restored = WorkspacePermissions::load(&path, &root).unwrap();
         assert!(restored.is_trusted());
         assert_eq!(restored.mode(), ApprovalMode::AutoEdits);

@@ -197,6 +197,7 @@ fn open_private_lock_file(
         Err(error) => return Err(StoreError::Io(error)),
     };
     let metadata = file.metadata()?;
+    super::check_acl(&file, true)?;
     if !metadata.is_file()
         || metadata.len() != 0
         || metadata.nlink() != 1

@@ -18,6 +18,11 @@ use config::Config;
 pub(crate) use skills::parse_json;
 pub use skills::{ProjectSkills, project_skills};
 pub use workspace::{WorkspacePermissions, mention_paths};
+/// Whether this OS implements native Guard protection for typed file Tools.
+pub const fn native_protection_supported() -> bool {
+    cfg!(any(target_os = "linux", target_os = "macos"))
+}
+
 pub fn configured_skill_names(state: &StateRoot) -> Result<Vec<String>, ToolError> {
     Ok(Config::load(state)?
         .skills
@@ -60,7 +65,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 pub use types::{
     EffectIntent, GuardReceipt, MAX_SKILLS, NetworkGrant, ToolCall, ToolContext, ToolDisposition,
-    ToolLimits, ToolObservation, ToolPolicyReceipt,
+    ToolLimits, ToolObservation, ToolPolicyReceipt, ToolResourceProfile,
 };
 pub(crate) use types::{MAX_MODEL_STEPS, MAX_TOOL_CALLS, MAX_TOOL_CONTEXT_BYTES};
 
@@ -112,6 +117,10 @@ impl ToolRuntime {
         guard_executable: PathBuf,
     ) -> Result<Self, ToolError> {
         guard::check_available()?;
+        #[cfg(target_os = "macos")]
+        if !config.commands.is_empty() || !config.mcp.is_empty() {
+            return Err(ToolError::ProtectionUnavailable);
+        }
         let enforcement_digest = guard::enforcement_digest()?;
         let root = fs::open_directory(workspace)?;
         state
@@ -121,7 +130,9 @@ impl ToolRuntime {
         let account = StateRoot::account_path().map_err(|_| ToolError::Path)?;
         fs::reject_overlap(workspace, &account)?;
         for protected in [workspace, state.path(), account.as_path()] {
-            fs::reject_overlap(Path::new(guard::RUNTIME_ROOT), protected)?;
+            for runtime in guard::runtime_roots() {
+                fs::reject_overlap(Path::new(runtime), protected)?;
+            }
         }
         let workspace_identity = fs::identity(&root)?;
         config.discover_skills(workspace)?;
@@ -160,7 +171,11 @@ impl ToolRuntime {
             "write": self.config.write,
             "file_tools": "list (directory entries), read (UTF-8, zero-based byte offset, limit 1..4096, whole-file sha256), search (literal UTF-8 content in a file or directory; use Read or an include for edit sha256), mkdir (new directory; parent must exist), write (null digest only creates), edit (unique literal match, expected sha256)",
             "commands": self.config.commands.iter().map(|program| serde_json::json!({"name":program.name,"interpreter":program.interpreter,"inputs":program.inputs.iter().map(|input| format!("/inputs/{}/{}", program.name, input.destination)).collect::<Vec<_>>()})).collect::<Vec<_>>(),
-            "command_contract": "Explicit argv only. Private writable selected-project snapshot at /workspace; /scratch is bounded. No network, host home, credentials or state. Subprocess file changes are discarded, not applied to host. Use typed write/edit to integrate source. Skills available at /skills/NAME.",
+            "command_contract": if cfg!(target_os = "macos") {
+                "Commands and MCP are unavailable on this native profile. Use the admitted typed file Tools and pinned Skill data."
+            } else {
+                "Explicit argv only. Private writable selected-project snapshot at /workspace; /scratch is bounded. No network, host home, credentials or state. Subprocess file changes are discarded, not applied to host. Use typed write/edit to integrate source. Skills available at /skills/NAME."
+            },
             "skills": skill_rows,
             "mcp_servers": self.config.mcp.iter().map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":"2025-11-25 stdio; use mcp_list before mcp_call"})).collect::<Vec<_>>(),
         }).to_string();

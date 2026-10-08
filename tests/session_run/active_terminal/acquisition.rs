@@ -13,7 +13,7 @@ use std::{
     io::{Read, Write},
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
     thread,
     time::{Duration, Instant},
 };
@@ -113,24 +113,25 @@ fn drain_nonblocking(reader: &mut impl Read, bytes: &mut Vec<u8>) {
 }
 
 #[test]
-fn cursor_query_timeout_during_acquisition_restores_raw_mode_without_state() {
+fn startup_without_cursor_replies_restores_raw_mode_without_session() {
     for (case, signal) in [
         ("no signal", None),
         ("SIGINT", Some(Signal::INT)),
         ("SIGTERM", Some(Signal::TERM)),
         ("SIGHUP", Some(Signal::HUP)),
     ] {
-        acquisition_case(case, signal);
+        startup_case(case, signal);
     }
 }
 
-fn acquisition_case(case: &str, signal: Option<Signal>) {
+fn startup_case(case: &str, signal: Option<Signal>) {
     let temp = tempfile::tempdir().expect("private test root");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
     let command = "stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
-    let mut attached = Command::new("/usr/bin/script");
+    let mut attached =
+        crate::process::account_isolated_script(state.parent().expect("fixture root"));
     attached
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -145,7 +146,7 @@ fn acquisition_case(case: &str, signal: Option<Signal>) {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     let mut attached = ChildGuard::new(attached.spawn().expect("attached PTY process"));
-    let _input = attached
+    let mut input = attached
         .child()
         .stdin
         .take()
@@ -155,14 +156,17 @@ fn acquisition_case(case: &str, signal: Option<Signal>) {
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking stdout pipe");
     let mut transcript = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(10);
+    let mut consent = false;
+    let mut suggested_input = Vec::new();
     loop {
         drain_nonblocking(&mut output, &mut transcript);
-        if transcript.windows(4).any(|part| part == b"\x1b[6n") {
+        crate::process::decline_workspace_consent(&mut suggested_input, &transcript, &mut consent);
+        if consent {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "cursor query was not issued: {case}"
+            "folder consent did not appear without cursor replies: {case}"
         );
         thread::yield_now();
     }
@@ -175,10 +179,12 @@ fn acquisition_case(case: &str, signal: Option<Signal>) {
     assert_ne!(
         tty_settings(product_pid),
         before,
-        "raw mode active before cursor query timeout: {case}"
+        "raw mode active before folder consent cancellation: {case}"
     );
     if let Some(signal) = signal {
-        kill_process(product_pid, signal).expect("signal during terminal acquisition");
+        kill_process(product_pid, signal).expect("signal during folder consent");
+    } else {
+        input.write_all(&[3]).expect("cancel folder consent");
     }
 
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -194,15 +200,16 @@ fn acquisition_case(case: &str, signal: Option<Signal>) {
         }
         assert!(
             Instant::now() < deadline,
-            "cursor query did not time out: {case}"
+            "folder consent cancellation did not exit: {case}"
         );
         thread::yield_now();
     }
     let result = wait_product(attached.take());
     drain_nonblocking(&mut output, &mut transcript);
-    assert!(
-        !result.status.success(),
-        "failed terminal acquisition exits: {case}"
+    assert_eq!(
+        result.status.success(),
+        signal.is_none() || signal == Some(Signal::INT),
+        "folder consent cancellation exit class: {case}"
     );
     assert_eq!(result.stderr, b"");
     let transcript = String::from_utf8(transcript).expect("PTY transcript UTF-8");
@@ -217,12 +224,15 @@ fn acquisition_case(case: &str, signal: Option<Signal>) {
     assert_eq!(
         transcript_field(&transcript, "TTY_BEFORE:"),
         after,
-        "raw mode restored after failed acquisition ({case}): {}",
+        "raw mode restored after startup cancellation ({case}): {}",
         redacted_tail(transcript.as_bytes())
     );
     assert!(
-        transcript.contains("terminal rendering failed"),
-        "typed acquisition failure: {case}"
+        !transcript
+            .as_bytes()
+            .windows(4)
+            .any(|part| part == b"\x1b[6n"),
+        "fullscreen startup must not query the cursor: {case}"
     );
     assert!(!transcript.contains("Status:"), "no Run receipt: {case}");
     assert!(!transcript.contains("Answer:"), "no Run answer: {case}");
@@ -233,7 +243,7 @@ fn acquisition_case(case: &str, signal: Option<Signal>) {
 }
 
 #[test]
-fn broken_stderr_after_cursor_query_restores_raw_mode_without_state() {
+fn broken_stderr_during_folder_consent_restores_raw_mode_without_session() {
     let temp = tempfile::tempdir().expect("private test root");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
@@ -279,7 +289,8 @@ fn broken_stderr_after_cursor_query_restores_raw_mode_without_state() {
     fcntl_setfl(&stderr_master, flags | OFlags::NONBLOCK).expect("nonblocking stderr master");
 
     let command = "stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; exec 2>\"$ARANY_TEST_STDERR_PTY\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
-    let mut attached = Command::new("/usr/bin/script");
+    let mut attached =
+        crate::process::account_isolated_script(state.parent().expect("fixture root"));
     attached
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -301,19 +312,22 @@ fn broken_stderr_after_cursor_query_restores_raw_mode_without_state() {
     let mut stdout_bytes = Vec::new();
     let mut stderr_bytes = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(10);
+    let mut consent = false;
+    let mut suggested_input = Vec::new();
     loop {
         drain_nonblocking(&mut output, &mut stdout_bytes);
         drain_nonblocking(&mut stderr_master, &mut stderr_bytes);
-        if stdout_bytes
-            .windows(4)
-            .chain(stderr_bytes.windows(4))
-            .any(|part| part == b"\x1b[6n")
-        {
+        crate::process::decline_workspace_consent(
+            &mut suggested_input,
+            &stderr_bytes,
+            &mut consent,
+        );
+        if consent {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "cursor query not issued; stdout: {}; stderr: {}",
+            "folder consent missing; stdout: {}; stderr: {}",
             redacted_tail(&stdout_bytes),
             redacted_tail(&stderr_bytes)
         );
@@ -362,7 +376,9 @@ fn broken_stderr_after_cursor_query_restores_raw_mode_without_state() {
         thread::yield_now();
     }
     drop(fault_probe);
-    input.write_all(b"\x1b[24;1R").expect("cursor response");
+    input
+        .write_all(b"\x1b[B")
+        .expect("redraw the consent choice");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         drain_nonblocking(&mut output, &mut stdout_bytes);
@@ -425,7 +441,8 @@ fn lost_pty_case(screen_reader: bool) {
     } else {
         "stty rows 24 cols 80; printf 'PRODUCT_PID:%s\n' \"$$\"; exec \"$ARANY_TEST_EXE\" --setup --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\""
     };
-    let mut attached = Command::new("/usr/bin/script");
+    let mut attached =
+        crate::process::account_isolated_script(state.parent().expect("fixture root"));
     attached
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -445,7 +462,7 @@ fn lost_pty_case(screen_reader: bool) {
     let flags = fcntl_getfl(&output).expect("stdout pipe flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
     let mut transcript = Vec::new();
-    let mut answered = 0;
+    let mut answered = crate::session_picker::PtyResponses::default();
     let deadline = Instant::now() + Duration::from_secs(10);
     while !transcript
         .windows(b"PRODUCT_PID:".len())

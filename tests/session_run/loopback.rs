@@ -1,17 +1,16 @@
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 use arany::StateRoot;
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 use std::{
-    io::Read,
-    process::{Child, Output},
-    time::Duration,
-};
-#[cfg(target_os = "linux")]
-use std::{
-    io::Write,
+    io::{Read, Write},
     net::TcpStream,
     os::unix::fs::PermissionsExt,
     path::Path,
     process::{Command, Stdio},
+};
+use std::{
+    process::{Child, Output},
+    time::Duration,
 };
 
 pub(super) struct ChildGuard(Option<Child>);
@@ -45,7 +44,7 @@ pub(super) fn wait_product(child: Child) -> Output {
     super::process::capture(child.child(), Duration::from_secs(10), 64 * 1024)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(super) fn read_request(stream: &mut TcpStream) -> Vec<u8> {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -80,7 +79,7 @@ pub(super) fn read_request(stream: &mut TcpStream) -> Vec<u8> {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(super) fn send_response(stream: &mut TcpStream, index: usize, text: serde_json::Value) {
     let response = serde_json::json!({
         "id": format!("resp_{}", index + 1),
@@ -98,7 +97,7 @@ pub(super) fn send_response(stream: &mut TcpStream, index: usize, text: serde_js
     .expect("synthetic response");
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(super) fn write_profile(state: &Path, port: u16) {
     StateRoot::admit(state).expect("state root");
     let profile = serde_json::json!({
@@ -122,12 +121,12 @@ pub(super) fn write_profile(state: &Path, port: u16) {
         .expect("private profile file");
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(super) fn check_profile(workspace: &Path, state: &Path) {
     check_profile_with_binary(workspace, state, Path::new(env!("CARGO_BIN_EXE_arany")));
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(super) fn check_profile_with_binary(workspace: &Path, state: &Path, executable: &Path) {
     let mut command = Command::new(executable);
     command

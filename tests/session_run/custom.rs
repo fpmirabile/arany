@@ -130,6 +130,9 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
                 }
             };
             stream
+                .set_nonblocking(false)
+                .expect("blocking accepted stream");
+            stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("request deadline");
             let mut request = Vec::new();

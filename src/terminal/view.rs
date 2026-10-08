@@ -1,6 +1,6 @@
-use super::Composer;
 use super::commands::{Submission, help_entry, help_len, parse_submission};
 use super::history::{HistoryRow, MAX_ROW_CELLS, MessageKind};
+use super::{Composer, TerminalOutput};
 use crate::presentation::{
     AgentInspectorModel, DraftAction, PresentationModel, model_id_preview, safe_truncate,
 };
@@ -15,7 +15,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap},
 };
-use std::io::{self, Stderr};
+use std::io;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -248,14 +248,14 @@ fn accent_lead(line: String, palette: Palette) -> Line<'static> {
     }
 }
 
-pub(super) fn screen_terminal() -> io::Result<Terminal<CrosstermBackend<Stderr>>> {
+pub(super) fn screen_terminal() -> io::Result<Terminal<CrosstermBackend<TerminalOutput>>> {
     let mut terminal = Terminal::with_options(
-        CrosstermBackend::new(io::stderr()),
+        CrosstermBackend::new(TerminalOutput(Some(io::stderr()))),
         TerminalOptions {
             viewport: Viewport::Fullscreen,
         },
     )?;
-    terminal.clear()?;
+    ratatui::backend::Backend::clear(terminal.backend_mut())?;
     Ok(terminal)
 }
 

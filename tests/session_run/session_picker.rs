@@ -22,11 +22,36 @@ pub(super) fn tail(bytes: &[u8]) -> String {
         .collect()
 }
 
+pub(super) struct PtyResponses {
+    pub(super) cursor_queries: usize,
+    consent_from: usize,
+    auto_consent: bool,
+}
+
+impl Default for PtyResponses {
+    fn default() -> Self {
+        Self {
+            cursor_queries: 0,
+            consent_from: 0,
+            auto_consent: true,
+        }
+    }
+}
+
+impl PtyResponses {
+    pub(super) fn manual_consent() -> Self {
+        Self {
+            auto_consent: false,
+            ..Self::default()
+        }
+    }
+}
+
 pub(super) fn pump(
     output: &mut impl Read,
     input: &mut impl Write,
     transcript: &mut Vec<u8>,
-    answered: &mut usize,
+    answered: &mut PtyResponses,
 ) {
     loop {
         let mut chunk = [0; 4096];
@@ -49,9 +74,20 @@ pub(super) fn pump(
         .filter(|part| *part == b"\x1b[6n")
         .count();
     assert!(queries <= 32, "bounded cursor queries");
-    while *answered < queries {
+    while answered.cursor_queries < queries {
         input.write_all(b"\x1b[2;1R").expect("cursor response");
-        *answered += 1;
+        answered.cursor_queries += 1;
+    }
+    if answered.auto_consent {
+        let mut declined = false;
+        super::process::decline_workspace_consent(
+            input,
+            &transcript[answered.consent_from..],
+            &mut declined,
+        );
+        if declined {
+            answered.consent_from = transcript.len();
+        }
     }
 }
 
@@ -113,7 +149,7 @@ fn run_picker_case(
     let flags = fcntl_getfl(&output).expect("stdout pipe flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking stdout pipe");
     let mut transcript = Vec::new();
-    let mut answered = 0;
+    let mut answered = crate::session_picker::PtyResponses::default();
     let deadline = Instant::now() + Duration::from_secs(10);
     while !transcript
         .windows(b"\x1b[?1000h".len())
@@ -376,12 +412,10 @@ fn screen_reader_entry(
     let flags = fcntl_getfl(&output).expect("stdout pipe flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking stdout pipe");
     let mut transcript = Vec::new();
-    let mut answered = 0;
-    let mut declined = false;
+    let mut answered = crate::session_picker::PtyResponses::default();
     let deadline = Instant::now() + Duration::from_secs(10);
     while !transcript.windows(8).any(|part| part == b"Input:\r\n") {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
-        super::process::decline_workspace_consent(&mut input, &transcript, &mut declined);
         assert!(
             Instant::now() < deadline,
             "screen-reader input not ready: {}",
@@ -424,7 +458,10 @@ fn screen_reader_entry(
         tail(&transcript)
     );
     assert_eq!(result.stderr, b"");
-    assert_eq!(answered, 0, "screen-reader mode uses no cursor query");
+    assert_eq!(
+        answered.cursor_queries, 0,
+        "screen-reader mode uses no cursor query"
+    );
     let text = String::from_utf8(transcript).expect("screen-reader UTF-8");
     let marker = |name: &str| {
         text.lines()

@@ -132,9 +132,10 @@ pub(crate) fn workspace_permission_lines(path: &std::path::Path) -> Vec<String> 
         "Do you trust this folder?".into(),
         escape_terminal(&path.to_string_lossy()),
         String::new(),
-        "Arany can read and automatically edit this project.".into(),
-        "Commands run offline in an isolated copy and ask first.".into(),
-        "Trust is remembered for this folder. Shift+Tab changes approval mode.".into(),
+        "Trust allows supported project edits, commands and Skills.".into(),
+        "Tools require native OS protection; unavailable Tools stay disabled.".into(),
+        "Supported commands run offline in an isolated copy and ask first.".into(),
+        "Trust is remembered for this folder. Shift+Tab changes supported approval modes.".into(),
     ]
 }
 

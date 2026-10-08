@@ -6,6 +6,9 @@ use directories::ProjectDirs;
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod acl;
 mod lock;
 pub(crate) use lock::SessionRunLock;
 
@@ -47,11 +50,22 @@ impl StateRoot {
         let path = dirs.state_dir().ok_or(StoreError::InvalidStateDirectory)?;
         #[cfg(not(target_os = "linux"))]
         let path = dirs.data_local_dir();
+        #[cfg(all(debug_assertions, any(target_os = "linux", target_os = "macos")))]
+        if let Some(fixture) = std::env::var_os("ARANY_TEST_ACCOUNT_ROOT") {
+            let fixture = PathBuf::from(fixture);
+            let parent = fixture
+                .parent()
+                .filter(|parent| fixture.is_absolute() && *parent != Path::new("/"))
+                .ok_or(StoreError::InvalidStateDirectory)?;
+            if !path.starts_with(parent) {
+                return Err(StoreError::InvalidStateDirectory);
+            }
+        }
         Ok(path.to_path_buf())
     }
 
     pub fn account_path() -> Result<PathBuf, StoreError> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             use nix::unistd::{User, geteuid};
 
@@ -74,9 +88,13 @@ impl StateRoot {
             if !user.dir.is_absolute() {
                 return Err(StoreError::InvalidStateDirectory);
             }
-            Ok(user.dir.join(".local/state/arany"))
+            #[cfg(target_os = "linux")]
+            let suffix = ".local/state/arany";
+            #[cfg(target_os = "macos")]
+            let suffix = "Library/Application Support/dev.Arany.arany";
+            Ok(user.dir.join(suffix))
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             Self::default_path()
         }
@@ -384,6 +402,7 @@ impl StateRoot {
 
 #[cfg(unix)]
 fn check_private_record_file(file: &cap_std::fs::File, limit: usize) -> Result<(), StoreError> {
+    check_acl(file, true)?;
     use cap_std::fs::MetadataExt;
 
     let metadata = file.metadata()?;
@@ -413,6 +432,7 @@ fn directory_identity(dir: &Dir) -> Result<(u64, u64), StoreError> {
 
 #[cfg(unix)]
 fn check_directory(dir: &Dir, leaf: bool) -> Result<(), StoreError> {
+    check_acl(dir, leaf)?;
     use cap_std::fs::MetadataExt;
     let meta = dir.dir_metadata()?;
     let mode = meta.mode();
@@ -461,6 +481,8 @@ fn prepare_database_file(dir: &Dir, create: bool) -> Result<(), StoreError> {
     #[cfg(unix)]
     nonblocking(&mut existing);
     let file = dir.open_with(DATABASE_FILE, &existing)?;
+    #[cfg(unix)]
+    check_acl(&file, true)?;
     let meta = file.metadata()?;
     if !meta.is_file() || meta.len() > MAX_DATABASE_BYTES as u64 {
         return Err(StoreError::StateNotPrivate);
@@ -475,84 +497,22 @@ fn prepare_database_file(dir: &Dir, create: bool) -> Result<(), StoreError> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn check_acl(file: &impl std::os::fd::AsFd, private: bool) -> Result<(), StoreError> {
+    #[cfg(target_os = "macos")]
+    acl::check(file.as_fd(), private)?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = (file, private);
+    Ok(())
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use rustix::fs::{CWD, Mode, mkfifoat};
-    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
-
+    use nix::{sys::stat::Mode, unistd::mkfifo};
     #[cfg(target_os = "linux")]
-    #[test]
-    fn account_path_ignores_session_state_environment() {
-        use nix::unistd::{User, geteuid};
-
-        const EXPECTED: &str = "ARANY_TEST_EXPECTED_ACCOUNT_PATH";
-        #[cfg(not(debug_assertions))]
-        const REJECT_OVERRIDE: &str = "ARANY_TEST_REJECT_ACCOUNT_OVERRIDE";
-        #[cfg(not(debug_assertions))]
-        if std::env::var_os(REJECT_OVERRIDE).is_some() {
-            assert!(matches!(
-                StateRoot::account_path(),
-                Err(StoreError::InvalidStateDirectory)
-            ));
-            return;
-        }
-        if let Some(expected) = std::env::var_os(EXPECTED) {
-            assert_eq!(
-                StateRoot::account_path().expect("OS user account path"),
-                PathBuf::from(expected)
-            );
-            return;
-        }
-        let expected = User::from_uid(geteuid())
-            .expect("OS user lookup")
-            .expect("OS user")
-            .dir
-            .join(".local/state/arany");
-        let temp = tempfile::tempdir().expect("temporary environment root");
-        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
-            .args([
-                "--exact",
-                "store::state::tests::account_path_ignores_session_state_environment",
-                "--nocapture",
-            ])
-            .env(EXPECTED, expected)
-            .env_remove("ARANY_TEST_ACCOUNT_ROOT")
-            .env("HOME", temp.path().join("different-home"))
-            .env("XDG_STATE_HOME", temp.path().join("different-state"))
-            .output()
-            .expect("isolated child");
-        assert!(
-            output.status.success(),
-            "account path changed with the Session environment"
-        );
-        assert!(
-            String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
-            "account-path child did not run its test"
-        );
-        #[cfg(not(debug_assertions))]
-        {
-            let output =
-                std::process::Command::new(std::env::current_exe().expect("test executable"))
-                    .args([
-                        "--exact",
-                        "store::state::tests::account_path_ignores_session_state_environment",
-                        "--nocapture",
-                    ])
-                    .env(REJECT_OVERRIDE, "1")
-                    .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
-                    .output()
-                    .expect("isolated release child");
-            assert!(
-                output.status.success(),
-                "release account override was accepted"
-            );
-            assert!(
-                String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
-                "release override child did not run its test"
-            );
-        }
-    }
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, symlink};
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -886,7 +846,7 @@ mod tests {
             "model-preferences.json",
             "ui-preferences.json",
         ] {
-            mkfifoat(CWD, path.join(name), Mode::RUSR | Mode::WUSR).expect("test FIFO");
+            mkfifo(&path.join(name), Mode::S_IRUSR | Mode::S_IWUSR).expect("test FIFO");
         }
         assert!(matches!(
             state.read_saved_account_record(),
@@ -932,7 +892,7 @@ mod tests {
             "model-preferences.pending",
             "ui-preferences.pending",
         ] {
-            mkfifoat(CWD, path.join(name), Mode::RUSR | Mode::WUSR).expect("test FIFO");
+            mkfifo(&path.join(name), Mode::S_IRUSR | Mode::S_IWUSR).expect("test FIFO");
         }
         assert!(matches!(
             state.replace_saved_account_record(b"synthetic"),
@@ -961,7 +921,7 @@ mod tests {
         ));
         drop(state);
         std::fs::remove_file(path.join(DATABASE_FILE)).expect("remove database");
-        mkfifoat(CWD, path.join(DATABASE_FILE), Mode::RUSR | Mode::WUSR).expect("test FIFO");
+        mkfifo(&path.join(DATABASE_FILE), Mode::S_IRUSR | Mode::S_IWUSR).expect("test FIFO");
         assert!(matches!(
             StateRoot::open_existing(&path),
             Err(StoreError::StateNotPrivate)

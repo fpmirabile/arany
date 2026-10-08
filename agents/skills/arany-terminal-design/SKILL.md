@@ -15,7 +15,7 @@ Resolve repository paths below from this skill's directory, independently of the
 
 - Read [terminal rules](../../../agents/terminal.md) before every design or review. They own modes, keys, layout constraints, drawing, restoration, and accessibility behavior.
 - Read [testing rules](../../../agents/testing.md) before implementation or verification claims. Use the existing owner for each claim.
-- Follow [AGENTS.md](../../../AGENTS.md) routing for security, CLI, Session, credentials, and architecture when the requested change reaches them.
+- Apply [Arany's priorities](../../../AGENTS.md#product-and-implementation-priorities), including Ponytail and OS parity, and follow its routing for security, CLI, Session, credentials, and architecture when the requested change reaches them.
 
 Inspect the current implementation and affected journey. Existing behavior may have advanced beyond an earlier screenshot or conversation. Identify the actual friction: lost context, unclear selection, excessive chrome, poor scan order, ambiguous status, or difficult recovery.
 

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use uuid::{Uuid, Variant, Version};
 
-const MIGRATED_REGISTRATION: &[u8] = b"{\"schema\":0,\"migrated\":\"os_user\"}";
+const MIGRATED_STATE: &[u8] = b"{\"schema\":0,\"migrated\":\"os_user\"}";
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -202,7 +202,7 @@ fn default_state() -> Result<StateRoot, AuthorizationError> {
     StateRoot::admit(&path).map_err(|_| AuthorizationError::Unavailable)
 }
 
-fn migrate_legacy(workspace: &Path) -> Result<(), AuthorizationError> {
+pub(super) fn migrate_legacy(workspace: &Path) -> Result<(), AuthorizationError> {
     let account_path = StateRoot::account_path().map_err(|_| AuthorizationError::Unavailable)?;
     let old_path = StateRoot::default_path().map_err(|_| AuthorizationError::Unavailable)?;
     migrate_legacy_at(&account_path, &old_path, workspace)
@@ -229,32 +229,76 @@ fn migrate_legacy_at(
     old.with_account_replacement_lock(workspace, || {
         let record = old
             .read_chatgpt_registration_record()
-            .map_err(|_| AuthorizationError::Unavailable)?;
-        let Some(record) = record else {
-            return Ok(());
-        };
-        if record == MIGRATED_REGISTRATION {
+            .map_err(|_| AuthorizationError::Unavailable)?
+            .filter(|bytes| bytes != MIGRATED_STATE);
+        let accounts = old
+            .read_chatgpt_accounts_record()
+            .map_err(|_| AuthorizationError::Unavailable)?
+            .filter(|bytes| bytes != MIGRATED_STATE);
+        if record.is_none() && accounts.is_none() {
             return Ok(());
         }
-        Record::decode(&record)?;
+        let registration = record.as_deref().map(Record::decode).transpose()?;
         let current =
             StateRoot::admit(account_path).map_err(|_| AuthorizationError::Unavailable)?;
         current
             .with_account_replacement_lock(workspace, || {
-                match current
+                let existing_registration = current
                     .read_chatgpt_registration_record()
-                    .map_err(|_| AuthorizationError::Unavailable)?
-                {
-                    Some(existing) if existing != record => {
-                        return Err(AuthorizationError::RegistrationConflict);
-                    }
-                    Some(_) => {}
-                    None => current
-                        .replace_chatgpt_registration_record(&record)
-                        .map_err(|_| AuthorizationError::Unavailable)?,
+                    .map_err(|_| AuthorizationError::Unavailable)?;
+                let existing_accounts = current
+                    .read_chatgpt_accounts_record()
+                    .map_err(|_| AuthorizationError::Unavailable)?;
+                if record.as_ref().is_some_and(|source| {
+                    existing_registration
+                        .as_ref()
+                        .is_some_and(|target| target != source)
+                }) || accounts.as_ref().is_some_and(|source| {
+                    existing_accounts
+                        .as_ref()
+                        .is_some_and(|target| target != source)
+                }) {
+                    return Err(AuthorizationError::RegistrationConflict);
                 }
-                old.replace_chatgpt_registration_record(MIGRATED_REGISTRATION)
-                    .map_err(|_| AuthorizationError::Unavailable)
+                let destination_registration = existing_registration
+                    .as_deref()
+                    .map(Record::decode)
+                    .transpose()?;
+                let host_id = registration
+                    .as_ref()
+                    .or(destination_registration.as_ref())
+                    .ok_or(AuthorizationError::InvalidIdentity)?
+                    .host_id;
+                for bytes in accounts
+                    .as_deref()
+                    .into_iter()
+                    .chain(existing_accounts.as_deref())
+                {
+                    account::validate_migration_record(bytes, host_id)?;
+                }
+                if existing_registration.is_none()
+                    && let Some(record) = &record
+                {
+                    current
+                        .replace_chatgpt_registration_record(record)
+                        .map_err(|_| AuthorizationError::Unavailable)?;
+                }
+                if existing_accounts.is_none()
+                    && let Some(accounts) = &accounts
+                {
+                    current
+                        .replace_chatgpt_accounts_record(accounts)
+                        .map_err(|_| AuthorizationError::Unavailable)?;
+                }
+                if accounts.is_some() {
+                    old.replace_chatgpt_accounts_record(MIGRATED_STATE)
+                        .map_err(|_| AuthorizationError::Unavailable)?;
+                }
+                if record.is_some() {
+                    old.replace_chatgpt_registration_record(MIGRATED_STATE)
+                        .map_err(|_| AuthorizationError::Unavailable)?;
+                }
+                Ok(())
             })
             .map_err(|_| AuthorizationError::Unavailable)?
     })
@@ -507,7 +551,7 @@ mod tests {
         );
         assert_eq!(
             old.read_chatgpt_registration_record().expect("old marker"),
-            Some(MIGRATED_REGISTRATION.to_vec())
+            Some(MIGRATED_STATE.to_vec())
         );
 
         let other_path = temp.path().join("conflicting-legacy");
@@ -526,5 +570,210 @@ mod tests {
             )
             .is_ok()
         );
+
+        let legacy = StateRoot::admit(&temp.path().join("legacy-accounts")).unwrap();
+        let saved_registration = Registration::at(&legacy, &workspace).unwrap();
+        let credentials = VerifiedCredentials {
+            client_id: "oaiapp_migrated".into(),
+            host_id: saved_registration.host_id(),
+            subject: "migration-subject".into(),
+            id_token: "synthetic-signed-identity".into(),
+            access_token: "synthetic-access".into(),
+            refresh_token: "synthetic-refresh".into(),
+            access_expires_at_unix: 1_900_000_000,
+        };
+        let consent = RiskPrompt::new(AccountStorage::PrivateFile)
+            .accept("Accept")
+            .unwrap()
+            .bind(&credentials)
+            .unwrap();
+        account::save_private_file_at(&legacy, &workspace, credentials, consent, None).unwrap();
+        let source = legacy.read_chatgpt_accounts_record().unwrap().unwrap();
+        let target_path = temp.path().join("migrated-accounts");
+        migrate_legacy_at(&target_path, legacy.path(), &workspace).unwrap();
+        let target = StateRoot::open_existing(&target_path).unwrap();
+        assert!(
+            target.read_chatgpt_accounts_record().unwrap().as_deref() == Some(source.as_slice()),
+            "migration must preserve the complete saved account index"
+        );
+        let registration_bytes = saved_registration.0.encode().unwrap();
+        let mut template: serde_json::Value = serde_json::from_slice(&source).unwrap();
+        let fingerprint = [7u8; 32];
+        template["model_checks"] = serde_json::json!([{
+            "account_id": template["selected"],
+            "fingerprint": fingerprint,
+            "checked_at_sec": 1,
+            "expires_at_sec": 86_401,
+        }]);
+        for case in [
+            "file",
+            "keyring",
+            "disconnected",
+            "permission-disabled",
+            "renewal-pending",
+            "signout-pending",
+            "partial-registration",
+            "partial-accounts",
+            "partial-both",
+            "tombstoned-registration",
+            "registration-conflict",
+            "account-conflict",
+            "host-mismatch",
+            "missing-registration",
+            "malformed-index",
+            "unsafe-pending",
+            "old-lock",
+            "new-lock",
+        ] {
+            let old = StateRoot::admit(&temp.path().join(format!("old-{case}"))).unwrap();
+            let new = StateRoot::admit(&temp.path().join(format!("new-{case}"))).unwrap();
+            old.replace_chatgpt_registration_record(&registration_bytes)
+                .unwrap();
+            let mut index = template.clone();
+            match case {
+                "keyring" => {
+                    index["accounts"][0]["storage"] = serde_json::json!("keyring");
+                    index["accounts"][0]["token"] = serde_json::Value::Null;
+                }
+                "disconnected" | "permission-disabled" => {
+                    index["accounts"][0]["disconnected"] = serde_json::json!(true);
+                    index["accounts"][0]["token"] = serde_json::Value::Null;
+                    index["model_checks"] = serde_json::json!([]);
+                    if case == "permission-disabled" {
+                        index["accounts"][0]["plan_permission_missing"] = serde_json::json!(true);
+                    }
+                }
+                "renewal-pending" => {
+                    index["accounts"][0]["renewal_pending"] = serde_json::json!(true)
+                }
+                "signout-pending" => {
+                    index["accounts"][0]["signout_pending"] = serde_json::json!(true);
+                    index["model_checks"] = serde_json::json!([]);
+                }
+                "host-mismatch" => {
+                    let host = Uuid::parse_str("00000000-0000-4000-8000-000000000002").unwrap();
+                    index["accounts"][0]["host_id"] = serde_json::json!(host);
+                    index["accounts"][0]["token"]["credentials"]["host_id"] =
+                        serde_json::json!(host);
+                }
+                "missing-registration" => {
+                    std::fs::remove_file(old.path().join("chatgpt-registration.json")).unwrap();
+                }
+                _ => {}
+            }
+            let source = if case == "malformed-index" {
+                b"{}".to_vec()
+            } else {
+                serde_json::to_vec(&index).unwrap()
+            };
+            old.replace_chatgpt_accounts_record(&source).unwrap();
+            if matches!(
+                case,
+                "partial-registration" | "partial-both" | "tombstoned-registration"
+            ) {
+                new.replace_chatgpt_registration_record(&registration_bytes)
+                    .unwrap();
+            }
+            if matches!(case, "partial-accounts" | "partial-both") {
+                new.replace_chatgpt_accounts_record(&source).unwrap();
+            }
+            if case == "tombstoned-registration" {
+                old.replace_chatgpt_registration_record(MIGRATED_STATE)
+                    .unwrap();
+            }
+            if case == "registration-conflict" {
+                Registration::at(&new, &workspace).unwrap();
+            }
+            if case == "account-conflict" {
+                let mut different = template.clone();
+                different["selected"] = serde_json::Value::Null;
+                new.replace_chatgpt_accounts_record(&serde_json::to_vec(&different).unwrap())
+                    .unwrap();
+            }
+            let outside = temp.path().join("outside-pending");
+            if case == "unsafe-pending" {
+                std::fs::write(&outside, b"synthetic untouched bytes").unwrap();
+                std::os::unix::fs::symlink(&outside, new.path().join("chatgpt-accounts.pending"))
+                    .unwrap();
+            }
+            let old_registration = old.read_chatgpt_registration_record().unwrap();
+            let new_registration = new.read_chatgpt_registration_record().unwrap();
+            let new_accounts = new.read_chatgpt_accounts_record().unwrap();
+            let migrate = || migrate_legacy_at(new.path(), old.path(), &workspace);
+            let result = match case {
+                "old-lock" => old
+                    .with_account_replacement_lock(&workspace, migrate)
+                    .unwrap(),
+                "new-lock" => new
+                    .with_account_replacement_lock(&workspace, migrate)
+                    .unwrap(),
+                _ => migrate(),
+            };
+            let expected = match case {
+                "registration-conflict" | "account-conflict" => {
+                    Err(AuthorizationError::RegistrationConflict)
+                }
+                "host-mismatch" | "missing-registration" | "malformed-index" => {
+                    Err(AuthorizationError::InvalidIdentity)
+                }
+                "unsafe-pending" | "old-lock" | "new-lock" => Err(AuthorizationError::Unavailable),
+                _ => Ok(()),
+            };
+            assert_eq!(result, expected, "{case}");
+            if result.is_err() {
+                assert!(
+                    old.read_chatgpt_accounts_record().unwrap().as_deref()
+                        == Some(source.as_slice()),
+                    "{case}: preserve source accounts"
+                );
+                assert!(
+                    old.read_chatgpt_registration_record().unwrap() == old_registration,
+                    "{case}: preserve source registration"
+                );
+                assert!(
+                    new.read_chatgpt_accounts_record().unwrap() == new_accounts,
+                    "{case}: preserve destination accounts"
+                );
+                if case != "unsafe-pending" {
+                    assert!(
+                        new.read_chatgpt_registration_record().unwrap() == new_registration,
+                        "{case}: reject before publication"
+                    );
+                    continue;
+                }
+                assert!(std::fs::read(&outside).unwrap() == b"synthetic untouched bytes");
+                std::fs::remove_file(new.path().join("chatgpt-accounts.pending")).unwrap();
+                migrate().expect("finish an interrupted account copy after fault removal");
+            }
+            let reopened = StateRoot::open_existing(new.path()).unwrap();
+            assert!(
+                reopened.read_chatgpt_accounts_record().unwrap().as_deref()
+                    == Some(source.as_slice()),
+                "{case}: preserve complete account state"
+            );
+            assert_eq!(
+                Registration::at(&reopened, &workspace).unwrap().host_id(),
+                saved_registration.host_id(),
+                "{case}"
+            );
+            assert!(
+                account::contains_saved_client_at(
+                    &reopened,
+                    "oaiapp_migrated",
+                    saved_registration.host_id()
+                )
+                .unwrap(),
+                "{case}: retain reconnect metadata"
+            );
+            assert!(
+                old.read_chatgpt_accounts_record().unwrap().as_deref() == Some(MIGRATED_STATE),
+                "{case}: tombstone only after durable copy"
+            );
+            assert!(
+                old.read_chatgpt_registration_record().unwrap().as_deref() == Some(MIGRATED_STATE),
+                "{case}: tombstone registration"
+            );
+            migrate().expect("completed migration is idempotent");
+        }
     }
 }

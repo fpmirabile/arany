@@ -1,9 +1,10 @@
-use super::{INPUT_POLL_INTERVAL, MAX_DRAFT_BYTES, ReaderEvent, StdinFlags, map_input};
+use super::{INPUT_POLL_INTERVAL, MAX_DRAFT_BYTES, ReaderEvent, map_input, terminal_input};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use mio::{Events, Interest, Poll, Token, unix::SourceFd};
 use std::{
+    fs::File,
     io::{self, Read},
     os::fd::AsRawFd,
     sync::{
@@ -22,29 +23,28 @@ const PASTE_END: &[u8; 6] = b"\x1b[201~";
 pub(super) fn start(
     sender: mpsc::Sender<io::Result<ReaderEvent>>,
     shutdown: Arc<AtomicBool>,
-) -> io::Result<(JoinHandle<()>, StdinFlags)> {
+) -> io::Result<JoinHandle<()>> {
+    let mut input = terminal_input()?;
     let mut poll = Poll::new()?;
-    let fd = io::stdin().as_raw_fd();
+    let fd = input.as_raw_fd();
     poll.registry()
         .register(&mut SourceFd(&fd), Token(0), Interest::READABLE)?;
-    let flags = StdinFlags::acquire()?;
-    let thread = std::thread::Builder::new()
+    std::thread::Builder::new()
         .name("arany-terminal-input".into())
         .spawn(move || {
-            if let Err(error) = read(&mut poll, fd, &sender, &shutdown) {
+            if let Err(error) = read(&mut poll, &mut input, &sender, &shutdown) {
                 let _ = sender.blocking_send(Err(error));
             }
-        })?;
-    Ok((thread, flags))
+        })
 }
 
 fn read(
     poll: &mut Poll,
-    fd: i32,
+    input: &mut File,
     sender: &mpsc::Sender<io::Result<ReaderEvent>>,
     shutdown: &AtomicBool,
 ) -> io::Result<()> {
-    let mut input = io::stdin().lock();
+    let fd = input.as_raw_fd();
     let mut events = Events::with_capacity(4);
     let mut bytes = [0; 4096];
     let mut decoder = Decoder::default();
