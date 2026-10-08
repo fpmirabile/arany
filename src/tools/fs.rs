@@ -819,31 +819,33 @@ fn replace(
         }
         verify()?;
         #[cfg(target_os = "linux")]
-        if expected.is_none() {
-            rustix::fs::renameat_with(
-                &parent,
-                &temporary,
-                &parent,
-                &leaf,
-                rustix::fs::RenameFlags::NOREPLACE,
-            )
-            .map_err(|_| ToolError::Conflict)?;
-        } else {
+        {
+            if expected.is_none() {
+                rustix::fs::renameat_with(
+                    &parent,
+                    &temporary,
+                    &parent,
+                    &leaf,
+                    rustix::fs::RenameFlags::NOREPLACE,
+                )
+                .map_err(|_| ToolError::Conflict)?;
+            } else {
+                parent
+                    .rename(&temporary, &parent, &leaf)
+                    .map_err(|_| ToolError::Operation)?;
+            }
             parent
-                .rename(&temporary, &parent, &leaf)
-                .map_err(|_| ToolError::Operation)?;
+                .try_clone()
+                .map_err(|_| ToolError::Uncertain)?
+                .into_std_file()
+                .sync_all()
+                .map_err(|_| ToolError::Uncertain)?;
+            Ok(json!({"sha256":hex_digest(bytes),"bytes":bytes.len()}).to_string())
         }
         #[cfg(not(target_os = "linux"))]
         {
-            return Err(ToolError::ProtectionUnavailable);
+            Err(ToolError::ProtectionUnavailable)
         }
-        parent
-            .try_clone()
-            .map_err(|_| ToolError::Uncertain)?
-            .into_std_file()
-            .sync_all()
-            .map_err(|_| ToolError::Uncertain)?;
-        Ok(json!({"sha256":hex_digest(bytes),"bytes":bytes.len()}).to_string())
     })();
     let _ = parent.remove_file(&temporary);
     result

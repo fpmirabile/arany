@@ -5,6 +5,11 @@ use std::sync::{Mutex, OnceLock};
 const MAX_RECORD_BYTES: usize = 24 * 1024;
 static ROOT: OnceLock<Mutex<StateRoot>> = OnceLock::new();
 
+#[cfg(all(test, unix))]
+#[allow(dead_code)]
+#[path = "../tests/common/process.rs"]
+mod test_process;
+
 /// Enables bounded local diagnostics in debug builds after ordinary state admission.
 pub fn enable_development_diagnostics(root: &StateRoot) {
     if cfg!(debug_assertions)
@@ -415,11 +420,39 @@ impl Write for BoundedRecord {
 
 #[cfg(all(test, unix))]
 mod tests {
+    use super::test_process::BoundedOutput;
     use super::*;
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
     #[test]
     fn diagnostic_file_is_bounded_private_and_rejects_aliases() {
+        const CASE: &str = "ARANY_TEST_DIAGNOSTIC_PROCESS";
+        const TEST: &str =
+            "diagnostics::tests::diagnostic_file_is_bounded_private_and_rejects_aliases";
+        if std::env::var_os(CASE).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST])
+                .env_clear()
+                .env(CASE, "isolated")
+                .env(
+                    "TMPDIR",
+                    std::fs::canonicalize(std::env::temp_dir()).unwrap(),
+                )
+                .current_dir("/")
+                .bounded_output_for(std::time::Duration::from_secs(30), 64 * 1024)
+                .expect("bounded isolated diagnostic owner");
+            assert!(output.status.success(), "isolated diagnostic owner failed");
+            assert_eq!(output.stderr, b"");
+            let completed = b"test result: ok. 1 passed; 0 failed; 0 ignored;";
+            assert!(
+                output
+                    .stdout
+                    .windows(completed.len())
+                    .any(|part| part == completed),
+                "diagnostic child did not complete exactly one test"
+            );
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let root = StateRoot::admit(&temp.path().join("state")).unwrap();
         let path = root.path().join("development.log");

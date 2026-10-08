@@ -5,7 +5,7 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::Path,
-    process::{Command, Stdio},
+    process::Stdio,
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -210,7 +210,8 @@ fn resident_memory_two_includes_on_named_host() {
     });
     check_profile(&workspace, &state);
 
-    let mut command = Command::new("/usr/bin/script");
+    let mut command =
+        crate::process::account_isolated_script(state.parent().expect("fixture root"));
     command
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -234,7 +235,10 @@ fn resident_memory_two_includes_on_named_host() {
     let mut input = child.child().stdin.take().expect("PTY input");
     let mut output = child.child().stdout.take().expect("PTY output");
     let (stage_sender, stage_receiver) = mpsc::channel();
+    let mut consent_input =
+        std::fs::File::from(rustix::io::dup(&input).expect("owned fixture input"));
     let reader = thread::spawn(move || {
+        let mut declined = false;
         let mut bytes = Vec::new();
         let mut pid_reported = false;
         let mut idle_reported = false;
@@ -247,6 +251,7 @@ fn resident_memory_two_includes_on_named_host() {
             }
             assert!(bytes.len() + count <= OUTPUT_LIMIT, "bounded PTY output");
             bytes.extend_from_slice(&chunk[..count]);
+            crate::process::decline_workspace_consent(&mut consent_input, &bytes, &mut declined);
             if !pid_reported
                 && let Some(start) = bytes
                     .windows(b"ARANY_PID:".len())

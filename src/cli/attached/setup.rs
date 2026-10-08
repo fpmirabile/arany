@@ -63,6 +63,7 @@ pub(super) enum SavedDefaults {
     Unconfigured,
     Cancelled,
     Selected(SessionDefaults),
+    AccessChecked(SessionDefaults),
 }
 
 enum ChatGptSetupAccount {
@@ -129,7 +130,7 @@ pub(super) async fn saved_defaults(
 ) -> Result<SavedDefaults, String> {
     if let Some(defaults) = super::models::last_saved_defaults(workspace)? {
         let disconnected = if defaults.provider.as_deref() == Some("chatgpt") {
-            match chatgpt::selected_account_id() {
+            match chatgpt::selected_account_id(workspace) {
                 Ok(_) => false,
                 Err(chatgpt::AuthorizationError::NoSelectedAccount) => true,
                 Err(error) => return Err(error.to_string()),
@@ -142,21 +143,8 @@ pub(super) async fn saved_defaults(
         }
     }
     let path = StateRoot::account_path().map_err(|error| error.to_string())?;
-    let (native, chatgpt) = match crate::cli::open_optional_state(&path) {
-        Ok(Some(state)) => (
-            state
-                .saved_account_record_present()
-                .map_err(|error| error.to_string())?,
-            state
-                .chatgpt_accounts_record_present()
-                .map_err(|error| error.to_string())?,
-        ),
-        Ok(None) => (false, false),
-        Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err("private account state unavailable".into());
-        }
-        Err(error) => return Err(error.to_string()),
-    };
+    let legacy = StateRoot::default_path().map_err(|error| error.to_string())?;
+    let (native, chatgpt) = saved_account_presence(&path, &legacy)?;
     match (native, chatgpt) {
         (true, true) => match choose(
             terminal,
@@ -167,33 +155,121 @@ pub(super) async fn saved_defaults(
         )
         .await?
         {
-            Some(b'1') => saved_native_defaults(workspace).await,
-            Some(b'2') => selected_chatgpt_defaults(),
+            Some(b'1') => saved_native_defaults(terminal, workspace)
+                .await
+                .map_err(Into::into),
+            Some(b'2') => selected_chatgpt_defaults(workspace),
             Some(b'0') | None => Ok(SavedDefaults::Cancelled),
             _ => Err("invalid saved access choice".into()),
         },
-        (true, false) => saved_native_defaults(workspace).await,
-        (false, true) => selected_chatgpt_defaults(),
-        (false, false) => Ok(inspect_or_file(workspace)
-            .await?
-            .account
-            .as_ref()
-            .map(defaults)
-            .map_or(SavedDefaults::Unconfigured, SavedDefaults::Selected)),
+        (true, false) => saved_native_defaults(terminal, workspace)
+            .await
+            .map_err(Into::into),
+        (false, true) => selected_chatgpt_defaults(workspace),
+        (false, false) => Ok(SavedDefaults::Unconfigured),
     }
 }
 
-async fn saved_native_defaults(workspace: &Path) -> Result<SavedDefaults, String> {
-    let account = credentials::inspect(workspace)
-        .await
+pub(super) async fn authorize_saved_access(
+    terminal: &mut AttachedTerminal,
+    workspace: &Path,
+    defaults: &SessionDefaults,
+) -> Result<bool, SetupError> {
+    let target = selected_keyring_slot(workspace, defaults).await?;
+    let Some(slot) = target else {
+        return Ok(true);
+    };
+    let expected = defaults
+        .account_id
+        .zip(defaults.provider.clone())
+        .filter(|(_, provider)| matches!(provider.as_str(), "openai" | "anthropic"));
+    let Some(result) = await_operation(
+        terminal,
+        "Authorize saved access",
+        "Approve this Arany credential in your OS password store; Esc or Ctrl+C exits",
+        credentials::authorize_keyring_slot(slot.clone(), expected),
+    )
+    .await?
+    else {
+        return Ok(false);
+    };
+    if !result.map_err(|error| error.to_string())? {
+        return Err(
+            "Saved sign-in is missing from the OS password store; use /setup to reconnect".into(),
+        );
+    }
+    if selected_keyring_slot(workspace, defaults).await? != Some(slot) {
+        return Err("Saved account changed during authorization; restart Arany".into());
+    }
+    Ok(true)
+}
+
+async fn selected_keyring_slot(
+    workspace: &Path,
+    defaults: &SessionDefaults,
+) -> Result<Option<String>, SetupError> {
+    let Some(id) = defaults.account_id else {
+        return Ok(None);
+    };
+    match defaults.provider.as_deref() {
+        Some("chatgpt") => {
+            chatgpt::selected_keyring_slot(workspace, id).map_err(|error| error.to_string().into())
+        }
+        Some(provider @ ("openai" | "anthropic")) => {
+            credentials::selected_keyring_slot(workspace, id, provider)
+                .await
+                .map_err(|error| error.to_string().into())
+        }
+        _ => Ok(None),
+    }
+}
+
+fn saved_account_presence(current: &Path, legacy: &Path) -> Result<(bool, bool), String> {
+    let mut native = false;
+    let mut chatgpt = false;
+    for path in std::iter::once(current).chain((legacy != current).then_some(legacy)) {
+        match crate::cli::open_optional_state(path) {
+            Ok(Some(state)) => {
+                native |= state
+                    .saved_account_record_present()
+                    .map_err(|error| error.to_string())?;
+                chatgpt |= state
+                    .chatgpt_accounts_record_present()
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(None) => {}
+            Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err("private account state unavailable".into());
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok((native, chatgpt))
+}
+
+async fn saved_native_defaults(
+    terminal: &mut AttachedTerminal,
+    workspace: &Path,
+) -> Result<SavedDefaults, SetupError> {
+    let Some(inspected) = await_operation(
+        terminal,
+        "Authorize saved access",
+        "Approve this Arany credential in your OS password store; Esc or Ctrl+C exits",
+        credentials::inspect_interactive(workspace),
+    )
+    .await?
+    else {
+        return Ok(SavedDefaults::Cancelled);
+    };
+    let account = inspected
         .map_err(|error| error.to_string())?
         .account
         .ok_or("saved API account unavailable; use /setup to repair it")?;
-    Ok(SavedDefaults::Selected(defaults(&account)))
+    Ok(SavedDefaults::AccessChecked(defaults(&account)))
 }
 
-fn selected_chatgpt_defaults() -> Result<SavedDefaults, String> {
-    match chatgpt::selected_account_id() {
+fn selected_chatgpt_defaults(workspace: &Path) -> Result<SavedDefaults, String> {
+    match chatgpt::selected_account_id(workspace) {
         Ok(id) => Ok(SavedDefaults::Selected(chatgpt_defaults(id))),
         Err(chatgpt::AuthorizationError::NoSelectedAccount) => Ok(SavedDefaults::Unconfigured),
         Err(error) => Err(error.to_string()),
@@ -259,7 +335,7 @@ async fn wizard(
         return Ok(None);
     };
     if access == b'2' {
-        let account = match chatgpt::selected_registration() {
+        let account = match chatgpt::selected_registration(workspace) {
             Ok((saved, true)) => match choose(
                 terminal,
                 2,
@@ -275,7 +351,7 @@ async fn wizard(
             {
                 Some(b'1') => choose_saved_chatgpt(terminal, workspace, saved).await?,
                 Some(b'2') => {
-                    let target = chatgpt::selected_reauthorization_target(saved)
+                    let target = chatgpt::selected_reauthorization_target(workspace, saved)
                         .map_err(|error| error.to_string())?;
                     reconnect_chatgpt(terminal, workspace, target).await?
                 }
@@ -284,7 +360,7 @@ async fn wizard(
                 Some(_) => return Err("invalid ChatGPT account choice".into()),
             },
             Ok((saved, false)) => {
-                let target = chatgpt::selected_reauthorization_target(saved)
+                let target = chatgpt::selected_reauthorization_target(workspace, saved)
                     .map_err(|error| error.to_string())?;
                 let permission_missing = target.plan_permission_missing;
                 let reconnect_label = if permission_missing {
@@ -292,7 +368,8 @@ async fn wizard(
                 } else {
                     "Reconnect"
                 };
-                let (_, ids) = chatgpt::saved_account_ids().map_err(|error| error.to_string())?;
+                let (_, ids) =
+                    chatgpt::saved_account_ids(workspace).map_err(|error| error.to_string())?;
                 let other_saved = ids.len() > 1;
                 let reconnect_choice = if other_saved { b'2' } else { b'1' };
                 let new_choice = if other_saved { b'3' } else { b'2' };
@@ -461,11 +538,12 @@ async fn choose_saved_chatgpt(
     workspace: &Path,
     expected_selected: uuid::Uuid,
 ) -> Result<Option<ChatGptSetupAccount>, SetupError> {
-    let (selected, ids) = chatgpt::saved_account_ids().map_err(|error| error.to_string())?;
+    let (selected, ids) =
+        chatgpt::saved_account_ids(workspace).map_err(|error| error.to_string())?;
     if selected != expected_selected {
         return Err("ChatGPT account changed during setup; use /setup again".into());
     }
-    let connected = chatgpt::selected_account_id().ok() == Some(selected);
+    let connected = chatgpt::selected_account_id(workspace).ok() == Some(selected);
     let ids = if connected {
         ids
     } else {
@@ -1220,6 +1298,32 @@ mod tests {
         assert_eq!(defaults.model.as_deref(), Some("gpt-5.4"));
         assert_eq!(defaults.effort, Some(Effort::High));
         assert_eq!(defaults.account_id, Some(account.id));
+
+        let temp = tempfile::tempdir().unwrap();
+        let current = temp.path().join("current");
+        let legacy = StateRoot::admit(&temp.path().join("legacy")).unwrap();
+        assert_eq!(
+            saved_account_presence(&current, legacy.path()).unwrap(),
+            (false, false)
+        );
+        legacy
+            .replace_chatgpt_accounts_record(b"not a parsed account index")
+            .unwrap();
+        assert_eq!(
+            saved_account_presence(&current, legacy.path()).unwrap(),
+            (false, true)
+        );
+        let root = StateRoot::admit(&current).unwrap();
+        root.replace_saved_account_record(b"not a parsed native account")
+            .unwrap();
+        assert_eq!(
+            saved_account_presence(&current, legacy.path()).unwrap(),
+            (true, true)
+        );
+        assert_eq!(
+            saved_account_presence(&current, &current).unwrap(),
+            (true, false)
+        );
     }
 
     #[test]

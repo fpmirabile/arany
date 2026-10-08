@@ -1,17 +1,16 @@
 #[cfg(target_os = "linux")]
 use arany::StateRoot;
-use std::{
-    io::Read,
-    process::{Child, Output},
-    time::Duration,
-};
 #[cfg(target_os = "linux")]
 use std::{
-    io::Write,
+    io::{Read, Write},
     net::TcpStream,
     os::unix::fs::PermissionsExt,
     path::Path,
     process::{Command, Stdio},
+};
+use std::{
+    process::{Child, Output},
+    time::Duration,
 };
 
 pub(super) struct ChildGuard(Option<Child>);

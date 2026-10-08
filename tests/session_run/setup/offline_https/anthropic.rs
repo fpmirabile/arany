@@ -165,10 +165,6 @@ fn command(args: &[&str]) -> std::process::Output {
 }
 
 pub(super) fn stage() {
-    let read_only: (&[u8], &[u8]) = (
-        b"Type trust or read only; empty Enter selects read only. Ctrl+C exits:",
-        b"read only\r",
-    );
     let mut server = start_response_server(NativeReplies::ScopedAnthropic);
     let setup_output = run_pty(
         &SETUP_SHELL.replace("state-one", "state-scoped"),
@@ -185,7 +181,6 @@ pub(super) fn stage() {
                 b"Choose API workspace\r",
             ),
             (b"Setup: API workspace ID", b"wrkspc_Selected123\r"),
-            read_only,
         ],
         None,
     );
@@ -222,7 +217,6 @@ pub(super) fn stage() {
     let output = run_pty(
         &TURN_SHELL.replace("state-three", "state-scoped-run"),
         &[
-            read_only,
             (b"Input:\r\n", b"scoped offline objective\r"),
             (b"Answer:\r\n  scoped answer", b"/compact\r"),
         ],
@@ -253,7 +247,6 @@ pub(super) fn stage() {
     run_pty(
         &CHECK_SHELL.replace("state-four", "state-scoped-check"),
         &[
-            read_only,
             (b"Input:\r\n", b"/model claude-offline-new high\r"),
             (
                 b"Notice: Model: claude-offline-new",

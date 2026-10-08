@@ -18,6 +18,8 @@ Rules for maintained execution plans. [README.md](./README.md) defines the folde
 
 ## Harness-specific questions
 
+Apply the [product and implementation priorities](../AGENTS.md#product-and-implementation-priorities) to every implementation plan: identify the harness responsibility served, the simplest sufficient solution after Ponytail, and any OS impact. For platform work, name the common behavior, necessary native differences, unavailable capabilities and native verification; platform-independent changes need only that conclusion.
+
 Every architecture or module plan resolves:
 
 - Which module owns each invariant and piece of state?

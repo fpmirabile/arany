@@ -45,7 +45,7 @@ mod setup;
 #[path = "session_run/loopback.rs"]
 mod loopback;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 #[path = "session_run/startup_trust.rs"]
 mod startup_trust;
 
@@ -72,6 +72,268 @@ mod disk_fault;
 #[cfg(target_os = "linux")]
 #[path = "session_run/performance.rs"]
 mod performance;
+
+#[cfg(unix)]
+#[test]
+fn terminal_readers_preserve_shared_output_and_setup_redraw() {
+    use arany::{AttachedTerminal, Composer, TerminalInput};
+    use rustix::fs::{OFlags, fcntl_getfl};
+    use std::{io::Write, process::Stdio, time::Duration};
+
+    const CASE: &str = "ARANY_TEST_TERMINAL_READER_CASE";
+    const TEST: &str = "terminal_readers_preserve_shared_output_and_setup_redraw";
+    if let Some(case) = std::env::var_os(CASE) {
+        let linear = case == "linear";
+        let flags = fcntl_getfl(std::io::stdin()).expect("inherited input flags");
+        assert!(!flags.contains(OFlags::NONBLOCK));
+        assert_eq!(fcntl_getfl(std::io::stderr()).unwrap(), flags);
+        let settings = nix::sys::termios::tcgetattr(std::io::stdin()).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut terminal = AttachedTerminal::acquire_with_preference(linear).unwrap();
+            assert_eq!(terminal.is_linear(), linear);
+            for cycle in 0..2 {
+                assert_eq!(
+                    fcntl_getfl(std::io::stderr()).unwrap(),
+                    flags,
+                    "input ownership must not make shared terminal output nonblocking"
+                );
+                assert_eq!(fcntl_getfl(std::io::stdin()).unwrap(), flags);
+                terminal
+                    .draw_setup(4, "Synthetic setup", "Returning to chat", 0, None)
+                    .unwrap();
+                let view = SessionView {
+                    id: SessionId::new(),
+                    title: "New Session".into(),
+                    title_is_explicit: false,
+                    inherited_title: None,
+                    workspace_identity: None,
+                    defaults: SessionDefaults::default(),
+                    created_sequence: 0,
+                    last_sequence: 0,
+                    lineage: None,
+                    runs: Vec::new(),
+                    compactions: Vec::new(),
+                };
+                terminal
+                    .draw(&view, &Composer::default(), Some("Synthetic setup ready"))
+                    .unwrap();
+                println!("INPUT_READY:{cycle}");
+                for expected in [TerminalInput::Character('x'), TerminalInput::Submit] {
+                    let observed =
+                        tokio::time::timeout(Duration::from_secs(5), terminal.next_input())
+                            .await
+                            .expect("bounded terminal input")
+                            .unwrap();
+                    assert_eq!(observed, expected);
+                }
+                terminal.restore().unwrap();
+                assert_eq!(
+                    nix::sys::termios::tcgetattr(std::io::stdin()).unwrap(),
+                    settings
+                );
+                assert_eq!(fcntl_getfl(std::io::stdin()).unwrap(), flags);
+                assert_eq!(fcntl_getfl(std::io::stderr()).unwrap(), flags);
+                if cycle == 0 {
+                    terminal.reacquire_after_output().unwrap();
+                }
+            }
+        });
+        return;
+    }
+
+    for case in ["inline", "linear"] {
+        let temp = tempfile::tempdir().unwrap();
+        let geometry = nix::pty::Winsize {
+            ws_row: 50,
+            ws_col: 100,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let pty = nix::pty::openpty(Some(&geometry), None).unwrap();
+        let slave = std::fs::File::from(pty.slave);
+        let master = std::fs::File::from(pty.master);
+        let mut input = master.try_clone().unwrap();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .env_clear()
+            .env(CASE, case)
+            .env("HOME", temp.path().join("legacy-home"))
+            .env("XDG_STATE_HOME", temp.path().join("legacy-state"))
+            .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+            .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account"))
+            .env("TERM", "xterm")
+            .current_dir(temp.path())
+            .args(["--exact", TEST, "--nocapture", "--test-threads", "1"])
+            .stdin(Stdio::from(slave.try_clone().unwrap()))
+            .stdout(Stdio::from(slave.try_clone().unwrap()))
+            .stderr(Stdio::from(slave));
+        let mut child = loopback::ChildGuard::new(command.spawn().unwrap());
+        drop(command);
+        let mut queries = 0;
+        let mut submissions = 0;
+        let output = process::capture_terminal(
+            child.child(),
+            master,
+            Duration::from_secs(20),
+            256 * 1024,
+            |bytes| {
+                let observed = bytes.windows(4).filter(|part| *part == b"\x1b[6n").count();
+                assert!(observed <= 8, "bounded cursor queries");
+                for _ in queries..observed {
+                    input.write_all(b"\x1b[1;1R").unwrap();
+                }
+                queries = observed;
+                let marker = format!("INPUT_READY:{submissions}");
+                if submissions < 2
+                    && bytes
+                        .windows(marker.len())
+                        .enumerate()
+                        .any(|(offset, part)| {
+                            part == marker.as_bytes()
+                                && (bytes[offset + marker.len()..].starts_with(b"\n")
+                                    || bytes[offset + marker.len()..].starts_with(b"\r\n"))
+                        })
+                {
+                    input.write_all(b"x\r").unwrap();
+                    submissions += 1;
+                }
+            },
+        );
+        assert!(
+            output.status.success(),
+            "{case} terminal owner failed: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(submissions, 2, "{case} input survives reacquisition");
+        assert!(output.stdout.is_empty());
+        assert!(
+            output
+                .stderr
+                .windows(b"1 passed; 0 failed; 0 ignored".len())
+                .any(|part| part == b"1 passed; 0 failed; 0 ignored"),
+            "exact child must complete one test"
+        );
+        assert!(
+            !temp.path().join("account").exists(),
+            "terminal evidence never opens an account"
+        );
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn account_path_ignores_session_state_environment() {
+    use nix::unistd::{User, geteuid};
+
+    const CASE: &str = "ARANY_TEST_ACCOUNT_PATH_CASE";
+    const TEST: &str = "account_path_ignores_session_state_environment";
+    if let Some(case) = std::env::var_os(CASE) {
+        match case.to_str() {
+            Some("system") => {
+                let home = User::from_uid(geteuid())
+                    .expect("OS user lookup")
+                    .expect("OS user")
+                    .dir;
+                #[cfg(target_os = "linux")]
+                let expected = home.join(".local/state/arany");
+                #[cfg(target_os = "macos")]
+                let expected = home.join("Library/Application Support/dev.Arany.arany");
+                assert_eq!(
+                    StateRoot::account_path().expect("OS user account path"),
+                    expected
+                );
+            }
+            #[cfg(debug_assertions)]
+            Some("fixture") => {
+                let fixture =
+                    std::path::PathBuf::from(std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").unwrap());
+                assert_eq!(
+                    StateRoot::account_path().expect("absolute debug fixture"),
+                    fixture
+                );
+                let parent = fixture.parent().expect("fixture-owned parent");
+                let legacy = StateRoot::default_path().expect("legacy fixture path");
+                assert!(
+                    legacy.starts_with(parent),
+                    "legacy migration root must remain inside the fixture"
+                );
+                assert_ne!(
+                    legacy, fixture,
+                    "stable and legacy fixture roots remain separate"
+                );
+            }
+            #[cfg(debug_assertions)]
+            Some("reject-legacy") => {
+                assert!(
+                    StateRoot::account_path().is_ok(),
+                    "stable fixture root is admitted"
+                );
+                assert!(
+                    matches!(
+                        StateRoot::default_path(),
+                        Err(StoreError::InvalidStateDirectory)
+                    ),
+                    "ambient legacy root must reject before migration can open it"
+                );
+            }
+            Some("reject") => assert!(matches!(
+                StateRoot::account_path(),
+                Err(StoreError::InvalidStateDirectory)
+            )),
+            _ => panic!("unknown account-path fixture"),
+        }
+        return;
+    }
+
+    let temp = tempfile::tempdir().expect("temporary environment root");
+    #[cfg(debug_assertions)]
+    let absolute_case = "fixture";
+    #[cfg(not(debug_assertions))]
+    let absolute_case = "reject";
+    for (case, fixture) in [
+        ("system", None),
+        (absolute_case, Some(temp.path().join("account-root"))),
+        (
+            "reject",
+            Some(std::path::PathBuf::from("relative-account-root")),
+        ),
+        #[cfg(debug_assertions)]
+        ("reject-legacy", Some(temp.path().join("account-root"))),
+    ] {
+        let mut command = Command::new(std::env::current_exe().expect("test executable"));
+        command
+            .args(["--exact", TEST])
+            .env_clear()
+            .env(CASE, case)
+            .current_dir(temp.path());
+        if case != "reject-legacy" {
+            command
+                .env("HOME", temp.path().join("different-home"))
+                .env("XDG_STATE_HOME", temp.path().join("different-state"))
+                .env("XDG_DATA_HOME", temp.path().join("different-data"));
+        }
+        if let Some(fixture) = fixture {
+            command.env("ARANY_TEST_ACCOUNT_ROOT", fixture);
+        }
+        let output = command
+            .bounded_output_for(std::time::Duration::from_secs(10), 64 * 1024)
+            .expect("bounded isolated account-path child");
+        assert!(output.status.success(), "account-path case {case} failed");
+        assert_eq!(output.stderr, b"");
+        let completed = b"test result: ok. 1 passed; 0 failed; 0 ignored;";
+        assert!(
+            output
+                .stdout
+                .windows(completed.len())
+                .any(|part| part == completed),
+            "account-path case {case} did not complete exactly one test"
+        );
+    }
+}
 
 #[test]
 fn version_one_journal_migrates_without_changing_canonical_events() {
@@ -281,8 +543,13 @@ fn model_catalog_command_reads_only_selected_configuration() {
     #[cfg(debug_assertions)]
     {
         let account_root = temp.path().join("missing-chatgpt-account");
+        let legacy_home = temp.path().join("legacy-home");
+        let legacy_state = temp.path().join("legacy-state");
         let chatgpt_missing = Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
+            .env("HOME", &legacy_home)
+            .env("XDG_STATE_HOME", &legacy_state)
+            .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
             .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
             .env("OPENAI_API_KEY", "synthetic-unselected-api-key")
             .current_dir(&workspace)
@@ -300,6 +567,9 @@ fn model_catalog_command_reads_only_selected_configuration() {
 
         let missing_effort = Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
+            .env("HOME", &legacy_home)
+            .env("XDG_STATE_HOME", &legacy_state)
+            .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
             .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
             .current_dir(&workspace)
             .args([
@@ -325,6 +595,9 @@ fn model_catalog_command_reads_only_selected_configuration() {
 
         let unselected_run = Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
+            .env("HOME", &legacy_home)
+            .env("XDG_STATE_HOME", &legacy_state)
+            .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
             .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
             .env("OPENAI_API_KEY", "synthetic-unselected-api-key")
             .current_dir(&workspace)
@@ -353,6 +626,9 @@ fn model_catalog_command_reads_only_selected_configuration() {
 
         let unchecked = Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
+            .env("HOME", &legacy_home)
+            .env("XDG_STATE_HOME", &legacy_state)
+            .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
             .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
             .env("OPENAI_API_KEY", "synthetic-unselected-api-key")
             .current_dir(&workspace)
@@ -373,6 +649,9 @@ fn model_catalog_command_reads_only_selected_configuration() {
 
         let check_missing = Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
+            .env("HOME", &legacy_home)
+            .env("XDG_STATE_HOME", &legacy_state)
+            .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
             .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
             .env("OPENAI_API_KEY", "synthetic-unselected-api-key")
             .current_dir(&workspace)
@@ -400,6 +679,9 @@ fn model_catalog_command_reads_only_selected_configuration() {
             let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
             command
                 .env_clear()
+                .env("HOME", &legacy_home)
+                .env("XDG_STATE_HOME", &legacy_state)
+                .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
                 .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
                 .current_dir(&workspace)
                 .args(["provider", "models", flag]);
@@ -425,6 +707,9 @@ fn model_catalog_command_reads_only_selected_configuration() {
             command
                 .env_clear()
                 .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
+                .env("HOME", &legacy_home)
+                .env("XDG_STATE_HOME", &legacy_state)
+                .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
                 .current_dir(&workspace)
                 .args(["provider", "check", flag]);
             if flag == "--state-dir" {
@@ -535,7 +820,9 @@ fn native_model_check_requires_explicit_cost_consent_before_state_or_credentials
 
     let saved_without_consent = Command::new(env!("CARGO_BIN_EXE_arany"))
         .env_clear()
+        .env("HOME", temp.path().join("legacy-home"))
         .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
+        .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
         .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
         .current_dir(&workspace)
         .args(["provider", "check", "--state-dir"])

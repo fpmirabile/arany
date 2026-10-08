@@ -98,6 +98,33 @@ pub(crate) async fn probe_chatgpt_keyring() -> Result<(), CredentialError> {
         .map_err(|_| CredentialError::Unavailable)?
 }
 
+pub(crate) async fn authorize_keyring_slot(
+    slot: String,
+    expected: Option<(Uuid, String)>,
+) -> Result<bool, CredentialError> {
+    keyring_helper::authorize(slot, expected).await
+}
+
+pub(crate) async fn selected_keyring_slot(
+    workspace: &Path,
+    id: Uuid,
+    provider: &str,
+) -> Result<Option<String>, CredentialError> {
+    migrate_legacy(workspace).await?;
+    let stored = tokio::task::spawn_blocking(load_file)
+        .await
+        .map_err(|_| CredentialError::StateUnavailable)??
+        .ok_or(CredentialError::InvalidAccount)?;
+    match stored.storage {
+        AccountStorage::Keyring => Ok(Some(DEFAULT_ACCOUNT.into())),
+        AccountStorage::PrivateFile => {
+            let account = stored.account.ok_or(CredentialError::InvalidAccount)?;
+            selected_credentials(&account, id, provider)?;
+            Ok(None)
+        }
+    }
+}
+
 pub(crate) fn read_chatgpt_keyring_record(slot: &str) -> Result<Option<Vec<u8>>, CredentialError> {
     keyring_helper::read(slot)
 }
@@ -182,6 +209,7 @@ pub(crate) enum CredentialError {
     Locked,
     #[error("saved account keyring unavailable; restore it before replacing the account")]
     PinnedStoreUnavailable,
+    #[cfg(target_os = "linux")]
     #[error("unsafe or unsupported D-Bus session address for the OS credential store")]
     UnsafeTransport,
     #[error("another process is replacing the saved account")]
@@ -502,6 +530,19 @@ fn account_lock_error(error: StoreError) -> CredentialError {
 }
 
 pub(crate) async fn inspect(workspace: &Path) -> Result<InspectedAccount, CredentialError> {
+    inspect_with_interaction(workspace, false).await
+}
+
+pub(crate) async fn inspect_interactive(
+    workspace: &Path,
+) -> Result<InspectedAccount, CredentialError> {
+    inspect_with_interaction(workspace, true).await
+}
+
+async fn inspect_with_interaction(
+    workspace: &Path,
+    interactive: bool,
+) -> Result<InspectedAccount, CredentialError> {
     migrate_legacy(workspace).await?;
     let file = tokio::task::spawn_blocking(load_file)
         .await
@@ -520,7 +561,14 @@ pub(crate) async fn inspect(workspace: &Path) -> Result<InspectedAccount, Creden
             AccountStorage::Keyring => {}
         }
     }
-    let account = load_at(DEFAULT_ACCOUNT).await.map_err(|error| {
+    let account = if interactive {
+        keyring_helper::read_interactive(DEFAULT_ACCOUNT)
+            .await
+            .and_then(parse_account)
+    } else {
+        load_at(DEFAULT_ACCOUNT).await
+    }
+    .map_err(|error| {
         if pinned_keyring
             && matches!(
                 error,
@@ -565,17 +613,20 @@ pub(crate) async fn load(workspace: &Path) -> Result<Option<SavedAccount>, Crede
 async fn load_at(slot: &str) -> Result<Option<SavedAccount>, CredentialError> {
     admit_transport()?;
     let slot = slot.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let Some(record) = keyring_helper::read(&slot)? else {
-            return Ok(None);
-        };
-        let account: SavedAccount =
-            serde_json::from_slice(&record).map_err(|_| CredentialError::InvalidAccount)?;
-        account.validate()?;
-        Ok(Some(account))
-    })
-    .await
-    .map_err(|_| CredentialError::Unavailable)?
+    tokio::task::spawn_blocking(move || parse_account(keyring_helper::read(&slot)?))
+        .await
+        .map_err(|_| CredentialError::Unavailable)?
+}
+
+fn parse_account(record: Option<Vec<u8>>) -> Result<Option<SavedAccount>, CredentialError> {
+    record
+        .map(|record| {
+            let account: SavedAccount =
+                serde_json::from_slice(&record).map_err(|_| CredentialError::InvalidAccount)?;
+            account.validate()?;
+            Ok(account)
+        })
+        .transpose()
 }
 
 pub(crate) async fn load_selected(

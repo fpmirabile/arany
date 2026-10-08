@@ -311,7 +311,7 @@ fn wait_browser_url(
     transcript: &mut Vec<u8>,
     previous: Option<&url::Url>,
 ) -> url::Url {
-    let mut answered = 0;
+    let mut answered = crate::session_picker::PtyResponses::default();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         pump(output, input, transcript, &mut answered);
@@ -331,7 +331,10 @@ fn wait_browser_url(
                 {
                     continue;
                 }
-                assert_eq!(answered, 0, "linear setup queried the cursor");
+                assert_eq!(
+                    answered.cursor_queries, 0,
+                    "linear setup queried the cursor"
+                );
                 return url;
             }
         }
@@ -347,7 +350,7 @@ fn wait_for_stage(
     output: &mut impl Read,
     input: &mut impl Write,
     transcript: &mut Vec<u8>,
-    answered: &mut usize,
+    answered: &mut crate::session_picker::PtyResponses,
     start: usize,
     needle: &[u8],
     signed: Option<&str>,
@@ -519,7 +522,7 @@ fn isolated_stage(checked_turn: bool) {
         let flags = fcntl_getfl(&output).expect("stdout flags");
         fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
         let mut transcript = Vec::new();
-        let mut answered = 0;
+        let mut answered = crate::session_picker::PtyResponses::default();
         wait_for_stage(
             &mut output,
             &mut input,
@@ -600,7 +603,7 @@ fn isolated_stage(checked_turn: bool) {
                 );
                 assert!(wait_product(child.take()).status.success());
                 pump(&mut output, &mut input, &mut transcript, &mut answered);
-                assert_eq!(answered, 0);
+                assert_eq!(answered.cursor_queries, 0);
                 assert!(!transcript.contains(&b'\x1b'));
                 let text = std::str::from_utf8(&transcript).expect("cancel output");
                 let marker = |name: &str| {
@@ -678,18 +681,6 @@ fn isolated_stage(checked_turn: bool) {
         callback(&authorization, returning, unfinished);
         previous_authorization = Some(authorization);
         signed_tokens.push(signed.clone());
-        wait_for_stage(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            0,
-            b"Type trust or read only; empty Enter selects read only. Ctrl+C exits:\r\n",
-            Some(&signed),
-        );
-        input
-            .write_all(b"read only\r")
-            .expect("explicit fixture folder choice");
         if permission_disabled {
             wait_for_stage(
                 &mut output,
@@ -773,7 +764,10 @@ fn isolated_stage(checked_turn: bool) {
         let result = wait_product(child.take());
         pump(&mut output, &mut input, &mut transcript, &mut answered);
         assert!(result.status.success(), "ChatGPT setup product exit");
-        assert_eq!(answered, 0, "screen-reader queried the cursor");
+        assert_eq!(
+            answered.cursor_queries, 0,
+            "screen-reader queried the cursor"
+        );
         assert!(
             !transcript.contains(&b'\x1b'),
             "screen-reader emitted escapes"
@@ -980,14 +974,7 @@ fn isolated_stage(checked_turn: bool) {
             );
             continue;
         }
-        let second_output = run_pty(
-            BARE_SHELL,
-            &[(
-                b"Type trust or read only; empty Enter selects read only. Ctrl+C exits:",
-                b"read only\r",
-            )],
-            None,
-        );
+        let second_output = run_pty(BARE_SHELL, &[], None);
         assert!(!String::from_utf8_lossy(&second_output).contains("Choose access method"));
         for secret in [ACCESS, REFRESH, signed.as_str()] {
             assert!(
@@ -1017,16 +1004,10 @@ fn isolated_stage(checked_turn: bool) {
             .replace("--screen-reader", "--screen-reader --resume");
         let resumed_output = run_pty(
             &resume_shell,
-            &[
-                (
-                    b"Choose number, exact ID, n next, p previous, or q close:",
-                    b"1\r",
-                ),
-                (
-                    b"Type trust or read only; empty Enter selects read only. Ctrl+C exits:",
-                    b"read only\r",
-                ),
-            ],
+            &[(
+                b"Choose number, exact ID, n next, p previous, or q close:",
+                b"1\r",
+            )],
             None,
         );
         let resumed_text = String::from_utf8_lossy(&resumed_output);

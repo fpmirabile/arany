@@ -72,7 +72,7 @@ fn run_picker_signal_case(signal: Signal, suspend: bool, columns: u16, rows: u16
     let flags = fcntl_getfl(&output).expect("stdout pipe flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking stdout pipe");
     let mut transcript = Vec::new();
-    let mut answered = 0;
+    let mut answered = crate::session_picker::PtyResponses::default();
     let deadline = Instant::now() + Duration::from_secs(10);
     while !transcript
         .windows(b"\x1b[?1000h".len())
@@ -315,6 +315,7 @@ fn run_picker_renderer_failure_case(columns: u16, rows: u16, attached_entry: boo
     let mut stdout_bytes = Vec::new();
     let mut stderr_bytes = Vec::new();
     let mut answered = 0;
+    let mut declined = false;
     let deadline = Instant::now() + Duration::from_secs(10);
     while !stderr_bytes
         .windows(b"Esc".len())
@@ -325,6 +326,7 @@ fn run_picker_renderer_failure_case(columns: u16, rows: u16, attached_entry: boo
     {
         drain(&mut output, &mut stdout_bytes);
         drain(&mut stderr_master, &mut stderr_bytes);
+        crate::process::decline_workspace_consent(&mut input, &stderr_bytes, &mut declined);
         let queries = stdout_bytes
             .windows(4)
             .chain(stderr_bytes.windows(4))

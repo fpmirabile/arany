@@ -69,3 +69,26 @@ jobs:
           bwrap --unshare-user --unshare-net --ro-bind / / -- true
       - run: cargo fetch --locked
       - run: cargo test --workspace --locked --offline ${{ matrix.cargo-flags }}
+
+  macos-tests:
+    name: macOS tests (${{ matrix.profile }})
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      TMPDIR: /private/tmp
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: debug
+            cargo-flags: ""
+          - profile: release
+            cargo-flags: --release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install repository Rust toolchain
+        run: rustup show
+      - run: cargo fetch --locked
+      - run: cargo test --workspace --locked --offline ${{ matrix.cargo-flags }}

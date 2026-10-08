@@ -1,8 +1,9 @@
 use super::{CommandOutput, OutputArg, chatgpt, native_run_key_from_env};
 use arany::{
     AnthropicProvider, CollaborationPolicy, CustomProvider, Effort, Engine, OpenAiProvider,
-    Provider, RunRequest, RunStatus, SessionId, StateRoot, Store, Telemetry, render_exec,
-    resolve_native_effort_for_run, validate_native_model_id,
+    Provider, RunRequest, RunStatus, SessionId, StateRoot, Store, Telemetry,
+    native_protection_supported, render_exec, resolve_native_effort_for_run,
+    validate_native_model_id,
 };
 use clap::{Args, ValueEnum};
 use std::{path::PathBuf, str::FromStr};
@@ -206,6 +207,12 @@ async fn run_with_provider<P: Provider + 'static>(
     let mut engine = Engine::open_with_telemetry(state, provider, telemetry)
         .map_err(|_| "state store unavailable".to_owned())?;
     if args.tools {
+        if !native_protection_supported() {
+            return Err(
+                "Tools require native OS protection, unavailable on this host; rerun without --tools"
+                    .to_owned(),
+            );
+        }
         engine
             .enable_tools(
                 std::env::current_exe().map_err(|_| "Guard executable unavailable".to_owned())?,

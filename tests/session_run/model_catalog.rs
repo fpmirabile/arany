@@ -8,7 +8,7 @@ use std::{
     fs::File,
     io::{Read, Write},
     path::Path,
-    process::{Command, Stdio},
+    process::Stdio,
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -361,7 +361,8 @@ fn inline_model_catalog_at_width(width: u16) {
     let command = format!(
         "stty rows 24 cols {width}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --no-color --provider custom:local --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
-    let mut attached = Command::new("/usr/bin/script");
+    let mut attached =
+        crate::process::account_isolated_script(state.parent().expect("fixture root"));
     attached
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -382,7 +383,7 @@ fn inline_model_catalog_at_width(width: u16) {
     let flags = fcntl_getfl(&output).expect("stdout pipe flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking stdout pipe");
     let mut transcript = Vec::new();
-    let mut answered = 0;
+    let mut answered = crate::session_picker::PtyResponses::default();
     let deadline = Instant::now() + Duration::from_secs(10);
     while !transcript
         .windows(b"Ask Arany".len())
@@ -743,7 +744,8 @@ fn run_model_catalog_cancel_then_sigterm_case(columns: u16, rows: u16) {
     let command = format!(
         "stty rows {rows} cols {columns}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --provider custom:local --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
-    let mut attached = Command::new("/usr/bin/script");
+    let mut attached =
+        crate::process::account_isolated_script(state.parent().expect("fixture root"));
     attached
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -762,7 +764,7 @@ fn run_model_catalog_cancel_then_sigterm_case(columns: u16, rows: u16) {
     let flags = fcntl_getfl(&output).expect("stdout pipe flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking stdout pipe");
     let mut transcript = Vec::new();
-    let mut answered = 0;
+    let mut answered = crate::session_picker::PtyResponses::default();
     let deadline = Instant::now() + Duration::from_secs(10);
     while !transcript
         .windows(b"/help".len())

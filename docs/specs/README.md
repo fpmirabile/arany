@@ -7,11 +7,12 @@ A spec is the maintained contract for one product domain: what a user or caller 
 | Domain | Contract | Editing rules |
 |---|---|---|
 | Attached terminal, interactive controls, accessibility and deterministic output | [Terminal](./terminal.md) | [Terminal](../../agents/terminal.md), [CLI](../../agents/cli.md), [history](../../agents/history.md) |
+| Saved-account scope, storage, selected-item authorization and recovery | [Credentials](./credentials.md) | [Credentials](../../agents/credentials.md), [ChatGPT](../../agents/chatgpt.md), [Store](../../agents/store.md), [security](../../agents/security.md) |
 | Tool grants, guarded file effects, commands, runtime Skills and local MCP | [Tools](./tools.md) | [Tools](../../agents/tools.md), [security](../../agents/security.md) |
 | Bounded Run coordination, delegation, strict outcomes and history-capacity admission | [Execution](./execution.md) | [Engine](../../agents/engine.md), [Session](../../agents/session.md), [Provider](../../agents/provider.md), [Store](../../agents/store.md) |
 | Local development failure diagnostics, privacy and retention | [Diagnostics](./diagnostics.md) | [Diagnostics](../../agents/diagnostics.md), [security](../../agents/security.md) |
 
-Unmigrated behavior, including full Session lifecycle, account/profile admission and telemetry, retains its current authoritative owner in [the documentation map](../README.md#find-the-owner-for-a-task). Create another spec when a real behavior change or an overloaded contract earns the extraction; avoid empty domain files.
+Unmigrated behavior, including full Session lifecycle, Provider/profile admission, ChatGPT OAuth/plan admission and telemetry, retains its current authoritative owner in [the documentation map](../README.md#find-the-owner-for-a-task). Create another spec when a real behavior change or an overloaded contract earns the extraction; avoid empty domain files.
 
 ## Maintain a contract
 

@@ -264,79 +264,94 @@ mod tests {
         std::fs::write(workspace.join(".env"), "synthetic excluded fixture").unwrap();
         std::os::unix::fs::symlink(temp.path(), workspace.join("outside")).unwrap();
         std::fs::hard_link(workspace.join("README.md"), workspace.join("linked.md")).unwrap();
-        assert_eq!(
-            fs::workspace_entries(&workspace, "", "").unwrap(),
-            vec!["docs/"]
-        );
-        assert_eq!(
-            fs::workspace_entries(&workspace, "docs", "hello").unwrap(),
-            vec!["docs/hello world.md"]
-        );
-        for query in ["world", "HELLO", "docs/hello", "hwd"] {
+        #[cfg(not(target_os = "linux"))]
+        {
             assert_eq!(
-                fs::workspace_entries(&workspace, "", query).unwrap(),
-                vec!["docs/hello world.md"],
-                "nested file query {query}"
+                fs::workspace_entries(&workspace, "", "").unwrap(),
+                vec!["docs/"]
+            );
+            let nested = fs::workspace_entries(&workspace, "docs", "hello");
+            assert!(
+                matches!(&nested, Err(ToolError::ProtectionUnavailable)),
+                "{nested:?}"
             );
         }
-        std::fs::create_dir_all(workspace.join("docs/guide")).unwrap();
-        std::fs::write(workspace.join("docs/guide/intro.md"), "synthetic file").unwrap();
-        std::fs::write(workspace.join("guide"), "synthetic file").unwrap();
-        std::fs::write(
-            workspace.join("target/guide.md"),
-            "synthetic excluded fixture",
-        )
-        .unwrap();
-        assert_eq!(
-            fs::workspace_entries(&workspace, "", "guide").unwrap(),
-            vec!["guide", "docs/guide/", "docs/guide/intro.md"]
-        );
-        assert!(
-            fs::workspace_entries(&workspace, "", "README")
-                .unwrap()
-                .is_empty()
-        );
-        for query in ["../outside", ".env", "docs/../../outside", "bad\\path"] {
-            assert!(fs::workspace_entries(&workspace, "", query).is_err());
-        }
-        for index in 0..70 {
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(
+                fs::workspace_entries(&workspace, "", "").unwrap(),
+                vec!["docs/"]
+            );
+            assert_eq!(
+                fs::workspace_entries(&workspace, "docs", "hello").unwrap(),
+                vec!["docs/hello world.md"]
+            );
+            for query in ["world", "HELLO", "docs/hello", "hwd"] {
+                assert_eq!(
+                    fs::workspace_entries(&workspace, "", query).unwrap(),
+                    vec!["docs/hello world.md"],
+                    "nested file query {query}"
+                );
+            }
+            std::fs::create_dir_all(workspace.join("docs/guide")).unwrap();
+            std::fs::write(workspace.join("docs/guide/intro.md"), "synthetic file").unwrap();
+            std::fs::write(workspace.join("guide"), "synthetic file").unwrap();
             std::fs::write(
-                workspace.join(format!("entry-{index:03}.md")),
+                workspace.join("target/guide.md"),
+                "synthetic excluded fixture",
+            )
+            .unwrap();
+            assert_eq!(
+                fs::workspace_entries(&workspace, "", "guide").unwrap(),
+                vec!["guide", "docs/guide/", "docs/guide/intro.md"]
+            );
+            assert!(
+                fs::workspace_entries(&workspace, "", "README")
+                    .unwrap()
+                    .is_empty()
+            );
+            for query in ["../outside", ".env", "docs/../../outside", "bad\\path"] {
+                assert!(fs::workspace_entries(&workspace, "", query).is_err());
+            }
+            for index in 0..70 {
+                std::fs::write(
+                    workspace.join(format!("entry-{index:03}.md")),
+                    "synthetic file",
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                fs::workspace_entries(&workspace, "", "entry-").unwrap(),
+                (0..64)
+                    .map(|index| format!("entry-{index:03}.md"))
+                    .collect::<Vec<_>>()
+            );
+            let large = workspace.join("large");
+            std::fs::create_dir(&large).unwrap();
+            for index in 0..8193 {
+                std::fs::write(large.join(format!("item-{index:05}.md")), b"synthetic").unwrap();
+            }
+            let partial = fs::workspace_entries(&workspace, "large", "").unwrap();
+            assert_eq!(partial.len(), 64);
+            assert!(partial.windows(2).all(|pair| pair[0] < pair[1]));
+            assert!(partial.iter().all(|path| path.starts_with("large/item-")));
+            let deep = std::iter::repeat_n("level", 16)
+                .collect::<Vec<_>>()
+                .join("/");
+            std::fs::create_dir_all(workspace.join(&deep)).unwrap();
+            std::fs::write(
+                workspace.join(&deep).join("depth-canary.md"),
                 "synthetic file",
             )
             .unwrap();
-        }
-        assert_eq!(
-            fs::workspace_entries(&workspace, "", "entry-").unwrap(),
-            (0..64)
-                .map(|index| format!("entry-{index:03}.md"))
-                .collect::<Vec<_>>()
-        );
-        let large = workspace.join("large");
-        std::fs::create_dir(&large).unwrap();
-        for index in 0..8193 {
-            std::fs::write(large.join(format!("item-{index:05}.md")), b"synthetic").unwrap();
-        }
-        let partial = fs::workspace_entries(&workspace, "large", "").unwrap();
-        assert_eq!(partial.len(), 64);
-        assert!(partial.windows(2).all(|pair| pair[0] < pair[1]));
-        assert!(partial.iter().all(|path| path.starts_with("large/item-")));
-        let deep = std::iter::repeat_n("level", 16)
-            .collect::<Vec<_>>()
-            .join("/");
-        std::fs::create_dir_all(workspace.join(&deep)).unwrap();
-        std::fs::write(
-            workspace.join(&deep).join("depth-canary.md"),
-            "synthetic file",
-        )
-        .unwrap();
-        assert!(
-            fs::workspace_entries(&workspace, "", "depth-canary")
-                .unwrap()
-                .is_empty()
-        );
-        for folder in ["../", "outside", ".git", ".env"] {
-            assert!(fs::workspace_entries(&workspace, folder, "").is_err());
+            assert!(
+                fs::workspace_entries(&workspace, "", "depth-canary")
+                    .unwrap()
+                    .is_empty()
+            );
+            for folder in ["../", "outside", ".git", ".env"] {
+                assert!(fs::workspace_entries(&workspace, folder, "").is_err());
+            }
         }
     }
 

@@ -23,7 +23,7 @@ Follow the [executable and input pin format](./specs/tools.md#commands). Pin res
 
 ## Portable Skills
 
-Install project Skills under `.agents/skills`. If a project lock exists without that directory, Arany advises `npx skills install`; it does not run the installer. See [Skill admission and private pins](./specs/tools.md#portable-skills) for supported metadata/resources and bounds.
+Install project Skills under `.agents/skills`. If a project lock exists without that directory, Arany advises `npx --yes skills@1.7.0 experimental_install`; it does not run the installer. See [Skill admission and private pins](./specs/tools.md#portable-skills) for supported metadata/resources and bounds.
 
 Type `/` and use Left/Right to select Skills. Tab or the first Enter stages `$NAME `; a later Enter submits. `/settings` chooses tabs or a combined list. Browsing does not load Skill guidance or run effects; the model requests admitted guidance through the Skill Tool.
 

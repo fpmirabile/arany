@@ -77,6 +77,23 @@ fn capture_pane(server: &TmuxServer) -> Option<Vec<u8>> {
     Some(result.stdout)
 }
 
+fn decline_initial_consent(server: &TmuxServer, screen: &[u8], declined: &mut bool) {
+    if *declined {
+        return;
+    }
+    let visible: String = String::from_utf8_lossy(screen)
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    if visible.contains("Doyoutrust")
+        && (visible.contains("Ctrl+Cexit") || visible.contains("^Cexit"))
+    {
+        let dismissed = server.run(&["send-keys", "-t", "arany-test:0.0", "Escape"]);
+        assert!(dismissed.status.success(), "dismiss fixture folder consent");
+        *declined = true;
+    }
+}
+
 fn capture_scrollback(server: &TmuxServer) -> Option<Vec<u8>> {
     let result = server.run(&["capture-pane", "-p", "-S", "-", "-t", "arany-test:0.0"]);
     if !result.status.success() {
@@ -229,7 +246,8 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
     let server = TmuxServer {
         socket: temp.path().join("tmux.sock"),
     };
-    let mut start = Command::new("/usr/bin/tmux");
+    let mut start =
+        crate::process::account_isolated_command(temp.path(), "/usr/bin/tmux", executable);
     start
         .env_clear()
         .env("TERM", "xterm")
@@ -269,12 +287,14 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
         String::from_utf8_lossy(&started.stderr)
     );
 
+    let mut declined = false;
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if let Some(screen) = capture_pane(&server)
-            && live_tail_layout(&screen, 80)
-        {
-            break;
+        if let Some(screen) = capture_pane(&server) {
+            decline_initial_consent(&server, &screen, &mut declined);
+            if live_tail_layout(&screen, 80) {
+                break;
+            }
         }
         assert!(
             Instant::now() < deadline,
@@ -1005,7 +1025,8 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     let server = TmuxServer {
         socket: temp.path().join("tmux.sock"),
     };
-    let mut start = Command::new("/usr/bin/tmux");
+    let mut start =
+        crate::process::account_isolated_command(temp.path(), "/usr/bin/tmux", &executable);
     start
         .env_clear()
         .env("TERM", "xterm")
@@ -1037,10 +1058,14 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
         .stderr(Stdio::piped());
     let started = wait_product(start.spawn().expect("tmux server start"));
     assert!(started.status.success(), "tmux pane started");
+    let mut declined = false;
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if capture_pane(&server).is_some_and(|screen| live_tail_layout(&screen, 40)) {
-            break;
+        if let Some(screen) = capture_pane(&server) {
+            decline_initial_consent(&server, &screen, &mut declined);
+            if live_tail_layout(&screen, 40) {
+                break;
+            }
         }
         assert!(Instant::now() < deadline, "idle composer missing");
         thread::yield_now();

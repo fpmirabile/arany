@@ -84,6 +84,25 @@ fn project_skill_discovery_preserves_grants_and_reports_missing_installation() {
             }
         }
         let discovery = super::project_skills(&workspace);
+        #[cfg(not(target_os = "linux"))]
+        if !matches!(layout, "absent" | "lock") {
+            assert!(
+                matches!(&discovery, Err(super::ToolError::ProtectionUnavailable)),
+                "{layout}: {:?}",
+                discovery.as_ref().err()
+            );
+            let mut value = config_value();
+            value["workspace_paths"] = json!(["."]);
+            let mut config: Config = serde_json::from_value(value).unwrap();
+            assert!(
+                matches!(
+                    config.discover_skills(&workspace),
+                    Err(super::ToolError::ProtectionUnavailable)
+                ),
+                "{layout}"
+            );
+            continue;
+        }
         if matches!(
             layout,
             "linked-directory" | "linked-file" | "oversized" | "too-many"

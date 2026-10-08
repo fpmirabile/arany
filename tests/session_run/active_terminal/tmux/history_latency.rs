@@ -1,4 +1,4 @@
-use super::{TmuxServer, capture_pane, redacted_tail};
+use super::{TmuxServer, capture_pane, decline_initial_consent, redacted_tail};
 use crate::loopback::{
     check_profile_with_binary, read_request, send_response, wait_product, write_profile,
 };
@@ -10,7 +10,7 @@ use std::{
     io::Read,
     net::{TcpListener, TcpStream},
     os::unix::fs::{MetadataExt, PermissionsExt},
-    process::{Command, Stdio},
+    process::Stdio,
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -231,7 +231,8 @@ async fn active_keyboard_stays_visible_with_near_cap_history() {
     let server = TmuxServer {
         socket: temp.path().join("tmux.sock"),
     };
-    let mut start = Command::new("/usr/bin/tmux");
+    let mut start =
+        crate::process::account_isolated_command(temp.path(), "/usr/bin/tmux", &executable);
     start
         .env_clear()
         .env("TERM", "xterm")
@@ -265,10 +266,14 @@ async fn active_keyboard_stays_visible_with_near_cap_history() {
             .status
             .success()
     );
+    let mut declined = false;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        if capture_pane(&server).is_some_and(|screen| resumed_tail_layout(&screen)) {
-            break;
+        if let Some(screen) = capture_pane(&server) {
+            decline_initial_consent(&server, &screen, &mut declined);
+            if resumed_tail_layout(&screen) {
+                break;
+            }
         }
         assert!(
             Instant::now() < deadline && !exit_path.exists(),

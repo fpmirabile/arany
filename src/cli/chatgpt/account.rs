@@ -264,8 +264,12 @@ impl AccountIndex {
         else {
             return Ok(Self::empty());
         };
+        Self::decode(&bytes)
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, AuthorizationError> {
         let index: Self =
-            serde_json::from_slice(&bytes).map_err(|_| AuthorizationError::InvalidIdentity)?;
+            serde_json::from_slice(bytes).map_err(|_| AuthorizationError::InvalidIdentity)?;
         index.validate()?;
         Ok(index)
     }
@@ -561,6 +565,17 @@ pub(super) fn saved_host_at(state: &StateRoot) -> Result<Option<Uuid>, Authoriza
         .map(|entry| entry.host_id))
 }
 
+pub(super) fn validate_migration_record(
+    bytes: &[u8],
+    host_id: Uuid,
+) -> Result<(), AuthorizationError> {
+    let index = AccountIndex::decode(bytes)?;
+    if index.accounts.iter().any(|entry| entry.host_id != host_id) {
+        return Err(AuthorizationError::InvalidIdentity);
+    }
+    Ok(())
+}
+
 pub(crate) async fn save_verified(
     workspace: PathBuf,
     credentials: VerifiedCredentials,
@@ -570,6 +585,7 @@ pub(crate) async fn save_verified(
     let storage = acknowledgment.storage();
     let consent = acknowledgment.bind(&credentials)?;
     tokio::task::spawn_blocking(move || {
+        registration::migrate_legacy(&workspace)?;
         let path = StateRoot::account_path().map_err(|_| AuthorizationError::Unavailable)?;
         let state = StateRoot::admit(&path).map_err(|_| AuthorizationError::Unavailable)?;
         match storage {
@@ -593,6 +609,7 @@ pub(crate) async fn save_without_plan_permission(
 ) -> Result<DisabledSignInOutcome, AuthorizationError> {
     let storage = acknowledgment.storage();
     tokio::task::spawn_blocking(move || {
+        registration::migrate_legacy(&workspace)?;
         let path = StateRoot::account_path().map_err(|_| AuthorizationError::Unavailable)?;
         let state = StateRoot::admit(&path).map_err(|_| AuthorizationError::Unavailable)?;
         save_without_plan_permission_at(
@@ -969,11 +986,37 @@ fn read_keyring_token(
     Ok(token)
 }
 
+pub(super) fn selected_keyring_slot(
+    workspace: &Path,
+    expected_id: Uuid,
+) -> Result<Option<String>, AuthorizationError> {
+    let state = open_account_state(workspace)?;
+    let index = AccountIndex::read(&state)?;
+    if index.selected != Some(expected_id) {
+        return Err(AuthorizationError::SelectedAccountChanged);
+    }
+    let entry = &index.accounts[index.account_position(expected_id)?];
+    if entry.disconnected {
+        return Err(if entry.plan_permission_missing {
+            AuthorizationError::PermissionMissing
+        } else {
+            AuthorizationError::NoSelectedAccount
+        });
+    }
+    if entry.signout_pending {
+        return Err(AuthorizationError::SignOutPending);
+    }
+    if entry.renewal_pending {
+        return Err(AuthorizationError::RenewalStorageUncertain);
+    }
+    Ok((entry.storage == AccountStorage::Keyring).then(|| keyring_slot(&entry.client_id)))
+}
+
 pub(super) async fn selected_for_use(
     workspace: PathBuf,
     expected_account_id: Option<Uuid>,
 ) -> Result<SelectedAccount, AuthorizationError> {
-    let state = open_account_state()?;
+    let state = open_account_state(&workspace)?;
     let id = match expected_account_id {
         Some(id) => id,
         None => AccountIndex::read(&state)?
@@ -983,12 +1026,12 @@ pub(super) async fn selected_for_use(
     refresh_selected_at(state, workspace, id).await
 }
 
-pub(super) fn selected_id() -> Result<Uuid, AuthorizationError> {
-    selected_id_at(&open_account_state()?)
+pub(super) fn selected_id(workspace: &Path) -> Result<Uuid, AuthorizationError> {
+    selected_id_at(&open_account_state(workspace)?)
 }
 
-pub(super) fn selected_registration() -> Result<(Uuid, bool), AuthorizationError> {
-    selected_registration_at(&open_account_state()?)
+pub(super) fn selected_registration(workspace: &Path) -> Result<(Uuid, bool), AuthorizationError> {
+    selected_registration_at(&open_account_state(workspace)?)
 }
 
 fn selected_registration_at(state: &StateRoot) -> Result<(Uuid, bool), AuthorizationError> {
@@ -1004,8 +1047,8 @@ fn selected_registration_at(state: &StateRoot) -> Result<(Uuid, bool), Authoriza
     Ok((id, !entry.disconnected && !entry.signout_pending))
 }
 
-pub(super) fn saved_ids() -> Result<(Uuid, Vec<Uuid>), AuthorizationError> {
-    saved_ids_at(&open_account_state()?)
+pub(super) fn saved_ids(workspace: &Path) -> Result<(Uuid, Vec<Uuid>), AuthorizationError> {
+    saved_ids_at(&open_account_state(workspace)?)
 }
 
 fn saved_ids_at(state: &StateRoot) -> Result<(Uuid, Vec<Uuid>), AuthorizationError> {
@@ -1030,7 +1073,7 @@ pub(super) async fn select_saved(
     target: Uuid,
 ) -> Result<(), AuthorizationError> {
     tokio::task::spawn_blocking(move || {
-        let state = open_account_state()?;
+        let state = open_account_state(&workspace)?;
         select_saved_at(&state, &workspace, expected_selected, target)
     })
     .await
@@ -1042,7 +1085,7 @@ pub(crate) async fn sign_out_selected(
 ) -> Result<SignOutOutcome, AuthorizationError> {
     let handle = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
-        let state = open_account_state()?;
+        let state = open_account_state(&workspace)?;
         sign_out_at_with(
             &state,
             &workspace,
@@ -1158,9 +1201,10 @@ fn select_saved_at(
 }
 
 pub(super) fn selected_reauthorization_target(
+    workspace: &Path,
     expected_id: Uuid,
 ) -> Result<ReauthorizationTarget, AuthorizationError> {
-    selected_reauthorization_target_at(&open_account_state()?, expected_id)
+    selected_reauthorization_target_at(&open_account_state(workspace)?, expected_id)
 }
 
 fn selected_reauthorization_target_at(
@@ -1195,7 +1239,8 @@ fn selected_id_at(state: &StateRoot) -> Result<Uuid, AuthorizationError> {
     }
 }
 
-fn open_account_state() -> Result<StateRoot, AuthorizationError> {
+fn open_account_state(workspace: &Path) -> Result<StateRoot, AuthorizationError> {
+    registration::migrate_legacy(workspace)?;
     let path = StateRoot::account_path().map_err(|_| AuthorizationError::Unavailable)?;
     crate::cli::open_optional_state(&path)
         .map_err(|_| AuthorizationError::Unavailable)?

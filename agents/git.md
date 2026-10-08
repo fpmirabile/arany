@@ -4,8 +4,8 @@ Load before running a git command or proposing a git step in a plan.
 
 ## Authorization
 
-- Use git only when the user explicitly requests it or approves a plan containing the git step.
-- Authorization does not carry into later plans or tasks.
+- The user's standing instruction authorizes inspecting repository state and creating or switching to a dedicated branch for every new feature. Do this before editing, without asking again.
+- Other git operations require an explicit user request or an approved plan containing the step; that authorization does not carry into later plans or tasks.
 
 ## Forbidden
 
@@ -17,8 +17,9 @@ Load before running a git command or proposing a git step in a plan.
 ## Branches
 
 - Create one branch per logical task: `feat/<short-desc>`, `fix/<short-desc>`, `chore/<short-desc>`, or `docs/<short-desc>`.
-- Use kebab-case and branch from the latest `origin/main`.
+- Use kebab-case and branch from the latest `origin/main`; fetching that reference is covered by the standing branch instruction.
 - Do not mix unrelated work into an existing branch.
+- Preserve pre-existing staged and unstaged work. Do not stash, reset or switch away from it implicitly. Use an isolated checkout when practical; a bounded in-place documentation edit may remain unstaged for the user to separate, without committing unrelated work.
 
 ## Commits
 
@@ -44,14 +45,14 @@ Load before running a git command or proposing a git step in a plan.
 
 - Read the complete diff after the last edit.
 - Remove debug output, dead code, commented-out blocks, and untracked TODOs.
-- Run the repository-declared format, lint, and test commands after the final edit.
+- Run the applicable [repository checks](../CONTRIBUTING.md#verification) after the final edit; documentation-only work follows its document and skill checks.
 - For Rust, default to `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace` once the workspace exists, unless repository commands replace them.
 - Confirm every changed line belongs to the approved task.
 - Confirm durable learnings were written to the authoritative documentation.
 
 ## Pull requests
 
-- Open a PR when the branch has a reviewable unit; do not merge it unless the user asks.
+- When publishing is authorized under the rules above, open a PR once the branch has a reviewable unit; do not merge it unless the user asks.
 - Use a short, imperative, scoped title without a trailing period.
 - The body contains `Summary`, `Verification`, `Security` when triggered, and `Documentation`.
 - Report skipped or blocked checks. Do not claim checks that were not run.

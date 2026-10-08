@@ -9,9 +9,11 @@ use crossterm::event::{
 #[cfg(unix)]
 use mio::{Events, Interest, Poll, Token, unix::SourceFd};
 #[cfg(unix)]
-use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+use rustix::fs::{Mode, OFlags, fstat, open};
 #[cfg(unix)]
 use std::collections::VecDeque;
+#[cfg(unix)]
+use std::fs::File;
 use std::io;
 #[cfg(unix)]
 use std::io::Read;
@@ -179,44 +181,46 @@ pub(super) struct LineReader {
     thread: Option<JoinHandle<()>>,
     pending: VecDeque<TerminalInput>,
     draft_bytes: usize,
-    stdin_flags: Option<StdinFlags>,
 }
 
 #[cfg(unix)]
-struct StdinFlags(OFlags);
-
-#[cfg(unix)]
-impl StdinFlags {
-    fn acquire() -> io::Result<Self> {
-        let stdin = io::stdin();
-        let original = fcntl_getfl(&stdin)?;
-        fcntl_setfl(&stdin, original | OFlags::NONBLOCK)?;
-        Ok(Self(original))
+fn terminal_input() -> io::Result<File> {
+    let stdin = io::stdin();
+    let admitted = fstat(&stdin)?;
+    let name = rustix::termios::ttyname(&stdin, Vec::new())?;
+    // A dup shares O_NONBLOCK with inherited terminal output.
+    let input = open(
+        name.as_c_str(),
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NOCTTY,
+        Mode::empty(),
+    )?;
+    let opened = fstat(&input)?;
+    if (opened.st_dev, opened.st_ino, opened.st_rdev)
+        != (admitted.st_dev, admitted.st_ino, admitted.st_rdev)
+        || !rustix::termios::isatty(&input)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "terminal input identity changed",
+        ));
     }
-}
-
-#[cfg(unix)]
-impl Drop for StdinFlags {
-    fn drop(&mut self) {
-        let _ = fcntl_setfl(io::stdin(), self.0);
-    }
+    Ok(File::from(input))
 }
 
 #[cfg(unix)]
 impl LineReader {
     fn start() -> io::Result<Self> {
+        let mut input = terminal_input()?;
         let mut poll = Poll::new()?;
-        let fd = io::stdin().as_raw_fd();
+        let fd = input.as_raw_fd();
         poll.registry()
             .register(&mut SourceFd(&fd), Token(0), Interest::READABLE)?;
-        let stdin_flags = StdinFlags::acquire()?;
         let (sender, receiver) = mpsc::channel(4);
         let shutdown = Arc::new(AtomicBool::new(false));
         let should_stop = Arc::clone(&shutdown);
         let thread = std::thread::Builder::new()
             .name("arany-terminal-line-input".into())
             .spawn(move || {
-                let mut input = io::stdin();
                 let mut events = Events::with_capacity(4);
                 let mut bytes = [0; 8194];
                 while !should_stop.load(Ordering::Acquire) {
@@ -267,7 +271,6 @@ impl LineReader {
             thread: Some(thread),
             pending: VecDeque::new(),
             draft_bytes: 0,
-            stdin_flags: Some(stdin_flags),
         })
     }
 
@@ -326,7 +329,6 @@ impl LineReader {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
-        self.stdin_flags.take();
     }
 }
 
@@ -370,8 +372,6 @@ pub(super) struct InputReader {
     shutdown: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     paste: Option<Result<String, &'static str>>,
-    #[cfg(unix)]
-    stdin_flags: Option<StdinFlags>,
 }
 
 impl InputReader {
@@ -380,7 +380,7 @@ impl InputReader {
         let shutdown = Arc::new(AtomicBool::new(false));
         let should_stop = Arc::clone(&shutdown);
         #[cfg(unix)]
-        let (thread, stdin_flags) = raw::start(sender, should_stop)?;
+        let thread = raw::start(sender, should_stop)?;
         #[cfg(not(unix))]
         let thread = std::thread::Builder::new()
             .name("arany-terminal-input".into())
@@ -408,8 +408,6 @@ impl InputReader {
             shutdown,
             thread: Some(thread),
             paste: None,
-            #[cfg(unix)]
-            stdin_flags: Some(stdin_flags),
         })
     }
 
@@ -419,8 +417,6 @@ impl InputReader {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
-        #[cfg(unix)]
-        self.stdin_flags.take();
     }
 
     pub(super) async fn recv(&mut self) -> Result<TerminalInput, TerminalError> {
@@ -570,7 +566,6 @@ mod tests {
             thread: None,
             pending: VecDeque::new(),
             draft_bytes: 0,
-            stdin_flags: None,
         };
         for expected in [3000, 6000] {
             let first = reader.accept_segment(vec![b'x'; 3000], false).unwrap();

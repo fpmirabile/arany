@@ -43,15 +43,37 @@ fn product_state(pid: Pid) -> char {
         .expect("product process state")
 }
 
-fn stdin_nonblocking(pid: Pid) -> bool {
-    let fdinfo = std::fs::read_to_string(format!("/proc/{}/fdinfo/0", pid.as_raw_pid()))
-        .expect("product stdin flags");
-    let flags = fdinfo
-        .lines()
-        .find_map(|line| line.strip_prefix("flags:").map(str::trim))
-        .expect("stdin flags field");
-    let flags = u32::from_str_radix(flags, 8).expect("octal stdin flags");
-    flags & 0o4000 != 0
+fn reader_nonblocking(pid: Pid) -> bool {
+    let process = std::path::PathBuf::from(format!("/proc/{}", pid.as_raw_pid()));
+    let terminal = std::fs::read_link(process.join("fd/0")).expect("product input terminal");
+    for entry in std::fs::read_dir(process.join("fd")).expect("product descriptors") {
+        let entry = entry.expect("descriptor entry");
+        let name = entry.file_name();
+        if matches!(name.to_str(), Some("0" | "1" | "2")) {
+            continue;
+        }
+        let target = match std::fs::read_link(entry.path()) {
+            Ok(target) => target,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => panic!("product descriptor identity unavailable: {error}"),
+        };
+        if target != terminal {
+            continue;
+        }
+        let fdinfo = match std::fs::read_to_string(process.join("fdinfo").join(name)) {
+            Ok(info) => info,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => panic!("product reader flags unavailable: {error}"),
+        };
+        let flags = fdinfo
+            .lines()
+            .find_map(|line| line.strip_prefix("flags:").map(str::trim))
+            .expect("reader flags field");
+        if u32::from_str_radix(flags, 8).expect("octal reader flags") & 0o4000 != 0 {
+            return true;
+        }
+    }
+    false
 }
 
 pub(super) fn tty_settings(pid: Pid) -> String {
@@ -235,7 +257,8 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     } else {
         "trap ':' INT; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 cancel; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     };
-    let mut attached = Command::new("/usr/bin/script");
+    let mut attached =
+        crate::process::account_isolated_script(state.parent().expect("fixture root"));
     attached
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -280,6 +303,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     let expect_second_ctrl_c = matches!(exit, ActiveExit::SecondCtrlC);
     let expect_resume = matches!(exit, ActiveExit::SuspendThenSignal) && !inline;
     let reader = thread::spawn(move || {
+        let mut declined = false;
         let mut bytes = Vec::new();
         let mut patterns: Vec<&[u8]> = vec![
             b"SHELL_PID:",
@@ -352,6 +376,11 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             }
             assert!(bytes.len() + count <= 64 * 1024, "bounded PTY output");
             bytes.extend_from_slice(&chunk[..count]);
+            crate::process::decline_workspace_consent(
+                &mut *reader_input.lock().expect("fixture input"),
+                &bytes,
+                &mut declined,
+            );
             if inline {
                 let queries = bytes.windows(4).filter(|part| *part == b"\x1b[6n").count();
                 assert!(queries <= 32, "bounded cursor-position queries");
@@ -505,7 +534,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             );
             write_input(&input, b"\x03");
             let deadline = Instant::now() + Duration::from_secs(3);
-            while stdin_nonblocking(product_pid) {
+            while reader_nonblocking(product_pid) {
                 assert!(
                     Instant::now() < deadline,
                     "second Ctrl+C did not release input"
@@ -547,11 +576,11 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                     .0,
                 2
             );
-            assert!(stdin_nonblocking(product_pid), "active canonical reader");
+            assert!(reader_nonblocking(product_pid), "active canonical reader");
             kill_process(product_pid, Signal::TSTP).expect("deliver SIGTSTP");
             wait_stopped(product_pid);
             assert!(
-                !stdin_nonblocking(product_pid),
+                !reader_nonblocking(product_pid),
                 "reader released before stop"
             );
             kill_process(product_pid, Signal::CONT).expect("resume active Run");
@@ -563,7 +592,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                 3
             );
             assert!(
-                stdin_nonblocking(product_pid),
+                reader_nonblocking(product_pid),
                 "reader reacquired after resume"
             );
             continue_draft(&input, b'c', 2193);

@@ -18,6 +18,12 @@ use config::Config;
 pub(crate) use skills::parse_json;
 pub use skills::{ProjectSkills, project_skills};
 pub use workspace::{WorkspacePermissions, mention_paths};
+/// Whether this OS has the native Guard/fs adapters (openat2 RESOLVE_BENEATH opens, no-replace
+/// atomic rename, cgroup/namespace enforcement) that back-protected Tool writes require.
+pub const fn native_protection_supported() -> bool {
+    cfg!(target_os = "linux")
+}
+
 pub fn configured_skill_names(state: &StateRoot) -> Result<Vec<String>, ToolError> {
     Ok(Config::load(state)?
         .skills

@@ -2,8 +2,9 @@ use super::{chatgpt, exec::ProviderArg};
 use arany::{
     AttachedTerminal, CollaborationPolicy, Composer, ComposerEdit, Effort, InteractiveCommand,
     RunOutcome, RunStatus, SessionDefaults, SessionId, SessionView, StateRoot, Store, Submission,
-    Telemetry, TerminalInput, continue_session, create_session, fork_session, parse_submission,
-    render_run_feedback, resume_session, set_session_defaults,
+    Telemetry, TerminalInput, continue_session, create_session, fork_session,
+    native_protection_supported, parse_submission, render_run_feedback, resume_session,
+    set_session_defaults,
 };
 use clap::Args;
 use std::{
@@ -239,20 +240,48 @@ impl AttachedArgs {
 
 pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), String> {
     let mut admission = args.admit(telemetry)?;
-    let ordinary_entry = admission.defaults.provider.is_none() && !admission.tools;
     let mut terminal = AttachedTerminal::acquire_with_preference(admission.screen_reader)
         .map_err(|error| error.to_string())?;
     if admission.no_color {
         terminal.disable_color();
     }
-    if admission.defaults.provider.as_deref() == Some("chatgpt") {
-        admission.defaults.account_id =
-            Some(chatgpt::selected_account_id().map_err(|error| error.to_string())?);
-    }
+    let mut composer = Composer::default();
     let mut setup_notice = None;
+    match permissions::admit(
+        &mut terminal,
+        &admission.workspace,
+        &mut composer,
+        admission.tools,
+    )
+    .await
+    {
+        Ok(
+            permissions::PermissionChoice::Selected(access)
+            | permissions::PermissionChoice::Closed(access),
+        ) => {
+            admission.workspace_permissions = Some(access);
+        }
+        Ok(permissions::PermissionChoice::Exit) => return Ok(()),
+        Err(setup::SetupError::Recoverable(error)) => {
+            return Err(format!(
+                "{error}; restore private folder trust state and retry"
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    }
+    if !native_protection_supported() {
+        append_notice(&mut setup_notice, permissions::UNAVAILABLE_NOTICE);
+    }
+    if admission.defaults.provider.as_deref() == Some("chatgpt") {
+        admission.defaults.account_id = Some(
+            chatgpt::selected_account_id(&admission.workspace)
+                .map_err(|error| error.to_string())?,
+        );
+    }
     let mut setup_catalog = None;
     let reuse_saved_selection =
         matches!(admission.entry, EntryMode::New) && admission.defaults.provider.is_none();
+    let mut access_checked = false;
     if matches!(admission.entry, EntryMode::New) && admission.defaults.provider.is_none() {
         if admission.setup_requested {
             match setup::resolve(&mut terminal, &admission.state_dir, &admission.workspace).await? {
@@ -279,12 +308,37 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         } else {
             match setup::saved_defaults(&mut terminal, &admission.workspace).await? {
                 setup::SavedDefaults::Selected(defaults) => admission.defaults = defaults,
+                setup::SavedDefaults::AccessChecked(defaults) => {
+                    admission.defaults = defaults;
+                    access_checked = true;
+                }
                 setup::SavedDefaults::Cancelled => return Ok(()),
                 setup::SavedDefaults::Unconfigured => {}
             }
         }
     }
-    if reuse_saved_selection {
+    let mut access_authorized = true;
+    if matches!(admission.entry, EntryMode::New) && !admission.setup_requested && !access_checked {
+        match setup::authorize_saved_access(
+            &mut terminal,
+            &admission.workspace,
+            &admission.defaults,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => return Ok(()),
+            Err(setup::SetupError::Recoverable(error)) => {
+                append_notice(
+                    &mut setup_notice,
+                    &format!("Error: {error}; use /setup to review saved access"),
+                );
+                access_authorized = false;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if reuse_saved_selection && access_authorized {
         let mut remembered = admission.defaults.clone();
         match models::restore_saved_models(
             &admission.workspace,
@@ -334,9 +388,10 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
             "ChatGPT account saved; use /model to select a model and effort before a Run".into(),
         );
     }
-    if admission.prompt.is_some()
-        && !matches!(admission.entry, EntryMode::Resume(_) | EntryMode::Continue)
-    {
+    if admission.prompt.is_some() && matches!(admission.entry, EntryMode::New) {
+        if !access_authorized {
+            return Err(setup_notice.unwrap_or_else(|| "Saved access was not authorized".into()));
+        }
         run::preflight_selected(
             &admission.state_dir,
             run::Selection {
@@ -357,62 +412,63 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         )
         .await?;
     }
-    let mut composer = Composer::default();
     match controls::restore_settings(&admission).await {
         Ok(layout) => composer.set_completion_layout(layout),
         Err(error) => append_notice(&mut setup_notice, &format!("Error: {error}; using tabs")),
     }
-    if ordinary_entry
-        && matches!(admission.entry, EntryMode::New)
-        && permissions::supports_tools(admission.defaults.provider.as_deref())
-    {
-        match permissions::admit(&mut terminal, &admission.workspace, &mut composer).await {
-            Ok(permissions::PermissionChoice::Selected(access)) => {
-                admission.workspace_permissions = Some(access)
-            }
-            Ok(permissions::PermissionChoice::Closed(access)) => {
-                admission.workspace_permissions = Some(access);
-            }
-            Ok(permissions::PermissionChoice::Exit) => {
-                return Ok(());
-            }
+    let (mut session_id, mut view) = start_session(&admission).await?;
+    if !matches!(admission.entry, EntryMode::New) {
+        match setup::authorize_saved_access(&mut terminal, &admission.workspace, &view.defaults)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return Ok(()),
             Err(setup::SetupError::Recoverable(error)) => {
-                setup_notice = Some(format!(
-                    "Error: {error}; read only; use /permissions to retry"
-                ))
+                append_notice(
+                    &mut setup_notice,
+                    &format!("Error: {error}; use /setup to review saved access"),
+                );
+                access_authorized = false;
             }
             Err(error) => return Err(error.into()),
         }
+        if admission.prompt.is_some() {
+            if !access_authorized {
+                return Err(
+                    setup_notice.unwrap_or_else(|| "Saved access was not authorized".into())
+                );
+            }
+            run::preflight_selected(
+                &admission.state_dir,
+                run::Selection {
+                    workspace: &admission.workspace,
+                    profile: view
+                        .defaults
+                        .provider
+                        .as_deref()
+                        .ok_or("a prompt requires a selected Provider")?,
+                    model: view
+                        .defaults
+                        .model
+                        .as_deref()
+                        .ok_or("a prompt requires a selected model")?,
+                    effort: view.defaults.effort,
+                    account_id: view.defaults.account_id,
+                },
+            )
+            .await?;
+        }
     }
-    let (mut session_id, mut view) = start_session(&admission).await?;
     if let Ok(root) = StateRoot::open_existing(&admission.state_dir) {
         arany::enable_development_diagnostics(&root);
     }
-    if ordinary_entry
-        && !matches!(admission.entry, EntryMode::New)
-        && permissions::supports_tools(view.defaults.provider.as_deref())
-    {
-        match permissions::admit(&mut terminal, &admission.workspace, &mut composer).await {
-            Ok(permissions::PermissionChoice::Selected(access)) => {
-                admission.workspace_permissions = Some(access)
-            }
-            Ok(permissions::PermissionChoice::Closed(access)) => {
-                admission.workspace_permissions = Some(access);
-            }
-            Ok(permissions::PermissionChoice::Exit) => {
-                return Ok(());
-            }
-            Err(setup::SetupError::Recoverable(error)) => {
-                setup_notice = Some(format!(
-                    "Error: {error}; read only; use /permissions to retry"
-                ))
-            }
-            Err(error) => return Err(error.into()),
-        }
-    } else if admission.tools {
-        composer.set_approval_mode(Some(arany::ApprovalMode::AutoEdits));
-    }
-    if setup_catalog.is_none() {
+    permissions::refresh_mode(
+        &mut composer,
+        view.defaults.provider.as_deref(),
+        admission.tools,
+        admission.workspace_permissions.as_ref(),
+    );
+    if setup_catalog.is_none() && access_authorized {
         match models::restore_saved_models(
             &admission.workspace,
             &admission.state_dir,
@@ -443,7 +499,13 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
             "Error: {error}; selection kept for this conversation only"
         ));
     }
-    refresh_runtime_skills(&admission, &mut composer, &mut setup_notice);
+    let mut skills_supported = permissions::supports_tools(view.defaults.provider.as_deref());
+    refresh_runtime_skills(
+        &admission,
+        &mut composer,
+        &mut setup_notice,
+        skills_supported,
+    );
     seed_setup_catalog(&mut composer, &view.defaults, setup_catalog.as_deref());
     let mut notice = if setup_notice.is_some() {
         setup_notice
@@ -464,6 +526,11 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
     .map(Feedback::History);
     let mut empty_interrupt = None::<Instant>;
     if let Some(prompt) = admission.prompt.clone() {
+        if !access_authorized {
+            return Err(notice
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "Saved access was not authorized".into()));
+        }
         active::validate_objective_inputs(&admission, &prompt)?;
         materialize_session(&admission, &mut session_id, &mut view).await?;
         terminal
@@ -489,6 +556,17 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         }
     }
     loop {
+        let supported = permissions::supports_tools(view.defaults.provider.as_deref());
+        if supported != skills_supported {
+            refresh_runtime_skills(&admission, &mut composer, &mut notice, supported);
+            skills_supported = supported;
+        }
+        permissions::refresh_mode(
+            &mut composer,
+            view.defaults.provider.as_deref(),
+            admission.tools,
+            admission.workspace_permissions.as_ref(),
+        );
         if let Some(error) = permissions::refresh_files(&admission.workspace, &mut composer) {
             append_notice(&mut notice, &error);
         }
@@ -677,7 +755,10 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 .account_id
                                 .filter(|_| view.defaults.provider.as_deref() == Some("chatgpt"))
                             {
-                                Some(id) => match chatgpt::selected_reauthorization_target(id) {
+                                Some(id) => match chatgpt::selected_reauthorization_target(
+                                    &admission.workspace,
+                                    id,
+                                ) {
                                     Ok(target) if target.plan_permission_missing => {
                                         chatgpt::AuthorizationError::PermissionMissing.to_string()
                                     }
@@ -742,26 +823,6 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                             }
                             empty_interrupt = None;
                             continue;
-                        }
-                        if ordinary_entry
-                            && admission.workspace_permissions.is_none()
-                            && permissions::supports_tools(view.defaults.provider.as_deref())
-                        {
-                            let access = permissions::choose(
-                                &mut terminal,
-                                &admission.workspace,
-                                &mut composer,
-                            )
-                            .await?;
-                            match access {
-                                permissions::PermissionChoice::Selected(access) => {
-                                    admission.workspace_permissions = Some(access)
-                                }
-                                permissions::PermissionChoice::Closed(access) => {
-                                    admission.workspace_permissions = Some(access);
-                                }
-                                permissions::PermissionChoice::Exit => return Ok(()),
-                            }
                         }
                     }
                 }
@@ -845,6 +906,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 &mut terminal,
                                 &admission.workspace,
                                 &mut composer,
+                                false,
                             )
                             .await?;
                             let access = match access {
@@ -856,7 +918,17 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 }
                                 permissions::PermissionChoice::Exit => return Ok(()),
                             };
-                            notice = Some(Feedback::History(if access.is_trusted() {
+                            notice = Some(Feedback::History(if !native_protection_supported() {
+                                format!(
+                                    "Folder {} · {}",
+                                    if access.is_trusted() {
+                                        "trusted"
+                                    } else {
+                                        "read only"
+                                    },
+                                    permissions::UNAVAILABLE_NOTICE
+                                )
+                            } else if access.is_trusted() {
                                 format!(
                                     "Folder trusted · {} · Shift+Tab changes mode",
                                     access.mode().label()
@@ -867,7 +939,12 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                             }));
                             admission.workspace_permissions = Some(access);
                             admission.tools = false;
-                            refresh_runtime_skills(&admission, &mut composer, &mut notice);
+                            refresh_runtime_skills(
+                                &admission,
+                                &mut composer,
+                                &mut notice,
+                                skills_supported,
+                            );
                         } else if command == InteractiveCommand::Setup {
                             notice = Some(
                                 configure_account(
@@ -1297,6 +1374,7 @@ fn refresh_runtime_skills<N: From<String> + std::fmt::Display>(
     admission: &Admission,
     composer: &mut Composer,
     notice: &mut Option<N>,
+    supported: bool,
 ) {
     let project = arany::project_skills(&admission.workspace);
     if let Ok(project) = &project
@@ -1304,10 +1382,12 @@ fn refresh_runtime_skills<N: From<String> + std::fmt::Display>(
     {
         append_notice(
             notice,
-            "Run npx skills install in this project: .agents/skills is missing and skills-lock.json exists.",
+            "Run npx --yes skills@1.7.0 experimental_install in this project: .agents/skills is missing and skills-lock.json exists.",
         );
     }
-    let skills = if admission.tools {
+    let skills = if !supported {
+        Ok(Vec::new())
+    } else if admission.tools {
         StateRoot::open_existing(&admission.state_dir)
             .map_err(|_| "Tool configuration unavailable".to_owned())
             .and_then(|root| {
@@ -1512,25 +1592,14 @@ async fn finish_existing_start(
         return Err("--effort requires a selected model".into());
     }
     if admission.prompt.is_some() {
-        let profile = defaults
+        defaults
             .provider
             .as_deref()
             .ok_or("a prompt requires a selected Provider")?;
-        let model = defaults
+        defaults
             .model
             .as_deref()
             .ok_or("a prompt requires a selected model")?;
-        run::preflight_selected(
-            &admission.state_dir,
-            run::Selection {
-                workspace: &admission.workspace,
-                profile,
-                model,
-                effort: defaults.effort,
-                account_id: defaults.account_id,
-            },
-        )
-        .await?;
     }
     if defaults != view.defaults {
         persist_defaults(admission, id, defaults).await?;

@@ -13,7 +13,7 @@ use std::{
     io::{Read, Write},
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
     thread,
     time::{Duration, Instant},
 };
@@ -130,7 +130,8 @@ fn acquisition_case(case: &str, signal: Option<Signal>) {
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
     let command = "stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
-    let mut attached = Command::new("/usr/bin/script");
+    let mut attached =
+        crate::process::account_isolated_script(state.parent().expect("fixture root"));
     attached
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -279,7 +280,8 @@ fn broken_stderr_after_cursor_query_restores_raw_mode_without_state() {
     fcntl_setfl(&stderr_master, flags | OFlags::NONBLOCK).expect("nonblocking stderr master");
 
     let command = "stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; exec 2>\"$ARANY_TEST_STDERR_PTY\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
-    let mut attached = Command::new("/usr/bin/script");
+    let mut attached =
+        crate::process::account_isolated_script(state.parent().expect("fixture root"));
     attached
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -425,7 +427,8 @@ fn lost_pty_case(screen_reader: bool) {
     } else {
         "stty rows 24 cols 80; printf 'PRODUCT_PID:%s\n' \"$$\"; exec \"$ARANY_TEST_EXE\" --setup --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\""
     };
-    let mut attached = Command::new("/usr/bin/script");
+    let mut attached =
+        crate::process::account_isolated_script(state.parent().expect("fixture root"));
     attached
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -445,7 +448,7 @@ fn lost_pty_case(screen_reader: bool) {
     let flags = fcntl_getfl(&output).expect("stdout pipe flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
     let mut transcript = Vec::new();
-    let mut answered = 0;
+    let mut answered = crate::session_picker::PtyResponses::default();
     let deadline = Instant::now() + Duration::from_secs(10);
     while !transcript
         .windows(b"PRODUCT_PID:".len())

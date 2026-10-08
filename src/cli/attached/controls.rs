@@ -495,7 +495,7 @@ pub(super) async fn handle_command(
         InteractiveCommand::Provider => match argument {
             Some(profile) if ProviderArg::from_str(profile).is_ok() => {
                 let account_id = if profile == "chatgpt" {
-                    match chatgpt::selected_account_id() {
+                    match chatgpt::selected_account_id(&admission.workspace) {
                         Ok(id) => Some(id),
                         Err(chatgpt::AuthorizationError::NoSelectedAccount) => {
                             return Ok(
