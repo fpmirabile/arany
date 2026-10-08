@@ -65,6 +65,57 @@ pub struct ToolView {
     pub observation: Option<crate::tools::ToolObservation>,
 }
 
+fn all_children_finished(run: &RunView) -> bool {
+    run.agents.len() > 1
+        && run
+            .agents
+            .iter()
+            .skip(1)
+            .all(|child| child.status == AgentStatus::Finished)
+}
+
+fn is_tool_continuation(run: &RunView, agent: &AgentView, record: &ProviderCallRecord) -> bool {
+    agent.role == AgentRole::Primary
+        && agent.provider_calls.last().is_some_and(|call| {
+            call.disposition == ProviderCallDisposition::ToolRequested && call.phase == record.phase
+                || call.phase == AgentPhase::ToolReview && record.phase == AgentPhase::RootPlan
+        })
+        && run.tools.last().is_some_and(|tool| {
+            tool.observation
+                .as_ref()
+                .is_some_and(|observation| !observation.stops_run())
+        })
+        && run.tools.len()
+            == agent
+                .provider_calls
+                .iter()
+                .filter(|call| call.disposition == ProviderCallDisposition::ToolRequested)
+                .count()
+}
+
+fn is_delegated_synthesis(run: &RunView, agent: &AgentView, record: &ProviderCallRecord) -> bool {
+    agent.role == AgentRole::Primary
+        && agent
+            .provider_calls
+            .last()
+            .is_some_and(|call| call.disposition == ProviderCallDisposition::Delegated)
+        && record.phase == AgentPhase::RootSynthesis
+        && all_children_finished(run)
+}
+
+fn is_tool_review(run: &RunView, agent: &AgentView, record: &ProviderCallRecord) -> bool {
+    agent.role == AgentRole::Primary
+        && record.phase == AgentPhase::ToolReview
+        && agent
+            .provider_calls
+            .last()
+            .is_some_and(|call| call.disposition == ProviderCallDisposition::ToolRequested)
+        && run
+            .tools
+            .last()
+            .is_some_and(|tool| tool.observation.is_none())
+}
+
 impl RunView {
     pub(crate) fn primary_tool_limit_reached(&self) -> bool {
         self.config
@@ -395,50 +446,9 @@ impl SessionView {
                     .config
                     .as_ref()
                     .is_some_and(|config| config.tool_policy.is_some());
-                let tool_continuation = tools_enabled
-                    && agent.role == AgentRole::Primary
-                    && agent.provider_calls.last().is_some_and(|call| {
-                        call.disposition == ProviderCallDisposition::ToolRequested
-                            && call.phase == record.phase
-                            || call.phase == crate::provider::AgentPhase::ToolReview
-                                && record.phase == crate::provider::AgentPhase::RootPlan
-                    })
-                    && run.tools.last().is_some_and(|tool| {
-                        tool.observation
-                            .as_ref()
-                            .is_some_and(|observation| !observation.stops_run())
-                    })
-                    && run.tools.len()
-                        == agent
-                            .provider_calls
-                            .iter()
-                            .filter(|call| {
-                                call.disposition == ProviderCallDisposition::ToolRequested
-                            })
-                            .count();
-                let delegated = tools_enabled
-                    && agent.role == AgentRole::Primary
-                    && agent
-                        .provider_calls
-                        .last()
-                        .is_some_and(|call| call.disposition == ProviderCallDisposition::Delegated)
-                    && record.phase == AgentPhase::RootSynthesis
-                    && run.agents.len() > 1
-                    && run
-                        .agents
-                        .iter()
-                        .skip(1)
-                        .all(|child| child.status == AgentStatus::Finished);
-                let tool_review = tools_enabled
-                    && agent.role == AgentRole::Primary
-                    && record.phase == crate::provider::AgentPhase::ToolReview
-                    && agent.provider_calls.last().is_some_and(|call| {
-                        call.disposition == ProviderCallDisposition::ToolRequested
-                    })
-                    && run
-                        .tools
-                        .last()
-                        .is_some_and(|tool| tool.observation.is_none());
+                let tool_continuation = tools_enabled && is_tool_continuation(run, agent, record);
+                let delegated = tools_enabled && is_delegated_synthesis(run, agent, record);
+                let tool_review = tools_enabled && is_tool_review(run, agent, record);
                 let valid = tool_continuation
                     || tool_review
                     || delegated
@@ -447,12 +457,7 @@ impl SessionView {
                         (AgentRole::Primary, [first], AgentPhase::RootSynthesis)
                             if first.disposition == ProviderCallDisposition::Delegated =>
                         {
-                            run.agents.len() > 1
-                                && run
-                                    .agents
-                                    .iter()
-                                    .skip(1)
-                                    .all(|child| child.status == AgentStatus::Finished)
+                            all_children_finished(run)
                         }
                         (AgentRole::Child, [], AgentPhase::ChildWork) => true,
                         _ => false,
