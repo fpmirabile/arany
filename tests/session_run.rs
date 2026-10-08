@@ -87,7 +87,8 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
     const CASE: &str = "ARANY_TEST_TERMINAL_READER_CASE";
     const TEST: &str = "terminal_readers_preserve_shared_output_and_setup_redraw";
     if let Some(case) = std::env::var_os(CASE) {
-        let linear = case == "linear";
+        let linear = case == "linear" || case == "linear-panic";
+        let unwind = case == "inline-panic" || case == "linear-panic";
         let flags = fcntl_getfl(std::io::stdin()).expect("inherited input flags");
         assert!(!flags.contains(OFlags::NONBLOCK));
         assert_eq!(fcntl_getfl(std::io::stderr()).unwrap(), flags);
@@ -126,6 +127,15 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                     .draw(&view, &Composer::default(), Some("Synthetic setup ready"))
                     .unwrap();
                 println!("INPUT_READY:{cycle}");
+                if unwind {
+                    let observed =
+                        tokio::time::timeout(Duration::from_secs(5), terminal.next_input())
+                            .await
+                            .expect("bounded unwind release")
+                            .unwrap();
+                    assert_eq!(observed, TerminalInput::Character('p'));
+                    panic!("TEST_ONLY_TERMINAL_OWNER_PANIC");
+                }
                 for expected in [TerminalInput::Character('x'), TerminalInput::Submit] {
                     let observed =
                         tokio::time::timeout(Duration::from_secs(5), terminal.next_input())
@@ -146,7 +156,8 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
         return;
     }
 
-    for case in ["inline", "linear"] {
+    for case in ["inline", "linear", "inline-panic", "linear-panic"] {
+        let unwind = case.ends_with("-panic");
         let temp = tempfile::tempdir().unwrap();
         let geometry = nix::pty::Winsize {
             ws_row: 50,
@@ -157,6 +168,8 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
         let pty = nix::pty::openpty(Some(&geometry), None).unwrap();
         let slave = std::fs::File::from(pty.slave);
         let master = std::fs::File::from(pty.master);
+        let before = process::terminal_settings(&master);
+        let probe = master.try_clone().unwrap();
         let mut input = master.try_clone().unwrap();
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
@@ -174,7 +187,6 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
             .stderr(Stdio::from(slave));
         let mut child = loopback::ChildGuard::new(command.spawn().unwrap());
         drop(command);
-        let mut queries = 0;
         let mut submissions = 0;
         let output = process::capture_terminal(
             child.child(),
@@ -182,14 +194,12 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
             Duration::from_secs(20),
             256 * 1024,
             |bytes| {
-                let observed = bytes.windows(4).filter(|part| *part == b"\x1b[6n").count();
-                assert!(observed <= 8, "bounded cursor queries");
-                for _ in queries..observed {
-                    input.write_all(b"\x1b[1;1R").unwrap();
-                }
-                queries = observed;
+                assert!(
+                    !bytes.windows(4).any(|part| part == b"\x1b[6n"),
+                    "terminal ownership does not require cursor replies"
+                );
                 let marker = format!("INPUT_READY:{submissions}");
-                if submissions < 2
+                if submissions < if unwind { 1 } else { 2 }
                     && bytes
                         .windows(marker.len())
                         .enumerate()
@@ -199,25 +209,58 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                                     || bytes[offset + marker.len()..].starts_with(b"\r\n"))
                         })
                 {
-                    input.write_all(b"x\r").unwrap();
+                    if unwind {
+                        let acquired = process::terminal_settings(&probe);
+                        if case == "inline-panic" {
+                            assert_ne!(acquired, before, "raw mode acquired before unwind");
+                        } else {
+                            assert_eq!(acquired, before, "linear mode remains canonical");
+                        }
+                    }
+                    input
+                        .write_all(if unwind { b"p\r" } else { b"x\r" })
+                        .unwrap();
                     submissions += 1;
                 }
             },
         );
         assert!(
-            output.status.success(),
+            if unwind {
+                output.status.code() == Some(101)
+            } else {
+                output.status.success()
+            },
             "{case} terminal owner failed: {:?}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(submissions, 2, "{case} input survives reacquisition");
+        assert_eq!(submissions, if unwind { 1 } else { 2 }, "{case} input gate");
+        assert_eq!(
+            process::terminal_settings(&probe),
+            before,
+            "{case} restoration"
+        );
         assert!(output.stdout.is_empty());
+        let completion: &[u8] = if unwind {
+            b"0 passed; 1 failed; 0 ignored"
+        } else {
+            b"1 passed; 0 failed; 0 ignored"
+        };
         assert!(
             output
                 .stderr
-                .windows(b"1 passed; 0 failed; 0 ignored".len())
-                .any(|part| part == b"1 passed; 0 failed; 0 ignored"),
+                .windows(completion.len())
+                .any(|part| part == completion),
             "exact child must complete one test"
         );
+        if unwind {
+            assert!(
+                output
+                    .stderr
+                    .windows(b"TEST_ONLY_TERMINAL_OWNER_PANIC".len())
+                    .any(|part| part == b"TEST_ONLY_TERMINAL_OWNER_PANIC"),
+                "{case} deliberate unwind reached"
+            );
+        }
         assert!(
             !temp.path().join("account").exists(),
             "terminal evidence never opens an account"

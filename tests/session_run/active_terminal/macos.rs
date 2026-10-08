@@ -32,6 +32,8 @@ enum Exit {
     Cancel,
     Suspend,
     Failure,
+    PtyLoss,
+    BrokenStderr,
 }
 
 fn restored(input: &std::fs::File, before: &nix::sys::termios::Termios) {
@@ -43,6 +45,178 @@ fn restored(input: &std::fs::File, before: &nix::sys::termios::Termios) {
 }
 
 #[test]
+fn native_folder_consent_restores_before_account_setup_or_session_work() {
+    for linear in [true, false] {
+        for case in [
+            "input",
+            "INT",
+            "TERM",
+            "HUP",
+            "stderr-before",
+            "stderr-after",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let workspace = temp.path().join("project");
+            let state = temp.path().join("state");
+            std::fs::create_dir(&workspace).unwrap();
+            let geometry = nix::pty::Winsize {
+                ws_row: 24,
+                ws_col: 80,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            let pty = nix::pty::openpty(Some(&geometry), None).unwrap();
+            let slave = std::fs::File::from(pty.slave);
+            let mut input = std::fs::File::from(pty.master);
+            let before = crate::process::terminal_settings(&input);
+            let broken = case.starts_with("stderr-");
+            let mut fault_probe = None;
+            let (master, stderr) = if broken {
+                let output = nix::pty::openpty(Some(&geometry), None).unwrap();
+                let stderr = std::fs::File::from(output.slave);
+                fault_probe = Some(stderr.try_clone().unwrap());
+                (std::fs::File::from(output.master), stderr)
+            } else {
+                (input.try_clone().unwrap(), slave.try_clone().unwrap())
+            };
+            for descriptor in [&slave, &input, &master, &stderr] {
+                rustix::io::fcntl_setfd(descriptor, rustix::io::FdFlags::CLOEXEC).unwrap();
+            }
+            if let Some(probe) = &fault_probe {
+                rustix::io::fcntl_setfd(probe, rustix::io::FdFlags::CLOEXEC).unwrap();
+            }
+            let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
+            command
+                .env_clear()
+                .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account"))
+                .env("HOME", temp.path().join("legacy-home"))
+                .env("XDG_STATE_HOME", temp.path().join("legacy-state"))
+                .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+                .env("TERM", if linear { "dumb" } else { "xterm" })
+                .current_dir(&workspace)
+                .args(["--no-color", "--state-dir"])
+                .arg(&state)
+                .arg("--workspace")
+                .arg(&workspace)
+                .stdin(Stdio::from(slave))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::from(stderr));
+            if linear {
+                command.arg("--screen-reader");
+            }
+            own_terminal(&mut command);
+            let mut master = Some(master);
+            if case == "stderr-before" {
+                drop(master.take());
+            }
+            let mut child = ChildGuard::new(command.spawn().unwrap());
+            drop(command);
+            let pid = Pid::from_raw(child.child().id().try_into().unwrap()).unwrap();
+            let mut transcript = Vec::new();
+            if case != "stderr-before" {
+                let reader = master.as_mut().unwrap();
+                let flags = rustix::fs::fcntl_getfl(&*reader).unwrap();
+                rustix::fs::fcntl_setfl(&*reader, flags | rustix::fs::OFlags::NONBLOCK).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(10);
+                let mut consent = false;
+                let mut suggested_input = Vec::new();
+                while !consent {
+                    let mut bytes = [0; 4096];
+                    match reader.read(&mut bytes) {
+                        Ok(0) => panic!("native consent closed before admission: {linear} {case}"),
+                        Ok(count) => {
+                            assert!(transcript.len() + count <= 64 * 1024);
+                            transcript.extend_from_slice(&bytes[..count]);
+                        }
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                            ) => {}
+                        Err(error) => panic!("native consent read: {error}"),
+                    }
+                    crate::process::decline_workspace_consent(
+                        &mut suggested_input,
+                        &transcript,
+                        &mut consent,
+                    );
+                    assert!(
+                        Instant::now() < deadline,
+                        "native consent missing: {linear} {case}"
+                    );
+                    assert!(child.child().try_wait().unwrap().is_none());
+                    thread::yield_now();
+                }
+                let active = crate::process::terminal_settings(&input);
+                assert_eq!(
+                    active == before,
+                    linear,
+                    "native consent settings: {linear} {case}"
+                );
+                match case {
+                    "input" => input.write_all(&[3]).unwrap(),
+                    "INT" => kill_process(pid, Signal::INT).unwrap(),
+                    "TERM" => kill_process(pid, Signal::TERM).unwrap(),
+                    "HUP" => kill_process(pid, Signal::HUP).unwrap(),
+                    "stderr-after" => drop(master.take()),
+                    _ => unreachable!(),
+                }
+            }
+            if let Some(mut probe) = fault_probe {
+                assert_eq!(
+                    probe.write(b"x").unwrap_err().raw_os_error(),
+                    Some(nix::libc::EIO),
+                    "positive native stderr disconnection: {linear} {case}"
+                );
+                if case == "stderr-after" {
+                    kill_process(pid, Signal::TERM).unwrap();
+                }
+            }
+            let output = crate::process::capture_terminal(
+                child.child(),
+                master.take().unwrap_or_else(|| input.try_clone().unwrap()),
+                Duration::from_secs(10),
+                64 * 1024,
+                |_| {},
+            );
+            transcript.extend_from_slice(&output.stderr);
+            assert_eq!(
+                output.status.code(),
+                Some(if matches!(case, "input" | "INT") {
+                    0
+                } else {
+                    1
+                }),
+                "native consent exit: {linear} {case}: {:?} stdout {:?}",
+                String::from_utf8_lossy(&transcript),
+                String::from_utf8_lossy(&output.stdout)
+            );
+            assert!(output.stdout.is_empty());
+            assert!(!transcript.windows(4).any(|part| part == b"\x1b[6n"));
+            restored(&input, &before);
+            assert!(!state.exists(), "no Session admission: {linear} {case}");
+            assert!(!transcript.windows(6).any(|part| part == b"Setup:"));
+            assert_eq!(std::fs::read_dir(&workspace).unwrap().count(), 0);
+            for name in ["legacy-home", "legacy-state", "legacy-data"] {
+                assert!(!temp.path().join(name).exists());
+            }
+            let account = temp.path().join("account");
+            if account.exists() {
+                for entry in std::fs::read_dir(&account).unwrap() {
+                    let entry = entry.unwrap();
+                    let name = entry.file_name();
+                    assert!(
+                        name == "account-credentials.lock" || name == "events.sqlite3",
+                        "folder trust admission must not create account metadata: {name:?}"
+                    );
+                    assert_eq!(entry.metadata().unwrap().len(), 0);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
     for linear in [true, false] {
         for exit in [
@@ -51,6 +225,8 @@ fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
             Exit::Cancel,
             Exit::Suspend,
             Exit::Failure,
+            Exit::PtyLoss,
+            Exit::BrokenStderr,
         ] {
             let temp = tempfile::tempdir().unwrap();
             let workspace = temp.path().join("project");
@@ -134,7 +310,28 @@ fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
                 rustix::io::fcntl_setfd(descriptor, rustix::io::FdFlags::CLOEXEC).unwrap();
             }
             let before = crate::process::terminal_settings(&slave);
-            let mut input = master.try_clone().unwrap();
+            let terminal_probe = matches!(exit, Exit::PtyLoss).then(|| slave.try_clone().unwrap());
+            let mut input = Some(master.try_clone().unwrap());
+            let mut input_master = None;
+            let (master, stderr) = if matches!(exit, Exit::PtyLoss | Exit::BrokenStderr) {
+                if matches!(exit, Exit::PtyLoss) {
+                    input_master = Some(master);
+                }
+                let output = nix::pty::openpty(Some(&geometry), None).unwrap();
+                for descriptor in [&output.master, &output.slave] {
+                    rustix::io::fcntl_setfd(descriptor, rustix::io::FdFlags::CLOEXEC).unwrap();
+                }
+                (
+                    std::fs::File::from(output.master),
+                    std::fs::File::from(output.slave),
+                )
+            } else {
+                (master, slave.try_clone().unwrap())
+            };
+            let output_master = matches!(exit, Exit::PtyLoss).then(|| master.try_clone().unwrap());
+            let stderr_before = crate::process::terminal_settings(&master);
+            let stderr_probe =
+                matches!(exit, Exit::BrokenStderr).then(|| stderr.try_clone().unwrap());
             let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
             command
                 .env_clear()
@@ -150,9 +347,9 @@ fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
                 .arg("--workspace")
                 .arg(&workspace)
                 .args(["--provider", "custom:local", "--model", "model-1", "cancel"])
-                .stdin(Stdio::from(slave.try_clone().unwrap()))
+                .stdin(Stdio::from(slave))
                 .stdout(Stdio::piped())
-                .stderr(Stdio::from(slave));
+                .stderr(Stdio::from(stderr));
             if linear {
                 command.arg("--screen-reader");
             }
@@ -160,80 +357,161 @@ fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
             let mut child = ChildGuard::new(command.spawn().unwrap());
             drop(command);
             let pid = Pid::from_raw(child.child().id().try_into().unwrap()).unwrap();
-            let mut queries = 0;
             let mut declined = false;
             let mut released = false;
             let mut suspended = false;
             let mut exited = false;
-            let output = crate::process::capture_terminal(
-                child.child(),
-                master,
-                Duration::from_secs(20),
-                512 * 1024,
-                |bytes| {
-                    let count = bytes.windows(4).filter(|part| *part == b"\x1b[6n").count();
-                    assert!(count <= 8, "native cursor-query bound");
-                    for _ in queries..count {
-                        input.write_all(b"\x1b[1;1R").unwrap();
-                    }
-                    queries = count;
-                    crate::process::decline_workspace_consent(&mut input, bytes, &mut declined);
-                    if !released && ready.try_recv().is_ok() {
-                        match exit {
-                            Exit::Term => kill_process(pid, Signal::TERM).unwrap(),
-                            Exit::Hangup => kill_process(pid, Signal::HUP).unwrap(),
-                            Exit::Cancel => kill_process(pid, Signal::INT).unwrap(),
-                            Exit::Suspend => kill_process(pid, Signal::TSTP).unwrap(),
-                            Exit::Failure => {}
+            let output = if let Some(mut probe) = stderr_probe {
+                use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+                let mut master = master;
+                let flags = fcntl_getfl(&master).unwrap();
+                fcntl_setfl(&master, flags | OFlags::NONBLOCK).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(15);
+                let mut transcript = Vec::new();
+                loop {
+                    let mut bytes = [0; 4096];
+                    match master.read(&mut bytes) {
+                        Ok(0) => panic!("native stderr closed before the fault"),
+                        Ok(count) => {
+                            assert!(transcript.len() + count <= 512 * 1024);
+                            transcript.extend_from_slice(&bytes[..count]);
                         }
-                        released = true;
-                        if !matches!(exit, Exit::Suspend) {
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                            ) => {}
+                        Err(error) => panic!("native stderr read: {error}"),
+                    }
+                    crate::process::decline_workspace_consent(
+                        input.as_mut().unwrap(),
+                        &transcript,
+                        &mut declined,
+                    );
+                    if ready.try_recv().is_ok() {
+                        break;
+                    }
+                    assert!(Instant::now() < deadline, "native renderer fault admission");
+                    assert!(
+                        child.child().try_wait().unwrap().is_none(),
+                        "native product exited before fault"
+                    );
+                    thread::yield_now();
+                }
+                assert!(!transcript.windows(4).any(|part| part == b"\x1b[6n"));
+                drop(master);
+                let flags = fcntl_getfl(&probe).unwrap();
+                fcntl_setfl(&probe, flags | OFlags::NONBLOCK).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    match probe.write(b"x") {
+                        Err(error) if error.raw_os_error() == Some(nix::libc::EIO) => break,
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                            ) => {}
+                        Ok(_) => {}
+                        Err(error) => panic!("native stderr fault probe: {error}"),
+                    }
+                    assert!(Instant::now() < deadline, "native stderr fault missing");
+                    thread::yield_now();
+                }
+                drop(probe);
+                input
+                    .as_mut()
+                    .unwrap()
+                    .write_all(if linear { b"x\r" } else { b"x" })
+                    .unwrap();
+                released = true;
+                release_tx.send(()).unwrap();
+                let mut output = crate::process::capture_terminal(
+                    child.child(),
+                    input.as_ref().unwrap().try_clone().unwrap(),
+                    Duration::from_secs(20),
+                    512 * 1024,
+                    |_| {},
+                );
+                transcript.extend_from_slice(&output.stderr);
+                output.stderr = transcript;
+                output
+            } else {
+                crate::process::capture_terminal(
+                    child.child(),
+                    master,
+                    Duration::from_secs(20),
+                    512 * 1024,
+                    |bytes| {
+                        assert!(!bytes.windows(4).any(|part| part == b"\x1b[6n"));
+                        if let Some(input) = &mut input {
+                            crate::process::decline_workspace_consent(input, bytes, &mut declined);
+                        }
+                        if !released && ready.try_recv().is_ok() {
+                            match exit {
+                                Exit::Term => kill_process(pid, Signal::TERM).unwrap(),
+                                Exit::Hangup => kill_process(pid, Signal::HUP).unwrap(),
+                                Exit::Cancel => kill_process(pid, Signal::INT).unwrap(),
+                                Exit::Suspend => kill_process(pid, Signal::TSTP).unwrap(),
+                                Exit::Failure => {}
+                                Exit::PtyLoss => {
+                                    drop(input.take());
+                                    drop(input_master.take());
+                                }
+                                Exit::BrokenStderr => {
+                                    unreachable!("separate native output fault owner")
+                                }
+                            }
+                            released = true;
+                            if !matches!(exit, Exit::Suspend) {
+                                release_tx.send(()).unwrap();
+                            }
+                        }
+                        if released
+                            && matches!(exit, Exit::Suspend)
+                            && !suspended
+                            && let Some(status) = waitid(
+                                WaitId::Pid(pid),
+                                WaitIdOptions::STOPPED
+                                    | WaitIdOptions::NOHANG
+                                    | WaitIdOptions::NOWAIT,
+                            )
+                            .unwrap()
+                            && status.stopped()
+                        {
+                            restored(input.as_ref().unwrap(), &before);
+                            kill_process(pid, Signal::CONT).unwrap();
+                            kill_process(pid, Signal::TERM).unwrap();
                             release_tx.send(()).unwrap();
+                            suspended = true;
                         }
-                    }
-                    if released
-                        && matches!(exit, Exit::Suspend)
-                        && !suspended
-                        && let Some(status) = waitid(
-                            WaitId::Pid(pid),
-                            WaitIdOptions::STOPPED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
-                        )
-                        .unwrap()
-                        && status.stopped()
-                    {
-                        restored(&input, &before);
-                        kill_process(pid, Signal::CONT).unwrap();
-                        kill_process(pid, Signal::TERM).unwrap();
-                        release_tx.send(()).unwrap();
-                        suspended = true;
-                    }
-                    let expected = if matches!(exit, Exit::Failure) {
-                        b"Status: failed".as_slice()
-                    } else {
-                        b"Status: cancelled".as_slice()
-                    };
-                    if released
-                        && !exited
-                        && matches!(exit, Exit::Cancel | Exit::Failure)
-                        && (if linear {
-                            bytes
-                                .windows(b"Input:".len())
-                                .enumerate()
-                                .any(|(offset, part)| {
-                                    part == b"Input:"
-                                        && bytes[..offset]
-                                            .windows(expected.len())
-                                            .any(|part| part == expected)
-                                })
+                        let expected = if matches!(exit, Exit::Failure) {
+                            b"Status: failed".as_slice()
                         } else {
-                            bytes.windows(expected.len()).any(|part| part == expected)
-                        })
-                    {
-                        kill_process(pid, Signal::TERM).unwrap();
-                        exited = true;
-                    }
-                },
-            );
+                            b"Status: cancelled".as_slice()
+                        };
+                        if released
+                            && !exited
+                            && matches!(exit, Exit::Cancel | Exit::Failure)
+                            && (if linear {
+                                bytes
+                                    .windows(b"Input:".len())
+                                    .enumerate()
+                                    .any(|(offset, part)| {
+                                        part == b"Input:"
+                                            && bytes[..offset]
+                                                .windows(expected.len())
+                                                .any(|part| part == expected)
+                                    })
+                            } else {
+                                bytes.windows(expected.len()).any(|part| part == expected)
+                            })
+                        {
+                            kill_process(pid, Signal::TERM).unwrap();
+                            exited = true;
+                        }
+                    },
+                )
+            };
             assert!(
                 released && declined,
                 "native {linear:?} {exit:?} admission was not exercised: {:?}",
@@ -250,7 +528,18 @@ fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
                 output.stdout.is_empty(),
                 "cancel/failure must emit no answer"
             );
-            restored(&input, &before);
+            assert!(!output.stderr.windows(4).any(|part| part == b"\x1b[6n"));
+            if matches!(exit, Exit::PtyLoss) {
+                assert_eq!(
+                    nix::sys::termios::tcgetattr(terminal_probe.as_ref().unwrap()).unwrap_err(),
+                    nix::errno::Errno::ENOTTY,
+                    "the lost controlling terminal must be disconnected"
+                );
+                restored(output_master.as_ref().unwrap(), &stderr_before);
+                drop(output_master);
+            } else {
+                restored(input.as_ref().unwrap(), &before);
+            }
             assert_eq!(suspended, matches!(exit, Exit::Suspend));
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()

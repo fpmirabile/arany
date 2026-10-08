@@ -6,7 +6,7 @@ Arany can continue a primary AgentRun through file operations, commands, portabl
 
 Folder consent and native Tool capability are independent. On platforms without an implemented enforcer, including macOS, attached chat remains available without Tools even after trust is remembered. `/permissions` uses the same consent choices; Shift+Tab reports the native restriction without enabling authority. Explicit `--tools` continues to reject unavailable protection. Trust alone never supplies missing OS protection, and no unconfined Tool executes.
 
-The complete harness requires equivalent granted file operations, commands, Skills and local MCP across supported operating systems, with the same permission, resource, cancellation and durable-result contract. Native enforcement mechanisms may differ. The current macOS read-only fallback is an implementation gap tracked by [the native Tool work](../../planning/native-macos/README.md#remaining-execution); successful chat and refusal checks do not establish this functionality.
+The complete harness requires equivalent granted file operations, commands, Skills and local MCP across supported operating systems, with the same permission, isolation, cancellation and durable-result contract. Resource guarantees differ explicitly by native profile as defined below. The current macOS read-only fallback is an implementation gap tracked by [the native Tool work](../../planning/native-macos/README.md#remaining-execution); successful chat and refusal checks do not establish this functionality.
 
 ```sh
 target/debug/arany --tools
@@ -128,7 +128,8 @@ Discovery returns a digest of each admitted complete tool definition. A later ca
 | Project snapshot | 32 MiB; 2,048 file/empty-directory entries; 8,192 scanned directory entries; depth 16 |
 | File operation | 1 MiB input file; reads page at most 4,096 UTF-8 bytes; writes/edit strings at most 8 KiB |
 | Runtime resources | 96 MiB aggregate copied executables/inputs/Skills; executable 32 MiB, extra input 1 MiB, Skill file 16 KiB |
-| Processes | 512 MiB aggregate memory, no swap, group OOM termination, 64 processes/threads; 25% of one CPU |
+| Linux processes | 512 MiB aggregate memory, no swap, group OOM termination, 64 processes/threads; 25% of one CPU |
+| macOS processes | Supervised aggregate resident-memory threshold 512 MiB and processes/threads threshold 64; nominal 10-ms sampling. Hard inherited CPU-time limit 15 seconds per process; no aggregate CPU rate quota. Native enforcement remains unimplemented. |
 | Private storage | Separate 64 MiB scratch and 64 MiB writable project tmpfs; no persistent generic-command changes |
 | Time | Run 300 seconds; each unit at most 60 seconds, command capture 50 seconds, MCP dialogue 40 seconds; finite startup/cleanup and parent deadlines |
 | Tool loop | 16 proposals/effects shared across primary planning/synthesis; model-step receipt ceiling 32; children retain their existing maximum of 8 one-call reasoning tasks |
@@ -137,6 +138,30 @@ Discovery returns a digest of each admitted complete tool definition. A later ca
 | MCP | 128 KiB frame; 4 pages, 128 tools and 256 KiB catalog; 64 incoming server messages; bounded schema depth/nodes/regex; no reference fetch |
 
 List/search return at most 64 rows and explicitly indicate possible truncation. Oversized requests/results otherwise reject whole records. This is a finite base, not automatic truncation of arbitrary files or unlimited model context. Provider requests retain their own byte/token/deadline and route restrictions; ChatGPT still has a local-only output-acceptance cap, not a remote plan-usage guarantee.
+
+The accepted macOS resource profile terminates its entire owned unit when an
+observation exceeds a threshold or the resource observer fails. Its memory/task
+thresholds are supervised rather than kernel ceilings: scheduling delays and
+work between samples can exceed them or exhaust host resources before
+termination. Swap prohibition and kernel group-OOM enforcement are not claimed.
+The CPU limit applies independently to each process and does not bound the
+whole tree's cumulative CPU time or instantaneous rate. Wall-time, output,
+private-storage, offline isolation and complete descendant termination remain
+required. Commands and MCP execute native macOS binaries on the host and retain
+ordinary child-launch compatibility, including `posix_spawn`. A fork/exec-only
+profile does not satisfy this contract.
+
+Normalized intents and Guard receipts explicitly identify `macos_supervised`
+resource semantics, and the enforcement digest binds the effective native
+profile. Historical intents without this discriminator retain Linux kernel
+semantics and their original serialized digest; replay does not reinterpret
+their memory/process numbers as supervised thresholds. A receipt for another
+resource profile rejects. Acceptance of the resource contract does not enable
+dispatch before native isolation, supervision and cleanup are attested.
+
+Setting Darwin's `RLIMIT_CPU` soft and hard values to 15 seconds alone does not
+attest the required CPU termination: the native diagnostic can ignore `SIGXCPU`
+and exceed that time. A sufficient mechanism remains unimplemented.
 
 The minimum admitted result budget is 128 bytes. Mutation and failure receipts must fit it, retaining resource identity through the correlated intent rather than repeating an arbitrarily long path. An applied mutation with a lost completion stays uncertain; receipt overflow cannot turn it into an ordinary retryable failure.
 

@@ -677,8 +677,12 @@ pub(super) fn copy_seed() -> Result<(), ToolError> {
     Ok(())
 }
 
-pub(super) fn native(call: &ToolCall, config: &Config) -> Result<String, ToolError> {
-    let root = open_directory(Path::new("/workspace"))?;
+pub(super) fn native(
+    workspace: &Path,
+    call: &ToolCall,
+    config: &Config,
+) -> Result<String, ToolError> {
+    let root = open_directory(workspace)?;
     match call {
         ToolCall::Read {
             path,
@@ -700,7 +704,7 @@ pub(super) fn native(call: &ToolCall, config: &Config) -> Result<String, ToolErr
         ToolCall::List { path } | ToolCall::Search { path, .. } => {
             let path = if path == "." { "" } else { path.as_str() };
             if config.workspace_paths == ["."] && matches!(call, ToolCall::List { .. }) {
-                let rows = workspace_entries(Path::new("/workspace"), path, "")?;
+                let rows = workspace_entries(workspace, path, "")?;
                 return Ok(
                     json!({"entries":rows,"limit":64,"may_be_truncated":rows.len()>=64})
                         .to_string(),
@@ -860,7 +864,7 @@ fn replace(
                 .map_err(|_| ToolError::Operation)?;
         }
         verify()?;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             if expected.is_none() {
                 rustix::fs::renameat_with(
@@ -884,7 +888,7 @@ fn replace(
                 .map_err(|_| ToolError::Uncertain)?;
             Ok(json!({"sha256":hex_digest(bytes),"bytes":bytes.len()}).to_string())
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             Err(ToolError::ProtectionUnavailable)
         }

@@ -192,9 +192,14 @@ impl WorkspacePermissions {
         if !self.trusted {
             return Err(ToolError::Configuration);
         }
+        let (shell, root) = if cfg!(target_os = "macos") {
+            ("/bin/sh", "/bin")
+        } else {
+            ("/usr/bin/sh", "/usr")
+        };
         let executable =
-            std::fs::canonicalize("/usr/bin/sh").map_err(|_| ToolError::ProtectionUnavailable)?;
-        if !executable.starts_with("/usr") {
+            std::fs::canonicalize(shell).map_err(|_| ToolError::ProtectionUnavailable)?;
+        if !executable.starts_with(root) {
             return Err(ToolError::ProtectionUnavailable);
         }
         let executable = executable.to_str().ok_or(ToolError::Path)?.to_owned();

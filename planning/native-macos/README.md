@@ -14,7 +14,7 @@ Complete the native macOS coding-agent harness, including granted file operation
 
 Completed account-scope, migration and selected-item authorization behavior belongs to [the credential spec](../../docs/specs/credentials.md) and the remaining [ChatGPT contract](../../agents/chatgpt.md). Homogeneous folder consent and setup-to-chat restoration belong to [the terminal spec](../../docs/specs/terminal.md). [The Tool spec](../../docs/specs/tools.md) owns grants, isolation, resources, cancellation, replay and unavailable-platform rejection. These contracts replace the completed execution instructions.
 
-Native Tool enforcement remains unimplemented; ordinary chat and remembered trust do not complete the granted Tool lifecycle. Checked macOS ACL admission, isolated Keychain save/replacement/lock/token-deletion evidence, native clipboard PNG/text transport and debug active-terminal signal/failure coverage are implemented. Safe handle-relative nested file/Skill discovery is implemented independently of Guard dispatch. Native TLS chain/name coverage uses a generated client-local trust anchor; default system-trust and compiled-endpoint HTTPS process journeys remain open. [The dated native evidence record](../../docs/research/testing-strategy-for-rust-cli-harness.md#native-macos-baseline-2026-10-08) owns completed checks, review outcomes and the account-fixture incident; [next steps](../../NEXT_STEPS.md#beta-2-and-broader-release) owns current gaps and user checks.
+Native Tool enforcement remains unimplemented; ordinary chat and remembered trust do not complete the granted Tool lifecycle. Checked macOS ACL admission, isolated Keychain save/replacement/lock/token-deletion evidence, native clipboard PNG/text transport and debug active-terminal/consent signal/failure coverage are implemented. Safe handle-relative nested file/Skill discovery, native exclusive atomic file primitives and native executable pin admission are implemented independently of Guard dispatch. Intents and receipts distinguish the accepted resource profile while preserving legacy serialized digest bytes. Native TLS chain/name coverage uses a generated client-local trust anchor; default system-trust and compiled-endpoint HTTPS process journeys remain open. [The dated native evidence record](../../docs/research/testing-strategy-for-rust-cli-harness.md#native-macos-baseline-2026-10-08) owns completed checks, review outcomes and the account-fixture incident; [next steps](../../NEXT_STEPS.md#beta-2-and-broader-release) owns current gaps and user checks.
 
 ## Ownership, security and resources
 
@@ -35,7 +35,7 @@ Extend existing owners rather than duplicate their corpus. Run applicable [repos
 
 ## Remaining execution
 
-### Native Guard decision still required
+### Native Guard implementation
 
 A harmless native Seatbelt profile can execute outside the development sandbox,
 but that capability does not attest the common Tool profile. Per-process limits
@@ -45,18 +45,45 @@ enforcer satisfying those requirements has been implemented or attested; the
 availability check must continue failing closed. Handle-relative file admission
 and discovery cannot stand in for that enforcement.
 
-The requested native scope remains the default. A bounded Linux VM would be an
-alternative isolation design, not an already approved or installed dependency;
-its guest/image provenance, resources, transport and lifecycle need review before
-implementation. Do not silently choose that route or weaken the Tool contract.
-The [Tool spec](../../docs/specs/tools.md) remains authoritative for the required
-bounds. Native terminal, credential and clipboard changes preserve the Engine
+Commands and MCP servers must execute macOS binaries on the host and retain
+ordinary native child-launch compatibility, including `posix_spawn`, as confirmed
+by the user. A Linux VM and a fork/exec-only payload profile are outside the accepted scope. Evaluate native controls
+against the complete contract; additional implementation is preferable to a
+security shortcut, and missing controls cannot silently weaken the Tool contract.
+The user accepts supervised 512-MiB memory and 64-task thresholds with nominal
+10-ms sampling, plus a hard 15-second per-process CPU-time limit. The
+[Tool spec](../../docs/specs/tools.md#limits-and-failure-behavior) owns these native semantics and their
+explicit overshoot, swap and aggregate-CPU limitations. This acceptance does not
+establish a working enforcer. Native terminal, credential and clipboard changes preserve the Engine
 boundary; shared path validation and startup clearing need native Linux
 re-verification.
 
+#### Native enforcement design
+
+The candidate keeps host-native execution and the separate Guard. Policy, grants,
+credential/state exclusion, offline execution, disposable command changes, the
+one-use GO gate and conservative effect/replay semantics remain required. The
+resource differences must be reflected in normalized intents, effective-profile
+attestation and durable receipts before any macOS dispatch is enabled.
+
+| Dimension | Native candidate | Required evidence and limitation |
+|---|---|---|
+| Memory and tasks | Implement the accepted supervision contract from the Tool spec. | Confirm aggregation, observer failure, excess termination and effective-profile reporting without claiming peak prevention. |
+| CPU | Implement the accepted hard per-process CPU-time limit and existing wall-time deadline. No sufficient CPU mechanism is selected. | A native child inherits soft/hard `RLIMIT_CPU` values of 15 and cannot widen them, but ignoring `SIGXCPU` permits 17 CPU seconds before the finite diagnostic exits itself. This API alone does not meet the contract. Confirm uncatchable expiry, inheritance and resistance to disabling the selected enforcement. |
+| Storage | Separate fixed-capacity private native filesystems for disposable project data and scratch, each at most 64 MiB including metadata. | Prove capacity, private mount ownership, path exclusion, crash/error cleanup and refused dispatch when attachment or verification fails. Directory polling or per-file limits do not establish this aggregate ceiling. Not implemented or attested. |
+| Descendants | Retain a native process-unit identity independently of mutable process groups. No sufficient mechanism is selected. | Direct `setsid`/`setpgid` denial does not stop spawn attributes. Blocking `SYS_posix_spawn` makes Rust child launch fail with `EPERM`, although the tested system shell still works; the user rejected this compatibility restriction. Prove ordinary fork/spawn inheritance, signal isolation, escape resistance and complete cleanup before dispatch. |
+
+Use a narrow native implementation at the existing Guard boundary rather than a
+new daemon, crate or Tool framework. The supervisor receives the same pinned
+intent and closed channels, with no inherited Provider/account authority. The
+native availability gate remains closed during this review. An observer-only
+profile reports the accepted native contract; it cannot attest Linux's hard
+resource guarantees. Native single-process-only execution is not selected as a
+substitute for the requested command/MCP lifecycle.
+
 1. Implement native macOS Tool enforcement for the complete granted file/command/Skill/MCP lifecycle. Evaluate standard kernel/OS facilities against the common contract and attest the selected profile before dispatch. Extend native successful operation, rejection, cancellation/descendant cleanup, uncertain-effect and replay evidence. Refusal-only evidence does not complete this slice; unresolved native constraints remain named implementation gaps.
 2. Complete isolated native account setup/refresh/logout and cross-user evidence. Checked ACL admission and native save/read/replacement/locked/denied/token-deletion evidence are implemented; the isolated Keychain fixture rejects optimized overrides. Human permission-dialog review remains user-owned.
-3. Complete compiled-endpoint offline HTTPS and default system-trust evidence, optimized active-CLI isolation, and remaining native terminal loss/fault/picker/tmux owners. Debug active-terminal signal/cancellation/failure coverage and bounded clipboard PNG/text transport are implemented; named-pasteboard service coverage does not replace general-pasteboard UX review.
+3. Complete compiled-endpoint offline HTTPS and default system-trust evidence, optimized active-CLI isolation, and remaining partial-acquisition/picker/tmux owners. Debug active-terminal signal/cancellation/failure, physical controlling-PTY loss and dead-stderr coverage are implemented; native consent cancellation/signals and stderr disconnection before/after the prompt restore surviving ownership before setup or Session work. Ordinary error reporting preserves failure exit when stderr is unavailable. Native exported-owner unwind passes both presentations and profiles through the shared reader corpus; it does not prove arbitrary shipped-CLI panic sites. Bounded clipboard PNG/text transport is implemented; named-pasteboard service coverage does not replace general-pasteboard UX review.
 4. Keep the consolidated native evidence and user-owned VoiceOver/live checks in `NEXT_STEPS.md` current after each remaining slice. Do not delete this plan while native enforcement or process-owner implementation remains.
 
 ## Exit criteria

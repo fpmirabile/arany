@@ -319,23 +319,16 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
     }
     let mut access_authorized = true;
     if matches!(admission.entry, EntryMode::New) && !admission.setup_requested && !access_checked {
-        match setup::authorize_saved_access(
+        match authorize_or_notice(
             &mut terminal,
             &admission.workspace,
             &admission.defaults,
+            &mut setup_notice,
         )
-        .await
+        .await?
         {
-            Ok(true) => {}
-            Ok(false) => return Ok(()),
-            Err(setup::SetupError::Recoverable(error)) => {
-                append_notice(
-                    &mut setup_notice,
-                    &format!("Error: {error}; use /setup to review saved access"),
-                );
-                access_authorized = false;
-            }
-            Err(error) => return Err(error.into()),
+            Some(authorized) => access_authorized = authorized,
+            None => return Ok(()),
         }
     }
     if reuse_saved_selection && access_authorized {
@@ -389,26 +382,12 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         );
     }
     if admission.prompt.is_some() && matches!(admission.entry, EntryMode::New) {
-        if !access_authorized {
-            return Err(setup_notice.unwrap_or_else(|| "Saved access was not authorized".into()));
-        }
-        run::preflight_selected(
+        require_access(access_authorized, setup_notice.as_ref())?;
+        preflight_prompt(
             &admission.state_dir,
-            run::Selection {
-                workspace: &admission.workspace,
-                profile: admission
-                    .defaults
-                    .provider
-                    .as_deref()
-                    .ok_or("a prompt requires a selected Provider; run arany and use /setup")?,
-                model: admission
-                    .defaults
-                    .model
-                    .as_deref()
-                    .ok_or("a prompt requires a selected model; run arany and use /model")?,
-                effort: admission.defaults.effort,
-                account_id: admission.defaults.account_id,
-            },
+            &admission.workspace,
+            &admission.defaults,
+            PromptEntry::New,
         )
         .await?;
     }
@@ -418,43 +397,24 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
     }
     let (mut session_id, mut view) = start_session(&admission).await?;
     if !matches!(admission.entry, EntryMode::New) {
-        match setup::authorize_saved_access(&mut terminal, &admission.workspace, &view.defaults)
-            .await
+        match authorize_or_notice(
+            &mut terminal,
+            &admission.workspace,
+            &view.defaults,
+            &mut setup_notice,
+        )
+        .await?
         {
-            Ok(true) => {}
-            Ok(false) => return Ok(()),
-            Err(setup::SetupError::Recoverable(error)) => {
-                append_notice(
-                    &mut setup_notice,
-                    &format!("Error: {error}; use /setup to review saved access"),
-                );
-                access_authorized = false;
-            }
-            Err(error) => return Err(error.into()),
+            Some(authorized) => access_authorized = authorized,
+            None => return Ok(()),
         }
         if admission.prompt.is_some() {
-            if !access_authorized {
-                return Err(
-                    setup_notice.unwrap_or_else(|| "Saved access was not authorized".into())
-                );
-            }
-            run::preflight_selected(
+            require_access(access_authorized, setup_notice.as_ref())?;
+            preflight_prompt(
                 &admission.state_dir,
-                run::Selection {
-                    workspace: &admission.workspace,
-                    profile: view
-                        .defaults
-                        .provider
-                        .as_deref()
-                        .ok_or("a prompt requires a selected Provider")?,
-                    model: view
-                        .defaults
-                        .model
-                        .as_deref()
-                        .ok_or("a prompt requires a selected model")?,
-                    effort: view.defaults.effort,
-                    account_id: view.defaults.account_id,
-                },
+                &admission.workspace,
+                &view.defaults,
+                PromptEntry::Existing,
             )
             .await?;
         }
@@ -526,11 +486,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
     .map(Feedback::History);
     let mut empty_interrupt = None::<Instant>;
     if let Some(prompt) = admission.prompt.clone() {
-        if !access_authorized {
-            return Err(notice
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "Saved access was not authorized".into()));
-        }
+        require_access(access_authorized, notice.as_ref())?;
         active::validate_objective_inputs(&admission, &prompt)?;
         materialize_session(&admission, &mut session_id, &mut view).await?;
         terminal
@@ -1420,6 +1376,82 @@ fn refresh_runtime_skills<N: From<String> + std::fmt::Display>(
             );
         }
     }
+}
+
+/// Runs saved-access authorization; `None` means the user cancelled, `Some(false)` a recoverable failure.
+async fn authorize_or_notice<N: From<String> + std::fmt::Display>(
+    terminal: &mut AttachedTerminal,
+    workspace: &Path,
+    defaults: &SessionDefaults,
+    notice: &mut Option<N>,
+) -> Result<Option<bool>, String> {
+    match setup::authorize_saved_access(terminal, workspace, defaults).await {
+        Ok(true) => Ok(Some(true)),
+        Ok(false) => Ok(None),
+        Err(setup::SetupError::Recoverable(error)) => {
+            append_notice(
+                notice,
+                &format!("Error: {error}; use /setup to review saved access"),
+            );
+            Ok(Some(false))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn require_access(authorized: bool, notice: Option<impl std::fmt::Display>) -> Result<(), String> {
+    if authorized {
+        return Ok(());
+    }
+    Err(notice.map_or_else(
+        || "Saved access was not authorized".into(),
+        |notice| notice.to_string(),
+    ))
+}
+
+/// Selects the missing-selection hints, which only a new conversation can act on.
+#[derive(Clone, Copy)]
+enum PromptEntry {
+    New,
+    Existing,
+}
+
+impl PromptEntry {
+    fn missing_provider(self) -> &'static str {
+        match self {
+            Self::New => "a prompt requires a selected Provider; run arany and use /setup",
+            Self::Existing => "a prompt requires a selected Provider",
+        }
+    }
+
+    fn missing_model(self) -> &'static str {
+        match self {
+            Self::New => "a prompt requires a selected model; run arany and use /model",
+            Self::Existing => "a prompt requires a selected model",
+        }
+    }
+}
+
+async fn preflight_prompt(
+    state_dir: &Path,
+    workspace: &Path,
+    defaults: &SessionDefaults,
+    entry: PromptEntry,
+) -> Result<(), String> {
+    run::preflight_selected(
+        state_dir,
+        run::Selection {
+            workspace,
+            profile: defaults
+                .provider
+                .as_deref()
+                .ok_or(entry.missing_provider())?,
+            model: defaults.model.as_deref().ok_or(entry.missing_model())?,
+            effort: defaults.effort,
+            account_id: defaults.account_id,
+        },
+    )
+    .await
 }
 
 fn append_notice<N: From<String> + std::fmt::Display>(notice: &mut Option<N>, message: &str) {

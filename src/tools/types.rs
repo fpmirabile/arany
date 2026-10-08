@@ -286,6 +286,22 @@ pub struct ToolLimits {
     pub max_processes: u32,
     pub scratch_bytes: u64,
     pub network: NetworkGrant,
+    #[serde(default, skip_serializing_if = "ToolResourceProfile::is_linux_kernel")]
+    pub resource_profile: ToolResourceProfile,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResourceProfile {
+    #[default]
+    LinuxKernel,
+    MacosSupervised,
+}
+
+impl ToolResourceProfile {
+    fn is_linux_kernel(&self) -> bool {
+        *self == Self::LinuxKernel
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -303,6 +319,11 @@ impl Default for ToolLimits {
             max_processes: MAX_PROCESSES,
             scratch_bytes: SCRATCH_BYTES,
             network: NetworkGrant::None,
+            resource_profile: if cfg!(target_os = "macos") {
+                ToolResourceProfile::MacosSupervised
+            } else {
+                ToolResourceProfile::LinuxKernel
+            },
         }
     }
 }

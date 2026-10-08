@@ -11,6 +11,10 @@ use arany::{
 use std::future::Future;
 use std::path::Path;
 
+const AUTHORIZE_TITLE: &str = "Authorize saved access";
+const AUTHORIZE_PROMPT: &str =
+    "Approve this Arany credential in your OS password store; Esc or Ctrl+C exits";
+
 pub(super) enum SetupError {
     Recoverable(String),
     Presentation(String),
@@ -185,8 +189,8 @@ pub(super) async fn authorize_saved_access(
         .filter(|(_, provider)| matches!(provider.as_str(), "openai" | "anthropic"));
     let Some(result) = await_operation(
         terminal,
-        "Authorize saved access",
-        "Approve this Arany credential in your OS password store; Esc or Ctrl+C exits",
+        AUTHORIZE_TITLE,
+        AUTHORIZE_PROMPT,
         credentials::authorize_keyring_slot(slot.clone(), expected),
     )
     .await?
@@ -253,8 +257,8 @@ async fn saved_native_defaults(
 ) -> Result<SavedDefaults, SetupError> {
     let Some(inspected) = await_operation(
         terminal,
-        "Authorize saved access",
-        "Approve this Arany credential in your OS password store; Esc or Ctrl+C exits",
+        AUTHORIZE_TITLE,
+        AUTHORIZE_PROMPT,
         credentials::inspect_interactive(workspace),
     )
     .await?

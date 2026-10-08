@@ -258,7 +258,24 @@ impl Program {
     pub(super) fn verify(&self) -> Result<(), ToolError> {
         let file = open_absolute(&self.executable)?;
         let bytes = read_regular(file, MAX_SNAPSHOT_BYTES)?;
-        if hex_digest(&bytes) != self.sha256 || !bytes.starts_with(b"\x7fELF") {
+        let native_binary = if cfg!(target_os = "macos") {
+            matches!(
+                bytes.get(..4),
+                Some(
+                    b"\xfe\xed\xfa\xce"
+                        | b"\xce\xfa\xed\xfe"
+                        | b"\xfe\xed\xfa\xcf"
+                        | b"\xcf\xfa\xed\xfe"
+                        | b"\xca\xfe\xba\xbe"
+                        | b"\xbe\xba\xfe\xca"
+                        | b"\xca\xfe\xba\xbf"
+                        | b"\xbf\xba\xfe\xca"
+                )
+            )
+        } else {
+            bytes.starts_with(b"\x7fELF")
+        };
+        if hex_digest(&bytes) != self.sha256 || !native_binary {
             return Err(ToolError::ChangedInput);
         }
         for input in &self.inputs {

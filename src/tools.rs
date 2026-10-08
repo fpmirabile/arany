@@ -66,7 +66,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 pub use types::{
     EffectIntent, GuardReceipt, MAX_SKILLS, NetworkGrant, ToolCall, ToolContext, ToolDisposition,
-    ToolLimits, ToolObservation, ToolPolicyReceipt,
+    ToolLimits, ToolObservation, ToolPolicyReceipt, ToolResourceProfile,
 };
 pub(crate) use types::{MAX_MODEL_STEPS, MAX_TOOL_CALLS, MAX_TOOL_CONTEXT_BYTES};
 

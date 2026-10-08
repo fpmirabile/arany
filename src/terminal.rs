@@ -143,6 +143,21 @@ struct RawMode {
     active: bool,
 }
 
+struct TerminalOutput(Option<Stderr>);
+
+impl Write for TerminalOutput {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        match self.0.as_mut() {
+            Some(output) => output.write(bytes),
+            None => Ok(bytes.len()),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.as_mut().map_or(Ok(()), Write::flush)
+    }
+}
+
 impl RawMode {
     fn acquire() -> io::Result<Self> {
         enable_raw_mode()?;
@@ -262,7 +277,7 @@ impl Drop for BracketedPaste {
 }
 
 pub struct AttachedTerminal {
-    terminal: Option<Terminal<CrosstermBackend<Stderr>>>,
+    terminal: Option<Terminal<CrosstermBackend<TerminalOutput>>>,
     history: History,
     input: Option<TerminalReader>,
     _raw_mode: Option<RawMode>,
@@ -1491,6 +1506,8 @@ impl AttachedTerminal {
                     first_error.get_or_insert(error);
                 }
             }
+            // Ratatui's Drop prints to stderr if cursor restoration fails.
+            *terminal.backend_mut() = CrosstermBackend::new(TerminalOutput(None));
         }
         if self.linear.take().is_some_and(|linear| linear.line_open)
             && let Err(error) = writeln!(io::stderr())

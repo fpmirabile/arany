@@ -26,10 +26,11 @@ fn preferences() -> [Vec<u8>; 2] {
 }
 
 pub(super) async fn roundtrip() {
-    if let Some(root) = std::env::var_os("ARANY_TEST_KEYCHAIN_ROOT") {
+    if let Some(root) = std::env::var_os(keyring_helper::macos::TEST_KEYCHAIN_ROOT_ENV) {
         let root = StateRoot::open_existing(Path::new(&root)).unwrap();
         let _interaction = SecKeychain::disable_user_interaction().unwrap();
-        let mut keychain = SecKeychain::open(root.path().join("arany-test.keychain-db")).unwrap();
+        let mut keychain =
+            SecKeychain::open(root.path().join(keyring_helper::macos::TEST_KEYCHAIN)).unwrap();
         let workspace = root.path().parent().unwrap().join("project");
         std::fs::create_dir(&workspace).unwrap();
         let account_root = root.path().parent().unwrap().join("account");
@@ -99,7 +100,7 @@ pub(super) async fn roundtrip() {
         let output = native_test_output(
             Command::new("/usr/bin/security")
                 .arg("lock-keychain")
-                .arg(root.path().join("arany-test.keychain-db"))
+                .arg(root.path().join(keyring_helper::macos::TEST_KEYCHAIN))
                 .env_clear(),
             None,
         );
@@ -168,7 +169,11 @@ pub(super) async fn roundtrip() {
             .account(DEFAULT_ACCOUNT)
             .delete();
         assert!(
-            denied.is_err_and(|error| matches!(error.code(), -25244 | -25308)),
+            denied.is_err_and(|error| matches!(
+                error.code(),
+                keyring_helper::macos::ERR_SEC_INVALID_OWNER_EDIT
+                    | keyring_helper::macos::ERR_SEC_INTERACTION_NOT_ALLOWED
+            )),
             "another test executable must not delete the item's native authorization"
         );
         assert_eq!(
@@ -183,7 +188,7 @@ pub(super) async fn roundtrip() {
     let before = preferences();
     let temp = tempfile::tempdir().unwrap();
     let root = StateRoot::admit(&temp.path().join("keychain")).unwrap();
-    let path = root.path().join("arany-test.keychain-db");
+    let path = root.path().join(keyring_helper::macos::TEST_KEYCHAIN);
     let _interaction = SecKeychain::disable_user_interaction().unwrap();
     let _keychain = CreateOptions::new()
         .password(PASSWORD)
@@ -201,7 +206,7 @@ pub(super) async fn roundtrip() {
         .args(["--exact", TEST, "--ignored", "--nocapture"])
         .env_clear()
         .env("ARANY_TEST_EXE", executable)
-        .env("ARANY_TEST_KEYCHAIN_ROOT", root.path())
+        .env(keyring_helper::macos::TEST_KEYCHAIN_ROOT_ENV, root.path())
         .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account"))
         .env("HOME", temp.path().join("legacy-home"))
         .env("XDG_STATE_HOME", temp.path().join("legacy-state"))

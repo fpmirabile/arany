@@ -5,7 +5,7 @@ use arany::StateRoot;
 use keyring::Entry;
 use keyring::Error;
 #[cfg(target_os = "macos")]
-mod macos;
+pub(super) mod macos;
 #[cfg(target_os = "macos")]
 use macos::Entry;
 use std::{
@@ -22,6 +22,9 @@ use uuid::Uuid;
 const DEADLINE: Duration = Duration::from_secs(5);
 const AUTHORIZATION_DEADLINE: Duration = Duration::from_secs(120);
 const CHATGPT_PROBE_SLOT: &str = "chatgpt-backend-probe";
+const EXIT_NOT_FOUND: u8 = 2;
+const EXIT_LOCKED: u8 = 3;
+const EXIT_IDENTITY_MISMATCH: u8 = 4;
 
 pub(super) fn probe_chatgpt_backend() -> Result<(), CredentialError> {
     invoke("probe", CHATGPT_PROBE_SLOT, None).map(|_| ())
@@ -147,11 +150,11 @@ fn helper_command(operation: &str, slot: &str) -> Result<(Command, usize), Crede
         }
     }
     #[cfg(all(target_os = "macos", debug_assertions))]
-    if let Some(root) = std::env::var_os("ARANY_TEST_KEYCHAIN_ROOT") {
-        command.env("ARANY_TEST_KEYCHAIN_ROOT", root);
+    if let Some(root) = std::env::var_os(macos::TEST_KEYCHAIN_ROOT_ENV) {
+        command.env(macos::TEST_KEYCHAIN_ROOT_ENV, root);
     }
     #[cfg(all(target_os = "macos", not(debug_assertions)))]
-    if std::env::var_os("ARANY_TEST_KEYCHAIN_ROOT").is_some() {
+    if std::env::var_os(macos::TEST_KEYCHAIN_ROOT_ENV).is_some() {
         return Err(CredentialError::Unavailable);
     }
     Ok((command, limit))
@@ -223,7 +226,7 @@ fn invoke_command(
         };
         let write_result = writer.map(|writer| writer.join());
         let output = reader.join().map_err(|_| CredentialError::Unavailable)??;
-        match status.code() {
+        match status.code().and_then(|code| u8::try_from(code).ok()) {
             Some(0) => {
                 if write_result.is_some_and(|result| !matches!(result, Ok(Ok(())))) {
                     return Err(CredentialError::Unavailable);
@@ -239,9 +242,11 @@ fn invoke_command(
                     Err(CredentialError::Unavailable)
                 }
             }
-            Some(2) if matches!(operation, "read" | "probe" | "authorize") => Ok(None),
-            Some(3) => Err(CredentialError::Locked),
-            Some(4) if operation == "authorize" => Err(CredentialError::InvalidAccount),
+            Some(EXIT_NOT_FOUND) if matches!(operation, "read" | "probe" | "authorize") => Ok(None),
+            Some(EXIT_LOCKED) => Err(CredentialError::Locked),
+            Some(EXIT_IDENTITY_MISMATCH) if operation == "authorize" => {
+                Err(CredentialError::InvalidAccount)
+            }
             _ => Err(CredentialError::Unavailable),
         }
     })
@@ -632,16 +637,16 @@ pub(super) fn main() -> ExitCode {
                 if valid_authorized_record(slot, &record, expected) {
                     ExitCode::SUCCESS
                 } else {
-                    ExitCode::from(4)
+                    ExitCode::from(EXIT_IDENTITY_MISMATCH)
                 }
             }
-            Err(Error::NoEntry) => ExitCode::from(2),
-            Err(Error::NoStorageAccess(_)) => ExitCode::from(3),
+            Err(Error::NoEntry) => ExitCode::from(EXIT_NOT_FOUND),
+            Err(Error::NoStorageAccess(_)) => ExitCode::from(EXIT_LOCKED),
             Err(_) => ExitCode::FAILURE,
         },
         "probe" => match Entry::new(SERVICE, slot).and_then(|entry| entry.get_password()) {
             Ok(_) | Err(Error::NoEntry) => ExitCode::SUCCESS,
-            Err(Error::NoStorageAccess(_)) => ExitCode::from(3),
+            Err(Error::NoStorageAccess(_)) => ExitCode::from(EXIT_LOCKED),
             Err(_) => ExitCode::FAILURE,
         },
         "read" => match Entry::new(SERVICE, slot).and_then(|entry| entry.get_password()) {
@@ -653,8 +658,8 @@ pub(super) fn main() -> ExitCode {
                 }
             }
             Ok(_) => ExitCode::FAILURE,
-            Err(Error::NoEntry) => ExitCode::from(2),
-            Err(Error::NoStorageAccess(_)) => ExitCode::from(3),
+            Err(Error::NoEntry) => ExitCode::from(EXIT_NOT_FOUND),
+            Err(Error::NoStorageAccess(_)) => ExitCode::from(EXIT_LOCKED),
             Err(_) => ExitCode::FAILURE,
         },
         "write" => {
@@ -676,13 +681,13 @@ pub(super) fn main() -> ExitCode {
             }
             match Entry::new(SERVICE, slot).and_then(|entry| entry.set_password(&record)) {
                 Ok(()) => ExitCode::SUCCESS,
-                Err(Error::NoStorageAccess(_)) => ExitCode::from(3),
+                Err(Error::NoStorageAccess(_)) => ExitCode::from(EXIT_LOCKED),
                 Err(_) => ExitCode::FAILURE,
             }
         }
         "delete" => match Entry::new(SERVICE, slot).and_then(|entry| entry.delete_credential()) {
             Ok(()) | Err(Error::NoEntry) => ExitCode::SUCCESS,
-            Err(Error::NoStorageAccess(_)) => ExitCode::from(3),
+            Err(Error::NoStorageAccess(_)) => ExitCode::from(EXIT_LOCKED),
             Err(_) => ExitCode::FAILURE,
         },
         _ => ExitCode::FAILURE,

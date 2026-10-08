@@ -55,7 +55,7 @@ pub use terminal::{
 pub use tools::{
     ApprovalInbox, ApprovalMode, EffectIntent, GuardReceipt, MAX_SKILLS, NetworkGrant,
     ProjectSkills, ToolApproval, ToolApprovals, ToolCall, ToolContext, ToolDisposition, ToolError,
-    ToolLimits, ToolObservation, ToolPolicyReceipt, WorkspacePermissions, configured_skill_names,
-    list_workspace_entries, mention_paths, native_protection_supported, project_skills,
-    runtime_skill_names, tool_guard_main,
+    ToolLimits, ToolObservation, ToolPolicyReceipt, ToolResourceProfile, WorkspacePermissions,
+    configured_skill_names, list_workspace_entries, mention_paths, native_protection_supported,
+    project_skills, runtime_skill_names, tool_guard_main,
 };

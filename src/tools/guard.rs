@@ -723,6 +723,7 @@ pub(super) fn helper_main() -> ExitCode {
             || task.intent.expires_at_ms <= now_ms()
             || !task.config.allows(&task.intent.call)
             || task.intent.enforcement_digest != enforcement_digest()?
+            || task.intent.limits.resource_profile != ToolLimits::default().resource_profile
         {
             return Err(ToolError::Configuration);
         }
@@ -836,7 +837,7 @@ pub(super) fn helper_main() -> ExitCode {
                     String::from_utf8(bytes).map_err(|_| ToolError::Operation)
                 }
                 ToolCall::McpList { .. } | ToolCall::McpCall { .. } => super::mcp::execute(&task.intent.call, &task.config).await,
-                call => super::fs::native(call, &task.config),
+                call => super::fs::native(Path::new("/workspace"), call, &task.config),
             }
         });
         let (disposition, output) = match result {

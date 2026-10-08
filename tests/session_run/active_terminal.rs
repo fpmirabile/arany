@@ -10,11 +10,7 @@ use std::{
     net::TcpListener,
     path::Path,
     process::{ChildStdin, Command, Stdio},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    },
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -277,11 +273,8 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
         attached.child().stdin.take().expect("PTY input"),
     ));
     let reader_input = Arc::clone(&input);
-    let awaiting_resume_query = Arc::new(AtomicBool::new(false));
-    let reader_awaiting_resume_query = Arc::clone(&awaiting_resume_query);
     let mut output = attached.child().stdout.take().expect("PTY output");
     let (stage_sender, stages) = mpsc::channel();
-    let (resume_query_sender, resume_queries) = mpsc::channel();
     let expect_idle = matches!(
         exit,
         ActiveExit::CtrlC
@@ -367,7 +360,6 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
         patterns.push(b"TTY_AFTER:");
         let mut next = 0;
         let mut search_from = 0;
-        let mut answered_cursor_queries = 0;
         loop {
             let mut chunk = [0; 4096];
             let count = output.read(&mut chunk).expect("PTY output bytes");
@@ -381,19 +373,10 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                 &bytes,
                 &mut declined,
             );
-            if inline {
-                let queries = bytes.windows(4).filter(|part| *part == b"\x1b[6n").count();
-                assert!(queries <= 32, "bounded cursor-position queries");
-                while answered_cursor_queries < queries {
-                    if reader_awaiting_resume_query.load(Ordering::Acquire) {
-                        resume_query_sender
-                            .send(())
-                            .expect("resumed cursor query stage");
-                    }
-                    write_input(&reader_input, b"\x1b[24;1R");
-                    answered_cursor_queries += 1;
-                }
-            }
+            assert!(
+                !bytes.windows(4).any(|part| part == b"\x1b[6n"),
+                "terminal ownership must not query cursor input"
+            );
             while next < patterns.len() {
                 let Some(offset) = bytes[search_from..]
                     .windows(patterns[next].len())
@@ -554,11 +537,17 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                 "raw mode released before stop"
             );
             suspended_settings = Some(stopped_settings);
-            awaiting_resume_query.store(true, Ordering::Release);
             kill_process(product_pid, Signal::CONT).expect("resume inline Run");
-            resume_queries
-                .recv_timeout(Duration::from_secs(10))
-                .expect("inline terminal reacquisition query");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while tty_settings(product_pid)
+                != *active_settings.as_ref().expect("active inline settings")
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "inline terminal did not reacquire"
+                );
+                thread::yield_now();
+            }
             assert_eq!(
                 tty_settings(product_pid),
                 *active_settings.as_ref().expect("active inline settings"),
@@ -811,17 +800,13 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     assert_eq!(result.status.success(), expect_idle, "attached exit class");
     assert_eq!(result.stderr, b"");
     let transcript = String::from_utf8(output).expect("PTY transcript UTF-8");
-    if inline && matches!(exit, ActiveExit::Signal(_, _)) {
-        assert_eq!(
-            transcript
-                .as_bytes()
-                .windows(4)
-                .filter(|part| *part == b"\x1b[6n")
-                .count(),
-            1,
-            "terminal restoration must not query input after stopping its reader"
-        );
-    }
+    assert!(
+        !transcript
+            .as_bytes()
+            .windows(4)
+            .any(|part| part == b"\x1b[6n"),
+        "terminal restoration must not query input after stopping its reader"
+    );
     assert_eq!(
         transcript_field(&transcript, "TTY_BEFORE:"),
         transcript_field(&transcript, "TTY_AFTER:"),
