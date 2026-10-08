@@ -201,7 +201,9 @@ pub(super) fn install(task: &Task) -> Result<(), ToolError> {
             return Err(ToolError::ProtectionUnavailable);
         }
     }
-    for syscall in [2_i32, 46, 48, 59, 66, 111, 184, 195, 244, 329, 330, 331, 380, 410, 422] {
+    for syscall in [
+        2_i32, 46, 48, 59, 66, 111, 184, 195, 244, 329, 330, 331, 380, 410, 422,
+    ] {
         // Darwin's syscall-number filter is 14; its variadic argument is a C int.
         if unsafe {
             sandbox_check(

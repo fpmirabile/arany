@@ -285,4 +285,77 @@ async fn native_file_journey_helper() {
         }
     }
     store.close().await.unwrap();
+    guard_refuses_before_go(root, &workspace, &outcome.run.tools[0].intent);
+}
+
+fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::EffectIntent) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let config_bytes = br#"{"version":1,"workspace_paths":["src"],"write":true,"commands":[],"skills":[],"mcp":[]}"#;
+    for (case, stage) in [
+        ("eof", "handshake"),
+        ("invalid_go", "handshake"),
+        ("stale_workspace", "workspace"),
+        ("resource_mismatch", "admission"),
+    ] {
+        let mut intent = admitted.clone();
+        intent.id = uuid::Uuid::now_v7();
+        intent.policy_digest = Sha256::digest(config_bytes).into();
+        intent.call = ToolCall::Write {
+            path: "src/never-dispatched.txt".into(),
+            expected_digest: None,
+            content: "must not be created".into(),
+        };
+        if case == "stale_workspace" {
+            intent.workspace_inode += 1;
+        }
+        if case == "resource_mismatch" {
+            intent.limits.resource_profile = ToolResourceProfile::LinuxKernel;
+        }
+        let task = serde_json::to_vec(
+            &json!({"config":serde_json::from_slice::<serde_json::Value>(config_bytes).unwrap(),
+            "intent":intent,"workspace":workspace,"guard_executable":env!("CARGO_BIN_EXE_arany")}),
+        )
+        .unwrap();
+        let child = Command::new(env!("CARGO_BIN_EXE_arany"))
+            .arg("--internal-tool-guard")
+            .env_clear()
+            .current_dir(root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut owned = crate::loopback::ChildGuard::new(child);
+        let mut stdin = owned.child().stdin.take().unwrap();
+        stdin.write_all(&task).unwrap();
+        stdin.write_all(b"\n").unwrap();
+        if case == "invalid_go" {
+            stdin.write_all(b"NO\n").unwrap();
+        }
+        drop(stdin);
+        let output = crate::process::capture(owned.child(), Duration::from_secs(10), 4096);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "native Guard refusal: {case}"
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&output.stderr).unwrap(),
+            json!({"stage":stage}),
+            "native Guard refusal stage: {case}"
+        );
+        assert!(
+            !workspace.join("src/never-dispatched.txt").exists(),
+            "pre-GO effect: {case}"
+        );
+        if stage == "handshake" {
+            let ready: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(ready["pid"].as_u64(), Some(u64::from(owned.child().id())));
+            assert_eq!(ready["profile_digest"], json!(admitted.enforcement_digest));
+        } else {
+            assert!(output.stdout.is_empty(), "premature Ready: {case}");
+        }
+    }
 }
