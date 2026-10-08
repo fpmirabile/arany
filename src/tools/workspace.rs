@@ -264,7 +264,7 @@ mod tests {
         std::fs::write(workspace.join(".env"), "synthetic excluded fixture").unwrap();
         std::os::unix::fs::symlink(temp.path(), workspace.join("outside")).unwrap();
         std::fs::hard_link(workspace.join("README.md"), workspace.join("linked.md")).unwrap();
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             assert_eq!(
                 fs::workspace_entries(&workspace, "", "").unwrap(),
@@ -276,7 +276,7 @@ mod tests {
                 "{nested:?}"
             );
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             assert_eq!(
                 fs::workspace_entries(&workspace, "", "").unwrap(),

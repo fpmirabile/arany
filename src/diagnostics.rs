@@ -6,9 +6,7 @@ const MAX_RECORD_BYTES: usize = 24 * 1024;
 static ROOT: OnceLock<Mutex<StateRoot>> = OnceLock::new();
 
 #[cfg(all(test, unix))]
-#[allow(dead_code)]
-#[path = "../tests/common/process.rs"]
-mod test_process;
+use crate::test_process;
 
 /// Enables bounded local diagnostics in debug builds after ordinary state admission.
 pub fn enable_development_diagnostics(root: &StateRoot) {

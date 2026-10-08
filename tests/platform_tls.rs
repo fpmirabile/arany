@@ -1,4 +1,4 @@
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 #[path = "common/process.rs"]
 pub mod process;
@@ -24,8 +24,28 @@ fn wait_bounded(mut child: Server) -> Output {
     process::capture(&mut child.0, Duration::from_secs(30), 64 * 1024)
 }
 
+fn openssl() -> std::path::PathBuf {
+    #[cfg(target_os = "linux")]
+    let path = Path::new("/usr/bin/openssl");
+    #[cfg(target_os = "macos")]
+    let path = [
+        "/opt/homebrew/opt/openssl@3/bin/openssl",
+        "/usr/local/opt/openssl@3/bin/openssl",
+    ]
+    .into_iter()
+    .map(Path::new)
+    .find(|path| path.is_file())
+    .expect(
+        "native TLS fixture requires installed OpenSSL 3 for an explicitly loopback-bound server",
+    );
+    std::fs::canonicalize(path).unwrap()
+}
+
 fn certificate(dir: &Path, name: &str) {
-    let root = Command::new("/usr/bin/openssl")
+    let configuration = dir.join(format!("{name}.cnf"));
+    std::fs::write(&configuration, "[req]\ndistinguished_name=dn\nx509_extensions=ca\nreq_extensions=leaf\nprompt=no\n[dn]\nCN=arany-test-root\n[ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n[leaf]\nsubjectAltName=DNS:localhost\nbasicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth\n").unwrap();
+    let root = Command::new(openssl())
+        .env_clear()
         .args([
             "req",
             "-x509",
@@ -36,12 +56,10 @@ fn certificate(dir: &Path, name: &str) {
             "1",
             "-subj",
             "/CN=arany-test-root",
-            "-addext",
-            "basicConstraints=critical,CA:TRUE",
-            "-addext",
-            "keyUsage=critical,keyCertSign,cRLSign",
-            "-keyout",
         ])
+        .arg("-config")
+        .arg(&configuration)
+        .arg("-keyout")
         .arg(dir.join(format!("{name}-ca.key")))
         .arg("-out")
         .arg(dir.join(format!("{name}-ca.pem")))
@@ -50,7 +68,8 @@ fn certificate(dir: &Path, name: &str) {
         .bounded_output()
         .expect("OpenSSL is required for the explicit TLS gate");
     assert!(root.status.success(), "generate test-owned root");
-    let request = Command::new("/usr/bin/openssl")
+    let request = Command::new(openssl())
+        .env_clear()
         .args([
             "req",
             "-new",
@@ -59,14 +78,10 @@ fn certificate(dir: &Path, name: &str) {
             "-nodes",
             "-subj",
             "/CN=localhost",
-            "-addext",
-            "subjectAltName=DNS:localhost",
-            "-addext",
-            "basicConstraints=critical,CA:FALSE",
-            "-addext",
-            "extendedKeyUsage=serverAuth",
-            "-keyout",
         ])
+        .arg("-config")
+        .arg(&configuration)
+        .arg("-keyout")
         .arg(dir.join(format!("{name}.key")))
         .arg("-out")
         .arg(dir.join(format!("{name}.csr")))
@@ -78,21 +93,18 @@ fn certificate(dir: &Path, name: &str) {
         request.status.success(),
         "generate test-owned certificate request"
     );
-    let signed = Command::new("/usr/bin/openssl")
+    let signed = Command::new(openssl())
+        .env_clear()
         .args(["x509", "-req", "-in"])
         .arg(dir.join(format!("{name}.csr")))
         .arg("-CA")
         .arg(dir.join(format!("{name}-ca.pem")))
         .arg("-CAkey")
         .arg(dir.join(format!("{name}-ca.key")))
-        .args([
-            "-CAcreateserial",
-            "-days",
-            "1",
-            "-copy_extensions",
-            "copy",
-            "-out",
-        ])
+        .args(["-CAcreateserial", "-days", "1"])
+        .arg("-extfile")
+        .arg(&configuration)
+        .args(["-extensions", "leaf", "-out"])
         .arg(dir.join(format!("{name}.pem")))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -105,7 +117,8 @@ fn server(dir: &Path, name: &str) -> (Server, u16) {
     let reservation = TcpListener::bind(("127.0.0.1", 0)).expect("reserve local port");
     let port = reservation.local_addr().expect("reserved address").port();
     drop(reservation);
-    let child = Command::new("/usr/bin/openssl")
+    let child = Command::new(openssl())
+        .env_clear()
         .args(["s_server", "-www", "-accept"])
         .arg(format!("127.0.0.1:{port}"))
         .arg("-cert")
@@ -120,13 +133,13 @@ fn server(dir: &Path, name: &str) -> (Server, u16) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while TcpStream::connect(("127.0.0.1", port)).is_err() {
         assert!(Instant::now() < deadline, "HTTPS peer did not start");
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::yield_now();
     }
     (child, port)
 }
 
 #[test]
-#[ignore = "explicit Linux TLS gate; requires /usr/bin/openssl"]
+#[ignore = "explicit native TLS chain/name gate; macOS requires OpenSSL 3 and uses a client-local test anchor"]
 fn platform_tls_chain_and_name() {
     let dir = tempfile::tempdir().expect("private TLS test files");
     certificate(dir.path(), "trusted");
@@ -142,6 +155,7 @@ fn platform_tls_chain_and_name() {
         .env("ARANY_TLS_WRONG_NAME_PORT", wrong_name_port.to_string())
         .env("ARANY_TLS_UNTRUSTED_PORT", untrusted_port.to_string())
         .env("SSL_CERT_FILE", dir.path().join("trusted-ca.pem"))
+        .env("ARANY_TLS_TEST_CA", dir.path().join("trusted-ca.pem"))
         .env_remove("SSL_CERT_DIR")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -228,7 +242,18 @@ fn platform_tls_child() {
 }
 
 fn client(port: u16) -> reqwest::Client {
-    reqwest::Client::builder()
+    let builder = reqwest::Client::builder();
+    #[cfg(target_os = "macos")]
+    let builder = builder.add_root_certificate(
+        reqwest::Certificate::from_pem(
+            &std::fs::read(
+                std::env::var_os("ARANY_TLS_TEST_CA").expect("isolated native trust anchor"),
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    );
+    builder
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())

@@ -7,6 +7,49 @@ fn config_value() -> Value {
     json!({"version":1,"workspace_paths":["src","Cargo.toml"],"write":false,"commands":[],"skills":[],"mcp":[]})
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn checked_tool_files_reject_links_traversal_and_special_objects() {
+    use nix::{sys::stat::Mode, unistd::mkfifo};
+    let temp = tempfile::tempdir().unwrap();
+    let root_path = temp.path().join("project");
+    std::fs::create_dir_all(root_path.join("nested")).unwrap();
+    std::fs::write(root_path.join("nested/file"), b"admitted").unwrap();
+    let root = super::fs::open_directory(&root_path).unwrap();
+    std::os::unix::fs::symlink("nested", root_path.join("linked")).unwrap();
+    std::os::unix::fs::symlink("file", root_path.join("nested/link")).unwrap();
+    std::fs::hard_link(root_path.join("nested/file"), root_path.join("hardlink")).unwrap();
+    mkfifo(&root_path.join("fifo"), Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
+    for path in [
+        "linked/file",
+        "nested/link",
+        "hardlink",
+        "fifo",
+        "../outside",
+        "nested/../nested/file",
+        "/etc/passwd",
+    ] {
+        assert!(
+            super::fs::open_file(&root, path)
+                .and_then(|file| super::fs::read_regular(file, 32))
+                .is_err(),
+            "hostile file case {path}"
+        );
+    }
+    std::fs::remove_file(root_path.join("hardlink")).unwrap();
+    assert_eq!(
+        super::fs::read_regular(super::fs::open_file(&root, "nested/file").unwrap(), 32).unwrap(),
+        b"admitted"
+    );
+    assert!(
+        super::fs::open_file(&root, ".")
+            .unwrap()
+            .metadata()
+            .unwrap()
+            .is_dir()
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn project_skill_discovery_preserves_grants_and_reports_missing_installation() {
@@ -84,7 +127,7 @@ fn project_skill_discovery_preserves_grants_and_reports_missing_installation() {
             }
         }
         let discovery = super::project_skills(&workspace);
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         if !matches!(layout, "absent" | "lock") {
             assert!(
                 matches!(&discovery, Err(super::ToolError::ProtectionUnavailable)),

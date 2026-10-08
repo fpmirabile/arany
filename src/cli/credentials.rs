@@ -2,7 +2,7 @@ use arany::{
     Effort, NativeApiCredentials, StateRoot, StoreError, resolve_native_effort,
     validate_native_model_id,
 };
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "macos")))]
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -10,7 +10,14 @@ use uuid::{Uuid, Version};
 
 mod keyring_helper;
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, target_os = "macos", debug_assertions))]
+#[path = "credentials/macos_tests.rs"]
+mod macos_tests;
+
+#[cfg(all(
+    test,
+    any(target_os = "linux", all(target_os = "macos", debug_assertions))
+))]
 pub(crate) fn native_test_output(
     command: &mut std::process::Command,
     input: Option<&[u8]>,
@@ -671,8 +678,10 @@ mod tests {
     #[cfg(target_os = "linux")]
     use std::process::Command;
 
+    #[cfg(not(target_os = "macos"))]
     struct RemoveTestAccount(String);
 
+    #[cfg(not(target_os = "macos"))]
     impl Drop for RemoveTestAccount {
         fn drop(&mut self) {
             if let Ok(entry) = Entry::new(SERVICE, &self.0) {
@@ -681,6 +690,14 @@ mod tests {
         }
     }
 
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    #[tokio::test]
+    #[ignore = "isolated native macOS Keychain gate; requires ARANY_TEST_EXE pointing to debug arany"]
+    async fn native_store_round_trips_an_isolated_synthetic_account() {
+        super::macos_tests::roundtrip().await;
+    }
+
+    #[cfg(not(target_os = "macos"))]
     #[tokio::test]
     #[ignore = "requires a native unlocked OS credential store"]
     async fn native_store_round_trips_an_isolated_synthetic_account() {

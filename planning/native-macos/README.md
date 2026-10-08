@@ -14,7 +14,7 @@ Complete the native macOS coding-agent harness, including granted file operation
 
 Completed account-scope, migration and selected-item authorization behavior belongs to [the credential spec](../../docs/specs/credentials.md) and the remaining [ChatGPT contract](../../agents/chatgpt.md). Homogeneous folder consent and setup-to-chat restoration belong to [the terminal spec](../../docs/specs/terminal.md). [The Tool spec](../../docs/specs/tools.md) owns grants, isolation, resources, cancellation, replay and unavailable-platform rejection. These contracts replace the completed execution instructions.
 
-Native Tool enforcement remains unimplemented; ordinary chat and remembered trust do not complete the granted Tool lifecycle. macOS private-file ACL admission, isolated Keychain lifecycle, native terminal/TLS process coverage and clipboard PNG transport also remain open. [The dated native evidence record](../../docs/research/testing-strategy-for-rust-cli-harness.md#native-macos-baseline-2026-10-08) owns completed checks, review outcomes and the account-fixture incident; [next steps](../../NEXT_STEPS.md#beta-2-and-broader-release) owns current gaps and user checks.
+Native Tool enforcement remains unimplemented; ordinary chat and remembered trust do not complete the granted Tool lifecycle. Checked macOS ACL admission, isolated Keychain save/replacement/lock/token-deletion evidence, native clipboard PNG/text transport and debug active-terminal signal/failure coverage are implemented. Safe handle-relative nested file/Skill discovery is implemented independently of Guard dispatch. Native TLS chain/name coverage uses a generated client-local trust anchor; default system-trust and compiled-endpoint HTTPS process journeys remain open. [The dated native evidence record](../../docs/research/testing-strategy-for-rust-cli-harness.md#native-macos-baseline-2026-10-08) owns completed checks, review outcomes and the account-fixture incident; [next steps](../../NEXT_STEPS.md#beta-2-and-broader-release) owns current gaps and user checks.
 
 ## Ownership, security and resources
 
@@ -35,10 +35,29 @@ Extend existing owners rather than duplicate their corpus. Run applicable [repos
 
 ## Remaining execution
 
+### Native Guard decision still required
+
+A harmless native Seatbelt profile can execute outside the development sandbox,
+but that capability does not attest the common Tool profile. Per-process limits
+and process-group termination do not by themselves bound aggregate memory,
+process count and scratch bytes or own descendants that leave a group. No native
+enforcer satisfying those requirements has been implemented or attested; the
+availability check must continue failing closed. Handle-relative file admission
+and discovery cannot stand in for that enforcement.
+
+The requested native scope remains the default. A bounded Linux VM would be an
+alternative isolation design, not an already approved or installed dependency;
+its guest/image provenance, resources, transport and lifecycle need review before
+implementation. Do not silently choose that route or weaken the Tool contract.
+The [Tool spec](../../docs/specs/tools.md) remains authoritative for the required
+bounds. Native terminal, credential and clipboard changes preserve the Engine
+boundary; shared path validation and startup clearing need native Linux
+re-verification.
+
 1. Implement native macOS Tool enforcement for the complete granted file/command/Skill/MCP lifecycle. Evaluate standard kernel/OS facilities against the common contract and attest the selected profile before dispatch. Extend native successful operation, rejection, cancellation/descendant cleanup, uncertain-effect and replay evidence. Refusal-only evidence does not complete this slice; unresolved native constraints remain named implementation gaps.
-2. Establish checked macOS ACL admission and isolated Keychain lifecycle evidence before claiming private native account support.
-3. Adapt existing terminal/TLS process owners to native macOS while preserving their bounded observation, restoration, signal and failure claims. Implement and prove bounded native clipboard PNG transport.
-4. Consolidate native evidence and user-owned VoiceOver/live checks in `NEXT_STEPS.md`; update the owning contracts and durable editing guidance after each slice.
+2. Complete isolated native account setup/refresh/logout and cross-user evidence. Checked ACL admission and native save/read/replacement/locked/denied/token-deletion evidence are implemented; the isolated Keychain fixture rejects optimized overrides. Human permission-dialog review remains user-owned.
+3. Complete compiled-endpoint offline HTTPS and default system-trust evidence, optimized active-CLI isolation, and remaining native terminal loss/fault/picker/tmux owners. Debug active-terminal signal/cancellation/failure coverage and bounded clipboard PNG/text transport are implemented; named-pasteboard service coverage does not replace general-pasteboard UX review.
+4. Keep the consolidated native evidence and user-owned VoiceOver/live checks in `NEXT_STEPS.md` current after each remaining slice. Do not delete this plan while native enforcement or process-owner implementation remains.
 
 ## Exit criteria
 

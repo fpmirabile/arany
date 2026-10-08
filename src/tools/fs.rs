@@ -63,6 +63,9 @@ pub(crate) fn open_absolute(path: &str) -> Result<File, ToolError> {
 }
 
 pub(super) fn open_file(root: &Dir, path: &str) -> Result<File, ToolError> {
+    if path != "." && !valid_relative(path, false) {
+        return Err(ToolError::Path);
+    }
     #[cfg(target_os = "linux")]
     {
         use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
@@ -79,7 +82,35 @@ pub(super) fn open_file(root: &Dir, path: &str) -> Result<File, ToolError> {
         .map_err(|_| ToolError::Path)?;
         Ok(File::from(fd))
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        use rustix::fs::{Mode, OFlags, openat};
+        use std::os::unix::fs::MetadataExt;
+        let device = identity(root)?.0;
+        let mut file = root
+            .try_clone()
+            .map_err(|_| ToolError::Path)?
+            .into_std_file();
+        for component in path.split('/') {
+            if !file.metadata().map_err(|_| ToolError::Path)?.is_dir() {
+                return Err(ToolError::Path);
+            }
+            file = File::from(
+                openat(
+                    &file,
+                    component,
+                    OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
+                    Mode::empty(),
+                )
+                .map_err(|_| ToolError::Path)?,
+            );
+            if file.metadata().map_err(|_| ToolError::Path)?.dev() != device {
+                return Err(ToolError::Path);
+            }
+        }
+        Ok(file)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = (root, path);
         Err(ToolError::ProtectionUnavailable)
@@ -187,7 +218,7 @@ impl Snapshot {
         config: &Config,
         include_workspace: bool,
     ) -> Result<Self, ToolError> {
-        let tmp = open_directory(Path::new("/tmp"))?;
+        let tmp = open_directory(snapshot_root())?;
         let name = format!("arany-tools-{}", uuid::Uuid::now_v7());
         let mut builder = DirBuilder::new();
         #[cfg(unix)]
@@ -199,7 +230,7 @@ impl Snapshot {
             .map_err(|_| ToolError::Operation)?;
         let dir = tmp.open_dir_nofollow(&name).map_err(|_| ToolError::Path)?;
         let snapshot = Self {
-            path: Path::new("/tmp").join(&name),
+            path: snapshot_root().join(&name),
             dir,
         };
         snapshot
@@ -277,9 +308,20 @@ impl Snapshot {
 
 impl Drop for Snapshot {
     fn drop(&mut self) {
-        if let (Ok(tmp), Some(name)) = (open_directory(Path::new("/tmp")), self.path.file_name()) {
+        if let (Ok(tmp), Some(name)) = (open_directory(snapshot_root()), self.path.file_name()) {
             let _ = tmp.remove_dir_all(name);
         }
+    }
+}
+
+fn snapshot_root() -> &'static Path {
+    #[cfg(target_os = "macos")]
+    {
+        Path::new("/private/tmp")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Path::new("/tmp")
     }
 }
 

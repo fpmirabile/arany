@@ -59,6 +59,7 @@ fn read(_cancelled: &AtomicBool) -> Result<ClipboardContent, &'static str> {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn read(cancelled: &AtomicBool) -> Result<ClipboardContent, &'static str> {
     use super::composer::MAX_DRAFT_BYTES;
+    #[cfg(target_os = "linux")]
     use std::process::Command;
     use std::time::{Duration, Instant};
 
@@ -171,23 +172,59 @@ fn read(cancelled: &AtomicBool) -> Result<ClipboardContent, &'static str> {
         }
     };
     #[cfg(target_os = "macos")]
-    let (mut command, image) = {
-        let mut command = Command::new(installed("pbpaste")?);
-        command.env_clear().env("LANG", "en_US.UTF-8");
-        (command, false)
-    };
-    let limit = if image {
-        crate::provider::MAX_IMAGE_BYTES
-    } else {
-        MAX_DRAFT_BYTES
-    };
-    let bytes = run_process(&mut command, cancelled, deadline, limit)?;
-    if image {
-        ImageAttachment::from_png(&bytes).map(ClipboardContent::Image)
-    } else {
-        String::from_utf8(bytes)
-            .map(ClipboardContent::Text)
-            .map_err(|_| "clipboard text is not valid UTF-8")
+    {
+        let mut command = native_command(None)?;
+        let bytes = run_process(
+            &mut command,
+            cancelled,
+            deadline,
+            MAX_DRAFT_BYTES.max(crate::provider::MAX_IMAGE_BYTES) + 2,
+        )?;
+        native_content(&bytes)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let limit = if image {
+            crate::provider::MAX_IMAGE_BYTES
+        } else {
+            MAX_DRAFT_BYTES
+        };
+        let bytes = run_process(&mut command, cancelled, deadline, limit)?;
+        if image {
+            ImageAttachment::from_png(&bytes).map(ClipboardContent::Image)
+        } else {
+            String::from_utf8(bytes)
+                .map(ClipboardContent::Text)
+                .map_err(|_| "clipboard text is not valid UTF-8")
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn native_command(name: Option<&str>) -> Result<std::process::Command, &'static str> {
+    let mut command = std::process::Command::new(installed("osascript")?);
+    command
+        .env_clear()
+        .args(["-l", "JavaScript", "-e", include_str!("clipboard.js")]);
+    command
+        .arg(name.unwrap_or(""))
+        .arg(crate::provider::MAX_IMAGE_BYTES.to_string())
+        .arg(super::composer::MAX_DRAFT_BYTES.to_string());
+    Ok(command)
+}
+
+#[cfg(target_os = "macos")]
+fn native_content(bytes: &[u8]) -> Result<ClipboardContent, &'static str> {
+    match bytes {
+        [b'P', b'\n', payload @ ..] => {
+            ImageAttachment::from_png(payload).map(ClipboardContent::Image)
+        }
+        [b'T', b'\n', payload @ ..] if payload.len() <= super::composer::MAX_DRAFT_BYTES => {
+            String::from_utf8(payload.to_vec())
+                .map(ClipboardContent::Text)
+                .map_err(|_| "clipboard text is not valid UTF-8")
+        }
+        _ => Err("clipboard contains no supported bounded text or PNG image"),
     }
 }
 
@@ -367,5 +404,136 @@ fn run_process(
             };
         }
         std::thread::park_timeout(Duration::from_millis(5));
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use std::{
+        process::Command,
+        time::{Duration, Instant},
+    };
+
+    const FIXTURE: &str = r#"
+ObjC.import('AppKit');
+ObjC.import('Foundation');
+function run(args) {
+    const board = $.NSPasteboard.pasteboardWithName(args[0]);
+    if (args.length === 1) { board.releaseGlobally; return; }
+    board.clearContents;
+    const data = $.NSData.dataWithContentsOfFile(args[2]);
+    if (!board.setDataForType(data, args[1])) { throw new Error('fixture write failed'); }
+    if (args.length === 4) { board.setStringForType('text fallback', 'public.utf8-plain-text'); }
+}
+"#;
+
+    struct Board(String);
+
+    impl Board {
+        fn invoke(&self, args: &[&str]) -> Result<Vec<u8>, &'static str> {
+            let mut command = Command::new(installed("osascript")?);
+            command
+                .env_clear()
+                .args(["-l", "JavaScript", "-e", FIXTURE, &self.0])
+                .args(args);
+            run_process(
+                &mut command,
+                &AtomicBool::new(false),
+                Instant::now() + Duration::from_secs(5),
+                1024,
+            )
+        }
+    }
+
+    impl Drop for Board {
+        fn drop(&mut self) {
+            let _ = self.invoke(&[]);
+        }
+    }
+
+    #[test]
+    fn native_clipboard_frames_keep_image_and_text_admission_closed() {
+        for bytes in [b"".as_slice(), b"X\ntext", b"T\n\xff", b"P\ninvalid"] {
+            assert!(native_content(bytes).is_err());
+        }
+        let mut oversized = b"T\n".to_vec();
+        oversized.extend(vec![b'x'; super::super::composer::MAX_DRAFT_BYTES + 1]);
+        assert!(native_content(&oversized).is_err());
+        let image = crate::provider::test_image();
+        let png = STANDARD.decode(image.base64()).unwrap();
+        let mut frame = b"P\n".to_vec();
+        frame.extend(&png);
+        assert!(
+            matches!(native_content(&frame), Ok(ClipboardContent::Image(value)) if value == image)
+        );
+        assert!(
+            matches!(native_content(b"T\nline\ntext"), Ok(ClipboardContent::Text(value)) if value == "line\ntext")
+        );
+    }
+
+    #[test]
+    #[ignore = "native named-pasteboard service gate; never accesses the general clipboard"]
+    fn native_named_pasteboard_png_text_and_rejection() {
+        let board = Board(format!("dev.Arany.test.{}", uuid::Uuid::now_v7()));
+        let fixture = tempfile::tempdir().unwrap();
+        let payload = fixture.path().join("payload");
+        let image = crate::provider::test_image();
+        for (kind, bytes, fallback, accepted) in [
+            (
+                "public.utf8-plain-text",
+                b"synthetic\ntext".to_vec(),
+                false,
+                true,
+            ),
+            (
+                "public.png",
+                STANDARD.decode(image.base64()).unwrap(),
+                true,
+                true,
+            ),
+            ("public.png", b"invalid PNG".to_vec(), true, false),
+            ("public.tiff", b"unsupported image".to_vec(), true, false),
+            (
+                "public.png",
+                vec![b'x'; crate::provider::MAX_IMAGE_BYTES + 1],
+                true,
+                false,
+            ),
+            (
+                "public.utf8-plain-text",
+                vec![b'x'; super::super::composer::MAX_DRAFT_BYTES + 1],
+                false,
+                false,
+            ),
+        ] {
+            std::fs::write(&payload, &bytes).unwrap();
+            let mut args = vec![kind, payload.to_str().unwrap()];
+            if fallback {
+                args.push("fallback");
+            }
+            assert!(
+                board.invoke(&args).is_ok(),
+                "isolated pasteboard fixture failed"
+            );
+            let mut command = native_command(Some(&board.0)).unwrap();
+            let result = run_process(
+                &mut command,
+                &AtomicBool::new(false),
+                Instant::now() + Duration::from_secs(5),
+                crate::provider::MAX_IMAGE_BYTES + 2,
+            )
+            .and_then(|bytes| native_content(&bytes));
+            assert_eq!(result.is_ok(), accepted, "native clipboard case {kind}");
+            if accepted {
+                match result.unwrap() {
+                    ClipboardContent::Image(value) => {
+                        assert!(value == image, "native PNG bytes changed")
+                    }
+                    ClipboardContent::Text(value) => assert_eq!(value.as_bytes(), bytes),
+                }
+            }
+        }
     }
 }

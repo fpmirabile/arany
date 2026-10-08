@@ -53,6 +53,10 @@ mod startup_trust;
 #[path = "session_run/active_terminal.rs"]
 mod active_terminal;
 
+#[cfg(all(target_os = "macos", debug_assertions))]
+#[path = "session_run/active_terminal/macos.rs"]
+mod active_terminal;
+
 #[cfg(target_os = "linux")]
 #[path = "session_run/session_picker.rs"]
 mod session_picker;
@@ -87,7 +91,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
         let flags = fcntl_getfl(std::io::stdin()).expect("inherited input flags");
         assert!(!flags.contains(OFlags::NONBLOCK));
         assert_eq!(fcntl_getfl(std::io::stderr()).unwrap(), flags);
-        let settings = nix::sys::termios::tcgetattr(std::io::stdin()).unwrap();
+        let settings = process::terminal_settings(std::io::stdin());
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -131,10 +135,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                     assert_eq!(observed, expected);
                 }
                 terminal.restore().unwrap();
-                assert_eq!(
-                    nix::sys::termios::tcgetattr(std::io::stdin()).unwrap(),
-                    settings
-                );
+                assert_eq!(process::terminal_settings(std::io::stdin()), settings);
                 assert_eq!(fcntl_getfl(std::io::stdin()).unwrap(), flags);
                 assert_eq!(fcntl_getfl(std::io::stderr()).unwrap(), flags);
                 if cycle == 0 {
@@ -332,6 +333,31 @@ fn account_path_ignores_session_state_environment() {
                 .any(|part| part == completed),
             "account-path case {case} did not complete exactly one test"
         );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn native_keychain_fixture_cannot_fall_back_to_default_store() {
+    let temp = tempfile::tempdir().unwrap();
+    let slot = format!("native-test-{}", uuid::Uuid::now_v7());
+    for root in [
+        std::path::PathBuf::from("relative"),
+        temp.path().join("missing"),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_arany"))
+            .args(["--internal-credential-helper", "read", &slot])
+            .env_clear()
+            .env("ARANY_TEST_KEYCHAIN_ROOT", root)
+            .current_dir(temp.path())
+            .bounded_output_for(std::time::Duration::from_secs(10), 4096)
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "fixture rejection must precede native store access"
+        );
+        assert!(output.stdout.is_empty() && output.stderr.is_empty());
     }
 }
 

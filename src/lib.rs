@@ -1,4 +1,9 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
+
+#[cfg(all(test, unix))]
+#[allow(dead_code)]
+#[path = "../tests/common/process.rs"]
+mod test_process;
 
 mod diagnostics;
 mod engine;

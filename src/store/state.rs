@@ -6,6 +6,9 @@ use directories::ProjectDirs;
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod acl;
 mod lock;
 pub(crate) use lock::SessionRunLock;
 
@@ -399,6 +402,7 @@ impl StateRoot {
 
 #[cfg(unix)]
 fn check_private_record_file(file: &cap_std::fs::File, limit: usize) -> Result<(), StoreError> {
+    check_acl(file, true)?;
     use cap_std::fs::MetadataExt;
 
     let metadata = file.metadata()?;
@@ -428,6 +432,7 @@ fn directory_identity(dir: &Dir) -> Result<(u64, u64), StoreError> {
 
 #[cfg(unix)]
 fn check_directory(dir: &Dir, leaf: bool) -> Result<(), StoreError> {
+    check_acl(dir, leaf)?;
     use cap_std::fs::MetadataExt;
     let meta = dir.dir_metadata()?;
     let mode = meta.mode();
@@ -476,6 +481,8 @@ fn prepare_database_file(dir: &Dir, create: bool) -> Result<(), StoreError> {
     #[cfg(unix)]
     nonblocking(&mut existing);
     let file = dir.open_with(DATABASE_FILE, &existing)?;
+    #[cfg(unix)]
+    check_acl(&file, true)?;
     let meta = file.metadata()?;
     if !meta.is_file() || meta.len() > MAX_DATABASE_BYTES as u64 {
         return Err(StoreError::StateNotPrivate);
@@ -487,6 +494,15 @@ fn prepare_database_file(dir: &Dir, create: bool) -> Result<(), StoreError> {
             return Err(StoreError::StateNotPrivate);
         }
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn check_acl(file: &impl std::os::fd::AsFd, private: bool) -> Result<(), StoreError> {
+    #[cfg(target_os = "macos")]
+    acl::check(file.as_fd(), private)?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = (file, private);
     Ok(())
 }
 

@@ -1,7 +1,13 @@
 use super::{CredentialError, DEFAULT_ACCOUNT, SERVICE, SavedAccount, admit_transport};
 use crate::cli::chatgpt::{MAX_TOKEN_RECORD_BYTES, valid_keyring_record};
 use arany::StateRoot;
-use keyring::{Entry, Error};
+#[cfg(not(target_os = "macos"))]
+use keyring::Entry;
+use keyring::Error;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+use macos::Entry;
 use std::{
     io::{IsTerminal, Read, Write},
     process::{Child, Command, ExitCode, Stdio},
@@ -139,6 +145,14 @@ fn helper_command(operation: &str, slot: &str) -> Result<(Command, usize), Crede
         if let Some(value) = std::env::var_os(name) {
             command.env(name, value);
         }
+    }
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    if let Some(root) = std::env::var_os("ARANY_TEST_KEYCHAIN_ROOT") {
+        command.env("ARANY_TEST_KEYCHAIN_ROOT", root);
+    }
+    #[cfg(all(target_os = "macos", not(debug_assertions)))]
+    if std::env::var_os("ARANY_TEST_KEYCHAIN_ROOT").is_some() {
+        return Err(CredentialError::Unavailable);
     }
     Ok((command, limit))
 }

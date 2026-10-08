@@ -255,7 +255,7 @@ pub(super) fn screen_terminal() -> io::Result<Terminal<CrosstermBackend<Stderr>>
             viewport: Viewport::Fullscreen,
         },
     )?;
-    terminal.clear()?;
+    ratatui::backend::Backend::clear(terminal.backend_mut())?;
     Ok(terminal)
 }
 

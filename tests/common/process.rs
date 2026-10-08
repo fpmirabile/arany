@@ -175,6 +175,20 @@ pub fn capture(child: &mut Child, duration: Duration, cap: usize) -> Output {
 }
 
 #[cfg(unix)]
+pub fn terminal_settings(terminal: impl AsFd) -> nix::sys::termios::Termios {
+    let settings = nix::sys::termios::tcgetattr(terminal).expect("native terminal settings");
+    #[cfg(target_os = "macos")]
+    {
+        let mut settings: nix::libc::termios = settings.into();
+        // Darwin sets this input-state bit when canonical input is restored.
+        settings.c_lflag &= !nix::sys::termios::LocalFlags::PENDIN.bits();
+        settings.into()
+    }
+    #[cfg(not(target_os = "macos"))]
+    settings
+}
+
+#[cfg(unix)]
 pub fn capture_terminal(
     child: &mut Child,
     terminal: std::fs::File,
@@ -271,7 +285,7 @@ fn drain(pipe: &mut Option<impl Read>, bytes: &mut Vec<u8>, cap: usize, channel:
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub fn decline_workspace_consent(
     input: &mut impl std::io::Write,
     transcript: &[u8],
