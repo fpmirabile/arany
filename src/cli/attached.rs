@@ -272,6 +272,11 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
     if !native_protection_supported() {
         append_notice(&mut setup_notice, permissions::UNAVAILABLE_NOTICE);
     }
+    #[cfg(target_os = "macos")]
+    append_notice(
+        &mut setup_notice,
+        "Guarded file Tools and Skills are available; commands and MCP are unavailable on macOS.",
+    );
     if admission.defaults.provider.as_deref() == Some("chatgpt") {
         admission.defaults.account_id = Some(
             chatgpt::selected_account_id(&admission.workspace)
@@ -890,8 +895,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                     access.mode().label()
                                 )
                             } else {
-                                "Read only · /permissions can enable guarded edits and commands"
-                                    .into()
+                                "Read only · /permissions can enable guarded Tools".into()
                             }));
                             admission.workspace_permissions = Some(access);
                             admission.tools = false;

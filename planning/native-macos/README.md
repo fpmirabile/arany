@@ -37,6 +37,23 @@ Extend existing owners rather than duplicate their corpus. Run applicable [repos
 
 ### Native Guard implementation
 
+Prioritize a complete native file-Tool slice through the existing Policy, Guard,
+GO gate and durable receipt. A separately supervised trusted worker admits
+List/Read/Search/Write/Edit/Mkdir and pinned Skill data, with default-denial
+Seatbelt rules, checked live Workspace handles, closed inherited descriptors and
+no payload execution or fork. Reset and unblock CPU expiry before installing
+rules that prohibit signal-mask/handler and limit changes. Observe the exact
+owned worker's memory/thread thresholds and kill/reap it on failure. This slice
+does not implement commands/MCP or replace their required spawn compatibility.
+Verify native integrated edits, hostile paths, denied host data/network/spawn,
+resource expiry, cancellation, uncertain effects and closed replay before
+enabling it; unsupported command/MCP grants continue rejecting locally. The
+existing Tool corpus and product journeys own this evidence. Keep the native
+FFI behind a safe private adapter and review ABI, process identity, descriptor
+ownership and initialized output lengths separately. No new dependency, daemon
+or Engine policy seam is required; Linux enforcement remains at its current
+boundary and needs native re-verification for shared changes.
+
 A harmless native Seatbelt profile can execute outside the development sandbox,
 but that capability does not attest the common Tool profile. Per-process limits
 and process-group termination do not by themselves bound aggregate memory,

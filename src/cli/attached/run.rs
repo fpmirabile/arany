@@ -845,9 +845,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_chat_without_tool_enforcement_preserves_turns_and_explicit_rejection() {
+    async fn native_chat_preserves_turns_with_file_tools_and_rejects_unsupported_grants() {
         const FIXTURE: &str = "ARANY_TEST_NATIVE_CHAT_ROOT";
-        const TEST: &str = "cli::attached::run::tests::native_chat_without_tool_enforcement_preserves_turns_and_explicit_rejection";
+        const TEST: &str = "cli::attached::run::tests::native_chat_preserves_turns_with_file_tools_and_rejects_unsupported_grants";
         let Some(root) = std::env::var_os(FIXTURE) else {
             let temp = tempfile::tempdir().unwrap();
             let pty = nix::pty::openpty(None, None).unwrap();
@@ -966,7 +966,7 @@ mod tests {
                     },
                 )
                 .await
-                .expect("ordinary greeting must not require native Tool protection");
+                .expect("ordinary greeting retains the admitted native file capability");
                 session = Some(outcome.session_id);
                 assert_eq!(outcome.run.status, RunStatus::Finished);
             }
@@ -978,7 +978,7 @@ mod tests {
                         .iter()
                         .all(|request| request.phase == AgentPhase::RootPlan
                             && request.objective == "hola hola"
-                            && request.tools.is_none()
+                            && request.tools.is_some() == permissions.is_some()
                             && request.collaboration == CollaborationPolicy::Single
                             && request.model == "synthetic-model"
                             && request.instructions.is_none()
@@ -1008,7 +1008,8 @@ mod tests {
                 && run.tools.is_empty()));
             store.close().await.unwrap();
             let private = state.join("tools.json");
-            std::fs::write(&private, br#"{"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+            std::fs::write(&private, serde_json::to_vec(&serde_json::json!({"version":1,"workspace_paths":["."],"write":true,
+                "commands":[{"name":"sh","executable":"/bin/sh","sha256":"0".repeat(64),"interpreter":true,"inputs":[]}],"skills":[],"mcp":[]})).unwrap()).unwrap();
             std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o600)).unwrap();
             let error = run_with_provider(
                 &state,
@@ -1037,8 +1038,8 @@ mod tests {
             )
             .await
             .err()
-            .expect("explicit unavailable Tools must reject");
-            assert_eq!(error, super::super::permissions::UNAVAILABLE_NOTICE);
+            .expect("explicit unsupported command grant must reject");
+            assert_eq!(error, arany::ToolError::ProtectionUnavailable.to_string());
             assert_eq!(
                 observed.lock().unwrap().len(),
                 2,
@@ -1070,10 +1071,17 @@ mod tests {
         ));
         assert_eq!(
             super::super::permissions::cycle(&mut composer),
-            super::super::permissions::UNAVAILABLE_NOTICE
+            if permissions.is_some() {
+                "Request approvals · Shift+Tab changes mode"
+            } else {
+                "Read only · use /permissions to trust this folder"
+            }
         );
         assert_eq!(composer.text(), "x");
-        assert_eq!(composer.approval_mode(), None);
+        assert_eq!(
+            composer.approval_mode(),
+            permissions.map(|_| ApprovalMode::Request)
+        );
         assert_eq!(std::fs::read(&trust_record).unwrap(), remembered);
         drop(terminal);
     }

@@ -15,6 +15,7 @@ pub(crate) const MAX_TOOL_CATALOG_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_FILE_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_SNAPSHOT_BYTES: usize = 32 * 1024 * 1024;
 pub(crate) const MAX_SNAPSHOT_FILES: usize = 2048;
+#[cfg(not(target_os = "macos"))]
 pub(crate) const MAX_RUNTIME_BYTES: usize = 96 * 1024 * 1024;
 pub(crate) const SCRATCH_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const MEMORY_BYTES: u64 = 512 * 1024 * 1024;

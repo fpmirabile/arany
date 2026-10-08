@@ -14,6 +14,10 @@ pub mod process;
 #[path = "session_run/tools.rs"]
 mod tools;
 
+#[cfg(all(target_os = "macos", debug_assertions))]
+#[path = "session_run/tools/macos.rs"]
+mod tools;
+
 #[cfg(unix)]
 #[path = "session_run/custom.rs"]
 mod custom;

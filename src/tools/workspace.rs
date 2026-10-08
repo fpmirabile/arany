@@ -1,5 +1,8 @@
 use super::approval::ApprovalMode;
-use super::config::{Config, Program};
+use super::config::Config;
+#[cfg(not(target_os = "macos"))]
+use super::config::Program;
+#[cfg(not(target_os = "macos"))]
 use super::types::{MAX_SNAPSHOT_BYTES, hex_digest};
 use super::{ToolError, fs};
 use crate::store::StateRoot;
@@ -192,29 +195,31 @@ impl WorkspacePermissions {
         if !self.trusted {
             return Err(ToolError::Configuration);
         }
-        let (shell, root) = if cfg!(target_os = "macos") {
-            ("/bin/sh", "/bin")
-        } else {
-            ("/usr/bin/sh", "/usr")
-        };
-        let executable =
-            std::fs::canonicalize(shell).map_err(|_| ToolError::ProtectionUnavailable)?;
-        if !executable.starts_with(root) {
-            return Err(ToolError::ProtectionUnavailable);
-        }
-        let executable = executable.to_str().ok_or(ToolError::Path)?.to_owned();
-        let bytes = fs::read_regular(fs::open_absolute(&executable)?, MAX_SNAPSHOT_BYTES)?;
-        let config = Config {
-            version: 1,
-            workspace_paths: vec![".".into()],
-            write: true,
-            commands: vec![Program {
+        #[cfg(not(target_os = "macos"))]
+        let commands = {
+            let (shell, root) = ("/usr/bin/sh", "/usr");
+            let executable =
+                std::fs::canonicalize(shell).map_err(|_| ToolError::ProtectionUnavailable)?;
+            if !executable.starts_with(root) {
+                return Err(ToolError::ProtectionUnavailable);
+            }
+            let executable = executable.to_str().ok_or(ToolError::Path)?.to_owned();
+            let bytes = fs::read_regular(fs::open_absolute(&executable)?, MAX_SNAPSHOT_BYTES)?;
+            vec![Program {
                 name: "sh".into(),
                 executable,
                 sha256: hex_digest(&bytes),
                 interpreter: true,
                 inputs: Vec::new(),
-            }],
+            }]
+        };
+        #[cfg(target_os = "macos")]
+        let commands = Vec::new();
+        let config = Config {
+            version: 1,
+            workspace_paths: vec![".".into()],
+            write: true,
+            commands,
             skills: Vec::new(),
             mcp: Vec::new(),
         };
@@ -369,6 +374,13 @@ mod tests {
         let mut access = WorkspacePermissions::load(&path, &root).unwrap();
         assert!(!access.is_trusted());
         access.save(&root, true, ApprovalMode::AutoEdits).unwrap();
+        #[cfg(target_os = "macos")]
+        {
+            let config = access.config(&path).unwrap();
+            assert!(config.write);
+            assert_eq!(config.workspace_paths, ["."]);
+            assert!(config.commands.is_empty() && config.mcp.is_empty());
+        }
         let restored = WorkspacePermissions::load(&path, &root).unwrap();
         assert!(restored.is_trusted());
         assert_eq!(restored.mode(), ApprovalMode::AutoEdits);

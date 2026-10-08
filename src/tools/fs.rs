@@ -6,8 +6,11 @@ use cap_std::fs::{Dir, DirBuilder, OpenOptions};
 use serde_json::json;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(target_os = "macos"))]
+use std::path::PathBuf;
 
+#[cfg(not(target_os = "macos"))]
 pub(super) struct Snapshot {
     pub path: PathBuf,
     pub dir: Dir,
@@ -212,6 +215,7 @@ fn put_entry(root: &Dir, entry: Entry) -> Result<(), ToolError> {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 impl Snapshot {
     pub(super) fn create(
         workspace: &Dir,
@@ -306,6 +310,7 @@ impl Snapshot {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 impl Drop for Snapshot {
     fn drop(&mut self) {
         if let (Ok(tmp), Some(name)) = (open_directory(snapshot_root()), self.path.file_name()) {
@@ -314,15 +319,9 @@ impl Drop for Snapshot {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn snapshot_root() -> &'static Path {
-    #[cfg(target_os = "macos")]
-    {
-        Path::new("/private/tmp")
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Path::new("/tmp")
-    }
+    Path::new("/tmp")
 }
 
 #[derive(Default)]
@@ -341,6 +340,7 @@ impl ScanBudget {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn charge_runtime(total: &mut usize, count: usize) -> Result<(), ToolError> {
     *total = total.checked_add(count).ok_or(ToolError::Limit)?;
     if *total > MAX_RUNTIME_BYTES {

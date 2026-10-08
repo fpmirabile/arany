@@ -7,16 +7,30 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{ExitCode, Stdio};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+#[cfg(not(target_os = "macos"))]
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
 const CAPTURE_BYTES: usize = 48 * 1024;
+#[cfg(not(target_os = "macos"))]
 const MANAGER_DEADLINE: Duration = Duration::from_secs(4);
 const PAYLOAD_DEADLINE: Duration = Duration::from_secs(50);
 pub(super) const RUNTIME_ROOT: &str = "/usr";
 
 #[cfg(target_os = "linux")]
 mod profile;
+
+#[cfg(target_os = "macos")]
+mod macos;
+
+pub(super) fn runtime_roots() -> &'static [&'static str] {
+    if cfg!(target_os = "macos") {
+        &["/System/Library", "/usr/lib"]
+    } else {
+        &[RUNTIME_ROOT]
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,6 +39,10 @@ struct Task {
     intent: EffectIntent,
     #[cfg(target_os = "linux")]
     parent_namespaces: profile::Namespaces,
+    #[cfg(target_os = "macos")]
+    workspace: std::path::PathBuf,
+    #[cfg(target_os = "macos")]
+    guard_executable: std::path::PathBuf,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -105,7 +123,11 @@ pub(super) fn check_available() -> Result<(), ToolError> {
         }
         Ok(())
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        macos::check_available()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         Err(ToolError::ProtectionUnavailable)
     }
@@ -118,12 +140,17 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
         bytes.extend_from_slice(&profile::profile_digest()?);
         Ok(digest(&bytes))
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        macos::enforcement_digest()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         Err(ToolError::ProtectionUnavailable)
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn manager_command(executable: &str) -> Command {
     let mut command = Command::new(executable);
     command.env_clear().env("PATH", "/usr/bin:/bin");
@@ -143,6 +170,7 @@ fn manager_command(executable: &str) -> Command {
     command
 }
 
+#[cfg(not(target_os = "macos"))]
 struct Unit {
     name: String,
     invocation: Option<String>,
@@ -150,6 +178,7 @@ struct Unit {
     kill: Option<cap_std::fs::File>,
 }
 
+#[cfg(not(target_os = "macos"))]
 impl Unit {
     async fn properties(&self) -> Result<serde_json::Value, ToolError> {
         let mut command = manager_command("/usr/bin/systemctl");
@@ -348,6 +377,7 @@ impl Unit {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 impl Drop for Unit {
     fn drop(&mut self) {
         self.kill_group();
@@ -360,12 +390,17 @@ pub(super) async fn execute(
     cancellation: RunCancellation,
 ) -> Result<ToolObservation, ToolError> {
     let mut dispatched = false;
-    match execute_inner(runtime, intent, cancellation, &mut dispatched).await {
+    #[cfg(target_os = "macos")]
+    let result = macos::execute_inner(runtime, intent, cancellation, &mut dispatched).await;
+    #[cfg(not(target_os = "macos"))]
+    let result = execute_inner(runtime, intent, cancellation, &mut dispatched).await;
+    match result {
         Err(error) if !dispatched => Ok(super::unstarted_observation(intent.clone(), error)),
         result => result,
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 async fn execute_inner(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
@@ -701,6 +736,8 @@ async fn capture(
 pub(super) fn helper_main() -> ExitCode {
     let mut stage = BootstrapStage::Admission;
     let result = (|| -> Result<(), ToolError> {
+        #[cfg(target_os = "macos")]
+        macos::bootstrap()?;
         let mut stdin = std::io::stdin().lock();
         let mut task = Vec::new();
         loop {
@@ -727,6 +764,15 @@ pub(super) fn helper_main() -> ExitCode {
         {
             return Err(ToolError::Configuration);
         }
+        #[cfg(target_os = "macos")]
+        {
+            stage = BootstrapStage::Capabilities;
+            macos::install(&task)?;
+        }
+        #[cfg(target_os = "macos")]
+        let workspace = task.workspace.as_path();
+        #[cfg(not(target_os = "macos"))]
+        let workspace = Path::new("/workspace");
         stage = BootstrapStage::Workspace;
         if matches!(
             task.intent.call,
@@ -736,10 +782,14 @@ pub(super) fn helper_main() -> ExitCode {
                 | ToolCall::Write { .. }
                 | ToolCall::Edit { .. }
                 | ToolCall::Mkdir { .. }
-        ) && super::fs::identity(&super::fs::open_directory(Path::new("/workspace"))?)?
+        ) && super::fs::identity(&super::fs::open_directory(workspace)?)?
             != (task.intent.workspace_device, task.intent.workspace_inode)
         {
             return Err(ToolError::ChangedInput);
+        }
+        #[cfg(target_os = "macos")]
+        if matches!(task.intent.call, ToolCall::Skill { .. }) {
+            load_skill_bytes(&task)?;
         }
         #[cfg(target_os = "linux")]
         {
@@ -788,9 +838,9 @@ pub(super) fn helper_main() -> ExitCode {
             pid: std::process::id(),
             #[cfg(target_os = "linux")]
             namespaces: profile::Namespaces::read()?,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             profile_digest: enforcement_digest()?,
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             profile_digest: [0; 32],
         };
         #[cfg(target_os = "linux")]
@@ -830,14 +880,9 @@ pub(super) fn helper_main() -> ExitCode {
                     let (status, out, err) = capture(command.spawn().map_err(|_| ToolError::Operation)?, (task.intent.limits.result_bytes as usize / 2).saturating_sub(128), PAYLOAD_DEADLINE).await?;
                     Ok(serde_json::json!({"exit_code":status.code(),"stdout":String::from_utf8(out).map_err(|_| ToolError::Operation)?,"stderr":String::from_utf8(err).map_err(|_| ToolError::Operation)?,"workspace_changes":"discarded"}).to_string())
                 }
-                ToolCall::Skill { name, resource } => {
-                    let path = format!("/skills/{name}/{}", resource.as_deref().unwrap_or("SKILL.md"));
-                    let bytes = super::fs::read_regular(super::fs::open_absolute(&path)?, MAX_TOOL_RESULT_BYTES)?;
-                    if resource.is_none() || resource.as_deref() == Some("SKILL.md") { super::skills::metadata(name, &bytes)?; }
-                    String::from_utf8(bytes).map_err(|_| ToolError::Operation)
-                }
+                ToolCall::Skill { .. } => load_skill(&task),
                 ToolCall::McpList { .. } | ToolCall::McpCall { .. } => super::mcp::execute(&task.intent.call, &task.config).await,
-                call => super::fs::native(Path::new("/workspace"), call, &task.config),
+                call => super::fs::native(workspace, call, &task.config),
             }
         });
         let (disposition, output) = match result {
@@ -913,6 +958,53 @@ pub(super) fn helper_main() -> ExitCode {
         let _ = serde_json::to_writer(std::io::stderr().lock(), &BootstrapFailure { stage });
         ExitCode::FAILURE
     }
+}
+
+fn load_skill_bytes(task: &Task) -> Result<Vec<u8>, ToolError> {
+    let ToolCall::Skill { name, resource } = &task.intent.call else {
+        return Err(ToolError::Configuration);
+    };
+    let resource = resource.as_deref().unwrap_or("SKILL.md");
+    #[cfg(target_os = "macos")]
+    let path = {
+        let skill = task
+            .config
+            .skills
+            .iter()
+            .find(|skill| &skill.name == name)
+            .ok_or(ToolError::Configuration)?;
+        Path::new(&skill.directory)
+            .join(resource)
+            .to_str()
+            .ok_or(ToolError::Path)?
+            .to_owned()
+    };
+    #[cfg(not(target_os = "macos"))]
+    let path = format!("/skills/{name}/{resource}");
+    let bytes = super::fs::read_regular(super::fs::open_absolute(&path)?, MAX_TOOL_RESULT_BYTES)?;
+    #[cfg(target_os = "macos")]
+    if task
+        .config
+        .skills
+        .iter()
+        .find(|skill| &skill.name == name)
+        .and_then(|skill| skill.files.get(resource))
+        != Some(&hex_digest(&bytes))
+    {
+        return Err(ToolError::ChangedInput);
+    }
+    Ok(bytes)
+}
+
+fn load_skill(task: &Task) -> Result<String, ToolError> {
+    let bytes = load_skill_bytes(task)?;
+    let ToolCall::Skill { name, resource } = &task.intent.call else {
+        return Err(ToolError::Configuration);
+    };
+    if resource.as_deref().unwrap_or("SKILL.md") == "SKILL.md" {
+        super::skills::metadata(name, &bytes)?;
+    }
+    String::from_utf8(bytes).map_err(|_| ToolError::Operation)
 }
 
 pub(super) fn payload(
