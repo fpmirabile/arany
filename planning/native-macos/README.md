@@ -14,7 +14,7 @@ Complete the native macOS coding-agent harness, including granted file operation
 
 Completed account-scope, migration and selected-item authorization behavior belongs to [the credential spec](../../docs/specs/credentials.md) and the remaining [ChatGPT contract](../../agents/chatgpt.md). Homogeneous folder consent and setup-to-chat restoration belong to [the terminal spec](../../docs/specs/terminal.md). [The Tool spec](../../docs/specs/tools.md) owns grants, isolation, resources, cancellation, replay and unavailable-platform rejection. These contracts replace the completed execution instructions.
 
-Native Tool enforcement remains unimplemented; ordinary chat and remembered trust do not complete the granted Tool lifecycle. Checked macOS ACL admission, isolated Keychain save/replacement/lock/token-deletion evidence, native clipboard PNG/text transport and debug active-terminal/consent signal/failure coverage are implemented. Safe handle-relative nested file/Skill discovery, native exclusive atomic file primitives and native executable pin admission are implemented independently of Guard dispatch. Intents and receipts distinguish the accepted resource profile while preserving legacy serialized digest bytes. Native TLS chain/name coverage uses a generated client-local trust anchor; default system-trust and compiled-endpoint HTTPS process journeys remain open. [The dated native evidence record](../../docs/research/testing-strategy-for-rust-cli-harness.md#native-macos-baseline-2026-10-08) owns completed checks, review outcomes and the account-fixture incident; [next steps](../../NEXT_STEPS.md#beta-2-and-broader-release) owns current gaps and user checks.
+Native file/Skill enforcement is implemented; complete command/MCP enforcement remains open. Ordinary chat and remembered trust do not complete that remaining lifecycle. Checked macOS ACL admission, isolated Keychain save/replacement/lock/token-deletion evidence, native clipboard PNG/text transport and debug active-terminal/consent signal/failure coverage are implemented. Safe handle-relative nested file/Skill discovery, native exclusive atomic file primitives and native executable pin admission are implemented independently of Guard dispatch. Intents and receipts distinguish the accepted resource profile while preserving legacy serialized digest bytes. Native TLS chain/name coverage uses a generated client-local trust anchor; default system-trust and compiled-endpoint HTTPS process journeys remain open. [The dated native evidence record](../../docs/research/testing-strategy-for-rust-cli-harness.md#native-macos-baseline-2026-10-08) owns completed checks, review outcomes and the account-fixture incident; [next steps](../../NEXT_STEPS.md#beta-2-and-broader-release) owns current gaps and user checks.
 
 ## Ownership, security and resources
 
@@ -37,29 +37,33 @@ Extend existing owners rather than duplicate their corpus. Run applicable [repos
 
 ### Native Guard implementation
 
-Prioritize a complete native file-Tool slice through the existing Policy, Guard,
-GO gate and durable receipt. A separately supervised trusted worker admits
-List/Read/Search/Write/Edit/Mkdir and pinned Skill data, with default-denial
+The native file-Tool slice now uses the existing Policy, Guard, GO gate and
+receipt. A separately supervised trusted worker admits
+List/Read/Search/Write/Edit/Mkdir and pinned Skill data with default-denial
 Seatbelt rules, checked live Workspace handles, closed inherited descriptors and
-no payload execution or fork. Reset and unblock CPU expiry before installing
-rules that prohibit signal-mask/handler and limit changes. Observe the exact
-owned worker's memory/thread thresholds and kill/reap it on failure. This slice
-does not implement commands/MCP or replace their required spawn compatibility.
-Verify native integrated edits, hostile paths, denied host data/network/spawn,
-resource expiry, cancellation, uncertain effects and closed replay before
-enabling it; unsupported command/MCP grants continue rejecting locally. The
-existing Tool corpus and product journeys own this evidence. Keep the native
-FFI behind a safe private adapter and review ABI, process identity, descriptor
-ownership and initialized output lengths separately. No new dependency, daemon
-or Engine policy seam is required; Linux enforcement remains at its current
-boundary and needs native re-verification for shared changes.
+no program execution, fork or spawn. CPU expiry is reset and unblocked before
+handler/mask/wait/limit changes are prohibited. The exact owned worker is
+supervised and killed/reaped on failure; kernel-confirmed exit retires resource
+observation before reap. The native Engine journey owns integrated effects,
+stale/linked-file rejection, pre-GO refusal and closed replay; the production
+profile corpus owns denied host/network/spawn access and actual CPU expiry.
+
+Completed behavior belongs to the Tool spec and native FFI editing constraints
+belong to [Guard rules](../../agents/guard.md). No dependency, daemon or Engine
+policy seam was added. This slice does not implement commands/MCP or replace
+their required ordinary spawn compatibility. Explicit unsupported grants reject
+before inference; remembered macOS trust grants only implemented file/Skill
+operations. Optimized full Engine/process isolation, threshold/fault stress and
+remaining cancellation/uncertainty evidence stay named at the evidence owner.
+Linux enforcement remains at its current boundary and needs native
+re-verification for shared changes.
 
 A harmless native Seatbelt profile can execute outside the development sandbox,
 but that capability does not attest the common Tool profile. Per-process limits
 and process-group termination do not by themselves bound aggregate memory,
-process count and scratch bytes or own descendants that leave a group. No native
-enforcer satisfying those requirements has been implemented or attested; the
-availability check must continue failing closed. Handle-relative file admission
+process count and scratch bytes or own descendants that leave a group. No native command/MCP
+enforcer satisfying those requirements has been implemented or attested; those
+grants must continue failing closed. Handle-relative file admission
 and discovery cannot stand in for that enforcement.
 
 Commands and MCP servers must execute macOS binaries on the host and retain
@@ -93,9 +97,9 @@ attestation and durable receipts before any macOS dispatch is enabled.
 Use a narrow native implementation at the existing Guard boundary rather than a
 new daemon, crate or Tool framework. The supervisor receives the same pinned
 intent and closed channels, with no inherited Provider/account authority. The
-native availability gate remains closed during this review. An observer-only
+native command/MCP gate remains closed during this review. An observer-only
 profile reports the accepted native contract; it cannot attest Linux's hard
-resource guarantees. Native single-process-only execution is not selected as a
+resource guarantees. The non-spawning file worker is not a
 substitute for the requested command/MCP lifecycle.
 
 1. Implement native macOS Tool enforcement for the complete granted file/command/Skill/MCP lifecycle. Evaluate standard kernel/OS facilities against the common contract and attest the selected profile before dispatch. Extend native successful operation, rejection, cancellation/descendant cleanup, uncertain-effect and replay evidence. Refusal-only evidence does not complete this slice; unresolved native constraints remain named implementation gaps.
