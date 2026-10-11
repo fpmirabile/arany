@@ -19,7 +19,7 @@ env:
 
 jobs:
   format:
-    name: Format
+    name: Linux Format
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -31,7 +31,7 @@ jobs:
       - run: cargo fmt --all --check
 
   clippy:
-    name: Clippy
+    name: Linux Clippy
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -44,7 +44,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 
   tests:
-    name: Tests (${{ matrix.profile }})
+    name: Linux Tests (${{ matrix.profile }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
