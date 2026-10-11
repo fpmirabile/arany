@@ -88,7 +88,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
     let saved_id = saved_conversation(&state, &workspace, SessionDefaults::default());
     let shell = "printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4 --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
     let mut command =
-        crate::process::account_isolated_script(state.parent().expect("fixture root"));
+        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
     command
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -419,7 +419,7 @@ fn narrow_help_signal_restores_terminal_without_starting_a_run() {
     let state = temp.path().join("state");
     let shell = "stty rows 8 cols 16; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
     let mut command =
-        crate::process::account_isolated_script(state.parent().expect("fixture root"));
+        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
     command
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -566,7 +566,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     .unwrap();
     let shell = "stty rows 24 cols 40; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider anthropic --tools --no-color; first_code=$?; printf 'SETTINGS_RESTART\n'; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider openai --tools --no-color; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; test \"$first_code\" -eq 0 || exit \"$first_code\"; exit \"$exit_code\"";
     let mut command =
-        crate::process::account_isolated_script(state.parent().expect("fixture root"));
+        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
     command
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -1294,7 +1294,7 @@ fn inline_quick_selector_returns_to_the_same_draft_and_caret() {
             String::new()
         };
         let mut command =
-            crate::process::account_isolated_script(state.parent().expect("fixture root"));
+            crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
         command
             .env_clear()
             .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -1529,7 +1529,7 @@ fn session_picker_close_case(quick: bool) {
     let saved_id = saved_conversation(&state, &workspace, SessionDefaults::default());
     let shell = "stty rows 24 cols 40; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --no-color; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
     let mut command =
-        crate::process::account_isolated_script(state.parent().expect("fixture root"));
+        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
     command
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -1675,7 +1675,7 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
     let saved_id = saved_conversation(&state, &workspace, SessionDefaults::default());
     let shell = "before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider anthropic; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
     let mut command =
-        crate::process::account_isolated_script(state.parent().expect("fixture root"));
+        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
     command
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))

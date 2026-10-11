@@ -364,25 +364,28 @@ async fn compact_with_provider<P: Provider + 'static>(
     Ok(record)
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, unix))]
 #[allow(dead_code)]
 #[path = "../../../tests/common/process.rs"]
 mod test_process;
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
     use arany::{
         AgentPhase, ApprovalMode, AttachedTerminal, ChatGptAdmission, ChatGptProvenance,
         CollaborationPolicy, Composer, Finish, OutputTokenBound, ProviderError, ProviderOutcome,
-        ProviderRequest, ProviderResponse, RunStatus, SessionView, Store,
+        ProviderRequest, ProviderResponse, RunStatus,
     };
+    use arany::{SessionView, Store};
+    #[cfg(target_os = "macos")]
+    use std::sync::{Arc, Mutex};
     use std::{
         io::Write,
         os::unix::fs::{MetadataExt, PermissionsExt},
         os::unix::process::CommandExt,
         process::{Child, Command, Stdio},
-        sync::{Arc, Mutex},
         time::Duration,
     };
 
@@ -395,7 +398,6 @@ mod tests {
         }
     }
 
-    #[cfg(debug_assertions)]
     #[tokio::test]
     async fn saved_access_is_authorized_before_chat_without_exposing_secrets() {
         enum StartupInput {
@@ -1111,12 +1113,14 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     struct Greeting {
         profile: &'static str,
         account_id: Uuid,
         observed: Arc<Mutex<Vec<ProviderRequest>>>,
     }
 
+    #[cfg(target_os = "macos")]
     impl Provider for Greeting {
         fn profile_name(&self) -> &str {
             self.profile
@@ -1162,6 +1166,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn native_chat_preserves_turns_with_guarded_tools_and_rejects_invalid_admission() {
         const FIXTURE: &str = "ARANY_TEST_NATIVE_CHAT_ROOT";

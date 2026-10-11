@@ -53,7 +53,7 @@ fn run_picker_signal_case(signal: Signal, suspend: bool, columns: u16, rows: u16
     let command = format!(
         "stty rows {rows} cols {columns}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
-    let mut attached = crate::process::isolated_script(temp.path());
+    let mut attached = crate::isolation::isolated_script(temp.path());
     attached
         .env_clear()
         .env("ARANY_TEST_EXE", "/arany")
@@ -293,7 +293,7 @@ fn run_picker_renderer_failure_case(columns: u16, rows: u16, attached_entry: boo
     let command = format!(
         "stty rows {rows} cols {columns}; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; exec 2>\"$ARANY_TEST_STDERR_PTY\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\""
     );
-    let mut attached = crate::process::isolated_script(temp.path());
+    let mut attached = crate::isolation::isolated_script(temp.path());
     attached
         .env_clear()
         .env("ARANY_TEST_EXE", "/arany")

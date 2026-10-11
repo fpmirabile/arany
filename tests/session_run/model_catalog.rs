@@ -71,7 +71,7 @@ fn screen_reader_model_catalog_selects_exact_profile_without_provider_egress() {
         .expect("unselected Session")
     });
 
-    let mut command = crate::process::isolated_script(temp.path());
+    let mut command = crate::isolation::isolated_script(temp.path());
     command
         .env_clear()
         .env("ARANY_TEST_EXE", "/arany")
@@ -362,7 +362,7 @@ fn inline_model_catalog_at_width(width: u16) {
         "stty rows 24 cols {width}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --no-color --provider custom:local --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
     let mut attached =
-        crate::process::account_isolated_script(state.parent().expect("fixture root"));
+        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
     attached
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -745,7 +745,7 @@ fn run_model_catalog_cancel_then_sigterm_case(columns: u16, rows: u16) {
         "stty rows {rows} cols {columns}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --provider custom:local --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
     let mut attached =
-        crate::process::account_isolated_script(state.parent().expect("fixture root"));
+        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
     attached
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))

@@ -702,7 +702,7 @@ fn bare_start_without_account_keeps_chat_input_and_offers_named_setup_choices() 
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let prompt_shell = "before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; if [ -n \"$ARANY_TEST_FORK\" ]; then set -- --fork \"$ARANY_TEST_FORK\"; else set --; fi; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" \"$@\" 'startup objective'; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
-    crate::process::remember_workspace_trust(
+    crate::isolation::remember_workspace_trust(
         &temp.path().join("account-root"),
         &workspace,
         &workspace,
@@ -2061,7 +2061,7 @@ fn replaced_file_account_cannot_run_an_older_session() {
     let replacement = prepare_test_file_account(temp.path());
     assert_ne!(replacement, original_account);
 
-    crate::process::remember_workspace_trust(
+    crate::isolation::remember_workspace_trust(
         &temp.path().join("account-root"),
         &workspace,
         std::path::Path::new("/data/workspace"),
@@ -2898,7 +2898,7 @@ fn unsafe_dbus_address_cannot_launch_a_credential_command() {
     let state = temp.path().join("state");
     let marker = temp.path().join("credential-command-marker");
     let address = format!("unixexec:path=/usr/bin/touch,argv1={}", marker.display());
-    crate::process::remember_workspace_trust(
+    crate::isolation::remember_workspace_trust(
         &temp.path().join("account-root"),
         &workspace,
         &workspace,
@@ -3207,7 +3207,7 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
     let temp = tempfile::tempdir().expect("private test root");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
-    crate::process::remember_workspace_trust(
+    crate::isolation::remember_workspace_trust(
         &temp.path().join("account-home/.local/state/arany"),
         &workspace,
         &workspace,
@@ -3218,7 +3218,7 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
     listener
         .set_nonblocking(true)
         .expect("nonblocking synthetic bus");
-    let mut command = super::process::isolated_script(temp.path());
+    let mut command = super::isolation::isolated_script(temp.path());
     command
         .env_clear()
         .env("ARANY_TEST_EXE", "/arany")
@@ -3340,7 +3340,7 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
             events
         });
         let shell = "printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; stty cols 40 rows 12; if [ \"$ARANY_TEST_LINEAR\" = 1 ]; then set -- --screen-reader; else set -- --no-color; fi; \"$ARANY_TEST_EXE\" \"$@\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; stty \"$before\"; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
-        let mut command = super::process::isolated_script(temp.path());
+        let mut command = super::isolation::isolated_script(temp.path());
         command
             .env_clear()
             .env("ARANY_TEST_EXE", &executable)

@@ -3,7 +3,7 @@ use super::{
     read_line_capped, read_observation,
 };
 use crate::engine::RunCancellation;
-use crate::tools::types::{MAX_PROCESSES, MEMORY_BYTES, digest};
+use crate::tools::types::{MAX_PROCESSES_OR_THREADS, MEMORY_BYTES, digest};
 use crate::tools::{EffectIntent, ToolCall, ToolError, ToolObservation, ToolRuntime};
 use nix::libc;
 use std::ffi::{CStr, CString};
@@ -31,13 +31,109 @@ const PROCESS_LIMITS: &[(rustix::process::Resource, u64)] = &[
     (rustix::process::Resource::Nofile, 64),
     (rustix::process::Resource::Core, 0),
 ];
+const SYS_FORK: i32 = 2;
+const SYS_SETUID: i32 = 23;
+const SYS_PTRACE: i32 = 26;
+const SYS_SENDMSG: i32 = 28;
+const SYS_SIGACTION: i32 = 46;
+const SYS_SIGPROCMASK: i32 = 48;
+const SYS_EXECVE: i32 = 59;
+const SYS_VFORK: i32 = 66;
+const SYS_SOCKET: i32 = 97;
+const SYS_CONNECT: i32 = 98;
+const SYS_BIND: i32 = 104;
+const SYS_LISTEN: i32 = 106;
+const SYS_SIGSUSPEND: i32 = 111;
+const SYS_SETREUID: i32 = 126;
+const SYS_SETREGID: i32 = 127;
+const SYS_SENDTO: i32 = 133;
+const SYS_SETGID: i32 = 181;
+const SYS_SETEGID: i32 = 182;
+const SYS_SETEUID: i32 = 183;
+const SYS_SIGRETURN: i32 = 184;
+const SYS_SETRLIMIT: i32 = 195;
+const SYS_SYSCTL: i32 = 202;
+const SYS_POSIX_SPAWN: i32 = 244;
+const SYS_SYSCTLBYNAME: i32 = 274;
+const SYS___PTHREAD_SIGMASK: i32 = 329;
+const SYS___SIGWAIT: i32 = 330;
+const SYS___DISABLE_THREADSIGNAL: i32 = 331;
+const SYS___MAC_EXECVE: i32 = 380;
+const SYS_SENDMSG_NOCANCEL: i32 = 402;
+const SYS_CONNECT_NOCANCEL: i32 = 409;
+const SYS_SIGSUSPEND_NOCANCEL: i32 = 410;
+const SYS_SENDTO_NOCANCEL: i32 = 413;
+const SYS___SIGWAIT_NOCANCEL: i32 = 422;
+const SYS_CONNECTX: i32 = 447;
+const SYS_SOCKET_DELEGATE: i32 = 450;
+const SYS_COALITION: i32 = 458;
+const SYS_COALITION_INFO: i32 = 459;
+const SYS_SENDMSG_X: i32 = 481;
+const SYS_PERSONA: i32 = 494;
+const SYS_COALITION_POLICY_SET: i32 = 556;
 const FILE_DENIED_SYSCALLS: &[i32] = &[
-    2, 28, 46, 48, 59, 66, 97, 98, 104, 106, 111, 133, 184, 195, 202, 244, 274, 329, 330, 331, 380,
-    402, 409, 410, 413, 422, 447, 450, 481,
+    SYS_FORK,
+    SYS_SENDMSG,
+    SYS_SIGACTION,
+    SYS_SIGPROCMASK,
+    SYS_EXECVE,
+    SYS_VFORK,
+    SYS_SOCKET,
+    SYS_CONNECT,
+    SYS_BIND,
+    SYS_LISTEN,
+    SYS_SIGSUSPEND,
+    SYS_SENDTO,
+    SYS_SIGRETURN,
+    SYS_SETRLIMIT,
+    SYS_SYSCTL,
+    SYS_POSIX_SPAWN,
+    SYS_SYSCTLBYNAME,
+    SYS___PTHREAD_SIGMASK,
+    SYS___SIGWAIT,
+    SYS___DISABLE_THREADSIGNAL,
+    SYS___MAC_EXECVE,
+    SYS_SENDMSG_NOCANCEL,
+    SYS_CONNECT_NOCANCEL,
+    SYS_SIGSUSPEND_NOCANCEL,
+    SYS_SENDTO_NOCANCEL,
+    SYS___SIGWAIT_NOCANCEL,
+    SYS_CONNECTX,
+    SYS_SOCKET_DELEGATE,
+    SYS_SENDMSG_X,
 ];
 const COMMAND_DENIED_SYSCALLS: &[i32] = &[
-    23, 26, 28, 97, 98, 104, 106, 126, 127, 133, 181, 182, 183, 195, 202, 274, 329, 330, 331, 380,
-    402, 409, 410, 413, 447, 450, 458, 459, 481, 494, 556,
+    SYS_SETUID,
+    SYS_PTRACE,
+    SYS_SENDMSG,
+    SYS_SOCKET,
+    SYS_CONNECT,
+    SYS_BIND,
+    SYS_LISTEN,
+    SYS_SETREUID,
+    SYS_SETREGID,
+    SYS_SENDTO,
+    SYS_SETGID,
+    SYS_SETEGID,
+    SYS_SETEUID,
+    SYS_SETRLIMIT,
+    SYS_SYSCTL,
+    SYS_SYSCTLBYNAME,
+    SYS___PTHREAD_SIGMASK,
+    SYS___SIGWAIT,
+    SYS___DISABLE_THREADSIGNAL,
+    SYS___MAC_EXECVE,
+    SYS_SENDMSG_NOCANCEL,
+    SYS_CONNECT_NOCANCEL,
+    SYS_SIGSUSPEND_NOCANCEL,
+    SYS_SENDTO_NOCANCEL,
+    SYS_CONNECTX,
+    SYS_SOCKET_DELEGATE,
+    SYS_COALITION,
+    SYS_COALITION_INFO,
+    SYS_SENDMSG_X,
+    SYS_PERSONA,
+    SYS_COALITION_POLICY_SET,
 ];
 
 const PROFILE: &str = "(allow file-read-metadata (literal \"/\") (literal \"/System\") (literal \"/usr\") (literal \"/dev\"))
@@ -90,7 +186,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     bytes.extend_from_slice(&CPU_LIMIT.as_nanos().to_le_bytes());
     bytes.extend_from_slice(&SUPERVISION_INTERVAL.as_nanos().to_le_bytes());
     bytes.extend_from_slice(&MEMORY_BYTES.to_le_bytes());
-    bytes.extend_from_slice(&MAX_PROCESSES.to_le_bytes());
+    bytes.extend_from_slice(&MAX_PROCESSES_OR_THREADS.to_le_bytes());
     bytes.extend_from_slice(&unit::STORAGE_BYTES_CAP.to_le_bytes());
     bytes.extend_from_slice(&(SYSTEM_PROGRAMS_CAP as u64).to_le_bytes());
     bytes.extend_from_slice(&(PROFILE_BYTES_CAP as u64).to_le_bytes());
@@ -427,7 +523,7 @@ fn check_process_resources(pid: u32) -> Result<bool, ToolError> {
     };
     if info.pti_threadnum < 1
         || info.pti_resident_size > MEMORY_BYTES
-        || info.pti_threadnum as u32 > MAX_PROCESSES
+        || info.pti_threadnum as u32 > MAX_PROCESSES_OR_THREADS
     {
         return Err(ToolError::Limit);
     }
@@ -614,7 +710,6 @@ async fn execute_worker(
 }
 
 #[cfg(test)]
-#[allow(unsafe_code)]
 mod tests {
     use super::*;
     use crate::test_process::BoundedOutput;
@@ -711,28 +806,8 @@ mod tests {
         };
         configure_resources().unwrap();
         install(&task).unwrap();
-        let mut query = [
-            libc::CTL_KERN,
-            libc::KERN_PROCARGS2,
-            std::process::id() as i32,
-        ];
-        let mut size = 0;
-        // This queries only the cleared-environment fixture itself, with live sized output.
         assert_eq!(
-            unsafe {
-                libc::sysctl(
-                    query.as_mut_ptr(),
-                    query.len() as u32,
-                    std::ptr::null_mut(),
-                    &mut size,
-                    std::ptr::null_mut(),
-                    0,
-                )
-            },
-            -1
-        );
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
+            ffi::process_arguments_errno(std::process::id() as i32),
             Some(libc::EPERM)
         );
         assert_eq!(

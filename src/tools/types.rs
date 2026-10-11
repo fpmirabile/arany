@@ -18,7 +18,7 @@ pub(crate) const MAX_SNAPSHOT_FILES: usize = 2048;
 pub(crate) const MAX_RUNTIME_BYTES: usize = 96 * 1024 * 1024;
 pub(crate) const SCRATCH_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const MEMORY_BYTES: u64 = 512 * 1024 * 1024;
-pub(crate) const MAX_PROCESSES: u32 = 64;
+pub(crate) const MAX_PROCESSES_OR_THREADS: u32 = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
@@ -314,7 +314,7 @@ impl Default for ToolLimits {
             result_bytes: MAX_TOOL_RESULT_BYTES as u32,
             runtime_ms: 60_000,
             memory_bytes: MEMORY_BYTES,
-            max_processes: MAX_PROCESSES,
+            max_processes: MAX_PROCESSES_OR_THREADS,
             scratch_bytes: SCRATCH_BYTES,
             network: NetworkGrant::None,
             resource_profile: if cfg!(target_os = "macos") {
@@ -331,7 +331,7 @@ impl ToolLimits {
         (128..=MAX_TOOL_RESULT_BYTES as u32).contains(&self.result_bytes)
             && (1_000..=60_000).contains(&self.runtime_ms)
             && self.memory_bytes == MEMORY_BYTES
-            && self.max_processes == MAX_PROCESSES
+            && self.max_processes == MAX_PROCESSES_OR_THREADS
             && self.scratch_bytes == SCRATCH_BYTES
             && self.network == NetworkGrant::None
     }

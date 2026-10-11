@@ -67,7 +67,7 @@ pub(super) fn check_available() -> Result<(), ToolError> {
                     .map_err(|_| ToolError::ProtectionUnavailable)?;
                 let result = tokio::time::timeout(
                     AVAILABILITY_DEADLINE,
-                    super::super::wait_owned_child(&mut child),
+                    super::super::reap_owned_child(&mut child),
                 )
                 .await;
                 if matches!(result, Ok(Ok(status)) if status.success()) {
@@ -76,7 +76,7 @@ pub(super) fn check_available() -> Result<(), ToolError> {
                 let _ = child.start_kill();
                 let _ = tokio::time::timeout(
                     Duration::from_secs(1),
-                    super::super::wait_owned_child(&mut child),
+                    super::super::reap_owned_child(&mut child),
                 )
                 .await;
                 Err(ToolError::ProtectionUnavailable)
@@ -186,7 +186,7 @@ impl Scope {
                 .checked_add(task.pti_threadnum as u64)
                 .ok_or(ToolError::Limit)?;
             if memory > MEMORY_BYTES
-                || threads > u64::from(MAX_PROCESSES)
+                || threads > u64::from(MAX_PROCESSES_OR_THREADS)
                 || (u128::from(usage.ri_user_time) + u128::from(usage.ri_system_time))
                     * u128::from(self.timebase.numer)
                     / u128::from(self.timebase.denom)
@@ -960,11 +960,9 @@ pub(super) fn helper_main() -> std::process::ExitCode {
 }
 
 #[cfg(test)]
-#[allow(unsafe_code)]
 mod tests {
     use super::*;
     use std::io::Read;
-    use std::mem::MaybeUninit;
 
     const HELPER: &str = "tools::guard::macos::unit::tests::native_unit_helper";
     const MCP_SCRIPT: &str = r#"set -eu
@@ -980,43 +978,9 @@ done
 "#;
 
     fn verify_coalition_spawn_denied(coalition: u64) {
-        unsafe extern "C" {
-            fn posix_spawnattr_setcoalition_np(
-                attributes: *const libc::posix_spawnattr_t,
-                coalition: u64,
-                kind: libc::c_int,
-                role: libc::c_int,
-            ) -> libc::c_int;
-        }
-        let mut attributes = MaybeUninit::<libc::posix_spawnattr_t>::uninit();
-        let mut child = 0;
-        let mut args = [c"/usr/bin/true".as_ptr().cast_mut(), std::ptr::null_mut()];
-        let mut environment = [std::ptr::null_mut()];
-        // Initialized spawn attributes and NUL-terminated arrays live through the native calls.
-        let status = unsafe {
-            assert_eq!(libc::posix_spawnattr_init(attributes.as_mut_ptr()), 0);
-            let mut attributes = attributes.assume_init();
-            assert_eq!(
-                posix_spawnattr_setcoalition_np(&attributes, coalition, 0, 0),
-                0
-            );
-            let status = libc::posix_spawn(
-                &mut child,
-                args[0],
-                std::ptr::null(),
-                &attributes,
-                args.as_mut_ptr(),
-                environment.as_mut_ptr(),
-            );
-            assert_eq!(libc::posix_spawnattr_destroy(&mut attributes), 0);
-            if status == 0 {
-                assert_eq!(libc::waitpid(child, std::ptr::null_mut(), 0), child);
-            }
-            status
-        };
         assert_eq!(
-            status,
-            libc::EPERM,
+            ffi::spawn_in_coalition(c"/usr/bin/true", coalition),
+            Err(libc::EPERM),
             "spawn must not enter the outside coalition"
         );
     }
@@ -1530,10 +1494,7 @@ done
     #[ignore = "isolated helper owned by the native unit gate"]
     fn native_unit_helper() {
         // The fixture owns a finite process and intentionally ignores the inherited CPU signal.
-        unsafe {
-            libc::alarm(75);
-            assert_ne!(libc::signal(libc::SIGXCPU, libc::SIG_IGN), libc::SIG_ERR);
-        }
+        assert!(ffi::ignore_cpu_signal_with_watchdog(75));
         let root = std::env::var_os("ARANY_TEST_NATIVE_UNIT_ROOT").unwrap();
         let root = Path::new(&root);
         let phase = std::env::var("ARANY_TEST_NATIVE_UNIT_PHASE").unwrap();
@@ -1745,10 +1706,12 @@ done
                     std::io::ErrorKind::PermissionDenied
                 );
                 // Signal 0 observes permission without risking a signal to the fixture's outside owner.
-                assert_eq!(unsafe { libc::kill(outside_pid, 0) }, -1);
                 assert_eq!(
-                    std::io::Error::last_os_error().raw_os_error(),
-                    Some(libc::EPERM)
+                    rustix::process::test_kill_process(
+                        rustix::process::Pid::from_raw(outside_pid).unwrap()
+                    )
+                    .unwrap_err(),
+                    rustix::io::Errno::PERM
                 );
                 assert_eq!(
                     std::fs::read(runtime.workspace.join("selected"))
@@ -1804,14 +1767,10 @@ done
                 );
                 assert!(output.stdout.is_empty() && output.stderr.is_empty());
                 verify_coalition_spawn_denied(outside_coalition);
-                for syscall in [459, 494] {
+                for syscall in [SYS_COALITION_INFO, SYS_PERSONA] {
                     // Invalid operations and null arguments cannot read or mutate host state.
                     assert_eq!(
-                        unsafe { libc::syscall(syscall, -1_i32, 0_usize, 0_usize, 0_usize) },
-                        -1
-                    );
-                    assert_eq!(
-                        std::io::Error::last_os_error().raw_os_error(),
+                        ffi::invalid_argument_syscall_errno(syscall),
                         Some(libc::EPERM)
                     );
                 }

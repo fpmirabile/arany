@@ -555,7 +555,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         "result_bytes": MAX_TOOL_RESULT_BYTES,
         "runtime_ms": 60_000,
         "memory_bytes": MEMORY_BYTES,
-        "max_processes": MAX_PROCESSES,
+        "max_processes": MAX_PROCESSES_OR_THREADS,
         "scratch_bytes": SCRATCH_BYTES,
         "network": "none"
     });

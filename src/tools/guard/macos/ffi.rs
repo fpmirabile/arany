@@ -419,3 +419,90 @@ pub(super) fn peer_credentials(stream: &UnixStream) -> Result<(i32, libc::xucred
     // The exact credential write above initializes the integer-only xucred structure.
     Ok((pid, unsafe { credentials.assume_init() }))
 }
+
+#[cfg(test)]
+unsafe extern "C" {
+    fn posix_spawnattr_setcoalition_np(
+        attributes: *const libc::posix_spawnattr_t,
+        coalition: u64,
+        kind: libc::c_int,
+        role: libc::c_int,
+    ) -> libc::c_int;
+}
+
+/// Spawns `program` into `coalition` and reaps it on success; returns the `posix_spawn` errno.
+#[cfg(test)]
+pub(super) fn spawn_in_coalition(program: &CStr, coalition: u64) -> Result<(), i32> {
+    let mut attributes = MaybeUninit::<libc::posix_spawnattr_t>::uninit();
+    let mut child = 0;
+    let mut args = [program.as_ptr().cast_mut(), std::ptr::null_mut()];
+    let mut environment = [std::ptr::null_mut()];
+    // Initialized attributes and NUL-terminated arrays live through every native call.
+    let status = unsafe {
+        assert_eq!(libc::posix_spawnattr_init(attributes.as_mut_ptr()), 0);
+        let mut attributes = attributes.assume_init();
+        assert_eq!(
+            posix_spawnattr_setcoalition_np(&attributes, coalition, 0, 0),
+            0
+        );
+        let status = libc::posix_spawn(
+            &mut child,
+            args[0],
+            std::ptr::null(),
+            &attributes,
+            args.as_mut_ptr(),
+            environment.as_mut_ptr(),
+        );
+        assert_eq!(libc::posix_spawnattr_destroy(&mut attributes), 0);
+        if status == 0 {
+            assert_eq!(libc::waitpid(child, std::ptr::null_mut(), 0), child);
+        }
+        status
+    };
+    match status {
+        0 => Ok(()),
+        failed => Err(failed),
+    }
+}
+
+/// Arms the fixture watchdog and ignores the inherited SIGXCPU action.
+#[cfg(test)]
+pub(super) fn ignore_cpu_signal_with_watchdog(seconds: u32) -> bool {
+    // The watchdog and disposition are process-wide and retain no borrowed memory.
+    unsafe {
+        libc::alarm(seconds);
+        libc::signal(libc::SIGXCPU, libc::SIG_IGN) != libc::SIG_ERR
+    }
+}
+
+/// Returns the errno of a rejected `KERN_PROCARGS2` size query for `pid`.
+#[cfg(test)]
+pub(super) fn process_arguments_errno(pid: i32) -> Option<i32> {
+    let mut query = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let mut size = 0;
+    // A null output buffer requests only the size path and retains no pointer.
+    let status = unsafe {
+        libc::sysctl(
+            query.as_mut_ptr(),
+            query.len() as u32,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (status != 0)
+        .then(|| std::io::Error::last_os_error().raw_os_error())
+        .flatten()
+}
+
+/// Issues a denied syscall with an invalid descriptor and null arguments; returns its errno when it fails.
+#[cfg(test)]
+pub(super) fn invalid_argument_syscall_errno(syscall: i32) -> Option<i32> {
+    assert!(super::COMMAND_DENIED_SYSCALLS.contains(&syscall));
+    // Only profile-denied syscalls with scalar arguments; none dereferences a pointer.
+    let status = unsafe { libc::syscall(syscall, -1_i32, 0_usize, 0_usize, 0_usize) };
+    (status == -1)
+        .then(|| std::io::Error::last_os_error().raw_os_error())
+        .flatten()
+}

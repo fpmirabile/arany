@@ -211,7 +211,7 @@ fn resident_memory_two_includes_on_named_host() {
     check_profile(&workspace, &state);
 
     let mut command =
-        crate::process::account_isolated_script(state.parent().expect("fixture root"));
+        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
     command
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))

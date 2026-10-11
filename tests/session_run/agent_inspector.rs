@@ -20,7 +20,7 @@ fn screen_reader_agent_inspector_opens_and_closes_without_provider_access() {
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
     let mut command =
-        crate::process::account_isolated_script(state.parent().expect("fixture root"));
+        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
     command
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -217,7 +217,7 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
         .expect("Session ID");
 
     let mut attached =
-        crate::process::account_isolated_script(state.parent().expect("fixture root"));
+        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
     attached
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
@@ -389,7 +389,7 @@ fn inline_inspector(
         "stty rows 24 cols {width}; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" {no_color}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
     let mut command_line =
-        crate::process::account_isolated_script(state.parent().expect("fixture root"));
+        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
     command_line
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))

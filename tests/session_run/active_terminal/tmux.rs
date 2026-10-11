@@ -247,7 +247,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
         socket: temp.path().join("tmux.sock"),
     };
     let mut start =
-        crate::process::account_isolated_command(temp.path(), "/usr/bin/tmux", executable);
+        crate::isolation::account_isolated_command(temp.path(), "/usr/bin/tmux", executable);
     start
         .env_clear()
         .env("TERM", "xterm")
@@ -1026,7 +1026,7 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
         socket: temp.path().join("tmux.sock"),
     };
     let mut start =
-        crate::process::account_isolated_command(temp.path(), "/usr/bin/tmux", &executable);
+        crate::isolation::account_isolated_command(temp.path(), "/usr/bin/tmux", &executable);
     start
         .env_clear()
         .env("TERM", "xterm")

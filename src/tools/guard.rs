@@ -259,7 +259,7 @@ impl Unit {
             ("memory.max", MEMORY_BYTES.to_string()),
             ("memory.swap.max", "0".into()),
             ("memory.oom.group", "1".into()),
-            ("pids.max", MAX_PROCESSES.to_string()),
+            ("pids.max", MAX_PROCESSES_OR_THREADS.to_string()),
             ("cpu.max", "25000 100000".into()),
         ] {
             let mut file = dir
@@ -285,7 +285,7 @@ impl Unit {
             .take(4096)
             .read_to_string(&mut members)
             .map_err(|_| ToolError::ProtectionUnavailable)?;
-        if members.lines().count() > MAX_PROCESSES as usize
+        if members.lines().count() > MAX_PROCESSES_OR_THREADS as usize
             || !members
                 .lines()
                 .any(|line| line.parse::<u32>() == Ok(main_pid))
@@ -712,13 +712,14 @@ async fn read_observation<R: tokio::io::AsyncBufRead + Unpin>(
     Ok(observation)
 }
 
-pub(super) async fn wait_owned_child(
+/// Reaps a child this process owns. On macOS it closes stdin first and polls `try_wait`
+/// every 10 ms, because Seatbelt blocks Tokio's signal wake socket; elsewhere it awaits exit.
+pub(super) async fn reap_owned_child(
     child: &mut Child,
 ) -> std::io::Result<std::process::ExitStatus> {
     #[cfg(target_os = "macos")]
     {
         drop(child.stdin.take());
-        // Seatbelt blocks Tokio's signal wake socket; reaping cannot depend on it.
         loop {
             if let Some(status) = child.try_wait()? {
                 return Ok(status);
@@ -740,7 +741,7 @@ async fn capture(
     let result = tokio::time::timeout(deadline, async {
         tokio::try_join!(
             async {
-                wait_owned_child(&mut child)
+                reap_owned_child(&mut child)
                     .await
                     .map_err(|_| ToolError::Operation)
             },
@@ -755,7 +756,7 @@ async fn capture(
         Err(_) => ToolError::Limit,
     };
     let _ = child.start_kill();
-    let _ = tokio::time::timeout(Duration::from_secs(1), wait_owned_child(&mut child)).await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), reap_owned_child(&mut child)).await;
     Err(error)
 }
 
@@ -789,6 +790,33 @@ fn read_task(reader: &mut std::io::BufReader<impl Read>) -> Result<Task, ToolErr
     serde_json::from_slice(&task).map_err(|_| ToolError::Configuration)
 }
 
+/// Returns the payload root and the Workspace this helper's call operates on.
+#[cfg(target_os = "macos")]
+fn bootstrap_locations(
+    task: &Task,
+    stage: &mut BootstrapStage,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), ToolError> {
+    *stage = BootstrapStage::Capabilities;
+    let root = macos::install(task)?;
+    let workspace = if task.intent.call.is_process() {
+        root.join("workspace")
+    } else {
+        task.workspace.clone()
+    };
+    Ok((root, workspace))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn bootstrap_locations(
+    _task: &Task,
+    _stage: &mut BootstrapStage,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), ToolError> {
+    Ok((
+        Path::new("/").to_owned(),
+        Path::new("/workspace").to_owned(),
+    ))
+}
+
 pub(super) fn helper_main() -> ExitCode {
     let mut stage = BootstrapStage::Admission;
     let result = (|| -> Result<(), ToolError> {
@@ -806,23 +834,8 @@ pub(super) fn helper_main() -> ExitCode {
         {
             return Err(ToolError::Configuration);
         }
-        #[cfg(target_os = "macos")]
-        let root = {
-            stage = BootstrapStage::Capabilities;
-            macos::install(&task)?
-        };
-        #[cfg(not(target_os = "macos"))]
-        let root = Path::new("/").to_owned();
-        #[cfg(target_os = "macos")]
-        let workspace = if task.intent.call.is_process() {
-            root.join("workspace")
-        } else {
-            task.workspace.clone()
-        };
-        #[cfg(target_os = "macos")]
+        let (root, workspace) = bootstrap_locations(&task, &mut stage)?;
         let workspace = workspace.as_path();
-        #[cfg(not(target_os = "macos"))]
-        let workspace = Path::new("/workspace");
         stage = BootstrapStage::Workspace;
         if (matches!(
             task.intent.call,

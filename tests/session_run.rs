@@ -11,6 +11,10 @@ use std::process::Command;
 pub mod process;
 
 #[cfg(target_os = "linux")]
+#[path = "session_run/isolation.rs"]
+mod isolation;
+
+#[cfg(target_os = "linux")]
 #[path = "session_run/tools.rs"]
 mod tools;
 

@@ -8,6 +8,8 @@ Folder consent and native Tool capability are independent. On platforms without 
 
 The native macOS profile admits checked file operations, pinned Skill data,
 host-native commands and local MCP through a separate trusted Guard worker.
+An intermittent rejection of MCP before GO remains an
+[open defect](../../NEXT_STEPS.md#open-defects).
 File/Skill dispatch prohibits program execution. Commands and MCP use private
 disposable storage and retain ordinary native child launches. Both preserve
 approval, GO, offline credential/state exclusion, supervised process ownership,
@@ -234,7 +236,11 @@ partial setup, cancellation and unwind require positively established process
 termination before detachment. Unexpected mount targets reject without following
 them. Unfinished attachment or failed cleanup retains the private control root
 and rejects completion rather than recursively deleting through a live or
-uncertain mount.
+uncertain mount. Each unit's owner-only root is `/private/tmp/arany-u-<uuid>`;
+no later Run reclaims a retained root and no count or byte cap applies, so
+retained roots accumulate until an operator removes them. A filename-prefix
+sweep is unsafe; positive ownership recovery is tracked as
+[macOS crash recovery](../../NEXT_STEPS.md#next-functional-priority).
 
 Commands and MCP receive a fresh checked snapshot of the selected Workspace,
 including prior typed edits, and a separate read-only tree of pinned runtime

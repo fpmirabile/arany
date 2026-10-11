@@ -232,7 +232,7 @@ async fn active_keyboard_stays_visible_with_near_cap_history() {
         socket: temp.path().join("tmux.sock"),
     };
     let mut start =
-        crate::process::account_isolated_command(temp.path(), "/usr/bin/tmux", &executable);
+        crate::isolation::account_isolated_command(temp.path(), "/usr/bin/tmux", &executable);
     start
         .env_clear()
         .env("TERM", "xterm")
