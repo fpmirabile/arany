@@ -7,25 +7,48 @@ use crate::tools::{EffectIntent, ToolCall, ToolError, ToolObservation, ToolRunti
 use nix::libc;
 use std::ffi::CString;
 use std::mem::{MaybeUninit, size_of, size_of_val};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::Command;
+
+mod unit;
+
+pub(super) fn unit_main() -> std::process::ExitCode {
+    unit::helper_main()
+}
 
 const PROC_FLAG_INEXIT: u32 = 4;
 
 const PROFILE: &str = "(version 1)
 (deny default)
 (allow syscall-unix)
-(deny syscall-unix (syscall-number 2) (syscall-number 46) (syscall-number 48) (syscall-number 59) (syscall-number 66) (syscall-number 111) (syscall-number 184) (syscall-number 195) (syscall-number 244) (syscall-number 329) (syscall-number 330) (syscall-number 331) (syscall-number 380) (syscall-number 410) (syscall-number 422))
+(deny syscall-unix (syscall-number 2) (syscall-number 28) (syscall-number 46) (syscall-number 48) (syscall-number 59) (syscall-number 66) (syscall-number 97) (syscall-number 98) (syscall-number 104) (syscall-number 106) (syscall-number 111) (syscall-number 133) (syscall-number 184) (syscall-number 195) (syscall-number 202) (syscall-number 244) (syscall-number 274) (syscall-number 329) (syscall-number 330) (syscall-number 331) (syscall-number 380) (syscall-number 402) (syscall-number 409) (syscall-number 410) (syscall-number 413) (syscall-number 422) (syscall-number 447) (syscall-number 450) (syscall-number 481))
 (allow file-read-metadata)
 (allow file-read* file-map-executable (subpath \"/System/Library\") (subpath \"/usr/lib\"))
-(allow sysctl-read)
 (allow file-read* (literal \"/dev/random\") (literal \"/dev/urandom\"))
 ";
 
+const COMMAND_PROFILE: &str = "(version 1)
+(deny default)
+(allow syscall-unix)
+(deny syscall-unix (syscall-number 23) (syscall-number 26) (syscall-number 28) (syscall-number 97) (syscall-number 98) (syscall-number 104) (syscall-number 106) (syscall-number 126) (syscall-number 127) (syscall-number 133) (syscall-number 181) (syscall-number 182) (syscall-number 183) (syscall-number 195) (syscall-number 202) (syscall-number 274) (syscall-number 329) (syscall-number 330) (syscall-number 331) (syscall-number 380) (syscall-number 402) (syscall-number 409) (syscall-number 410) (syscall-number 413) (syscall-number 447) (syscall-number 450) (syscall-number 458) (syscall-number 459) (syscall-number 481) (syscall-number 494) (syscall-number 556))
+(allow file-read-metadata)
+(allow file-read* file-map-executable (subpath \"/System/Library\") (subpath \"/usr/lib\"))
+(allow file-read* (literal \"/\") (literal \"/bin\") (literal \"/usr/bin\") (literal \"/dev/random\") (literal \"/dev/urandom\"))
+(allow file-read* file-write* (literal \"/dev/null\"))
+(allow process-fork)
+(deny process-fork (require-entitlement \"com.apple.private.coalition-spawn\") (require-entitlement \"com.apple.private.persona-mgmt\"))
+(deny process-exec-update-label)
+(allow signal (target self) (target children))
+";
+
 unsafe extern "C" {
+    static mach_task_self_: u32;
+    fn task_set_special_port(task: u32, which: libc::c_int, port: u32) -> libc::c_int;
+    fn task_get_special_port(task: u32, which: libc::c_int, port: *mut u32) -> libc::c_int;
+    fn mach_ports_register(task: u32, ports: *mut u32, count: u32) -> libc::c_int;
     fn sandbox_init(
         profile: *const libc::c_char,
         flags: u64,
@@ -40,6 +63,17 @@ unsafe extern "C" {
     ) -> libc::c_int;
 }
 
+#[link(name = "Security", kind = "framework")]
+unsafe extern "C" {
+    static kSecCodeInfoEntitlements: core_foundation::string::CFStringRef;
+    static kSecCodeInfoEntitlementsDict: core_foundation::string::CFStringRef;
+    fn SecCodeCopySigningInformation(
+        code: core_foundation::base::CFTypeRef,
+        flags: u32,
+        information: *mut core_foundation::dictionary::CFDictionaryRef,
+    ) -> i32;
+}
+
 pub(super) fn check_available() -> Result<(), ToolError> {
     if cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
         Ok(())
@@ -50,8 +84,10 @@ pub(super) fn check_available() -> Result<(), ToolError> {
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     check_available()?;
-    let mut bytes = b"arany-macos-file-guard-v1:typed-files-pinned-skills-only;no-fork-exec-network-mach;closed-inherited-fds;live-no-follow-handles;literal-directory-ancestors;workspace-call-write;guard-read-only;cpu15-default-unblocked-immutable;nofile64;core0;rss536870912-tasks64-supervised10ms;exact-child-kill-reap;bounded-go-receipt".to_vec();
+    let mut bytes = b"arany-macos-guard-v3:typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;literal-directory-ancestors;workspace-call-write;guard-read-only;file-cpu15-default-unblocked-immutable;nofile64;core0;rss536870912-tasks64-cpu15-supervised10ms;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;bounded-go-receipt".to_vec();
     bytes.extend_from_slice(PROFILE.as_bytes());
+    bytes.extend_from_slice(COMMAND_PROFILE.as_bytes());
+    bytes.extend_from_slice(b"native-commands-mcp:checked-private-cwd;fixed64m-nosuid-project-scratch;fresh-selected-snapshot;read-only-pinned-runtime;bounded-positive-root-owned-non-setid-unentitled-system-exec;dynamic-coalition-persona-entitlement-fork-denial;null-bootstrap-registered-ports;child-only-signals;supervised-cpu");
     Ok(digest(&bytes))
 }
 
@@ -140,14 +176,11 @@ fn ancestors(profile: &mut String, path: &Path) -> Result<(), ToolError> {
 }
 
 pub(super) fn install(task: &Task) -> Result<(), ToolError> {
-    if !task.config.commands.is_empty()
-        || !task.config.mcp.is_empty()
-        || matches!(
-            task.intent.call,
-            ToolCall::Command { .. } | ToolCall::McpList { .. } | ToolCall::McpCall { .. }
-        )
-    {
-        return Err(ToolError::ProtectionUnavailable);
+    if matches!(
+        task.intent.call,
+        ToolCall::Command { .. } | ToolCall::McpList { .. } | ToolCall::McpCall { .. }
+    ) {
+        return install_command(task);
     }
     let mut profile = PROFILE.to_owned();
     ancestors(&mut profile, &task.workspace)?;
@@ -179,22 +212,7 @@ pub(super) fn install(task: &Task) -> Result<(), ToolError> {
         "(deny file-write* (literal {}))\n",
         quoted(&task.guard_executable)?
     ));
-    if profile.len() > 96 * 1024 {
-        return Err(ToolError::Limit);
-    }
-    let profile = CString::new(profile).map_err(|_| ToolError::Path)?;
-    let mut error = std::ptr::null_mut();
-    // The profile is NUL-terminated and lives through the call; Apple owns the error allocation.
-    let status = unsafe {
-        let status = sandbox_init(profile.as_ptr(), 0, &mut error);
-        if !error.is_null() {
-            sandbox_free_error(error);
-        }
-        status
-    };
-    if status != 0 {
-        return Err(ToolError::ProtectionUnavailable);
-    }
+    install_profile(profile)?;
     for operation in [c"process-fork", c"network-outbound"] {
         // These operations have no filter argument; the PID is the calling process.
         if unsafe { sandbox_check(std::process::id() as i32, operation.as_ptr(), 0) } != 1 {
@@ -202,7 +220,8 @@ pub(super) fn install(task: &Task) -> Result<(), ToolError> {
         }
     }
     for syscall in [
-        2_i32, 46, 48, 59, 66, 111, 184, 195, 244, 329, 330, 331, 380, 410, 422,
+        2_i32, 28, 46, 48, 59, 66, 97, 98, 104, 106, 111, 133, 184, 195, 202, 244, 274, 329, 330,
+        331, 380, 402, 409, 410, 413, 422, 447, 450, 481,
     ] {
         // Darwin's syscall-number filter is 14; its variadic argument is a C int.
         if unsafe {
@@ -218,6 +237,242 @@ pub(super) fn install(task: &Task) -> Result<(), ToolError> {
         }
     }
     verify_cpu_controls()?;
+    Ok(())
+}
+
+fn install_profile(profile: String) -> Result<(), ToolError> {
+    if profile.len() > 96 * 1024 {
+        return Err(ToolError::Limit);
+    }
+    let profile = CString::new(profile).map_err(|_| ToolError::Path)?;
+    let mut error = std::ptr::null_mut();
+    // The profile lives through the call; the native error allocation is released exactly once.
+    let status = unsafe {
+        let status = sandbox_init(profile.as_ptr(), 0, &mut error);
+        if !error.is_null() {
+            sandbox_free_error(error);
+        }
+        status
+    };
+    if status != 0 {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok(())
+}
+
+fn command_root(task: &Task) -> Result<PathBuf, ToolError> {
+    let root = std::env::current_dir().map_err(|_| ToolError::Path)?;
+    crate::store::StateRoot::open_existing(&root).map_err(|_| ToolError::Path)?;
+    crate::tools::fs::reject_overlap(&root, &task.workspace)?;
+    if crate::tools::fs::identity(&crate::tools::fs::open_directory(&task.workspace)?)?
+        != (task.intent.workspace_device, task.intent.workspace_inode)
+    {
+        return Err(ToolError::ChangedInput);
+    }
+    unit::verify_storage(&root)?;
+    Ok(root)
+}
+
+pub(super) fn system_program(path: &str) -> Result<bool, ToolError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let path = Path::new(path);
+    if !matches!(path.parent(), Some(parent) if [Path::new("/bin"), Path::new("/usr/bin")].contains(&parent))
+    {
+        return Ok(false);
+    }
+    let parent = crate::tools::fs::open_directory(path.parent().ok_or(ToolError::Path)?)?;
+    let parent = parent
+        .into_std_file()
+        .metadata()
+        .map_err(|_| ToolError::Path)?;
+    let file = crate::tools::fs::open_absolute(path.to_str().ok_or(ToolError::Path)?)?;
+    let metadata = file.metadata().map_err(|_| ToolError::Path)?;
+    if !parent.is_dir()
+        || parent.uid() != 0
+        || parent.mode() & 0o022 != 0
+        || !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o6022 != 0
+    {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok(true)
+}
+
+fn system_program_without_entitlements(path: &Path) -> Result<bool, ToolError> {
+    use core_foundation::base::{CFType, TCFType};
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::string::CFString;
+    use core_foundation::url::CFURL;
+    use security_framework::os::macos::code_signing::{Flags, SecStaticCode};
+
+    let url = CFURL::from_path(path, false).ok_or(ToolError::Path)?;
+    let Ok(code) = SecStaticCode::from_path(&url, Flags::NONE) else {
+        return Ok(false);
+    };
+    let mut information = std::ptr::null();
+    // Only immutable OS-owned code is inspected; successful Copy transfers one retained dictionary.
+    let status = unsafe { SecCodeCopySigningInformation(code.as_CFTypeRef(), 2, &mut information) };
+    if status != 0 || information.is_null() {
+        return Ok(false);
+    }
+    // The successful SDK Copy owns this dictionary; exported constant keys use the Get rule.
+    let (information, dictionary_key, data_key) = unsafe {
+        (
+            CFDictionary::<CFString, CFType>::wrap_under_create_rule(information),
+            CFString::wrap_under_get_rule(kSecCodeInfoEntitlementsDict),
+            CFString::wrap_under_get_rule(kSecCodeInfoEntitlements),
+        )
+    };
+    if let Some(value) = information.find(&dictionary_key) {
+        return Ok(value
+            .downcast::<CFDictionary>()
+            .is_some_and(|value| value.is_empty()));
+    }
+    Ok(!information.contains_key(&data_key))
+}
+
+fn install_command(task: &Task) -> Result<(), ToolError> {
+    use std::os::unix::fs::MetadataExt;
+
+    if rustix::process::geteuid().as_raw() == 0
+        || rustix::process::getuid() != rustix::process::geteuid()
+        || rustix::process::getgid() != rustix::process::getegid()
+    {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    let root = command_root(task)?;
+    for program in task
+        .config
+        .commands
+        .iter()
+        .chain(task.config.mcp.iter().map(|server| &server.program))
+    {
+        program.verify()?;
+        if system_program(&program.executable)?
+            && !system_program_without_entitlements(Path::new(&program.executable))?
+        {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+    }
+    let mut profile = COMMAND_PROFILE.to_owned();
+    for name in ["workspace", "scratch"] {
+        let path = root.join(name);
+        ancestors(&mut profile, &path)?;
+        profile.push_str(&format!(
+            "(allow file-read* file-write* file-map-executable process-exec (subpath {}))\n",
+            quoted(&path)?
+        ));
+    }
+    let resources = root.join("runtime");
+    let metadata = std::fs::symlink_metadata(&resources).map_err(|_| ToolError::Path)?;
+    if !metadata.is_dir()
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.mode() & 0o7777 != 0o700
+    {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    profile.push_str(&format!(
+        "(allow file-read* file-map-executable (subpath {}))\n(allow process-exec (subpath {}))\n",
+        quoted(&resources)?,
+        quoted(&resources.join("programs"))?
+    ));
+    let mut count = 0;
+    for directory in ["/bin", "/usr/bin"] {
+        let dir = crate::tools::fs::open_directory(Path::new(directory))?;
+        use cap_std::fs::MetadataExt;
+        let metadata = dir
+            .dir_metadata()
+            .map_err(|_| ToolError::ProtectionUnavailable)?;
+        if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        for entry in dir
+            .entries()
+            .map_err(|_| ToolError::ProtectionUnavailable)?
+        {
+            count += 1;
+            if count > 2048 {
+                return Err(ToolError::Limit);
+            }
+            let entry = entry.map_err(|_| ToolError::ProtectionUnavailable)?;
+            if !entry
+                .file_type()
+                .map_err(|_| ToolError::ProtectionUnavailable)?
+                .is_file()
+            {
+                continue;
+            }
+            let metadata = entry
+                .metadata()
+                .map_err(|_| ToolError::ProtectionUnavailable)?;
+            if !metadata.is_file()
+                || metadata.uid() != 0
+                || metadata.nlink() != 1
+                || metadata.mode() & 0o6022 != 0
+            {
+                continue;
+            }
+            let path = Path::new(directory).join(entry.file_name());
+            if !system_program_without_entitlements(&path)? {
+                continue;
+            }
+            profile.push_str(&format!(
+                "(allow file-read* file-map-executable process-exec (literal {}))\n",
+                quoted(&path)?
+            ));
+            if profile.len() > 96 * 1024 {
+                return Err(ToolError::Limit);
+            }
+        }
+    }
+    profile.push_str(&format!(
+        "(deny file-write* (literal {}))\n",
+        quoted(&task.guard_executable)?
+    ));
+    let mut bootstrap = u32::MAX;
+    // Mach ports are 32-bit SDK names; these calls retain no borrowed memory or service right.
+    let detached = unsafe {
+        task_set_special_port(mach_task_self_, 4, 0) == 0
+            && mach_ports_register(mach_task_self_, std::ptr::null_mut(), 0) == 0
+            && task_get_special_port(mach_task_self_, 4, &mut bootstrap) == 0
+            && bootstrap == 0
+    };
+    if !detached {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    install_profile(profile)?;
+    // The unfiltered query uses this process's PID; entitled actors must lose launch authority.
+    if unsafe { sandbox_check(std::process::id() as i32, c"process-fork".as_ptr(), 0) } != 0 {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    for operation in [
+        c"network-outbound",
+        c"mach-lookup",
+        c"iokit-open-user-client",
+        c"process-exec-update-label",
+    ] {
+        // The default rule rejects unfiltered service/network operations for this process.
+        if unsafe { sandbox_check(std::process::id() as i32, operation.as_ptr(), 0) } != 1 {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+    }
+    for syscall in [202_i32, 274, 458, 459, 494, 556] {
+        // The syscall-number filter accepts a C int and no retained pointer.
+        if unsafe {
+            sandbox_check(
+                std::process::id() as i32,
+                c"syscall-unix".as_ptr(),
+                14,
+                syscall,
+            )
+        } != 1
+        {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+    }
     Ok(())
 }
 
@@ -257,7 +512,7 @@ fn verify_cpu_controls() -> Result<(), ToolError> {
 
 fn task_info(pid: u32) -> Result<libc::proc_taskinfo, ToolError> {
     let mut info = MaybeUninit::<libc::proc_taskinfo>::uninit();
-    // The parent observes its unreaped owned child; a full native write initializes every field.
+    // Callers establish process ownership; a full kernel write initializes the SDK layout.
     let count = unsafe {
         libc::proc_pidinfo(
             pid as i32,
@@ -279,7 +534,7 @@ fn observe(pid: u32) -> Result<bool, ToolError> {
         Ok(info) => info,
         Err(_) => {
             let mut info = MaybeUninit::<libc::proc_bsdinfo>::uninit();
-            // The unreaped PID cannot be reused; exact output proves whether kernel exit has begun.
+            // Callers bind the process identity; exact BSD output establishes kernel exit.
             let count = unsafe {
                 libc::proc_pidinfo(
                     pid as i32,
@@ -313,16 +568,23 @@ fn observe(pid: u32) -> Result<bool, ToolError> {
 pub(super) async fn execute_inner(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
-    mut cancellation: RunCancellation,
+    cancellation: RunCancellation,
     dispatched: &mut bool,
 ) -> Result<ToolObservation, ToolError> {
     crate::tools::fs::validate_workspace(runtime)?;
-    if matches!(
-        intent.call,
-        ToolCall::Command { .. } | ToolCall::McpList { .. } | ToolCall::McpCall { .. }
-    ) {
-        return Err(ToolError::ProtectionUnavailable);
-    }
+    unit::execute(runtime, intent, cancellation, dispatched).await
+}
+
+async fn execute_worker(
+    runtime: &ToolRuntime,
+    intent: &EffectIntent,
+    mut cancellation: RunCancellation,
+    scope: &mut unit::Scope,
+    control: &mut tokio::net::unix::OwnedWriteHalf,
+    receive_go: tokio::sync::oneshot::Receiver<()>,
+    root: &Path,
+) -> Result<ToolObservation, ToolError> {
+    crate::tools::fs::validate_workspace(runtime)?;
     let task = serde_json::to_vec(&Task {
         config: runtime.config.clone(),
         intent: intent.clone(),
@@ -336,7 +598,16 @@ pub(super) async fn execute_inner(
     let mut child = Command::new(&runtime.guard_executable)
         .arg("--internal-tool-guard")
         .env_clear()
-        .current_dir("/")
+        .current_dir(
+            if matches!(
+                intent.call,
+                ToolCall::Command { .. } | ToolCall::McpList { .. } | ToolCall::McpCall { .. }
+            ) {
+                root
+            } else {
+                Path::new("/")
+            },
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -372,7 +643,16 @@ pub(super) async fn execute_inner(
         if !observe(pid).map_err(|_| ToolError::GuardRejected("resource attestation"))? {
             return Err(ToolError::GuardRejected("resource attestation"));
         }
-        *dispatched = true;
+        let ready = serde_json::to_vec(&ready).map_err(|_| ToolError::Operation)?;
+        control
+            .write_all(&ready)
+            .await
+            .map_err(|_| ToolError::Operation)?;
+        control
+            .write_all(b"\n")
+            .await
+            .map_err(|_| ToolError::Operation)?;
+        receive_go.await.map_err(|_| ToolError::Operation)?;
         let payload_deadline = tokio::time::Instant::now()
             + Duration::from_millis(u64::from(intent.limits.runtime_ms));
         tokio::time::timeout_at(payload_deadline, async {
@@ -408,7 +688,6 @@ pub(super) async fn execute_inner(
     tokio::pin!(execution);
     let mut samples = tokio::time::interval(Duration::from_millis(10));
     let mut status = None;
-    let mut live = true;
     let result = loop {
         tokio::select! {
             biased;
@@ -417,14 +696,8 @@ pub(super) async fn execute_inner(
             exited = child.wait(), if status.is_none() => {
                 status = Some(exited.map_err(|_| ToolError::Operation));
             }
-            _ = samples.tick(), if status.is_none() && live => {
-                match observe(pid) {
-                    Ok(active) => live = active,
-                    Err(error) => match child.try_wait() {
-                        Ok(Some(exited)) => status = Some(Ok(exited)),
-                        _ => break Err(error),
-                    },
-                }
+            _ = samples.tick() => {
+                if let Err(error) = scope.observe() { break Err(error); }
             }
         }
     };
@@ -564,6 +837,30 @@ mod tests {
         };
         configure_resources().unwrap();
         install(&task).unwrap();
+        let mut query = [
+            libc::CTL_KERN,
+            libc::KERN_PROCARGS2,
+            std::process::id() as i32,
+        ];
+        let mut size = 0;
+        // This queries only the cleared-environment fixture itself, with live sized output.
+        assert_eq!(
+            unsafe {
+                libc::sysctl(
+                    query.as_mut_ptr(),
+                    query.len() as u32,
+                    std::ptr::null_mut(),
+                    &mut size,
+                    std::ptr::null_mut(),
+                    0,
+                )
+            },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EPERM)
+        );
         assert_eq!(
             std::fs::read(root.join("outside")).unwrap_err().kind(),
             std::io::ErrorKind::PermissionDenied
@@ -576,6 +873,18 @@ mod tests {
         );
         assert_eq!(
             std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            std::os::unix::net::UnixListener::bind(root.join("workspace/socket"))
                 .unwrap_err()
                 .kind(),
             std::io::ErrorKind::PermissionDenied

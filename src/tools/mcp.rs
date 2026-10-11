@@ -1,6 +1,6 @@
 use super::ToolError;
 use super::config::Config;
-use super::guard::{payload, read_capped, read_line_capped};
+use super::guard::{payload, read_capped, read_line_capped, wait_owned_child};
 use super::skills::parse_json;
 use super::types::{MAX_TOOL_RESULT_BYTES, ToolCall, hex_digest, parse_mcp_arguments};
 use serde_json::{Value, json};
@@ -208,7 +208,11 @@ pub(super) async fn execute(call: &ToolCall, config: &Config) -> Result<String, 
     }).await.unwrap_or(Err(ToolError::Limit));
     let _ = connection.writer.shutdown().await;
     let _ = connection.child.start_kill();
-    let reaped = tokio::time::timeout(Duration::from_secs(2), connection.child.wait()).await;
+    let reaped = tokio::time::timeout(
+        Duration::from_secs(2),
+        wait_owned_child(&mut connection.child),
+    )
+    .await;
     let drained = tokio::time::timeout(Duration::from_secs(2), &mut stderr_task).await;
     if drained.is_err() {
         stderr_task.abort();

@@ -253,7 +253,7 @@ impl SessionView {
                         title: title.clone(),
                         title_is_explicit: !crate::session::placeholder_title(title),
                         inherited_title: None,
-                        workspace_identity: *workspace_identity,
+                        workspace_identity: Some(*workspace_identity),
                         defaults: SessionDefaults::default(),
                         created_sequence: prior,
                         last_sequence: prior,
@@ -415,7 +415,7 @@ impl SessionView {
                     && run.agents[0]
                         .provider_calls
                         .last()
-                        .is_some_and(|call| call.disposition != ProviderCallDisposition::Delegated)
+                        .is_none_or(|call| call.disposition != ProviderCallDisposition::Delegated)
                 {
                     return Err(ReplayError::InvalidTransition);
                 }
@@ -584,7 +584,7 @@ impl SessionView {
                     return Err(ReplayError::InvalidTransition);
                 }
                 if *disposition == AgentDisposition::Finished
-                    && run.agents[index].provider_calls.last().is_some_and(|call| {
+                    && run.agents[index].provider_calls.last().is_none_or(|call| {
                         call.disposition != ProviderCallDisposition::Finished
                             || call.phase == crate::provider::AgentPhase::ToolReview
                     })

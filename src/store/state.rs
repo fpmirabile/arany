@@ -20,6 +20,55 @@ const CHATGPT_REGISTRATION_FILE: &str = "chatgpt-registration.json";
 const PENDING_CHATGPT_REGISTRATION_FILE: &str = "chatgpt-registration.pending";
 const CHATGPT_ACCOUNTS_FILE: &str = "chatgpt-accounts.json";
 const PENDING_CHATGPT_ACCOUNTS_FILE: &str = "chatgpt-accounts.pending";
+const HISTORY_FILES: [&str; 4] = [
+    "events.sqlite3-journal",
+    "events.sqlite3-wal",
+    "events.sqlite3-shm",
+    DATABASE_FILE,
+];
+
+pub struct HistoryReset {
+    state: StateRoot,
+    _lock: lock::HistoryLock,
+    records: [Option<cap_std::fs::Metadata>; 4],
+}
+
+impl HistoryReset {
+    pub fn apply(self) -> Result<(), StoreError> {
+        #[cfg(unix)]
+        {
+            use cap_std::fs::MetadataExt;
+
+            let current = self.state.history_records()?;
+            for (expected, current) in self.records.iter().zip(&current) {
+                match (expected, current) {
+                    (None, None) => {}
+                    (Some(expected), Some(current))
+                        if expected.dev() == current.dev()
+                            && expected.ino() == current.ino()
+                            && expected.len() == current.len()
+                            && expected.modified()? == current.modified()? => {}
+                    _ => return Err(StoreError::HistoryChanged),
+                }
+            }
+            for (name, record) in HISTORY_FILES.iter().zip(&self.records) {
+                if record.is_some() {
+                    self.state._dir.remove_file(name)?;
+                }
+            }
+            prepare_database_file(&self.state._dir, true)?;
+            self.state
+                ._dir
+                .open_with(".", OpenOptions::new().read(true))?
+                .sync_all()?;
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            Err(StoreError::InvalidStateDirectory)
+        }
+    }
+}
 
 pub struct StateRoot {
     path: PathBuf,
@@ -150,6 +199,10 @@ impl StateRoot {
             #[cfg(unix)]
             ancestors.push(directory_identity(&dir)?);
         }
+        #[cfg(unix)]
+        if create {
+            lock::prepare_history_lock(&dir)?;
+        }
         prepare_database_file(&dir, create)?;
         Ok(Self {
             path: normalized,
@@ -161,6 +214,29 @@ impl StateRoot {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn prepare_history_reset(self, workspace: &Path) -> Result<HistoryReset, StoreError> {
+        let workspace = Dir::open_ambient_dir(workspace, ambient_authority())?;
+        self.ensure_outside_workspace(&workspace)?;
+        let lock = self.lock_history(true)?;
+        let records = self.history_records()?;
+        Ok(HistoryReset {
+            state: self,
+            _lock: lock,
+            records,
+        })
+    }
+
+    fn history_records(&self) -> Result<[Option<cap_std::fs::Metadata>; 4], StoreError> {
+        let mut records = std::array::from_fn(|_| None);
+        for (name, record) in HISTORY_FILES.iter().zip(&mut records) {
+            *record = self
+                .open_private_record(name, MAX_DATABASE_BYTES as usize)?
+                .map(|file| file.metadata())
+                .transpose()?;
+        }
+        Ok(records)
     }
 
     pub(crate) fn append_development_diagnostic(&self, record: &[u8]) -> Result<(), StoreError> {
@@ -268,6 +344,22 @@ impl StateRoot {
         )
     }
 
+    pub fn remove_saved_account_record(&self) -> Result<(), StoreError> {
+        self.remove_private_record(
+            SAVED_ACCOUNT_FILE,
+            PENDING_ACCOUNT_FILE,
+            Self::MAX_ACCOUNT_RECORD_BYTES,
+        )
+    }
+
+    pub fn remove_model_preferences_record(&self) -> Result<(), StoreError> {
+        self.remove_private_record(
+            "model-preferences.json",
+            "model-preferences.pending",
+            Self::MAX_MODEL_PREFERENCES_BYTES,
+        )
+    }
+
     pub fn read_chatgpt_registration_record(&self) -> Result<Option<Vec<u8>>, StoreError> {
         self.read_private_record(
             CHATGPT_REGISTRATION_FILE,
@@ -301,6 +393,50 @@ impl StateRoot {
             record,
             Self::MAX_CHATGPT_ACCOUNTS_BYTES,
         )
+    }
+
+    pub fn remove_chatgpt_accounts_record(&self) -> Result<(), StoreError> {
+        self.remove_private_record(
+            CHATGPT_ACCOUNTS_FILE,
+            PENDING_CHATGPT_ACCOUNTS_FILE,
+            Self::MAX_CHATGPT_ACCOUNTS_BYTES,
+        )
+    }
+
+    pub fn remove_chatgpt_registration_record(&self) -> Result<(), StoreError> {
+        self.remove_private_record(
+            CHATGPT_REGISTRATION_FILE,
+            PENDING_CHATGPT_REGISTRATION_FILE,
+            Self::MAX_CHATGPT_REGISTRATION_BYTES,
+        )
+    }
+
+    fn remove_private_record(
+        &self,
+        name: &str,
+        pending: &str,
+        limit: usize,
+    ) -> Result<(), StoreError> {
+        #[cfg(unix)]
+        {
+            let record = self.open_private_record(name, limit)?;
+            let staged = self.open_private_record(pending, limit)?;
+            if staged.is_some() {
+                self._dir.remove_file(pending)?;
+            }
+            if record.is_some() {
+                self._dir.remove_file(name)?;
+            }
+            self._dir
+                .open_with(".", OpenOptions::new().read(true))?
+                .sync_all()?;
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (name, pending, limit);
+            Err(StoreError::InvalidStateDirectory)
+        }
     }
 
     fn read_private_record(&self, name: &str, limit: usize) -> Result<Option<Vec<u8>>, StoreError> {
@@ -510,7 +646,6 @@ fn check_acl(file: &impl std::os::fd::AsFd, private: bool) -> Result<(), StoreEr
 mod tests {
     use super::*;
     use nix::{sys::stat::Mode, unistd::mkfifo};
-    #[cfg(target_os = "linux")]
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::fs::{MetadataExt, symlink};
 
@@ -715,12 +850,26 @@ mod tests {
             0
         );
         assert!(!path.join(PENDING_ACCOUNT_FILE).exists());
+        std::fs::write(path.join(PENDING_ACCOUNT_FILE), b"aborted-replacement").unwrap();
+        std::fs::set_permissions(
+            path.join(PENDING_ACCOUNT_FILE),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        state.remove_saved_account_record().unwrap();
+        assert!(state.read_saved_account_record().unwrap().is_none());
+        assert!(!path.join(PENDING_ACCOUNT_FILE).exists());
+        state.remove_saved_account_record().unwrap();
+        state
+            .replace_saved_account_record(b"synthetic-second")
+            .unwrap();
 
         let file = path.join(SAVED_ACCOUNT_FILE);
         let outside = temp.path().join("outside");
         std::fs::write(&outside, b"outside-stays").expect("outside fixture");
         std::fs::remove_file(&file).expect("remove test record");
         symlink(&outside, &file).expect("symlink fixture");
+        assert!(state.remove_saved_account_record().is_err());
         assert!(state.saved_account_record_present().is_err());
         assert!(state.read_saved_account_record().is_err());
         assert!(state.replace_saved_account_record(b"new").is_err());
@@ -731,12 +880,14 @@ mod tests {
         std::fs::remove_file(&file).expect("remove test symlink");
 
         std::fs::hard_link(&outside, &file).expect("hard-link fixture");
+        assert!(state.remove_saved_account_record().is_err());
         assert!(state.saved_account_record_present().is_err());
         assert!(state.read_saved_account_record().is_err());
         assert!(state.replace_saved_account_record(b"new").is_err());
         std::fs::remove_file(&file).expect("remove test hard link");
 
         symlink(&outside, path.join(PENDING_ACCOUNT_FILE)).expect("pending symlink fixture");
+        assert!(state.remove_saved_account_record().is_err());
         assert!(state.replace_saved_account_record(b"new").is_err());
         assert_eq!(
             std::fs::read(&outside).expect("outside file"),
@@ -768,19 +919,27 @@ mod tests {
             0
         );
         assert!(!path.join(PENDING_CHATGPT_REGISTRATION_FILE).exists());
+        state.remove_chatgpt_registration_record().unwrap();
+        assert!(state.read_chatgpt_registration_record().unwrap().is_none());
+        state
+            .replace_chatgpt_registration_record(b"synthetic-second")
+            .unwrap();
 
         let outside = temp.path().join("outside");
         std::fs::write(&outside, b"outside-stays").unwrap();
         let file = path.join(CHATGPT_REGISTRATION_FILE);
         std::fs::remove_file(&file).unwrap();
         symlink(&outside, &file).unwrap();
+        assert!(state.remove_chatgpt_registration_record().is_err());
         assert!(state.read_chatgpt_registration_record().is_err());
         assert!(state.replace_chatgpt_registration_record(b"new").is_err());
         std::fs::remove_file(&file).unwrap();
         std::fs::hard_link(&outside, &file).unwrap();
+        assert!(state.remove_chatgpt_registration_record().is_err());
         assert!(state.read_chatgpt_registration_record().is_err());
         std::fs::remove_file(&file).unwrap();
         symlink(&outside, path.join(PENDING_CHATGPT_REGISTRATION_FILE)).unwrap();
+        assert!(state.remove_chatgpt_registration_record().is_err());
         assert!(state.replace_chatgpt_registration_record(b"new").is_err());
         assert_eq!(std::fs::read(&outside).unwrap(), b"outside-stays");
         assert!(
@@ -806,6 +965,11 @@ mod tests {
             0
         );
         assert!(!path.join(PENDING_CHATGPT_ACCOUNTS_FILE).exists());
+        state.remove_chatgpt_accounts_record().unwrap();
+        assert!(state.read_chatgpt_accounts_record().unwrap().is_none());
+        state
+            .replace_chatgpt_accounts_record(b"synthetic-token-index")
+            .unwrap();
         assert!(
             state
                 .replace_chatgpt_accounts_record(&vec![
@@ -817,15 +981,18 @@ mod tests {
         let file = path.join(CHATGPT_ACCOUNTS_FILE);
         std::fs::remove_file(&file).unwrap();
         symlink(&outside, &file).unwrap();
+        assert!(state.remove_chatgpt_accounts_record().is_err());
         assert!(state.chatgpt_accounts_record_present().is_err());
         assert!(state.read_chatgpt_accounts_record().is_err());
         assert!(state.replace_chatgpt_accounts_record(b"new").is_err());
         std::fs::remove_file(&file).unwrap();
         std::fs::hard_link(&outside, &file).unwrap();
+        assert!(state.remove_chatgpt_accounts_record().is_err());
         assert!(state.chatgpt_accounts_record_present().is_err());
         assert!(state.read_chatgpt_accounts_record().is_err());
         std::fs::remove_file(&file).unwrap();
         symlink(&outside, path.join(PENDING_CHATGPT_ACCOUNTS_FILE)).unwrap();
+        assert!(state.remove_chatgpt_accounts_record().is_err());
         assert!(state.replace_chatgpt_accounts_record(b"new").is_err());
         assert_eq!(std::fs::read(outside).unwrap(), b"outside-stays");
     }
@@ -845,9 +1012,22 @@ mod tests {
             PROVIDER_PROFILES_FILE,
             "model-preferences.json",
             "ui-preferences.json",
+            "events.sqlite3-journal",
+            "events.sqlite3-wal",
+            "events.sqlite3-shm",
         ] {
             mkfifo(&path.join(name), Mode::S_IRUSR | Mode::S_IWUSR).expect("test FIFO");
         }
+        assert!(state.remove_saved_account_record().is_err());
+        assert!(state.remove_chatgpt_registration_record().is_err());
+        assert!(state.remove_chatgpt_accounts_record().is_err());
+        assert!(state.remove_model_preferences_record().is_err());
+        assert!(matches!(
+            StateRoot::open_existing(&path)
+                .unwrap()
+                .prepare_history_reset(&workspace),
+            Err(StoreError::StateNotPrivate)
+        ));
         assert!(matches!(
             state.read_saved_account_record(),
             Err(StoreError::StateNotPrivate)

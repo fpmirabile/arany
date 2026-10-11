@@ -117,10 +117,6 @@ impl ToolRuntime {
         guard_executable: PathBuf,
     ) -> Result<Self, ToolError> {
         guard::check_available()?;
-        #[cfg(target_os = "macos")]
-        if !config.commands.is_empty() || !config.mcp.is_empty() {
-            return Err(ToolError::ProtectionUnavailable);
-        }
         let enforcement_digest = guard::enforcement_digest()?;
         let root = fs::open_directory(workspace)?;
         state
@@ -172,7 +168,7 @@ impl ToolRuntime {
             "file_tools": "list (directory entries), read (UTF-8, zero-based byte offset, limit 1..4096, whole-file sha256), search (literal UTF-8 content in a file or directory; use Read or an include for edit sha256), mkdir (new directory; parent must exist), write (null digest only creates), edit (unique literal match, expected sha256)",
             "commands": self.config.commands.iter().map(|program| serde_json::json!({"name":program.name,"interpreter":program.interpreter,"inputs":program.inputs.iter().map(|input| format!("/inputs/{}/{}", program.name, input.destination)).collect::<Vec<_>>()})).collect::<Vec<_>>(),
             "command_contract": if cfg!(target_os = "macos") {
-                "Commands and MCP are unavailable on this native profile. Use the admitted typed file Tools and pinned Skill data."
+                "Explicit argv only. Private selected-project cwd; use ARANY_TOOL_WORKSPACE, ARANY_TOOL_INPUTS and ARANY_TOOL_SKILLS for paths inside shell strings. Standalone /workspace, /scratch, /inputs, /skills and /programs argv paths map to private native paths; checked system programs execute at their original paths. No network, host home, credentials or state. Subprocess changes are discarded; use typed write/edit to integrate source."
             } else {
                 "Explicit argv only. Private writable selected-project snapshot at /workspace; /scratch is bounded. No network, host home, credentials or state. Subprocess file changes are discarded, not applied to host. Use typed write/edit to integrate source. Skills available at /skills/NAME."
             },
@@ -290,4 +286,9 @@ pub(crate) fn now_ms() -> u64 {
 
 pub fn tool_guard_main() -> std::process::ExitCode {
     guard::helper_main()
+}
+
+#[cfg(target_os = "macos")]
+pub fn tool_guard_unit_main() -> std::process::ExitCode {
+    guard::unit_main()
 }

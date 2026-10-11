@@ -75,10 +75,6 @@ pub(super) fn load(
     if !valid_name(name) {
         return Err(StoreError::InvalidHistory);
     }
-    let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version == 1 {
-        return Ok(None);
-    }
     let raw: Option<(Vec<u8>, String, i64, i64)> = connection
         .query_row(
             "SELECT profile_digest, addresses, checked_at_ms, expires_at_ms
@@ -168,10 +164,6 @@ pub(super) fn load_native(
     connection: &Connection,
     fingerprint: &[u8; 32],
 ) -> Result<Option<NativeEvidenceRecord>, StoreError> {
-    let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version < 3 {
-        return Ok(None);
-    }
     let raw: Option<(i64, i64)> = connection
         .query_row(
             "SELECT checked_at_ms, expires_at_ms

@@ -245,69 +245,87 @@ impl Snapshot {
             .dir
             .open_dir_nofollow("workspace")
             .map_err(|_| ToolError::Path)?;
-        let mut entries = Vec::new();
-        let mut budget = ScanBudget::default();
-        if include_workspace {
-            for path in &config.workspace_paths {
-                if path == "." {
-                    collect_root(workspace, "", &mut entries, &mut budget)?;
-                } else {
-                    collect(workspace, path, &mut entries, &mut budget)?;
-                }
+        snapshot_into(
+            workspace,
+            config,
+            include_workspace.then_some(&target),
+            &snapshot.dir,
+        )?;
+        Ok(snapshot)
+    }
+}
+
+pub(super) fn snapshot_into(
+    workspace: &Dir,
+    config: &Config,
+    project: Option<&Dir>,
+    resources: &Dir,
+) -> Result<(), ToolError> {
+    config.validate()?;
+    let mut entries = Vec::new();
+    let mut budget = ScanBudget::default();
+    if let Some(target) = project {
+        for path in &config.workspace_paths {
+            if path == "." {
+                collect_root(workspace, "", &mut entries, &mut budget)?;
+            } else {
+                collect(workspace, path, &mut entries, &mut budget)?;
             }
         }
         for entry in entries {
-            put_entry(&target, entry)?;
+            put_entry(target, entry)?;
         }
-        let mut runtime_bytes = 0usize;
-        for program in config
-            .commands
-            .iter()
-            .chain(config.mcp.iter().map(|server| &server.program))
-        {
-            let executable = read_regular(open_absolute(&program.executable)?, MAX_SNAPSHOT_BYTES)?;
-            if hex_digest(&executable) != program.sha256 {
-                return Err(ToolError::ChangedInput);
-            }
-            charge_runtime(&mut runtime_bytes, executable.len())?;
+    }
+    let mut runtime_bytes = 0usize;
+    for program in config
+        .commands
+        .iter()
+        .chain(config.mcp.iter().map(|server| &server.program))
+    {
+        let executable = read_regular(open_absolute(&program.executable)?, MAX_SNAPSHOT_BYTES)?;
+        if hex_digest(&executable) != program.sha256 {
+            return Err(ToolError::ChangedInput);
+        }
+        charge_runtime(&mut runtime_bytes, executable.len())?;
+        if !super::guard::native_system_program(&program.executable)? {
             put(
-                &snapshot.dir,
+                resources,
                 &format!("programs/{}", program.name),
                 &executable,
                 true,
             )?;
-            for input in &program.inputs {
-                let content = read_regular(open_absolute(&input.path)?, MAX_FILE_BYTES)?;
-                if hex_digest(&content) != input.sha256 {
-                    return Err(ToolError::ChangedInput);
-                }
-                charge_runtime(&mut runtime_bytes, content.len())?;
-                put(
-                    &snapshot.dir,
-                    &format!("inputs/{}/{}", program.name, input.destination),
-                    &content,
-                    false,
-                )?;
-            }
         }
-        for skill in &config.skills {
-            let root = open_directory(Path::new(&skill.directory))?;
-            for (path, hash) in &skill.files {
-                let content = read_regular(open_file(&root, path)?, MAX_TOOL_RESULT_BYTES)?;
-                if hex_digest(&content) != *hash {
-                    return Err(ToolError::ChangedInput);
-                }
-                charge_runtime(&mut runtime_bytes, content.len())?;
-                put(
-                    &snapshot.dir,
-                    &format!("skills/{}/{path}", skill.name),
-                    &content,
-                    false,
-                )?;
+        for input in &program.inputs {
+            let content = read_regular(open_absolute(&input.path)?, MAX_FILE_BYTES)?;
+            if hex_digest(&content) != input.sha256 {
+                return Err(ToolError::ChangedInput);
             }
+            charge_runtime(&mut runtime_bytes, content.len())?;
+            put(
+                resources,
+                &format!("inputs/{}/{}", program.name, input.destination),
+                &content,
+                false,
+            )?;
         }
-        Ok(snapshot)
     }
+    for skill in &config.skills {
+        let root = open_directory(Path::new(&skill.directory))?;
+        for (path, hash) in &skill.files {
+            let content = read_regular(open_file(&root, path)?, MAX_TOOL_RESULT_BYTES)?;
+            if hex_digest(&content) != *hash {
+                return Err(ToolError::ChangedInput);
+            }
+            charge_runtime(&mut runtime_bytes, content.len())?;
+            put(
+                resources,
+                &format!("skills/{}/{path}", skill.name),
+                &content,
+                false,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -340,7 +358,6 @@ impl ScanBudget {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
 fn charge_runtime(total: &mut usize, count: usize) -> Result<(), ToolError> {
     *total = total.checked_add(count).ok_or(ToolError::Limit)?;
     if *total > MAX_RUNTIME_BYTES {
@@ -657,6 +674,7 @@ fn path_match(path: &str, query: &str) -> Option<u8> {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 pub(super) fn copy_seed() -> Result<(), ToolError> {
     let root = open_directory(Path::new("/seed/workspace"))?;
     let target = open_directory(Path::new("/workspace"))?;

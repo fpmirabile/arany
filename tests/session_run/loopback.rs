@@ -111,7 +111,7 @@ pub(super) fn write_profile(state: &Path, port: u16) {
             "outcome_encoding": "json_schema",
             "privacy": "user_authorized",
             "max_output_tokens": 4096,
-            "capability_evidence_version": 1
+            "capability_evidence_version": 2, "efforts": []
         }]
     });
     let path = state.join("provider-profiles.json");

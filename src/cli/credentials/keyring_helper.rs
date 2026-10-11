@@ -21,13 +21,13 @@ use uuid::Uuid;
 
 const DEADLINE: Duration = Duration::from_secs(5);
 const AUTHORIZATION_DEADLINE: Duration = Duration::from_secs(120);
-const CHATGPT_PROBE_SLOT: &str = "chatgpt-backend-probe";
+const PROBE_SLOT: &str = "credential-backend-probe";
 const EXIT_NOT_FOUND: u8 = 2;
 const EXIT_LOCKED: u8 = 3;
 const EXIT_IDENTITY_MISMATCH: u8 = 4;
 
-pub(super) fn probe_chatgpt_backend() -> Result<(), CredentialError> {
-    invoke("probe", CHATGPT_PROBE_SLOT, None).map(|_| ())
+pub(super) fn probe_backend() -> Result<(), CredentialError> {
+    invoke("probe", PROBE_SLOT, None).map(|_| ())
 }
 
 struct CancelAuthorization(Arc<AtomicBool>);
@@ -121,7 +121,7 @@ fn invoke(
 fn helper_command(operation: &str, slot: &str) -> Result<(Command, usize), CredentialError> {
     admit_transport()?;
     let limit = slot_record_limit(slot).ok_or(CredentialError::InvalidAccount)?;
-    if operation != "probe" && slot == CHATGPT_PROBE_SLOT {
+    if operation != "probe" && slot == PROBE_SLOT {
         return Err(CredentialError::InvalidAccount);
     }
     #[cfg(all(not(test), target_os = "linux"))]
@@ -259,8 +259,8 @@ mod tests {
 
     #[test]
     fn keyring_slots_are_bounded_and_do_not_accept_arbitrary_accounts() {
-        assert_eq!(slot_record_limit(CHATGPT_PROBE_SLOT), Some(0));
-        assert!(write(CHATGPT_PROBE_SLOT, "synthetic").is_err());
+        assert_eq!(slot_record_limit(PROBE_SLOT), Some(0));
+        assert!(write(PROBE_SLOT, "synthetic").is_err());
         assert_eq!(
             delete(DEFAULT_ACCOUNT),
             Err(CredentialError::InvalidAccount)
@@ -542,7 +542,7 @@ impl OwnedChild {
 }
 
 fn slot_record_limit(slot: &str) -> Option<usize> {
-    if slot == CHATGPT_PROBE_SLOT {
+    if slot == PROBE_SLOT {
         Some(0)
     } else if slot == DEFAULT_ACCOUNT
         || ["native-test-", "native-client-test-"]
@@ -621,8 +621,8 @@ pub(super) fn main() -> ExitCode {
         operation,
         "read" | "write" | "probe" | "delete" | "authorize"
     ) || !valid_slot(slot)
-        || (operation == "probe" && slot != CHATGPT_PROBE_SLOT)
-        || (operation != "probe" && slot == CHATGPT_PROBE_SLOT)
+        || (operation == "probe" && slot != PROBE_SLOT)
+        || (operation != "probe" && slot == PROBE_SLOT)
         || (operation == "delete" && !slot.starts_with("chatgpt-"))
         || admit_transport().is_err()
     {

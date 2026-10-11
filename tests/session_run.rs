@@ -172,16 +172,25 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
         let pty = nix::pty::openpty(Some(&geometry), None).unwrap();
         let slave = std::fs::File::from(pty.slave);
         let master = std::fs::File::from(pty.master);
+        for descriptor in [&slave, &master] {
+            rustix::io::fcntl_setfd(descriptor, rustix::io::FdFlags::CLOEXEC).unwrap();
+            assert!(
+                rustix::io::fcntl_getfd(descriptor)
+                    .unwrap()
+                    .contains(rustix::io::FdFlags::CLOEXEC),
+                "fixture PTY must not survive an unrelated test process exec"
+            );
+        }
         let before = process::terminal_settings(&master);
         let probe = master.try_clone().unwrap();
-        let mut input = master.try_clone().unwrap();
+        let input = master.try_clone().unwrap();
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
             .env_clear()
             .env(CASE, case)
-            .env("HOME", temp.path().join("legacy-home"))
-            .env("XDG_STATE_HOME", temp.path().join("legacy-state"))
-            .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+            .env("HOME", temp.path().join("fixture-home"))
+            .env("XDG_STATE_HOME", temp.path().join("fixture-state"))
+            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
             .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account"))
             .env("TERM", "xterm")
             .current_dir(temp.path())
@@ -189,45 +198,65 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave.try_clone().unwrap()))
             .stderr(Stdio::from(slave));
-        let mut child = loopback::ChildGuard::new(command.spawn().unwrap());
+        // Close fixture PTYs before reaping a child on unwind.
+        let (mut child, mut input, probe) = (
+            loopback::ChildGuard::new(command.spawn().unwrap()),
+            input,
+            probe,
+        );
         drop(command);
         let mut submissions = 0;
-        let output = process::capture_terminal(
-            child.child(),
-            master,
-            Duration::from_secs(20),
-            256 * 1024,
-            |bytes| {
-                assert!(
-                    !bytes.windows(4).any(|part| part == b"\x1b[6n"),
-                    "terminal ownership does not require cursor replies"
-                );
-                let marker = format!("INPUT_READY:{submissions}");
-                if submissions < if unwind { 1 } else { 2 }
-                    && bytes
-                        .windows(marker.len())
-                        .enumerate()
-                        .any(|(offset, part)| {
-                            part == marker.as_bytes()
-                                && (bytes[offset + marker.len()..].starts_with(b"\n")
-                                    || bytes[offset + marker.len()..].starts_with(b"\r\n"))
-                        })
-                {
-                    if unwind {
-                        let acquired = process::terminal_settings(&probe);
-                        if case == "inline-panic" {
-                            assert_ne!(acquired, before, "raw mode acquired before unwind");
-                        } else {
-                            assert_eq!(acquired, before, "linear mode remains canonical");
-                        }
+        let mut observed_tail = String::new();
+        let mut observed_bytes = 0;
+        let observation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            process::capture_terminal(
+                child.child(),
+                master,
+                Duration::from_secs(20),
+                256 * 1024,
+                |bytes| {
+                    if observed_bytes != bytes.len() {
+                        observed_tail =
+                            String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(4096)..])
+                                .chars()
+                                .flat_map(char::escape_default)
+                                .collect();
+                        observed_bytes = bytes.len();
                     }
-                    input
-                        .write_all(if unwind { b"p\r" } else { b"x\r" })
-                        .unwrap();
-                    submissions += 1;
-                }
-            },
-        );
+                    assert!(
+                        !bytes.windows(4).any(|part| part == b"\x1b[6n"),
+                        "terminal ownership does not require cursor replies"
+                    );
+                    let marker = format!("INPUT_READY:{submissions}");
+                    if submissions < if unwind { 1 } else { 2 }
+                        && bytes
+                            .windows(marker.len())
+                            .enumerate()
+                            .any(|(offset, part)| {
+                                part == marker.as_bytes()
+                                    && (bytes[offset + marker.len()..].starts_with(b"\n")
+                                        || bytes[offset + marker.len()..].starts_with(b"\r\n"))
+                            })
+                    {
+                        if unwind {
+                            let acquired = process::terminal_settings(&probe);
+                            if case == "inline-panic" {
+                                assert_ne!(acquired, before, "raw mode acquired before unwind");
+                            } else {
+                                assert_eq!(acquired, before, "linear mode remains canonical");
+                            }
+                        }
+                        input
+                            .write_all(if unwind { b"p\r" } else { b"x\r" })
+                            .unwrap();
+                        submissions += 1;
+                    }
+                },
+            )
+        }));
+        let output = observation.unwrap_or_else(|_| {
+            panic!("{case} terminal owner observation failed after {submissions} submissions: {observed_tail}")
+        });
         assert!(
             if unwind {
                 output.status.code() == Some(101)
@@ -304,18 +333,18 @@ fn account_path_ignores_session_state_environment() {
                     fixture
                 );
                 let parent = fixture.parent().expect("fixture-owned parent");
-                let legacy = StateRoot::default_path().expect("legacy fixture path");
+                let default_state = StateRoot::default_path().expect("fixture Session path");
                 assert!(
-                    legacy.starts_with(parent),
-                    "legacy migration root must remain inside the fixture"
+                    default_state.starts_with(parent),
+                    "environment-selected state must remain inside the fixture"
                 );
                 assert_ne!(
-                    legacy, fixture,
-                    "stable and legacy fixture roots remain separate"
+                    default_state, fixture,
+                    "account and Session fixture roots remain separate"
                 );
             }
             #[cfg(debug_assertions)]
-            Some("reject-legacy") => {
+            Some("reject-ambient-state") => {
                 assert!(
                     StateRoot::account_path().is_ok(),
                     "stable fixture root is admitted"
@@ -325,7 +354,7 @@ fn account_path_ignores_session_state_environment() {
                         StateRoot::default_path(),
                         Err(StoreError::InvalidStateDirectory)
                     ),
-                    "ambient legacy root must reject before migration can open it"
+                    "ambient default state must reject before it can be opened"
                 );
             }
             Some("reject") => assert!(matches!(
@@ -350,7 +379,10 @@ fn account_path_ignores_session_state_environment() {
             Some(std::path::PathBuf::from("relative-account-root")),
         ),
         #[cfg(debug_assertions)]
-        ("reject-legacy", Some(temp.path().join("account-root"))),
+        (
+            "reject-ambient-state",
+            Some(temp.path().join("account-root")),
+        ),
     ] {
         let mut command = Command::new(std::env::current_exe().expect("test executable"));
         command
@@ -358,7 +390,7 @@ fn account_path_ignores_session_state_environment() {
             .env_clear()
             .env(CASE, case)
             .current_dir(temp.path());
-        if case != "reject-legacy" {
+        if case != "reject-ambient-state" {
             command
                 .env("HOME", temp.path().join("different-home"))
                 .env("XDG_STATE_HOME", temp.path().join("different-state"))
@@ -409,134 +441,97 @@ fn native_keychain_fixture_cannot_fall_back_to_default_store() {
 }
 
 #[test]
-fn version_one_journal_migrates_without_changing_canonical_events() {
-    let temp = tempfile::tempdir().expect("private test root");
-    let state_path = temp.path().join("state");
-    StateRoot::admit(&state_path).expect("state root");
-    let session_id = SessionId::new();
-    let connection = rusqlite::Connection::open(state_path.join("events.sqlite3"))
-        .expect("version one database");
-    connection
-        .execute_batch(
-            "CREATE TABLE events (
-                sequence INTEGER PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                run_id TEXT,
-                agent_run_id TEXT,
-                kind TEXT NOT NULL,
-                event_version INTEGER NOT NULL CHECK (event_version >= 1),
-                payload TEXT NOT NULL CHECK (json_valid(payload)),
-                created_at_ms INTEGER NOT NULL
-            ) STRICT;
-            CREATE INDEX events_by_session ON events (session_id, sequence);
-            CREATE INDEX events_by_run ON events (run_id, sequence) WHERE run_id IS NOT NULL;
-            PRAGMA user_version=1;",
-        )
-        .expect("version one schema");
-    connection
-        .execute(
-            "INSERT INTO events (sequence, session_id, kind, event_version, payload, created_at_ms)
-             VALUES (1, ?1, 'SessionStarted', 1, '{\"title\":\"Legacy Session\"}', 1)",
-            [session_id.to_string()],
-        )
-        .expect("version one Event");
-    drop(connection);
-
+fn unsupported_journal_versions_reject_without_changing_existing_data() {
     let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
         .build()
-        .expect("runtime");
-    runtime.block_on(async {
-        let read_only =
-            Store::open_read_only(StateRoot::open_existing(&state_path).expect("existing state"))
-                .expect("legacy read-only Store");
-        assert_eq!(read_only.load_session(session_id).await.unwrap().len(), 1);
-        read_only.close().await.expect("close read-only Store");
+        .unwrap();
+    for version in [0, 1, 2, 3, 5] {
+        let temp = tempfile::tempdir().expect("private test root");
+        let state_path = temp.path().join("state");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        StateRoot::admit(&state_path).expect("state root");
+        let database = state_path.join("events.sqlite3");
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE canary (value TEXT); INSERT INTO canary VALUES ('preserved');",
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", version)
+            .unwrap();
+        drop(connection);
+        let original = std::fs::read(&database).unwrap();
+        for read_only in [true, false] {
+            let state = StateRoot::open_existing(&state_path).unwrap();
+            let result = if read_only {
+                Store::open_read_only(state)
+            } else {
+                Store::open(state)
+            };
+            assert!(
+                matches!(result, Err(StoreError::InvalidHistory)),
+                "version {version}, read_only {read_only}"
+            );
+            assert_eq!(std::fs::read(&database).unwrap(), original);
+        }
+        let reset = StateRoot::open_existing(&state_path)
+            .unwrap()
+            .prepare_history_reset(&workspace)
+            .unwrap();
+        for read_only in [true, false] {
+            let state = StateRoot::open_existing(&state_path).unwrap();
+            let result = if read_only {
+                Store::open_read_only(state)
+            } else {
+                Store::open(state)
+            };
+            assert!(matches!(result, Err(StoreError::HistoryBusy)));
+        }
+        drop(reset);
+        assert_eq!(std::fs::read(&database).unwrap(), original);
 
-        let store = Store::open(StateRoot::open_existing(&state_path).expect("existing state"))
-            .expect("migrated Store");
-        let events = store
-            .load_session(session_id)
-            .await
-            .expect("preserved Events");
-        assert_eq!(events.len(), 1);
+        let reset = StateRoot::open_existing(&state_path)
+            .unwrap()
+            .prepare_history_reset(&workspace)
+            .unwrap();
+        let mut changed = original;
+        changed.push(0);
+        std::fs::write(&database, &changed).unwrap();
+        assert!(matches!(reset.apply(), Err(StoreError::HistoryChanged)));
+        assert_eq!(std::fs::read(&database).unwrap(), changed);
+
+        StateRoot::open_existing(&state_path)
+            .unwrap()
+            .prepare_history_reset(&workspace)
+            .unwrap()
+            .apply()
+            .unwrap();
+        let store = Store::open(StateRoot::open_existing(&state_path).unwrap()).unwrap();
         assert!(matches!(
-            &events[0].event,
-            Event::SessionStarted { title, workspace_identity: None } if title == "Legacy Session"
+            StateRoot::open_existing(&state_path)
+                .unwrap()
+                .prepare_history_reset(&workspace),
+            Err(StoreError::HistoryBusy)
         ));
-        store.close().await.expect("close migrated Store");
-    });
-
-    let connection = rusqlite::Connection::open(state_path.join("events.sqlite3"))
-        .expect("inspect migrated database");
-    let version: i64 = connection
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .expect("schema version");
-    assert_eq!(version, 3);
-    let table: String = connection
-        .query_row(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='provider_evidence'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("evidence table");
-    assert_eq!(table, "provider_evidence");
-    let native_table: String = connection
-        .query_row(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='native_provider_evidence'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("native evidence table");
-    assert_eq!(native_table, "native_provider_evidence");
-}
-
-#[test]
-fn version_two_journal_migrates_without_losing_custom_evidence() {
-    let temp = tempfile::tempdir().expect("private test root");
-    let state_path = temp.path().join("state");
-    let root = StateRoot::admit(&state_path).expect("state root");
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("runtime");
-    runtime
-        .block_on(Store::open(root).expect("Store").close())
-        .expect("close Store");
-    let connection = rusqlite::Connection::open(state_path.join("events.sqlite3"))
-        .expect("version two database");
-    connection
-        .execute_batch(
-            "DROP TABLE native_provider_evidence;
-             INSERT INTO provider_evidence (profile_name, profile_digest, addresses, checked_at_ms, expires_at_ms)
-             VALUES ('legacy', zeroblob(32), '[\"127.0.0.1:443\"]', 1, 2);
-             PRAGMA user_version=2;",
-        )
-        .expect("version two schema");
-    drop(connection);
-
-    runtime.block_on(async {
-        let read_only =
-            Store::open_read_only(StateRoot::open_existing(&state_path).expect("existing state"))
-                .expect("legacy read-only Store");
-        read_only.close().await.expect("close read-only Store");
-        let store = Store::open(StateRoot::open_existing(&state_path).expect("existing state"))
-            .expect("migrated Store");
-        store.close().await.expect("close migrated Store");
-    });
-
-    let connection = rusqlite::Connection::open(state_path.join("events.sqlite3"))
-        .expect("inspect migrated database");
-    let version: i64 = connection
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .expect("schema version");
-    assert_eq!(version, 3);
-    let retained: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM provider_evidence WHERE profile_name = 'legacy'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("custom evidence survives migration");
-    assert_eq!(retained, 1);
+        runtime.block_on(store.close()).unwrap();
+        let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+        assert!(matches!(
+            StateRoot::open_existing(&state_path)
+                .unwrap()
+                .prepare_history_reset(&workspace),
+            Err(StoreError::HistoryBusy)
+        ));
+        assert!(
+            runtime
+                .block_on(store.load_session(SessionId::new()))
+                .unwrap()
+                .is_empty()
+        );
+        runtime.block_on(store.close()).unwrap();
+    }
 }
 
 #[test]
@@ -616,13 +611,13 @@ fn model_catalog_command_reads_only_selected_configuration() {
     #[cfg(debug_assertions)]
     {
         let account_root = temp.path().join("missing-chatgpt-account");
-        let legacy_home = temp.path().join("legacy-home");
-        let legacy_state = temp.path().join("legacy-state");
+        let fixture_home = temp.path().join("fixture-home");
+        let fixture_state = temp.path().join("fixture-state");
         let chatgpt_missing = Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
-            .env("HOME", &legacy_home)
-            .env("XDG_STATE_HOME", &legacy_state)
-            .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+            .env("HOME", &fixture_home)
+            .env("XDG_STATE_HOME", &fixture_state)
+            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
             .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
             .env("OPENAI_API_KEY", "synthetic-unselected-api-key")
             .current_dir(&workspace)
@@ -640,9 +635,9 @@ fn model_catalog_command_reads_only_selected_configuration() {
 
         let missing_effort = Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
-            .env("HOME", &legacy_home)
-            .env("XDG_STATE_HOME", &legacy_state)
-            .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+            .env("HOME", &fixture_home)
+            .env("XDG_STATE_HOME", &fixture_state)
+            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
             .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
             .current_dir(&workspace)
             .args([
@@ -668,9 +663,9 @@ fn model_catalog_command_reads_only_selected_configuration() {
 
         let unselected_run = Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
-            .env("HOME", &legacy_home)
-            .env("XDG_STATE_HOME", &legacy_state)
-            .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+            .env("HOME", &fixture_home)
+            .env("XDG_STATE_HOME", &fixture_state)
+            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
             .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
             .env("OPENAI_API_KEY", "synthetic-unselected-api-key")
             .current_dir(&workspace)
@@ -699,9 +694,9 @@ fn model_catalog_command_reads_only_selected_configuration() {
 
         let unchecked = Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
-            .env("HOME", &legacy_home)
-            .env("XDG_STATE_HOME", &legacy_state)
-            .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+            .env("HOME", &fixture_home)
+            .env("XDG_STATE_HOME", &fixture_state)
+            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
             .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
             .env("OPENAI_API_KEY", "synthetic-unselected-api-key")
             .current_dir(&workspace)
@@ -722,9 +717,9 @@ fn model_catalog_command_reads_only_selected_configuration() {
 
         let check_missing = Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
-            .env("HOME", &legacy_home)
-            .env("XDG_STATE_HOME", &legacy_state)
-            .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+            .env("HOME", &fixture_home)
+            .env("XDG_STATE_HOME", &fixture_state)
+            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
             .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
             .env("OPENAI_API_KEY", "synthetic-unselected-api-key")
             .current_dir(&workspace)
@@ -752,9 +747,9 @@ fn model_catalog_command_reads_only_selected_configuration() {
             let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
             command
                 .env_clear()
-                .env("HOME", &legacy_home)
-                .env("XDG_STATE_HOME", &legacy_state)
-                .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+                .env("HOME", &fixture_home)
+                .env("XDG_STATE_HOME", &fixture_state)
+                .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
                 .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
                 .current_dir(&workspace)
                 .args(["provider", "models", flag]);
@@ -780,9 +775,9 @@ fn model_catalog_command_reads_only_selected_configuration() {
             command
                 .env_clear()
                 .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
-                .env("HOME", &legacy_home)
-                .env("XDG_STATE_HOME", &legacy_state)
-                .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+                .env("HOME", &fixture_home)
+                .env("XDG_STATE_HOME", &fixture_state)
+                .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
                 .current_dir(&workspace)
                 .args(["provider", "check", flag]);
             if flag == "--state-dir" {
@@ -842,7 +837,7 @@ fn model_catalog_command_reads_only_selected_configuration() {
 
     let root = StateRoot::admit(&state_dir).expect("private state root");
     let profile_file = root.path().join("provider-profiles.json");
-    std::fs::write(&profile_file, r#"{"version":1,"profiles":[{"name":"local","protocol":"openai-responses","endpoint":"http://127.0.0.1:9321/v1/responses","model":"model-1","credential_env":"ARANY_PROVIDER_LOCAL_KEY","outcome_encoding":"json_schema","privacy":"user_authorized","max_output_tokens":4096,"capability_evidence_version":1}]}"#).expect("profile file");
+    std::fs::write(&profile_file, r#"{"version":1,"profiles":[{"name":"local","protocol":"openai-responses","endpoint":"http://127.0.0.1:9321/v1/responses","model":"model-1","credential_env":"ARANY_PROVIDER_LOCAL_KEY","outcome_encoding":"json_schema","privacy":"user_authorized","max_output_tokens":4096,"capability_evidence_version":2,"efforts":[]}]}"#).expect("profile file");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -893,9 +888,9 @@ fn native_model_check_requires_explicit_cost_consent_before_state_or_credentials
 
     let saved_without_consent = Command::new(env!("CARGO_BIN_EXE_arany"))
         .env_clear()
-        .env("HOME", temp.path().join("legacy-home"))
+        .env("HOME", temp.path().join("fixture-home"))
         .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-        .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+        .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
         .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
         .current_dir(&workspace)
         .args(["provider", "check", "--state-dir"])
@@ -1071,7 +1066,7 @@ fn exact_resume_and_rename_survive_file_backed_reopen() {
         assert_eq!(shown.stderr, b"");
         let expected = format!(
             "{{\"sequence\":1,\"session_id\":\"{id}\",\"run_id\":null,\"agent_run_id\":null,\"kind\":\"SessionStarted\",\"event_version\":2,\"payload\":{{\"title\":\"New Session\",\"workspace_device\":{device},\"workspace_inode\":{inode}}},\"created_at_ms\":{}}}\n\
-             {{\"sequence\":2,\"session_id\":\"{id}\",\"run_id\":null,\"agent_run_id\":null,\"kind\":\"SessionRenamed\",\"event_version\":1,\"payload\":{{\"title\":\"Research thread\"}},\"created_at_ms\":{}}}\n",
+             {{\"sequence\":2,\"session_id\":\"{id}\",\"run_id\":null,\"agent_run_id\":null,\"kind\":\"SessionRenamed\",\"event_version\":2,\"payload\":{{\"title\":\"Research thread\"}},\"created_at_ms\":{}}}\n",
             events[0].created_at_ms, events[1].created_at_ms
         );
         assert_eq!(shown.stdout, expected.as_bytes());
@@ -1132,21 +1127,6 @@ fn continue_selects_latest_committed_activity_in_the_admitted_workspace() {
         )
         .await
         .expect("second Session");
-        let legacy = SessionId::new();
-        let store =
-            Store::open(StateRoot::admit(&state_path).expect("state")).expect("writable Store");
-        store
-            .append(
-                legacy,
-                Event::SessionStarted {
-                    title: "Unbound legacy Session".into(),
-                    workspace_identity: None,
-                },
-            )
-            .await
-            .expect("legacy Session");
-        store.close().await.expect("Store shutdown");
-
         let listed = list_sessions(
             StateRoot::open_existing(&state_path).expect("existing state"),
             workspace.clone(),
@@ -1225,7 +1205,7 @@ fn continue_selects_latest_committed_activity_in_the_admitted_workspace() {
         connection
             .execute(
                 "UPDATE events SET event_version=9 WHERE session_id=?1",
-                [legacy.to_string()],
+                [other.to_string()],
             )
             .expect("malformed unrelated Session");
         drop(connection);
@@ -1376,11 +1356,11 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
             compaction_content_digest: None,
             tool_policy: None,
         };
-        let legacy_config = serde_json::to_value(&config).expect("legacy Run config JSON");
-        assert!(legacy_config.get("effort").is_none());
+        let encoded_config = serde_json::to_value(&config).expect("current Run config JSON");
+        assert!(encoded_config["effort"].is_null());
         assert_eq!(
-            serde_json::from_value::<RunConfig>(legacy_config)
-                .expect("legacy Run config")
+            serde_json::from_value::<RunConfig>(encoded_config)
+                .expect("current Run config")
                 .effort,
             None
         );
@@ -1466,7 +1446,7 @@ fn session_journal_survives_reopen_and_rejects_invalid_history() {
                 id,
                 Event::SessionStarted {
                     title: "First Session".into(),
-                    workspace_identity: None,
+                    workspace_identity: (1, 1),
                 },
             )
             .await
@@ -1488,7 +1468,7 @@ fn session_journal_survives_reopen_and_rejects_invalid_history() {
                     id,
                     Event::SessionStarted {
                         title: "Invalid duplicate".into(),
-                        workspace_identity: None,
+                        workspace_identity: (1, 1),
                     },
                 )
                 .await,
@@ -1505,7 +1485,7 @@ fn session_journal_survives_reopen_and_rejects_invalid_history() {
             .expect("Session exists");
         assert_eq!(view.title, hostile_title);
         assert_eq!(view.last_sequence, 2);
-        assert_eq!(view.workspace_identity, None);
+        assert_eq!(view.workspace_identity, Some((1, 1)));
         store.close().await.expect("closed reopened store");
 
         let text = Command::new(env!("CARGO_BIN_EXE_arany"))
@@ -1554,7 +1534,7 @@ fn session_journal_survives_reopen_and_rejects_invalid_history() {
             assert_eq!(line["session_id"], id.to_string());
             assert!(line["run_id"].is_null());
             assert!(line["agent_run_id"].is_null());
-            assert_eq!(line["event_version"], 1);
+            assert_eq!(line["event_version"], 2);
             assert_eq!(line["created_at_ms"], event.created_at_ms);
         }
 
@@ -1970,7 +1950,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
             let prefix = [
                 Event::SessionStarted {
                     title: "New Session".into(),
-                    workspace_identity: None,
+                    workspace_identity: identity,
                 },
                 Event::MessageAccepted {
                     run_id: interrupted_run,
@@ -2032,10 +2012,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                 .expect("valid prefix")
                 .expect("Session");
             assert_eq!(view.runs[0].status, RunStatus::Interrupted);
-            assert_eq!(
-                view.workspace_identity,
-                (prefix_len > 2).then_some(identity)
-            );
+            assert_eq!(view.workspace_identity, Some(identity));
             if prefix_len > 2 {
                 let listed = list_sessions(
                     StateRoot::open_existing(&state_path).unwrap(),
@@ -2331,20 +2308,13 @@ fn exec_process_rejects_a_busy_session_and_recovers_after_holder_death() {
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).expect("Workspace directory");
         let state_path = temp.path().join("state");
-        let session_id = SessionId::new();
-        let store = Store::open(StateRoot::admit(&state_path).expect("state admission"))
-            .expect("new store");
-        store
-            .append(
-                session_id,
-                Event::SessionStarted {
-                    title: "Locked Session".into(),
-                    workspace_identity: None,
-                },
-            )
-            .await
-            .expect("committed Session");
-        store.close().await.expect("store shutdown");
+        let session_id = create_session(
+            StateRoot::admit(&state_path).expect("state admission"),
+            workspace.clone(),
+            Some("Locked Session".into()),
+        )
+        .await
+        .expect("committed pinned Session");
 
         let ready_path = temp.path().join("holder-ready");
         let mut holder = SupervisedChild(Some(

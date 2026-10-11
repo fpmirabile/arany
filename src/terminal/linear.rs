@@ -177,17 +177,11 @@ impl LinearState {
 
     pub(super) fn draw_setup_warning(
         &mut self,
+        title: &str,
         warning: &str,
         notice: Option<&str>,
     ) -> io::Result<()> {
-        self.write_setup_with_limit(
-            &mut io::stderr(),
-            1,
-            "ChatGPT plan consent",
-            warning,
-            notice,
-            (1024, false),
-        )
+        self.write_setup_with_limit(&mut io::stderr(), 1, title, warning, notice, (1024, false))
     }
 
     pub(super) fn draw_setup_choices(

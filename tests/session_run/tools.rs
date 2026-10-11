@@ -535,7 +535,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     let prefix = [
         Event::SessionStarted {
             title: "Historical tool facts".into(),
-            workspace_identity: None,
+            workspace_identity: (1, 1),
         },
         Event::MessageAccepted {
             run_id: run,

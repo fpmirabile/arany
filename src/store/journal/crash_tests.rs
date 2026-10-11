@@ -74,7 +74,7 @@ fn seed_interrupted_run(state: &Path) -> (SessionId, RunId) {
         for event in [
             Event::SessionStarted {
                 title: "Crash fixture".into(),
-                workspace_identity: None,
+                workspace_identity: (1, 1),
             },
             Event::MessageAccepted {
                 run_id,

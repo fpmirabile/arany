@@ -226,8 +226,8 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                     .replace_saved_account_record(
                         &serde_json::to_vec(&serde_json::json!({
                             "schema":1,"storage":"private_file","account":{
-                                "schema":1,"id":uuid::Uuid::now_v7(),"provider":"openai",
-                                "model":"gpt-5.4","effort":null,"api_key":"synthetic-never-sent-key"
+                                "schema":2,"id":uuid::Uuid::now_v7(),"provider":"openai",
+                                "model":"gpt-5.4","effort":null,"api_key":"synthetic-never-sent-key","anthropic_workspace_id":null
                             }
                         }))
                         .unwrap(),
@@ -513,9 +513,9 @@ fn folder_consent_precedes_setup_and_remembers_only_the_exact_trusted_directory(
         command
             .env_clear()
             .env("ARANY_TEST_ACCOUNT_ROOT", &account)
-            .env("HOME", temp.path().join("legacy-home"))
-            .env("XDG_STATE_HOME", temp.path().join("legacy-state"))
-            .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+            .env("HOME", temp.path().join("fixture-home"))
+            .env("XDG_STATE_HOME", temp.path().join("fixture-state"))
+            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
             .env("TERM", "dumb")
             .current_dir(&workspace)
             .args(["--screen-reader", "--no-color", "--workspace"])
@@ -589,10 +589,11 @@ fn folder_consent_precedes_setup_and_remembers_only_the_exact_trusted_directory(
             assert!(
                 name == "workspace-permissions.json"
                     || name == "account-credentials.lock"
+                    || name == "history.lock"
                     || name == "events.sqlite3",
                 "startup must not create account metadata: {name:?}"
             );
-            if name == "events.sqlite3" {
+            if name == "events.sqlite3" || name == "history.lock" {
                 assert_eq!(std::fs::metadata(account.join(name)).unwrap().len(), 0);
             }
         }

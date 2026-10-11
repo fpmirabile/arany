@@ -572,10 +572,10 @@ The native active-process corpus also passes physical controlling-PTY loss and i
 Native Guard investigation retains host execution of macOS binaries; the user excludes a Linux VM. A harmless default-denial Seatbelt probe that permits execution, fork, reads and sysctl still succeeds at `setpgid` and child `setsid`, so a process group alone cannot own these descendants. The installed Darwin `sys/event.h` explicitly marks `NOTE_TRACK`, `NOTE_TRACKERR` and `NOTE_CHILD` unsupported since 10.5. A minimal native process reports 445,746,364,416 virtual bytes and 1,310,720 resident bytes before a 512-MiB `RLIMIT_AS` request returns `EINVAL`; virtual address size cannot substitute for the aggregate physical-memory contract. Apple's [resource implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_resource.c) applies that limit to the current VM map. Its [coalition syscall](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/sys_coalition.c) requires privileged coalition membership, and [memorystatus controls](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_memorystatus.c) require root or an entitlement for memory-limit configuration. These observations reject the simple Seatbelt/process-group/rlimit design; they do not prove every native enforcement design impossible or authorize weaker resource guarantees.
 
 The user subsequently accepted the explicit macOS supervision contract now owned
-by the Tool spec: nominal 10-ms aggregate memory/task observation and a hard
-15-second per-process CPU-time limit, with overshoot, swap and aggregate-CPU
-non-claims. Intents and receipts identify the profile; the existing typed corpus
-checks profile mismatch and exact legacy serialized bytes. Guard admission also
+by the Tool spec: nominal 10-ms aggregate memory/task observation and supervised
+15-second per-process CPU time, with overshoot, swap and aggregate-CPU non-claims.
+Intents and receipts identify the mandatory profile; the existing typed corpus
+checks profile mismatch and rejects missing serialized profile fields. Guard admission also
 rejects a resource profile different from its native implementation. No macOS
 dispatch is enabled by this encoding change.
 
@@ -624,6 +624,15 @@ to setup. The active native fourteen-case owner also passes without any cursor
 reply, rejecting a reintroduced query. Optimized product isolation and arbitrary
 partial-acquisition/picker/tmux faults remain outside these claims.
 
+The dead-stderr cases exposed a second cleanup failure: Ratatui's destructor
+retried cursor output after the checked restoration path, then panicked while
+reporting the write failure to the disconnected stderr. The terminal owner now
+retains restoration errors and detaches its backend to an inert sink before
+destruction. The twelve consent and fourteen active-process cases pass through
+that corrected owner; ordinary error reporting also preserves the failure exit
+when stderr is unavailable. This proves the exercised ownership paths, not every
+possible shipped-CLI panic site.
+
 A finite Seatbelt identity diagnostic using Apple's installed `same-sandbox`
 signal filter permits signal 0 to its forked child, denies it to the outside
 parent, and retains the observed file-permission profile after a rejected nested
@@ -640,11 +649,357 @@ sets the CPU virtual timer from the soft value and sends `SIGXCPU`. This rejects
 that API alone as the accepted hard CPU boundary. Neither the agreed CPU
 requirement nor ordinary spawn compatibility has been weakened.
 
+A separate finite CPU-monitor diagnostic successfully requests
+`proc_rlimit_control(RLIMIT_CPU_USAGE_MONITOR, CPUMON_MAKE_FATAL)` but still exits
+normally after 17 CPU seconds with `SIGXCPU` ignored. Apple's
+[task implementation](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/task.c)
+sets a monitor-fatal flag through this call; the flag alone does not configure
+a lifetime CPU budget. Its
+[policy implementation](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/task_policy.c)
+distinguishes per-thread exception monitors, replenishing process-wide ledgers
+and wall-time deadlines. These inspected mechanisms do not establish the
+accepted inherited hard per-process budget for arbitrary native commands.
+No compatibility or resource requirement was changed on this evidence.
+
+The 2026-10-09 file-Guard continuation enables typed native files and pinned
+Skill data through the existing immutable intent, separate worker, GO gate and
+receipt. The debug Engine journey uses the actual Cargo-built Guard for thirteen
+operations, including create/replacement, Edit, Mkdir, inspection and progressive
+Skill loading. It proves exact file bytes, conflict and linked-file rejection,
+omitted/outside-data exclusion from Provider requests and Events, native resource
+receipts and closed SQLite replay. Its direct-worker corpus proves no mutation
+after EOF or invalid GO and rejects a stale Workspace identity or another
+resource profile before readiness. Remembered trust now advertises only native
+file/Skill capability; explicit command/MCP grants still reject before inference.
+The attached scripted greeting/resume owner verifies that distinction.
+
+The production-profile corpus independently proves denied host reads/writes,
+TCP/UDP/pathname-Unix socket creation, program launch and immutable signal/limit
+controls. Removing a broad `sysctl-read` permission did not by itself reject the
+fixture's own process-argument query; explicit `sysctl` and `sysctlbyname` syscall
+denial now closes that surface without reading another process's environment.
+The activated CPU owner resets/unblocks SIGXCPU, installs the production profile,
+publishes readiness and spins until actual SIGXCPU termination in debug and
+release. This mechanism is restricted to the trusted non-spawning worker and
+does not solve ordinary command-launch compatibility.
+
+The separately built standalone optimized executable also passes a disposable
+direct-worker protocol check for Mkdir, create, Edit, replacement and Read. Each
+owned cleared-environment child returns exactly Ready and a matching native
+receipt, with successful exit, empty stderr, capped capture and bounded reap;
+the final file bytes and read result match. All fixtures are removed. This
+artifact check opens no account or Provider and does not replace the optimized
+full Engine/SQLite journey's isolation prerequisite.
+
+The dedicated native FFI review covered the installed SDK/libc signatures,
+variadic syscall-filter C-int arguments, signal POD initialization, exact native
+output sizes, descriptor/profile bounds, C-string/error ownership and the exact
+unreaped PID lifetime. The syscall inventory includes pthread signal masking,
+signal return/wait, alternate exec and delegated/non-cancellable network paths.
+Apple's [process-info implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/proc_info.c)
+explains the observed task-info/exit race: BSD inspection must include zombies
+and establish kernel exit before retiring observation. The worker closes inherited
+descriptors at single-threaded entry, exposes no named network or Mach service,
+and preserves post-GO uncertainty. No dependency, daemon or Engine seam was added.
+
 The existing explicitly activated TLS owner passes valid chain/name, wrong-name rejection and unrelated-chain rejection in debug and release using generated certificates, loopback-bound OpenSSL 3 servers and a client-local test anchor. It changes no OS trust settings and does not prove default system-trust or actual compiled-endpoint HTTPS journeys on macOS.
 
-Final locked offline native suites execute 258 debug and 255 release tests, with zero failures and 17/16 explicitly ignored gates respectively. Formatting, strict all-target Clippy in both profiles and diff checks pass. The isolated Keychain gate completes exactly one parent/child test in debug; the named-pasteboard and TLS gates each complete exactly one activated owner in both profiles. These checks use physical TMPDIR=/private/tmp and synthetic current/legacy account roots; native loopback and OS-service gates require execution outside the development sandbox. Cargo audit/deny remain unavailable, so no fresh advisory/license-policy pass is inferred.
+Final locked offline native suites execute 261 debug and 256 release tests, with zero failures and 20/18 explicitly ignored gates respectively. Formatting, strict all-target Clippy in both profiles and diff checks pass. The isolated Keychain gate completes exactly one parent/child test in debug; the named-pasteboard, TLS and activated file-worker CPU gates each complete exactly one owner in both profiles. These checks use physical TMPDIR=/private/tmp and synthetic current/legacy account roots; native loopback and OS-service gates require execution outside the development sandbox. An invocation without the physical temporary-root setting rejected linked paths before its fixtures ran; the corrected invocation supplies that prerequisite. Cargo audit/deny remain unavailable, so no fresh advisory/license-policy pass is inferred.
 
-Full granted file/command/runtime-Skill/MCP enforcement remains an implementation gap: no native profile attests the accepted resource guarantees, storage isolation and complete descendant ownership. macOS effects still fail closed. Optimized active-CLI/account setup needs isolated effective-user roots; remaining acquisition/picker/tmux faults, actual compiled-endpoint/default-trust TLS, Keychain setup/refresh/logout/cross-user scope, VoiceOver, Linux re-verification and distribution provenance remain separate. [Next steps](../../NEXT_STEPS.md#beta-2-and-broader-release) and [the active native plan](../../planning/native-macos/README.md) retain the unresolved isolation design and remaining evidence without a complete macOS support claim.
+At this checkpoint, native command/MCP enforcement remained an implementation gap: no compatible profile attested their accepted CPU budget, fixed-capacity private storage and complete descendant ownership. Those grants failed closed while file/Skill Tools worked. The optimized full Engine/file journey lacked isolated effective-user roots; the release profile corpus and override refusal did not substitute for it. Supervised-threshold/observer-fault stress and native cancellation/post-GO uncertainty remained additional file-worker evidence gaps. Optimized active-CLI/account setup needed the same isolation prerequisite; acquisition/picker/tmux faults, compiled-endpoint/default-trust TLS, Keychain setup/refresh/logout/cross-user scope, VoiceOver, Linux re-verification and distribution provenance were separate. The later dated continuation records implementation and verification changes; [next steps](../../NEXT_STEPS.md#beta-2-and-broader-release) owns current remaining checks without a complete macOS support claim.
+
+### Native process-unit continuation — 2026-10-09
+
+The accepted CPU contract now uses supervised 15-second per-process CPU time,
+alongside the existing nominal 10-ms memory/task thresholds. The native adapter
+uses one temporary Background launchd job, a distinct resource coalition and a
+trusted supervisor around the separate Seatbelt file worker. Launchd's reported
+PID, local peer credentials, unique process identity and coalition must agree
+before the task/GO exchange. The controller checks aggregate resources before
+GO and requires coalition emptiness plus exact job removal/absence afterward.
+The enforcement digest now binds this topology and accounting.
+
+Finite native diagnostics establish coalition inheritance through fork/setsid
+and ordinary posix_spawn, and show that job removal alone leaves an escaped
+orphan alive. Exact audit-token signaling rejects a stale version and terminates
+the owned incarnation. The installed SDK and Apple's
+[process-information implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/proc_info.c)
+inform the fixed ABI/selector review. A CPU diagnostic compares converted native
+counters with the process clock and confirms cumulative CPU retention across
+exec. Resource identity uses the process unique ID across exec; signals retain
+the current audit version.
+
+The real thirteen-operation debug Engine journey passes effects, rejection,
+receipts and closed replay through this unit. It first exposed a missing
+Background session declaration and then false post-GO uncertainty when bootout
+reported an already retired job. An exact synthetic one-use job confirms print
+status 113 and bootout ESRCH after retirement; other removal failures still
+reject. The dedicated FFI pass checked 40/56-byte process layouts, the eight-byte
+Mach timebase, initialized output, CPU conversion overflow, peer credentials,
+exact-incarnation signals, descriptor ownership and bounded channels. It fixed
+short positive writes being mistaken for ESRCH through stale errno. The local
+SDK layout replaces deprecated libc timebase declarations without a dependency.
+
+The activated unit owner passes in debug and release: a setsid/orphan descendant
+remains in the coalition, a stale token leaves it alive, two active synthetic
+memory allocations exceed the aggregate RSS threshold, parked threads exceed
+the task threshold, and a CPU burner ignoring SIGXCPU reaches supervised
+termination. Every case positively confirms empty membership and absent owned
+incarnations. Initial fixture runs timed out without useful phase diagnostics;
+the owner now reports bounded helper diagnostics and maintains incompressible,
+active memory pages. Further readiness/load and observer-fault stress remains
+open rather than inferred from these successful runs.
+
+Job manifests now use Core Foundation's property-list serializer through the
+existing locked macOS binding. The fixed dictionary is emitted as a binary
+plist with bounded arguments/output and exclusive mode-0600 creation; no XML
+template or custom escaping remains. The dependency delta makes that existing
+package explicit without changing package versions or adding build scripts or
+procedural macros. The serialization review checked copied UTF-8 strings,
+retained collection elements, the live dictionary reference and the owned data
+buffer through the write; native errors remain fixed, closed failures.
+
+The activated unit owner now checks literal XML metacharacters, Unicode and an
+XML-disallowed control byte through the actual launchd argument vector. Its
+debug run exposed another memory-readiness timeout while an optimized build was
+active: expensive resource preparation preceded the fixture's identity report.
+Readiness now publishes every descendant identity before an explicit parent
+gate starts the resource workload, within the separate observation deadline.
+The corrected debug and release owners pass without changing any resource
+threshold or cleanup assertion. This fixes fixture ordering; broad host-load and
+readiness stress remains open.
+
+Locked offline workspace suites pass 258 debug and 253 release tests, with
+22/20 explicitly ignored gates. Strict all-target Clippy passes both profiles;
+formatting, the optimized executable build, diff checks and 419 local links and
+anchors pass. These are native Apple Silicon synthetic checks, not Linux/Intel,
+live Provider or general-clipboard evidence. Command/MCP spawning and private
+filesystem lifecycle, supervisor-loss/signal-isolation, optimized full Engine
+account isolation and the remaining native plan gates are still incomplete.
+
+### Attached account recovery — 2026-10-09
+
+A synthetic saved ChatGPT index missing the required plan-permission flag
+reproduced the reported `invalid authorization identity` exit before the
+composer. This identifies a reproducible persisted-format failure, not the
+uninspected user's actual record. Persisted index/registration rejection now
+has a distinct actionable diagnostic; live signed OAuth identity checks retain
+their strict admission. Saved-access and recoverable initial setup failures
+leave attached chat available without choosing another billing route.
+
+The existing native macOS startup PTY owner now covers invalid ChatGPT/API
+records, model preferences, registration, and initial setup failure. It checks
+default Back cancellation, confirmed route/model reset, ordinary fresh setup
+storage consent, helper access bounds, exact terminal restoration and closed
+history preservation. Its first red invocation reproduced the original exit.
+A later fixture timeout came from writing Ctrl+C to a PTY without a controlling
+foreground group; the corrected driver signals its exact owned child. The final
+twenty-case owner passes. The private-file credential corpus also proves opaque
+snapshot comparison, concurrent-change refusal, scoped removal and fresh save;
+private-record corpora reject symlinks, hard links and FIFOs before removal.
+
+Final locked offline Apple Silicon workspace suites pass 258 debug and 253
+release tests, with zero failures and 22/20 ignored gates. Formatting and strict
+all-target Clippy pass in both profiles. These synthetic checks use physical
+`TMPDIR=/private/tmp`, isolated account/Session roots and a fake credential
+helper. They do not read or reset the user's account, exercise actual browser
+sign-in or Keychain recovery, or establish Linux/Windows execution. Reset and
+its local-only deletion limits belong to the [credential contract](../specs/credentials.md#storage-replacement-and-recovery);
+the native command/MCP and private-filesystem work remains open in the existing
+native plan.
+
+### Attached history recovery — 2026-10-09
+
+The account-recovery change did not cover SQLite admission. A synthetic closed
+Session whose journal schema was changed to version 3 reproduced the reported
+`state store unavailable` exit before the composer. This proves a persisted
+history failure path; the user's actual history remains uninspected. Attached
+startup now offers recovery after folder consent and before saved-account
+authorization, with default Retry and a separate complete Back/Accept warning
+before deletion. Confirmed reset keeps account, model and trust records, enters
+a new unsaved conversation and does not submit an initial task automatically.
+The [terminal contract](../specs/terminal.md#setup-and-account-choices) owns this
+behavior; ordinary Store opening still rejects unsupported formats.
+
+The first native lease implementation locked the database file itself and
+failed even on a fresh Store with SQLite `database is locked`. Darwin flock
+conflicts with SQLite's write locking on that file. A separate private zero-byte
+lease now protects every open Store and excludes reset through confirmation
+and replacement. The existing journal-version corpus proves unchanged ordinary
+refusal, cancellation, active read/write Store exclusion, concurrent-change
+refusal and fresh current-schema reopening. The private-file corpus rejects
+special SQLite sidecars before opening or removing them.
+
+The native startup PTY owner now passes twenty-five cases, including damaged
+history, incompatible history, default Back cancellation, unsafe sidecar
+refusal and accounts/history sharing the normal StateRoot. The shared-root
+case also supplies an initial task and continue request, proving that reset
+does not submit that task or resume a deleted Session. Exact terminal
+restoration and bounded fake-helper access remain checked. Two existing startup
+fixtures initially rejected the new coordination file as account metadata;
+their allowlists now admit only that additional zero-byte file.
+
+Locked offline Apple Silicon workspace suites pass 258 debug and 253 release
+tests, with zero failures and 22/20 explicitly ignored gates. Formatting and
+strict all-target Clippy pass both profiles. The attached PTY recovery owner
+uses the debug-only isolated account-root barrier; optimized verification
+covers Store reset and warning frames, not real account setup. These checks use
+synthetic private state and no actual user history, Keychain, clipboard or live
+Provider. Linux/Windows execution and the native command/MCP and private
+filesystem lifecycle gates remain unverified.
+
+### Startup fixture responsibility review — 2026-10-09
+
+The native startup owner now declares reply/signal sequences for each case
+outside the transport pump. Fresh complete prompts consume one action, and
+sequence exhaustion is required alongside the existing account-access,
+closed-history and terminal-restoration assertions. This removes duplicated
+case-name/step inference without another fixture framework or product change.
+The focused twenty-five-case owner passes.
+
+The first broad debug run exposed a separate consent fixture race: a write
+immediately after closing the PTY master returned one byte rather than `EIO`.
+Consent now reuses the active-terminal owner's nonblocking disconnection probe,
+with its existing five-second deadline and positive `EIO` requirement. The
+focused consent owner and corrected complete workspace suites pass: 258 debug
+and 253 release tests, zero failures and 22/20 explicitly ignored gates.
+Formatting, strict all-target debug Clippy and diff checks pass. The fixture
+guidance records explicit startup sequences; product contracts are unchanged.
+These are isolated synthetic Apple Silicon checks, not live-account,
+clipboard, Linux/Windows or remaining Guard lifecycle evidence.
+
+### Native private-storage lifecycle — 2026-10-09
+
+The unit owner now allocates separate fixed-size case-sensitive HFS+ project
+and scratch images inside its checked private root. Opened mounts must have
+different devices from the parent, current-user ownership, writable `NOSUID`
+flags and exactly 64-MiB kernel capacities. Native commands retain bounded
+capture/deadlines and a cleared allowlisted environment; allocation adds no
+dependency or unsafe block. The [Tool contract](../specs/tools.md#macos-enforcement-and-compatibility)
+owns the current behavior.
+
+The first userspace-image trial failed on a newline-sensitive fixture assertion
+and killed its disk-image service before detachment. The user reported an
+improper-eject notification at that time. Only that positively identified,
+already-unmounted synthetic root was removed. The installed native manual's
+kernel-only attachment option passed a private capacity/exhaustion/detachment
+probe, so production allocation requires it. Storage remains mounted after
+supervisor termination and can then be cleanly detached; unsupported kernel
+attachment rejects.
+
+The existing activated unit corpus now fills both filesystems until actual
+`ENOSPC`, confirms the absence of an auxiliary process in the owned coalition,
+kills the supervisor, positively observes surviving mounts and then detaches
+them. Its unwind case deliberately panics with the payload still live; the
+scoped teardown reactor confirms empty membership, removes the job, detaches
+both mounts and removes the private root. Partial setup rejects an
+outside-pointing scratch link without changing the outside directory and
+cleans the already-created project mount. An unfinished-attachment marker
+refuses completion and preserves its private root until the fixture explicitly
+removes that synthetic uncertainty.
+
+One subsequent run exposed an initial-channel race: Darwin returned `EINVAL`
+when the helper set a receive timeout after the parent had already closed its
+peer. A minimal native socket-pair probe confirms timeout setup succeeds with
+a live peer and fails after peer closure. The unit fixture now retains that
+connection until next-stage readiness, without sleeps, retries or longer
+deadlines.
+
+The final activated owner passes in debug and release, including positively
+observed deliberate unwind and all existing descendant/resource assertions.
+Complete locked offline workspace suites pass 258 debug and 253 release tests,
+with zero failures and 22/20 explicitly ignored gates. Strict all-target debug
+Clippy, formatting and diff checks pass. No matching test image/unit roots
+remain after verification. These checks do not inspect user disks or clipboard
+data, and do not attest command/MCP snapshot and spawning enforcement, primary
+process death during attachment, signal isolation or platform parity. Those
+remaining implementation and evidence gates stay in the native plan and
+[next steps](../../NEXT_STEPS.md#beta-2-and-broader-release).
+
+### Native command/MCP and process continuation (2026-10-11)
+
+The native Guard now admits host-native commands and local MCP alongside typed
+files and Skills, through the existing Policy, one-use GO gate, supervisor and
+receipt. Linux and macOS share the checked selected-file snapshot copier.
+Native project/scratch images retain their fixed capacities; runtime resources
+use a private read-only tree. Checked immutable system executables keep their
+native paths because relocating the tested system shell caused termination even
+without Seatbelt. The [Tool contract](../specs/tools.md#macos-enforcement-and-compatibility)
+owns current path, compatibility and resource semantics. No dependency, daemon,
+Engine policy seam or compatibility reader was added.
+
+The command profile denies direct coalition/persona mutation and sandbox
+relabeling, clears inherited bootstrap/registered ports before exec, and denies
+fork/spawn dynamically for actors holding coalition-spawn or persona-management
+authority. The installed SDK and Apple's XNU sources own the reviewed ABI and
+spawn-attribute behavior. An ad-hoc signed synthetic actor proves the dynamic
+caller-entitlement predicate with an ordinary development entitlement; this does
+not grant or prove possession of Apple's private entitlements. Ordinary native
+child launches, denied direct APIs and privilege predicates pass in the existing
+activated unit corpus in debug and release. The same owner retains actual storage
+exhaustion, escaped descendants, supervised resource excess, stale identity and
+positive cleanup evidence. Dedicated FFI review covers borrowed descriptors,
+Security Copy-result ownership, CF metadata and exact native syscall arguments.
+
+Optimized execution initially exceeded the command-profile owner's unchanged
+20-second phase deadline. Bounded phase measurements showed three successful
+captures each waking only at their five-second deadline, followed by MCP cleanup
+waking at its two-second deadline. Tokio's local signal/reaper implementation
+uses an anonymous Unix wake socket and ignores handler write errors. A private
+pair succeeds before Seatbelt and returns `PermissionDenied` after the production
+profile. Native capture and MCP cleanup now poll the exact owned child every
+10 ms within their existing deadlines; signal and network grants are unchanged.
+The final clean activated unit owner passes in debug (37.22 seconds overall) and
+release (34.10 seconds overall), with the original phase/resource bounds.
+Initial failure diagnostics were also lost when a Tokio writer shut down its
+shared socket before a cloned descriptor wrote; bounded typed failure output now
+precedes shutdown. Helper EOF is followed by positive empty-coalition observation
+before reading its exact completed libtest summary.
+
+The [native Engine journey](../../tests/session_run/tools/macos.rs) passes after
+the polling correction (38.87 seconds, one parent and exactly one completed
+private helper). It executes the real command/MCP path with fresh post-edit
+snapshots, ordinary descendants and discarded writes. It checks stale and linked
+inputs, approval denial/cancellation, attested output/protocol failures,
+post-GO missing completion without retry, bounded canaries and exact closed
+SQLite replay. Its linked-file fault is introduced only before the relevant typed
+read, so it does not accidentally invalidate an earlier selected-directory
+snapshot. Every later refusal receives a fresh identity and expiry. The attached
+composition owner distinguishes debug stale-pin refusal from release's earlier
+account-fixture-override refusal; both preserve Provider call counts and Events.
+
+Native picker and partial-acquisition owners add signals, suspension/reacquisition,
+16-column geometry, independently broken stderr and exact surviving termios.
+The first full suite hid a picker assertion behind blocking cleanup: stopped
+kernel status preceded the parent's captured mouse-disable bytes. The fixture
+now gates continuation on both observations and closes retained PTY masters
+before child reap during unwind. Its controlled capture-deadline fault positively
+confirms the exact child was reaped. A later full suite found an exported terminal
+owner's PTY descriptors missing `CLOEXEC`; another concurrent helper could retain
+terminal EOF. The corrected owner sets close-on-exec before spawn, retains bounded
+case-specific failure diagnostics and passes with all six native terminal tests
+together. Deadlines and exact restoration assertions were not relaxed.
+
+The [TLS owner](../../tests/platform_tls.rs) passes in debug and release, each
+with exactly two completed private helpers: generated-anchor chain/name checks
+and default system-trust rejection of the generated CA with a matching name.
+These tests change no host trust, Keychain preferences, DNS or user clipboard.
+They do not prove acceptance of a public system-trusted chain or a compiled-endpoint
+HTTPS product journey. Optimized actual-product account/active-CLI evidence needs
+an isolated effective OS user; changing `HOME` cannot isolate release account
+roots. Native tmux is unavailable on this host. These prerequisites, scheduled
+load/fault work, human accessibility and live Provider checks remain explicit in
+[next steps](../../NEXT_STEPS.md#beta-2-and-broader-release). Linux/Windows runtime
+verification and fresh dependency-policy/advisory checks were not run;
+`cargo-deny` and `cargo-audit` are not installed.
+
+Final locked offline workspace suites pass with physical `TMPDIR=/private/tmp`:
+261 debug and 253 release tests, zero failures, with 22 and 20 ignored gates
+respectively. Formatting, strict all-target Clippy in both profiles and staged/
+unstaged diff checks pass. The completed native implementation plan was removed;
+current behavior lives in domain contracts and unavailable/user-owned evidence
+remains in next steps. These results do not establish complete macOS release
+support or substitute for the unperformed platform and account gates above.
 
 ## 19. Decisions that supersede or sharpen earlier research
 
@@ -707,3 +1062,41 @@ This testing model keeps the suite small because each test is broad in compositi
 - [OpenAI: Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs)
 - [OpenAI: Your data](https://developers.openai.com/api/docs/guides/your-data)
 - [OpenAI Responses API](https://developers.openai.com/api/reference/cli/resources/responses/methods/create)
+
+
+### Pre-beta current-format verification — 2026-10-09
+
+The pre-beta compatibility decision now requires one current internal format.
+Account readers no longer relocate old-root metadata or create migration markers.
+Native API accounts require schema 2 and explicit nullable scope/effort; ChatGPT
+index flags, model checks and nullable fields are explicit. Unmarked native
+Keychain items do not configure an account. SQLite admits schema 4 only and
+creates it only in an empty version-zero file. Every Event uses payload version
+2, every compaction uses compiler version 3, and Tool resource profiles are
+mandatory. Custom profiles use capability-evidence version 2 with an explicit
+effort list, empty for provider-default only. Missing or unsupported values
+reject; stored data is never automatically converted or deleted. Replay also
+requires an observed delegation before child spawn and an observed finished
+call before successful Agent completion. The current behavior belongs to the
+[execution](../specs/execution.md), [credential](../specs/credentials.md) and
+[Tool](../specs/tools.md) contracts.
+
+Native Apple Silicon offline suites passed with physical `TMPDIR=/private/tmp`:
+258 debug tests and 253 release tests, zero failures, with 20 and 18 ignored
+respectively. These include actual native file/Skill effects, closed journal
+replay, interruption/cancellation and unsupported-format refusal. The journal
+corpus checks unchanged database bytes after refusal in both open modes; current
+payload corpora check mandatory fields and missing-call rejection. Formatting,
+strict all-target Clippy in debug/release and a standalone optimized build passed.
+Linux execution was not repeated.
+
+The isolated native Keychain owner passed with schema-2 save/read/replacement,
+identity/lock/deletion checks, and a current item that remains unconfigured while
+its backend marker is absent. Automatic approval review rejected the first
+invocation because the owner read user Keychain preferences. Those preference
+queries were removed; the successful owner accesses only its temporary synthetic
+Keychain. This run does not re-prove preservation of user default/search-list
+preferences; the earlier dated observations remain separate evidence. No live
+account, Provider or general clipboard was used. An initial release invocation
+omitted the documented physical `TMPDIR` and failed fixture path admission; the
+corrected invocation passed without weakening that admission.

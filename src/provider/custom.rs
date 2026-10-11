@@ -67,8 +67,7 @@ struct ProfileEntry {
     privacy: Privacy,
     max_output_tokens: u32,
     capability_evidence_version: u32,
-    #[serde(default)]
-    efforts: Option<Vec<Effort>>,
+    efforts: Vec<Effort>,
 }
 
 #[derive(Deserialize)]
@@ -142,19 +141,12 @@ impl CustomProfile {
             || entry.model.len() > 128
             || !entry.model.bytes().all(|byte| byte.is_ascii_graphic())
             || entry.max_output_tokens != OUTPUT_CAP
-            || !matches!(entry.capability_evidence_version, 1 | 2)
-            || entry.capability_evidence_version == 1 && entry.efforts.is_some()
-            || entry.capability_evidence_version == 2
-                && entry.efforts.as_ref().is_none_or(Vec::is_empty)
+            || entry.capability_evidence_version != 2
+            || entry.efforts.len() > Effort::ALL.len()
             || entry
                 .efforts
-                .as_ref()
-                .is_some_and(|values| values.len() > Effort::ALL.len())
-            || entry.efforts.as_ref().is_some_and(|values| {
-                values
-                    .windows(2)
-                    .any(|pair| effort_index(pair[0]) >= effort_index(pair[1]))
-            })
+                .windows(2)
+                .any(|pair| effort_index(pair[0]) >= effort_index(pair[1]))
             || !valid_credential_env(&entry.credential_env)
             || !valid_endpoint(&entry.endpoint)
         {
@@ -166,7 +158,7 @@ impl CustomProfile {
             model: entry.model,
             credential_env: entry.credential_env,
             capability_evidence_version: entry.capability_evidence_version,
-            efforts: entry.efforts.unwrap_or_default(),
+            efforts: entry.efforts,
         })
     }
 
@@ -273,7 +265,7 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    const VALID: &str = r#"{"version":1,"profiles":[{"name":"local","protocol":"openai-responses","endpoint":"http://127.0.0.1:9321/v1/responses","model":"model-1","credential_env":"ARANY_PROVIDER_LOCAL_KEY","outcome_encoding":"json_schema","privacy":"user_authorized","max_output_tokens":4096,"capability_evidence_version":1}]}"#;
+    const VALID: &str = r#"{"version":1,"profiles":[{"name":"local","protocol":"openai-responses","endpoint":"http://127.0.0.1:9321/v1/responses","model":"model-1","credential_env":"ARANY_PROVIDER_LOCAL_KEY","outcome_encoding":"json_schema","privacy":"user_authorized","max_output_tokens":4096,"capability_evidence_version":2,"efforts":[]}]}"#;
 
     fn state_with_file(temp: &Path, body: &[u8]) -> StateRoot {
         let state = StateRoot::admit(&temp.join("state")).expect("private state root");
@@ -309,7 +301,7 @@ mod tests {
             ("encoding", "\"outcome_encoding\":\"json_mode\""),
             ("privacy", "\"privacy\":\"provider_zdr\""),
             ("cap", "\"max_output_tokens\":8192"),
-            ("evidence", "\"capability_evidence_version\":2"),
+            ("evidence", "\"capability_evidence_version\":1"),
             ("credential", "\"credential_env\":\"OPENAI_API_KEY\""),
             (
                 "metadata address",
@@ -337,7 +329,7 @@ mod tests {
                 "encoding" => "\"outcome_encoding\":\"json_schema\"",
                 "privacy" => "\"privacy\":\"user_authorized\"",
                 "cap" => "\"max_output_tokens\":4096",
-                "evidence" => "\"capability_evidence_version\":1",
+                "evidence" => "\"capability_evidence_version\":2",
                 "credential" => "\"credential_env\":\"ARANY_PROVIDER_LOCAL_KEY\"",
                 "metadata address" | "plaintext domain" | "query" | "noncanonical host" => {
                     "\"endpoint\":\"http://127.0.0.1:9321/v1/responses\""
@@ -359,10 +351,9 @@ mod tests {
         }
 
         let mut versioned: serde_json::Value = serde_json::from_str(VALID).unwrap();
-        versioned["profiles"][0]["capability_evidence_version"] = serde_json::json!(2);
         for (efforts, valid) in [
             (serde_json::json!(["low", "high"]), true),
-            (serde_json::json!([]), false),
+            (serde_json::json!([]), true),
             (serde_json::json!(["high", "low"]), false),
             (serde_json::json!(["low", "low"]), false),
             (serde_json::json!(["minimal"]), false),
@@ -376,7 +367,10 @@ mod tests {
             let loaded = CustomProfile::load_named(&state, "local");
             assert_eq!(loaded.is_ok(), valid);
             if let Ok(profile) = loaded {
-                assert!(profile.admits_effort(Some(Effort::Low)));
+                assert_eq!(
+                    profile.admits_effort(Some(Effort::Low)),
+                    !profile.efforts().is_empty()
+                );
                 assert!(!profile.admits_effort(Some(Effort::Max)));
                 assert_eq!(profile.capability_evidence_version(), 2);
             }

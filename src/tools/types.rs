@@ -15,7 +15,6 @@ pub(crate) const MAX_TOOL_CATALOG_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_FILE_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_SNAPSHOT_BYTES: usize = 32 * 1024 * 1024;
 pub(crate) const MAX_SNAPSHOT_FILES: usize = 2048;
-#[cfg(not(target_os = "macos"))]
 pub(crate) const MAX_RUNTIME_BYTES: usize = 96 * 1024 * 1024;
 pub(crate) const SCRATCH_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const MEMORY_BYTES: u64 = 512 * 1024 * 1024;
@@ -287,22 +286,14 @@ pub struct ToolLimits {
     pub max_processes: u32,
     pub scratch_bytes: u64,
     pub network: NetworkGrant,
-    #[serde(default, skip_serializing_if = "ToolResourceProfile::is_linux_kernel")]
     pub resource_profile: ToolResourceProfile,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolResourceProfile {
-    #[default]
     LinuxKernel,
     MacosSupervised,
-}
-
-impl ToolResourceProfile {
-    fn is_linux_kernel(&self) -> bool {
-        *self == Self::LinuxKernel
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

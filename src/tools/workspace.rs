@@ -1,8 +1,5 @@
 use super::approval::ApprovalMode;
-use super::config::Config;
-#[cfg(not(target_os = "macos"))]
-use super::config::Program;
-#[cfg(not(target_os = "macos"))]
+use super::config::{Config, Program};
 use super::types::{MAX_SNAPSHOT_BYTES, hex_digest};
 use super::{ToolError, fs};
 use crate::store::StateRoot;
@@ -195,9 +192,12 @@ impl WorkspacePermissions {
         if !self.trusted {
             return Err(ToolError::Configuration);
         }
-        #[cfg(not(target_os = "macos"))]
         let commands = {
-            let (shell, root) = ("/usr/bin/sh", "/usr");
+            let (shell, root) = if cfg!(target_os = "macos") {
+                ("/bin/sh", "/bin")
+            } else {
+                ("/usr/bin/sh", "/usr")
+            };
             let executable =
                 std::fs::canonicalize(shell).map_err(|_| ToolError::ProtectionUnavailable)?;
             if !executable.starts_with(root) {
@@ -213,8 +213,6 @@ impl WorkspacePermissions {
                 inputs: Vec::new(),
             }]
         };
-        #[cfg(target_os = "macos")]
-        let commands = Vec::new();
         let config = Config {
             version: 1,
             workspace_paths: vec![".".into()],
@@ -379,7 +377,11 @@ mod tests {
             let config = access.config(&path).unwrap();
             assert!(config.write);
             assert_eq!(config.workspace_paths, ["."]);
-            assert!(config.commands.is_empty() && config.mcp.is_empty());
+            assert_eq!(config.commands.len(), 1);
+            assert_eq!(config.commands[0].name, "sh");
+            assert_eq!(config.commands[0].executable, "/bin/sh");
+            config.commands[0].verify().unwrap();
+            assert!(config.mcp.is_empty());
         }
         let restored = WorkspacePermissions::load(&path, &root).unwrap();
         assert!(restored.is_trusted());

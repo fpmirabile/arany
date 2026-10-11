@@ -139,7 +139,7 @@ fn server(dir: &Path, name: &str) -> (Server, u16) {
 }
 
 #[test]
-#[ignore = "explicit native TLS chain/name gate; macOS requires OpenSSL 3 and uses a client-local test anchor"]
+#[ignore = "explicit native TLS gate; macOS requires OpenSSL 3 and checks system-root rejection plus client-local chain/name trust"]
 fn platform_tls_chain_and_name() {
     let dir = tempfile::tempdir().expect("private TLS test files");
     certificate(dir.path(), "trusted");
@@ -147,38 +147,48 @@ fn platform_tls_chain_and_name() {
     let (_trusted_server, trusted_port) = server(dir.path(), "trusted");
     let (_wrong_name_server, wrong_name_port) = server(dir.path(), "trusted");
     let (_untrusted_server, untrusted_port) = server(dir.path(), "untrusted");
-    let child = Command::new(std::env::current_exe().expect("test executable"))
-        .args(["--exact", "platform_tls_child", "--ignored", "--nocapture"])
-        .env_clear()
-        .env("ARANY_TLS_TEST_CHILD", "1")
-        .env("ARANY_TLS_TRUSTED_PORT", trusted_port.to_string())
-        .env("ARANY_TLS_WRONG_NAME_PORT", wrong_name_port.to_string())
-        .env("ARANY_TLS_UNTRUSTED_PORT", untrusted_port.to_string())
-        .env("SSL_CERT_FILE", dir.path().join("trusted-ca.pem"))
-        .env("ARANY_TLS_TEST_CA", dir.path().join("trusted-ca.pem"))
-        .env_remove("SSL_CERT_DIR")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("isolated TLS client test");
-    let output = wait_bounded(Server(child));
-    assert!(
-        output.status.success(),
-        "TLS client gate failed: {} {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.lines().any(|line| line == "running 1 test"),
-        "TLS child did not run exactly one test"
-    );
-    assert!(
-        stdout
-            .lines()
-            .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;")),
-        "TLS child did not complete its assertions"
-    );
+    #[cfg(target_os = "linux")]
+    let modes = ["local"];
+    #[cfg(target_os = "macos")]
+    let modes = ["local", "system"];
+    for mode in modes {
+        let mut command = Command::new(std::env::current_exe().expect("test executable"));
+        command
+            .args(["--exact", "platform_tls_child", "--ignored", "--nocapture"])
+            .current_dir(dir.path())
+            .env_clear()
+            .env("ARANY_TLS_TEST_CHILD", "1")
+            .env("ARANY_TLS_ROOT_MODE", mode)
+            .env("ARANY_TLS_TRUSTED_PORT", trusted_port.to_string())
+            .env("ARANY_TLS_WRONG_NAME_PORT", wrong_name_port.to_string())
+            .env("ARANY_TLS_UNTRUSTED_PORT", untrusted_port.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if mode == "local" {
+            command
+                .env("SSL_CERT_FILE", dir.path().join("trusted-ca.pem"))
+                .env("ARANY_TLS_TEST_CA", dir.path().join("trusted-ca.pem"));
+        }
+        let child = command.spawn().expect("isolated TLS client test");
+        let output = wait_bounded(Server(child));
+        assert!(
+            output.status.success(),
+            "TLS {mode} client gate failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.lines().any(|line| line == "running 1 test"),
+            "TLS {mode} child did not run exactly one test"
+        );
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;")),
+            "TLS {mode} child did not complete its assertions"
+        );
+    }
 }
 
 #[test]
@@ -206,13 +216,32 @@ fn platform_tls_child() {
         .build()
         .expect("TLS test runtime");
     runtime.block_on(async {
-        let trusted_client = client(trusted_port);
+        let mode = std::env::var("ARANY_TLS_ROOT_MODE").expect("parent-selected root mode");
+        #[cfg(target_os = "macos")]
+        if mode == "system" {
+            assert!(std::env::var_os("SSL_CERT_FILE").is_none());
+            assert!(std::env::var_os("SSL_CERT_DIR").is_none());
+            assert!(std::env::var_os("ARANY_TLS_TEST_CA").is_none());
+            let rejection = client(trusted_port, false)
+                .get(format!("https://localhost:{trusted_port}/"))
+                .send()
+                .await
+                .expect_err("default system trust must reject the generated private CA");
+            let rejection = format!("{rejection:?}");
+            assert!(
+                rejection.contains("InvalidCertificate") && rejection.contains("UnknownIssuer"),
+                "default system rejection must identify the untrusted issuer: {rejection}"
+            );
+            return;
+        }
+        assert_eq!(mode, "local");
+        let trusted_client = client(trusted_port, true);
         let valid = trusted_client
             .get(format!("https://localhost:{trusted_port}/"))
             .send()
             .await;
         assert!(valid.is_ok(), "trusted chain and name: {valid:?}");
-        let wrong_name = client(wrong_name_port)
+        let wrong_name = client(wrong_name_port, true)
             .get(format!("https://127.0.0.1:{wrong_name_port}/"))
             .send()
             .await;
@@ -224,7 +253,7 @@ fn platform_tls_child() {
             wrong_name.contains("InvalidCertificate") && wrong_name.contains("NotValidForName"),
             "wrong server name must fail certificate validation: {wrong_name}"
         );
-        let invalid_chain = client(untrusted_port)
+        let invalid_chain = client(untrusted_port, true)
             .get(format!("https://localhost:{untrusted_port}/"))
             .send()
             .await;
@@ -241,18 +270,24 @@ fn platform_tls_child() {
     });
 }
 
-fn client(port: u16) -> reqwest::Client {
+fn client(port: u16, local_anchor: bool) -> reqwest::Client {
     let builder = reqwest::Client::builder();
     #[cfg(target_os = "macos")]
-    let builder = builder.add_root_certificate(
-        reqwest::Certificate::from_pem(
-            &std::fs::read(
-                std::env::var_os("ARANY_TLS_TEST_CA").expect("isolated native trust anchor"),
+    let builder = if local_anchor {
+        builder.add_root_certificate(
+            reqwest::Certificate::from_pem(
+                &std::fs::read(
+                    std::env::var_os("ARANY_TLS_TEST_CA").expect("isolated native trust anchor"),
+                )
+                .unwrap(),
             )
             .unwrap(),
         )
-        .unwrap(),
-    );
+    } else {
+        builder
+    };
+    #[cfg(target_os = "linux")]
+    let _ = local_anchor;
     builder
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())

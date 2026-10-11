@@ -399,7 +399,7 @@ fn run_pty_with_gate(
         .env("SHELL", "/usr/bin/sh")
         .env("TERM", "dumb")
         .env("HOME", "/root")
-        .env("XDG_STATE_HOME", "/root/legacy-state")
+        .env("XDG_STATE_HOME", "/root/fixture-state")
         .env("SSL_CERT_FILE", "/fixture/ca.pem")
         .env("ANTHROPIC_WORKSPACE_ID", AMBIENT_WORKSPACE)
         .stdin(Stdio::piped())

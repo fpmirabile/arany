@@ -14,7 +14,7 @@ mod product;
 fn started(title: String) -> Event {
     Event::SessionStarted {
         title,
-        workspace_identity: None,
+        workspace_identity: (1, 1),
     }
 }
 

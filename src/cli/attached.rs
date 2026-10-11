@@ -269,69 +269,99 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         }
         Err(error) => return Err(error.into()),
     }
+    match setup::admit_history(&mut terminal, &admission.state_dir, &admission.workspace).await {
+        Ok(Some(false)) => {}
+        Ok(Some(true)) => {
+            admission.entry = EntryMode::New;
+            if admission.prompt.take().is_some() {
+                append_notice(
+                    &mut setup_notice,
+                    "Initial task was not submitted; enter it again.",
+                );
+            }
+            append_notice(
+                &mut setup_notice,
+                "Starting a new conversation; saved accounts and folder trust kept.",
+            );
+        }
+        Ok(None) => return Ok(()),
+        Err(error) => return Err(error.into()),
+    }
     if !native_protection_supported() {
         append_notice(&mut setup_notice, permissions::UNAVAILABLE_NOTICE);
     }
-    #[cfg(target_os = "macos")]
-    append_notice(
-        &mut setup_notice,
-        "Guarded file Tools and Skills are available; commands and MCP are unavailable on macOS.",
-    );
+    let explicit_provider = admission.defaults.provider.is_some();
     if admission.defaults.provider.as_deref() == Some("chatgpt") {
-        admission.defaults.account_id = Some(
-            chatgpt::selected_account_id(&admission.workspace)
-                .map_err(|error| error.to_string())?,
-        );
+        match chatgpt::selected_account_id() {
+            Ok(id) => admission.defaults.account_id = Some(id),
+            Err(error) => {
+                append_notice(
+                    &mut setup_notice,
+                    &format!(
+                        "Saved access could not be restored: {error}; use /setup to choose or reset access"
+                    ),
+                );
+                admission.defaults = SessionDefaults::default();
+            }
+        }
     }
     let mut setup_catalog = None;
-    let reuse_saved_selection =
-        matches!(admission.entry, EntryMode::New) && admission.defaults.provider.is_none();
+    let reuse_saved_selection = matches!(admission.entry, EntryMode::New) && !explicit_provider;
     let mut access_checked = false;
-    if matches!(admission.entry, EntryMode::New) && admission.defaults.provider.is_none() {
+    if matches!(admission.entry, EntryMode::New) && !explicit_provider {
         if admission.setup_requested {
-            match setup::resolve(&mut terminal, &admission.state_dir, &admission.workspace).await? {
-                Some(setup::SetupSelection::Native {
+            match setup::resolve(&mut terminal, &admission.state_dir, &admission.workspace).await {
+                Ok(Some(setup::SetupSelection::Native {
                     defaults,
                     notice,
                     catalog,
-                }) => {
+                })) => {
                     admission.defaults = defaults;
                     setup_notice = Some(notice);
                     setup_catalog = Some(catalog);
                 }
-                Some(setup::SetupSelection::ChatGpt {
+                Ok(Some(setup::SetupSelection::ChatGpt {
                     defaults,
                     notice,
                     catalog,
-                }) => {
+                })) => {
                     admission.defaults = defaults;
                     setup_notice = notice;
                     setup_catalog = Some(catalog);
                 }
-                None => return Ok(()),
+                Ok(None) => return Ok(()),
+                Err(setup::SetupError::Recoverable(error)) => {
+                    append_notice(
+                        &mut setup_notice,
+                        &format!("Setup could not be completed: {error}; use /setup to try again"),
+                    );
+                }
+                Err(error) => return Err(error.into()),
             }
         } else {
-            match setup::saved_defaults(&mut terminal, &admission.workspace).await? {
-                setup::SavedDefaults::Selected(defaults) => admission.defaults = defaults,
-                setup::SavedDefaults::AccessChecked(defaults) => {
+            match setup::saved_defaults(&mut terminal, &admission.workspace).await {
+                Ok(setup::SavedDefaults::Selected(defaults)) => admission.defaults = defaults,
+                Ok(setup::SavedDefaults::AccessChecked(defaults)) => {
                     admission.defaults = defaults;
                     access_checked = true;
                 }
-                setup::SavedDefaults::Cancelled => return Ok(()),
-                setup::SavedDefaults::Unconfigured => {}
+                Ok(setup::SavedDefaults::Cancelled) => return Ok(()),
+                Ok(setup::SavedDefaults::Unconfigured) => {}
+                Err(setup::SetupError::Recoverable(error)) => {
+                    append_notice(
+                        &mut setup_notice,
+                        &format!(
+                            "Saved access could not be restored: {error}; use /setup to choose or reset access"
+                        ),
+                    );
+                }
+                Err(error) => return Err(error.into()),
             }
         }
     }
     let mut access_authorized = true;
     if matches!(admission.entry, EntryMode::New) && !admission.setup_requested && !access_checked {
-        match authorize_or_notice(
-            &mut terminal,
-            &admission.workspace,
-            &admission.defaults,
-            &mut setup_notice,
-        )
-        .await?
-        {
+        match authorize_or_notice(&mut terminal, &admission.defaults, &mut setup_notice).await? {
             Some(authorized) => access_authorized = authorized,
             None => return Ok(()),
         }
@@ -402,14 +432,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
     }
     let (mut session_id, mut view) = start_session(&admission).await?;
     if !matches!(admission.entry, EntryMode::New) {
-        match authorize_or_notice(
-            &mut terminal,
-            &admission.workspace,
-            &view.defaults,
-            &mut setup_notice,
-        )
-        .await?
-        {
+        match authorize_or_notice(&mut terminal, &view.defaults, &mut setup_notice).await? {
             Some(authorized) => access_authorized = authorized,
             None => return Ok(()),
         }
@@ -716,10 +739,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 .account_id
                                 .filter(|_| view.defaults.provider.as_deref() == Some("chatgpt"))
                             {
-                                Some(id) => match chatgpt::selected_reauthorization_target(
-                                    &admission.workspace,
-                                    id,
-                                ) {
+                                Some(id) => match chatgpt::selected_reauthorization_target(id) {
                                     Ok(target) if target.plan_permission_missing => {
                                         chatgpt::AuthorizationError::PermissionMissing.to_string()
                                     }
@@ -1385,11 +1405,10 @@ fn refresh_runtime_skills<N: From<String> + std::fmt::Display>(
 /// Runs saved-access authorization; `None` means the user cancelled, `Some(false)` a recoverable failure.
 async fn authorize_or_notice<N: From<String> + std::fmt::Display>(
     terminal: &mut AttachedTerminal,
-    workspace: &Path,
     defaults: &SessionDefaults,
     notice: &mut Option<N>,
 ) -> Result<Option<bool>, String> {
-    match setup::authorize_saved_access(terminal, workspace, defaults).await {
+    match setup::authorize_saved_access(terminal, defaults).await {
         Ok(true) => Ok(Some(true)),
         Ok(false) => Ok(None),
         Err(setup::SetupError::Recoverable(error)) => {

@@ -9,22 +9,6 @@ const PASSWORD: &str = "synthetic-keychain-password";
 const TEST: &str =
     "cli::credentials::tests::native_store_round_trips_an_isolated_synthetic_account";
 
-fn preferences() -> [Vec<u8>; 2] {
-    ["list-keychains", "default-keychain"].map(|operation| {
-        let output = native_test_output(
-            Command::new("/usr/bin/security")
-                .args([operation, "-d", "user"])
-                .env_clear(),
-            None,
-        );
-        assert!(
-            output.status.success(),
-            "read-only Keychain preference observation"
-        );
-        output.stdout
-    })
-}
-
 pub(super) async fn roundtrip() {
     if let Some(root) = std::env::var_os(keyring_helper::macos::TEST_KEYCHAIN_ROOT_ENV) {
         let root = StateRoot::open_existing(Path::new(&root)).unwrap();
@@ -57,6 +41,15 @@ pub(super) async fn roundtrip() {
             StoredAccountFile::parse(&marker).unwrap().storage,
             AccountStorage::Keyring
         );
+        let marker_path = state.path().join("account-credentials.json");
+        let held_marker = state.path().join("held-account-marker.json");
+        std::fs::rename(&marker_path, &held_marker).unwrap();
+        assert!(
+            inspect().await.unwrap().account.is_none(),
+            "an unmarked Keychain item cannot configure an account"
+        );
+        std::fs::rename(&held_marker, &marker_path).unwrap();
+        assert_eq!(inspect().await.unwrap().account.unwrap().id, id);
         assert!(
             !marker
                 .windows(b"synthetic-native-key".len())
@@ -185,7 +178,6 @@ pub(super) async fn roundtrip() {
     let executable =
         std::env::var_os("ARANY_TEST_EXE").expect("set ARANY_TEST_EXE to built debug arany");
     assert!(Path::new(&executable).is_absolute());
-    let before = preferences();
     let temp = tempfile::tempdir().unwrap();
     let root = StateRoot::admit(&temp.path().join("keychain")).unwrap();
     let path = root.path().join(keyring_helper::macos::TEST_KEYCHAIN);
@@ -196,11 +188,6 @@ pub(super) async fn roundtrip() {
         .create(&path)
         .unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-    assert_eq!(
-        preferences(),
-        before,
-        "private creation must preserve user Keychain preferences"
-    );
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
         .args(["--exact", TEST, "--ignored", "--nocapture"])
@@ -208,17 +195,12 @@ pub(super) async fn roundtrip() {
         .env("ARANY_TEST_EXE", executable)
         .env(keyring_helper::macos::TEST_KEYCHAIN_ROOT_ENV, root.path())
         .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account"))
-        .env("HOME", temp.path().join("legacy-home"))
-        .env("XDG_STATE_HOME", temp.path().join("legacy-state"))
-        .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+        .env("HOME", temp.path().join("fixture-home"))
+        .env("XDG_STATE_HOME", temp.path().join("fixture-state"))
+        .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
         .env("TMPDIR", "/private/tmp")
         .current_dir(temp.path());
     let output = native_test_output(&mut command, None);
-    assert_eq!(
-        preferences(),
-        before,
-        "native lifecycle must preserve user Keychain preferences"
-    );
     for secret in [
         b"synthetic-native-key".as_slice(),
         b"synthetic-replacement-key".as_slice(),

@@ -13,7 +13,7 @@ fn append_refuses_event_past_replay_limit() {
         session_id,
         Event::SessionStarted {
             title: "Session".into(),
-            workspace_identity: None,
+            workspace_identity: (1, 1),
         },
     )
     .expect("first Event");
@@ -65,7 +65,7 @@ fn other_connection_changes_invalidate_hot_history() {
         session_id,
         Event::SessionStarted {
             title: "Session".into(),
-            workspace_identity: None,
+            workspace_identity: (1, 1),
         },
     )
     .expect("first Event");
@@ -75,7 +75,7 @@ fn other_connection_changes_invalidate_hot_history() {
     let other_id = SessionId::new();
     let other_start = Event::SessionStarted {
         title: "Other".into(),
-        workspace_identity: None,
+        workspace_identity: (1, 1),
     };
     second
         .execute(
@@ -147,7 +147,7 @@ fn failed_insert_drops_hot_projection_before_recovery() {
         session_id,
         Event::SessionStarted {
             title: "Session".into(),
-            workspace_identity: None,
+            workspace_identity: (1, 1),
         },
     )
     .expect("first Event");

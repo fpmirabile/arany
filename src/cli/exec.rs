@@ -500,7 +500,7 @@ mod tests {
         ) {
             assert_eq!(line["sequence"], event.sequence);
             assert_eq!(line["created_at_ms"], event.created_at_ms);
-            assert_eq!(line["event_version"], 1);
+            assert_eq!(line["event_version"], 2);
         }
         store.close().await.expect("closed store");
 

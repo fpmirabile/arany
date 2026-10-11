@@ -18,7 +18,7 @@ Arany is a Rust-first, CLI-only agent harness. The product and executable are na
 | Saved accounts, keyrings, credential transport | [Credential spec](./docs/specs/credentials.md), [credential rules](./agents/credentials.md) |
 | ChatGPT-plan OAuth, consent, tokens, weaker output bounds | [ChatGPT](./agents/chatgpt.md) |
 | Sessions, resume/fork/compaction, collaboration, topology, context | [Session](./agents/session.md) |
-| SQLite admission, Events, migrations, replay | [Store](./agents/store.md) |
+| SQLite admission, Events, replay | [Store](./agents/store.md) |
 | Terminal behavior, output, accessibility, restoration, presentation | [Terminal](./agents/terminal.md) |
 | Clipboard transport, clients, workers, results | [Clipboard](./agents/clipboard.md) |
 | Image admission, multimodal context, replay | [Image](./agents/image.md) |
@@ -30,6 +30,7 @@ Arany is a Rust-first, CLI-only agent harness. The product and executable are na
 | Run coordination, budgets, Provider outcomes | [Engine](./agents/engine.md) |
 | Model-driven Tools, commands, runtime Skills, MCP, Guard | [Tools](./agents/tools.md) |
 | Native Guard launch, sandbox profiles, resources, FFI and process ownership | [Guard](./agents/guard.md) |
+| Native macOS coalition ownership, control transport and resource supervision | [Guard unit](./agents/guard-unit.md) |
 | Development skill installation or maintenance | [Project skills](./agents/skills/README.md) |
 | CLI admission, modes, channels, `exec` composition | [CLI](./agents/cli.md) |
 | OTLP endpoints, privacy, bounds, shutdown | [Telemetry](./agents/telemetry.md) |
@@ -45,7 +46,7 @@ When a new module is introduced, add `agents/<module>.md` and link it here. Crea
 2. **Minimal comments**: default to none. Add one short comment when the reason is non-obvious. Architectural reasoning belongs in the relevant design document or ADR.
 3. **Deep modules**: keep interfaces small and hide complexity inside the implementation. Prefer in-process calls. Add a seam only when at least two adapters exist or privilege, process, release, or ownership isolation makes it unavoidable. No speculative frameworks, traits or configuration.
 4. **Explicit resource bounds**: queues, buffers, caches, request bodies, tool output, artifacts, concurrency, and retry counts have declared limits and overflow behavior.
-5. **No historical residue**: remove superseded code cleanly. Documentation describes the current system; git history records the old one.
+5. **No historical residue**: remove superseded code cleanly. During pre-beta, keep one current internal format without compatibility readers, automatic migrations or relocation fallbacks. Reject unsupported stored formats without changing their data. External protocol support remains governed by its owning contract. Documentation describes the current system; git history records the old one.
 6. **Never inspect or print `.env`**: read `.env.example` only. Commands may load secrets without echoing them or dumping the process environment.
 7. **Unsafe Rust is exceptional**: keep `unsafe` isolated behind a safe interface, document its invariants, and require a dedicated review and test strategy.
 

@@ -140,7 +140,7 @@ mod tests {
             endpoint: format!("http://127.0.0.1:{port}/v1/responses"),
             model: "model-1".into(),
             credential_env: "ARANY_PROVIDER_LOCAL_KEY".into(),
-            capability_evidence_version: 1,
+            capability_evidence_version: 2,
             efforts: Vec::new(),
         };
         let destination = profile.resolve_destination().await.unwrap();
@@ -149,7 +149,7 @@ mod tests {
             model: "model-1".into(),
             endpoint: profile.endpoint().into(),
             evidence_digest: fingerprint(&profile),
-            evidence_version: 1,
+            evidence_version: 2,
             effort: None,
             transport: CustomTransport::new(&destination, "synthetic-key".into()).unwrap(),
         };

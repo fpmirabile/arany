@@ -15,6 +15,9 @@ mod telemetry;
 mod terminal;
 mod tools;
 
+#[cfg(target_os = "macos")]
+pub use tools::tool_guard_unit_main;
+
 pub use diagnostics::{
     DevelopmentFailure, enable_development_diagnostics, record_development_failure,
 };
@@ -45,7 +48,7 @@ pub use session::{
     RunDisposition, RunId, RunStatus, RunView, SessionDefaults, SessionId, SessionListItem,
     SessionView, ToolView,
 };
-pub use store::{StateRoot, Store, StoreError};
+pub use store::{HistoryReset, StateRoot, Store, StoreError};
 pub use telemetry::{Telemetry, TelemetryConfigError};
 pub use terminal::{
     AttachedTerminal, CommandAvailability, CommandParseError, CompletionLayout, Composer,

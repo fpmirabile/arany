@@ -279,10 +279,9 @@ impl ProviderIdentity<'_> {
                 == (self.output_token_bound == OutputTokenBound::LocalAcceptanceOnly)
             && (self.profile != "chatgpt" || self.effort.is_some() && self.concurrency == 1)
             && self.chatgpt_provenance.is_none_or(ChatGptProvenance::valid)
-            && self.custom_profile_provenance.is_none_or(|provenance| {
-                provenance.valid()
-                    && (provenance.capability_evidence_version != 1 || self.effort.is_none())
-            })
+            && self
+                .custom_profile_provenance
+                .is_none_or(|provenance| provenance.valid())
             && (1..=8).contains(&self.concurrency)
     }
 }
@@ -617,22 +616,13 @@ pub enum OutputTokenBound {
 pub struct ChatGptProvenance {
     pub account_id: Uuid,
     pub evidence_fingerprint: [u8; 32],
-    #[serde(default, skip_serializing_if = "ChatGptAdmission::is_conformance")]
     pub admission: ChatGptAdmission,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatGptAdmission {
-    #[default]
-    Conformance,
     AccountConsent,
-}
-
-impl ChatGptAdmission {
-    fn is_conformance(&self) -> bool {
-        *self == Self::Conformance
-    }
 }
 
 impl ChatGptProvenance {
@@ -647,7 +637,7 @@ impl CustomProfileProvenance {
         !self.endpoint.is_empty()
             && self.endpoint.len() <= 512
             && !self.endpoint.chars().any(char::is_control)
-            && matches!(self.capability_evidence_version, 1 | 2)
+            && self.capability_evidence_version == 2
     }
 }
 

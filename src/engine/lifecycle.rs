@@ -24,7 +24,7 @@ pub async fn create_session(
             session_id,
             Event::SessionStarted {
                 title: title.unwrap_or_else(|| "New Session".into()),
-                workspace_identity: Some(workspace_identity),
+                workspace_identity,
             },
         )
         .await;

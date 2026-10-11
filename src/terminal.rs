@@ -1000,6 +1000,7 @@ impl AttachedTerminal {
 
     pub fn draw_setup_warning(
         &mut self,
+        title: &str,
         warning: &str,
         page: usize,
         accept_selected: bool,
@@ -1008,7 +1009,7 @@ impl AttachedTerminal {
         self.cancel_clipboard_paste();
         if let Some(linear) = &mut self.linear {
             linear
-                .draw_setup_warning(warning, notice)
+                .draw_setup_warning(title, warning, notice)
                 .map_err(TerminalError::Io)?;
             return Ok(false);
         }
@@ -1022,6 +1023,7 @@ impl AttachedTerminal {
                 visible = frame.area().width >= 16 && frame.area().height >= 8;
                 has_more = draw_setup_warning_frame(
                     frame,
+                    title,
                     warning,
                     page,
                     accept_selected,
@@ -1032,7 +1034,7 @@ impl AttachedTerminal {
         if !visible {
             return Err(TerminalError::Io(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "ChatGPT consent needs a visible terminal with at least 16 columns and 8 rows; no sign-in started",
+                "Confirmation needs a visible terminal with at least 16 columns and 8 rows; nothing accepted",
             )));
         }
         Ok(has_more)

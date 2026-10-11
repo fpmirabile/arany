@@ -121,6 +121,95 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
     pinned.verify().unwrap();
     pinned.sha256 = "0".repeat(64);
     assert!(pinned.verify().is_err(), "changed executable pin rejects");
+
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir(root_path.join("empty")).unwrap();
+    std::fs::write(root_path.join("script"), b"synthetic executable data").unwrap();
+    std::fs::set_permissions(
+        root_path.join("script"),
+        std::fs::Permissions::from_mode(0o6755),
+    )
+    .unwrap();
+    let input = temp.path().join("runtime-input");
+    std::fs::write(&input, b"pinned input").unwrap();
+    pinned.sha256 = hex_digest(&bytes);
+    pinned.inputs.push(super::config::ProgramInput {
+        path: input.to_str().unwrap().into(),
+        destination: "data".into(),
+        sha256: hex_digest(b"pinned input"),
+    });
+    let copied = temp.path().join("copied-program");
+    std::fs::write(&copied, &bytes).unwrap();
+    let copied_program = super::config::Program {
+        name: "copied".into(),
+        executable: copied.to_str().unwrap().into(),
+        sha256: hex_digest(&bytes),
+        interpreter: true,
+        inputs: Vec::new(),
+    };
+    let snapshot_config = Config {
+        version: 1,
+        workspace_paths: vec!["nested/file".into(), "empty".into(), "script".into()],
+        write: true,
+        commands: vec![pinned, copied_program],
+        skills: Vec::new(),
+        mcp: Vec::new(),
+    };
+    for (case, drift) in [("fresh", false), ("changed-input", true)] {
+        let target = temp.path().join(case);
+        std::fs::create_dir_all(target.join("project")).unwrap();
+        std::fs::create_dir(target.join("runtime")).unwrap();
+        let project = super::fs::open_directory(&target.join("project")).unwrap();
+        let resources = super::fs::open_directory(&target.join("runtime")).unwrap();
+        if drift {
+            std::fs::write(&input, b"changed after admission").unwrap();
+        }
+        let result = super::fs::snapshot_into(&root, &snapshot_config, Some(&project), &resources);
+        if drift {
+            assert!(
+                matches!(result, Err(super::ToolError::ChangedInput)),
+                "{case}"
+            );
+            continue;
+        }
+        result.unwrap();
+        assert_eq!(
+            std::fs::read(target.join("project/nested/file")).unwrap(),
+            b"replaced"
+        );
+        assert!(target.join("project/empty").is_dir());
+        assert_eq!(
+            std::fs::metadata(target.join("project/script"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o700
+        );
+        assert!(!target.join("project/linked").exists());
+        assert!(!target.join("project/fifo").exists());
+        if cfg!(target_os = "macos") {
+            assert!(!target.join("runtime/programs/sh").exists());
+        } else {
+            assert_eq!(
+                std::fs::read(target.join("runtime/programs/sh")).unwrap(),
+                bytes
+            );
+        }
+        assert_eq!(
+            std::fs::read(target.join("runtime/programs/copied")).unwrap(),
+            bytes
+        );
+        assert_eq!(
+            std::fs::read(target.join("runtime/inputs/sh/data")).unwrap(),
+            b"pinned input"
+        );
+        std::fs::write(target.join("project/nested/file"), b"disposable").unwrap();
+        assert_eq!(
+            std::fs::read(root_path.join("nested/file")).unwrap(),
+            b"replaced"
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -462,7 +551,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         use_count: 1,
     };
     assert!(intent.valid());
-    let legacy_limits = json!({
+    let mut limits = json!({
         "result_bytes": MAX_TOOL_RESULT_BYTES,
         "runtime_ms": 60_000,
         "memory_bytes": MEMORY_BYTES,
@@ -470,20 +559,24 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         "scratch_bytes": SCRATCH_BYTES,
         "network": "none"
     });
-    let legacy: ToolLimits = serde_json::from_value(legacy_limits.clone()).unwrap();
-    assert_eq!(legacy.resource_profile, ToolResourceProfile::LinuxKernel);
-    assert_eq!(serde_json::to_value(&legacy).unwrap(), legacy_limits);
-    assert_eq!(serde_json::to_vec(&legacy).unwrap(),
-        br#"{"result_bytes":16384,"runtime_ms":60000,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"network":"none"}"#,
-        "historical serialized limits preserve digest bytes");
+    assert!(serde_json::from_value::<ToolLimits>(limits.clone()).is_err());
     let mut native = intent.clone();
-    native.limits = legacy.clone();
-    let legacy_intent = native.digest();
+    native.limits.resource_profile = ToolResourceProfile::LinuxKernel;
+    let linux_intent = native.digest();
     native.limits.resource_profile = ToolResourceProfile::MacosSupervised;
+    for profile in [
+        ToolResourceProfile::LinuxKernel,
+        ToolResourceProfile::MacosSupervised,
+    ] {
+        limits["resource_profile"] = serde_json::to_value(profile).unwrap();
+        let decoded: ToolLimits = serde_json::from_value(limits.clone()).unwrap();
+        assert_eq!(decoded.resource_profile, profile);
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), limits);
+    }
     assert!(native.valid());
     assert_ne!(
         native.digest(),
-        legacy_intent,
+        linux_intent,
         "resource semantics bind the intent"
     );
     assert_eq!(

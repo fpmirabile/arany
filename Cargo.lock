@@ -134,6 +134,7 @@ dependencies = [
  "cap-fs-ext",
  "cap-std",
  "clap",
+ "core-foundation",
  "crossterm",
  "directories",
  "getrandom 0.4.3",

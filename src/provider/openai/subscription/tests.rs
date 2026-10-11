@@ -18,33 +18,24 @@ fn checked_provider_declares_local_bound_and_exact_account_provenance() {
     let provenance = ChatGptProvenance {
         account_id: uuid::Uuid::now_v7(),
         evidence_fingerprint: [7; 32],
-        admission: crate::provider::ChatGptAdmission::Conformance,
+        admission: crate::provider::ChatGptAdmission::AccountConsent,
     };
-    for admission in [
-        crate::provider::ChatGptAdmission::Conformance,
-        crate::provider::ChatGptAdmission::AccountConsent,
-    ] {
-        let provenance = ChatGptProvenance {
-            admission,
-            ..provenance.clone()
-        };
-        let provider = ChatGptProvider::from_checked_account(
-            "model-a".into(),
-            Effort::High,
-            TOKEN.into(),
-            provenance.clone(),
-        )
-        .expect("admitted synthetic account");
-        assert_eq!(provider.profile_name(), "chatgpt");
-        assert_eq!(provider.model_name(), "model-a");
-        assert_eq!(provider.reasoning_effort(), Some(Effort::High));
-        assert_eq!(provider.max_concurrent_calls(), 1);
-        assert_eq!(provider.chatgpt_provenance(), Some(provenance));
-        assert_eq!(
-            provider.output_token_bound(),
-            OutputTokenBound::LocalAcceptanceOnly
-        );
-    }
+    let provider = ChatGptProvider::from_checked_account(
+        "model-a".into(),
+        Effort::High,
+        TOKEN.into(),
+        provenance.clone(),
+    )
+    .expect("admitted synthetic account");
+    assert_eq!(provider.profile_name(), "chatgpt");
+    assert_eq!(provider.model_name(), "model-a");
+    assert_eq!(provider.reasoning_effort(), Some(Effort::High));
+    assert_eq!(provider.max_concurrent_calls(), 1);
+    assert_eq!(provider.chatgpt_provenance(), Some(provenance.clone()));
+    assert_eq!(
+        provider.output_token_bound(),
+        OutputTokenBound::LocalAcceptanceOnly
+    );
     assert!(
         ChatGptProvider::from_checked_account(
             "model-a".into(),

@@ -45,7 +45,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> S
             session_id,
             Event::SessionStarted {
                 title: "Near-cap fixture".into(),
-                workspace_identity: Some((metadata.dev(), metadata.ino())),
+                workspace_identity: (metadata.dev(), metadata.ino()),
             },
         )
         .await

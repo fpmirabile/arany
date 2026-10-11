@@ -46,12 +46,12 @@ fn prepare_test_file_account_at(account_root: &Path) -> Uuid {
         "schema": 1,
         "storage": "private_file",
         "account": {
-            "schema": 1,
+            "schema": 2,
             "id": account_id,
             "provider": "openai",
             "model": "gpt-5.4",
             "effort": null,
-            "api_key": "synthetic-existing-key"
+            "api_key": "synthetic-existing-key", "anthropic_workspace_id": null
         }
     });
     state
@@ -77,9 +77,9 @@ fn prepare_selected_chatgpt_account_at(account_root: &Path) -> Uuid {
             "client_id": "oaiapp_synthetic_saved",
             "subject": "synthetic-subject",
             "storage": "keyring",
-            "renewal_pending": false,
-            "token": null
-        }]
+            "renewal_pending": false, "signout_pending": false,
+            "disconnected": false, "plan_permission_missing": false, "token": null
+        }], "model_checks": []
     });
     state
         .replace_chatgpt_accounts_record(&serde_json::to_vec(&record).expect("account index"))
@@ -144,8 +144,8 @@ fn bare_start_reuses_private_file_account_without_setup_or_run() {
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("HOME", temp.path().join("legacy-home"))
-        .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+        .env("HOME", temp.path().join("fixture-home"))
+        .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
         .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
         .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
         .env("DBUS_SESSION_BUS_ADDRESS", "unixexec:path=/usr/bin/false")
@@ -264,8 +264,8 @@ fn bare_start_with_both_accounts_requires_an_explicit_billing_route() {
             .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
             .env("ARANY_TEST_STATE", &state)
             .env("ARANY_TEST_WORKSPACE", &workspace)
-            .env("HOME", temp.path().join("legacy-home"))
-            .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+            .env("HOME", temp.path().join("fixture-home"))
+            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
             .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
             .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
             .env(
@@ -450,8 +450,8 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
             .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
             .env("ARANY_TEST_STATE", &state)
             .env("ARANY_TEST_WORKSPACE", &workspace)
-            .env("HOME", temp.path().join("legacy-home"))
-            .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+            .env("HOME", temp.path().join("fixture-home"))
+            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
             .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
             .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
             .env(
@@ -609,8 +609,8 @@ fn saved_chatgpt_picker_lists_account_ids_and_cancels_cleanly() {
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("HOME", temp.path().join("legacy-home"))
-        .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+        .env("HOME", temp.path().join("fixture-home"))
+        .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
         .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
         .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
         .env(
@@ -716,8 +716,8 @@ fn bare_start_without_account_keeps_chat_input_and_offers_named_setup_choices() 
                 .env("ARANY_TEST_STATE", &prompt_state)
                 .env("ARANY_TEST_WORKSPACE", &workspace)
                 .env("ARANY_TEST_FORK", fork)
-                .env("HOME", temp.path().join("legacy-home"))
-                .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+                .env("HOME", temp.path().join("fixture-home"))
+                .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
                 .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
                 .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
                 .env(
@@ -761,8 +761,8 @@ fn bare_start_without_account_keeps_chat_input_and_offers_named_setup_choices() 
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("HOME", temp.path().join("legacy-home"))
-        .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+        .env("HOME", temp.path().join("fixture-home"))
+        .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
         .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
         .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
         .env(
@@ -880,8 +880,8 @@ fn screen_reader_chatgpt_consent_defaults_to_back_before_browser_or_account_stat
             .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
             .env("ARANY_TEST_STATE", &state)
             .env("ARANY_TEST_WORKSPACE", &workspace)
-            .env("HOME", temp.path().join("legacy-home"))
-            .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+            .env("HOME", temp.path().join("fixture-home"))
+            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
             .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
             .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
             .env(
@@ -1432,10 +1432,10 @@ fn release_saved_account_is_private_across_os_users() {
         } else {
             "/arany --screen-reader --state-dir /other/state --workspace /other/workspace"
         };
-        let legacy_state = if expected_account.is_some() {
+        let fixture_state = if expected_account.is_some() {
             "/owner/spoofed-state"
         } else {
-            "/other/legacy-state"
+            "/other/fixture-state"
         };
         let mut command = Command::new("/usr/bin/script");
         command
@@ -1444,7 +1444,7 @@ fn release_saved_account_is_private_across_os_users() {
             .env("SHELL", "/usr/bin/sh")
             .env("TERM", "dumb")
             .env("HOME", "/owner")
-            .env("XDG_STATE_HOME", legacy_state)
+            .env("XDG_STATE_HOME", fixture_state)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -1658,8 +1658,8 @@ fn narrow_no_color_chatgpt_warning_pages_before_acceptance_and_restores_terminal
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("HOME", temp.path().join("legacy-home"))
-                .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+        .env("HOME", temp.path().join("fixture-home"))
+                .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
                 .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
         .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
         .env(
@@ -1790,8 +1790,8 @@ fn unconfigured_inline_composer_shows_draft_and_setup_selection_at_narrow_widths
             .env("ARANY_TEST_EXE", &executable)
             .env("ARANY_TEST_STATE", &state)
             .env("ARANY_TEST_WORKSPACE", &workspace)
-            .env("HOME", temp.path().join("legacy-home"))
-            .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+            .env("HOME", temp.path().join("fixture-home"))
+            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
             .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
             .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
             .env(
@@ -2095,7 +2095,8 @@ fn replaced_file_account_cannot_run_an_older_session() {
         "screen-reader output has escapes"
     );
     assert!(
-        transcript == "error: invalid saved account\r\n",
+        transcript
+            == "error: invalid saved account; use arany --setup to choose or reset access\r\n",
         "stale account was not rejected exactly: {diagnostic}"
     );
 
@@ -2133,8 +2134,8 @@ fn narrow_no_color_setup_hides_key_and_restores_terminal_on_cancel() {
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("HOME", temp.path().join("legacy-home"))
-                .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+        .env("HOME", temp.path().join("fixture-home"))
+                .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
                 .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
         .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
         .env(
@@ -2435,8 +2436,8 @@ fn cancelled_screen_reader_setup_hides_key_and_creates_no_session() {
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("HOME", temp.path().join("legacy-home"))
-        .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+        .env("HOME", temp.path().join("fixture-home"))
+        .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
         .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
         .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
         .env("DBUS_SESSION_BUS_ADDRESS", "unixexec:path=/usr/bin/false")
@@ -2700,8 +2701,8 @@ fn setup_signals_after_hidden_key_segment_restore_echo_and_preserve_defaults() {
             .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
             .env("ARANY_TEST_STATE", &state)
             .env("ARANY_TEST_WORKSPACE", &workspace)
-            .env("HOME", temp.path().join("legacy-home"))
-            .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+            .env("HOME", temp.path().join("fixture-home"))
+            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
             .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
             .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
             .env("DBUS_SESSION_BUS_ADDRESS", "unixexec:path=/usr/bin/false")
@@ -2907,8 +2908,8 @@ fn unsafe_dbus_address_cannot_launch_a_credential_command() {
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("HOME", temp.path().join("legacy-home"))
-                .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+        .env("HOME", temp.path().join("fixture-home"))
+                .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
                 .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
         .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
         .env("DBUS_SESSION_BUS_ADDRESS", address)
@@ -3023,8 +3024,8 @@ fn saved_account_fifo_is_rejected_without_blocking_or_keyring_access() {
             .arg(env!("CARGO_BIN_EXE_arany"))
             .args(["provider", "models", "openai", "--saved-account"])
             .env_clear()
-            .env("HOME", temp.path().join("legacy-home"))
-            .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+            .env("HOME", temp.path().join("fixture-home"))
+            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
             .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
             .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
             .env("DBUS_SESSION_BUS_ADDRESS", "unixexec:path=/usr/bin/false")
@@ -3135,12 +3136,12 @@ fn native_credential_helper_round_trips_a_synthetic_isolated_slot() {
     let slot = format!("native-test-{}", Uuid::now_v7());
     let _cleanup = Cleanup(slot.clone());
     let account = serde_json::to_vec(&serde_json::json!({
-        "schema": 1,
+        "schema": 2,
         "id": Uuid::now_v7(),
         "provider": "openai",
         "model": "gpt-5.4",
         "effort": null,
-        "api_key": "synthetic-native-helper-key"
+        "api_key": "synthetic-native-helper-key", "anthropic_workspace_id": null
     }))
     .expect("synthetic account");
     let mut command = credential_helper_command("write", &slot, temp.path());
@@ -3223,8 +3224,8 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
         .env("ARANY_TEST_EXE", "/arany")
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("HOME", temp.path().join("legacy-home"))
-                .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+        .env("HOME", temp.path().join("fixture-home"))
+                .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
                 .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
         .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={}", socket.display()))
         .env("SHELL", "/bin/sh")
@@ -3347,8 +3348,8 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
             .env("ARANY_TEST_WORKSPACE", &workspace)
             .env("ARANY_TEST_SESSION", session_id.to_string())
             .env("ARANY_TEST_LINEAR", if linear { "1" } else { "0" })
-            .env("HOME", temp.path().join("legacy-home"))
-            .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+            .env("HOME", temp.path().join("fixture-home"))
+            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
             .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
             .env(
                 "DBUS_SESSION_BUS_ADDRESS",

@@ -273,7 +273,7 @@ async fn select_provider_inner(
 
 async fn native_key(selection: Selection<'_>) -> Result<NativeApiCredentials, String> {
     match selection.account_id {
-        Some(id) => credentials::load_selected(selection.workspace, id, selection.profile)
+        Some(id) => credentials::load_selected(id, selection.profile)
             .await
             .map_err(|error| error.to_string()),
         None => NativeApiCredentials::from_env(selection.profile).map_err(|_| {
@@ -398,6 +398,12 @@ mod tests {
     #[cfg(debug_assertions)]
     #[tokio::test]
     async fn saved_access_is_authorized_before_chat_without_exposing_secrets() {
+        enum StartupInput {
+            Reply(&'static str),
+            Interrupt,
+        }
+        use StartupInput::{Interrupt, Reply};
+
         const ROOT: &str = "ARANY_TEST_SAVED_ACCESS_ROOT";
         const CASE: &str = "ARANY_TEST_SAVED_ACCESS_CASE";
         const TEST: &str = "cli::attached::run::tests::saved_access_is_authorized_before_chat_without_exposing_secrets";
@@ -412,17 +418,78 @@ mod tests {
                 "replaced",
                 "private_file",
                 "unconfigured",
+                "invalid_chatgpt",
+                "invalid_chatgpt_reset",
+                "invalid_native",
+                "invalid_native_reset",
+                "invalid_preferences",
+                "invalid_preferences_reset",
+                "invalid_registration",
+                "initial_setup_failure",
+                "invalid_history",
+                "invalid_history_same_root",
+                "invalid_history_cancel",
+                "corrupt_history",
+                "unsafe_history",
                 "resume_locked",
                 "continue_missing",
                 "cancel",
             ] {
+                let dialogue: &[StartupInput] = match case {
+                    "invalid_chatgpt" | "invalid_registration" => &[
+                        Reply("/setup\n"),
+                        Reply("ChatGPT plan\n"),
+                        Reply("\n"),
+                        Reply("/quit\n"),
+                    ],
+                    "invalid_chatgpt_reset" => &[
+                        Reply("/setup\n"),
+                        Reply("ChatGPT plan\n"),
+                        Reply("Reset local setup\n"),
+                        Reply("\n"),
+                        Reply("/quit\n"),
+                    ],
+                    "invalid_native" => &[
+                        Reply("/setup\n"),
+                        Reply("API key\n"),
+                        Reply("\n"),
+                        Reply("/quit\n"),
+                    ],
+                    "invalid_native_reset" => &[
+                        Reply("/setup\n"),
+                        Reply("API key\n"),
+                        Reply("Reset local setup\n"),
+                        Reply("\n"),
+                        Reply("/quit\n"),
+                    ],
+                    "invalid_preferences" => &[Reply("/setup\n"), Reply("\n"), Reply("/quit\n")],
+                    "invalid_preferences_reset" => &[
+                        Reply("/setup\n"),
+                        Reply("Reset local setup\n"),
+                        Interrupt,
+                        Reply("/quit\n"),
+                    ],
+                    "initial_setup_failure" => &[Reply("ChatGPT plan\n"), Reply("/quit\n")],
+                    "invalid_history" | "invalid_history_same_root" | "corrupt_history" => &[
+                        Reply("Reset history\n"),
+                        Reply("Accept\n"),
+                        Reply("/quit\n"),
+                    ],
+                    "invalid_history_cancel" => {
+                        &[Reply("Reset history\n"), Reply("\n"), Reply("Exit\n")]
+                    }
+                    "unsafe_history" => &[Reply("Exit\n")],
+                    "resume_locked" | "continue_missing" | "cancel" => &[],
+                    _ => &[Reply("/quit\n")],
+                };
+                let mut inputs = dialogue.iter();
                 let temp = tempfile::tempdir().unwrap();
                 let pty = nix::pty::openpty(None, None).unwrap();
                 let slave = std::fs::File::from(pty.slave);
                 let master = std::fs::File::from(pty.master);
                 let settings = nix::sys::termios::tcgetattr(&master).unwrap();
                 let mut input = master.try_clone().unwrap();
-                let mut quit = false;
+                let mut answered_bytes = 0;
                 let listener = if case == "cancel" {
                     let listener =
                         std::os::unix::net::UnixListener::bind(temp.path().join("authorization"))
@@ -442,9 +509,9 @@ mod tests {
                     .env(CASE, case)
                     .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account"))
                     .env("ARANY_TEST_EXE", temp.path().join("credential-helper"))
-                    .env("HOME", temp.path().join("legacy-home"))
-                    .env("XDG_STATE_HOME", temp.path().join("legacy-state"))
-                    .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+                    .env("HOME", temp.path().join("fixture-home"))
+                    .env("XDG_STATE_HOME", temp.path().join("fixture-state"))
+                    .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
                     .env("TERM", "dumb")
                     .args(["--exact", TEST, "--nocapture"])
                     .current_dir(temp.path())
@@ -487,29 +554,50 @@ mod tests {
                                 Err(error) => panic!("authorization readiness: {error}"),
                             }
                         }
-                        if !quit
-                            && String::from_utf8_lossy(bytes)
-                                .replace("\r\n", "\n")
-                                .contains("Input:\n")
+                        let fresh =
+                            String::from_utf8_lossy(&bytes[answered_bytes..]).replace("\r\n", "\n");
+                        if fresh.contains("Input:\n")
+                            && let Some(action) = inputs.next()
                         {
-                            input.write_all(b"/quit\n").unwrap();
-                            quit = true;
+                            match action {
+                                Reply(line) => input.write_all(line.as_bytes()).unwrap(),
+                                Interrupt => {
+                                    rustix::process::kill_process(
+                                        product_pid,
+                                        rustix::process::Signal::INT,
+                                    )
+                                    .unwrap();
+                                }
+                            }
+                            answered_bytes = bytes.len();
                         }
                     },
                 );
                 let transcript = String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n");
                 assert!(
                     output.status.success(),
-                    "saved access case {case}: {}",
-                    String::from_utf8_lossy(&output.stdout)
+                    "saved access case {case}: {}; terminal {}",
+                    String::from_utf8_lossy(&output.stdout),
+                    arany::escape_terminal(
+                        &transcript.replace("synthetic-startup-secret", "[redacted]")
+                    )
                 );
                 assert!(
                     String::from_utf8_lossy(&output.stdout)
                         .contains("1 passed; 0 failed; 0 ignored"),
                     "exact child must execute one test"
                 );
-                let submitted = matches!(case, "resume_locked" | "continue_missing" | "cancel");
-                assert_eq!(quit, !submitted, "startup input ownership for {case}");
+                let expects_prompt =
+                    !matches!(case, "resume_locked" | "continue_missing" | "cancel");
+                assert_eq!(
+                    transcript.contains("Input:\n"),
+                    expects_prompt,
+                    "startup input ownership for {case}"
+                );
+                assert!(
+                    inputs.as_slice().is_empty(),
+                    "startup dialogue must complete for {case}"
+                );
                 assert_eq!(
                     nix::sys::termios::tcgetattr(&input).unwrap(),
                     settings,
@@ -535,7 +623,58 @@ mod tests {
                     "credential escaped to presentation"
                 );
                 let marker = temp.path().join("helper-access");
-                if matches!(case, "private_file" | "unconfigured") {
+                if case.contains("history") {
+                    assert!(
+                        transcript.contains("Setup: History recovery"),
+                        "history case {case}: {}",
+                        arany::escape_terminal(&transcript)
+                    );
+                    assert!(transcript.contains("empty Enter selects Retry"));
+                    if case == "unsafe_history" {
+                        assert!(!transcript.contains("Reset history"));
+                        assert!(transcript.contains("unsafe or inaccessible"));
+                    } else {
+                        assert!(transcript.contains("Reset deletes all conversations"));
+                        assert!(transcript.contains("Reset history"));
+                        assert!(transcript.contains("This cannot be undone."));
+                        assert!(transcript.contains("empty Enter selects Back"));
+                    }
+                    let calls = std::fs::read_to_string(marker).unwrap_or_default();
+                    assert_eq!(
+                        calls.lines().count(),
+                        usize::from(!case.ends_with("_cancel") && case != "unsafe_history")
+                    );
+                } else if case.starts_with("invalid_") || case == "initial_setup_failure" {
+                    assert!(transcript.contains("Setup: "));
+                    if !matches!(case, "invalid_registration" | "initial_setup_failure") {
+                        assert!(transcript.contains("Saved access could not be restored"));
+                    }
+                    if case == "initial_setup_failure" {
+                        assert!(transcript.contains("Setup could not be completed"));
+                    } else {
+                        assert!(
+                            transcript.contains("empty Enter selects Back"),
+                            "reset must initially decline"
+                        );
+                        assert!(
+                            transcript.contains("Reset local setup"),
+                            "reset choice must not be clipped"
+                        );
+                        if !case.starts_with("invalid_preferences") {
+                            assert!(transcript.contains("no remote sign-out"));
+                        }
+                    }
+                    let expected = usize::from(matches!(
+                        case,
+                        "invalid_registration" | "invalid_chatgpt_reset" | "invalid_native_reset"
+                    ));
+                    let calls = std::fs::read_to_string(marker).unwrap_or_default();
+                    assert_eq!(
+                        calls.lines().count(),
+                        expected,
+                        "only explicit setup probes or valid startup authorization may use the helper"
+                    );
+                } else if matches!(case, "private_file" | "unconfigured") {
                     assert!(
                         !marker.exists(),
                         "unconfigured/private file must not access the OS store"
@@ -543,7 +682,7 @@ mod tests {
                     assert!(!transcript.contains("Authorize saved access"));
                 } else {
                     let phase = transcript.find("Approve this Arany credential in your OS password store; Esc or Ctrl+C exits\n").expect("authorization phase");
-                    if !submitted {
+                    if expects_prompt {
                         assert!(phase < transcript.find("Input:\n").expect("composer"));
                     }
                     let calls = std::fs::read_to_string(marker).unwrap();
@@ -576,6 +715,11 @@ mod tests {
         let case = std::env::var(CASE).unwrap();
         let workspace = root.join("workspace");
         std::fs::create_dir(&workspace).unwrap();
+        let session_path = root.join(if case == "invalid_history_same_root" {
+            "account"
+        } else {
+            "session"
+        });
         let state = StateRoot::admit(&root.join("account")).unwrap();
         let metadata = std::fs::metadata(&workspace).unwrap();
         let trust = serde_json::to_vec(&serde_json::json!({
@@ -588,7 +732,12 @@ mod tests {
         std::fs::set_permissions(&trust_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let native = matches!(
             case.as_str(),
-            "native" | "native_cached" | "replaced" | "private_file"
+            "native"
+                | "native_cached"
+                | "replaced"
+                | "private_file"
+                | "invalid_native"
+                | "invalid_native_reset"
         );
         let account = crate::cli::credentials::SavedAccount::new(
             "openai".into(),
@@ -646,13 +795,14 @@ mod tests {
                         "schema": 1, "selected": id, "accounts": [{
                             "id": id, "host_id": "11111111-1111-4111-8111-111111111111",
                             "client_id": "synthetic-client", "subject": "synthetic-subject",
-                            "storage": "keyring", "renewal_pending": false, "token": null
+                            "storage": "keyring", "renewal_pending": false, "signout_pending": false,
+                            "disconnected": false, "plan_permission_missing": false, "token": null
                         }], "model_checks": []
                     }))
                     .unwrap(),
                 )
                 .unwrap();
-            let slot = crate::cli::chatgpt::selected_keyring_slot(&workspace, id)
+            let slot = crate::cli::chatgpt::selected_keyring_slot(id)
                 .unwrap()
                 .unwrap();
             let response = match case.as_str() {
@@ -661,12 +811,26 @@ mod tests {
                 "missing" | "continue_missing" => "exit 2",
                 "secret" => "printf synthetic-startup-secret",
                 "cancel" => "held-helper",
+                "invalid_registration"
+                | "invalid_history_same_root"
+                | "invalid_history"
+                | "invalid_history_cancel"
+                | "corrupt_history"
+                | "unsafe_history" => "exit 0",
+                "initial_setup_failure"
+                | "invalid_chatgpt"
+                | "invalid_chatgpt_reset"
+                | "invalid_preferences"
+                | "invalid_preferences_reset" => "exit 1",
                 _ => panic!("invalid synthetic startup case"),
             }
             .into();
             ("authorize", slot, response)
         };
-        if !matches!(case.as_str(), "native" | "unconfigured") {
+        if !matches!(
+            case.as_str(),
+            "native" | "unconfigured" | "invalid_native" | "invalid_native_reset"
+        ) {
             state
                 .replace_model_preferences_record(
                     &serde_json::to_vec(&serde_json::json!({
@@ -678,6 +842,52 @@ mod tests {
                 )
                 .unwrap();
         }
+        if case.starts_with("invalid_chatgpt") {
+            let mut record: serde_json::Value =
+                serde_json::from_slice(&state.read_chatgpt_accounts_record().unwrap().unwrap())
+                    .unwrap();
+            record["accounts"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("plan_permission_missing");
+            state
+                .replace_chatgpt_accounts_record(&serde_json::to_vec(&record).unwrap())
+                .unwrap();
+        }
+        if case.starts_with("invalid_native") {
+            state
+                .replace_saved_account_record(b"unsupported-api-setup")
+                .unwrap();
+        }
+        if case.starts_with("invalid_preferences") {
+            state
+                .replace_model_preferences_record(b"unsupported-model-preferences")
+                .unwrap();
+        }
+        if case == "invalid_registration" {
+            state
+                .replace_chatgpt_registration_record(b"unsupported-registration")
+                .unwrap();
+        }
+        if case == "initial_setup_failure" {
+            nix::unistd::mkfifo(
+                &state.path().join("chatgpt-registration.json"),
+                nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+            )
+            .unwrap();
+        }
+        let recovery = case.starts_with("invalid_")
+            || case.ends_with("_history")
+            || case == "initial_setup_failure";
+        let before_accounts = if recovery {
+            Some((
+                state.read_saved_account_record().unwrap(),
+                state.read_chatgpt_accounts_record().unwrap(),
+                state.read_model_preferences_record().unwrap(),
+            ))
+        } else {
+            None
+        };
         let marker = root
             .join("helper-access")
             .to_str()
@@ -706,27 +916,71 @@ mod tests {
             response
         };
         let script = format!(
-            "#!/bin/sh\n[ \"$1\" = --internal-credential-helper ] || exit 1\nprintf '%s:%s\\n' \"$2\" \"$3\" >> '{marker}'\n{identity}\n[ \"$2\" = '{operation}' ] && [ \"$3\" = '{slot}' ] || exit 1\n{response}\n"
+            "#!/bin/sh\n[ \"$1\" = --internal-credential-helper ] || exit 1\nprintf '%s:%s\\n' \"$2\" \"$3\" >> '{marker}'\nif [ \"$2\" = probe ]; then exit 1; fi\n{identity}\n[ \"$2\" = '{operation}' ] && [ \"$3\" = '{slot}' ] || exit 1\n{response}\n"
         );
         let helper = root.join("credential-helper");
         std::fs::write(&helper, script).unwrap();
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
         let mut args = super::super::AttachedArgs {
             workspace: Some(workspace.clone()),
-            state_dir: Some(root.join("session")),
+            state_dir: Some(session_path.clone()),
             screen_reader: true,
             ..Default::default()
         };
+        args.setup = case == "initial_setup_failure";
+        if case == "invalid_history_same_root" {
+            args.prompt = Some("synthetic task must remain unsubmitted".into());
+            args.continue_session = true;
+        }
+        let before_history = if recovery {
+            let session = arany::create_session(
+                StateRoot::admit(&session_path).unwrap(),
+                workspace.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+            let store =
+                Store::open_read_only(StateRoot::open_existing(&session_path).unwrap()).unwrap();
+            let events = store.load_session(session).await.unwrap();
+            store.close().await.unwrap();
+            Some((session, events))
+        } else {
+            None
+        };
+        if case.starts_with("invalid_history") {
+            let connection =
+                rusqlite::Connection::open(session_path.join("events.sqlite3")).unwrap();
+            connection.execute_batch("PRAGMA user_version=3").unwrap();
+        }
+        if case == "corrupt_history" {
+            std::fs::write(
+                session_path.join("events.sqlite3"),
+                b"synthetic-broken-history",
+            )
+            .unwrap();
+        }
+        let outside = root.join("outside-history");
+        if case == "unsafe_history" {
+            std::fs::write(&outside, b"outside-stays").unwrap();
+            std::os::unix::fs::symlink(&outside, session_path.join("events.sqlite3-journal"))
+                .unwrap();
+        }
+        let before_database = if case.contains("history") {
+            Some(std::fs::read(session_path.join("events.sqlite3")).unwrap())
+        } else {
+            None
+        };
         if matches!(case.as_str(), "resume_locked" | "continue_missing") {
             let session = arany::create_session(
-                StateRoot::admit(&root.join("session")).unwrap(),
+                StateRoot::admit(&session_path).unwrap(),
                 workspace.clone(),
                 None,
             )
             .await
             .unwrap();
             arany::set_session_defaults(
-                StateRoot::open_existing(&root.join("session")).unwrap(),
+                StateRoot::open_existing(&session_path).unwrap(),
                 workspace.clone(),
                 session,
                 arany::SessionDefaults {
@@ -740,8 +994,7 @@ mod tests {
             .await
             .unwrap();
             let store =
-                Store::open_read_only(StateRoot::open_existing(&root.join("session")).unwrap())
-                    .unwrap();
+                Store::open_read_only(StateRoot::open_existing(&session_path).unwrap()).unwrap();
             let before = store.load_session(session).await.unwrap();
             store.close().await.unwrap();
             args.prompt = Some("synthetic task must not be submitted".into());
@@ -760,8 +1013,7 @@ mod tests {
             }));
             eprintln!("Startup rejected: {error}");
             let store =
-                Store::open_read_only(StateRoot::open_existing(&root.join("session")).unwrap())
-                    .unwrap();
+                Store::open_read_only(StateRoot::open_existing(&session_path).unwrap()).unwrap();
             assert_eq!(
                 store.load_session(session).await.unwrap(),
                 before,
@@ -775,20 +1027,87 @@ mod tests {
             .unwrap();
         if case == "cancel" {
             assert!(
-                !root.join("session").exists(),
+                !session_path.exists(),
                 "cancelled startup must not create Session state"
             );
             eprintln!("Startup authorization cancelled");
             return;
         }
+        if let Some((session, events)) = before_history {
+            if let Some(database) = before_database {
+                if case.ends_with("_cancel") || case == "unsafe_history" {
+                    assert!(
+                        std::fs::read(session_path.join("events.sqlite3")).unwrap() == database
+                    );
+                    if case == "unsafe_history" {
+                        assert_eq!(std::fs::read(outside).unwrap(), b"outside-stays");
+                    }
+                } else {
+                    let store =
+                        Store::open_read_only(StateRoot::open_existing(&session_path).unwrap())
+                            .unwrap();
+                    assert!(store.load_session(session).await.unwrap().is_empty());
+                    store.close().await.unwrap();
+                    assert!(
+                        arany::list_sessions(
+                            StateRoot::open_existing(&session_path).unwrap(),
+                            workspace.clone(),
+                        )
+                        .await
+                        .unwrap()
+                        .is_empty()
+                    );
+                }
+                assert!(
+                    state.read_chatgpt_accounts_record().unwrap() == before_accounts.unwrap().1
+                );
+                assert!(trust_path.exists());
+                return;
+            }
+            let store =
+                Store::open_read_only(StateRoot::open_existing(&session_path).unwrap()).unwrap();
+            let current = store.load_session(session).await.unwrap();
+            assert_eq!(current, events, "recovery preserves closed history");
+            assert!(
+                SessionView::replay(session, &current)
+                    .unwrap()
+                    .unwrap()
+                    .runs
+                    .is_empty()
+            );
+            store.close().await.unwrap();
+            let (native_before, chatgpt_before, models_before) = before_accounts.unwrap();
+            let reset = case.ends_with("_reset");
+            assert!(
+                state.read_saved_account_record().unwrap()
+                    == if reset && native { None } else { native_before }
+            );
+            assert!(
+                state.read_chatgpt_accounts_record().unwrap()
+                    == if reset && case.starts_with("invalid_chatgpt") {
+                        None
+                    } else {
+                        chatgpt_before
+                    }
+            );
+            if case == "invalid_registration" {
+                assert!(
+                    state.read_chatgpt_registration_record().unwrap()
+                        == Some(b"unsupported-registration".to_vec())
+                );
+            } else {
+                assert!(
+                    state.read_model_preferences_record().unwrap()
+                        == if reset { None } else { models_before }
+                );
+            }
+            return;
+        }
         assert!(
-            arany::list_sessions(
-                StateRoot::open_existing(&root.join("session")).unwrap(),
-                workspace,
-            )
-            .await
-            .unwrap()
-            .is_empty(),
+            arany::list_sessions(StateRoot::open_existing(&session_path).unwrap(), workspace,)
+                .await
+                .unwrap()
+                .is_empty(),
             "startup and quit must create no canonical Session or Run"
         );
     }
@@ -845,9 +1164,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_chat_preserves_turns_with_file_tools_and_rejects_unsupported_grants() {
+    async fn native_chat_preserves_turns_with_guarded_tools_and_rejects_invalid_admission() {
         const FIXTURE: &str = "ARANY_TEST_NATIVE_CHAT_ROOT";
-        const TEST: &str = "cli::attached::run::tests::native_chat_preserves_turns_with_file_tools_and_rejects_unsupported_grants";
+        const TEST: &str = "cli::attached::run::tests::native_chat_preserves_turns_with_guarded_tools_and_rejects_invalid_admission";
         let Some(root) = std::env::var_os(FIXTURE) else {
             let temp = tempfile::tempdir().unwrap();
             let pty = nix::pty::openpty(None, None).unwrap();
@@ -859,9 +1178,9 @@ mod tests {
             command
                 .env_clear()
                 .env(FIXTURE, temp.path())
-                .env("HOME", temp.path().join("legacy-home"))
-                .env("XDG_STATE_HOME", temp.path().join("legacy-state"))
-                .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+                .env("HOME", temp.path().join("fixture-home"))
+                .env("XDG_STATE_HOME", temp.path().join("fixture-state"))
+                .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
                 .env("TERM", "dumb")
                 .current_dir(temp.path())
                 .args(["--exact", TEST, "--nocapture"])
@@ -1038,8 +1357,19 @@ mod tests {
             )
             .await
             .err()
-            .expect("explicit unsupported command grant must reject");
-            assert_eq!(error, arany::ToolError::ProtectionUnavailable.to_string());
+            .expect("explicit Tool admission must reject before inference");
+            #[cfg(debug_assertions)]
+            assert_eq!(
+                error,
+                arany::ToolError::ChangedInput.to_string(),
+                "the admitted private account fixture must reach stale executable-pin rejection"
+            );
+            #[cfg(not(debug_assertions))]
+            assert_eq!(
+                error,
+                arany::ToolError::Path.to_string(),
+                "the optimized account override must reject before executable verification or host account access"
+            );
             assert_eq!(
                 observed.lock().unwrap().len(),
                 2,

@@ -68,6 +68,15 @@ pub(super) fn open_connection(root: &StateRoot, read_only: bool) -> Result<Conne
         return Err(StoreError::InvalidStateDirectory);
     }
     connection.busy_timeout(std::time::Duration::from_millis(250))?;
+    let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let fresh = version == 0
+        && !read_only
+        && connection.query_row("SELECT COUNT(*) FROM sqlite_schema", [], |row| {
+            row.get::<_, i64>(0)
+        })? == 0;
+    if version != 4 && !fresh {
+        return Err(StoreError::InvalidHistory);
+    }
     if read_only {
         connection.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")?;
     } else {
@@ -106,7 +115,6 @@ pub(super) fn open_connection(root: &StateRoot, read_only: bool) -> Result<Conne
             return Err(StoreError::InvalidStateDirectory);
         }
     }
-    let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     match version {
         0 if !read_only => connection.execute_batch(
             "BEGIN IMMEDIATE;
@@ -134,37 +142,10 @@ pub(super) fn open_connection(root: &StateRoot, read_only: bool) -> Result<Conne
                 checked_at_ms INTEGER NOT NULL,
                 expires_at_ms INTEGER NOT NULL
             ) STRICT;
-            PRAGMA user_version=3;
+            PRAGMA user_version=4;
             COMMIT;",
         )?,
-        1 if !read_only => connection.execute_batch(
-            "BEGIN IMMEDIATE;
-            CREATE TABLE provider_evidence (
-                profile_name TEXT PRIMARY KEY,
-                profile_digest BLOB NOT NULL CHECK(length(profile_digest) = 32),
-                addresses TEXT NOT NULL CHECK(json_valid(addresses)),
-                checked_at_ms INTEGER NOT NULL,
-                expires_at_ms INTEGER NOT NULL
-            ) STRICT;
-            CREATE TABLE native_provider_evidence (
-                fingerprint BLOB PRIMARY KEY CHECK(length(fingerprint) = 32),
-                checked_at_ms INTEGER NOT NULL,
-                expires_at_ms INTEGER NOT NULL
-            ) STRICT;
-            PRAGMA user_version=3;
-            COMMIT;",
-        )?,
-        2 if !read_only => connection.execute_batch(
-            "BEGIN IMMEDIATE;
-            CREATE TABLE native_provider_evidence (
-                fingerprint BLOB PRIMARY KEY CHECK(length(fingerprint) = 32),
-                checked_at_ms INTEGER NOT NULL,
-                expires_at_ms INTEGER NOT NULL
-            ) STRICT;
-            PRAGMA user_version=3;
-            COMMIT;",
-        )?,
-        1..=3 => {}
+        4 => {}
         _ => return Err(StoreError::InvalidHistory),
     }
     Ok(connection)

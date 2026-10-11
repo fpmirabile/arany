@@ -35,6 +35,12 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("--internal-native-tool-unit"))
+    {
+        return arany::tool_guard_unit_main();
+    }
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--internal-tool-guard"))
     {
         return arany::tool_guard_main();

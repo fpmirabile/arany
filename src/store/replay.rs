@@ -197,7 +197,7 @@ fn scan_session_heads(
                 Event::SessionStarted {
                     title,
                     workspace_identity,
-                } => (title.clone(), *workspace_identity, None),
+                } => (title.clone(), Some(*workspace_identity), None),
                 Event::SessionForked {
                     title,
                     source_session_id,

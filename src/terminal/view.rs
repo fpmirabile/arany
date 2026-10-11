@@ -520,6 +520,7 @@ pub(super) fn draw_setup_choices_frame(
 
 pub(super) fn draw_setup_warning_frame(
     frame: &mut Frame,
+    title: &str,
     warning: &str,
     page: usize,
     accept_selected: bool,
@@ -544,7 +545,10 @@ pub(super) fn draw_setup_warning_frame(
     let page = page.min(pages - 1);
     let has_more = page + 1 < pages;
     frame.render_widget(
-        Paragraph::new(Line::styled("ChatGPT plan consent", palette.selection())),
+        Paragraph::new(Line::styled(
+            safe_truncate(title, usize::from(width)),
+            palette.selection(),
+        )),
         Rect::new(area.x, area.y, width, 1),
     );
     let start = page * usize::from(body_height);

@@ -145,7 +145,7 @@ fn command(args: &[&str]) -> std::process::Output {
         .args(args)
         .env_clear()
         .env("HOME", "/root")
-        .env("XDG_STATE_HOME", "/root/legacy-state")
+        .env("XDG_STATE_HOME", "/root/fixture-state")
         .env("SSL_CERT_FILE", "/fixture/ca.pem")
         .env("ANTHROPIC_WORKSPACE_ID", AMBIENT_WORKSPACE)
         .current_dir("/root/workspace")

@@ -90,7 +90,7 @@ fn account_command(
     }
     command.args([
         "--", "/usr/bin/sh", "-c",
-        "HOME=${HOME:-\"$1\"}; XDG_STATE_HOME=${XDG_STATE_HOME:-\"$1/legacy-state\"}; XDG_DATA_HOME=${XDG_DATA_HOME:-\"$1/legacy-data\"}; export HOME XDG_STATE_HOME XDG_DATA_HOME; shift; exec \"$@\"",
+        "HOME=${HOME:-\"$1\"}; XDG_STATE_HOME=${XDG_STATE_HOME:-\"$1/fixture-state\"}; XDG_DATA_HOME=${XDG_DATA_HOME:-\"$1/fixture-data\"}; export HOME XDG_STATE_HOME XDG_DATA_HOME; shift; exec \"$@\"",
         "arany-account-fixture",
     ]).arg(home);
     command

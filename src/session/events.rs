@@ -135,11 +135,13 @@ impl CollaborationPolicy {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionDefaults {
+    #[serde(deserialize_with = "Option::deserialize")]
     pub provider: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "Option::deserialize")]
     pub effort: Option<crate::provider::Effort>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "Option::deserialize")]
     pub account_id: Option<Uuid>,
     pub policy: CollaborationPolicy,
 }
@@ -202,13 +204,18 @@ mod account_default_tests {
     }
 
     #[test]
-    fn legacy_defaults_without_account_binding_remain_readable() {
-        let defaults: SessionDefaults = serde_json::from_str(
-            r#"{"provider":"openai","model":"gpt-5.4","policy":{"mode":"single"}}"#,
-        )
-        .expect("legacy defaults");
-        assert_eq!(defaults.account_id, None);
-        assert!(defaults.validate().is_ok());
+    fn current_defaults_require_explicit_nullable_fields() {
+        let defaults = SessionDefaults::default();
+        let encoded = serde_json::to_value(&defaults).unwrap();
+        assert_eq!(
+            serde_json::from_value::<SessionDefaults>(encoded.clone()).unwrap(),
+            defaults
+        );
+        for field in ["provider", "model", "effort", "account_id"] {
+            let mut missing = encoded.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<SessionDefaults>(missing).is_err());
+        }
     }
 
     #[test]
@@ -249,13 +256,13 @@ mod account_default_tests {
         ));
         config.saved_api_account_id = None;
         assert!(config.validate().is_ok());
-        let legacy: RunConfig =
-            serde_json::from_value(serde_json::to_value(&config).expect("legacy JSON"))
-                .expect("legacy Run config");
-        assert_eq!(legacy.saved_api_account_id, None);
-        assert_eq!(legacy.chatgpt_provenance, None);
+        let decoded: RunConfig =
+            serde_json::from_value(serde_json::to_value(&config).expect("current JSON"))
+                .expect("current Run config");
+        assert_eq!(decoded.saved_api_account_id, None);
+        assert_eq!(decoded.chatgpt_provenance, None);
         assert_eq!(
-            legacy.output_token_bound,
+            decoded.output_token_bound,
             crate::provider::OutputTokenBound::ProviderEnforced
         );
 
@@ -265,7 +272,7 @@ mod account_default_tests {
         config.chatgpt_provenance = Some(crate::provider::ChatGptProvenance {
             account_id: Uuid::now_v7(),
             evidence_fingerprint: [7; 32],
-            admission: crate::provider::ChatGptAdmission::Conformance,
+            admission: crate::provider::ChatGptAdmission::AccountConsent,
         });
         assert!(config.validate().is_err());
         config.output_token_bound = crate::provider::OutputTokenBound::LocalAcceptanceOnly;
@@ -294,21 +301,36 @@ mod account_default_tests {
         let encoded = serde_json::to_value(&config).unwrap();
         assert_eq!(encoded["output_token_bound"], "local_acceptance_only");
         assert_eq!(encoded["chatgpt_provenance"]["evidence_fingerprint"][0], 7);
-        assert!(encoded["chatgpt_provenance"].get("admission").is_none());
-        let decoded: RunConfig = serde_json::from_value(encoded.clone()).unwrap();
-        assert_eq!(decoded, config);
-        config.chatgpt_provenance.as_mut().unwrap().admission =
-            crate::provider::ChatGptAdmission::AccountConsent;
-        assert!(config.validate().is_ok());
-        let current = serde_json::to_value(&config).unwrap();
         assert_eq!(
-            current["chatgpt_provenance"]["admission"],
+            encoded["chatgpt_provenance"]["admission"],
             "account_consent"
         );
         assert_eq!(
-            serde_json::from_value::<RunConfig>(current).unwrap(),
+            serde_json::from_value::<RunConfig>(encoded.clone()).unwrap(),
             config
         );
+        for field in [
+            "effort",
+            "custom_profile_provenance",
+            "saved_api_account_id",
+            "chatgpt_provenance",
+            "output_token_bound",
+            "provider_concurrency",
+            "context_usage",
+            "compaction_event_sequence",
+            "compaction_content_digest",
+            "tool_policy",
+        ] {
+            let mut missing = encoded.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<RunConfig>(missing).is_err());
+        }
+        let mut missing_admission = encoded.clone();
+        missing_admission["chatgpt_provenance"]
+            .as_object_mut()
+            .unwrap()
+            .remove("admission");
+        assert!(serde_json::from_value::<RunConfig>(missing_admission).is_err());
         for (field, value) in [
             ("admission", serde_json::json!("unchecked")),
             ("admission", serde_json::Value::Null),
@@ -327,12 +349,7 @@ pub struct ContextUsage {
     pub used_bytes: u32,
     pub budget_bytes: u32,
     pub compactable_bytes: u32,
-    #[serde(default, skip_serializing_if = "zero")]
     pub tool_history_bytes: u32,
-}
-
-fn zero(value: &u32) -> bool {
-    *value == 0
 }
 
 impl ContextUsage {
@@ -360,33 +377,32 @@ impl ContextUsage {
 pub struct RunConfig {
     pub provider: String,
     pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "Option::deserialize")]
     pub effort: Option<crate::provider::Effort>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "Option::deserialize")]
     pub custom_profile_provenance: Option<crate::provider::CustomProfileProvenance>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "Option::deserialize")]
     pub saved_api_account_id: Option<Uuid>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "Option::deserialize")]
     pub chatgpt_provenance: Option<crate::provider::ChatGptProvenance>,
-    #[serde(default, skip_serializing_if = "provider_enforced_bound")]
     pub output_token_bound: crate::provider::OutputTokenBound,
     pub policy: CollaborationPolicy,
     pub output_token_cap: u32,
-    #[serde(default = "default_provider_concurrency")]
     pub provider_concurrency: u8,
     pub workspace_device: u64,
     pub workspace_inode: u64,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub instruction_digest: Option<[u8; 32]>,
     pub include_digests: Vec<[u8; 32]>,
     pub history_run_ids: Vec<RunId>,
     pub excluded_history_runs: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "Option::deserialize")]
     pub context_usage: Option<ContextUsage>,
-    #[serde(default)]
+    #[serde(deserialize_with = "Option::deserialize")]
     pub compaction_event_sequence: Option<u64>,
-    #[serde(default)]
+    #[serde(deserialize_with = "Option::deserialize")]
     pub compaction_content_digest: Option<[u8; 32]>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "Option::deserialize")]
     pub tool_policy: Option<crate::tools::ToolPolicyReceipt>,
 }
 
@@ -433,14 +449,6 @@ impl RunConfig {
         }
         self.policy.validate()
     }
-}
-
-fn default_provider_concurrency() -> u8 {
-    1
-}
-
-fn provider_enforced_bound(bound: &crate::provider::OutputTokenBound) -> bool {
-    *bound == crate::provider::OutputTokenBound::ProviderEnforced
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -502,14 +510,16 @@ pub struct CompactionRecord {
     pub compiler_version: u16,
     pub source_bytes: u32,
     pub source_tokens_estimate: u32,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub input_tokens: Option<u32>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub output_tokens: Option<u32>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub response_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "Option::deserialize")]
     pub wire_provenance: Option<crate::provider::ProviderWireProvenance>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "Option::deserialize")]
     pub chatgpt_provenance: Option<crate::provider::ChatGptProvenance>,
-    #[serde(default, skip_serializing_if = "provider_enforced_bound")]
     pub output_token_bound: crate::provider::OutputTokenBound,
     pub status: CompactionStatus,
 }
@@ -519,7 +529,7 @@ impl CompactionRecord {
         if self.covered_sequence == 0
             || self.prompt_version != 1
             || self.schema_version != 1
-            || !matches!(self.compiler_version, 1..=3)
+            || self.compiler_version != 3
             || self.source_bytes == 0
             || self.source_bytes > 256 * 1024
             || self.source_tokens_estimate != self.source_bytes.div_ceil(4)
@@ -583,7 +593,7 @@ mod subscription_compaction_tests {
             model: "gpt-5.4".into(),
             prompt_version: 1,
             schema_version: 1,
-            compiler_version: 1,
+            compiler_version: 3,
             source_bytes: 4,
             source_tokens_estimate: 1,
             input_tokens: None,
@@ -597,34 +607,39 @@ mod subscription_compaction_tests {
             },
         };
         assert!(record.validate().is_ok());
-        let legacy = serde_json::to_value(&record).unwrap();
-        assert!(legacy.get("chatgpt_provenance").is_none());
-        assert!(legacy.get("output_token_bound").is_none());
+        let encoded = serde_json::to_value(&record).unwrap();
+        assert!(encoded["chatgpt_provenance"].is_null());
+        assert_eq!(encoded["output_token_bound"], "provider_enforced");
+        for field in [
+            "wire_provenance",
+            "chatgpt_provenance",
+            "output_token_bound",
+        ] {
+            let mut missing = encoded.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<CompactionRecord>(missing).is_err());
+        }
+        for compiler_version in [1, 2, 4] {
+            let mut invalid = record.clone();
+            invalid.compiler_version = compiler_version;
+            assert!(invalid.validate().is_err());
+        }
         record.provider = "chatgpt".into();
         record.chatgpt_provenance = Some(crate::provider::ChatGptProvenance {
             account_id: Uuid::now_v7(),
             evidence_fingerprint: [7; 32],
-            admission: crate::provider::ChatGptAdmission::Conformance,
+            admission: crate::provider::ChatGptAdmission::AccountConsent,
         });
         assert!(record.validate().is_err());
         record.output_token_bound = crate::provider::OutputTokenBound::LocalAcceptanceOnly;
         assert!(record.validate().is_ok());
-        let legacy = serde_json::to_value(&record).unwrap();
-        assert!(legacy["chatgpt_provenance"].get("admission").is_none());
+        let encoded = serde_json::to_value(&record).unwrap();
         assert_eq!(
-            serde_json::from_value::<CompactionRecord>(legacy.clone()).unwrap(),
-            record
-        );
-        record.chatgpt_provenance.as_mut().unwrap().admission =
-            crate::provider::ChatGptAdmission::AccountConsent;
-        assert!(record.validate().is_ok());
-        let current = serde_json::to_value(&record).unwrap();
-        assert_eq!(
-            current["chatgpt_provenance"]["admission"],
+            encoded["chatgpt_provenance"]["admission"],
             "account_consent"
         );
         assert_eq!(
-            serde_json::from_value::<CompactionRecord>(current).unwrap(),
+            serde_json::from_value::<CompactionRecord>(encoded.clone()).unwrap(),
             record
         );
         for (field, value) in [
@@ -632,7 +647,7 @@ mod subscription_compaction_tests {
             ("admission", serde_json::Value::Null),
             ("unknown", serde_json::json!(true)),
         ] {
-            let mut invalid = legacy.clone();
+            let mut invalid = encoded.clone();
             invalid["chatgpt_provenance"][field] = value;
             assert!(serde_json::from_value::<CompactionRecord>(invalid).is_err());
         }
@@ -665,12 +680,15 @@ pub enum ProviderCallDisposition {
 pub struct ProviderCallRecord {
     pub phase: crate::provider::AgentPhase,
     pub disposition: ProviderCallDisposition,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub response_id: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub input_tokens: Option<u32>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub output_tokens: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "Option::deserialize")]
     pub wire_provenance: Option<crate::provider::ProviderWireProvenance>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "Option::deserialize")]
     pub failure_reason: Option<crate::provider::ProviderFailureReason>,
 }
 
@@ -770,45 +788,29 @@ mod provider_call_tests {
         assert!(record.validate().is_err());
         record.disposition = ProviderCallDisposition::Finished;
         record.wire_provenance = None;
-        let legacy = serde_json::to_value(&record).expect("legacy payload");
-        assert!(legacy.get("wire_provenance").is_none());
-        let legacy: ProviderCallRecord = serde_json::from_value(legacy).expect("legacy replay");
-        assert_eq!(legacy.wire_provenance, None);
-        assert_eq!(legacy.failure_reason, None);
+        let encoded = serde_json::to_value(&record).expect("current payload");
+        assert!(encoded["wire_provenance"].is_null());
+        assert!(encoded["failure_reason"].is_null());
+        let decoded: ProviderCallRecord = serde_json::from_value(encoded).expect("current replay");
+        assert_eq!(decoded, record);
 
         use crate::provider::ProviderFailureReason;
         let run = RunId::new();
         let agent = AgentRunId::new();
         let run_id = Some(run);
         let agent_run_id = Some(agent);
-        let legacy_event = Event::ProviderCallRecorded {
+        let event = Event::ProviderCallRecorded {
             run_id: run,
             agent_run_id: agent,
-            record: legacy,
+            record: decoded,
         };
-        let legacy_payload = legacy_event.payload().expect("v1 payload");
-        assert_eq!(legacy_event.version(), 1);
+        let payload = event.payload().expect("current payload");
+        assert_eq!(event.version(), 2);
         assert_eq!(
-            Event::decode(
-                "ProviderCallRecorded",
-                1,
-                &legacy_payload,
-                run_id,
-                agent_run_id
-            )
-            .expect("v1 replay"),
-            legacy_event
+            Event::decode("ProviderCallRecorded", 2, &payload, run_id, agent_run_id).unwrap(),
+            event
         );
-        assert!(
-            Event::decode(
-                "ProviderCallRecorded",
-                2,
-                &legacy_payload,
-                run_id,
-                agent_run_id
-            )
-            .is_err()
-        );
+        assert!(Event::decode("ProviderCallRecorded", 1, &payload, run_id, agent_run_id).is_err());
         for (reason, expected) in [
             (
                 ProviderFailureReason::AccountAccess,
@@ -924,7 +926,7 @@ mod provider_call_tests {
                         run_id,
                         agent_run_id
                     )
-                    .is_err()
+                    .is_ok()
                 );
                 invalid.as_object_mut().unwrap().remove("failure_reason");
                 assert!(
@@ -946,7 +948,7 @@ mod provider_call_tests {
 pub enum Event {
     SessionStarted {
         title: String,
-        workspace_identity: Option<(u64, u64)>,
+        workspace_identity: (u64, u64),
     },
     SessionDefaultChanged {
         defaults: SessionDefaults,
@@ -1049,7 +1051,7 @@ struct TitlePayload {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StartedPayloadV2 {
+struct StartedPayload {
     title: String,
     workspace_device: u64,
     workspace_inode: u64,
@@ -1070,7 +1072,7 @@ struct TextPayload {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct MessagePayloadV2 {
+struct MessagePayload {
     text: String,
     #[serde(deserialize_with = "crate::provider::deserialize_images")]
     images: Vec<crate::provider::ImageAttachment>,
@@ -1080,13 +1082,16 @@ struct MessagePayloadV2 {
 struct SpawnPayload {
     role: AgentRole,
     ordinal: u8,
+    #[serde(deserialize_with = "Option::deserialize")]
     objective: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AgentFinishedPayload {
     disposition: AgentDisposition,
+    #[serde(deserialize_with = "Option::deserialize")]
     summary: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
     result: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
@@ -1106,15 +1111,7 @@ impl Event {
     }
 
     pub(crate) fn version(&self) -> i64 {
-        match self {
-            Self::SessionStarted {
-                workspace_identity: Some(_),
-                ..
-            } => 2,
-            Self::ProviderCallRecorded { record, .. } if record.failure_reason.is_some() => 2,
-            Self::MessageAccepted { images, .. } if !images.is_empty() => 2,
-            _ => 1,
-        }
+        2
     }
 
     pub(crate) fn kind(&self) -> &'static str {
@@ -1180,17 +1177,13 @@ impl Event {
         match self {
             Self::SessionStarted {
                 title,
-                workspace_identity: Some((workspace_device, workspace_inode)),
-            } => serialize(&StartedPayloadV2 {
+                workspace_identity: (workspace_device, workspace_inode),
+            } => serialize(&StartedPayload {
                 title: title.clone(),
                 workspace_device: *workspace_device,
                 workspace_inode: *workspace_inode,
             }),
-            Self::SessionStarted {
-                title,
-                workspace_identity: None,
-            }
-            | Self::SessionRenamed { title } => serialize(&TitlePayload {
+            Self::SessionRenamed { title } => serialize(&TitlePayload {
                 title: title.clone(),
             }),
             Self::SessionDefaultChanged { defaults } => serialize(defaults),
@@ -1208,15 +1201,11 @@ impl Event {
                 prefix_digest: *prefix_digest,
             }),
             Self::ContextCompacted { record } => serialize(record),
-            Self::MessageAccepted { text, images, .. } if !images.is_empty() => {
-                serialize(&MessagePayloadV2 {
-                    text: text.clone(),
-                    images: images.clone(),
-                })
-            }
-            Self::MessageAccepted { text, .. } | Self::MessageCommitted { text, .. } => {
-                serialize(&TextPayload { text: text.clone() })
-            }
+            Self::MessageAccepted { text, images, .. } => serialize(&MessagePayload {
+                text: text.clone(),
+                images: images.clone(),
+            }),
+            Self::MessageCommitted { text, .. } => serialize(&TextPayload { text: text.clone() }),
             Self::RunStarted { config, .. } => serialize(config),
             Self::AgentSpawned {
                 role,
@@ -1254,55 +1243,15 @@ impl Event {
         run_id: Option<RunId>,
         agent_run_id: Option<AgentRunId>,
     ) -> Result<Self, ReplayError> {
-        if kind == "MessageAccepted" && version == 2 {
-            if agent_run_id.is_some() {
-                return Err(ReplayError::InvalidPayload);
-            }
-            let data: MessagePayloadV2 = parse(payload)?;
-            if data.images.is_empty() {
-                return Err(ReplayError::InvalidPayload);
-            }
-            let event = Self::MessageAccepted {
-                run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
-                text: data.text,
-                images: data.images,
-            };
-            event.validate()?;
-            return Ok(event);
-        }
-        if kind == "ProviderCallRecorded" && matches!(version, 1 | 2) {
-            let record: ProviderCallRecord = parse(payload)?;
-            if (version == 2) != record.failure_reason.is_some() {
-                return Err(ReplayError::InvalidPayload);
-            }
-            let event = Self::ProviderCallRecorded {
-                run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
-                agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
-                record,
-            };
-            event.validate()?;
-            return Ok(event);
-        }
-        if kind == "SessionStarted" && version == 2 {
-            if run_id.is_some() || agent_run_id.is_some() {
-                return Err(ReplayError::InvalidPayload);
-            }
-            let data: StartedPayloadV2 = parse(payload)?;
-            let event = Self::SessionStarted {
-                title: data.title,
-                workspace_identity: Some((data.workspace_device, data.workspace_inode)),
-            };
-            event.validate()?;
-            return Ok(event);
-        }
-        if version != 1 {
+        if version != 2 {
             return Err(ReplayError::UnknownEvent);
         }
         let event = match kind {
             "SessionStarted" if run_id.is_none() && agent_run_id.is_none() => {
+                let data: StartedPayload = parse(payload)?;
                 Self::SessionStarted {
-                    title: parse::<TitlePayload>(payload)?.title,
-                    workspace_identity: None,
+                    title: data.title,
+                    workspace_identity: (data.workspace_device, data.workspace_inode),
                 }
             }
             "SessionDefaultChanged" if run_id.is_none() && agent_run_id.is_none() => {
@@ -1331,10 +1280,11 @@ impl Event {
                 }
             }
             "MessageAccepted" if run_id.is_some() && agent_run_id.is_none() => {
+                let data: MessagePayload = parse(payload)?;
                 Self::MessageAccepted {
                     run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
-                    text: parse::<TextPayload>(payload)?.text,
-                    images: Vec::new(),
+                    text: data.text,
+                    images: data.images,
                 }
             }
             "RunStarted" if run_id.is_some() && agent_run_id.is_none() => Self::RunStarted {
@@ -1359,6 +1309,13 @@ impl Event {
                     disposition: data.disposition,
                     summary: data.summary,
                     result: data.result,
+                }
+            }
+            "ProviderCallRecorded" if run_id.is_some() && agent_run_id.is_some() => {
+                Self::ProviderCallRecorded {
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                    record: parse(payload)?,
                 }
             }
             "ToolStarted" if run_id.is_some() && agent_run_id.is_some() => Self::ToolStarted {

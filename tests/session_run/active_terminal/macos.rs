@@ -44,6 +44,477 @@ fn restored(input: &std::fs::File, before: &nix::sys::termios::Termios) {
     );
 }
 
+fn wait_stderr_disconnection(mut probe: std::fs::File, context: &str) {
+    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+
+    let flags = fcntl_getfl(&probe).unwrap();
+    fcntl_setfl(&probe, flags | OFlags::NONBLOCK).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match probe.write(b"x") {
+            Err(error) if error.raw_os_error() == Some(nix::libc::EIO) => break,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) => {}
+            Ok(_) => {}
+            Err(error) => panic!("native stderr fault probe: {context}: {error}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "native stderr fault missing: {context}"
+        );
+        thread::yield_now();
+    }
+}
+
+#[test]
+fn native_resume_picker_restores_mouse_and_terminal_without_changing_history() {
+    for (signal, suspend, columns, rows) in [
+        (Signal::TERM, false, 80, 24),
+        (Signal::HUP, false, 80, 24),
+        (Signal::TERM, true, 80, 24),
+        (Signal::TERM, false, 16, 8),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("project");
+        let state = temp.path().join("state");
+        std::fs::create_dir(&workspace).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let id = runtime
+            .block_on(arany::create_session(
+                StateRoot::admit(&state).unwrap(),
+                workspace.clone(),
+                Some("Stable".into()),
+            ))
+            .unwrap();
+        let geometry = nix::pty::Winsize {
+            ws_row: rows,
+            ws_col: columns,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let pty = nix::pty::openpty(Some(&geometry), None).unwrap();
+        let slave = std::fs::File::from(pty.slave);
+        let master = std::fs::File::from(pty.master);
+        for descriptor in [&slave, &master] {
+            rustix::io::fcntl_setfd(descriptor, rustix::io::FdFlags::CLOEXEC).unwrap();
+        }
+        let before = crate::process::terminal_settings(&master);
+        let probe = master.try_clone().unwrap();
+        let input = master.try_clone().unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
+        command
+            .env_clear()
+            .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account"))
+            .env("HOME", temp.path().join("fixture-home"))
+            .env("XDG_STATE_HOME", temp.path().join("fixture-state"))
+            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
+            .env("TERM", "xterm")
+            .current_dir(&workspace)
+            .args(["--no-color", "--resume", "--state-dir"])
+            .arg(&state)
+            .arg("--workspace")
+            .arg(&workspace)
+            .stdin(Stdio::from(slave.try_clone().unwrap()))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::from(slave));
+        own_terminal(&mut command);
+        // Close fixture PTYs before reaping a child on unwind.
+        let (mut child, mut input, probe) =
+            (ChildGuard::new(command.spawn().unwrap()), input, probe);
+        drop(command);
+        let pid = Pid::from_raw(child.child().id().try_into().unwrap()).unwrap();
+        let mut declined = false;
+        let mut signalled = false;
+        let mut suspended = false;
+        let mut continued = false;
+        let mut resumed_at = 0;
+        let output = crate::process::capture_terminal(
+            child.child(),
+            master,
+            Duration::from_secs(20),
+            64 * 1024,
+            |bytes| {
+                assert!(!bytes.windows(4).any(|part| part == b"\x1b[6n"));
+                crate::process::decline_workspace_consent(&mut input, bytes, &mut declined);
+                let enabled = bytes
+                    .windows(8)
+                    .filter(|part| *part == b"\x1b[?1000h")
+                    .count();
+                let frame_complete = [b"Stable".as_slice(), b"Esc", b"\x1b[?25l"]
+                    .iter()
+                    .all(|cue| bytes.windows(cue.len()).any(|part| part == *cue));
+                if !signalled && enabled == 1 && frame_complete {
+                    assert_ne!(crate::process::terminal_settings(&probe), before);
+                    kill_process(pid, if suspend { Signal::TSTP } else { signal }).unwrap();
+                    signalled = true;
+                }
+                if signalled
+                    && suspend
+                    && !suspended
+                    && let Some(status) = waitid(
+                        WaitId::Pid(pid),
+                        WaitIdOptions::STOPPED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+                    )
+                    .unwrap()
+                    && status.stopped()
+                {
+                    restored(&probe, &before);
+                    let disabled = bytes
+                        .windows(8)
+                        .filter(|part| *part == b"\x1b[?1000l")
+                        .count();
+                    if disabled == 0 {
+                        return;
+                    }
+                    assert_eq!(disabled, 1);
+                    resumed_at = bytes.len();
+                    kill_process(pid, Signal::CONT).unwrap();
+                    suspended = true;
+                }
+                if suspended
+                    && !continued
+                    && enabled == 2
+                    && bytes[resumed_at..]
+                        .windows(6)
+                        .any(|part| part == b"\x1b[?25l")
+                {
+                    assert_ne!(crate::process::terminal_settings(&probe), before);
+                    kill_process(pid, signal).unwrap();
+                    continued = true;
+                }
+            },
+        );
+        assert!(
+            declined && signalled,
+            "native picker admission at {columns}x{rows}"
+        );
+        assert_eq!(suspended, suspend);
+        assert_eq!(continued, suspend);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        restored(&probe, &before);
+        let count = if suspend { 2 } else { 1 };
+        for sequence in [b"\x1b[?1000h", b"\x1b[?1000l"] {
+            assert_eq!(
+                output
+                    .stderr
+                    .windows(8)
+                    .filter(|part| *part == sequence)
+                    .count(),
+                count
+            );
+        }
+        runtime.block_on(async {
+            let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+            let events = store.load_session(id).await.unwrap();
+            store.close().await.unwrap();
+            let view = SessionView::replay(id, &events).unwrap().unwrap();
+            assert_eq!(
+                events.len(),
+                1,
+                "picker interruption preserves canonical history"
+            );
+            assert_eq!(view.title, "Stable");
+            assert!(view.runs.is_empty());
+            let sessions =
+                arany::list_sessions(StateRoot::open_existing(&state).unwrap(), workspace)
+                    .await
+                    .unwrap();
+            assert_eq!(sessions.len(), 1);
+            assert_eq!(sessions[0].id, id);
+        });
+    }
+}
+
+#[test]
+fn native_resume_picker_renderer_failure_restores_surviving_terminal() {
+    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+
+    for (columns, rows, deadline_fault) in [(80, 24, false), (16, 8, false), (80, 24, true)] {
+        let mut acquired = false;
+        let mut owned_pid = None;
+        let observation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let temp = tempfile::tempdir().unwrap();
+            let workspace = temp.path().join("project");
+            let state = temp.path().join("state");
+            std::fs::create_dir(&workspace).unwrap();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let id = runtime
+                .block_on(arany::create_session(
+                    StateRoot::admit(&state).unwrap(),
+                    workspace.clone(),
+                    Some("Stable".into()),
+                ))
+                .unwrap();
+            let geometry = nix::pty::Winsize {
+                ws_row: rows,
+                ws_col: columns,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            let input_pty = nix::pty::openpty(Some(&geometry), None).unwrap();
+            let output_pty = nix::pty::openpty(Some(&geometry), None).unwrap();
+            let slave = std::fs::File::from(input_pty.slave);
+            let input = std::fs::File::from(input_pty.master);
+            let stderr = std::fs::File::from(output_pty.slave);
+            let master = std::fs::File::from(output_pty.master);
+            for descriptor in [&slave, &input, &stderr, &master] {
+                rustix::io::fcntl_setfd(descriptor, rustix::io::FdFlags::CLOEXEC).unwrap();
+            }
+            let before = crate::process::terminal_settings(&input);
+            let probe = stderr.try_clone().unwrap();
+            let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
+            command
+                .env_clear()
+                .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account"))
+                .env("HOME", temp.path().join("fixture-home"))
+                .env("XDG_STATE_HOME", temp.path().join("fixture-state"))
+                .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
+                .env("TERM", "xterm")
+                .current_dir(&workspace)
+                .args(["--no-color", "--resume", "--state-dir"])
+                .arg(&state)
+                .arg("--workspace")
+                .arg(&workspace)
+                .stdin(Stdio::from(slave))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::from(stderr));
+            own_terminal(&mut command);
+            // Close fixture PTYs before reaping a child on unwind.
+            let (mut child, mut master, mut input, probe) = (
+                ChildGuard::new(command.spawn().unwrap()),
+                master,
+                input,
+                probe,
+            );
+            drop(command);
+            let flags = fcntl_getfl(&master).unwrap();
+            fcntl_setfl(&master, flags | OFlags::NONBLOCK).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut transcript = Vec::new();
+            let mut declined = false;
+            loop {
+                let mut bytes = [0; 4096];
+                match master.read(&mut bytes) {
+                    Ok(0) => panic!("native picker output closed before renderer fault"),
+                    Ok(count) => {
+                        assert!(transcript.len() + count <= 64 * 1024);
+                        transcript.extend_from_slice(&bytes[..count]);
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                        ) => {}
+                    Err(error) => panic!("native picker output: {error}"),
+                }
+                crate::process::decline_workspace_consent(&mut input, &transcript, &mut declined);
+                if [b"Stable".as_slice(), b"Esc", b"\x1b[?1000h", b"\x1b[?25l"]
+                    .iter()
+                    .all(|cue| transcript.windows(cue.len()).any(|part| part == *cue))
+                {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "native picker renderer fault admission at {columns}x{rows}"
+                );
+                assert!(child.child().try_wait().unwrap().is_none());
+                thread::yield_now();
+            }
+            assert!(declined);
+            assert!(!transcript.windows(4).any(|part| part == b"\x1b[6n"));
+            assert_ne!(crate::process::terminal_settings(&input), before);
+            acquired = true;
+            if deadline_fault {
+                let pid = Pid::from_raw(child.child().id().try_into().unwrap()).unwrap();
+                owned_pid = Some(pid);
+                kill_process(pid, Signal::STOP).unwrap();
+                crate::process::capture_terminal(
+                    child.child(),
+                    master,
+                    Duration::ZERO,
+                    64 * 1024,
+                    |_| {},
+                );
+                unreachable!("zero-duration capture must fail before collection");
+            }
+            drop(master);
+            wait_stderr_disconnection(probe, "native resume picker renderer");
+            input.write_all(b"\x1b[B").unwrap();
+            let output = crate::process::capture_terminal(
+                child.child(),
+                input.try_clone().unwrap(),
+                Duration::from_secs(10),
+                64 * 1024,
+                |_| {},
+            );
+            assert_eq!(output.status.code(), Some(1));
+            assert!(output.stdout.is_empty());
+            restored(&input, &before);
+            runtime.block_on(async {
+                let store =
+                    Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+                let events = store.load_session(id).await.unwrap();
+                store.close().await.unwrap();
+                let view = SessionView::replay(id, &events).unwrap().unwrap();
+                assert_eq!(
+                    events.len(),
+                    1,
+                    "picker renderer failure preserves canonical history"
+                );
+                assert_eq!(view.title, "Stable");
+                assert!(view.runs.is_empty());
+            });
+        }));
+        if deadline_fault {
+            assert!(acquired, "deadline fault follows native picker acquisition");
+            let failure = observation.expect_err("deadline fault must unwind owned native process");
+            let message = failure
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| failure.downcast_ref::<String>().map(String::as_str))
+                .unwrap();
+            assert_eq!(message, "subprocess exit/output EOF deadline exceeded");
+            assert_eq!(
+                waitid(
+                    WaitId::Pid(owned_pid.unwrap()),
+                    WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+                )
+                .unwrap_err(),
+                rustix::io::Errno::CHILD,
+                "deadline unwind must reap its exact child"
+            );
+        } else if let Err(failure) = observation {
+            std::panic::resume_unwind(failure);
+        }
+    }
+}
+
+#[test]
+fn native_partial_acquisition_restores_raw_mode_when_initial_output_disconnects() {
+    use rustix::fs::{Mode, OFlags, open};
+
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("project");
+    let state = temp.path().join("state");
+    let account = temp.path().join("account");
+    std::fs::create_dir(&workspace).unwrap();
+    let geometry = nix::pty::Winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let input_pty = nix::pty::openpty(Some(&geometry), None).unwrap();
+    let output_pty = nix::pty::openpty(Some(&geometry), None).unwrap();
+    let slave = std::fs::File::from(input_pty.slave);
+    let input = std::fs::File::from(input_pty.master);
+    let stderr = std::fs::File::from(output_pty.slave);
+    let master = std::fs::File::from(output_pty.master);
+    for descriptor in [&slave, &input, &stderr, &master] {
+        rustix::io::fcntl_setfd(descriptor, rustix::io::FdFlags::CLOEXEC).unwrap();
+    }
+    let before = crate::process::terminal_settings(&input);
+    let probe = stderr.try_clone().unwrap();
+    let name = rustix::termios::ttyname(&stderr, Vec::new()).unwrap();
+    let mut filler = std::fs::File::from(
+        open(
+            name,
+            OFlags::WRONLY | OFlags::NOCTTY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut filled = 0;
+    loop {
+        match filler.write(&[b'x'; 1024]) {
+            Ok(count) => {
+                assert!(count > 0);
+                filled += count;
+                assert!(filled <= 1024 * 1024, "bounded private PTY backpressure");
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => panic!("native partial-acquisition backpressure: {error}"),
+        }
+        assert!(Instant::now() < deadline, "private output PTY did not fill");
+    }
+    assert!(filled > 0);
+    drop(filler);
+    assert!(
+        !rustix::fs::fcntl_getfl(&stderr)
+            .unwrap()
+            .contains(OFlags::NONBLOCK)
+    );
+    let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
+    command
+        .env_clear()
+        .env("ARANY_TEST_ACCOUNT_ROOT", &account)
+        .env("HOME", temp.path().join("fixture-home"))
+        .env("XDG_STATE_HOME", temp.path().join("fixture-state"))
+        .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
+        .env("TERM", "xterm")
+        .current_dir(&workspace)
+        .args(["--no-color", "--state-dir"])
+        .arg(&state)
+        .arg("--workspace")
+        .arg(&workspace)
+        .stdin(Stdio::from(slave))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(stderr));
+    own_terminal(&mut command);
+    // Close fixture PTYs before reaping a child on unwind.
+    let (mut child, input, probe, master) = (
+        ChildGuard::new(command.spawn().unwrap()),
+        input,
+        probe,
+        master,
+    );
+    drop(command);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while crate::process::terminal_settings(&input) == before {
+        assert!(child.child().try_wait().unwrap().is_none());
+        assert!(
+            Instant::now() < deadline,
+            "native initial raw acquisition missing"
+        );
+        thread::yield_now();
+    }
+    assert!(!state.exists());
+    assert!(!account.exists());
+    drop(master);
+    wait_stderr_disconnection(probe, "native partial acquisition");
+    let output = crate::process::capture_terminal(
+        child.child(),
+        input.try_clone().unwrap(),
+        Duration::from_secs(10),
+        16 * 1024,
+        |_| {},
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    restored(&input, &before);
+    assert!(
+        !state.exists(),
+        "partial acquisition creates no Session state"
+    );
+    assert!(
+        !account.exists(),
+        "partial acquisition precedes account admission"
+    );
+}
+
 #[test]
 fn native_folder_consent_restores_before_account_setup_or_session_work() {
     for linear in [true, false] {
@@ -89,9 +560,9 @@ fn native_folder_consent_restores_before_account_setup_or_session_work() {
             command
                 .env_clear()
                 .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account"))
-                .env("HOME", temp.path().join("legacy-home"))
-                .env("XDG_STATE_HOME", temp.path().join("legacy-state"))
-                .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+                .env("HOME", temp.path().join("fixture-home"))
+                .env("XDG_STATE_HOME", temp.path().join("fixture-state"))
+                .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
                 .env("TERM", if linear { "dumb" } else { "xterm" })
                 .current_dir(&workspace)
                 .args(["--no-color", "--state-dir"])
@@ -162,12 +633,8 @@ fn native_folder_consent_restores_before_account_setup_or_session_work() {
                     _ => unreachable!(),
                 }
             }
-            if let Some(mut probe) = fault_probe {
-                assert_eq!(
-                    probe.write(b"x").unwrap_err().raw_os_error(),
-                    Some(nix::libc::EIO),
-                    "positive native stderr disconnection: {linear} {case}"
-                );
+            if let Some(probe) = fault_probe {
+                wait_stderr_disconnection(probe, &format!("folder consent: {linear} {case}"));
                 if case == "stderr-after" {
                     kill_process(pid, Signal::TERM).unwrap();
                 }
@@ -197,7 +664,7 @@ fn native_folder_consent_restores_before_account_setup_or_session_work() {
             assert!(!state.exists(), "no Session admission: {linear} {case}");
             assert!(!transcript.windows(6).any(|part| part == b"Setup:"));
             assert_eq!(std::fs::read_dir(&workspace).unwrap().count(), 0);
-            for name in ["legacy-home", "legacy-state", "legacy-data"] {
+            for name in ["fixture-home", "fixture-state", "fixture-data"] {
                 assert!(!temp.path().join(name).exists());
             }
             let account = temp.path().join("account");
@@ -206,7 +673,9 @@ fn native_folder_consent_restores_before_account_setup_or_session_work() {
                     let entry = entry.unwrap();
                     let name = entry.file_name();
                     assert!(
-                        name == "account-credentials.lock" || name == "events.sqlite3",
+                        name == "account-credentials.lock"
+                            || name == "history.lock"
+                            || name == "events.sqlite3",
                         "folder trust admission must not create account metadata: {name:?}"
                     );
                     assert_eq!(entry.metadata().unwrap().len(), 0);
@@ -336,9 +805,9 @@ fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
             command
                 .env_clear()
                 .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account"))
-                .env("HOME", temp.path().join("legacy-home"))
-                .env("XDG_STATE_HOME", temp.path().join("legacy-state"))
-                .env("XDG_DATA_HOME", temp.path().join("legacy-data"))
+                .env("HOME", temp.path().join("fixture-home"))
+                .env("XDG_STATE_HOME", temp.path().join("fixture-state"))
+                .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
                 .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
                 .env("TERM", if linear { "dumb" } else { "xterm" })
                 .current_dir(&workspace)
@@ -361,7 +830,7 @@ fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
             let mut released = false;
             let mut suspended = false;
             let mut exited = false;
-            let output = if let Some(mut probe) = stderr_probe {
+            let output = if let Some(probe) = stderr_probe {
                 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
                 let mut master = master;
                 let flags = fcntl_getfl(&master).unwrap();
@@ -400,24 +869,7 @@ fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
                 }
                 assert!(!transcript.windows(4).any(|part| part == b"\x1b[6n"));
                 drop(master);
-                let flags = fcntl_getfl(&probe).unwrap();
-                fcntl_setfl(&probe, flags | OFlags::NONBLOCK).unwrap();
-                let deadline = Instant::now() + Duration::from_secs(5);
-                loop {
-                    match probe.write(b"x") {
-                        Err(error) if error.raw_os_error() == Some(nix::libc::EIO) => break,
-                        Err(error)
-                            if matches!(
-                                error.kind(),
-                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                            ) => {}
-                        Ok(_) => {}
-                        Err(error) => panic!("native stderr fault probe: {error}"),
-                    }
-                    assert!(Instant::now() < deadline, "native stderr fault missing");
-                    thread::yield_now();
-                }
-                drop(probe);
+                wait_stderr_disconnection(probe, &format!("active terminal: {linear} {exit:?}"));
                 input
                     .as_mut()
                     .unwrap()

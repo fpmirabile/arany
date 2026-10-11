@@ -276,7 +276,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
             "outcome_encoding": "json_schema",
             "privacy": "user_authorized",
             "max_output_tokens": 4096,
-            "capability_evidence_version": 1
+            "capability_evidence_version": 2, "efforts": []
         }]
     });
     let profile_path = state.join("provider-profiles.json");

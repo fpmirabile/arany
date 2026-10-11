@@ -1529,12 +1529,23 @@ fn private_file_accounts_reopen_and_reject_cross_account_drift() {
         "subject-two"
     );
     let encoded = serde_json::to_value(&enabled).unwrap();
-    assert!(
-        encoded["accounts"][1]
-            .get("plan_permission_missing")
-            .is_none(),
-        "enabled record must keep its old format"
-    );
+    assert_eq!(encoded["accounts"][1]["plan_permission_missing"], false);
+    for field in [
+        "signout_pending",
+        "disconnected",
+        "plan_permission_missing",
+        "token",
+    ] {
+        let mut missing = encoded.clone();
+        missing["accounts"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        assert!(serde_json::from_value::<AccountIndex>(missing).is_err());
+    }
+    let mut missing = encoded.clone();
+    missing.as_object_mut().unwrap().remove("model_checks");
+    assert!(serde_json::from_value::<AccountIndex>(missing).is_err());
 
     let valid = serde_json::to_value(AccountIndex::read(&reopened).unwrap()).unwrap();
     let mut contradictory = valid.clone();
@@ -1544,7 +1555,7 @@ fn private_file_accounts_reopen_and_reject_cross_account_drift() {
         .unwrap();
     assert!(matches!(
         load_selected_private_file_at(&reopened, second_id),
-        Err(AuthorizationError::InvalidIdentity)
+        Err(AuthorizationError::InvalidSavedState)
     ));
     let mut wrong_host = valid.clone();
     wrong_host["accounts"][0]["host_id"] = "123e4567-e89b-42d3-a456-426614174001".into();
@@ -1553,7 +1564,7 @@ fn private_file_accounts_reopen_and_reject_cross_account_drift() {
         .unwrap();
     assert!(matches!(
         load_selected_private_file_at(&reopened, second_id),
-        Err(AuthorizationError::InvalidIdentity)
+        Err(AuthorizationError::InvalidSavedState)
     ));
 
     let mut malformed = valid;
@@ -1563,7 +1574,7 @@ fn private_file_accounts_reopen_and_reject_cross_account_drift() {
         .unwrap();
     assert!(matches!(
         load_selected_private_file_at(&reopened, second_id),
-        Err(AuthorizationError::InvalidIdentity)
+        Err(AuthorizationError::InvalidSavedState)
     ));
 
     let metadata_state = StateRoot::admit(&temp.path().join("metadata-only")).unwrap();

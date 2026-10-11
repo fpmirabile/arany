@@ -30,7 +30,9 @@ Malformed/non-object/duplicate-key MCP arguments and selected-credential reflect
 
 ## Admission, persistence and recovery
 
-Admit the selected Provider and complete bounded request before Workspace disclosure. Pin the Workspace, instructions/includes, policy, model/effort and caps for the Run. Commit accepted Message, Run and primary identity before inference; commit each observed call before its terminal AgentRun disposition. Known call usage survives an interrupted journal prefix.
+Persist only the current internal format: SQLite schema 4, Event payload version 2 and compaction compiler version 3. Required nullable fields are explicit, including Run configuration and Provider provenance. Reading unsupported stored formats or missing fields rejects without conversion, automatic deletion or an optimistic projection. Attached startup offers the [explicit history reset](./terminal.md#setup-and-account-choices); it discards history rather than converting or admitting an unsupported format.
+
+Admit the selected Provider and complete bounded request before Workspace disclosure. Pin the Workspace, instructions/includes, policy, model/effort and caps for the Run. Commit accepted Message, Run and primary identity before inference; commit each observed call before its terminal AgentRun disposition. Replay requires an observed delegation before child spawn and an observed successful call before successful Agent completion. Known call usage survives an interrupted journal prefix.
 
 Before Workspace input, inference or Tool preparation, require logical Event capacity for the entire bounded topology and configured continuations, plus conservative database-byte headroom. The Session and fork ancestors remain locked for the operation. Independent lineages remain concurrent; byte preflight does not reserve physical disk or guarantee against storage faults. Reject capacity exhaustion before disclosure or usage and direct the user to a new Session.
 
@@ -48,6 +50,7 @@ Cancellation before Message acceptance creates no Run. After admission it drains
 | Routine edit guidance and historical agent inspection | Shared prompts discourage unnecessary delegation; inspection separates Run and history counts | [Shared provider requests](../../src/provider.rs), [terminal frames](../../src/terminal/view.rs), [slash journey](../../tests/session_run/slash_completion.rs) |
 | Strict text/native function outcomes and usage caps | Malformed/ambiguous/oversized outcomes reject; exactly one admitted result persists | [Native wire corpus](../../src/provider/openai/wire/tests.rs), [Engine Run corpus](../../tests/engine_run.rs) |
 | Sparse/full SSE completion and invalid closure | Reconciliation accepts only complete matching items; failure publishes no partial answer | [Offline ChatGPT journey](../../tests/session_run/setup/offline_https/chatgpt/checked_turn.rs) |
+| Current format only | Old journal versions and missing fields reject; refused database bytes stay unchanged | [Journal admission corpus](../../tests/session_run.rs), [Event payload corpus](../../src/session/events.rs) |
 | Event/byte headroom, resulting fork quota and compaction exhaustion | Rejection precedes disclosure, usage or partial target; previous history/summary remains readable | [Store](../../src/store.rs), [replay](../../src/store/replay.rs), [Engine Run corpus](../../tests/engine_run.rs), [automatic compaction journey](../../tests/session_run/auto_compaction.rs) |
 | Sequential effects, minimum receipt budget and interrupted/resumed history | Correlated bounded facts persist; fresh work never redispatches a historical effect | [Real native Tool journeys](../../tests/session_run/tools.rs), [Tool corpus](../../src/tools/tests.rs) |
 

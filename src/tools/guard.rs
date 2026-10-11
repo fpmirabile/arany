@@ -26,9 +26,21 @@ mod macos;
 
 pub(super) fn runtime_roots() -> &'static [&'static str] {
     if cfg!(target_os = "macos") {
-        &["/System/Library", "/usr/lib"]
+        &["/System/Library", "/usr/lib", "/bin", "/usr/bin"]
     } else {
         &[RUNTIME_ROOT]
+    }
+}
+
+pub(super) fn native_system_program(path: &str) -> Result<bool, ToolError> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::system_program(path)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        Ok(false)
     }
 }
 
@@ -55,7 +67,7 @@ struct Ready {
     profile_digest: [u8; 32],
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum BootstrapStage {
     Admission,
@@ -708,6 +720,24 @@ pub(super) async fn read_line_capped<R: tokio::io::AsyncBufRead + Unpin>(
     }
 }
 
+pub(super) async fn wait_owned_child(
+    child: &mut Child,
+) -> std::io::Result<std::process::ExitStatus> {
+    #[cfg(target_os = "macos")]
+    {
+        drop(child.stdin.take());
+        // Seatbelt blocks Tokio's signal wake socket; reaping cannot depend on it.
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Ok(status);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    child.wait().await
+}
+
 async fn capture(
     mut child: Child,
     cap: usize,
@@ -717,7 +747,11 @@ async fn capture(
     let err = child.stderr.take().ok_or(ToolError::Operation)?;
     let result = tokio::time::timeout(deadline, async {
         tokio::try_join!(
-            async { child.wait().await.map_err(|_| ToolError::Operation) },
+            async {
+                wait_owned_child(&mut child)
+                    .await
+                    .map_err(|_| ToolError::Operation)
+            },
             read_capped(out, cap),
             read_capped(err, cap)
         )
@@ -729,7 +763,7 @@ async fn capture(
         Err(_) => ToolError::Limit,
     };
     let _ = child.start_kill();
-    let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), wait_owned_child(&mut child)).await;
     Err(error)
 }
 
@@ -770,11 +804,22 @@ pub(super) fn helper_main() -> ExitCode {
             macos::install(&task)?;
         }
         #[cfg(target_os = "macos")]
-        let workspace = task.workspace.as_path();
+        let workspace = if matches!(
+            task.intent.call,
+            ToolCall::Command { .. } | ToolCall::McpList { .. } | ToolCall::McpCall { .. }
+        ) {
+            std::env::current_dir()
+                .map_err(|_| ToolError::Path)?
+                .join("workspace")
+        } else {
+            task.workspace.clone()
+        };
+        #[cfg(target_os = "macos")]
+        let workspace = workspace.as_path();
         #[cfg(not(target_os = "macos"))]
         let workspace = Path::new("/workspace");
         stage = BootstrapStage::Workspace;
-        if matches!(
+        if (matches!(
             task.intent.call,
             ToolCall::List { .. }
                 | ToolCall::Read { .. }
@@ -782,8 +827,9 @@ pub(super) fn helper_main() -> ExitCode {
                 | ToolCall::Write { .. }
                 | ToolCall::Edit { .. }
                 | ToolCall::Mkdir { .. }
-        ) && super::fs::identity(&super::fs::open_directory(workspace)?)?
-            != (task.intent.workspace_device, task.intent.workspace_inode)
+        ) || cfg!(target_os = "macos") && matches!(task.intent.call, ToolCall::Skill { .. }))
+            && super::fs::identity(&super::fs::open_directory(workspace)?)?
+                != (task.intent.workspace_device, task.intent.workspace_inode)
         {
             return Err(ToolError::ChangedInput);
         }
@@ -862,6 +908,7 @@ pub(super) fn helper_main() -> ExitCode {
         }
         drop(stdin);
         stage = BootstrapStage::Payload;
+        #[cfg(not(target_os = "macos"))]
         if matches!(
             task.intent.call,
             ToolCall::Command { .. } | ToolCall::McpList { .. } | ToolCall::McpCall { .. }
@@ -960,6 +1007,11 @@ pub(super) fn helper_main() -> ExitCode {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub(super) fn unit_main() -> ExitCode {
+    macos::unit_main()
+}
+
 fn load_skill_bytes(task: &Task) -> Result<Vec<u8>, ToolError> {
     let ToolCall::Skill { name, resource } = &task.intent.call else {
         return Err(ToolError::Configuration);
@@ -1012,22 +1064,57 @@ pub(super) fn payload(
     args: &[String],
     cwd: &str,
 ) -> Result<Command, ToolError> {
-    let executable = format!("/programs/{}", program.name);
-    let bytes =
-        super::fs::read_regular(super::fs::open_absolute(&executable)?, MAX_SNAPSHOT_BYTES)?;
+    #[cfg(target_os = "macos")]
+    let root = std::env::current_dir().map_err(|_| ToolError::Path)?;
+    #[cfg(not(target_os = "macos"))]
+    let root = Path::new("/").to_owned();
+    let resources = if cfg!(target_os = "macos") {
+        root.join("runtime")
+    } else {
+        root.clone()
+    };
+    let workspace = root.join("workspace");
+    let scratch = root.join("scratch");
+    let executable = if native_system_program(&program.executable)? {
+        Path::new(&program.executable).to_owned()
+    } else {
+        resources.join("programs").join(&program.name)
+    };
+    let bytes = super::fs::read_regular(
+        super::fs::open_absolute(executable.to_str().ok_or(ToolError::Path)?)?,
+        MAX_SNAPSHOT_BYTES,
+    )?;
     if hex_digest(&bytes) != program.sha256 {
         return Err(ToolError::ChangedInput);
     }
     let mut command = Command::new(executable);
     command
-        .args(args)
-        .current_dir(Path::new("/workspace").join(cwd))
+        .args(args.iter().map(|arg| {
+            if cfg!(target_os = "macos") {
+                for (alias, target) in [
+                    ("workspace", &workspace),
+                    ("scratch", &scratch),
+                    ("inputs", &resources.join("inputs")),
+                    ("skills", &resources.join("skills")),
+                    ("programs", &resources.join("programs")),
+                ] {
+                    if let Ok(relative) = Path::new(arg).strip_prefix(format!("/{alias}")) {
+                        return target.join(relative).into_os_string();
+                    }
+                }
+            }
+            std::ffi::OsString::from(arg)
+        }))
+        .current_dir(workspace.join(cwd))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
-        .env("HOME", "/scratch")
-        .env("TMPDIR", "/scratch")
-        .env("CARGO_HOME", "/scratch/cargo")
-        .env("CARGO_TARGET_DIR", "/scratch/target")
+        .env("HOME", &scratch)
+        .env("TMPDIR", &scratch)
+        .env("CARGO_HOME", scratch.join("cargo"))
+        .env("CARGO_TARGET_DIR", scratch.join("target"))
+        .env("ARANY_TOOL_WORKSPACE", &workspace)
+        .env("ARANY_TOOL_INPUTS", resources.join("inputs"))
+        .env("ARANY_TOOL_SKILLS", resources.join("skills"))
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

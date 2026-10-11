@@ -452,7 +452,7 @@ impl<P: Provider + 'static> Engine<P> {
                     session_id,
                     Event::SessionStarted {
                         title: request.title.unwrap_or_else(|| "New Session".into()),
-                        workspace_identity: Some((workspace_device, workspace_inode)),
+                        workspace_identity: (workspace_device, workspace_inode),
                     },
                 )
                 .await?;

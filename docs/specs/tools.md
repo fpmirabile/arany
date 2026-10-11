@@ -6,17 +6,15 @@ Arany can continue a primary AgentRun through file operations, commands, portabl
 
 Folder consent and native Tool capability are independent. On platforms without an implemented enforcer, attached chat remains available without Tools even after trust is remembered. `/permissions` uses the same consent choices; Shift+Tab reports the native restriction without enabling authority. Explicit `--tools` rejects unavailable protection. Trust alone never supplies missing OS protection, and no unconfined Tool executes.
 
-The native macOS file-Tool slice admits checked file operations and pinned Skill
-data through a separate trusted Guard worker. It executes no project program,
-creates no descendant, excludes host credentials/state/network, supervises its
-owned process and preserves approval, GO, atomic preconditions, uncertainty and
-durable receipts. Unsupported command/MCP grants reject before model invocation;
-remembered trust advertises only implemented operations. The native file journey
-and profile corpus below own this slice’s evidence. This partial
-capability does not complete the native command/MCP lifecycle or relax its
-ordinary child-launch requirement.
+The native macOS profile admits checked file operations, pinned Skill data,
+host-native commands and local MCP through a separate trusted Guard worker.
+File/Skill dispatch prohibits program execution. Commands and MCP use private
+disposable storage and retain ordinary native child launches. Both preserve
+approval, GO, offline credential/state exclusion, supervised process ownership,
+uncertainty and durable receipts. Native evidence and remaining release checks
+belong to the linked evidence owners below.
 
-The complete harness requires equivalent granted file operations, commands, Skills and local MCP across supported operating systems, with the same permission, isolation, cancellation and durable-result contract. Resource guarantees differ explicitly by native profile as defined below. Native macOS commands/MCP remain an implementation gap tracked by [the native Tool work](../../planning/native-macos/README.md#remaining-execution); working file Tools do not complete that lifecycle.
+The complete harness requires equivalent granted file operations, commands, Skills and local MCP across supported operating systems, with the same permission, isolation, cancellation and durable-result contract. Resource guarantees differ explicitly by native profile as defined below. [Next steps](../../NEXT_STEPS.md#beta-2-and-broader-release) records unperformed native, platform, live and human checks; implemented code alone does not establish platform support.
 
 ```sh
 target/debug/arany --tools
@@ -31,7 +29,7 @@ The generated function/outcome schemas offer file reads/search and only catalog-
 
 The consent screen shows the full folder path, a brief access explanation and vertical Read only / Trust choices. Read only starts focused. With explicit `--tools`, the first choice instead says Use explicit config and explains that skipping folder trust retains that private configuration; neither choice expands its roots or capabilities. Enter confirms; Escape dismisses without a decision; Ctrl+C exits Arany without saving a decision or entering account setup. Consent precedes saved-account lookup, catalog or credential access, Session discovery and creation, and applies to new, resumed and forked entry. Choosing read only, using explicit configuration without trust, or dismissing does not remember trust, so the next process asks again. Unavailable, malformed or unsafe trust metadata stops startup before account or Session access. Trust is user-owned, shared by conversations, and pinned to the exact absolute path plus filesystem directory identity. Replacing the directory requires trust again; Session replay never supplies authority. A remembered grant applies only to native Providers and platforms that admit Tools; custom Providers stay read-only. Explicit private `--tools` configuration takes precedence over remembered trust and retains its narrower roots and capabilities.
 
-A private version-1 `workspace-permissions.json` in the fixed OS-user account root stores at most 128 entries and 64 KiB using owner-only atomic replacement. Trust generates a version-1 grant for `workspace_paths: ["."]`, typed writes and discovered project Skills. Linux also grants the pinned resolved system `sh` executable; macOS grants no command or MCP capability. Standard secret/link/mount exclusions and finite snapshots still apply; generated directories `target`, `node_modules`, `.venv` and `venv` are omitted from root discovery/snapshots. Commands use the existing offline Guard, not the host terminal or home-installed toolchains. macOS startup reports its file/Skill capability and unavailable commands/MCP.
+A private version-1 `workspace-permissions.json` in the fixed OS-user account root stores at most 128 entries and 64 KiB using owner-only atomic replacement. Trust generates a version-1 grant for `workspace_paths: ["."]`, typed writes, discovered project Skills and a pinned resolved system `sh` executable on Linux/macOS. MCP requires explicit private configuration. Standard secret/link/mount exclusions and finite snapshots still apply; generated directories `target`, `node_modules`, `.venv` and `venv` are omitted from root discovery/snapshots. Commands use the existing offline Guard, not the host terminal or home-installed toolchains.
 
 Shift+Tab cycles **Auto edits → Request approvals → Auto approval → Auto edits**, preserving the draft and caret. The current mode appears beside the composer and follows the selected Provider's native capability. Selecting a supported native Provider after trusting an unconfigured conversation restores the remembered mode; changing between supported selections retains the current mode. Auto edits initially allows typed edits and asks for commands/MCP calls; Request approvals asks for every effect. Reads and Skill/catalog discovery still need the pinned grant but no per-action question. Auto approval uses the selected AI to review the exact proposed action against the current user request; additional model usage can apply. Uncertainty, invalid output, failure or an exhausted review budget asks the user. Switching out of Auto while the AI is reviewing also asks the user.
 
@@ -76,9 +74,9 @@ Each `commands` entry declares a reviewed executable and its SHA-256, whether it
 }
 ```
 
-The placeholder above is deliberately invalid. Resolve a system executable's real path and calculate its digest yourself, for example with `readlink -f /usr/bin/bash` and `sha256sum /usr/bin/bash`. Arany requires a no-follow, regular, single-link ELF input; a symlink such as `/usr/bin/python3` must be replaced with its resolved executable path. Updating an executable requires reviewing and changing its pin.
+The placeholder above is deliberately invalid. Resolve a system executable's real path and calculate its digest yourself, for example with `readlink -f /usr/bin/bash` and `sha256sum /usr/bin/bash` on Linux, or `shasum -a 256 /bin/sh` on macOS. Arany requires a no-follow, regular, single-link native executable: ELF on Linux or Mach-O on macOS. A symlink must be replaced with its resolved executable path. Updating an executable requires reviewing and changing its pin.
 
-Additional inputs use `{"path":"/absolute/reviewed/file","destination":"relative/name","sha256":"<digest>"}`. They appear read-only under `/inputs/PROGRAM_ID/relative/name`. Executables are copied to `/programs/PROGRAM_ID`. Paths and digests are checked again for each fresh invocation. Descriptions and the `interpreter` declaration do not prove that arbitrary arguments or a script are safe; allowing a shell/interpreter authorizes its behavior inside the same OS-enforced boundary, including descendants using the read-only `/usr` runtime.
+Additional inputs use `{"path":"/absolute/reviewed/file","destination":"relative/name","sha256":"<digest>"}`. They appear read-only under `/inputs/PROGRAM_ID/relative/name`. Executables are copied to `/programs/PROGRAM_ID`, except checked immutable macOS system programs, which retain their original paths. Paths and digests are checked again for each fresh invocation. Descriptions and the `interpreter` declaration do not prove that arbitrary arguments or a script are safe; allowing a shell/interpreter authorizes its behavior inside the same OS-enforced boundary, including descendants using the admitted native runtime.
 
 Commands receive an explicit argument array, a relative working directory, cleared environment, private `HOME`/temporary/Cargo directories, no terminal input, and bounded UTF-8 stdout/stderr. They use a fresh writable snapshot of only selected project paths. Empty directories and executable bits are preserved without set-ID bits. They see prior typed edits, but **their own file changes are discarded**. A compiler can write a binary under `/scratch` and execute it in the same command. No artifact auto-import, shared build cache, package download or background job survives a call. The current limits do not establish support for every large Rust build or language toolchain.
 
@@ -139,8 +137,8 @@ Discovery returns a digest of each admitted complete tool definition. A later ca
 | File operation | 1 MiB input file; reads page at most 4,096 UTF-8 bytes; writes/edit strings at most 8 KiB |
 | Runtime resources | 96 MiB aggregate copied executables/inputs/Skills; executable 32 MiB, extra input 1 MiB, Skill file 16 KiB |
 | Linux processes | 512 MiB aggregate memory, no swap, group OOM termination, 64 processes/threads; 25% of one CPU |
-| macOS processes | Supervised aggregate resident-memory threshold 512 MiB and processes/threads threshold 64; nominal 10-ms sampling. Hard inherited CPU-time limit 15 seconds per process; no aggregate CPU rate quota. Implemented for the non-spawning file/Skill worker; command/MCP enforcement remains unimplemented. |
-| Private command storage | Separate 64 MiB scratch and 64 MiB writable project tmpfs on Linux; native macOS command storage remains unimplemented. Typed file mutations publish bounded files directly into the admitted Workspace. |
+| macOS processes | Supervised aggregate resident-memory threshold 512 MiB, processes/threads threshold 64 and CPU-time threshold 15 seconds per process; nominal 10-ms sampling. No aggregate CPU rate quota. The non-spawning file/Skill worker additionally enforces immutable CPU expiry; commands/MCP retain ordinary signal behavior and use external supervision. |
+| Private command storage | Separate 64 MiB scratch and 64 MiB writable project filesystems, including metadata: tmpfs on Linux, fixed-capacity native images on macOS. Commands/MCP operate on a fresh checked snapshot; their writes are discarded. Typed file mutations publish bounded files directly into the admitted Workspace. |
 | Time | Run 300 seconds; each unit at most 60 seconds, command capture 50 seconds, MCP dialogue 40 seconds; finite startup/cleanup and parent deadlines |
 | Tool loop | 16 proposals/effects shared across primary planning/synthesis; model-step receipt ceiling 32; children retain their existing maximum of 8 one-call reasoning tasks |
 | Skill discovery | 256 top-level entries; 64 Skills; 32 resources per Skill; 8,192 resource entries; depth 16; 32 MiB read; merged grant at most 64 KiB; overflow rejects |
@@ -150,31 +148,30 @@ Discovery returns a digest of each admitted complete tool definition. A later ca
 List/search return at most 64 rows and explicitly indicate possible truncation. Oversized requests/results otherwise reject whole records. This is a finite base, not automatic truncation of arbitrary files or unlimited model context. Provider requests retain their own byte/token/deadline and route restrictions; ChatGPT still has a local-only output-acceptance cap, not a remote plan-usage guarantee.
 
 The accepted macOS resource profile terminates its entire owned unit when an
-observation exceeds a threshold or the resource observer fails. Its memory/task
+observation exceeds a threshold or the resource observer fails. Its memory/task/CPU
 thresholds are supervised rather than kernel ceilings: scheduling delays and
 work between samples can exceed them or exhaust host resources before
 termination. Swap prohibition and kernel group-OOM enforcement are not claimed.
-The CPU limit applies independently to each process and does not bound the
+The CPU threshold applies independently to each process and does not bound the
 whole tree's cumulative CPU time or instantaneous rate. Wall-time, output,
 private-storage, offline isolation and complete descendant termination remain
 required. Commands and MCP execute native macOS binaries on the host and retain
 ordinary child-launch compatibility, including `posix_spawn`. A fork/exec-only
 profile does not satisfy this contract.
 
-Normalized intents and Guard receipts explicitly identify `macos_supervised`
-resource semantics, and the enforcement digest binds the effective native
-profile. Historical intents without this discriminator retain Linux kernel
-semantics and their original serialized digest; replay does not reinterpret
-their memory/process numbers as supervised thresholds. A receipt for another
-resource profile rejects. Acceptance of the resource contract does not enable
+Normalized intents and Guard receipts explicitly identify `linux_kernel` or
+`macos_supervised` resource semantics, and the enforcement digest binds the
+effective native profile. The discriminator is mandatory in every intent;
+missing or unknown profiles and receipts for another resource profile reject. Acceptance of the resource contract does not enable
 dispatch before native isolation, supervision and cleanup are attested.
 
 Setting Darwin's `RLIMIT_CPU` soft and hard values to 15 seconds alone does not
-attest the required CPU termination: a process can ignore `SIGXCPU` and exceed
+replace CPU supervision: a process can ignore `SIGXCPU` and exceed
 that time. The macOS file worker resets and unblocks that signal, then prohibits
 handler, mask, signal-wait and limit changes, plus the supported process-launch
 variants, before dispatch. This restriction applies only to trusted file/Skill
-code. A compatible CPU/descendant mechanism for commands/MCP remains unimplemented.
+code. Commands and MCP retain signal compatibility and use external CPU
+supervision.
 
 The minimum admitted result budget is 128 bytes. Mutation and failure receipts must fit it, retaining resource identity through the correlated intent rather than repeating an arbitrarily long path. An applied mutation with a lost completion stays uncertain; receipt overflow cannot turn it into an ordinary retryable failure.
 
@@ -196,9 +193,51 @@ Before review or dispatch the Engine commits an immutable `ToolStarted` intent. 
 
 The [execution admission contract](./execution.md#admission-persistence-and-recovery) owns complete-topology Event headroom, ancestor locking, compaction/fork quotas and pre-disclosure rejection. Logical headroom does not reserve physical disk or eliminate crash/disk-fault uncertainty after dispatch.
 
+## macOS enforcement and compatibility
+
+Native Tool dispatch requires an available Background launchd user domain,
+a distinct kernel resource coalition, a trusted bounded supervisor and a
+separate attested Seatbelt worker. The private control directory must be outside
+the Workspace; overlapping roots reject before dispatch. The supervisor's
+reported launchd PID and authenticated local peer must identify the same
+process. The controller validates resources before GO and accepts completion
+only after the owned coalition is empty and the one-use job is removed or
+positively reported absent. Automatic job retirement alone is insufficient
+descendant cleanup. Missing enforcement has no unconfined fallback.
+
+Supervision uses kernel process identity and cumulative CPU accounting across
+exec. Exact-incarnation signaling must not affect a reused PID.
+
+The private-storage primitive allocates separate owner-only, writable native
+filesystems with fixed 64-MiB capacities. Killing the unit supervisor must leave
+the storage available for clean detachment by its controller. Normal completion,
+partial setup, cancellation and unwind require positively established process
+termination before detachment. Unexpected mount targets reject without following
+them. Unfinished attachment or failed cleanup retains the private control root
+and rejects completion rather than recursively deleting through a live or
+uncertain mount.
+
+Commands and MCP receive a fresh checked snapshot of the selected Workspace,
+including prior typed edits, and a separate read-only tree of pinned runtime
+resources. Writable project/scratch mounts prohibit set-ID behavior. Reviewed
+system executables must be immutable, root-owned, non-set-ID and unentitled;
+privileged process/credential/coalition changes remain denied even after exec.
+The runtime excludes host account and Session roots, network destinations and
+Mach services. Root or mismatched real/effective identities reject process
+dispatch. Ordinary unprivileged `fork`, `exec` and `posix_spawn` remain available.
+
+macOS uses private physical paths rather than a Linux mount namespace. The
+command's relative working directory is inside its project snapshot. Standalone
+argv paths rooted at `/workspace`, `/scratch`, `/inputs`, `/skills` or `/programs`
+map into private storage; copied-program aliases apply to copied executables.
+Shell strings are not rewritten. Use `ARANY_TOOL_WORKSPACE`, `ARANY_TOOL_INPUTS`
+and `ARANY_TOOL_SKILLS`, or project-relative paths, inside scripts. `HOME` and
+`TMPDIR` point to private scratch. Checked system binaries execute at their
+original paths because native relocation is not universally supported.
+
 ## Linux enforcement and compatibility
 
-The first enforcer requires installed non-set-ID, root-owned `/usr/bin/bwrap`, `/usr/bin/systemd-run`, `/usr/bin/systemctl` and `/usr/bin/env`, working unprivileged user namespaces, a systemd user manager and cgroup v2 with effective memory/swap/PID/CPU limits and owned cgroup termination. This is a kernel/native-capability contract, not a GNOME/KDE dependency. Other Linux init systems need a separately enforcing adapter; Arany does not pretend the present implementation works without these facilities. Unsupported architecture or missing enforcement fails closed, with no unsandboxed fallback. The macOS file worker uses its separate native profile; command/MCP containment remains unimplemented.
+The first enforcer requires installed non-set-ID, root-owned `/usr/bin/bwrap`, `/usr/bin/systemd-run`, `/usr/bin/systemctl` and `/usr/bin/env`, working unprivileged user namespaces, a systemd user manager and cgroup v2 with effective memory/swap/PID/CPU limits and owned cgroup termination. This is a kernel/native-capability contract, not a GNOME/KDE dependency. Other Linux init systems need a separately enforcing adapter; Arany does not pretend the present implementation works without these facilities. Unsupported architecture or missing enforcement fails closed, with no unsandboxed fallback. macOS uses the separate native profiles described above.
 
 The Guard verifies isolated mount/network/PID/user/IPC/UTS namespaces, dropped capabilities, no-new-privileges, inherited syscall filters and effective limits before releasing a one-use intent. It owns the exact transient unit, invocation and retained cgroup identity, including double-fork/setsid descendants, and verifies termination before accepting completion. Normal transient-unit garbage collection is handled using the retained group's empty/removed state. The compiled seccomp deny profile is defense in depth, not a universal syscall allowlist. ARM64's profile is source-supported; native runner evidence is required before claiming platform support.
 
@@ -208,16 +247,19 @@ Byte/entry bounds on synchronous local snapshot preparation do not guarantee a f
 
 | Scenario | Required observation | Existing owner |
 |---|---|---|
-| Folder admission before account setup | Every attached entry resolves folder access first, including without an account and with explicit flags. Ctrl+C enters no account flow and creates no Session. Read-only/dismissal asks again next time; remembered trust skips the prompt only for the same directory identity. macOS retains ordinary chat after consent and offers its implemented file/Skill capability only after native admission. Explicit `--tools` discloses retained private-config authority at the choice. An initially unconfigured trusted conversation restores its displayed approval mode when a supported native Provider is selected. | [Startup consent journey](../../tests/session_run/startup_trust.rs), [native macOS attached composition](../../src/cli/attached/run.rs) |
-| Native macOS attached capability | Remembered trust offers file/Skill Tools and approval controls while ordinary/resumed greetings retain history without effect Events; unsupported command grants reject before inference and preserve the committed prefix | [Native macOS attached composition](../../src/cli/attached/run.rs) |
+| Folder admission before account setup | Every attached entry resolves folder access first, including without an account and with explicit flags. Ctrl+C enters no account flow and creates no Session. Read-only/dismissal asks again next time; remembered trust skips the prompt only for the same directory identity. macOS retains ordinary chat after consent and admits granted Tools only after native protection attests. Explicit `--tools` discloses retained private-config authority at the choice. An initially unconfigured trusted conversation restores its displayed approval mode when a supported native Provider is selected. | [Startup consent journey](../../tests/session_run/startup_trust.rs), [native macOS attached composition](../../src/cli/attached/run.rs) |
+| Native macOS attached capability | Remembered trust offers file/Skill Tools, the pinned native shell and approval controls while ordinary/resumed greetings retain history without effect Events; stale executable pins reject before inference and preserve the committed prefix | [Native macOS attached composition](../../src/cli/attached/run.rs) |
 | Private grant and project discovery | Only selected roots and `.agents/skills` contribute pinned guidance; private names take precedence; unsafe paths and overflow reject | [Tool configuration and discovery corpus](../../src/tools/tests.rs), [native Skill journey](../../tests/session_run/tools.rs) |
 | Lock present without installed project Skills | Startup advises `npx --yes skills@1.7.0 experimental_install` without reading lock contents or running an installer; an existing empty directory produces no notice | [Discovery corpus](../../src/tools/tests.rs), [attached notice journey](../../tests/session_run/slash_completion.rs) |
 | File Read/Search and digest-bound Edit/Write | Named regular files work under whole-project trust; aliases, special files, stale preconditions and excess bounds reject; exact mutation matches receipt | [Workspace corpus](../../src/tools/tests.rs), [native Tool journeys](../../tests/session_run/tools.rs) |
 | Command/MCP isolation and protocol rejection | Disposable writes, network denial, owned descendants and limits hold; malformed frames, schemas, drift and unsupported content reject without fallback | [Native Tool journeys](../../tests/session_run/tools.rs), [MCP fixture](../../tests/fixtures/mcp-tools.py) |
 | Native macOS file/Skill Guard | Read, Search, List, Mkdir, create/replace Write, Edit and pinned Skill data execute through the real worker; stale create/edit and linked-file access reject; exact file bytes, receipts and closed replay agree | [Native file journey](../../tests/session_run/tools/macos.rs), [Workspace corpus](../../src/tools/tests.rs) |
 | Native macOS profile isolation and CPU expiry | Host data/network/process launch and CPU-control changes reject under the compiled profile; an activated owned worker terminates through the immutable CPU limit | [Native profile corpus](../../src/tools/guard/macos.rs) |
+| Native macOS owned unit and supervised resources | Escaped orphan descendants remain owned; stale audit tokens cannot signal another incarnation; aggregate memory/task excess and per-process CPU excess with ignored SIGXCPU terminate the complete unit; cleanup confirms the coalition empty and the job absent | [Activated native unit owner](../../src/tools/guard/macos/unit.rs) |
+| Native macOS private-storage lifecycle | Both private filesystems enforce their 64-MiB capacities through actual `ENOSPC`; storage survives supervisor termination for clean detachment; partial setup and unwind clean owned mounts; unsafe targets remain untouched and uncertain cleanup retains its control root | [Activated native unit owner](../../src/tools/guard/macos/unit.rs) |
+| Native macOS command/MCP lifecycle | Ordinary native child launches succeed with current selected snapshots and discarded changes; host/network/signals/privilege changes reject; bounded protocol/output failures retain receipts; approval cancellation and missing post-GO completion retain closed replay without retry | [Native Engine journey](../../tests/session_run/tools/macos.rs), [activated native unit owner](../../src/tools/guard/macos/unit.rs) |
 | Approval, denial and uncertain review | Only a granted immutable action can dispatch once; failed/uncertain AI review asks a human; denial/cancellation stops and closed replay agrees | [Native approval journeys](../../tests/session_run/tools.rs), [approval policy](../../src/tools/approval.rs) |
 | Uncertainty, cancellation, receipt bounds and fresh resumed work | Missing post-GO completion remains uncertain; bounded receipts persist; fresh inspection/edit does not execute old intents | [Native Tool journeys](../../tests/session_run/tools.rs), [Tool corpus](../../src/tools/tests.rs), [replay](../../src/store/replay.rs) |
 | Slash Skill insertion and file mentions | Browsing loads no guidance or effects; selecting stages a task; file includes carry path/digest and directory references grant no authority | [Terminal contract](./terminal.md), [slash journey](../../tests/session_run/slash_completion.rs), [Engine Run corpus](../../tests/engine_run.rs) |
 
-Native Linux and macOS file owners exercise their actual enforcers with synthetic Providers; pure wire/configuration/replay corpora do not launch effects. Live model/account loops, native macOS commands/MCP, Linux ARM64 and human terminal/accessibility checks need separate evidence. [Next steps](../../NEXT_STEPS.md) and the active [beta record](../../planning/arany-beta/README.md) retain dated outcomes and open checks; [dependency review](../security/local-tool-dependency-review.md) owns scoped supply-chain evidence. Activation and test-lane requirements remain in [testing rules](../../agents/testing.md).
+Native Linux and macOS owners exercise their actual enforcers with synthetic Providers; pure wire/configuration/replay corpora do not launch effects. Live model/account loops, optimized macOS Engine/account isolation, Linux ARM64 and human terminal/accessibility checks need separate evidence. [Next steps](../../NEXT_STEPS.md) and the active [beta record](../../planning/arany-beta/README.md) retain dated outcomes and open checks; [dependency review](../security/local-tool-dependency-review.md) owns scoped supply-chain evidence. Activation and test-lane requirements remain in [testing rules](../../agents/testing.md).

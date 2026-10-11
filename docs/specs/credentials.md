@@ -8,7 +8,7 @@ This contract owns saved-account scope, protected storage, selected-item startup
 
 A saved Provider Account belongs to one effective OS user across that user's Sessions and StateRoots, never the whole machine. On Linux and macOS, account metadata and its replacement lock use the effective user's passwd home, independently of `HOME`, XDG variables and Session `--state-dir`. The native roots are `.local/state/arany` on Linux and `Library/Application Support/dev.Arany.arany` on macOS. Keyring items remain in that user's OS credential store. Session-root configuration retains its separate contract.
 
-Native API-account records validate the exact OpenAI or Anthropic Provider, UUIDv7 account identity, bounded printable key, and either a reviewed model/effort or a bounded model ID with explicit effort on both read and write. Key-only records use schema 1 and omit workspace scope. Schema 2 requires a validated explicit Anthropic API workspace. Unknown or mismatched versions, absent/invalid scope and cross-Provider scope reject. Older binaries reject scoped records rather than discard billing scope; saved scope is never reconstructed from ambient environment variables.
+Native API-account records validate the exact OpenAI or Anthropic Provider, UUIDv7 account identity, bounded printable key, and either a reviewed model/effort or a bounded model ID with explicit effort on both read and write. All native API records use schema 2 and explicit nullable workspace scope. A non-null scope requires a validated Anthropic API workspace. Unsupported versions, missing fields, invalid non-null scope and cross-Provider scope reject. Saved scope is never reconstructed from ambient environment variables.
 
 A Session stores the saved account UUID, without its credential. Before native Run or catalog use, resolve that UUID and Provider against the current protected record. Replacing an account makes it unavailable to an older Session. Explicit environment-backed access never falls through to saved credentials, and saved access never falls through to environment credentials. A saved model/effort tuple is not compatibility evidence: actual Run admission and strict request/outcome validation remain required, without a mandatory synthetic check.
 
@@ -16,7 +16,7 @@ A Session stores the saved account UUID, without its credential. Before native R
 
 Setup prefers the OS keyring. An unavailable, unpinned store may offer a separately warned, explicitly selected private-file backend. A locked store reports a locked error. The checked backend marker pins keyring storage without a key, or file storage with the account. Read, write or authorization failure on a pinned keyring never silently downgrades storage.
 
-Bare startup first reuses the last explicit saved-source preference, selecting Provider/account/model metadata without loading credentials; disconnected ChatGPT metadata cannot restore access. Without a preference, checked record presence determines available saved routes before either payload is read. When API and ChatGPT records coexist, billing-route choice is explicit. Cancellation reads neither payload and creates no Session; an invalid selected record never falls back to the other route. With an existing ChatGPT index, discovery of an old unpinned native keyring item requires explicit native inspection/setup.
+Bare startup first reuses the last explicit saved-source preference, selecting Provider/account/model metadata without loading credentials; disconnected ChatGPT metadata cannot restore access. Without a preference, checked record presence determines available saved routes before either payload is read. When API and ChatGPT records coexist, billing-route choice is explicit. Cancellation reads neither payload and creates no Session; an invalid selected record never falls back to the other route. A native keyring item without a current backend marker is not a configured account and is never loaded during discovery.
 
 ### Selected-item authorization
 
@@ -28,15 +28,41 @@ Interactive startup access has a supervised two-minute human-interaction deadlin
 
 ## Storage, replacement and recovery
 
+An incompatible or malformed saved account or model preference must not prevent
+opening the attached CLI. Show safe recovery guidance and keep access
+unconfigured until the user selects valid access. Do not switch billing routes,
+load an alternate credential or submit an initial objective automatically.
+Recoverable failure during initial `--setup` returns to the composer; terminal
+failure and shutdown retain their normal exit behavior.
+
+Setup offers an explicit local reset for invalid selected-route data, with Back
+focused by default. Confirmed reset discards only that route's checked account
+records, its ChatGPT registration when applicable, and saved model choices.
+Conversations, folder trust and other-route accounts remain intact. Snapshot the
+bounded records before confirmation and recheck them under the account lock;
+concurrent change refuses reset. Cancellation writes nothing. Unsafe or
+over-limit filesystem objects cannot be reset through this flow. A partial
+storage failure reports uncertainty and does not claim rollback.
+
+Invalid saved model choices can be reset separately, preserving all accounts.
+Confirming a reset is a completed local effect even if later setup is cancelled;
+subsequent cancellation cannot restore the deleted records.
+
+Reset never interprets an unsupported format, migrates old records, enumerates
+the password store or revokes remote access. Explain that old password-store
+entries may remain and that reset is local. New setup follows ordinary explicit
+storage consent and verified sign-in. Headless commands retain rejection with
+actionable attached-setup guidance.
+
 The explicitly approved private-file backend is plaintext at rest beneath a checked, user-owned `0700` root. Each fixed record and pending replacement is bounded, no-follow, single-link, owner-checked and `0600`. On macOS, opened private roots/files/locks reject extended ACL allow entries; ancestors reject ACL mutation grants. Unreadable or unknown ACLs fail closed. Atomic rename with file and directory synchronization prevents a partially written final record; a crash may leave one bounded pending file. Permission modes and ACL checks do not encrypt credentials, exclude same-UID/privileged processes or securely erase old disk contents.
 
 Native Keychain access selects the exact user-domain Keychain, service and slot without changing the default, search list or item permissions. Replacement first reads the selected existing item; only item-not-found permits insertion. Locked or denied access preserves the pinned backend and cannot become a new item or plaintext fallback.
 
-On Linux and macOS, a validated native API record in the previous environment-selected root migrates under the old-root lock followed by the stable-root lock. Make the new copy durable before replacing the old record with a version-zero tombstone. An identical partial copy can finish on retry; a different current account reports a redacted conflict without overwriting either record. ChatGPT registration and matching account-index preservation retain their [migration contract](../../agents/chatgpt.md); relocation cannot grant or renew account consent.
+Account readers use only the current OS-user root. They do not inspect or move records from environment-selected Session roots. Native API accounts use schema 2 with explicit nullable effort and Anthropic workspace fields; schema 1 and missing fields reject. ChatGPT registration explicitly carries its nullable issued client ID; index state flags, nullable token/selection and bounded model checks are explicit. Reading unsupported records preserves them; deletion requires the explicit reset described above. Setup and replacement still require current identity, backend and consent admission.
 
 Timed-out OS-store writes report an uncertain outcome distinct from a timed-out read. Keep the backend pinned, and do not claim rollback merely because the helper was killed. ChatGPT logout deletes only its validated token slot, never the native API item. An uncertain deletion keeps account use blocked and warns the user. After a recognized terminal refresh-token error, disconnect the account and clear model evidence before attempting deletion; failed cleanup never re-enables use and remains visible.
 
-## Limits and compatibility
+## Limits and record admission
 
 Native API-account records and their backend marker retain the aggregate 1-KiB limit. The separate ChatGPT helper slot admits a versioned, consent-bound token record of at most 64 KiB. Invalid or oversized records reject without partial admission. Pass credentials to or from OS-store helpers only through bounded private pipes, never arguments or process-global environment. Keys and tokens never enter Events, logs, telemetry or drawing calls. Errors are redacted and never expose platform error text or secret records. Availability probes return no existing secret.
 
@@ -55,6 +81,7 @@ These owners define verification scope, not a claim that every native gate passe
 | Selected startup item | Folder consent precedes selected-item authorization, which precedes catalog/chat; unrelated sources launch no credential helper and account changes reject. | [Attached startup composition](../../src/cli/attached/run.rs), [helper protocol corpus](../../src/cli/credentials/keyring_helper.rs) |
 | Slow authorization and cancellation | Human interaction can exceed five seconds within the two-minute bound; interruption restores the terminal, kills/reaps the helper and submits no task. | [Supervisor corpus](../../src/cli/credentials/keyring_helper.rs), [attached startup composition](../../src/cli/attached/run.rs); native OS dialog remains a separate gate |
 | Failed initial or resumed access | No automatic objective submission, Provider Run, alternate route or replay mutation follows failed startup authorization. | [Attached startup composition](../../src/cli/attached/run.rs), [Linux stalled-store journey](../../tests/session_run/setup.rs) |
-| Durable relocation | Valid API records and matching ChatGPT registration/index preserve saved identity; interrupted copies retry, conflicts and unsafe records reject. | [Credential corpus](../../src/cli/credentials.rs), [registration migration corpus](../../src/cli/chatgpt/registration.rs), [private-record owner](../../src/store/state.rs) |
+| Current account format and root | Only current records in the OS-user root authorize access; unsupported or malformed records reject without conversion or automatic deletion. Attached startup remains available for explicit recovery. | [Credential corpus](../../src/cli/credentials.rs), [ChatGPT account corpus](../../src/cli/chatgpt/account/tests.rs), [attached startup owner](../../src/cli/attached/run.rs) |
+| Local setup recovery | Invalid selected-route data keeps the composer and setup available; Back preserves records, confirmed reset permits fresh setup, and concurrent replacement or unsafe files prevent deletion. Other accounts and closed conversation history remain intact. | [Attached startup owner](../../src/cli/attached/run.rs), [credential corpus](../../src/cli/credentials.rs), [private record corpus](../../src/store/state.rs) |
 | Routine timeout and uncertain effects | Stalled helpers are killed/reaped within routine bounds; uncertain writes/deletion cannot claim rollback or restore blocked access. | [Helper corpus](../../src/cli/credentials/keyring_helper.rs), [stalled-store native gate](../security/findings/stalled-credential-store.md) |
 | Real native store lifecycle | Isolated synthetic items prove save/read/replacement, item authorization and failure/deletion without accessing the user's live account store. | [Native gates](../../NEXT_STEPS.md#beta-2-and-broader-release), [setup guide](../setup.md) |
