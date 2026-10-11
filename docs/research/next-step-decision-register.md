@@ -1,236 +1,194 @@
-# Arany beta decision register
+# Arany decision register
 
-**Status:** research closure for the first implementation
-**Date:** 2026-09-29  
-**Canonical design:** [Arany beta architecture](../architecture/system-overview.md)  
-**Contract owners:** [documentation map](../README.md); migrated behavior lives in [product specs](../specs/README.md), not duplicated decision summaries
+This register owns accepted architectural choices and their reasons. Current
+behavior belongs to [domain specs](../specs/README.md) and the unmigrated owners
+in [the documentation map](../README.md). [Architecture](../architecture/system-overview.md)
+owns physical implementation; [next steps](../../NEXT_STEPS.md) owns open work.
+A decision is not evidence that its implementation or release gate passed.
 
-Every item has one of three statuses:
-
-- **Beta decision:** implement it.
-- **Implementation gate:** prove it with code or runtime evidence before claiming it.
-- **Triggered scope:** do not build it until the named condition occurs.
-
-There is no missing research choice blocking the implementation plan. The repository now includes the exact Apache-2.0 `LICENSE` and a project `NOTICE` attributed to `fpmirabile`.
+Keep a decision here while its reason affects future changes. Replace superseded
+choices rather than appending amendments, copied contracts or verification logs.
 
 ## 1. Why SQLite remains canonical state
 
-Arany now needs durable Sessions as well as Runs, but its storage requirement is unchanged: one local authoritative writer, transactional semantic transitions, crash recovery, indexed replay, and no service.
+The detailed storage comparison and reconsideration gates live in
+[persistence rationale](./agent-state-persistence.md). D-05 records the accepted
+architectural consequence.
 
-| Option | Why it is not beta canonical state | Triggered role |
-|---|---|---|
-| Memory only | Cannot resume after process exit | Reducer tests only |
-| JSONL files | Arany would own torn tails, multi-Event atomicity, locking, sync, indexes, and migration | Deterministic export |
-| Directory per Session | Cross-file atomicity and derived-summary consistency become application code | Large Artifacts later |
-| SQLite rollback journal | Supplies transactions, recovery, constraints, migrations, and inspection locally | **Selected** |
-| SQLite WAL | Adds sidecars and checkpoint policy without a live second reader | Benchmark after measured reader/commit pressure |
-| redb/Fjall/RocksDB | Indexes, queries, migrations, inspection, or compaction become Arany work | Revisit only after a measured SQLite breach or C prohibition |
-| PostgreSQL | Adds a server and operator lifecycle | Multi-host writers, tenancy, replication, or PITR |
-
-Use bundled `rusqlite`/SQLite on a verified local filesystem, one connection on one named thread, a private state root outside the Workspace, no-follow open, defensive mode, `DELETE + EXTRA`, `trusted_schema=OFF`, a 250 ms busy timeout, short `BEGIN IMMEDIATE` transactions, bounded payloads/pages, and commit-before-feedback. Incomplete committed histories replay as `Interrupted`; they are never auto-resumed as work.
-
-## 2. Settled beta decisions
+## 2. Settled decisions
 
 ### D-01 — Runtime and physical ownership
 
-**Beta decision:** one package and process. A current-thread Tokio runtime owns network, timers, signals, AgentRuns, and coordination. One standard-library thread owns SQLite; one bounded worker owns OTLP export. Do not use the multithreaded Tokio scheduler, `spawn_blocking`, SQLx, or a pool without profile evidence.
-
-The physical files are `main.rs`, deep `lib.rs`, `session.rs`, `provider.rs`, `store.rs`, `presentation.rs`, `terminal.rs`, and last-slice `telemetry.rs`. A daemon, process protocol, or crate split requires a measured client/release/privilege/dependency boundary.
+One Cargo package and one long-lived process keep internal interfaces private.
+A current-thread async coordinator, a dedicated SQLite owner and bounded helper
+lifecycles separate waiting from blocking work. Extra crates or a daemon need a
+real dependency, release, privilege, ownership or Client boundary. See
+[runtime rationale](./rust-foundation-and-engine-contract.md) and
+[physical architecture](../architecture/system-overview.md).
 
 ### D-02 — Durable Session model
 
-**Beta decision:** `Session -> Run -> AgentRun` is canonical vocabulary.
-
-- Session: durable ordered Messages, Runs, title, defaults, fork lineage, and derived compaction snapshots.
-- Run: one accepted user submission to one terminal outcome.
-- AgentRun: one primary or child execution inside a Run.
-
-Resume preserves Session identity. Fork creates a new Session from an exact committed Run/sequence/prefix digest. Historical children remain inspectable but never become live again. Retrying interrupted work creates a new Run. Provider/model/profile defaults may change only between Runs; `RunStarted` persists resolved values.
-
-Compaction creates digest-bound derived context and never deletes or replaces canonical history. Manual compaction is idle-only and visible; automatic compaction runs only at a committed boundary after warning. Provider state is an optimization, never the sole resume path.
+Arany owns conversation history across Provider changes and process exit.
+Resume continues that identity; fork creates a new lineage; compaction is
+rebuildable context. This avoids depending on opaque Provider continuation for
+recovery. [Session rules](../../agents/session.md) own lifecycle semantics;
+[context rationale](./context-memory-and-compaction.md) explains the distinction.
 
 ### D-03 — Generic bounded agent protocol
 
-**Beta decision:** every Run pins one collaboration policy:
-
-- `single`: no children;
-- `auto(N)`: primary may finish directly or delegate; and
-- `team(N)`: primary must propose a non-empty bounded decomposition.
-
-The beta topology is one primary plus an ordered `0..N` collection of direct read-only children. Children cannot create nested teams. The default is `auto` with three active children maximum; the beta process hard ceiling is eight active children. `--max-agents` counts active children and excludes the primary.
-
-Effective capacity is the minimum of the selected maximum, hard ceiling, aggregate call/token/byte/time budgets, and Provider concurrency. A direct answer is one Provider call. With `k` children, a successful team Run is `k + 2` calls: primary plan, `k` child calls, primary synthesis. All required children must finish successfully before synthesis. There are no detached children or automatic retries.
-
-**Gate:** one scripted scenario proves direct single completion, generic ordered children, bounded concurrency, reverse completion, join-all, overflow rejection, cancellation of all children, and invalid phase/outcome rejection. Boundary tables cover `N = 0, 1, 3, 8, 9`.
+One accountable primary and direct read-only children provide useful fan-out
+without recursive scheduling, leases or ownership transfer. Ordered assignments
+make synthesis independent of completion order. Single-agent work avoids
+unnecessary coordination and cost. [Execution](../specs/execution.md) owns the
+protocol and bounds; [supervision rationale](./multi-agent-loop-and-user-feedback.md)
+owns alternatives and expansion conditions.
 
 ### D-04 — Provider seam and profiles
 
-**Beta decision:** `Provider` is the only Engine trait. Engine types carry Arany semantics, never vendor wire objects or generic parameter bags. Use the strict scripted fake for Engine proof and a closed adapter enum for product Providers.
-
-Native OpenAI Responses and Anthropic Messages are supported first. One ProviderProfile/model/outcome encoding/privacy profile is pinned before Workspace input and for every call in a Run. Strict provider-enforced JSON Schema is preferred; a synthetic outcome tool is allowed only with documented strict arguments and forced selection. JSON mode, prompt-only repair, and automatic tool selection fail admission.
-
-Custom endpoint support is part of beta, beginning with a closed `openai-responses` protocol family. Profiles live only in trusted user configuration and name exact normalized origin/base path, model, credential environment reference, outcome encoding, privacy assertion, and evidence version. `arany provider check PROFILE` must pass a data-free bounded conformance suite before the profile receives Workspace content. Evidence is keyed by Arany/adapter/test versions, exact endpoint, model, encoding, output cap, timestamp, and expiry. A model catalog alone proves nothing.
-
-Receipts classify `native supported`, `custom verified`, `custom unverified`, or future `broker constrained`. A built-in OpenRouter profile is triggered scope behind route/privacy/provenance/no-fallback gates. Z.AI remains unadmitted while the exact route lacks strict outcome enforcement.
+Provider is the substitutable Engine behavior seam because multiple real
+adapters exist. Semantic types prevent vendor schemas from defining policy.
+Exact custom profiles require data-free conformance: resemblance to an API does
+not prove output, privacy or routing guarantees. [Provider rules](../../agents/provider.md)
+own admission and current capability requirements.
 
 ### D-05 — Event contract and replay
 
-**Beta decision:** one STRICT Events table contains global sequence, required Session ID, optional Run/AgentRun IDs, kind, event version, bounded JSON payload, and display timestamp. Sequence defines order.
-
-Initial semantic kinds are:
-
-- `SessionStarted`, `SessionRenamed`, `SessionDefaultChanged`, `SessionForked`, `ContextCompacted`;
-- `MessageAccepted`, `MessageCommitted`;
-- `RunStarted`, `RunFinished`; and
-- `AgentSpawned`, `AgentUpdated`, `AgentFinished`.
-
-SessionView and RunView are pure reductions. Unknown kind/version, gaps, malformed payload, illegal transition, wrong scope, invalid fork boundary, or compaction digest mismatch fails closed. Rebuildable Session-list indexes are allowed; duplicate canonical Session/Run/Message tables are not.
+One SQLite journal owns canonical facts; Session and Run views are reductions.
+This keeps durable acknowledgement, causal history and replay consistent without
+multiple mutable representations of the same state. Rollback journaling fits
+the single-owner workload. [Store rules](../../agents/store.md) own durability
+and format checks; [architecture](../architecture/system-overview.md) owns schema.
 
 ### D-06 — Identity and time
 
-**Beta decision:** typed UUIDv7 newtypes identify Sessions, Runs, and AgentRuns; SQLite integer sequence is authoritative Event order. Persist Unix milliseconds for display and use monotonic `Instant` for deadlines. Do not add Clock or ID-generator traits.
+Typed identities, journal sequence, display timestamps and monotonic deadlines
+solve different problems. Keeping them distinct avoids ordering by wall time
+or treating a display identifier as authority. Concrete standard/library types
+suffice; no Clock or ID-generator seam is earned by the current flow.
 
 ### D-07 — Workspace and instruction inputs
 
-**Beta decision:** pin the user-selected Workspace as a capability. Resolve exact root `AGENTS.md`, falling back to exact root `CLAUDE.md` only on absence. Resolve every explicit include component-by-component with no-follow handles. Reject absolute paths, `.`, `..`, empty components, links/reparse points, and non-regular files.
-
-Read each opened handle once, bound it, validate UTF-8, hash exact bytes, and send snapshots rather than paths. Repository/Git configuration, `.env`, hooks, plugins, packages, tests, and startup commands are never consulted.
+Pinned handles and immutable bounded snapshots tie disclosure to admitted
+objects. Project text cannot select credentials or grant capabilities. Exact
+root instructions avoid implicit discovery and expansion. [Session input rules](../../agents/session.md)
+and [security rules](../../agents/security.md) own the admission contract.
 
 ### D-08 — Resource bounds
 
-**Beta decision:** keep limits fixed until measurements justify configuration.
-
-| Resource | Beta limit |
-|---|---:|
-| User Message/objective | 8 KiB |
-| Explicit includes | 16 files |
-| One include / all includes | 128 KiB / 256 KiB |
-| Instruction file | 64 KiB |
-| Compiled Provider input | 384 KiB |
-| Child objective / summary / result | 2 KiB / 2 KiB / 16 KiB |
-| Primary final result | 32 KiB |
-| Provider response body | 1 MiB |
-| Event payload | 64 KiB |
-| Default / hard active children | 3 / 8 |
-| Provider calls | `1` direct or at most `N + 2` team calls |
-| Output tokens per call | 4,096 |
-| Provider-call / Run deadline | 120 s / 300 s |
-| Cancellation drain | 2 s |
-| Automatic retries | 0 |
-| SQLite busy wait / database / admission headroom | 250 ms / 256 MiB / 4 MiB |
-| Update / store channels | 32 / 64 items |
-
-Before `RunStarted`, reserve the selected policy's maximum call/output/resource budget. Every overflow is typed and visible; canonical content is never silently truncated. The eight-child ceiling may increase only after named-host concurrency, memory, cost-feedback, and terminal-density gates pass.
+Reserve aggregate resources before admitting work so concurrency and model
+proposals cannot multiply the per-call allowance. Limits change for demonstrated
+needs, not speculative configurability. [Execution](../specs/execution.md),
+[Tools](../specs/tools.md) and their module owners define current bounds and
+overflow; this register keeps no parallel constant table.
 
 ### D-09 — CLI and Session commands
 
-**Decision:** keep attached Session work and deterministic machine modes explicit, with a compiled local command registry. This preserves familiar chat operation while preventing project/model text from becoming command authority or headless input from changing interpretation. Session selection is explicit and never inferred from a matching directory.
-
-[The terminal spec](../specs/terminal.md#entry-modes-and-channels) owns current modes, channels and interactive command behavior; [Session rules](../../agents/session.md#session-commands) own lifecycle semantics. The compiled registry owns exact syntax/availability. [CLI rules](../../agents/cli.md) own composition and admission.
+Explicit attached and machine modes make interpretation predictable for humans
+and scripts. A compiled local registry prevents project/model text from becoming
+command authority. [Terminal](../specs/terminal.md) and [CLI rules](../../agents/cli.md)
+own current entry modes, channels and syntax.
 
 ### D-10 — Terminal contract
 
-**Decision:** use the primary screen with a bottom composer/status and conditional activity, complete keyboard access and transient picker-only mouse. Arany owns navigable committed history rather than treating emulator scrollback as the full Session. This keeps ordinary single-agent work compact while making bounded-team work inspectable.
-
-[The terminal spec](../specs/terminal.md) owns current layout, keys, accessibility, restoration and acceptance scenarios. [Architecture](../architecture/system-overview.md#8-terminal-presentation) owns physical responsibility; [terminal rules](../../agents/terminal.md) own implementation constraints.
+Primary-screen history and compact conditional activity keep ordinary chat
+readable while allowing team inspection. Complete keyboard access and transient
+picker mouse reporting avoid imposing a permanent control room or pointer
+requirement. [The terminal spec](../specs/terminal.md) owns interaction and
+restoration; [terminal research](./beta-terminal-interface-and-multi-agent-feedback.md)
+retains the comparative evidence.
 
 ### D-11 — Configuration, credentials, and custom endpoints
 
-**Beta decision:** resolve CLI selections over trusted user config/Session defaults. State/config roots are platform user locations outside the Workspace and admitted before project input. Custom Provider profiles are configuration, not repository data.
-
-The current CLI retains explicit API-key environment references for `exec`, custom profiles, and flag-selected attached use. Bare new attached mode can select one native API account from the OS credential store; first-run setup writes one versioned record containing its key and selected Provider/model/effort, and Session defaults pin only the account UUID. Replacing the record makes older saved-account Sessions fail closed. A Provider Account belongs to the current OS user across that user's Sessions and StateRoots, not to the whole machine or one Session. On Linux, the account root and replacement lock are shared across Session StateRoots; [the account-scope finding](../security/findings/default-account-slot-cross-root.md) owns remaining native keyring evidence. Linux uses the standard Secret Service interface, not a KDE-specific contract; KDE Wallet is one test backend, not a product prerequisite. Setup prefers the OS keyring and may use a user-confirmed private-file fallback when unavailable; `0600`/`0700` do not encrypt or exclude other same-user processes. Never accept keys in arguments, profile files, Events, terminal output, or telemetry. Do not load `.env` or run credential commands.
-
-Native origins are compiled. Custom non-loopback origins require HTTPS; numeric loopback may use explicit HTTP. Normalize and pin origin/base path, disable redirects/cookies/ambient proxies, reject metadata/link-local/multicast and route drift, and bind one credential to one origin.
+Accounts belong to the current OS user across Sessions and StateRoots; a
+Session override must not create another billing identity. Trusted selection
+precedes secret access and project input. OS stores have distinct availability
+and confidentiality limits, so fallback must be explicit. [Credentials](../specs/credentials.md)
+owns scope, storage and recovery; [Provider rules](../../agents/provider.md)
+own destination admission.
 
 ### D-12 — Cancellation, errors, and retries
 
-**Decision:** cancellation preserves an honest durable prefix rather than promising remote rollback. [The terminal interruption contract](../specs/terminal.md#interruption-suspension-and-restoration) owns state-dependent keys and shutdown bounds; Engine/Session own whole-Run cleanup and interrupted replay. Store failure must not be presented as durable cancellation.
-
-Provider/Engine errors are typed safe classes. No credentials, headers, prompts, Messages, includes, response bodies, or raw stored payloads enter diagnostics. Automatic retries, provider/model fallback, and broker fallback are zero; a sent request may already be billable.
+Local cancellation preserves an honest durable prefix; it cannot undo remote
+usage or an already dispatched effect. Automatic retries and fallback would add
+billable attempts and recovery ambiguity. [Execution](../specs/execution.md),
+[Tools](../specs/tools.md) and [Provider rules](../../agents/provider.md) own the
+applicable outcomes and retry policy.
 
 ### D-13 — Dependency boundary
 
-**Beta decision:** direct dependencies remain the reviewed Rust foundation set: capability filesystem crates, clap, Tokio/cancellation, serde/JSON, reqwest+Rustls, rusqlite/bundled SQLite, directories, secrecy, SHA-256, UUID, error handling, Ratatui/Crossterm, target-specific platform APIs, and trace-only OpenTelemetry crates for the final slice. Dev dependencies include tempfile, Tokio test utilities, OpenTelemetry test support, and a reviewed PTY helper such as expectrl.
+Use reviewed libraries for actual capabilities without adding pools, generic
+configuration, dynamic plugins or forwarding traits. A dependency's default
+retry, routing or logging policy cannot become harness policy implicitly.
+[Cargo inputs](../../Cargo.toml) and the [dependency inventory](../security/beta-dependency-inventory.md)
+own the current set and review scope.
 
-Do not add SQLx, a pool, async-trait, vendor community SDKs, a generic configuration framework, tracing subscriber, a second terminal framework, or dynamic plugin loading. The approved account-setup and ChatGPT-plan slices may need reviewed OS credential, OAuth, browser-open, and streaming support; add only the minimal dependencies justified by those concrete boundaries. `Cargo.lock`, feature inspection, advisories, licenses, build scripts, proc macros, native code, and application `unsafe` are release gates.
+### D-14 — OTLP is optional lossy output
 
-### D-14 — OTLP ships last in beta
-
-**Beta decision:** after Session/team/native/custom-provider gates pass, ship runtime-opt-in trace-only OTLP/HTTP protobuf to an explicit numeric-loopback Collector. It is part of beta, not deferred to an external request.
-
-Each Run is a trace correlated by safe Session/Run/AgentRun IDs. Spans are dynamic and bounded by admitted agents and calls; the topology is not fixed at nine. Typed fields exclude user Messages, objectives, prompts, instructions, summaries, results, paths, contents, Event payloads, bodies, headers, credentials, and arbitrary attributes. Export failure/drop/shutdown never changes canonical state or Run exit.
+Traces describe timing and causality; they are not durable history. A local
+Collector keeps remote authentication and routing outside the harness. Bounded,
+content-free export protects Run correctness and privacy even when delivery
+fails. [Telemetry rules](../../agents/telemetry.md) own enforcement;
+[OTLP rationale](./otlp-observability.md) explains the transport and SDK choices.
 
 ### D-15 — Security boundary
 
-**Beta decision:** establish all authority before project input. Session history, repository text, Provider/custom-profile output, compaction, child data, and replay are untrusted. None may widen roots, endpoints, credentials, protocol, models, budgets, topology, policy, instruction role, telemetry, or capabilities.
-
-The current implementation has no shell, subprocess, Workspace write, arbitrary fetch, MCP, runtime plugin, callback listener, or sandbox claim. The approved official ChatGPT OAuth slice may add a bounded loopback callback listener only after its separate authentication and local-transport review. State is private/no-follow/defensive; output is inert; custom egress requires exact current evidence; budgets are aggregate; mouse capture is transient and restored; supply-chain inputs are pinned and reviewed. The first effectful Tool activates typed EffectIntent, Policy, approval proof, separate Guard, and attestation.
+Establish authority before consuming untrusted input. Model proposals require
+deterministic Policy and separately enforced effects; instructions alone cannot
+provide containment. [Security rules](../../agents/security.md) and
+[the Tool contract](../specs/tools.md) own current requirements. Incident evidence
+remains in [security research](./harness-security-lessons-and-controls.md).
 
 ### D-16 — Evidence-dense testing
 
-**Beta decision:** maximize evidence per test, not test count or line coverage. One deterministic Session journey owns new/single Run, exit/resume, Provider switch, `N`-child team, controlled completion, fork, compaction failure, cancellation, replay, and exact output with only Provider scripted.
-
-Tables/corpora own other `N` values, parser/command states, illegal histories, path/security inputs, custom-profile conformance, and terminal controls. TestBackend owns semantic composer/footer/shelf frames. Native Linux/macOS PTYs own scrollback, Session/agent pickers, transient mouse, signals, suspension, cancellation, and restoration. Native adapters own explicit paid live runs; custom profiles own data-free conformance before Workspace-bearing smoke.
+Exercise real Engine, filesystem and SQLite behavior with only Provider scripted.
+Reuse a scenario or corpus when it proves the same claim; add another layer only
+for distinct process, native or durability evidence. This catches integrated
+failures without maximizing test count. [Testing rules](../../agents/testing.md)
+own procedures; [testing rationale](./testing-strategy-for-rust-cli-harness.md)
+owns the trade-offs.
 
 ### D-17 — Product identity, platforms, and license
 
-**Product decision:** the product and executable are Arany/`arany`. The current beta 1 goal targets a locally built Linux executable and Engine/Provider iteration for one user; native macOS testing is explicitly outside this goal and becomes a next step on a macOS machine. Cross-platform release claims still require native filesystem, persistence, signal, terminal, packaging, and accessibility evidence. Windows remains triggered scope.
-
-Use **Apache-2.0 plus a project NOTICE** attributed to `fpmirabile`. This is the closest standard license to free use/modification with redistributed attribution, changed-file marking, and an explicit patent grant. Do not dual-license with MIT and do not append a custom attribution clause. It cannot force private users or hosted services to display credit. Preserve `LICENSE` and `NOTICE` in every release artifact.
+The product and executable are Arany and `arany`. Linux-first delivery does not
+change the OS parity goal; native evidence determines support claims. Apache-2.0
+plus NOTICE supplies standard attribution and patent terms without a custom
+license. It does not require private users or hosted services to display credit.
+[LICENSE](../../LICENSE), [NOTICE](../../NOTICE) and [project priorities](../../AGENTS.md)
+own the current obligations.
 
 ### D-18 — Explicitly accepted ChatGPT-plan route is beta scope
 
-**Context:** OpenAI's official open-source Sign in with ChatGPT flow now permits eligible Plus/Pro users to authorize Responses inference with their plan. Its preview route requires `stream: true` and rejects `max_output_tokens`, so it cannot satisfy the existing remote output-token guarantee. See the [official quickstart](https://developers.openai.com/siwc/quickstart), [route limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations), and [error guidance](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery).
+The user accepted a distinct consented plan route with a weaker remote cost
+guarantee: local stream/time limits cannot enforce a remote output-token or
+plan-usage cap. The benefit is eligible plan access; the cost is that explicitly
+accepted limitation. It does not weaken API-key/custom guarantees or authorize
+billing fallback. [ChatGPT rules](../../agents/chatgpt.md) own account-bound
+consent and transport; the [subscription source review](./subscription-provider-routes-2026-10.md)
+retains the dated provider-policy evidence.
 
-**Beta decision (approved, offline implementation complete; live proof open):** offer API key and ChatGPT-plan access as distinct first-run choices, with ChatGPT subscription activation ahead of performance and distribution work. The plan route requires a clear warning and affirmative account-level acceptance that local time/read limits cannot guarantee a remote output-token or plan-usage cap. Pin access method and effective guarantee before each Run; never silently fall back to API-key billing. Keep the strict remote cap on existing API-key and custom routes. This accepts a weaker cost guarantee for the voluntary subscription route in exchange for using an eligible existing plan; it does not authorize an unbounded local stream or a claim of exact cost control. Browser setup, protected account lifecycle, catalog, model/effort checks, and checked Engine Runs are wired and offline-tested. A real account login, paid check, and direct turn remain unverified. Never import other harness credentials or call private ChatGPT routes.
+### D-19 — Personal beta prioritizes Engine flows and user-owned live testing
 
-**Implementation boundary:** the user's approval sets product policy, not consent for any particular ChatGPT account. Bind affirmative acceptance to the verified registration and warning version before activating it; a switched saved account must already carry its own current receipt, and a changed warning requires renewed acceptance. Choosing an already-consented saved account does not repeat browser login or the warning. The official route has a distinct account-specific model catalog and treats only a terminal `response.completed` event as success. Sources: [accounts and sessions](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions), [models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference).
-
-### D-19 — Personal beta 1 prioritizes Engine flows and user-owned live testing
-
-**Context:** the local Engine and terminal have extensive synthetic evidence and the ChatGPT sign-in path is implemented, but no real subscription-backed turn has yet been observed. Distribution and more latency tuning do not answer that immediate product question. The [current subscription-source review](./subscription-provider-routes-2026-10.md) distinguishes OpenAI's admitted open-source route from Anthropic's restricted third-party login.
-
-**Decision (2026-10-03, updated user handoff):** beta 1 is a locally buildable Linux executable for its current OS user, centered on durable Engine turns and the admitted ChatGPT-plan connection flow. Finish account-bound OAuth consent, keyring-first token handling with an explicit same-user-access warning and a separately confirmed private-file fallback when the keyring is unavailable, model/effort evidence, readable chat, and direct/delegated Runs with automated synthetic verification before more performance work or a Linux redistribution bundle. Real sign-in, plan-consuming checks and turns, remaining native credential checks, and manual UX/accessibility tests belong to the user after implementation; they do not block that handoff and do not become verified support claims. A separate live team check remains opt-in. Claude Pro/Max subscription access is also a high-priority product request, but the documented third-party authorization/route gate remains unresolved; do not import Claude Code tokens or present API billing as a subscription. Seek explicit Anthropic approval or a published compatible route, then prove it separately. The existing Anthropic API-key adapter remains available for later opt-in paid testing. macOS native testing moves to a next step on a macOS machine, not a gate for this Linux personal beta 1 goal. KDE Wallet was a test backend, never a product requirement. Preserve security, correctness, offline regression, and license-metadata checks; deferring distribution and performance polish does not waive them.
-
-**Trade-off and status:** a working local binary and genuine ChatGPT Engine iteration arrive before cross-platform or redistributable-release claims. The keyring risk was accepted, the protected lifecycle and per-user consistency have offline and synthetic native evidence, and a paid, user-consented live conformance/turn remains open; Anthropic subscription needs external permission or a changed official contract. The next broader beta can revisit portable release artifacts, native macOS, accessibility, and measured performance after the core workflow is usable.
+Prioritize a usable local harness and genuine account-backed work over packaging
+or further latency tuning. Keep automated security/correctness checks; separately
+authorized paid calls and human UX checks remain user-owned evidence, not silent
+release clearance. Linux-first milestone ordering does not prevent native macOS
+work or imply parity. Anthropic subscription integration remains conditional on
+provider authorization or an admitted published route; API-key billing is a
+separate choice. [Next steps](../../NEXT_STEPS.md) owns current delivery and gaps.
 
 ### D-20 — Mixed saved access is chosen on every new start
 
-**Context:** bare `arany` previously preferred a saved native API account even when a ChatGPT-plan account was also selected. That could surprise the user with a different billing route, and the old lookup loaded the API key before deciding.
+A repeated explicit billing choice avoids inferring intent from timestamps,
+Session history or whichever credential is found first. Checked record presence
+is a routing hint, not authorization. This costs one interaction and avoids
+another secret-adjacent preference record. [The credential contract](../specs/credentials.md)
+owns the selection and validation behavior; [the scoped finding](../security/findings/ambiguous-saved-access-selection.md)
+retains the failure context.
 
-**Decision (2026-10-02, approved and implemented offline):** when both protected access records exist, prompt for `API key` or `ChatGPT plan` on every new attached start without explicit Provider flags. Do not remember a preference, infer one from Session history or timestamps, or fall back when the chosen account is invalid. Cancelling creates no Session. Probe only checked record presence before the choice, then read the chosen route's record and pin its selected account UUID. The ChatGPT index may contain multiple private-file tokens and is read as a whole; this decision prevents reading the other billing route's record, not every unselected token in the chosen index. Explicit Provider flags and resumed Sessions retain their own admission rules. If multiple ChatGPT registrations are already saved, `/setup` may switch to one only after checking its current consented credential under the OS-user account lock; model visibility and optional diagnostic checks do not replace current Run account/consent admission or strict actual-response validation.
+## 3. Expansion decisions
 
-**Reason and trade-off:** a repeated one-step choice costs an interaction but makes account and billing intent explicit without adding another secret-adjacent preference record. Presence is a routing hint, not proof that either account can run; the selected record is still validated before use. Offline Linux process and Store tests pass. Native macOS, full writable-keyring setup, and a real paid subscription turn remain unverified; no commit was made.
-
-## 3. Triggered modules
-
-| Trigger | Introduce | Evidence already available |
-|---|---|---|
-| Local effects exceed the implemented Linux base | Reviewed runtime/cache/artifact or native-platform adapters | [Local tools](../tools.md), Security/protection reports |
-| Children need nested delegation | Recursive supervision and depth budgets | Multi-agent report |
-| Concurrent writes | Isolated Workspace views and integration owner | Multi-agent report |
-| Dependencies/ownership transfer | Assignment DAG, attempts, leases, fencing | Multi-agent report |
-| Knowledge helps another Session | Scoped Memory and retrieval/deletion evaluation | Context/Memory report |
-| Event payload bound is exceeded | Content-addressed Artifacts | Context/Provider reports |
-| Replay misses measured budget | Rebuildable snapshots | Persistence report |
-| Retrieval quality requires it | FTS5, then vector/hybrid only after labelled gap | Context report |
-| Second Client or detached work | Per-user daemon and versioned local protocol | Modular architecture |
-| Built-in OpenRouter support is claimed | Exact broker route/privacy/provenance/no-fallback adapter | Provider report |
-| Browser/remote/multi-tenant product exists | New authn/authz/quota/encryption/retention/threat model | Modular/security reports |
-| Direct remote telemetry is required | TLS/auth/secrets/proxy/SSRF design | OTLP report |
-
-## 4. Implementation handoff
-
-1. Write one implementation plan from `planning/TEMPLATE.md`, importing D-15 security and D-16 evidence owners.
-2. Create the one package with pinned toolchain, lockfile, minimal features, and supply-chain inventory.
-3. Implement trusted startup, private state, Workspace snapshots, Session/Event schema, reducers, deterministic output, and hostile-content handling.
-4. Prove create/exit/resume/multi-Run/fork and deterministic context compilation with the scripted Provider.
-5. Prove `single`, `auto`, `team`, ordered `0..N` children, aggregate budgets, join, and cancellation.
-6. Add the primary-screen committed history, fixed-bottom composer/status and conditional activity shelf, Session/agent pickers, accessibility, and transient mouse after keyboard/restoration proof.
-7. Add native OpenAI and Anthropic API-key adapters and their offline/live conformance.
-8. Add trusted custom `openai-responses` profiles and data-free `provider check`.
-9. Retain the implemented slash completion and account setup, then complete the officially admitted ChatGPT-plan route with account-bound consent, model/effort conformance, and synthetic Engine turns; hand real sign-in and plan-consuming checks/turns to the user after implementation.
-10. Keep Anthropic subscription integration pending an official authorization or published route while preserving its independently billed API-key adapter. Complete the local Linux correctness, security, and dependency checks needed for a usable beta 1 executable.
-11. After beta 1, recheck OTLP with the new routes and pursue portable release packaging, native macOS and accessibility evidence, and additional named-host performance gates.
-
-The initial read-only proof preceded the Guard/Tool runtime. The user subsequently included the implemented local coding base in beta 1; [local tools](../tools.md) owns its supported subset. Daemon, additional Clients, cross-Session Memory, Artifact store, nested teams, Assignment DAG, search indexes, automatic routing, built-in OpenRouter, evaluation service, web API, direct remote telemetry, OTLP logs and metrics retain their named future triggers.
+Reconsider a boundary only for its named constraint. Subject reports retain
+conditions for a second Client, recursive supervision, cross-Session Memory,
+retrieval, Artifacts and storage optimizations. [The research index](./README.md)
+locates them. An extension requires a concrete accepted contract and plan; this
+register does not maintain a second deferred-feature or execution checklist.

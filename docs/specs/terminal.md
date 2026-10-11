@@ -208,7 +208,7 @@ Width layouts distinguish at least 80 columns, 50–79 and narrower terminals. A
 
 ## Acceptance scenarios and evidence owners
 
-Each row is a required scenario and names its existing owner, not a claim that all listed gates have passed. [Testing rules](../../agents/testing.md) determine evidence admission; dated outcomes live in [the beta plan](../../planning/arany-beta/README.md), and user-owned checks in [next steps](../../NEXT_STEPS.md#beta-1-final-user-owned-checks).
+Each row is a required scenario and names its existing owner, not a claim that all listed gates have passed. [Testing rules](../../agents/testing.md) determine evidence admission; completed outcomes belong in the handoff and Git/CI history, and user-owned checks in [next steps](../../NEXT_STEPS.md#beta-1-final-user-owned-checks).
 
 | Scenario | Given / when / expected outcome | Existing owner |
 |---|---|---|

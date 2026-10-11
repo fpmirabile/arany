@@ -174,6 +174,16 @@ pub fn capture(child: &mut Child, duration: Duration, cap: usize) -> Output {
     )
 }
 
+/// Asserts that a self-spawned `--exact` test child completed exactly one passing test.
+pub fn assert_single_test_completed(stdout: &[u8], context: &str) {
+    assert!(
+        String::from_utf8_lossy(stdout)
+            .lines()
+            .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;")),
+        "{context}: child did not complete exactly one test"
+    );
+}
+
 #[cfg(unix)]
 pub fn terminal_settings(terminal: impl AsFd) -> nix::sys::termios::Termios {
     let settings = nix::sys::termios::tcgetattr(terminal).expect("native terminal settings");

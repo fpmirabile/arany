@@ -2846,11 +2846,7 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
                 .any(|part| part == b"running 1 test\n")
         );
         assert_eq!(seeded.stderr, b"");
-        assert!(
-            seeded.stdout.windows(b"test result: ok. 1 passed; 0 failed; 0 ignored;".len())
-                .any(|part| part == b"test result: ok. 1 passed; 0 failed; 0 ignored;"),
-            "exactly one completed seed test"
-        );
+        process::assert_single_test_completed(&seeded.stdout, "seed");
         let selected = continue_session(
             StateRoot::open_existing(&state_path).expect("seed State"),
             workspace.clone(),

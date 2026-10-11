@@ -91,4 +91,10 @@ jobs:
       - name: Install repository Rust toolchain
         run: rustup show
       - run: cargo fetch --locked
+      - name: Clippy on macOS
+        run: cargo clippy --workspace --all-targets --locked --offline ${{ matrix.cargo-flags }} -- -D warnings
       - run: cargo test --workspace --locked --offline ${{ matrix.cargo-flags }}
+      - name: Native macOS unit ownership and resource enforcement
+        run: cargo test --lib --locked --offline ${{ matrix.cargo-flags }} tools::guard::macos::unit::tests::native_unit_owns_descendants_and_supervises_resources -- --exact --ignored
+      - name: Native macOS immutable file CPU expiry
+        run: cargo test --lib --locked --offline ${{ matrix.cargo-flags }} tools::guard::macos::tests::native_file_profile_cpu_expiry_cannot_be_disabled -- --exact --ignored

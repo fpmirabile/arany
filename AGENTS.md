@@ -19,6 +19,7 @@ Arany is a Rust-first, CLI-only agent harness. The product and executable are na
 | ChatGPT-plan OAuth, consent, tokens, weaker output bounds | [ChatGPT](./agents/chatgpt.md) |
 | Sessions, resume/fork/compaction, collaboration, topology, context | [Session](./agents/session.md) |
 | SQLite admission, Events, replay | [Store](./agents/store.md) |
+| Shared private-directory admission and native ACL checks | [Private filesystem](./agents/private-fs.md) |
 | Terminal behavior, output, accessibility, restoration, presentation | [Terminal](./agents/terminal.md) |
 | Clipboard transport, clients, workers, results | [Clipboard](./agents/clipboard.md) |
 | Image admission, multimodal context, replay | [Image](./agents/image.md) |
@@ -70,4 +71,4 @@ Create a module only after its implementation gains depth; a crate needs measure
 
 ## Maintaining these instructions
 
-Keep this file limited to knowledge useful in almost every session. Keep one authoritative source per rule; rewrite or prune instead of appending duplicates. Put module details behind conditional links, and verification history in its evidence owner. Keep machine-local paths and developer-specific tool preferences in personal agent configuration. When changing routing, check links and representative tasks; do not repeat facts an agent can cheaply discover from code or configuration.
+Keep this file limited to knowledge useful in almost every session. Keep one authoritative source per rule; rewrite or prune instead of appending duplicates. Put module details behind conditional links, and verification guidance in its authoritative owner. Keep machine-local paths and developer-specific tool preferences in personal agent configuration. When changing routing, check links and representative tasks; do not repeat facts an agent can cheaply discover from code or configuration.

@@ -116,7 +116,7 @@ fn guarded_native_files_and_skills_survive_closed_replay() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+    crate::process::assert_single_test_completed(&output.stdout, "native file journey");
     assert!(
         output.stderr.is_empty(),
         "native journey stderr: {:?}",
@@ -562,9 +562,14 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
     let config_bytes = br#"{"version":1,"workspace_paths":["src"],"write":true,"commands":[],"skills":[],"mcp":[]}"#;
     for (case, stage) in [
         ("eof", "handshake"),
-        ("invalid_go", "handshake"),
+        ("invalid_go", "admission"),
+        ("early_go", "admission"),
         ("stale_workspace", "workspace"),
         ("resource_mismatch", "admission"),
+        ("truncated_task", "admission"),
+        ("malformed_task", "admission"),
+        ("oversized_task", "admission"),
+        ("maximum_task", "handshake"),
     ] {
         let mut intent = admitted.clone();
         intent.id = uuid::Uuid::now_v7();
@@ -588,11 +593,27 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
         if case == "resource_mismatch" {
             intent.limits.resource_profile = ToolResourceProfile::LinuxKernel;
         }
-        let task = serde_json::to_vec(
+        let mut task = serde_json::to_vec(
             &json!({"config":serde_json::from_slice::<serde_json::Value>(config_bytes).unwrap(),
             "intent":intent,"workspace":workspace,"guard_executable":env!("CARGO_BIN_EXE_arany")}),
         )
         .unwrap();
+        const TASK_BYTES_CAP: usize = 96 * 1024;
+        match case {
+            "malformed_task" => task = b"{".to_vec(),
+            "maximum_task" => task.resize(TASK_BYTES_CAP, b' '),
+            "oversized_task" => task.resize(TASK_BYTES_CAP + 1, b' '),
+            _ => {}
+        }
+        if !matches!(case, "truncated_task" | "oversized_task") {
+            task.push(b'\n');
+        }
+        if case == "early_go" {
+            task.extend_from_slice(b"GO\n");
+        }
+        if case == "invalid_go" {
+            task.extend_from_slice(b"NO\n");
+        }
         let child = Command::new(env!("CARGO_BIN_EXE_arany"))
             .arg("--internal-tool-guard")
             .env_clear()
@@ -605,10 +626,6 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
         let mut owned = crate::loopback::ChildGuard::new(child);
         let mut stdin = owned.child().stdin.take().unwrap();
         stdin.write_all(&task).unwrap();
-        stdin.write_all(b"\n").unwrap();
-        if case == "invalid_go" {
-            stdin.write_all(b"NO\n").unwrap();
-        }
         drop(stdin);
         let output = crate::process::capture(owned.child(), Duration::from_secs(10), 4096);
         assert_eq!(

@@ -1,4 +1,4 @@
-use super::StoreError;
+use super::Error;
 use std::{
     ffi::c_void,
     marker::PhantomData,
@@ -134,14 +134,14 @@ impl Drop for Acl {
     }
 }
 
-pub(super) fn check(fd: BorrowedFd<'_>, private: bool) -> Result<(), StoreError> {
+pub(super) fn check(fd: BorrowedFd<'_>, private: bool) -> Result<(), Error> {
     let acl = match Acl::from_fd(fd) {
         Ok(Some(acl)) => acl,
         Ok(None) => return Ok(()),
-        Err(_) => return Err(StoreError::StateNotPrivate),
+        Err(_) => return Err(Error::NotPrivate),
     };
     if !acl.is_valid() {
-        return Err(StoreError::StateNotPrivate);
+        return Err(Error::NotPrivate);
     }
     for index in 0..=MAX_ACL_ENTRIES {
         let entry = if index == 0 {
@@ -152,19 +152,19 @@ pub(super) fn check(fd: BorrowedFd<'_>, private: bool) -> Result<(), StoreError>
         let entry = match entry {
             Ok(Some(entry)) if index < MAX_ACL_ENTRIES => entry,
             Ok(None) => return Ok(()),
-            _ => return Err(StoreError::StateNotPrivate),
+            _ => return Err(Error::NotPrivate),
         };
         let Some((tag, permissions)) = entry.tag_and_permissions() else {
-            return Err(StoreError::StateNotPrivate);
+            return Err(Error::NotPrivate);
         };
         if !matches!(tag, ACL_EXTENDED_ALLOW | ACL_EXTENDED_DENY)
             || permissions & !KNOWN_PERMISSIONS != 0
             || tag == ACL_EXTENDED_ALLOW && (private || permissions & MUTATION != 0)
         {
-            return Err(StoreError::StateNotPrivate);
+            return Err(Error::NotPrivate);
         }
     }
-    Err(StoreError::StateNotPrivate)
+    Err(Error::NotPrivate)
 }
 
 #[cfg(test)]
@@ -187,6 +187,8 @@ mod tests {
     fn private_state_rejects_native_acl_grants_through_opened_handles() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("state");
+        let directory = super::super::open_directory(&path, true).unwrap();
+        assert_eq!(directory.dir.entries().unwrap().count(), 0);
         let workspace = temp.path().join("project");
         std::fs::create_dir(&workspace).unwrap();
         let state = StateRoot::admit(&path).unwrap();
@@ -250,6 +252,10 @@ mod tests {
             chmod(&file, &["-N"]);
         }
         chmod(&path, &["+a", "everyone allow read,search"]);
+        assert!(matches!(
+            super::super::open_directory(&path, false),
+            Err(super::Error::NotPrivate)
+        ));
         assert!(matches!(
             StateRoot::open_existing(&path),
             Err(StoreError::StateNotPrivate)

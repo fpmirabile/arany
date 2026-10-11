@@ -404,14 +404,7 @@ fn account_path_ignores_session_state_environment() {
             .expect("bounded isolated account-path child");
         assert!(output.status.success(), "account-path case {case} failed");
         assert_eq!(output.stderr, b"");
-        let completed = b"test result: ok. 1 passed; 0 failed; 0 ignored;";
-        assert!(
-            output
-                .stdout
-                .windows(completed.len())
-                .any(|part| part == completed),
-            "account-path case {case} did not complete exactly one test"
-        );
+        process::assert_single_test_completed(&output.stdout, &format!("account-path case {case}"));
     }
 }
 

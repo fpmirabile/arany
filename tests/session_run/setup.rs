@@ -1549,7 +1549,7 @@ fn release_saved_account_is_private_across_os_users() {
                 .take(2048)
                 .collect::<String>()
             );
-            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+            crate::process::assert_single_test_completed(&output.stdout, "second OS user");
         }
         return;
     }
@@ -1641,7 +1641,7 @@ fn release_saved_account_is_private_across_os_users() {
         .take(4096)
         .collect::<String>()
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+    crate::process::assert_single_test_completed(&output.stdout, "saved account");
 }
 
 #[cfg(debug_assertions)]

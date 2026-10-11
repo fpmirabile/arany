@@ -33,6 +33,11 @@ Tools owns one private model-input projection shared by the native adapters. It 
 
 There is one Rust package, one long-lived process, and one substitutable Engine behavior seam. Short-lived same-binary children isolate blocking OS-credential calls and effectful Tool execution at separate privilege boundaries; neither is a second Client or daemon.
 
+The macOS Tool controller runs its bounded unit lifecycle on an awaited blocking
+owner with a private reactor. Native teardown, including synchronous unwind,
+does not occupy the terminal reactor. Abandoning that await cancels the owner;
+the dispatch marker still distinguishes pre-GO refusal from uncertain execution.
+
 ```mermaid
 flowchart LR
     User([User or script]) --> CLI[Arany CLI]
@@ -75,6 +80,11 @@ Provider is the only substitutable Engine behavior because several implementatio
 
 The current-thread Tokio coordinator owns async lifecycle. One named standard-library thread owns the sole synchronous SQLite connection. A bounded telemetry worker owns OTLP export. Neither storage nor telemetry blocks Provider progress on the coordinator.
 
+Store and Guard share a private filesystem admission module for checked
+directory handles and native ACL validation. This module knows neither history
+nor Tool policy. Store creates its database, records and leases after admission;
+Guard admits only its temporary control directory and retains its handle.
+
 ## 3. Physical beta shape
 
 ```text
@@ -112,6 +122,9 @@ src/
 │   ├── exec.rs      one-Run command composition and durable receipt
 │   └── provider.rs  model catalog and data-free custom profile check commands
 ├── lib.rs           small public interface for the deep Engine
+├── private_fs.rs    shared no-follow private-directory admission
+├── private_fs/
+│   └── acl.rs       native macOS descriptor-based ACL checks
 ├── diagnostics.rs   closed local debug failure stages and bounded stack frames
 ├── engine.rs        Run admission, budgets, Provider outcomes
 ├── engine/
@@ -177,7 +190,7 @@ src/
 │   ├── journal/
 │   │   └── crash_tests.rs ignored Linux append transaction-death gate
 │   ├── replay.rs    bounded strict Event loading and lineage resolution
-│   ├── state.rs     private state-root admission inside the store boundary
+│   ├── state.rs     private State records and checked history reset
 │   └── state/
 │       └── lock.rs  per-Session and account-replacement locks, private file checks
 ├── presentation.rs  pure linear projections and sanitization
@@ -387,13 +400,13 @@ The Engine publishes the latest acknowledged RunView and committed sequence thro
 
 A terminal-owned clipboard worker has bounded trusted OS-client ownership distinct from the reader and Engine. Immutable image values cross semantic Provider/Session boundaries; human drawing receives metadata. Canonical image bytes, multimodal context and compaction remain under the image/Session/Store owners.
 
-The released terminal owner retains signal listeners through committed output and transfers them to reacquisition. Raw/canonical input is stopped and joined before modes/flags are restored; suspension retains the pinned Run future and bounded draft. Lifecycle failures cannot manufacture a committed outcome. Detailed fault ownership and current unverified claims remain in [next steps](../../NEXT_STEPS.md) and [the beta evidence plan](../../planning/arany-beta/README.md).
+The released terminal owner retains signal listeners through committed output and transfers them to reacquisition. Raw/canonical input is stopped and joined before modes/flags are restored; suspension retains the pinned Run future and bounded draft. Lifecycle failures cannot manufacture a committed outcome. Detailed fault ownership remains in [terminal rules](../../agents/terminal.md); [next steps](../../NEXT_STEPS.md) owns unverified claims.
 
 ## 9. Provider profiles and custom endpoints
 
 One ProviderProfile binds protocol family, normalized endpoint/base path, credential reference, model, outcome encoding, privacy claim, and capability evidence. Native profiles are compiled; each admitted model still requires paid model-scoped live proof before a release claim. Custom profiles live only in trusted user configuration outside the Workspace.
 
-Native API selection carries one closed credential value: Provider, key and optional Anthropic API workspace. The API workspace is a tenant/billing scope, not Arany's filesystem Workspace. Environment-backed Anthropic selections read it explicitly; other Providers and saved accounts never inherit it. Setup offers key-scoped access or a visible explicit workspace ID. Every native API account uses schema 2 with explicit nullable workspace scope; the backend marker and aggregate storage cap stay unchanged. The selected-account loader returns the complete validated credential. Its scope is immutable across catalog pages and all native calls and enters the current exact-evidence fingerprint. It authorizes no new endpoint or arbitrary header. The [beta plan](../../planning/arany-beta/README.md#completed-implementation-explicit-anthropic-api-workspace-scope) records the implementation and evidence scope; synthetic success is not live API compatibility.
+Native API selection carries one closed credential value: Provider, key and optional Anthropic API workspace. The API workspace is a tenant/billing scope, not Arany's filesystem Workspace. Environment-backed Anthropic selections read it explicitly; other Providers and saved accounts never inherit it. Setup offers key-scoped access or a visible explicit workspace ID. Every native API account uses schema 2 with explicit nullable workspace scope; the backend marker and aggregate storage cap stay unchanged. The selected-account loader returns the complete validated credential. Its scope is immutable across catalog pages and all native calls and enters the current exact-evidence fingerprint. It authorizes no new endpoint or arbitrary header. The [credential contract](../specs/credentials.md) owns account scope and acceptance scenarios; synthetic success is not live API compatibility.
 
 Native model effort is selected from a reviewed per-model set or resolved to an explicit reviewed default before Workspace input. The native adapter sends the resolved level explicitly on every Run and compaction request, and `RunStarted` pins it for replay. The finite reviewed table contains exact model/effort metadata; account catalogs may contain many more IDs. Custom capability-evidence version 2 binds its exact model and an explicit bounded ordered effort list to the exact profile and fingerprint; an empty list permits only provider-default reasoning behavior, and each declared effort receives a data-free strict finish probe. An admitted explicit choice is sent on every Run and compaction call and pinned in `RunStarted`; omission retains the conformed provider-default behavior. Catalog availability alone does not prove compatibility. Unknown native models may be selected with explicit closed effort without a synthetic check; `resolve_native_effort_for_run` validates their local selection and limits concurrency to one, while the reviewed metadata resolver stays closed. All actual requests still require provider-enforced schema and strict outcomes.
 
@@ -459,7 +472,7 @@ The release boundary includes:
 - one immutable aggregate Run budget for calls, output tokens, bytes, time, memory, disk, `N`, and concurrency;
 - only admitted fixed native or exact verified custom Provider requests, with phase-minimal content and origin-bound credentials; standard OS TLS validation may make auxiliary certificate-related connections, never an Arany payload destination;
 - inert terminal output, no alternate screen, transient picker-only mouse, and one RAII terminal owner that restores every enabled mode on every exit path; and
-- pinned/reviewed dependencies, lockfile, build/proc-macro/native inventory, and forbidden application `unsafe`.
+- pinned/reviewed dependencies, lockfile, build/proc-macro/native inventory, binary-forbidden and library-denied `unsafe` with scoped native Guard/ACL exceptions.
 
 The first local effectful base implements immutable typed effects, deterministic restrict-only Policy and a separately enforcing Guard. Private reviewed configuration or explicit user folder trust supplies upfront grants. Attached Request approvals, Auto edits and AI-reviewed Auto approval narrow dispatch through a bounded one-shot control channel; AI reviews use the existing Provider seam and canonical phase/usage, never a new authority. The terminal owns vertical choices and mode keys. Replay retains review/effect facts without renewing permission. Universal host/same-UID protection is not claimed. Native macOS, remote MCP/network disclosure and larger runtimes require separate admission/evidence.
 
@@ -505,7 +518,7 @@ It does not force private users or hosted services to show a public “Powered b
 ## 15. Implementation order
 
 1. Write the implementation plan with this Session/team contract, security claims/non-claims, and evidence owners.
-2. Create the package with forbidden application `unsafe`, pinned toolchain/lockfile, minimal features, and reviewed supply chain.
+2. Keep the package's binary-forbidden and library-denied `unsafe` policy, scoped reviewed native Guard/ACL exceptions, pinned toolchain/lockfile, minimal features, and reviewed supply chain.
 3. Implement trusted startup, private state admission, Workspace snapshots, Session identity, Event schema, reducers, deterministic output, and hostile-content handling.
 4. Make create/exit/resume/multi-Run/fork and deterministic context compilation pass with the scripted Provider.
 5. Implement ordered bounded `0..N` children and prove `single`, `auto`, `team`, aggregate budgets, join, and cancellation.

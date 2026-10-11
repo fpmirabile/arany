@@ -87,6 +87,12 @@ pub(crate) fn parse_mcp_arguments(arguments: &str) -> Result<Value, super::ToolE
 }
 
 impl ToolCall {
+    pub(crate) fn is_process(&self) -> bool {
+        matches!(
+            self,
+            Self::Command { .. } | Self::McpList { .. } | Self::McpCall { .. }
+        )
+    }
     pub(crate) fn valid(&self) -> bool {
         if !serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_ARGUMENT_BYTES) {
             return false;
@@ -371,6 +377,9 @@ pub struct ToolObservation {
 }
 
 impl ToolObservation {
+    pub(crate) fn attested_for(&self, intent: &EffectIntent) -> bool {
+        self.intent == *intent && self.valid() && self.guard.is_some()
+    }
     pub(crate) fn stops_run(&self) -> bool {
         matches!(
             self.disposition,

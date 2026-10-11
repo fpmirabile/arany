@@ -4,23 +4,14 @@ use security_framework::{
     os::macos::keychain::{SecKeychain, SecPreferencesDomain},
 };
 
-/// `errSecItemNotFound`.
 const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
-/// `errSecWrPerm`.
 const ERR_SEC_WR_PERM: i32 = -61;
-/// `errSecInvalidOwnerEdit`.
 pub(in crate::cli::credentials) const ERR_SEC_INVALID_OWNER_EDIT: i32 = -25244;
-/// `errSecNotAvailable`.
 const ERR_SEC_NOT_AVAILABLE: i32 = -25291;
-/// `errSecReadOnly`.
 const ERR_SEC_READ_ONLY: i32 = -25292;
-/// `errSecAuthFailed`.
 const ERR_SEC_AUTH_FAILED: i32 = -25293;
-/// `errSecNoSuchKeychain`.
 const ERR_SEC_NO_SUCH_KEYCHAIN: i32 = -25294;
-/// `errSecInvalidKeychain`.
 const ERR_SEC_INVALID_KEYCHAIN: i32 = -25295;
-/// `errSecInteractionNotAllowed`.
 pub(in crate::cli::credentials) const ERR_SEC_INTERACTION_NOT_ALLOWED: i32 = -25308;
 /// The store exists but cannot be used right now.
 const ERR_SEC_STORAGE_ACCESS: [i32; 8] = [

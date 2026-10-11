@@ -95,6 +95,7 @@ pub enum ToolError {
     GuardBootstrap(guard::BootstrapFailure),
 }
 
+#[derive(Clone)]
 pub(crate) struct ToolRuntime {
     config: Config,
     workspace: PathBuf,

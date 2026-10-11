@@ -102,7 +102,7 @@ impl StateRoot {
                 Err(error) => return Err(io::Error::from(error).into()),
             }
             let guard = HistoryLock(file);
-            let current = self._dir.symlink_metadata(HISTORY_LOCK_FILE)?;
+            let current = self.dir.symlink_metadata(HISTORY_LOCK_FILE)?;
             let held = guard.0.metadata()?;
             if current.dev() != held.dev() || current.ino() != held.ino() {
                 return Err(StoreError::HistoryChanged);
@@ -158,7 +158,7 @@ pub(super) fn prepare_history_lock(dir: &Dir) -> Result<(), StoreError> {
 fn lock_account(state: &StateRoot) -> Result<AccountLock, StoreError> {
     use rustix::fs::{FlockOperation, flock};
 
-    let (file, _) = open_private_lock_file(&state._dir, ACCOUNT_LOCK_FILE, || Ok(()))?;
+    let (file, _) = open_private_lock_file(&state.dir, ACCOUNT_LOCK_FILE, || Ok(()))?;
     match flock(&file, FlockOperation::NonBlockingLockExclusive) {
         Ok(()) => Ok(AccountLock(file)),
         Err(rustix::io::Errno::WOULDBLOCK) => Err(StoreError::AccountBusy),
@@ -182,7 +182,7 @@ fn lock_session_with_limit(
     use rustix::fs::{FlockOperation, flock};
 
     let name = format!("session-{session_id}.lock");
-    let dir = state._dir.try_clone()?;
+    let dir = state.dir.try_clone()?;
     let _namespace = lock_namespace(&dir)?;
     let (file, created) =
         open_private_lock_file(&dir, &name, || check_lock_file_quota(&dir, limit))?;
@@ -248,7 +248,7 @@ fn open_private_lock_file(
         Err(error) => return Err(StoreError::Io(error)),
     };
     let metadata = file.metadata()?;
-    super::check_acl(&file, true)?;
+    crate::private_fs::check_acl(&file, true)?;
     if !metadata.is_file()
         || metadata.len() != 0
         || metadata.nlink() != 1

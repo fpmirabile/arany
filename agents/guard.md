@@ -11,8 +11,10 @@ limits and compatibility.
   profile. Commands/MCP use the private snapshot and ordinary-launch profile;
   keep those authorities distinct and reject unavailable enforcement.
 - Close inherited descriptors at the single-threaded worker entry before Rust
-  opens persistent handles. Reset and unblock SIGXCPU and install inherited hard
-  limits before Seatbelt prohibits changes. Attest denial before GO; no payload
+  opens persistent handles. Install shared descriptor/core limits at bootstrap;
+  only the non-spawning file/Skill worker resets and unblocks SIGXCPU and installs
+  hard CPU expiry before Seatbelt prohibits changes. Commands/MCP and the
+  supervisor use external CPU observation. Attest denial before GO; no payload
   may run under a partially installed profile.
   The trusted unit supervisor closes inherited descriptors at its own entry too.
 - Keep process-environment sysctl access denied. Named socket creation, network
@@ -25,11 +27,34 @@ limits and compatibility.
   retiring resource observation. Missing live-process information fails closed.
   Inside the macOS worker, poll child exit within the existing deadline;
   sandboxed execution must not depend on Tokio's signal wake socket.
-- Only the native adapter allows unsafe Rust. Match the installed SDK and libc
+- Guard's native adapter and the separate [private filesystem ACL adapter](./private-fs.md)
+  are the isolated unsafe Rust exceptions. Match the installed SDK and libc
   ABI, validate exact initialized output sizes, bound descriptor/profile buffers,
   retain C string lifetimes through each call and free native error allocations
   once. Never parse or print arbitrary native diagnostics. The syscall-number
   filter and explicit Darwin syscall numbers support only reviewed 64-bit ABIs.
+- Grant ancestor metadata only, without directory-data access; unrelated host
+  metadata and control-root listings must remain denied. The policy fingerprint
+  covers profile rules, admission algorithms and enforced constants. Fresh
+  executable catalogues instantiate that policy; configured pins and selected
+  resources are bound separately by the normalized intent and configuration.
+  The command profile additionally reads the literal filesystem root for the
+  native loader; this does not grant reads beneath that directory. Do not
+  remove it without native launch evidence: the loader opens `/` and aborts
+  when denied, even with an admitted project working directory.
+  Native shell selection also needs exact metadata for the OS shell selector
+  and its path aliases; keep those literal runtime entries separate from grants.
+  Return the admitted command root from profile installation and pass it into
+  payload/MCP setup. Do not rediscover it with getcwd after Seatbelt: that can
+  require directory-data access to the intentionally hidden control ancestors.
+- Validate launchctl, env and hdiutil through the same no-follow OS-program
+  admission before launching them. Path-based execution relies on their
+  root-owned, non-writable system directories and files; privileged OS mutation
+  is outside this current-user attacker boundary.
+  Before offering Tools, also check kernel coalition observation and the effective
+  user's launchd domain through a bounded data-free probe. Keep this admission
+  probe separate from the policy fingerprint, which workers recompute under
+  Seatbelt. Actual helper isolation and storage are still attested before GO.
 - Native process profiles must deny credential and coalition changes through
   both direct syscalls and spawn attributes. Dynamically deny fork/spawn for
   actors holding coalition-spawn or persona-management authority after exec;

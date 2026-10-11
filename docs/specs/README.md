@@ -37,7 +37,7 @@ Use these sections when they contain substantive content; concise tables or pros
 
 Give scenarios descriptive stable headings or table names so plans and tests can reference them. Use Given/When/Then wording when it clarifies a transition; no framework, generated schema or new identifier registry is required. Describe semantics rather than private function names, renderer libraries or test helper mechanics.
 
-Contract status and verification status are separate. Specs express requirements; native platforms, live Providers and human accessibility need their own evidence before a support claim. Link dated outcomes and open checks to their existing records instead of maintaining a second pass/fail ledger here.
+Contract status and verification status are separate. Specs express requirements; native platforms, live Providers and human accessibility need their own evidence before a support claim. Name scenario owners here, report completed checks in the handoff/PR and CI, and keep only open verification in next steps. Do not maintain a pass/fail or completed-work ledger in specs.
 
 ## Extraction discipline
 
@@ -50,6 +50,7 @@ Classify each passage before moving it:
 | Physical responsibility and data flow | Architecture |
 | Context, alternatives and trade-offs | Existing decision record, or ADR when warranted |
 | Proposed behavior or implementation sequence | Plan |
-| Dated verification outcome or pending user check | Existing evidence record or next steps |
+| Completed verification outcome | Implementation handoff and Git/PR/CI history; scoped audit records only when still needed for their reasoning |
+| Unresolved defect or pending user check | Next steps, removed on completion |
 
 Validate the route with representative tasks: a terminal-copy edit reaches terminal behavior, a Provider decoder change still reaches Provider/security/testing, and a persistence change still reaches Session/Store/testing. Extraction succeeds when agents can locate the contract without losing required boundaries, not merely when a file becomes shorter.

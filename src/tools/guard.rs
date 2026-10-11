@@ -8,12 +8,13 @@ use std::path::Path;
 use std::process::{ExitCode, Stdio};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
 const CAPTURE_BYTES: usize = 48 * 1024;
-#[cfg(not(target_os = "macos"))]
+const TASK_BYTES_CAP: usize = 96 * 1024;
+#[cfg(target_os = "linux")]
 const MANAGER_DEADLINE: Duration = Duration::from_secs(4);
 const PAYLOAD_DEADLINE: Duration = Duration::from_secs(50);
 pub(super) const RUNTIME_ROOT: &str = "/usr";
@@ -148,7 +149,7 @@ pub(super) fn check_available() -> Result<(), ToolError> {
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     #[cfg(target_os = "linux")]
     {
-        let mut bytes = b"arany-guard-v1:private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account".to_vec();
+        let mut bytes = b"arany-guard-v3:no-buffered-go-before-ready;pinned-skill-digest-pre-go;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account".to_vec();
         bytes.extend_from_slice(&profile::profile_digest()?);
         Ok(digest(&bytes))
     }
@@ -162,7 +163,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn manager_command(executable: &str) -> Command {
     let mut command = Command::new(executable);
     command.env_clear().env("PATH", "/usr/bin:/bin");
@@ -182,7 +183,7 @@ fn manager_command(executable: &str) -> Command {
     command
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 struct Unit {
     name: String,
     invocation: Option<String>,
@@ -190,7 +191,7 @@ struct Unit {
     kill: Option<cap_std::fs::File>,
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 impl Unit {
     async fn properties(&self) -> Result<serde_json::Value, ToolError> {
         let mut command = manager_command("/usr/bin/systemctl");
@@ -389,7 +390,7 @@ impl Unit {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 impl Drop for Unit {
     fn drop(&mut self) {
         self.kill_group();
@@ -404,15 +405,17 @@ pub(super) async fn execute(
     let mut dispatched = false;
     #[cfg(target_os = "macos")]
     let result = macos::execute_inner(runtime, intent, cancellation, &mut dispatched).await;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     let result = execute_inner(runtime, intent, cancellation, &mut dispatched).await;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let result = Err(ToolError::ProtectionUnavailable);
     match result {
         Err(error) if !dispatched => Ok(super::unstarted_observation(intent.clone(), error)),
         result => result,
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 async fn execute_inner(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
@@ -424,14 +427,8 @@ async fn execute_inner(
         + Duration::from_secs(5);
     super::fs::validate_workspace(runtime)?;
     let workspace = super::fs::open_directory(&runtime.workspace)?;
-    let snapshot = super::fs::Snapshot::create(
-        &workspace,
-        &runtime.config,
-        matches!(
-            intent.call,
-            ToolCall::Command { .. } | ToolCall::McpList { .. } | ToolCall::McpCall { .. }
-        ),
-    )?;
+    let snapshot =
+        super::fs::Snapshot::create(&workspace, &runtime.config, intent.call.is_process())?;
     let mut unit = Unit {
         name: format!("arany-tool-{}.service", intent.id),
         invocation: None,
@@ -561,34 +558,22 @@ async fn execute_inner(
     let stderr = child.stderr.take().ok_or(ToolError::Operation)?;
     let mut stderr_task = tokio::spawn(read_capped(stderr, CAPTURE_BYTES));
     let execution = async {
-        let task = serde_json::to_vec(&Task {
+        let task = encode_task(&Task {
             config: runtime.config.clone(),
             intent: intent.clone(),
             #[cfg(target_os = "linux")]
             parent_namespaces: parent_namespaces.clone(),
-        })
-        .map_err(|_| ToolError::Configuration)?;
-        if task.len() > 96 * 1024 {
-            return Err(ToolError::Limit);
-        }
+        })?;
         stdin
             .write_all(&task)
             .await
             .map_err(|_| ToolError::Operation)?;
-        stdin
-            .write_all(b"\n")
-            .await
-            .map_err(|_| ToolError::Operation)?;
-        let ready_bytes = read_line_capped(&mut stdout, 2048).await?;
-        let ready: Ready =
-            serde_json::from_slice(&ready_bytes).map_err(|_| ToolError::ProtectionUnavailable)?;
-        if ready.digest != intent.digest() || ready.pid != 1 && ready.pid != 2 {
+        let ready = parse_ready(&read_line_capped(&mut stdout, 2048).await?, intent)?;
+        if ready.pid != 1 && ready.pid != 2 {
             return Err(ToolError::ProtectionUnavailable);
         }
         #[cfg(target_os = "linux")]
-        if !ready.namespaces.isolated_from(&parent_namespaces)
-            || ready.profile_digest != intent.enforcement_digest
-        {
+        if !ready.namespaces.isolated_from(&parent_namespaces) {
             return Err(ToolError::ProtectionUnavailable);
         }
         unit.admit()
@@ -600,22 +585,7 @@ async fn execute_inner(
             .await
             .map_err(|_| ToolError::Operation)?;
         stdin.shutdown().await.map_err(|_| ToolError::Operation)?;
-        let bytes = read_line_capped(&mut stdout, CAPTURE_BYTES).await?;
-        let observation: ToolObservation =
-            serde_json::from_slice(&bytes).map_err(|_| ToolError::Operation)?;
-        if observation.intent != *intent
-            || !observation.valid()
-            || observation
-                .guard
-                .as_ref()
-                .is_none_or(|receipt| !receipt.valid_for(intent))
-        {
-            return Err(ToolError::Operation);
-        }
-        let tail = read_capped(stdout, 1).await?;
-        if !tail.is_empty() {
-            return Err(ToolError::Operation);
-        }
+        let observation = read_observation(&mut stdout, intent).await?;
         if !child
             .wait()
             .await
@@ -720,6 +690,28 @@ pub(super) async fn read_line_capped<R: tokio::io::AsyncBufRead + Unpin>(
     }
 }
 
+fn parse_ready(bytes: &[u8], intent: &EffectIntent) -> Result<Ready, ToolError> {
+    let ready: Ready =
+        serde_json::from_slice(bytes).map_err(|_| ToolError::ProtectionUnavailable)?;
+    if ready.digest != intent.digest() || ready.profile_digest != intent.enforcement_digest {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok(ready)
+}
+
+async fn read_observation<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    intent: &EffectIntent,
+) -> Result<ToolObservation, ToolError> {
+    let bytes = read_line_capped(reader, CAPTURE_BYTES).await?;
+    let observation: ToolObservation =
+        serde_json::from_slice(&bytes).map_err(|_| ToolError::Operation)?;
+    if !observation.attested_for(intent) || !read_capped(&mut *reader, 1).await?.is_empty() {
+        return Err(ToolError::Operation);
+    }
+    Ok(observation)
+}
+
 pub(super) async fn wait_owned_child(
     child: &mut Child,
 ) -> std::io::Result<std::process::ExitStatus> {
@@ -767,27 +759,43 @@ async fn capture(
     Err(error)
 }
 
+fn encode_task(task: &Task) -> Result<Vec<u8>, ToolError> {
+    let mut bytes = serde_json::to_vec(task).map_err(|_| ToolError::Configuration)?;
+    if bytes.len() > TASK_BYTES_CAP {
+        return Err(ToolError::Limit);
+    }
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+fn read_task(reader: &mut std::io::BufReader<impl Read>) -> Result<Task, ToolError> {
+    let mut task = Vec::new();
+    std::io::BufRead::read_until(
+        &mut Read::take(&mut *reader, (TASK_BYTES_CAP + 1) as u64),
+        b'\n',
+        &mut task,
+    )
+    .map_err(|_| ToolError::Operation)?;
+    if task.last() != Some(&b'\n') {
+        return Err(if task.len() > TASK_BYTES_CAP {
+            ToolError::Limit
+        } else {
+            ToolError::Operation
+        });
+    }
+    if !reader.buffer().is_empty() {
+        return Err(ToolError::Configuration);
+    }
+    serde_json::from_slice(&task).map_err(|_| ToolError::Configuration)
+}
+
 pub(super) fn helper_main() -> ExitCode {
     let mut stage = BootstrapStage::Admission;
     let result = (|| -> Result<(), ToolError> {
         #[cfg(target_os = "macos")]
         macos::bootstrap()?;
-        let mut stdin = std::io::stdin().lock();
-        let mut task = Vec::new();
-        loop {
-            let mut byte = [0];
-            if stdin.read(&mut byte).map_err(|_| ToolError::Operation)? != 1 {
-                return Err(ToolError::Operation);
-            }
-            if byte[0] == b'\n' {
-                break;
-            }
-            if task.len() == 96 * 1024 {
-                return Err(ToolError::Limit);
-            }
-            task.push(byte[0]);
-        }
-        let task: Task = serde_json::from_slice(&task).map_err(|_| ToolError::Configuration)?;
+        let mut stdin = std::io::BufReader::new(std::io::stdin().lock());
+        let task = read_task(&mut stdin)?;
         task.config.validate()?;
         if !task.intent.valid()
             || task.intent.policy_digest != task.config.digest()
@@ -799,18 +807,15 @@ pub(super) fn helper_main() -> ExitCode {
             return Err(ToolError::Configuration);
         }
         #[cfg(target_os = "macos")]
-        {
+        let root = {
             stage = BootstrapStage::Capabilities;
-            macos::install(&task)?;
-        }
+            macos::install(&task)?
+        };
+        #[cfg(not(target_os = "macos"))]
+        let root = Path::new("/").to_owned();
         #[cfg(target_os = "macos")]
-        let workspace = if matches!(
-            task.intent.call,
-            ToolCall::Command { .. } | ToolCall::McpList { .. } | ToolCall::McpCall { .. }
-        ) {
-            std::env::current_dir()
-                .map_err(|_| ToolError::Path)?
-                .join("workspace")
+        let workspace = if task.intent.call.is_process() {
+            root.join("workspace")
         } else {
             task.workspace.clone()
         };
@@ -833,7 +838,6 @@ pub(super) fn helper_main() -> ExitCode {
         {
             return Err(ToolError::ChangedInput);
         }
-        #[cfg(target_os = "macos")]
         if matches!(task.intent.call, ToolCall::Skill { .. }) {
             load_skill_bytes(&task)?;
         }
@@ -909,10 +913,7 @@ pub(super) fn helper_main() -> ExitCode {
         drop(stdin);
         stage = BootstrapStage::Payload;
         #[cfg(not(target_os = "macos"))]
-        if matches!(
-            task.intent.call,
-            ToolCall::Command { .. } | ToolCall::McpList { .. } | ToolCall::McpCall { .. }
-        ) {
+        if task.intent.call.is_process() {
             super::fs::copy_seed()?;
         }
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -923,12 +924,12 @@ pub(super) fn helper_main() -> ExitCode {
             match &task.intent.call {
                 ToolCall::Command { program, args, cwd } => {
                     let definition = task.config.commands.iter().find(|value| &value.name == program).ok_or(ToolError::Configuration)?;
-                    let mut command = payload(definition, args, cwd)?;
+                    let mut command = payload(definition, args, cwd, &root)?;
                     let (status, out, err) = capture(command.spawn().map_err(|_| ToolError::Operation)?, (task.intent.limits.result_bytes as usize / 2).saturating_sub(128), PAYLOAD_DEADLINE).await?;
                     Ok(serde_json::json!({"exit_code":status.code(),"stdout":String::from_utf8(out).map_err(|_| ToolError::Operation)?,"stderr":String::from_utf8(err).map_err(|_| ToolError::Operation)?,"workspace_changes":"discarded"}).to_string())
                 }
                 ToolCall::Skill { .. } => load_skill(&task),
-                ToolCall::McpList { .. } | ToolCall::McpCall { .. } => super::mcp::execute(&task.intent.call, &task.config).await,
+                ToolCall::McpList { .. } | ToolCall::McpCall { .. } => super::mcp::execute(&task.intent.call, &task.config, &root).await,
                 call => super::fs::native(workspace, call, &task.config),
             }
         });
@@ -1034,7 +1035,6 @@ fn load_skill_bytes(task: &Task) -> Result<Vec<u8>, ToolError> {
     #[cfg(not(target_os = "macos"))]
     let path = format!("/skills/{name}/{resource}");
     let bytes = super::fs::read_regular(super::fs::open_absolute(&path)?, MAX_TOOL_RESULT_BYTES)?;
-    #[cfg(target_os = "macos")]
     if task
         .config
         .skills
@@ -1063,15 +1063,12 @@ pub(super) fn payload(
     program: &super::config::Program,
     args: &[String],
     cwd: &str,
+    root: &Path,
 ) -> Result<Command, ToolError> {
-    #[cfg(target_os = "macos")]
-    let root = std::env::current_dir().map_err(|_| ToolError::Path)?;
-    #[cfg(not(target_os = "macos"))]
-    let root = Path::new("/").to_owned();
     let resources = if cfg!(target_os = "macos") {
         root.join("runtime")
     } else {
-        root.clone()
+        root.to_owned()
     };
     let workspace = root.join("workspace");
     let scratch = root.join("scratch");

@@ -8,6 +8,7 @@ mod test_process;
 mod diagnostics;
 mod engine;
 mod presentation;
+mod private_fs;
 mod provider;
 mod session;
 mod store;

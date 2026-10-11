@@ -1268,5 +1268,5 @@ fn run_isolated(test_name: &str, stage: &str) {
         .flat_map(char::escape_default)
         .collect::<String>()
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+    crate::process::assert_single_test_completed(&output.stdout, stage);
 }

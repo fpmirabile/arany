@@ -520,38 +520,13 @@ Fuzz or corpus-test all renderer inputs for ANSI/ECMA-48 controls, OSC hyperlink
 
 **Recommendation.** Until G0–G7 pass, `exec --output text` is the beta-safe executable path. After they pass, bare `arany` may ship as the attached-human default because the deterministic automation command is explicit and separately proven.
 
-## Canonical documents and decisions that must change
+## Current contract owners
 
-The following inventory separates documents whose current canonical statement is directly contradicted from supporting research whose scope amendment would become misleading. The new report must be indexed rather than left as an orphan.
-
-### Directly superseded canonical statements
-
-1. **`docs/architecture/system-overview.md`** — replace the feedback claim that V1 has only append-only stderr/final stdout, no TTY detection, color, cursor, width, or resize. Add the bare-interactive/`exec` command split, Session-aware terminal projection boundary, `presentation.rs`/`terminal.rs`, accessibility fallback, and new verification map. Keep Engine, Events, SessionView/RunView, Provider seam, one package, and one process unchanged.
-2. **`docs/architecture/arany-conceptual-overview.md`** — describe the CLI-only durable interactive Session plus deterministic text/JSONL `exec`/`show`; no web UI. Replace rejection of TTY-dependent output and the full-screen-TUI future trigger with the exact inline/no-alternate-screen decision. Update examples, physical topology, experience table, test flow, and non-goals.
-3. **`docs/research/next-step-decision-register.md` D-08** — replace the old command/output contract and the explicit prohibition on a TTY branch, color, cursor movement, redraw, width, resize, and raw mode. Record the bare-interactive/`exec` split, terminal-eligibility guard, flags, channel ownership, accessibility, scrollback, cancellation, and restoration.
-4. **`docs/research/next-step-decision-register.md` D-12** — add Ratatui and Crossterm to the reviewed direct dependency boundary and the PTY harness as a development dependency. A TUI is no longer “notably absent.”
-5. **`docs/research/next-step-decision-register.md` D-14/testing decision and trigger table** — extend the `ObservationBundle` with a separate PTY lane and replace “measured terminal usability requires a richer renderer” as a future trigger with G0–G7 acceptance evidence.
-6. **`docs/research/research-closure-audit.md`** — revise the implementation-decision amendment, CLI-feedback amendment, resolved decisions 8/12 as applicable, requirements R-41 and R-54, the CLI feedback evidence row, and all closing summaries that declare append-only feedback closed. Preserve RunView as user-visible truth and OTLP as noncanonical.
-7. **`docs/research/README.md`** — add this report to the index and change the summary that SessionView/RunView are rendered only as append-only terminal output or JSONL.
-
-### Supporting decisions that need amendments, not wholesale rewrites
-
-8. **`docs/research/cli-inputs-configuration-and-operability.md`** — supersede sections 1.1, 3.1–3.4, rendering verification, dependency/layout advice, trigger table, and checklist items that require no `is_terminal`, ANSI, cursor, width, resize, raw mode, or alternate presentation. Preserve input bounds, stdout/stderr separation, JSONL determinism, and exact `exec` text-output tests.
-9. **`docs/research/cli-user-feedback-patterns-from-agent-harnesses.md`** — its fixed “append-only, no TUI” scope and adopt/adapt/reject table are no longer current. Mark this report as the focused superseding terminal decision while retaining its source comparison and durable receipt/partial-result conclusions.
-10. **`docs/research/multi-agent-loop-and-user-feedback.md`** — revise the 2026-09-29 scope amendment that defers interactive rendering. Its broader overview/tree/timeline/attention recommendations should be narrowed to the exact fixed-team information architecture here, not activated as a server/protocol projection system.
-11. **`docs/research/testing-strategy-for-rust-cli-harness.md`** — remove the claim that V1 has no TUI tests, preserve exact-output acceptance for `exec` text/JSONL, and add `TestBackend`, PTY, restoration, resize, accessibility, width, and native Linux/macOS evidence owners without duplicating each semantic scenario.
-12. **`docs/research/rust-foundation-and-engine-contract.md`** — update `main.rs` rendering responsibility, physical files and dependencies, `RunUpdate`/`RunView` fields, and verification. Keep all Ratatui/Crossterm types out of Engine interfaces.
-13. **`docs/research/otlp-observability.md`** — replace statements that the terminal is append-only and that an interactive table was superseded. Preserve the invariant that both terminal projections and OTLP consume committed state and that OTLP cannot affect UI, cancellation, or exit status.
-14. **`docs/research/modular-harness-architecture.md`** — revise only its scope amendment that categorically defers TUI. The one-package in-process presentation remains far smaller than the future multi-client architecture analyzed there.
-
-### Repository rules and glossary
-
-15. **`AGENTS.md`** — “CLI-only” remains correct. Update the module-boundary paragraph to name the private/presentation files only after they exist, and add an `agents/terminal.md` pointer when the terminal module has real invariants and workflow. Do not introduce a new crate or client seam.
-16. **`agents/security.md`** — preserve the existing hostile-terminal-content rule and extend its verification checklist to Arany-owned CSI, raw mode, cursor, scrollback insertion, panic/signal restoration, resize, OSC prohibition, screen-reader output, and fallback. Model/provider text remains inert.
-17. **`agents/testing.md`** — preserve the exact-byte `ObservationBundle` for `exec` text/JSONL and add the PTY/test-backend/native-platform lane as the owner for interactive behavior. State that raw terminal escape bytes are not golden API output.
-18. **`CONTEXT.md` or the active domain glossary, if it currently defines terminal concepts** — add `PresentationModel`, interactive display, linear display, and terminal session only if those names enter code. Do not call the terminal a second Client or make selection/layout domain state.
-
-**Inference.** Other research documents that mention a hypothetical future TUI but do not claim current append-only behavior are historical option analysis and need no edit. Search results alone are not a reason to churn them. The list above is the complete currently discovered set of authoritative or directly misleading documents for this decision; G0 requires a fresh repository search before implementation in case later documents add another canonical statement.
+[The terminal spec](../specs/terminal.md) owns accepted interaction and acceptance
+scenarios; [terminal rules](../../agents/terminal.md) and [testing rules](../../agents/testing.md)
+own implementation and evidence procedures. [Architecture](../architecture/system-overview.md)
+owns presentation boundaries. This source comparison does not maintain another
+document-migration checklist or implementation status.
 
 ## Final recommendation
 

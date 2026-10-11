@@ -1,1131 +1,133 @@
 # Testing strategy for the Rust CLI harness
 
-> **Session/team amendment — 2026-09-29:** The central journey is now one durable Session covering a single-agent Run, process exit/resume, provider switch, bounded `N`-child Run, fork, compaction failure, cancellation, and replay. TestBackend owns composer/footer/conditional-shelf frames; native PTY owns Session/agent pickers and transient mouse restoration. Custom profiles require data-free exact conformance before Workspace-bearing smoke. The evidence-per-test and no-duplication rules remain unchanged.
-
-**Status:** recommended beta testing contract
-**Research date:** 2026-09-29  
-**Scope:** the canonical single-package, single-process, CLI-only, read-only demonstrator in [the system overview](../architecture/system-overview.md)
-
-> **Provider and terminal amendment — 2026-09-29:** [Beta multi-provider routing](./beta-multi-provider-routing-and-adapters.md) replaces the single-OpenAI live lane with one explicitly activated paid test per claimed adapter. [Beta terminal interface](./beta-terminal-interface-and-multi-agent-feedback.md) preserves the exact-byte `ObservationBundle` for deterministic `exec`/`show` and adds separate pure/TestBackend, native PTY, and accessibility lanes for bare interactive `arany`. Raw interactive escape bytes are not public golden output.
-
-> **Interactive/auth amendment — 2026-09-29:** [Interactive CLI conventions](./interactive-cli-conventions-and-command-surface.md) replaces `run` with a durable bare `arany` Session, adds the composer and closed slash-registry corpus, and keeps `exec` as deterministic one-Run automation. [Consumer subscription authentication](./consumer-subscription-authentication-for-provider-adapters.md) keeps the beta API-key only. The suite must prove login commands are absent and imported subscription credentials are rejected; future OpenAI plan support would require separate OAuth/OIDC/secret/SSE/live gates, while Anthropic subscription login remains prohibited without prior approval.
-
-## Executive decision
-
-The harness should optimize for **evidence per test**, not test count or line coverage.
-
-The initial suite should have one deterministic durable-Session journey as its center: one Run finishes directly; a second Run delegates a small admitted team whose children finish in controlled reverse order; the primary synthesizes; Events are committed; visible output is captured; and a fresh process reconstructs the same Session facts from SQLite. Around that journey, add only compact table-driven or corpus tests for boundaries that the happy path cannot prove: rejected startup input, illegal Event histories, terminal-control payloads, cancellation/deadlines, provider wire parsing, and durable failure.
-
-This produces three honest levels of end-to-end evidence:
-
-1. **Deterministic product composition:** real Engine, loop, scheduler, store, reducer, and deterministic renderers with the strict scripted `Provider`. This is the main release gate and compares the exact bytes `exec`/`show` users receive.
-2. **Real product process and terminal:** spawn the Cargo-built executable to prove arguments, exits, streams, environment isolation, replay, and native PTY lifecycle. It must not add a hidden fake-provider mode to production.
-3. **Real provider smoke:** one explicitly selected, ignored, paid test per claimed adapter runs the actual executable and asserts structural facts, not exact natural language.
-
-The product cannot have a deterministic, subprocess-level bare interactive Run using the fake without exposing a fake route in the production binary or creating a second test binary. Neither is justified for V1. The deterministic journey should therefore exercise the actual CLI adapter and writers in-process, while the product-process/PTy tests own OS plumbing and `show`, and live smokes own complete production paths. Calling these layers separately is more accurate than overstating one test as fully real.
-
-The practical target is a small number of named scenarios, each owning several related assertions. There is no test-per-function policy, no coverage percentage target, no snapshot for every error, and no duplicate assertion merely because another layer could repeat it. Rust's own testing introduction notes that tests demonstrate failures rather than prove their absence; the suite should make the strongest product claims executable without pretending that volume equals assurance. [The Rust Programming Language: Writing Automated Tests](https://doc.rust-lang.org/book/ch11-00-testing.html)
-
-## 1. V1 claims the suite must prove
-
-Testing follows the architecture rather than inventing a parallel product. Beta contains one Cargo package, one CLI process, durable Sessions, one Engine behavior seam, one SQLite Events table, admitted direct or `N + 2` team-call budgets, and no effectful Tool. The suite must prove these externally meaningful claims:
-
-- bare interactive `arany` and `exec` accept the documented bounded inputs, execute direct and bounded-team Runs through the same loop, and do not synthesize until every admitted child finishes;
-- bare interactive mode shows the durable causal team state on stderr, restores terminal state on every exit path, and writes only the successful final answer to stdout;
-- screen-reader mode is labeled and append-only with no CSI/OSC or rewriting;
-- deterministic `exec` text/JSONL and `show` obey exact channel and byte contracts without terminal initialization;
-- `show <run-id>` reconstructs the same facts after the originating process and database connection have ended;
-- input, state, provider, output, concurrency, time, storage, and cost limits fail in the documented class without widening authority;
-- cancellation reaches every active child, drops pending Provider futures, drains or aborts within the fixed bound, and leaves an honest durable prefix;
-- malformed or hostile repository content, restored Events, provider data, and terminal content remain data rather than authority;
-- every claimed Provider adapter still matches its live protocol when its explicitly paid smoke is run; and
-- the same claimed filesystem and process behavior works on every supported platform.
-
-Tests do **not** need to prove deferred modules. There should be no V1 tests for Memory, MCP, plugins, a daemon, a process protocol, a browser, effect Policy/Guard, general assignment DAGs, snapshots, FTS, automatic Provider routing, or remote OTLP. The inline terminal is V1 scope and owns focused tests; this does not justify a general UI framework.
-
-### 1.1 Canonical user-visible observation bundle
-
-Every deterministic noninteractive acceptance scenario produces one diagnostic value, even if its assertions inspect only part of it:
-
-```text
-ObservationBundle
-  exit                 process/adapter exit class
-  stdout_bytes         exact bytes delivered on stdout
-  stderr_bytes         exact bytes delivered on stderr
-  reopened_events      Events read after the writer/connection has closed
-  reopened_run_view    RunView reduced from those reopened Events
-```
-
-This is the minimum evidence unit for user-visible behavior. A success assertion is incomplete if it checks only an Engine return value, only a mock call, or only stdout. The bundle proves together what the user received, what automation received, whether the process reported success, and what durable truth survives for `show` after exit. Dynamic IDs and timestamps may be canonically labelled for comparison, but the raw bundle remains available in bounded escaped failure output.
-
-For the deterministic in-process journey, `exit` is the exact exit class returned by the CLI adapter and the byte buffers are the actual writer outputs; the reopened state uses a fresh SQLite connection. For subprocess cases, all five fields come from the shipped executable and its closed state database. Each ignored live smoke produces the same bundle from the complete production path. Bare interactive `arany` adds a PTY observation containing semantic frames, terminal settings before/after, keys/signals, and the final post-restore receipt; it does not replace or redefine this exact-byte bundle.
-
-## 2. Admission rule for a test
-
-A new test is justified only when all four conditions hold:
-
-1. It protects a user-visible contract, a durable/security invariant, a protocol boundary, a concurrency/failure mode, or a demonstrated regression.
-2. No existing test already fails for the same defect with equally useful diagnostics.
-3. It can be deterministic, isolated, and bounded, or it is explicitly classified as an opt-in live/performance check.
-4. The author can state the defect it catches and show that the test would fail when that defect is present.
-
-If any condition is false, prefer strengthening an existing scenario, a type, or a parser instead of adding a test.
-
-Examples that normally do **not** earn a new test:
-
-- one test per private helper or struct field;
-- assertions that only repeat Rust type checking or exhaustive enum matching;
-- tests of mock call order when order is not part of the protocol;
-- snapshots of `Debug` output, SQL strings, internal request structs, or implementation-specific task scheduling;
-- a second example from the same equivalence partition with no new boundary;
-- exact model wording, elapsed wall-clock timing, or provider latency;
-- tests for an abstraction created only to make that test possible; and
-- a regression test after the feature or reachable failure class has been removed.
-
-Coverage can reveal an unvisited branch, but it is not an acceptance target. A covered assertion-free path is weak evidence, while one black-box scenario can prove many connected contracts. SQLite's own testing documentation distinguishes statement, branch, fault, crash, boundary, fuzz, and other evidence; its unusually high coverage is one part of a much broader assurance system, not a universal application quota. [SQLite: How SQLite Is Tested](https://www.sqlite.org/testing.html)
-
-## 3. Evidence portfolio, not a test pyramid quota
-
-Use the following portfolio. The “owner” column prevents duplication.
-
-| Evidence owner | What is real | What is controlled | Claims owned | Default run |
-|---|---|---|---|---|
-| deterministic team journey | Engine, loop, SQLite file, reducer, renderer, filesystem fixtures | Provider semantic outcomes, release gates, monotonic test time | topology, concurrency, commits, replay, visible human/JSONL facts | yes |
-| real-binary contract | shipped executable, OS process, clap, stdout, stderr, exit status, `show` | temporary state/workspace and known stored Run | process channels, invocation errors, replay after process exit | yes |
-| pure terminal projection | PresentationModel, sanitizer, Ratatui TestBackend | RunView fixtures, widths, colors, focus | semantic parity, hostile text, 40/50/79/80/120 layouts | yes |
-| native PTY contract | shipped bare `arany`, OS terminal, Crossterm/Ratatui lifecycle | scripted scenario, composer/commands, keys, resize, signals, terminal emulator/tmux matrix | eligibility, parsing, restoration, scrollback, cancellation, suspend/resume, fallback | CI on claimed OS |
-| accessibility contract | linear presentation and shipped screen-reader mode | exact fixtures plus manual assistive technology | no control rewriting, reading order, labelled facts | automated + release manual |
-| focused owning-module tests | production parsers/reducer/sanitizer/store code | small tables or hostile corpora | exhaustive transition and boundary invariants | yes |
-| crash/fault scenario | child process, real SQLite file, reopen and replay | deterministic kill/fault point | old-or-complete transaction and honest interrupted recovery | release/CI gate |
-| cross-platform conformance | actual OS filesystem, ACL/path/signal behavior | same logical cases per platform | supported-platform claims | CI on claimed OS |
-| live Provider matrix | shipped executable, DNS/TLS/HTTP, selected adapter, persistence, output | tiny fixed workspace and structural assertions | current wire compatibility and complete production wiring per claimed adapter | ignored/manual |
-| performance measurement | release binary and named machine | scripted Provider and fixed fixtures | local overhead and resource budgets | release measurement |
-| fuzz/property/model checks | one bounded pure boundary or state machine | generated inputs and retained regressions | broad input/trace classes | triggered, not initial default |
-
-Cargo integration tests are separate crates, and Cargo automatically builds binary targets and provides `CARGO_BIN_EXE_<name>` so an integration test can execute the actual program. Cargo also notes that every integration-test file becomes a separate executable, so the V1 suite should keep process scenarios together rather than multiplying files. [Cargo targets: integration tests](https://doc.rust-lang.org/cargo/reference/cargo-targets.html#integration-tests)
-
-### 3.1 Tests, live smoke, evaluations, and benchmarks are different evidence
-
-Do not mix these categories or make one gate inherit another's uncertainty:
-
-| Category | Question | Assertion style | Default CI |
-|---|---|---|---|
-| deterministic test | Did a binary invariant hold for this controlled execution? | exact/binary, repeatable | yes |
-| live provider smoke | Does the complete adapter still interoperate with the current service? | structural and bounded | no; explicit paid run |
-| behavioral evaluation | How reliably and well does a model/scaffold solve a task distribution? | repeated trials, graders, distributions | deferred until its architecture trigger |
-| benchmark | What latency/resource/cost distribution does a named build/environment exhibit? | measurement against a release gate | separate named environment |
-
-A live smoke is not an eval: one successful model response does not establish quality or reliability. An eval is not a correctness test: a score cannot override a broken replay invariant, leaked secret, wrong exit code, or invalid output stream. V1 has no evaluation runner; the existing [evaluation research](./evaluation-and-quality-strategy.md) activates only when repeated trials are needed for release evidence.
-
-## 4. The central deterministic journey
-
-### 4.1 One scenario, many observable claims
-
-The main fixture should contain:
-
-- a temporary Workspace with exact root `AGENTS.md`, a decoy `CLAUDE.md`, two explicit include files, and hostile files that were not included;
-- a temporary private state directory on a real local filesystem;
-- a strict scripted Provider with four expectations matched by phase, role, objective, ordinal, and required input digests;
-- separate release gates for the two children so worker B finishes before worker A; and
-- bounded fixture results containing representative Unicode plus harmless newline/tab content.
-
-The journey should drive:
-
-```text
-root plan -> delegate A and B
-worker A  -> wait A -> finish
-worker B  -> wait B -> finish first
-root      -> synthesize only after A and B -> finish
-```
-
-The small-team portion may choose `N=2` to make overlap and reverse completion easy to observe; separate table rows cover `N=0`, configured limits, and the hard ceiling. The scenario then asserts:
-
-- exactly the admitted calls and no unclaimed expectation;
-- two child calls overlap, completion order differs from spawn order, and child display order remains stable by spawn sequence;
-- root synthesis input includes both committed child results and cannot occur early;
-- selected instruction path/digest and include digests match the bytes actually read;
-- omitted hostile files and canary secrets never appear in Provider observations, Events, SQLite bytes, stdout, or stderr;
-- every visible transition corresponds to a committed Event;
-- the live `RunView` equals the view replayed after closing and reopening the store;
-- human stdout is exactly the final result plus one newline;
-- human stderr is exactly the approved progress grammar after narrow canonicalization of generated identities/time;
-- JSONL is valid UTF-8, exactly one object per line, strictly sequence ordered, and semantically equal to stored Events; and
-- `show` renders the same stored facts twice, byte for byte.
-
-These are multiple assertions in one user journey, not multiple tests for each implementation layer. A failure message should report the phase plus bounded captured stdout/stderr and the semantic Event diff so an agent can diagnose it without rerunning with ad hoc logging.
-
-### 4.2 Strict Provider double
-
-The scripted Provider is the only Engine behavior double. It must behave like a small protocol verifier, not a queue of “next response” values:
-
-```text
-ExpectedCall
-  matcher  = phase + role + objective + ordinal + required digests
-  behavior = return outcome after gate | remain pending until dropped
-```
-
-It atomically claims one unique expectation before awaiting. It fails on no match, multiple matches, duplicate claims, unexpected calls, extra calls, or unclaimed ordinary expectations at teardown. Pending cancellation expectations use a drop guard so the test proves that the in-flight future was actually cancelled.
-
-Do not match the concurrent workers by arrival order. Their arrival is intentionally nondeterministic. Match by semantic identity, then control only the completion ordering with gates. Do not sleep, use randomness, touch the network, inspect ambient environment, or issue production IDs from the fake.
-
-This double belongs at the semantic `Provider` boundary because that is the only production behavior seam. Do not mock the store, reducer, scheduler, filesystem, or renderer in the central journey.
-
-### 4.3 Exact user-visible output
-
-The output assertion should compare bytes, not log records or an internal `RunView` alone:
-
-- capture human stdout and stderr in separate byte buffers through the same writers used by the CLI adapter;
-- capture JSONL as bytes, split only on LF, parse each line with `serde_json`, and compare it to the canonical Event projection;
-- call the real product binary for `show` against the journey's closed database and compare its stdout to the in-process rendering;
-- assert exit status separately from both streams; and
-- on failure, show a bounded, escaped diff of both streams.
-
-Generated UUIDv7 values and timestamps must not be erased with broad regular expressions. Parse the structured Events, build a one-to-one mapping such as `RUN`, `ROOT`, `WORKER_A`, `WORKER_B`, and replace only fields declared nondeterministic by the contract. Preserve identity equality, ordering, counts, and every user-controlled byte. A normalizer that removes arbitrary numbers or whole lines can hide a real regression.
-
-## 5. Real subprocess tests
-
-Use `std::process::Command` with the absolute Cargo-provided binary path; never invoke `cargo run`, a shell, or PATH lookup from the test. Rust's process API captures status, stdout, and stderr directly, and `Command::env_clear` prevents ambient variables from entering the child unless explicitly restored. [`std::process`](https://doc.rust-lang.org/std/process/) [`Command`](https://doc.rust-lang.org/std/process/struct.Command.html)
-
-Every subprocess test must:
-
-- use its own `TempDir` Workspace and state directory;
-- set an explicit current directory;
-- clear the inherited environment and add only the minimum platform variables and harness configuration needed by that case;
-- pass arguments as an argument vector, never a command string;
-- capture stdout and stderr separately;
-- impose a parent-side deadline and kill/reap a hung child;
-- assert the documented exit class plus output channels; and
-- avoid fixed ports or shared database paths.
-
-The first black-box table should cover related process contracts without one function per row:
-
-| Case | Exit | stdout | stderr |
-|---|---:|---|---|
-| `--help` | 0 | help contract | empty or documented clap behavior |
-| invalid syntax | 2 | empty | safe invocation diagnostic |
-| missing required model/key for bare interactive mode | 2 | empty | safe configuration diagnostic |
-| unknown Run for `show` | 1 | empty | safe operational diagnostic |
-| known completed Run for human `show` | 0 | exact reconstructed view | empty |
-| known completed Run for JSONL `show` | 0 | exact stored Events | empty |
-| corrupt/incompatible Run | 1 | empty | safe corruption/incompatibility diagnostic |
-
-Do not add `assert_cmd` initially. Standard-library process control and one helper are enough at this size. Add a process-test crate only when at least three scenarios duplicate material timeout/signal/platform machinery; this matches the existing architecture's dependency trigger rather than prepaying for a framework.
-
-### 5.1 Ctrl-C at the process boundary
-
-The Engine-level cancellation scenario is mandatory and deterministic. A true signal test is also needed before claiming CLI Ctrl-C behavior, but it is platform-specific:
-
-- Unix sends `SIGINT` to the spawned product process and waits for exit 130;
-- Windows uses the supported console-control mechanism in an isolated process group and waits for the documented result;
-- both inspect the reopened database and prove that active agents terminated honestly; and
-- both always reap the child, including assertion failures.
-
-Keep the unsafe/platform-specific signal helper in test support, not application code. If a claimed platform cannot deliver the signal reliably in CI, record that as missing platform evidence rather than silently skipping the test. The deterministic supervisor test still owns cancellation ordering; the process signal test owns only OS wiring and exit behavior.
-
-Tokio documents graceful shutdown as detecting shutdown, notifying tasks, and waiting for completion; its `CancellationToken` provides the cancellation tree used here. [Tokio: Graceful Shutdown](https://tokio.rs/tokio/topics/shutdown) [`CancellationToken`](https://docs.rs/tokio-util/latest/tokio_util/sync/struct.CancellationToken.html)
-
-## 6. Persistence and replay tests
-
-Never use SQLite `:memory:` as evidence for durability, reopen behavior, file permissions, journaling, page limits, or `show`. Every persistence test uses a real temporary database file and closes every connection before replay.
-
-The store suite owns four claim groups:
-
-1. **Schema/configuration:** exact schema version, STRICT table, journal/synchronous/trusted-schema/defensive/no-follow settings, page size/cap, private state permissions or ACL, and one owning connection.
-2. **Transition transaction:** a logical transition is either wholly visible or absent; feedback never precedes its commit.
-3. **Strict replay:** sequence gaps, unknown kind/version, malformed payload, identity mismatch, illegal transition, excessive count/size, and instruction-looking text fail closed or remain inert data as specified.
-4. **Recovery:** normal close, process death between transaction boundaries, disk/full-page refusal, and a committed nonterminal prefix reconstruct honestly as `Interrupted` rather than fabricated cancellation.
-
-Use compact data tables for malformed histories. Do not write a separate test per Event kind × state × error. A reducer transition table can enumerate legal transitions and systematically generate the complementary invalid pairs because V1 has only five Event kinds and a small state space.
-
-For crash evidence, spawn a child that performs the production store operation and terminates at a named test-only fault point before or after commit acknowledgement. The parent then opens the actual file and checks:
-
-- the transaction is wholly absent or wholly present;
-- sequence continuity and reducer invariants hold;
-- `PRAGMA integrity_check` succeeds; and
-- rendered/replayed state never claims a terminal Event that was not committed.
-
-SQLite itself validates atomic commit by repeatedly simulating crashes at varying write points and checking that a transaction occurred completely or not at all. The harness does not need to reproduce SQLite's VFS verification; it must test its own transaction boundary, acknowledgement order, and recovery interpretation. [SQLite: Atomic Commit, crash testing](https://www.sqlite.org/atomiccommit.html#testing_atomic_commit_behavior) [SQLite: How SQLite Is Tested](https://www.sqlite.org/testing.html#crash_testing)
-
-Do not copy a live database file as a fixture. SQLite warns that a database and hot journal must remain paired and recommends the Backup API, `VACUUM INTO`, or copying only while quiescent. V1 can simply close its sole connection before an inspection copy. [SQLite: How To Corrupt Your Database](https://www.sqlite.org/howtocorrupt.html#_backup_or_restore_while_a_transaction_is_active)
-
-## 7. Concurrency, cancellation, and time
-
-Concurrency tests must schedule events; they must not hope for an interleaving.
-
-Required deterministic scenarios for the selected `team(2)` overlap fixture:
-
-- both child Provider calls in the `team(2)` fixture reach claimed expectations before either gate is released;
-- worker B completes before A even though A was spawned first;
-- primary synthesis remains blocked until both child terminal Events in that fixture commit;
-- cancelling while both children are pending drops both Provider futures and prevents late results from committing;
-- a response made ready concurrently with cancellation cannot win after the supervisor has observed cancellation;
-- a closed update sink or blocked store applies bounded backpressure and cannot exceed the fixture's admitted four calls; and
-- the call and whole-Run deadlines produce the documented durable status and exit class.
-
-Use Tokio's paused time on the explicit current-thread runtime. Tokio's `pause`/auto-advance support requires a current-thread runtime and advances timer-backed work without wall sleeps. [`tokio::time::pause`](https://docs.rs/tokio/latest/tokio/time/fn.pause.html)
-
-Never use:
-
-- `sleep` to “let the worker start”;
-- assertion timeouts as the only synchronization mechanism;
-- repeated runs as a substitute for a controllable gate;
-- assumptions about task polling or child completion order; or
-- a global mutable clock or public Clock trait added solely for tests.
-
-`loom` is valuable when application-owned low-level synchronization must be checked across possible interleavings, but it requires replacing synchronization primitives and can face combinatorial growth. V1 delegates synchronization to Tokio channels, `JoinSet`, and `CancellationToken`; do not add `loom` unless the harness later owns a custom synchronization primitive whose state space cannot be proven with gates. [`loom` documentation](https://docs.rs/loom/latest/loom/)
-
-## 8. Provider adapter evidence
-
-The Engine fake and the OpenAI adapter answer different questions:
-
-- the strict fake proves Engine semantics independent of a network or model;
-- request-construction tests prove exact method, compiled origin/path, headers, sensitive Authorization marking, `store:false`, disabled truncation, strict schema, model, token bound, and absence of Tools;
-- byte-fixture parser tests prove valid, refused, incomplete, malformed, oversized, and typed error responses under the 1 MiB cap;
-- configuration tests prove redirects, ambient proxy, cookies, unsafe TLS, and automatic retries are disabled; and
-- the ignored live smoke proves the current remote service still accepts the complete request.
-
-Do not create a mock HTTP server or configurable base URL merely to intercept production calls. The fixed OpenAI origin is a security property. Keep request assembly and bounded response decoding as private pure/streaming functions that can consume reviewed fixtures, and reserve actual DNS/TLS/HTTP behavior for the live test and hostile-network security gates.
-
-Provider fixtures must be minimal hand-reviewed examples shaped from the official Responses contract, not captured production bodies containing user data. Never snapshot Authorization headers or rich reqwest errors. OpenAI's Structured Outputs contract is the semantic boundary, while `store:false` is part of the data-control request. [OpenAI: Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs) [OpenAI: Your data](https://developers.openai.com/api/docs/guides/your-data)
-
-### 8.1 One live smoke
-
-Keep exactly one ignored test, selected by name:
-
-```text
-live_openai_team_run
-```
-
-It should spawn the actual product executable with a temporary Workspace/state directory, tiny deterministic documents, the explicitly provided model, and the inherited API key passed without formatting. Use one direct Run and one small bounded team Run; the test records and asserts the admitted call count. It asserts only:
-
-- exit 0;
-- stdout is a non-empty bounded final result with the documented newline policy;
-- stderr contains the expected primary/child lifecycle grammar and no raw terminal controls;
-- the admitted provider-call facts and terminal Runs exist in SQLite;
-- fresh product-process `show` and `show --jsonl` succeed and expose the same identities/states/results; and
-- canary content excluded from the request does not appear in persisted or rendered output.
-
-It must not assert exact prose, worker completion order, latency, token counts beyond bounds, or model quality. It must not retry. Missing key/model should fail only when the user explicitly selects this test, with a setup message that prints neither value.
-
-Rust supports `#[ignore]` so tests run only when explicitly requested. One passing live invocation is compatibility evidence, not a deterministic regression suite or proof of model quality. [The Rust Programming Language: ignored tests](https://doc.rust-lang.org/book/ch11-02-running-tests.html#ignoring-some-tests-unless-specifically-requested)
-
-## 9. Golden and snapshot policy
-
-Use goldens only where the bytes are themselves a product contract:
-
-- one canonical deterministic `exec` text stdout/stderr pair;
-- one canonical screen-reader output and post-restore receipt;
-- one canonical human `show` output;
-- one canonical JSONL Event stream; and
-- later, one safe diagnostic format if it cannot be covered legibly inline.
-
-Do not add `insta` in V1. Store small reviewed `.txt`/`.jsonl` fixtures or inline literals and compare directly. This keeps the exact dependency boundary and makes the contract readable without another tool.
-
-Rules for every golden:
-
-- it contains only user-visible output, never `Debug` representations;
-- nondeterministic fields are canonicalized narrowly and visibly before comparison;
-- it is small enough to review as a whole;
-- CI never rewrites or auto-accepts it;
-- an agent may update it only alongside an intentional user-visible contract change and must summarize the diff; and
-- deleting or changing a line in a golden does not replace semantic assertions such as Event count, identity relationships, exit status, or secret absence.
-
-Snapshot tools can improve review workflows by writing pending files and requiring explicit acceptance, but their own documentation also supports automatic overwrite modes. If the suite later adopts one, CI must force no-update behavior and unreferenced snapshots must fail rather than accumulate. [Insta: reviewing and update modes](https://insta.rs/docs/quickstart/) [Insta: unreferenced snapshots](https://insta.rs/docs/advanced/#handling-unused-snapshots)
-
-The danger is not snapshots themselves; it is accepting a large output change without knowing which contract changed. A golden is appropriate when a human can answer that question from the diff.
-
-## 10. Property, model-based, and fuzz testing
-
-V1 should not begin with `proptest`, `proptest-state-machine`, Kani, or a broad fuzz suite. The state space is currently small enough for explicit tables, and the canonical dependency decision intentionally excludes these tools. Add generative machinery only when one property replaces a material family of hand-written examples.
-
-Good triggered candidates are:
-
-| Boundary | Property | Trigger |
-|---|---|---|
-| Event reducer/replay | every generated legal trace reduces identically live and after serialization; every invalid mutation fails closed | Event vocabulary/state space stops being cheaply enumerable or a sequence bug escapes |
-| terminal sanitizer | output is valid UTF-8, contains no forbidden controls, is idempotent, and cannot forge a trusted prefix | corpus grows beyond readable table coverage or a control-sequence bug escapes |
-| capability intersection | child effective authority is a subset of global, parent, and explicit grant | first effectful Tool activates Policy/Guard |
-| bounded decoders | arbitrary bytes never panic, exceed allocation bounds, or produce an unchecked Event/provider outcome | parser implementation exists and deterministic corpus is stable |
-| storage state machine | implementation and small reference model agree after generated append/reopen/corrupt sequences | schema/event model gains enough operations to make tables unwieldy |
-
-Proptest can generate arbitrary inputs, shrink a failure to a smaller counterexample, and retain regression seeds. Its state-machine support compares a system under test with an abstract reference model, but it requires setup and currently describes sequential state-machine generation. Use it for the reducer/store only after the trigger, not to generate arbitrary agent prose or async schedules. [Proptest README](https://github.com/proptest-rs/proptest/blob/main/proptest/README.md) [Proptest: State Machine testing](https://proptest-rs.github.io/proptest/proptest/state-machine.html)
-
-Fuzz only bounded byte-oriented trust boundaries: Event decoding, provider response decoding, instruction/UTF-8 validation, and terminal escaping. Seed each target with the deterministic hostile corpus and promote every minimized crash into that corpus. `cargo-fuzz` uses libFuzzer, needs nightly and platform support, and can minimize failing inputs; that makes it a scheduled/release security job rather than the default developer loop. [`cargo-fuzz` repository and usage](https://github.com/rust-fuzz/cargo-fuzz)
-
-Kani is not needed for V1. It becomes plausible for small pure functions with a precise bounded property, especially future capability algebra or isolated unsafe code. Kani's own documentation says it proves or disproves assertions within a proof harness but may run out of resources and does not support every Rust feature. [Kani documentation](https://model-checking.github.io/kani/)
-
-## 11. Security and adversarial corpus
-
-Security cases should be corpora and composition scenarios, not hundreds of individually named tests.
-
-Maintain focused tables for:
-
-- startup authority: malicious `.env`, Git configuration, hooks, filters, worktrees, package metadata, Skills, trust-looking instruction text, and unsupported OTLP variables cause no discovery or execution;
-- Workspace paths: empty/absolute/dot/parent components, final and intermediate symlinks, reparse points/junctions, non-regular files, invalid UTF-8, concurrent replacement, hard-link policy, exact limit and limit + 1;
-- state: state inside Workspace, link substitution, wrong type, broad permissions/ACL, wrong owner, non-local filesystem, malformed header/schema/Event, page/headroom failure;
-- egress and secrets: hostile proxy environment, redirects, oversized/compressed responses, omitted-file canary, credential canary, forbidden telemetry fields;
-- output: every C0/C1 byte, ESC/CSI/OSC/DCS, CR, backspace, bidi controls, newlines, JSON delimiters, forged prefixes, oversized fields, and broken pipes; and
-- topology/budget: direct mode, representative `team(N)` values, limit/hard-ceiling overflow, child delegation, primary early finish, calls above the admitted budget, late completion, closed receiver, and blocked store.
-
-Each corpus row records the invariant and expected error class. A loop executes the table and reports the row name on failure. Add a new row for a genuinely distinct encoding, platform primitive, or escaped defect; do not turn every row into another test function.
-
-Canary scanning is one shared assertion helper over all relevant sinks: provider observations, stdout, stderr, serialized Events, database bytes, panic text produced by controlled failures, and runtime-opt-in OTLP capture. The canary must be a test-only value and output reporting must not echo it when the assertion fails.
-
-The security report remains authoritative for the required threat cases and non-claims: [Harness security lessons and controls](./harness-security-lessons-and-controls.md).
-
-## 12. Cross-platform policy
-
-A platform is supported only when its behavior suite runs on that platform. Compiling for a target is not evidence for ACLs, reparse points, signals, path namespaces, or process behavior. Rust's target tiers describe Rust toolchain guarantees; they do not prove application-specific filesystem and security semantics. [rustc platform support](https://doc.rust-lang.org/rustc/platform-support.html)
-
-The blocking beta matrix runs on Linux and macOS:
-
-- build, Clippy, and deterministic suite on the pinned toolchain;
-- real-binary help/error/show channel contract;
-- exact instruction/include path suite using the platform's links and special objects;
-- state ownership and private permission/ACL admission;
-- close/reopen SQLite replay and process-death recovery;
-- cancellation supervisor plus actual process signal/control delivery;
-- deterministic text/JSONL byte contract, terminal TestBackend frames, native PTY restoration, and manual VoiceOver/Orca evidence; and
-- explicit `ProtectionUnavailable` for any required invariant the platform implementation cannot attest.
-
-Use a shared semantic case description with small platform adapters. Do not force identical low-level setup where operating systems differ, and do not hide an unsupported case behind an unconditional skip. Platform exclusions must name the missing claim in the support matrix. Windows is a deferred support target and must pass the corresponding ACL, reparse-point, console-control, path-namespace, persistence, terminal, and packaging cases natively before it becomes supported; compiling for Windows is not a beta release gate and is not a support claim.
-
-The Cargo CI guide recommends balancing platform/toolchain combinations against project risk and cost. For this harness, filesystem and process behavior are high-risk and platform-specific, so running behavior on every claimed host is justified; testing stable/beta/nightly combinations on every OS is not. Pin one release toolchain for blocking CI and move future-toolchain compatibility to a scheduled advisory job. [Cargo Book: Continuous Integration](https://doc.rust-lang.org/cargo/guide/continuous-integration.html)
-
-## 13. Flake prevention
-
-A test that occasionally passes cannot protect a release claim. Apply these rules:
-
-- no real sleeps; use gates, notifications, paused Tokio time, or parent-side deadlines;
-- no network in the default suite;
-- no dependence on test execution order; Cargo/libtest runs test functions in parallel by default;
-- no mutation of process-global environment in parallel tests; pass a configuration map to pure resolution code or set a cleared environment on a subprocess;
-- no shared state directory, fixed temporary filename, fixed port, singleton database, or global runtime;
-- no assertion on task arrival/completion order unless a gate establishes it;
-- no exact wall-clock duration assertions in correctness tests;
-- no retries of a failed test in CI and no “rerun until green” policy;
-- property/fuzz failures retain the seed or minimized corpus input;
-- live-provider and named-machine performance checks are clearly separated from deterministic CI; and
-- every spawned process, task, thread, store connection, temporary listener, and file handle is closed or reaped even during failure cleanup.
-
-Cargo documents that libtest executes test functions in parallel and separate integration-test targets serially. Isolation must therefore be structural rather than achieved by forcing the entire suite to one thread. [Cargo targets](https://doc.rust-lang.org/cargo/reference/cargo-targets.html#tests) [Cargo test](https://doc.rust-lang.org/cargo/commands/cargo-test.html)
-
-If a deterministic test flakes, treat it as a release-blocking bug in either production synchronization or the test. Quarantining is allowed only with a named owner, missing claim, and removal condition; it does not count as passing evidence.
-
-## 14. Failure diagnostics for humans and agents
-
-Tests should show the product contract that failed, not only `left != right`.
-
-Shared assertion helpers should produce:
-
-```text
-scenario: deterministic team run / human output
-command:  arany <redacted fixture objective> ...
-exit:     expected 0, observed 1
-stdout:   <bounded escaped bytes>
-stderr:   <bounded escaped bytes>
-events:   expected semantic sequence vs observed sequence
-state:    temporary fixture identifier, not a user home path
-```
-
-For security failures, do not print secret canaries, raw credentials, full provider bodies, database payloads, or hostile controls. Report the sink and byte offset/class. For oversized output, show a bounded prefix/suffix plus total byte count. For JSONL, identify line/sequence/kind and parse error without dumping arbitrary content.
-
-Passing tests should stay quiet. The exact user-visible examples live in reviewed golden fixtures, while failures surface those bytes automatically. An agent should not need verbose production logging, `RUST_LOG`, database dumps, or rerunning against OpenAI to understand a deterministic failure.
-
-## 15. Test maintenance and deletion
-
-Every test has one sentence in its name or nearby table that states the owned claim. Delete or merge a test when:
-
-- the feature/contract no longer exists;
-- a higher-value test now catches the same defect with equally precise diagnostics;
-- its only assertion is an implementation detail no caller can observe and no safety invariant requires;
-- its fixture duplicates an existing equivalence partition;
-- a regression is made structurally impossible and the remaining test adds no boundary evidence; or
-- it has become permanently ignored without a release procedure that runs it.
-
-Do **not** delete a durable/security regression merely because the implementation was fixed. Move it to the narrowest stable corpus or owning scenario. Do not keep obsolete snapshots “for history”; git already stores history.
-
-When changing behavior:
-
-1. identify the existing owner test;
-2. demonstrate its failure or temporarily introduce the target defect if the change is already implemented;
-3. update the smallest scenario/corpus row that proves the new contract;
-4. review exact user-visible output changes manually;
-5. remove superseded assertions and fixtures; and
-6. record a new test only if the admission rule is satisfied.
-
-This prevents the common LLM pattern of appending tests for every touched function while never pruning overlapping cases.
-
-## 16. Execution tiers
-
-### Developer and pull request
-
-Run on every change:
-
-```text
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
-```
-
-The default suite contains no network, wall sleeps, stochastic model, or hardware-sensitive latency assertion. Keep it fast enough that agents run it after every relevant change; set an actual duration budget only after measuring the initial implementation.
-
-### Cross-platform blocking CI
-
-Run the deterministic suite and platform conformance subset on every claimed OS. Run lockfile/source/advisory checks as specified by the security policy. Do not multiply the OS matrix by unnecessary Rust release channels.
-
-### Scheduled or release gates
-
-- repeated deterministic journey for flake detection, comparing canonical semantic output;
-- process-death/disk-fault scenarios if too expensive for every PR;
-- bounded fuzz targets after their trigger;
-- sanitizer/Miri or model-checking jobs if the implementation earns them;
-- release-mode local latency/RSS measurements on a named environment; and
-- one explicitly authorized live smoke per Provider Arany intends to claim.
-
-Performance is a measurement, not a correctness assertion. Keep the existing local thresholds in the CLI research as release evidence, but do not fail ordinary tests on host-sensitive milliseconds. Repeating one scenario 100 times for a release measurement is not 100 tests and should not inflate the developer loop.
-
-## 17. Recommended initial physical shape
-
-Keep test support as small as the production design:
-
-```text
-src/
-  main.rs       private CLI adapter tests for exact mode/channel behavior
-  lib.rs        reducer, bounds, sanitizer, cancellation tables near owners
-  provider.rs   strict fake plus request/response fixture tests
-  store.rs      real-file append/reopen/replay/fault tests
-tests/
-  team_run.rs   deterministic journey, real-binary contract, ignored live smokes
-  fixtures/
-    interactive.stdout.txt
-    interactive.stderr.txt
-    human-show.stdout.txt
-    team-run.jsonl
-```
-
-This is a responsibility sketch, not a requirement to create every fixture immediately. Prefer inline strings while output is tiny. Keep one integration-test target until compilation time or organization proves a second target is worthwhile.
-
-Initial dev support remains:
-
-- `tempfile` for isolated real filesystem/state roots;
-- Tokio `test-util` for paused current-thread time; and
-- the existing OpenTelemetry SDK testing support only when the optional telemetry patch begins.
-
-Do not initially add `assert_cmd`, `insta`, `proptest`, `loom`, `criterion`, `nextest`, a mock HTTP server, or a custom test framework. Each has a named trigger in this report. Cargo's built-in test harness, the standard library, and the strict Provider fake are sufficient to produce strong V1 evidence.
-
-## 18. Concrete V1 verification register
-
-The implementation plan should turn these claims into a small set of scenario/table owners, not one test per row.
-
-| Claim family | Evidence | Release blocking |
-|---|---|---|
-| direct and bounded-team workflows | deterministic durable-Session journey with controlled reverse child completion | yes |
-| exact human stdout/stderr | byte golden from actual CLI adapter | yes |
-| JSONL validity/facts/order | parsed lines plus canonical Event comparison | yes |
-| real process arguments/channels/exits | product subprocess table | yes |
-| replay after exit | close store, product subprocess `show`, exact repeated output | yes |
-| strict startup/input/state trust | adversarial table/corpus on claimed platforms | yes |
-| transaction acknowledgement/recovery | real SQLite file plus child-process death/fault point | yes |
-| reducer legality/data-only replay | exhaustive transition/history table; generative trigger later | yes |
-| cancellation/deadlines | gates, drop guards, paused time; real OS signal subset | yes |
-| provider wire construction/parsing | reviewed request/response fixtures | yes |
-| no secret/omitted-input leakage | shared canary scan over every sink | yes |
-| terminal inertness | hostile control corpus plus human/JSONL byte checks | yes |
-| platform support | native CI behavior, no silent skip | yes for each claimed OS |
-| live adapter compatibility | one ignored actual-binary structural smoke per claimed Provider | required before claiming that adapter works, not default CI |
-| local performance | release measurement on named host | release evidence, not ordinary test |
-| OTLP privacy/topology/failure | separate runtime-opt-in scenario | only when the final beta telemetry slice ships |
-
-### Native macOS baseline (2026-10-08)
-
-The user resumed native macOS work on an Apple Silicon host running macOS 26.6.2 and Rust 1.98.1. The initial test build failed on the Unix corpus's Linux-only FIFO constructor. The account-path owner then reproduced environment-selected `HOME` changing macOS account scope. The implementation now reuses the pinned POSIX effective-user lookup with macOS's existing account suffix; the owner moved into the existing product test target and uses its bounded subprocess capture. Absolute debug fixtures, relative rejection and optimized override rejection are covered without opening the user's account root or Keychain.
-
-Native baseline corrections preserve actual private FIFO rejection, the platform-specific consent warning and explicit refusal of unsupported guarded reads. The Collector and custom-provider fixtures reset accepted sockets to blocking mode before timeout-bounded reads: macOS inherits listener nonblocking state. The process-global diagnostic privacy owner now runs in an exact filtered subprocess through the existing bounded capture, excluding unrelated tests' legitimate log contention/rotation. The paused callback owner establishes its connection before starting the receiver's virtual deadline. No product bound, account warning, outcome schema or Guard capability was relaxed.
-
-Astra's complete review found that the account-root correction could strand a saved ChatGPT index at the previous environment-selected root. The new preservation row in the existing registration-migration owner failed before the correction. That owner now migrates registration and the validated matching index under both account locks before saved-account access, with destination/host preflight and old-root tombstones only after durable copies. Its corpus passes private-file tokens, token-free keyring metadata, pending/disconnected/permission-disabled state and model evidence, identical partial copies, an already copied registration, conflicts, missing/malformed identity, unsafe pending-file recovery and both busy locks. The existing setup owner proves old-root presence can reach billing choice without parsing either credential body. The subsequent complete Astra review returned `No findings`; it is defect-review evidence, not native Keychain lifecycle proof.
-
-The user's subsequent ChatGPT greeting reproduced unavailable Tool protection after remembered folder trust. The attached permission owner now reports unsupported native enforcement before loading trust, retaining read-only chat; explicit Tool configuration still rejects. Its native PTY/scripted-Provider owner reproduced the exact error before correction and now proves direct and resumed greetings for all three native profiles, complete supplied request semantics, closed SQLite replay, absent Tool context/Events, unchanged trust/draft and explicit Tool rejection before inference. Repeat review corrected supervision of a `script` descendant: the fixture now uses the pinned safe Nix PTY wrapper and directly owns its exact test process through bounded capture and kill/reap cleanup.
-
-The first full debug rerun exposed a P1 fixture-isolation incident: the existing catalog owner isolated only its stable account root. Cleared HOME/XDG fell back to the real legacy root, migration tombstoned live registration/index metadata, and panic cleanup removed the temporary copy after a credential-helper deadline. This supersedes the earlier no-live-account/Keychain-access assertion for this continuation. Migration performs no Keychain deletion and no live inference was confirmed, but the lost metadata requires an external backup or fresh sign-in. [The finding](../security/findings/account-fixture-legacy-root.md) owns impact and recovery limits. All affected launches now isolate both roots, and debug default-path admission refuses an ambient legacy root outside the fixture parent before opening it. The existing account-path owner proves confined roots and ambient rejection. Automatic approval review initially refused another broad suite; targeted isolation evidence and the new admission guard earned approval for the corrected reruns.
-
-Local recovery preserved only the two exact 33-byte markers in a private same-root backup under the existing account lock, after no-follow/type/owner/mode/link/identity checks. Astra reviewed the one-off procedure; synthetic success/refusal fixtures and a real read-only check passed before automatic approval allowed it. Post-operation checks confirmed the original paths absent and both marker bytes preserved. No Keychain item or Session history was changed by recovery. This makes fresh setup available; it does not reconstruct the lost metadata or prove successful reauthorization.
-
-Final native locked offline workspace suites after the setup-redraw correction executed 249 tests in debug and 248 in optimized release, with zero failures and 11 explicitly ignored gates per profile. Formatting, strict all-target Clippy in both profiles and the optimized executable build passed. The activated native callback owner separately completed exactly one test in each profile before the greeting correction: a stalled local connection expired and a subsequent valid synthetic callback succeeded. Fixture commands used physical `TMPDIR=/private/tmp`; ordinary `/tmp` or `/var` aliases still reject through production no-follow admission. Loopback fixtures required execution outside the development environment's network restriction. No user clipboard was accessed.
-
-The user's clarified consent contract is identical on macOS and Linux: every attached entry asks before account or Session work until exact folder trust is remembered. The new native macOS shipped-process linear PTY row failed before the startup correction and now proves setup/explicit-flag ordering, cancellation before saved-account/setup or Session work, read-only re-entry, remembered exact-identity reuse and directory replacement. It also verifies explicit `--tools` is accurately described as retaining private configuration. This startup row is debug-only because optimized account overrides reject; optimized actual-product startup isolation remains unverified. The scripted attached greeting/replay/refusal owner passes in both profiles and opens the same permission prompt in debug. No real account, Keychain or inference was used in this consent correction. Linux PTY readers now isolate passwd home and legacy roots, handle the first decision once, and retain selected release-binary visibility for tmux; their native compilation and execution remain pending. Repeated Astra review fixed fixture type/lint/ordering issues and Provider/mode/Skill eligibility inconsistencies; its final complete review returned `No findings`.
-
-The reported post-ChatGPT-setup renderer failure exposed a shared Unix descriptor bug: setting inherited stdin nonblocking also changes duplicated terminal output. Native macOS inspection reproduced `WouldBlock` after a partial write, and the new terminal-owner process row failed before correction on its inherited-output flag assertion. Both readers now own an independently opened nonblocking handle with no-follow/no-controlling-terminal acquisition and device/inode/rdev validation. The native process owner passes in both profiles: synthetic setup returns to a complete chat redraw, two input submissions straddle release/reacquisition, inherited flags remain unchanged and exact terminal settings restore in inline and linear modes. Its directly owned bounded child opens no account, credential, browser or network. The Linux signal observer now checks the owned reader descriptor; native Linux execution and the actual browser-login return remain unverified. Astra's focused implementation review returned `No findings` by inspection.
-
-The selected-credential startup correction moves OS-store access before chat and credential-bearing Provider preflight, including resume/continue with an initial objective. A fixed service/validated slot and helper-side native UUID/Provider check constrain the status-only authorization; it returns no credential. The interactive supervisor waits up to two minutes, supports future-drop cancellation and kills/reaps the helper. Native discovery without preferences uses the same interactive bound for its existing bounded read, discarding the key before chat; ordinary operations retain five-second deadlines and write/deletion uncertainty. Unconfigured startup no longer probes the OS store. The native debug attached-process corpus uses isolated current/legacy roots and an immediate or held synthetic helper, proving selected item/protocol, authorization before input, missing/denied/invalid response handling, cached/native discovery, private-file/unconfigured bypass, unchanged closed resume/continue Event prefixes, Ctrl+C exit before Session work, exact terminal restoration, helper EOF and positive PID disappearance. The helper protocol/cancellation corpus runs in both profiles. The explicitly activated six-second latency owner failed with the old five-second authorization deadline and passed with the correction in debug and release; the routine write-timeout/uncertainty/reaping owner passed on macOS debug. Final full native suites pass 253 debug and 251 release tests with 14 ignored gates each; format, strict all-target lint in both profiles, optimized executable build and diff checks pass. Astra's final review returned `No findings` after fixing initial preflight ordering, native identity checks and the Linux stalled-bus fixture. Its Linux adaptation explicitly declines synthetic startup access before exercising a later user-submitted admission/cancellation; native Linux execution remains unverified. This correction used no real Keychain item, user credential, sign-in, Provider or clipboard. Per-item native Keychain dialog/ACL behavior remains an isolated synthetic-store/manual gate, and Allow Once can require a subsequent prompt.
-
-The requested continuation adds native descriptor-based ACL admission for private roots, record/pending/database files and account/Session locks. The real ACL corpus keeps private mode bits while adding broad allow grants, proving that mode-only admission misses the defect; deny-only ancestor ACLs remain valid. The dedicated FFI review checked the macOS SDK's enum/permission ABI, absent-ACL/end-of-entry errors, borrowed descriptor lifetime, validated allocation, bounded traversal and single native free. Only this narrow Store adapter allows local unsafe code; the library otherwise denies it and the executable still forbids it. No same-UID or privileged exclusion is claimed.
-
-The macOS helper now uses the already locked Security framework directly for the exact user-domain Keychain/service/slot, inserting only after item-not-found rather than after a denied read. Its debug-only fixed-file fixture checks a private StateRoot and rejects malformed paths; optimized helper/supervisor overrides reject before native access. The explicitly activated isolated owner passes production-supervisor save/read, replacement, selected UUID/Provider checks, locked read/write rejection without a backend/item change, ChatGPT token save/read/deletion and preservation after another executable's denied deletion. It creates a privately named disposable Keychain and observes unchanged user default/search-list preferences before and after; no login-Keychain item or real credential is used. The native framework was promoted from an existing transitive dependency, adding no packages. Human dialogs, optimized lifecycle and cross-user scope remain unverified.
-
-Clipboard transport now uses the checked system JavaScript/AppKit bridge in the existing cleared-environment, killable process owner. A uniquely named synthetic pasteboard gate passes PNG-over-text selection, exact text/PNG bytes, malformed PNG, unsupported TIFF with a text fallback, and oversized PNG/text rejection in debug and release. Type count/name length, pasteboard generation and payload bounds are checked before returning the closed typed frame; ordinary image/text admission remains authoritative. The user's general clipboard was never accessed. Existing draft/modal/cancellation/replay owners retain their scope; general-pasteboard UX and live vision are separate checks.
-
-Handle-relative macOS file admission now rejects component links, traversal, hard links, special objects and device crossings while admitting checked nested files. The shared hostile file-discovery and installed-Skill corpora execute their successful/rejection paths on macOS. Discovery is not Guard dispatch. Native debug active-process PTYs exercise both linear and inline TERM, HUP, Ctrl+C, suspension/resumption and failed-call restoration, with independently captured empty stdout, closed cancelled/failed replay and no accepted assistant message. The fixture owns its session/controlling terminal and close-on-exec descriptors. It exposed fullscreen startup's cursor-preserving clear querying stdout and timing out when stdout is piped; startup now clears stderr directly. Shared restoration observation normalizes only Darwin's kernel-maintained PENDIN bit and compares every other field. The tiny child pre-exec exception was reviewed separately for owned fd 0, allocation-free native syscalls and failure propagation.
-
-The native active-process corpus also passes physical controlling-PTY loss and independently disconnected stderr in both presentations. It checks actual socket closure, empty stdout and cancelled closed replay, and compares surviving terminal settings. Darwin returns `ENOTTY` for the disconnected controlling slave; this is positive loss evidence, not restoration proof. The dead-stderr row reproduced a product panic with exit 101 after cancellation: main's `eprintln!` attempted to report the failure through the dead sink. Shared CLI error reporting now uses fallible writes and preserves exit 1. Split-PTY fixtures must drain controlling-input echo during cleanup; holding a slave prevents EOF, and leaving echo undrained can stall Darwin's process exit. The stalled fixture and its exact child were terminated and positively observed absent before rerunning the corrected owner. Linux startup and panic owners now gate on consent/acquired ownership instead of waiting for the removed cursor query; native Linux execution remains pending.
-
-Native Guard investigation retains host execution of macOS binaries; the user excludes a Linux VM. A harmless default-denial Seatbelt probe that permits execution, fork, reads and sysctl still succeeds at `setpgid` and child `setsid`, so a process group alone cannot own these descendants. The installed Darwin `sys/event.h` explicitly marks `NOTE_TRACK`, `NOTE_TRACKERR` and `NOTE_CHILD` unsupported since 10.5. A minimal native process reports 445,746,364,416 virtual bytes and 1,310,720 resident bytes before a 512-MiB `RLIMIT_AS` request returns `EINVAL`; virtual address size cannot substitute for the aggregate physical-memory contract. Apple's [resource implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_resource.c) applies that limit to the current VM map. Its [coalition syscall](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/sys_coalition.c) requires privileged coalition membership, and [memorystatus controls](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_memorystatus.c) require root or an entitlement for memory-limit configuration. These observations reject the simple Seatbelt/process-group/rlimit design; they do not prove every native enforcement design impossible or authorize weaker resource guarantees.
-
-The user subsequently accepted the explicit macOS supervision contract now owned
-by the Tool spec: nominal 10-ms aggregate memory/task observation and supervised
-15-second per-process CPU time, with overshoot, swap and aggregate-CPU non-claims.
-Intents and receipts identify the mandatory profile; the existing typed corpus
-checks profile mismatch and rejects missing serialized profile fields. Guard admission also
-rejects a resource profile different from its native implementation. No macOS
-dispatch is enabled by this encoding change.
-
-A stronger native Seatbelt diagnostic rejects direct `setsid` and `setpgid` with
-`EPERM` through syscall denial. A separately waited `posix_spawn` child still
-enters its own group through spawn attributes; adding `SYS_posix_spawn` to the
-denial rejects that path while the tested fork still succeeds. Apple's
-[spawn implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_exec.c)
-applies these attributes inside the kernel. This is candidate-control evidence,
-not complete descendant attestation. Under that denial, a cleared-environment
-Rust `std::process::Command` probe returns `EPERM`, while the fixed `/bin/sh`
-probe can still launch its tested child. The user requires ordinary native
-child-launch compatibility and rejected the fork/exec-only profile. Resource
-supervision acceptance remains unchanged; no compatible descendant mechanism
-has been selected. A private 64-MiB case-sensitive HFS+ image
-reported 65,536 KiB capacity and returned `ENOSPC` after 65,011,712 written bytes.
-It was positively observed detached, then its image and private directories were
-removed. The storage primitive is proven locally; the Guard's mount lifecycle,
-isolation and recovery are not implemented or attested.
-
-The existing file corpus now executes native exclusive creation and digest-bound
-atomic replacement on macOS through Rustix's already installed `renameat_with`
-adapter, without new unsafe code. It proves fresh-inode publication, stale-digest
-and unsafe-object rejection, and native Mach-O executable pin admission. A retained
-original descriptor has link count zero after publication, so the fixture reads
-its already validated finite bytes directly rather than treating it as a newly
-admissible linked file. File primitives remain independent of Guard dispatch.
-The shared terminal-reader corpus passes deliberate inline/linear unwind in debug
-and release, with actual acquired settings, exact restoration and one positively
-observed failed child test; no account store is opened. Linux acquisition, active
-suspension and panic owners no longer wait for removed cursor queries, but native
-Linux execution remains pending.
-
-The native consent fault corpus passes twelve debug shipped-process cases across
-linear and inline presentations: input Ctrl+C, INT, TERM, HUP, and separately
-disconnected stderr before or after the completed consent prompt. It checks
-actual acquired settings, exact surviving restoration, positive `EIO`, intended
-exit classes, empty stdout, absent setup and Session state, and unchanged
-synthetic account metadata. Reading folder trust may admit its empty private
-account root/lock/database; this is not account setup. Inline frames compress
-spaces with cursor movement, so both native and Linux consent observers use the
-existing visible-frame detector without sending its suggested response. A
-linear invalid response need not redraw the same cached prompt; the disconnected
-consent sink case uses TERM to prove shutdown/error reporting without advancing
-to setup. The active native fourteen-case owner also passes without any cursor
-reply, rejecting a reintroduced query. Optimized product isolation and arbitrary
-partial-acquisition/picker/tmux faults remain outside these claims.
-
-The dead-stderr cases exposed a second cleanup failure: Ratatui's destructor
-retried cursor output after the checked restoration path, then panicked while
-reporting the write failure to the disconnected stderr. The terminal owner now
-retains restoration errors and detaches its backend to an inert sink before
-destruction. The twelve consent and fourteen active-process cases pass through
-that corrected owner; ordinary error reporting also preserves the failure exit
-when stderr is unavailable. This proves the exercised ownership paths, not every
-possible shipped-CLI panic site.
-
-A finite Seatbelt identity diagnostic using Apple's installed `same-sandbox`
-signal filter permits signal 0 to its forked child, denies it to the outside
-parent, and retains the observed file-permission profile after a rejected nested
-`sandbox_init`. Forked `setsid` and a spawned new process group still succeed.
-This distinguishes sandbox membership from a mutable group for these cases; it
-does not attest a complete supervisor, recovery after guardian death, identity
-enumeration, or safe whole-unit cleanup. No broadcast terminating signal was
-sent. A separate CPU diagnostic inherits soft/hard `RLIMIT_CPU` values of 15,
-rejects widening with `EPERM`, and normally terminates through `SIGXCPU` near
-15 seconds. Ignoring that signal allows 17 CPU seconds before the diagnostic
-exits itself; its waited parent reports normal exit rather than kernel kill.
-Apple's [resource implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_resource.c)
-sets the CPU virtual timer from the soft value and sends `SIGXCPU`. This rejects
-that API alone as the accepted hard CPU boundary. Neither the agreed CPU
-requirement nor ordinary spawn compatibility has been weakened.
-
-A separate finite CPU-monitor diagnostic successfully requests
-`proc_rlimit_control(RLIMIT_CPU_USAGE_MONITOR, CPUMON_MAKE_FATAL)` but still exits
-normally after 17 CPU seconds with `SIGXCPU` ignored. Apple's
-[task implementation](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/task.c)
-sets a monitor-fatal flag through this call; the flag alone does not configure
-a lifetime CPU budget. Its
-[policy implementation](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/task_policy.c)
-distinguishes per-thread exception monitors, replenishing process-wide ledgers
-and wall-time deadlines. These inspected mechanisms do not establish the
-accepted inherited hard per-process budget for arbitrary native commands.
-No compatibility or resource requirement was changed on this evidence.
-
-The 2026-10-09 file-Guard continuation enables typed native files and pinned
-Skill data through the existing immutable intent, separate worker, GO gate and
-receipt. The debug Engine journey uses the actual Cargo-built Guard for thirteen
-operations, including create/replacement, Edit, Mkdir, inspection and progressive
-Skill loading. It proves exact file bytes, conflict and linked-file rejection,
-omitted/outside-data exclusion from Provider requests and Events, native resource
-receipts and closed SQLite replay. Its direct-worker corpus proves no mutation
-after EOF or invalid GO and rejects a stale Workspace identity or another
-resource profile before readiness. Remembered trust now advertises only native
-file/Skill capability; explicit command/MCP grants still reject before inference.
-The attached scripted greeting/resume owner verifies that distinction.
-
-The production-profile corpus independently proves denied host reads/writes,
-TCP/UDP/pathname-Unix socket creation, program launch and immutable signal/limit
-controls. Removing a broad `sysctl-read` permission did not by itself reject the
-fixture's own process-argument query; explicit `sysctl` and `sysctlbyname` syscall
-denial now closes that surface without reading another process's environment.
-The activated CPU owner resets/unblocks SIGXCPU, installs the production profile,
-publishes readiness and spins until actual SIGXCPU termination in debug and
-release. This mechanism is restricted to the trusted non-spawning worker and
-does not solve ordinary command-launch compatibility.
-
-The separately built standalone optimized executable also passes a disposable
-direct-worker protocol check for Mkdir, create, Edit, replacement and Read. Each
-owned cleared-environment child returns exactly Ready and a matching native
-receipt, with successful exit, empty stderr, capped capture and bounded reap;
-the final file bytes and read result match. All fixtures are removed. This
-artifact check opens no account or Provider and does not replace the optimized
-full Engine/SQLite journey's isolation prerequisite.
-
-The dedicated native FFI review covered the installed SDK/libc signatures,
-variadic syscall-filter C-int arguments, signal POD initialization, exact native
-output sizes, descriptor/profile bounds, C-string/error ownership and the exact
-unreaped PID lifetime. The syscall inventory includes pthread signal masking,
-signal return/wait, alternate exec and delegated/non-cancellable network paths.
-Apple's [process-info implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/proc_info.c)
-explains the observed task-info/exit race: BSD inspection must include zombies
-and establish kernel exit before retiring observation. The worker closes inherited
-descriptors at single-threaded entry, exposes no named network or Mach service,
-and preserves post-GO uncertainty. No dependency, daemon or Engine seam was added.
-
-The existing explicitly activated TLS owner passes valid chain/name, wrong-name rejection and unrelated-chain rejection in debug and release using generated certificates, loopback-bound OpenSSL 3 servers and a client-local test anchor. It changes no OS trust settings and does not prove default system-trust or actual compiled-endpoint HTTPS journeys on macOS.
-
-Final locked offline native suites execute 261 debug and 256 release tests, with zero failures and 20/18 explicitly ignored gates respectively. Formatting, strict all-target Clippy in both profiles and diff checks pass. The isolated Keychain gate completes exactly one parent/child test in debug; the named-pasteboard, TLS and activated file-worker CPU gates each complete exactly one owner in both profiles. These checks use physical TMPDIR=/private/tmp and synthetic current/legacy account roots; native loopback and OS-service gates require execution outside the development sandbox. An invocation without the physical temporary-root setting rejected linked paths before its fixtures ran; the corrected invocation supplies that prerequisite. Cargo audit/deny remain unavailable, so no fresh advisory/license-policy pass is inferred.
-
-At this checkpoint, native command/MCP enforcement remained an implementation gap: no compatible profile attested their accepted CPU budget, fixed-capacity private storage and complete descendant ownership. Those grants failed closed while file/Skill Tools worked. The optimized full Engine/file journey lacked isolated effective-user roots; the release profile corpus and override refusal did not substitute for it. Supervised-threshold/observer-fault stress and native cancellation/post-GO uncertainty remained additional file-worker evidence gaps. Optimized active-CLI/account setup needed the same isolation prerequisite; acquisition/picker/tmux faults, compiled-endpoint/default-trust TLS, Keychain setup/refresh/logout/cross-user scope, VoiceOver, Linux re-verification and distribution provenance were separate. The later dated continuation records implementation and verification changes; [next steps](../../NEXT_STEPS.md#beta-2-and-broader-release) owns current remaining checks without a complete macOS support claim.
-
-### Native process-unit continuation — 2026-10-09
-
-The accepted CPU contract now uses supervised 15-second per-process CPU time,
-alongside the existing nominal 10-ms memory/task thresholds. The native adapter
-uses one temporary Background launchd job, a distinct resource coalition and a
-trusted supervisor around the separate Seatbelt file worker. Launchd's reported
-PID, local peer credentials, unique process identity and coalition must agree
-before the task/GO exchange. The controller checks aggregate resources before
-GO and requires coalition emptiness plus exact job removal/absence afterward.
-The enforcement digest now binds this topology and accounting.
-
-Finite native diagnostics establish coalition inheritance through fork/setsid
-and ordinary posix_spawn, and show that job removal alone leaves an escaped
-orphan alive. Exact audit-token signaling rejects a stale version and terminates
-the owned incarnation. The installed SDK and Apple's
-[process-information implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/proc_info.c)
-inform the fixed ABI/selector review. A CPU diagnostic compares converted native
-counters with the process clock and confirms cumulative CPU retention across
-exec. Resource identity uses the process unique ID across exec; signals retain
-the current audit version.
-
-The real thirteen-operation debug Engine journey passes effects, rejection,
-receipts and closed replay through this unit. It first exposed a missing
-Background session declaration and then false post-GO uncertainty when bootout
-reported an already retired job. An exact synthetic one-use job confirms print
-status 113 and bootout ESRCH after retirement; other removal failures still
-reject. The dedicated FFI pass checked 40/56-byte process layouts, the eight-byte
-Mach timebase, initialized output, CPU conversion overflow, peer credentials,
-exact-incarnation signals, descriptor ownership and bounded channels. It fixed
-short positive writes being mistaken for ESRCH through stale errno. The local
-SDK layout replaces deprecated libc timebase declarations without a dependency.
-
-The activated unit owner passes in debug and release: a setsid/orphan descendant
-remains in the coalition, a stale token leaves it alive, two active synthetic
-memory allocations exceed the aggregate RSS threshold, parked threads exceed
-the task threshold, and a CPU burner ignoring SIGXCPU reaches supervised
-termination. Every case positively confirms empty membership and absent owned
-incarnations. Initial fixture runs timed out without useful phase diagnostics;
-the owner now reports bounded helper diagnostics and maintains incompressible,
-active memory pages. Further readiness/load and observer-fault stress remains
-open rather than inferred from these successful runs.
-
-Job manifests now use Core Foundation's property-list serializer through the
-existing locked macOS binding. The fixed dictionary is emitted as a binary
-plist with bounded arguments/output and exclusive mode-0600 creation; no XML
-template or custom escaping remains. The dependency delta makes that existing
-package explicit without changing package versions or adding build scripts or
-procedural macros. The serialization review checked copied UTF-8 strings,
-retained collection elements, the live dictionary reference and the owned data
-buffer through the write; native errors remain fixed, closed failures.
-
-The activated unit owner now checks literal XML metacharacters, Unicode and an
-XML-disallowed control byte through the actual launchd argument vector. Its
-debug run exposed another memory-readiness timeout while an optimized build was
-active: expensive resource preparation preceded the fixture's identity report.
-Readiness now publishes every descendant identity before an explicit parent
-gate starts the resource workload, within the separate observation deadline.
-The corrected debug and release owners pass without changing any resource
-threshold or cleanup assertion. This fixes fixture ordering; broad host-load and
-readiness stress remains open.
-
-Locked offline workspace suites pass 258 debug and 253 release tests, with
-22/20 explicitly ignored gates. Strict all-target Clippy passes both profiles;
-formatting, the optimized executable build, diff checks and 419 local links and
-anchors pass. These are native Apple Silicon synthetic checks, not Linux/Intel,
-live Provider or general-clipboard evidence. Command/MCP spawning and private
-filesystem lifecycle, supervisor-loss/signal-isolation, optimized full Engine
-account isolation and the remaining native plan gates are still incomplete.
-
-### Attached account recovery — 2026-10-09
-
-A synthetic saved ChatGPT index missing the required plan-permission flag
-reproduced the reported `invalid authorization identity` exit before the
-composer. This identifies a reproducible persisted-format failure, not the
-uninspected user's actual record. Persisted index/registration rejection now
-has a distinct actionable diagnostic; live signed OAuth identity checks retain
-their strict admission. Saved-access and recoverable initial setup failures
-leave attached chat available without choosing another billing route.
-
-The existing native macOS startup PTY owner now covers invalid ChatGPT/API
-records, model preferences, registration, and initial setup failure. It checks
-default Back cancellation, confirmed route/model reset, ordinary fresh setup
-storage consent, helper access bounds, exact terminal restoration and closed
-history preservation. Its first red invocation reproduced the original exit.
-A later fixture timeout came from writing Ctrl+C to a PTY without a controlling
-foreground group; the corrected driver signals its exact owned child. The final
-twenty-case owner passes. The private-file credential corpus also proves opaque
-snapshot comparison, concurrent-change refusal, scoped removal and fresh save;
-private-record corpora reject symlinks, hard links and FIFOs before removal.
-
-Final locked offline Apple Silicon workspace suites pass 258 debug and 253
-release tests, with zero failures and 22/20 ignored gates. Formatting and strict
-all-target Clippy pass in both profiles. These synthetic checks use physical
-`TMPDIR=/private/tmp`, isolated account/Session roots and a fake credential
-helper. They do not read or reset the user's account, exercise actual browser
-sign-in or Keychain recovery, or establish Linux/Windows execution. Reset and
-its local-only deletion limits belong to the [credential contract](../specs/credentials.md#storage-replacement-and-recovery);
-the native command/MCP and private-filesystem work remains open in the existing
-native plan.
-
-### Attached history recovery — 2026-10-09
-
-The account-recovery change did not cover SQLite admission. A synthetic closed
-Session whose journal schema was changed to version 3 reproduced the reported
-`state store unavailable` exit before the composer. This proves a persisted
-history failure path; the user's actual history remains uninspected. Attached
-startup now offers recovery after folder consent and before saved-account
-authorization, with default Retry and a separate complete Back/Accept warning
-before deletion. Confirmed reset keeps account, model and trust records, enters
-a new unsaved conversation and does not submit an initial task automatically.
-The [terminal contract](../specs/terminal.md#setup-and-account-choices) owns this
-behavior; ordinary Store opening still rejects unsupported formats.
-
-The first native lease implementation locked the database file itself and
-failed even on a fresh Store with SQLite `database is locked`. Darwin flock
-conflicts with SQLite's write locking on that file. A separate private zero-byte
-lease now protects every open Store and excludes reset through confirmation
-and replacement. The existing journal-version corpus proves unchanged ordinary
-refusal, cancellation, active read/write Store exclusion, concurrent-change
-refusal and fresh current-schema reopening. The private-file corpus rejects
-special SQLite sidecars before opening or removing them.
-
-The native startup PTY owner now passes twenty-five cases, including damaged
-history, incompatible history, default Back cancellation, unsafe sidecar
-refusal and accounts/history sharing the normal StateRoot. The shared-root
-case also supplies an initial task and continue request, proving that reset
-does not submit that task or resume a deleted Session. Exact terminal
-restoration and bounded fake-helper access remain checked. Two existing startup
-fixtures initially rejected the new coordination file as account metadata;
-their allowlists now admit only that additional zero-byte file.
-
-Locked offline Apple Silicon workspace suites pass 258 debug and 253 release
-tests, with zero failures and 22/20 explicitly ignored gates. Formatting and
-strict all-target Clippy pass both profiles. The attached PTY recovery owner
-uses the debug-only isolated account-root barrier; optimized verification
-covers Store reset and warning frames, not real account setup. These checks use
-synthetic private state and no actual user history, Keychain, clipboard or live
-Provider. Linux/Windows execution and the native command/MCP and private
-filesystem lifecycle gates remain unverified.
-
-### Startup fixture responsibility review — 2026-10-09
-
-The native startup owner now declares reply/signal sequences for each case
-outside the transport pump. Fresh complete prompts consume one action, and
-sequence exhaustion is required alongside the existing account-access,
-closed-history and terminal-restoration assertions. This removes duplicated
-case-name/step inference without another fixture framework or product change.
-The focused twenty-five-case owner passes.
-
-The first broad debug run exposed a separate consent fixture race: a write
-immediately after closing the PTY master returned one byte rather than `EIO`.
-Consent now reuses the active-terminal owner's nonblocking disconnection probe,
-with its existing five-second deadline and positive `EIO` requirement. The
-focused consent owner and corrected complete workspace suites pass: 258 debug
-and 253 release tests, zero failures and 22/20 explicitly ignored gates.
-Formatting, strict all-target debug Clippy and diff checks pass. The fixture
-guidance records explicit startup sequences; product contracts are unchanged.
-These are isolated synthetic Apple Silicon checks, not live-account,
-clipboard, Linux/Windows or remaining Guard lifecycle evidence.
-
-### Native private-storage lifecycle — 2026-10-09
-
-The unit owner now allocates separate fixed-size case-sensitive HFS+ project
-and scratch images inside its checked private root. Opened mounts must have
-different devices from the parent, current-user ownership, writable `NOSUID`
-flags and exactly 64-MiB kernel capacities. Native commands retain bounded
-capture/deadlines and a cleared allowlisted environment; allocation adds no
-dependency or unsafe block. The [Tool contract](../specs/tools.md#macos-enforcement-and-compatibility)
-owns the current behavior.
-
-The first userspace-image trial failed on a newline-sensitive fixture assertion
-and killed its disk-image service before detachment. The user reported an
-improper-eject notification at that time. Only that positively identified,
-already-unmounted synthetic root was removed. The installed native manual's
-kernel-only attachment option passed a private capacity/exhaustion/detachment
-probe, so production allocation requires it. Storage remains mounted after
-supervisor termination and can then be cleanly detached; unsupported kernel
-attachment rejects.
-
-The existing activated unit corpus now fills both filesystems until actual
-`ENOSPC`, confirms the absence of an auxiliary process in the owned coalition,
-kills the supervisor, positively observes surviving mounts and then detaches
-them. Its unwind case deliberately panics with the payload still live; the
-scoped teardown reactor confirms empty membership, removes the job, detaches
-both mounts and removes the private root. Partial setup rejects an
-outside-pointing scratch link without changing the outside directory and
-cleans the already-created project mount. An unfinished-attachment marker
-refuses completion and preserves its private root until the fixture explicitly
-removes that synthetic uncertainty.
-
-One subsequent run exposed an initial-channel race: Darwin returned `EINVAL`
-when the helper set a receive timeout after the parent had already closed its
-peer. A minimal native socket-pair probe confirms timeout setup succeeds with
-a live peer and fails after peer closure. The unit fixture now retains that
-connection until next-stage readiness, without sleeps, retries or longer
-deadlines.
-
-The final activated owner passes in debug and release, including positively
-observed deliberate unwind and all existing descendant/resource assertions.
-Complete locked offline workspace suites pass 258 debug and 253 release tests,
-with zero failures and 22/20 explicitly ignored gates. Strict all-target debug
-Clippy, formatting and diff checks pass. No matching test image/unit roots
-remain after verification. These checks do not inspect user disks or clipboard
-data, and do not attest command/MCP snapshot and spawning enforcement, primary
-process death during attachment, signal isolation or platform parity. Those
-remaining implementation and evidence gates stay in the native plan and
-[next steps](../../NEXT_STEPS.md#beta-2-and-broader-release).
-
-### Native command/MCP and process continuation (2026-10-11)
-
-The native Guard now admits host-native commands and local MCP alongside typed
-files and Skills, through the existing Policy, one-use GO gate, supervisor and
-receipt. Linux and macOS share the checked selected-file snapshot copier.
-Native project/scratch images retain their fixed capacities; runtime resources
-use a private read-only tree. Checked immutable system executables keep their
-native paths because relocating the tested system shell caused termination even
-without Seatbelt. The [Tool contract](../specs/tools.md#macos-enforcement-and-compatibility)
-owns current path, compatibility and resource semantics. No dependency, daemon,
-Engine policy seam or compatibility reader was added.
-
-The command profile denies direct coalition/persona mutation and sandbox
-relabeling, clears inherited bootstrap/registered ports before exec, and denies
-fork/spawn dynamically for actors holding coalition-spawn or persona-management
-authority. The installed SDK and Apple's XNU sources own the reviewed ABI and
-spawn-attribute behavior. An ad-hoc signed synthetic actor proves the dynamic
-caller-entitlement predicate with an ordinary development entitlement; this does
-not grant or prove possession of Apple's private entitlements. Ordinary native
-child launches, denied direct APIs and privilege predicates pass in the existing
-activated unit corpus in debug and release. The same owner retains actual storage
-exhaustion, escaped descendants, supervised resource excess, stale identity and
-positive cleanup evidence. Dedicated FFI review covers borrowed descriptors,
-Security Copy-result ownership, CF metadata and exact native syscall arguments.
-
-Optimized execution initially exceeded the command-profile owner's unchanged
-20-second phase deadline. Bounded phase measurements showed three successful
-captures each waking only at their five-second deadline, followed by MCP cleanup
-waking at its two-second deadline. Tokio's local signal/reaper implementation
-uses an anonymous Unix wake socket and ignores handler write errors. A private
-pair succeeds before Seatbelt and returns `PermissionDenied` after the production
-profile. Native capture and MCP cleanup now poll the exact owned child every
-10 ms within their existing deadlines; signal and network grants are unchanged.
-The final clean activated unit owner passes in debug (37.22 seconds overall) and
-release (34.10 seconds overall), with the original phase/resource bounds.
-Initial failure diagnostics were also lost when a Tokio writer shut down its
-shared socket before a cloned descriptor wrote; bounded typed failure output now
-precedes shutdown. Helper EOF is followed by positive empty-coalition observation
-before reading its exact completed libtest summary.
-
-The [native Engine journey](../../tests/session_run/tools/macos.rs) passes after
-the polling correction (38.87 seconds, one parent and exactly one completed
-private helper). It executes the real command/MCP path with fresh post-edit
-snapshots, ordinary descendants and discarded writes. It checks stale and linked
-inputs, approval denial/cancellation, attested output/protocol failures,
-post-GO missing completion without retry, bounded canaries and exact closed
-SQLite replay. Its linked-file fault is introduced only before the relevant typed
-read, so it does not accidentally invalidate an earlier selected-directory
-snapshot. Every later refusal receives a fresh identity and expiry. The attached
-composition owner distinguishes debug stale-pin refusal from release's earlier
-account-fixture-override refusal; both preserve Provider call counts and Events.
-
-Native picker and partial-acquisition owners add signals, suspension/reacquisition,
-16-column geometry, independently broken stderr and exact surviving termios.
-The first full suite hid a picker assertion behind blocking cleanup: stopped
-kernel status preceded the parent's captured mouse-disable bytes. The fixture
-now gates continuation on both observations and closes retained PTY masters
-before child reap during unwind. Its controlled capture-deadline fault positively
-confirms the exact child was reaped. A later full suite found an exported terminal
-owner's PTY descriptors missing `CLOEXEC`; another concurrent helper could retain
-terminal EOF. The corrected owner sets close-on-exec before spawn, retains bounded
-case-specific failure diagnostics and passes with all six native terminal tests
-together. Deadlines and exact restoration assertions were not relaxed.
-
-The [TLS owner](../../tests/platform_tls.rs) passes in debug and release, each
-with exactly two completed private helpers: generated-anchor chain/name checks
-and default system-trust rejection of the generated CA with a matching name.
-These tests change no host trust, Keychain preferences, DNS or user clipboard.
-They do not prove acceptance of a public system-trusted chain or a compiled-endpoint
-HTTPS product journey. Optimized actual-product account/active-CLI evidence needs
-an isolated effective OS user; changing `HOME` cannot isolate release account
-roots. Native tmux is unavailable on this host. These prerequisites, scheduled
-load/fault work, human accessibility and live Provider checks remain explicit in
-[next steps](../../NEXT_STEPS.md#beta-2-and-broader-release). Linux/Windows runtime
-verification and fresh dependency-policy/advisory checks were not run;
-`cargo-deny` and `cargo-audit` are not installed.
-
-Final locked offline workspace suites pass with physical `TMPDIR=/private/tmp`:
-261 debug and 253 release tests, zero failures, with 22 and 20 ignored gates
-respectively. Formatting, strict all-target Clippy in both profiles and staged/
-unstaged diff checks pass. The completed native implementation plan was removed;
-current behavior lives in domain contracts and unavailable/user-owned evidence
-remains in next steps. These results do not establish complete macOS release
-support or substitute for the unperformed platform and account gates above.
-
-## 19. Decisions that supersede or sharpen earlier research
-
-The existing CLI and architecture research is directionally correct but its “smallest verification matrix” can be misread as dozens of individual tests. This report sharpens it as follows:
-
-- every matrix section becomes a scenario, table, or corpus owner rather than a test-count requirement;
-- exact boundary and boundary + 1 checks share tables instead of separate functions;
-- the deterministic fake proves the composition in-process, while the real binary owns OS channels and replay; no hidden fake CLI is added;
-- each ignored live smoke should spawn the shipped executable so it is the genuinely complete Provider path;
-- user-output goldens are few, explicit, and manually reviewed without a snapshot dependency;
-- 100-run repeatability and latency loops are release measurements, not 100 permanent test cases;
-- property/model/fuzz tools are triggered by state-space growth or escaped bugs rather than installed preemptively; and
-- test deletion is part of every behavior change, so the suite can become smaller when a stronger proof replaces weaker examples.
-
-## 20. Final recommendation
-
-Begin implementation with the deterministic journey and make it display the exact human stdout/stderr and JSONL facts the user will see. Add the real `show` subprocess as soon as SQLite replay exists. Add compact adversarial tables only at the boundaries named by the architecture and security reports. Finish the core proof with deterministic cancellation and one real OS signal test per supported platform. Only then run each explicitly paid actual-binary smoke for an adapter Arany intends to claim.
-
-This testing model keeps the suite small because each test is broad in composition but precise in ownership. It remains strong because storage, rendering, process behavior, hostile input, and cancellation are real; only the stochastic Provider is replaced in the default journey, at the exact seam the production architecture already requires.
+This document explains the testing design and its trade-offs. [Testing rules](../../agents/testing.md)
+own the working requirements; [fixture details](../../agents/references/testing-details.md)
+own native procedures. [Domain specs](../specs/README.md) own behavior and acceptance
+scenarios, and [next steps](../../NEXT_STEPS.md) owns unresolved defects and missing
+verification. Completed work and past check results belong in Git and CI history.
+
+## Evidence per test
+
+The useful unit is a claim with a clear owner, not a test count or coverage
+percentage. One connected journey can prove coordination, durable writes,
+replay and visible output. Small boundary corpora complement that journey where
+its successful path cannot exercise rejection or a specific failure.
+
+Prefer extending the existing owner over adding another layer that asserts the
+same fact. A new framework, fixture abstraction or generative tool needs a
+reachable gap that the existing suite cannot cover clearly. A private helper's
+shape is not itself a product claim.
+
+This keeps changes reviewable: the test name, scenario or corpus row explains
+what breaks, while its observation shows the user-visible or security consequence.
+An implementation fix can make a test more valuable; completion alone is no
+reason to delete a durable/security regression.
+
+## Composition and process evidence
+
+The deterministic Session journey uses the real Engine, temporary file-backed
+SQLite, reducers and presentation, with a strict scripted Provider at the
+existing substitution boundary. It exercises direct and bounded-team Runs,
+controlled child completion, resume/fork, compaction and cancellation.
+
+Provider scripts match complete semantic requests, reject missing or extra
+calls and expose controlled gates. A mock panic followed by generic Run failure
+cannot prove product refusal. Forbidden-call peers return valid success if the
+request reaches them, so rejection assertions depend on Arany's boundary.
+
+A separate product-process lane owns argument parsing, signals, exit status,
+channel separation and replay after process exit. It executes the shipped
+binary rather than adding a fake-provider mode or second product executable.
+These lanes establish different facts; neither is advertised as proof of the
+other.
+
+For a noninteractive acceptance scenario, compare one connected observation:
+
+- exit class and exact stdout/stderr bytes;
+- Events reopened from the closed SQLite store;
+- SessionView/RunView reduced from those Events.
+
+Interactive scenarios add semantic frames, terminal settings, keys/signals and
+the post-restoration receipt. Ratatui TestBackend owns deterministic layout;
+native PTY tests own terminal acquisition, restoration and OS input behavior.
+Raw escape sequences are not public output goldens, and automated frame tests
+do not establish assistive-technology usability.
+
+## Durability and failure
+
+Use real filesystem objects and file-backed SQLite for ownership, permission,
+transaction, quota, reopen and recovery claims. An in-memory database cannot
+prove persistence after a connection or process ends. Acknowledged Events must
+survive reopen; failure before acknowledgement must leave an honest prefix.
+
+Fault owners choose explicit boundaries, such as before commit or after append
+acknowledgement, then kill/reap the owned process and inspect the closed state.
+This proves the selected application boundary, not arbitrary power-loss timing.
+The same distinction applies to interrupted effects: durable reporting must
+preserve uncertainty rather than infer rollback from missing completion.
+
+Cancellation owners observe dropped futures, joined tasks and positively owned
+child cleanup. Gates and paused time control scheduling; sleeping until an
+assumed order is not synchronization. Native supervisors need bounded observation
+of actual process identity and resource enforcement, independently of Engine
+return values.
+
+Fixture isolation is part of the evidence. A temporary Session directory and a
+changed HOME do not isolate an account derived from the effective OS user.
+Native account/OS-service gates follow the dedicated fixture rules and fail
+visibly when their isolation prerequisites are unavailable.
+
+## Evidence lanes
+
+| Lane | What it establishes | Scope limit |
+| --- | --- | --- |
+| Deterministic composition | Engine policy, strict Provider exchange, persistence, replay and visible facts | Scripted outcomes do not establish live service compatibility |
+| Product process | CLI admission, exits, channels, signals and fresh-process replay | Requires the actual built executable and bounded ownership |
+| Boundary corpus | Parsers, legal transitions, hostile input, limits and demonstrated regressions | A covered branch alone is not a useful assertion |
+| Native conformance | Filesystem/ACL, process/Guard, keyring, TLS and terminal behavior | Evidence is specific to the OS, architecture and activated scenario |
+| Live Provider smoke | Current wire compatibility through the complete production path | Explicitly authorized usage; structural facts, not model quality |
+| Human review | Desktop interoperability, theme, clipboard and accessibility UX | Automated frame or synthetic-service success does not replace it |
+| Named-host measurement | Latency, RSS, supervision and telemetry cost under recorded load | Separate release/performance gate, not a host-sensitive default assertion |
+| Triggered fuzz/model checks | Larger input/trace spaces at a bounded pure boundary | Add when escaped defects or state-space growth justify the tool |
+
+A compile-only target does not prove native behavior. An ignored test or a
+filtered invocation that executes zero tests proves nothing. A helper filtered
+with `--exact` must complete its intended nonzero count and remain under its
+parent's deadline and kill/reap owner.
+
+Behavioral evaluation asks how reliably a model/scaffold solves a distribution
+of tasks; it belongs to [evaluation research](./evaluation-and-quality-strategy.md).
+Scores, one live answer and benchmarks cannot override a broken deterministic
+contract, unsafe disclosure or invalid durable history.
+
+## Maintenance
+
+Keep accepted behavior and scenario ownership in the domain specs. Keep
+implementation traps and fixture requirements in module rules. Keep only open
+claims and their completion conditions in next steps; remove resolved items
+instead of appending dated closeout sections.
+
+For an implementation handoff or PR, report checks actually run, their scope and
+material limitations. Git and CI preserve completed results. Retain a focused
+security finding or source investigation when its reasoning, unresolved cause
+or scoped audit evidence is still needed; it is not a second feature changelog.
+
+Review tests when their contract disappears or a stronger owner subsumes them.
+Remove obsolete fixtures and snapshots, while keeping security/durability
+regressions at the narrowest stable owner. Review manually maintained public
+output goldens when an intentional contract change alters bytes. Incidental
+UUIDs, timestamps and temporary paths may be canonicalized; user-controlled
+content, ordering and identity relationships may not.
+
+Use [the contribution guide](../../CONTRIBUTING.md#verification) for current check
+commands and the workflow for CI configuration. Do not cache their commands,
+job names, test totals or historical native runs in this strategy.
 
 ## Primary sources
 
-### Rust and Cargo
-
-- [The Rust Programming Language: Writing Automated Tests](https://doc.rust-lang.org/book/ch11-00-testing.html)
-- [The Rust Programming Language: Test Organization](https://doc.rust-lang.org/book/ch11-03-test-organization.html)
-- [The Rust Programming Language: ignored tests](https://doc.rust-lang.org/book/ch11-02-running-tests.html#ignoring-some-tests-unless-specifically-requested)
-- [Cargo targets and integration tests](https://doc.rust-lang.org/cargo/reference/cargo-targets.html#tests)
-- [`cargo test`](https://doc.rust-lang.org/cargo/commands/cargo-test.html)
-- [Cargo Continuous Integration guide](https://doc.rust-lang.org/cargo/guide/continuous-integration.html)
-- [`std::process`](https://doc.rust-lang.org/std/process/)
-- [`std::process::Command`](https://doc.rust-lang.org/std/process/struct.Command.html)
-- [rustc platform support](https://doc.rust-lang.org/rustc/platform-support.html)
-
-### Runtime and concurrency
-
+- [Rust: Writing Automated Tests](https://doc.rust-lang.org/book/ch11-00-testing.html)
+- [Cargo: test targets](https://doc.rust-lang.org/cargo/reference/cargo-targets.html#tests)
 - [Tokio: Graceful Shutdown](https://tokio.rs/tokio/topics/shutdown)
-- [`tokio_util::sync::CancellationToken`](https://docs.rs/tokio-util/latest/tokio_util/sync/struct.CancellationToken.html)
-- [`tokio::time::pause`](https://docs.rs/tokio/latest/tokio/time/fn.pause.html)
-- [`loom`](https://docs.rs/loom/latest/loom/)
-
-### Persistence
-
+- [Tokio: paused time](https://docs.rs/tokio/latest/tokio/time/fn.pause.html)
 - [SQLite: How SQLite Is Tested](https://www.sqlite.org/testing.html)
 - [SQLite: Atomic Commit](https://www.sqlite.org/atomiccommit.html)
-- [SQLite: How To Corrupt Your Database](https://www.sqlite.org/howtocorrupt.html)
-- [SQLite database defensive configuration](https://www.sqlite.org/c3ref/c_dbconfig_defensive.html)
-
-### Generative testing and snapshots
-
-- [Proptest README](https://github.com/proptest-rs/proptest/blob/main/proptest/README.md)
-- [Proptest: State Machine testing](https://proptest-rs.github.io/proptest/proptest/state-machine.html)
-- [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz)
-- [Kani Rust Verifier](https://model-checking.github.io/kani/)
-- [Insta snapshot review workflow](https://insta.rs/docs/quickstart/)
-- [Insta advanced snapshot lifecycle](https://insta.rs/docs/advanced/)
-
-### Provider
-
-- [OpenAI: Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs)
-- [OpenAI: Your data](https://developers.openai.com/api/docs/guides/your-data)
-- [OpenAI Responses API](https://developers.openai.com/api/reference/cli/resources/responses/methods/create)
-
-
-### Pre-beta current-format verification — 2026-10-09
-
-The pre-beta compatibility decision now requires one current internal format.
-Account readers no longer relocate old-root metadata or create migration markers.
-Native API accounts require schema 2 and explicit nullable scope/effort; ChatGPT
-index flags, model checks and nullable fields are explicit. Unmarked native
-Keychain items do not configure an account. SQLite admits schema 4 only and
-creates it only in an empty version-zero file. Every Event uses payload version
-2, every compaction uses compiler version 3, and Tool resource profiles are
-mandatory. Custom profiles use capability-evidence version 2 with an explicit
-effort list, empty for provider-default only. Missing or unsupported values
-reject; stored data is never automatically converted or deleted. Replay also
-requires an observed delegation before child spawn and an observed finished
-call before successful Agent completion. The current behavior belongs to the
-[execution](../specs/execution.md), [credential](../specs/credentials.md) and
-[Tool](../specs/tools.md) contracts.
-
-Native Apple Silicon offline suites passed with physical `TMPDIR=/private/tmp`:
-258 debug tests and 253 release tests, zero failures, with 20 and 18 ignored
-respectively. These include actual native file/Skill effects, closed journal
-replay, interruption/cancellation and unsupported-format refusal. The journal
-corpus checks unchanged database bytes after refusal in both open modes; current
-payload corpora check mandatory fields and missing-call rejection. Formatting,
-strict all-target Clippy in debug/release and a standalone optimized build passed.
-Linux execution was not repeated.
-
-The isolated native Keychain owner passed with schema-2 save/read/replacement,
-identity/lock/deletion checks, and a current item that remains unconfigured while
-its backend marker is absent. Automatic approval review rejected the first
-invocation because the owner read user Keychain preferences. Those preference
-queries were removed; the successful owner accesses only its temporary synthetic
-Keychain. This run does not re-prove preservation of user default/search-list
-preferences; the earlier dated observations remain separate evidence. No live
-account, Provider or general clipboard was used. An initial release invocation
-omitted the documented physical `TMPDIR` and failed fixture path admission; the
-corrected invocation passed without weakening that admission.
-
-
-### Branch-review corrections — 2026-10-11
-
-Review of `feat/macos-native-support` against the merge base with `origin/main`
-reproduced intermittent post-GO uncertainty during an ordinary native command.
-A short-lived child disappeared between coalition enumeration and task sampling;
-the fallback observer rejected before the existing identity revalidation could
-confirm reaping. Resource samples now retain their result until identity is
-revalidated, including failed samples. Confirmed absence or reuse retires that
-member; missing live-process observation still rejects. The native Engine
-journey now launches 128 short-lived children and retains its receipt, effect,
-no-retry and closed-replay assertions. Temporary bounded diagnostics were removed.
-
-Two Linux setup assertions still expected the removed cursor-position queries;
-they now require no query in either presentation. Native Linux execution remains
-pending. The subscription Run/compaction journey no longer repeats the identical
-account-consent scenario twice. README, architecture and Tool guidance now agree
-on native command support, consent ordering and macOS anonymous-socket limits.
-The Tool contract and Guard rules record the resource-sampling exit invariant.
-
-Locked offline Apple Silicon suites pass 261 debug and 253 release tests, with
-22 and 20 explicitly ignored gates. The activated native unit/resource owner
-passes separately in both profiles, including escaped descendants, resource
-excess, native profile rejection and positive cleanup. The simplified replay
-owner passes again in debug and release. Formatting, strict all-target Clippy in
-both profiles and diff checks pass. These checks use synthetic fixtures and do
-not establish Linux/Windows execution, optimized full account isolation, live
-Provider compatibility or human accessibility evidence.

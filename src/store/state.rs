@@ -1,14 +1,10 @@
 use super::{DATABASE_FILE, MAX_DATABASE_BYTES, StoreError};
-use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
-use cap_std::fs::{Dir, DirBuilder, OpenOptions};
+use cap_std::fs::{Dir, OpenOptions};
 use directories::ProjectDirs;
 use std::io::{self, Read, Write};
-use std::path::{Component, Path, PathBuf};
-
-#[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
-mod acl;
+use std::path::{Path, PathBuf};
 mod lock;
 pub(crate) use lock::SessionRunLock;
 
@@ -53,12 +49,12 @@ impl HistoryReset {
             }
             for (name, record) in HISTORY_FILES.iter().zip(&self.records) {
                 if record.is_some() {
-                    self.state._dir.remove_file(name)?;
+                    self.state.dir.remove_file(name)?;
                 }
             }
-            prepare_database_file(&self.state._dir, true)?;
+            prepare_database_file(&self.state.dir, true)?;
             self.state
-                ._dir
+                .dir
                 .open_with(".", OpenOptions::new().read(true))?
                 .sync_all()?;
             Ok(())
@@ -72,7 +68,7 @@ impl HistoryReset {
 
 pub struct StateRoot {
     path: PathBuf,
-    _dir: Dir,
+    dir: Dir,
     #[cfg(unix)]
     ancestors: Vec<(u64, u64)>,
 }
@@ -86,7 +82,7 @@ impl StateRoot {
     pub(crate) fn try_clone(&self) -> Result<Self, StoreError> {
         Ok(Self {
             path: self.path.clone(),
-            _dir: self._dir.try_clone()?,
+            dir: self.dir.try_clone()?,
             #[cfg(unix)]
             ancestors: self.ancestors.clone(),
         })
@@ -158,57 +154,17 @@ impl StateRoot {
     }
 
     fn open(path: &Path, create: bool) -> Result<Self, StoreError> {
-        if !path.is_absolute() {
-            return Err(StoreError::InvalidStateDirectory);
-        }
-        let mut components = path.components();
-        if components.next() != Some(Component::RootDir) {
-            return Err(StoreError::InvalidStateDirectory);
-        }
-        let mut names = Vec::new();
-        let mut normalized = PathBuf::from("/");
-        for component in components {
-            let Component::Normal(name) = component else {
-                return Err(StoreError::InvalidStateDirectory);
-            };
-            names.push(name);
-            normalized.push(name);
-        }
-        if names.is_empty() || normalized != path {
-            return Err(StoreError::InvalidStateDirectory);
-        }
-        let mut dir = Dir::open_ambient_dir(Path::new("/"), ambient_authority())?;
-        #[cfg(unix)]
-        let mut ancestors = vec![directory_identity(&dir)?];
-        for (index, name) in names.iter().enumerate() {
-            match dir.open_dir_nofollow(name) {
-                Ok(next) => dir = next,
-                Err(error) if create && error.kind() == io::ErrorKind::NotFound => {
-                    let mut builder = DirBuilder::new();
-                    #[cfg(unix)]
-                    {
-                        use cap_std::fs::DirBuilderExt;
-                        builder.mode(0o700);
-                    }
-                    dir.create_dir_with(name, &builder)?;
-                    dir = dir.open_dir_nofollow(name)?;
-                }
-                Err(error) => return Err(StoreError::Io(error)),
-            }
-            check_directory(&dir, index + 1 == names.len())?;
-            #[cfg(unix)]
-            ancestors.push(directory_identity(&dir)?);
-        }
+        let directory = crate::private_fs::open_directory(path, create)?;
         #[cfg(unix)]
         if create {
-            lock::prepare_history_lock(&dir)?;
+            lock::prepare_history_lock(&directory.dir)?;
         }
-        prepare_database_file(&dir, create)?;
+        prepare_database_file(&directory.dir, create)?;
         Ok(Self {
-            path: normalized,
-            _dir: dir,
+            path: directory.path,
+            dir: directory.dir,
             #[cfg(unix)]
-            ancestors,
+            ancestors: directory.ancestors,
         })
     }
 
@@ -251,11 +207,11 @@ impl StateRoot {
             let mut options = OpenOptions::new();
             options.read(true).write(true).follow(FollowSymlinks::No);
             nonblocking(&mut options);
-            let mut file = match self._dir.open_with("development.log", &options) {
+            let mut file = match self.dir.open_with("development.log", &options) {
                 Ok(file) => file,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     options.create_new(true).mode(0o600);
-                    self._dir.open_with("development.log", &options)?
+                    self.dir.open_with("development.log", &options)?
                 }
                 Err(error) => return Err(error.into()),
             };
@@ -422,12 +378,12 @@ impl StateRoot {
             let record = self.open_private_record(name, limit)?;
             let staged = self.open_private_record(pending, limit)?;
             if staged.is_some() {
-                self._dir.remove_file(pending)?;
+                self.dir.remove_file(pending)?;
             }
             if record.is_some() {
-                self._dir.remove_file(name)?;
+                self.dir.remove_file(name)?;
             }
-            self._dir
+            self.dir
                 .open_with(".", OpenOptions::new().read(true))?
                 .sync_all()?;
             Ok(())
@@ -464,7 +420,7 @@ impl StateRoot {
             options.read(true);
             options.follow(FollowSymlinks::No);
             nonblocking(&mut options);
-            let file = match self._dir.open_with(name, &options) {
+            let file = match self.dir.open_with(name, &options) {
                 Ok(file) => file,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
                 Err(error) => return Err(StoreError::Io(error)),
@@ -498,14 +454,14 @@ impl StateRoot {
             existing.read(true).write(true);
             existing.follow(FollowSymlinks::No);
             nonblocking(&mut existing);
-            let mut file = match self._dir.open_with(pending, &existing) {
+            let mut file = match self.dir.open_with(pending, &existing) {
                 Ok(file) => file,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     let mut create = OpenOptions::new();
                     create.read(true).write(true).create_new(true).mode(0o600);
                     create.follow(FollowSymlinks::No);
                     nonblocking(&mut create);
-                    self._dir.open_with(pending, &create)?
+                    self.dir.open_with(pending, &create)?
                 }
                 Err(error) => return Err(StoreError::Io(error)),
             };
@@ -513,8 +469,8 @@ impl StateRoot {
             file.set_len(0)?;
             file.write_all(record)?;
             file.sync_all()?;
-            self._dir.rename(pending, &self._dir, name)?;
-            self._dir
+            self.dir.rename(pending, &self.dir, name)?;
+            self.dir
                 .open_with(".", OpenOptions::new().read(true))?
                 .sync_all()?;
             Ok(())
@@ -538,7 +494,7 @@ impl StateRoot {
 
 #[cfg(unix)]
 fn check_private_record_file(file: &cap_std::fs::File, limit: usize) -> Result<(), StoreError> {
-    check_acl(file, true)?;
+    crate::private_fs::check_acl(file, true)?;
     use cap_std::fs::MetadataExt;
 
     let metadata = file.metadata()?;
@@ -564,31 +520,6 @@ fn directory_identity(dir: &Dir) -> Result<(u64, u64), StoreError> {
     use cap_std::fs::MetadataExt;
     let metadata = dir.dir_metadata()?;
     Ok((metadata.dev(), metadata.ino()))
-}
-
-#[cfg(unix)]
-fn check_directory(dir: &Dir, leaf: bool) -> Result<(), StoreError> {
-    check_acl(dir, leaf)?;
-    use cap_std::fs::MetadataExt;
-    let meta = dir.dir_metadata()?;
-    let mode = meta.mode();
-    let current_uid = rustix::process::geteuid().as_raw();
-    if !meta.is_dir() || (meta.uid() != current_uid && meta.uid() != 0) {
-        return Err(StoreError::StateNotPrivate);
-    }
-    if leaf {
-        if meta.uid() != current_uid || mode & 0o077 != 0 {
-            return Err(StoreError::StateNotPrivate);
-        }
-    } else if mode & 0o022 != 0 && !(meta.uid() == 0 && mode & 0o1000 != 0) {
-        return Err(StoreError::StateNotPrivate);
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn check_directory(_dir: &Dir, _leaf: bool) -> Result<(), StoreError> {
-    Err(StoreError::InvalidStateDirectory)
 }
 
 fn prepare_database_file(dir: &Dir, create: bool) -> Result<(), StoreError> {
@@ -618,7 +549,7 @@ fn prepare_database_file(dir: &Dir, create: bool) -> Result<(), StoreError> {
     nonblocking(&mut existing);
     let file = dir.open_with(DATABASE_FILE, &existing)?;
     #[cfg(unix)]
-    check_acl(&file, true)?;
+    crate::private_fs::check_acl(&file, true)?;
     let meta = file.metadata()?;
     if !meta.is_file() || meta.len() > MAX_DATABASE_BYTES as u64 {
         return Err(StoreError::StateNotPrivate);
@@ -626,19 +557,13 @@ fn prepare_database_file(dir: &Dir, create: bool) -> Result<(), StoreError> {
     #[cfg(unix)]
     {
         use cap_std::fs::MetadataExt;
-        if meta.uid() != rustix::process::geteuid().as_raw() || meta.mode() & 0o077 != 0 {
+        if meta.uid() != rustix::process::geteuid().as_raw()
+            || meta.mode() & 0o077 != 0
+            || meta.nlink() != 1
+        {
             return Err(StoreError::StateNotPrivate);
         }
     }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn check_acl(file: &impl std::os::fd::AsFd, private: bool) -> Result<(), StoreError> {
-    #[cfg(target_os = "macos")]
-    acl::check(file.as_fd(), private)?;
-    #[cfg(not(target_os = "macos"))]
-    let _ = (file, private);
     Ok(())
 }
 
@@ -699,9 +624,9 @@ mod tests {
                             .take(1024)
                             .collect::<String>()
                     );
-                    assert!(
-                        String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
-                        "second OS user did not exercise the account boundary"
+                    crate::test_process::assert_single_test_completed(
+                        &output.stdout,
+                        "second OS user",
                     );
                     assert_eq!(
                         state.read_saved_account_record().unwrap().as_deref(),
@@ -807,10 +732,7 @@ mod tests {
                 .take(1024)
                 .collect::<String>()
         );
-        assert!(
-            String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
-            "cross-user child did not run its test"
-        );
+        crate::test_process::assert_single_test_completed(&output.stdout, "cross-user");
     }
 
     #[test]
@@ -1100,6 +1022,12 @@ mod tests {
             Err(StoreError::StateNotPrivate)
         ));
         drop(state);
+        let alias = path.join("database-alias");
+        std::fs::hard_link(path.join(DATABASE_FILE), &alias).expect("database hard link");
+        for result in [StateRoot::open_existing(&path), StateRoot::admit(&path)] {
+            assert!(matches!(result, Err(StoreError::StateNotPrivate)));
+        }
+        std::fs::remove_file(alias).expect("remove database hard link");
         std::fs::remove_file(path.join(DATABASE_FILE)).expect("remove database");
         mkfifo(&path.join(DATABASE_FILE), Mode::S_IRUSR | Mode::S_IWUSR).expect("test FIFO");
         assert!(matches!(

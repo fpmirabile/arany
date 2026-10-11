@@ -161,7 +161,11 @@ profile does not satisfy this contract.
 
 Normalized intents and Guard receipts explicitly identify `linux_kernel` or
 `macos_supervised` resource semantics, and the enforcement digest binds the
-effective native profile. The discriminator is mandatory in every intent;
+native enforcement policy: profile templates, admission rules and their actual
+resource constants. Per-invocation paths and the fresh catalogue of eligible
+immutable system executables instantiate that policy; selected grants and
+configured executable/input pins are bound by the intent's policy digest and
+resource identities. The discriminator is mandatory in every intent;
 missing or unknown profiles and receipts for another resource profile reject. Acceptance of the resource contract does not enable
 dispatch before native isolation, supervision and cleanup are attested.
 
@@ -189,6 +193,12 @@ Native file writes use digest/create preconditions, no-follow handles and a fres
 
 Guard preparation, bootstrap or attestation failures before the GO dispatch gate record Failed without a receipt and stop the Run without another model call; strict replay rejects continuation or a successful answer after that failure: no operation was dispatched. Beginning the GO write makes subsequent missing completion conservatively uncertain, including a partial write. No unconfined fallback exists. Historical failures are previous-Run facts, not pending current Tools; a fresh request may inspect current files and propose a newly authorized edit with fresh preconditions. It never reuses a previous intent or approval.
 
+The internal Guard task is one newline-delimited JSON frame with at most 96 KiB
+before its delimiter. Missing delimiters, oversized frames and malformed tasks
+reject before Ready or effects; the exact capacity remains admissible. Both
+worker and supervisor reject trailing buffered input, including a valid GO
+coalesced with the task, before Ready. GO remains a separate one-use exchange.
+
 Before review or dispatch the Engine commits an immutable `ToolStarted` intent. Before inferring again it commits the correlated bounded `ToolFinished` observation. An interrupted or uncertain effect stops the loop without automatic retry; inspect `arany show --output text SESSION_ID` or the private JSONL export and the actual files before intentionally retrying. Replay, resume, fork and compaction carry past tool facts only as untrusted context and never execute an old intent or renew permission. JSONL is an explicit sensitive-data export.
 
 The [execution admission contract](./execution.md#admission-persistence-and-recovery) owns complete-topology Event headroom, ancestor locking, compaction/fork quotas and pre-disclosure rejection. Logical headroom does not reserve physical disk or eliminate crash/disk-fault uncertainty after dispatch.
@@ -204,6 +214,13 @@ process. The controller validates resources before GO and accepts completion
 only after the owned coalition is empty and the one-use job is removed or
 positively reported absent. Automatic job retirement alone is insufficient
 descendant cleanup. Missing enforcement has no unconfined fallback.
+
+Before Tools are offered, admission validates the immutable `launchctl`, `env`
+and `hdiutil` executables, kernel coalition observation and the effective user's
+launchd domain. The domain probe discards output, has a three-second deadline
+and allows one second for kill/reap after failure. Per-unit authentication,
+distinct coalition ownership, storage preparation and installed enforcement
+remain mandatory before GO; startup availability is not dispatch attestation.
 
 Supervision uses kernel process identity and cumulative CPU accounting across
 exec. Reaped or replaced members retire after identity revalidation, including
@@ -227,6 +244,14 @@ privileged process/credential/coalition changes remain denied even after exec.
 The runtime excludes host account and Session roots, network destinations and
 Mach services. Root or mismatched real/effective identities reject process
 dispatch. Ordinary unprivileged `fork`, `exec` and `posix_spawn` remain available.
+Unselected host paths have no general metadata grant. Directory ancestors
+needed for traversal grant metadata without listings, including `/private/tmp`
+and the unit control root; admitted runtime directories remain readable.
+Commands additionally read the literal filesystem root because the native
+loader opens it during launch. This permits listing top-level names, without
+granting access beneath them or listing shared temporary/account directories.
+Exact runtime metadata also covers native shell selection and system path
+aliases; it grants no subtree access to host account or temporary storage.
 
 macOS uses private physical paths rather than a Linux mount namespace. The
 command's relative working directory is inside its project snapshot. Standalone
@@ -256,12 +281,13 @@ Byte/entry bounds on synchronous local snapshot preparation do not guarantee a f
 | File Read/Search and digest-bound Edit/Write | Named regular files work under whole-project trust; aliases, special files, stale preconditions and excess bounds reject; exact mutation matches receipt | [Workspace corpus](../../src/tools/tests.rs), [native Tool journeys](../../tests/session_run/tools.rs) |
 | Command/MCP isolation and protocol rejection | Disposable writes, network denial, owned descendants and limits hold; malformed frames, schemas, drift and unsupported content reject without fallback | [Native Tool journeys](../../tests/session_run/tools.rs), [MCP fixture](../../tests/fixtures/mcp-tools.py) |
 | Native macOS file/Skill Guard | Read, Search, List, Mkdir, create/replace Write, Edit and pinned Skill data execute through the real worker; stale create/edit and linked-file access reject; exact file bytes, receipts and closed replay agree | [Native file journey](../../tests/session_run/tools/macos.rs), [Workspace corpus](../../src/tools/tests.rs) |
-| Native macOS profile isolation and CPU expiry | Host data/network/process launch and CPU-control changes reject under the compiled profile; an activated owned worker terminates through the immutable CPU limit | [Native profile corpus](../../src/tools/guard/macos.rs) |
+| Native macOS profile isolation and CPU expiry | Unselected host metadata/data, ancestor listings, network/process launch and CPU-control changes reject under the compiled file profile; an activated owned worker terminates through the immutable CPU limit | [Native profile corpus](../../src/tools/guard/macos.rs) |
+| Guard task framing | Truncated, malformed and oversized task frames reject before Ready and effects; the exact-capacity valid frame reaches Ready but still requires GO | [Native refusal corpus](../../tests/session_run/tools/macos.rs) |
 | Native macOS owned unit and supervised resources | Escaped orphan descendants remain owned; stale audit tokens cannot signal another incarnation; aggregate memory/task excess and per-process CPU excess with ignored SIGXCPU terminate the complete unit; cleanup confirms the coalition empty and the job absent | [Activated native unit owner](../../src/tools/guard/macos/unit.rs) |
 | Native macOS private-storage lifecycle | Both private filesystems enforce their 64-MiB capacities through actual `ENOSPC`; storage survives supervisor termination for clean detachment; partial setup and unwind clean owned mounts; unsafe targets remain untouched and uncertain cleanup retains its control root | [Activated native unit owner](../../src/tools/guard/macos/unit.rs) |
-| Native macOS command/MCP lifecycle | Ordinary native child launches, including bursts of short-lived children, succeed with current selected snapshots and discarded changes; host/network/signals/privilege changes reject; bounded protocol/output failures retain receipts; approval cancellation and missing post-GO completion retain closed replay without retry | [Native Engine journey](../../tests/session_run/tools/macos.rs), [activated native unit owner](../../src/tools/guard/macos/unit.rs) |
+| Native macOS command/MCP lifecycle | Ordinary native child launches, including bursts of short-lived children, succeed with current selected snapshots and discarded changes; unselected host metadata, ancestor listings, network/signals/privilege changes reject; commands retain signal compatibility without inheriting the file-worker CPU limit; bounded protocol/output failures retain receipts; approval cancellation and missing post-GO completion retain closed replay without retry | [Native Engine journey](../../tests/session_run/tools/macos.rs), [activated native unit owner](../../src/tools/guard/macos/unit.rs) |
 | Approval, denial and uncertain review | Only a granted immutable action can dispatch once; failed/uncertain AI review asks a human; denial/cancellation stops and closed replay agrees | [Native approval journeys](../../tests/session_run/tools.rs), [approval policy](../../src/tools/approval.rs) |
 | Uncertainty, cancellation, receipt bounds and fresh resumed work | Missing post-GO completion remains uncertain; bounded receipts persist; fresh inspection/edit does not execute old intents | [Native Tool journeys](../../tests/session_run/tools.rs), [Tool corpus](../../src/tools/tests.rs), [replay](../../src/store/replay.rs) |
 | Slash Skill insertion and file mentions | Browsing loads no guidance or effects; selecting stages a task; file includes carry path/digest and directory references grant no authority | [Terminal contract](./terminal.md), [slash journey](../../tests/session_run/slash_completion.rs), [Engine Run corpus](../../tests/engine_run.rs) |
 
-Native Linux and macOS owners exercise their actual enforcers with synthetic Providers; pure wire/configuration/replay corpora do not launch effects. Live model/account loops, optimized macOS Engine/account isolation, Linux ARM64 and human terminal/accessibility checks need separate evidence. [Next steps](../../NEXT_STEPS.md) and the active [beta record](../../planning/arany-beta/README.md) retain dated outcomes and open checks; [dependency review](../security/local-tool-dependency-review.md) owns scoped supply-chain evidence. Activation and test-lane requirements remain in [testing rules](../../agents/testing.md).
+Native Linux and macOS owners exercise their actual enforcers with synthetic Providers; pure wire/configuration/replay corpora do not launch effects. Live model/account loops, optimized macOS Engine/account isolation, Linux ARM64 and human terminal/accessibility checks need separate evidence. [Next steps](../../NEXT_STEPS.md) owns open checks; completed outcomes belong in the handoff and Git/CI history; [dependency review](../security/local-tool-dependency-review.md) owns scoped supply-chain evidence. Activation and test-lane requirements remain in [testing rules](../../agents/testing.md).

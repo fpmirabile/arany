@@ -133,7 +133,3 @@ Use one ordered list for a cohesive PR. Split into tickets only when one PR woul
 - Security:
 - Documentation and auto-learning:
 - Closeout: update the owning spec, route evidence and pending checks to their existing owners, update inbound links and delete the completed plan:
-
-## Change log
-
-- `YYYY-MM-DD`: Created plan.

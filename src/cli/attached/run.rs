@@ -582,10 +582,9 @@ mod tests {
                         &transcript.replace("synthetic-startup-secret", "[redacted]")
                     )
                 );
-                assert!(
-                    String::from_utf8_lossy(&output.stdout)
-                        .contains("1 passed; 0 failed; 0 ignored"),
-                    "exact child must execute one test"
+                test_process::assert_single_test_completed(
+                    &output.stdout,
+                    &format!("saved access case {case}"),
                 );
                 let expects_prompt =
                     !matches!(case, "resume_locked" | "continue_missing" | "cancel");
@@ -1210,10 +1209,7 @@ mod tests {
                 arany::escape_terminal(&String::from_utf8_lossy(&output.stdout)),
                 arany::escape_terminal(&String::from_utf8_lossy(&output.stderr))
             );
-            assert!(
-                String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed; 0 ignored"),
-                "exact child must execute one test"
-            );
+            test_process::assert_single_test_completed(&output.stdout, "native chat regression");
             assert_eq!(cancelled, cfg!(debug_assertions));
             return;
         };

@@ -1,5 +1,5 @@
 use super::*;
-use crate::store::StateRoot;
+use crate::private_fs::{PrivateDirectory, open_directory};
 use core_foundation::array::CFArray;
 use core_foundation::base::TCFType;
 use core_foundation::boolean::CFBoolean;
@@ -8,8 +8,7 @@ use core_foundation::number::CFNumber;
 use core_foundation::propertylist::{create_data, kCFPropertyListBinaryFormat_v1_0};
 use core_foundation::string::CFString;
 use serde::{Deserialize, Serialize};
-use std::io::{Read, Write};
-use std::os::fd::AsRawFd;
+use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
@@ -17,42 +16,12 @@ use tokio::io::AsyncReadExt;
 
 const HOST_PROCESS_CAP: usize = 65_536;
 const JOB_BYTES_CAP: usize = 128 * 1024;
-const STORAGE_BYTES_CAP: u64 = 64 * 1024 * 1024;
+pub(super) const STORAGE_BYTES_CAP: u64 = crate::tools::types::SCRATCH_BYTES;
+const BYTES_PER_MEBIBYTE: u64 = 1024 * 1024;
+const _: () = assert!(STORAGE_BYTES_CAP.is_multiple_of(BYTES_PER_MEBIBYTE));
 const STORAGE_NAMES: [&str; 2] = ["workspace", "scratch"];
 const STORAGE_PENDING: &str = "storage.pending";
-
-#[repr(C)]
-struct CoalitionInfo {
-    ids: [u64; 2],
-    reserved: [u64; 3],
-}
-
-#[repr(C)]
-struct ProcessInfo {
-    executable_uuid: [u8; 16],
-    unique_id: u64,
-    parent_unique_id: u64,
-    version: i32,
-    parent_version: i32,
-    reserved: [u64; 2],
-}
-
-#[repr(C)]
-struct Timebase {
-    numer: u32,
-    denom: u32,
-}
-
-const _: () = assert!(
-    size_of::<CoalitionInfo>() == 40
-        && size_of::<ProcessInfo>() == 56
-        && size_of::<Timebase>() == 8
-);
-
-unsafe extern "C" {
-    fn proc_signal_with_audittoken(token: *mut [u32; 8], signal: i32) -> i32;
-    fn mach_timebase_info(timebase: *mut Timebase) -> i32;
-}
+const AVAILABILITY_DEADLINE: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -64,33 +33,58 @@ struct Identity {
 }
 
 fn identity(pid: u32) -> Result<Identity, ToolError> {
-    let mut process = MaybeUninit::<ProcessInfo>::uninit();
-    let mut coalition = MaybeUninit::<CoalitionInfo>::uninit();
-    let failure = |bytes| {
-        if bytes <= 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
-            ToolError::ChangedInput
-        } else {
-            ToolError::ProtectionUnavailable
-        }
-    };
-    // Reviewed Darwin POD layouts are read only after exact-size kernel writes.
-    let bytes = unsafe { libc::proc_pidinfo(pid as i32, 17, 0, process.as_mut_ptr().cast(), 56) };
-    if bytes != 56 {
-        return Err(failure(bytes));
-    }
-    // The coalition output has its own size check; a short positive write is never absence.
-    let bytes = unsafe { libc::proc_pidinfo(pid as i32, 20, 0, coalition.as_mut_ptr().cast(), 40) };
-    if bytes != 40 {
-        return Err(failure(bytes));
-    }
-    // Every field was initialized by the two exact-size writes above.
-    let (process, coalition) = unsafe { (process.assume_init(), coalition.assume_init()) };
+    let process = ffi::process_info(pid)?;
     Ok(Identity {
         pid,
         version: process.version as u32,
         unique_id: process.unique_id,
-        coalition: coalition.ids[0],
+        coalition: ffi::coalition(pid)?,
     })
+}
+
+pub(super) fn check_available() -> Result<(), ToolError> {
+    Scope::new(identity(std::process::id())?.coalition)?;
+    // Admission can run inside Tokio; this bounded probe owns a separate reactor.
+    std::thread::Builder::new()
+        .spawn(|| {
+            let reactor = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|_| ToolError::ProtectionUnavailable)?;
+            reactor.block_on(async {
+                let mut child = Command::new("/bin/launchctl")
+                    .args([
+                        "print",
+                        &format!("user/{}", rustix::process::geteuid().as_raw()),
+                    ])
+                    .env_clear()
+                    .current_dir("/")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .kill_on_drop(true)
+                    .spawn()
+                    .map_err(|_| ToolError::ProtectionUnavailable)?;
+                let result = tokio::time::timeout(
+                    AVAILABILITY_DEADLINE,
+                    super::super::wait_owned_child(&mut child),
+                )
+                .await;
+                if matches!(result, Ok(Ok(status)) if status.success()) {
+                    return Ok(());
+                }
+                let _ = child.start_kill();
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    super::super::wait_owned_child(&mut child),
+                )
+                .await;
+                Err(ToolError::ProtectionUnavailable)
+            })
+        })
+        .map_err(|_| ToolError::ProtectionUnavailable)?
+        .join()
+        .unwrap_or(Err(ToolError::ProtectionUnavailable))
 }
 
 impl Identity {
@@ -101,21 +95,14 @@ impl Identity {
     }
 
     fn signal(self, signal: i32) -> Result<(), ToolError> {
-        let mut token = [0_u32; 8];
-        token[5] = self.pid;
-        token[7] = self.version;
-        // Darwin resolves the PID/version atomically; the other token fields are not selectors.
-        match unsafe { proc_signal_with_audittoken(&mut token, signal) } {
-            0 | libc::ESRCH => Ok(()),
-            _ => Err(ToolError::ProtectionUnavailable),
-        }
+        ffi::signal(self.pid, self.version, signal)
     }
 }
 
 pub(super) struct Scope {
     coalition: u64,
     pids: Vec<i32>,
-    timebase: Timebase,
+    timebase: ffi::Timebase,
 }
 
 impl Scope {
@@ -123,34 +110,12 @@ impl Scope {
         if coalition <= 1 {
             return Err(ToolError::ProtectionUnavailable);
         }
-        let mut timebase = MaybeUninit::<Timebase>::uninit();
-        // Success initializes the SDK's two integer clock-conversion fields.
-        if unsafe { mach_timebase_info(timebase.as_mut_ptr()) } != 0 {
-            return Err(ToolError::ProtectionUnavailable);
-        }
-        // Only the successful native call permits reading this output.
-        let timebase = unsafe { timebase.assume_init() };
+        let timebase = ffi::timebase()?;
         if timebase.numer == 0 || timebase.denom == 0 {
             return Err(ToolError::ProtectionUnavailable);
         }
-        let mut maximum = 0_i32;
-        let mut length = size_of::<i32>();
-        let mut query = [libc::CTL_KERN, libc::KERN_MAXPROC];
-        // This reads one bounded kernel capacity, never process arguments or environments.
-        if unsafe {
-            libc::sysctl(
-                query.as_mut_ptr(),
-                2,
-                (&mut maximum as *mut i32).cast(),
-                &mut length,
-                std::ptr::null_mut(),
-                0,
-            )
-        } != 0
-            || length != size_of::<i32>()
-            || maximum < 1
-            || maximum as usize >= HOST_PROCESS_CAP
-        {
+        let maximum = ffi::max_processes()?;
+        if maximum < 1 || maximum as usize >= HOST_PROCESS_CAP {
             return Err(ToolError::ProtectionUnavailable);
         }
         Ok(Self {
@@ -161,25 +126,16 @@ impl Scope {
     }
 
     fn members(&mut self) -> Result<Vec<Identity>, ToolError> {
-        // The fixed buffer exceeds the admitted kernel-wide process ceiling.
-        let bytes = unsafe {
-            libc::proc_listpids(
-                1,
-                0,
-                self.pids.as_mut_ptr().cast(),
-                size_of_val(self.pids.as_slice()) as i32,
-            )
-        };
-        if bytes <= 0
-            || bytes as usize >= size_of_val(self.pids.as_slice())
-            || !(bytes as usize).is_multiple_of(size_of::<i32>())
-        {
-            return Err(ToolError::ProtectionUnavailable);
-        }
         let mut members = Vec::new();
-        for pid in &self.pids[..bytes as usize / size_of::<i32>()] {
+        for pid in ffi::list_pids(&mut self.pids)? {
             if *pid <= 1 {
                 continue;
+            }
+            match ffi::coalition(*pid as u32) {
+                Ok(coalition) if coalition != self.coalition => continue,
+                Err(ToolError::ChangedInput) => continue,
+                Err(error) => return Err(error),
+                Ok(_) => {}
             }
             let first = match identity(*pid as u32) {
                 Ok(first) => first,
@@ -198,31 +154,17 @@ impl Scope {
         Ok(members)
     }
 
-    pub(super) fn observe(&mut self) -> Result<(), ToolError> {
+    pub(super) fn check_resources(&mut self) -> Result<(), ToolError> {
         let mut memory = 0_u64;
         let mut threads = 0_u64;
         for member in self.members()? {
             let sample = (|| {
-                let task = match task_info(member.pid) {
+                let task = match ffi::task_info(member.pid) {
                     Ok(task) => task,
-                    Err(_) if !super::observe(member.pid)? => return Ok(None),
+                    Err(_) if !super::check_process_resources(member.pid)? => return Ok(None),
                     Err(error) => return Err(error),
                 };
-                let mut usage = MaybeUninit::<libc::rusage_info_v0>::uninit();
-                // The selected flavor writes the SDK's fixed rusage_info_v0 layout.
-                if unsafe {
-                    libc::proc_pid_rusage(
-                        member.pid as i32,
-                        libc::RUSAGE_INFO_V0,
-                        usage.as_mut_ptr().cast(),
-                    )
-                } != 0
-                {
-                    return Err(ToolError::ProtectionUnavailable);
-                }
-                // The successful flavor-specific write initializes every integer/byte-array field.
-                let usage = unsafe { usage.assume_init() };
-                Ok(Some((task, usage)))
+                Ok(Some((task, ffi::rusage(member.pid)?)))
             })();
             // Revalidate even failed samples: a reaped member has no remaining task metadata.
             match identity(member.pid) {
@@ -248,7 +190,7 @@ impl Scope {
                 || (u128::from(usage.ri_user_time) + u128::from(usage.ri_system_time))
                     * u128::from(self.timebase.numer)
                     / u128::from(self.timebase.denom)
-                    > 15_000_000_000
+                    > CPU_LIMIT.as_nanos()
             {
                 return Err(ToolError::Limit);
             }
@@ -256,13 +198,13 @@ impl Scope {
         Ok(())
     }
 
-    pub(super) async fn stop(&mut self, except: u32) -> Result<(), ToolError> {
+    pub(super) async fn stop(&mut self, except: Option<u32>) -> Result<(), ToolError> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         loop {
             let members = self.members()?;
             let members: Vec<_> = members
                 .into_iter()
-                .filter(|member| member.pid != except)
+                .filter(|member| Some(member.pid) != except)
                 .collect();
             if members.is_empty() {
                 return Ok(());
@@ -276,52 +218,24 @@ impl Scope {
             if tokio::time::Instant::now() >= deadline {
                 return Err(ToolError::ProtectionUnavailable);
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(SUPERVISION_INTERVAL).await;
         }
     }
 }
 
 fn peer(stream: &UnixStream) -> Result<u32, ToolError> {
-    let mut pid = 0_i32;
-    let mut credentials = MaybeUninit::<libc::xucred>::uninit();
-    let mut pid_size = size_of::<i32>() as libc::socklen_t;
-    let mut credential_size = size_of::<libc::xucred>() as libc::socklen_t;
-    // Both socket options write exactly their installed SDK layouts into live buffers.
-    let complete = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_LOCAL,
-            libc::LOCAL_PEERPID,
-            (&mut pid as *mut i32).cast(),
-            &mut pid_size,
-        ) == 0
-            && libc::getsockopt(
-                stream.as_raw_fd(),
-                libc::SOL_LOCAL,
-                libc::LOCAL_PEERCRED,
-                credentials.as_mut_ptr().cast(),
-                &mut credential_size,
-            ) == 0
-    };
-    if !complete
-        || pid_size as usize != size_of::<i32>()
-        || credential_size as usize != size_of::<libc::xucred>()
-        || pid <= 1
+    let (pid, credentials) = ffi::peer_credentials(stream)?;
+    if pid <= 1
+        || credentials.cr_version != 0
+        || credentials.cr_uid != rustix::process::geteuid().as_raw()
     {
-        return Err(ToolError::ProtectionUnavailable);
-    }
-    // The exact credential write above initializes the integer-only xucred structure.
-    let credentials = unsafe { credentials.assume_init() };
-    if credentials.cr_version != 0 || credentials.cr_uid != rustix::process::geteuid().as_raw() {
         return Err(ToolError::ProtectionUnavailable);
     }
     Ok(pid as u32)
 }
 
 async fn disk_command(root: &Path, arguments: &[&str]) -> Result<(), ToolError> {
-    let metadata = std::fs::symlink_metadata("/usr/bin/hdiutil")
-        .map_err(|_| ToolError::ProtectionUnavailable)?;
-    if !metadata.is_file() || metadata.uid() != 0 || metadata.mode() & 0o6022 != 0 {
+    if !system_program("/usr/bin/hdiutil")? {
         return Err(ToolError::ProtectionUnavailable);
     }
     let mut command = Command::new("/usr/bin/hdiutil");
@@ -355,7 +269,7 @@ async fn prepare_storage(root: &Path) -> Result<[cap_std::fs::Dir; 2], ToolError
     use cap_fs_ext::{DirExt, OpenOptionsFollowExt};
     use cap_std::fs::{OpenOptionsExt, PermissionsExt};
 
-    StateRoot::open_existing(root).map_err(|_| ToolError::Path)?;
+    open_directory(root, false).map_err(|_| ToolError::Path)?;
     let directory = crate::tools::fs::open_directory(root)?;
     let parent = crate::tools::fs::identity(&directory)?;
     let mut volumes = Vec::with_capacity(2);
@@ -376,23 +290,14 @@ async fn prepare_storage(root: &Path) -> Result<[cap_std::fs::Dir; 2], ToolError
         let mount = root.join(name);
         let image_path = image.to_str().ok_or(ToolError::Path)?;
         let mount_path = mount.to_str().ok_or(ToolError::Path)?;
-        directory
-            .open_with(
-                STORAGE_PENDING,
-                cap_std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .follow(cap_fs_ext::FollowSymlinks::No),
-            )
-            .map_err(|_| ToolError::Operation)?;
+        let size = format!("{}m", STORAGE_BYTES_CAP / BYTES_PER_MEBIBYTE);
         disk_command(
             root,
             &[
                 "create",
                 "-quiet",
                 "-size",
-                "64m",
+                &size,
                 "-layout",
                 "NONE",
                 "-type",
@@ -427,6 +332,16 @@ async fn prepare_storage(root: &Path) -> Result<[cap_std::fs::Dir; 2], ToolError
         image
             .set_permissions(cap_std::fs::Permissions::from_mode(0o600))
             .map_err(|_| ToolError::Path)?;
+        directory
+            .open_with(
+                STORAGE_PENDING,
+                cap_std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .follow(cap_fs_ext::FollowSymlinks::No),
+            )
+            .map_err(|_| ToolError::Operation)?;
         disk_command(
             root,
             &[
@@ -581,10 +496,16 @@ async fn cleanup_storage(root: &Path) -> Result<(), ToolError> {
 
 struct Unit {
     root: PathBuf,
-    _state: StateRoot,
+    _directory: PrivateDirectory,
     target: String,
     scope: Option<Scope>,
     stopped: bool,
+}
+
+enum ManagerAction<'a> {
+    Bootstrap(&'a Path),
+    Kickstart,
+    Bootout,
 }
 
 impl Unit {
@@ -595,8 +516,8 @@ impl Unit {
             .mode(0o700)
             .create(&root)
             .map_err(|_| ToolError::Operation)?;
-        let state = match StateRoot::admit(&root) {
-            Ok(state) => state,
+        let directory = match open_directory(&root, false) {
+            Ok(directory) => directory,
             Err(_) => {
                 let _ = std::fs::remove_dir(&root);
                 return Err(ToolError::Path);
@@ -604,7 +525,7 @@ impl Unit {
         };
         Ok(Self {
             root,
-            _state: state,
+            _directory: directory,
             target: format!(
                 "user/{}/dev.arany.tool.{name}",
                 rustix::process::geteuid().as_raw()
@@ -669,23 +590,31 @@ impl Unit {
         Ok(path)
     }
 
-    async fn manager(&self, action: &str, path: Option<&Path>) -> Result<Vec<u8>, ToolError> {
-        let mut command = Command::new("/bin/launchctl");
-        command.env_clear().current_dir("/").arg(action);
-        if action == "kickstart" {
-            command.arg("-p");
+    async fn manager(&self, action: ManagerAction<'_>) -> Result<Vec<u8>, ToolError> {
+        if !system_program("/bin/launchctl")? {
+            return Err(ToolError::ProtectionUnavailable);
         }
-        if let Some(path) = path {
-            command
-                .arg(
-                    self.target
-                        .rsplit_once('/')
-                        .ok_or(ToolError::Configuration)?
-                        .0,
-                )
-                .arg(path);
-        } else {
-            command.arg(&self.target);
+        let bootout = matches!(action, ManagerAction::Bootout);
+        let mut command = Command::new("/bin/launchctl");
+        command.env_clear().current_dir("/");
+        match action {
+            ManagerAction::Bootstrap(path) => {
+                command
+                    .arg("bootstrap")
+                    .arg(
+                        self.target
+                            .rsplit_once('/')
+                            .ok_or(ToolError::Configuration)?
+                            .0,
+                    )
+                    .arg(path);
+            }
+            ManagerAction::Kickstart => {
+                command.args(["kickstart", "-p", &self.target]);
+            }
+            ManagerAction::Bootout => {
+                command.args(["bootout", &self.target]);
+            }
         }
         command
             .stdin(Stdio::null())
@@ -700,7 +629,7 @@ impl Unit {
             Duration::from_secs(3),
         )
         .await?;
-        if status.success() || (action == "bootout" && status.code() == Some(libc::ESRCH)) {
+        if status.success() || (bootout && status.code() == Some(libc::ESRCH)) {
             Ok(stdout)
         } else {
             Err(ToolError::ProtectionUnavailable)
@@ -720,6 +649,9 @@ impl Unit {
             .map_err(|_| ToolError::Operation)?;
         let listener =
             tokio::net::UnixListener::from_std(listener).map_err(|_| ToolError::Operation)?;
+        if !system_program("/usr/bin/env")? {
+            return Err(ToolError::ProtectionUnavailable);
+        }
         let path = self.write_job(
             &[
                 "/usr/bin/env",
@@ -730,8 +662,8 @@ impl Unit {
             ],
             "/dev/null",
         )?;
-        self.manager("bootstrap", Some(&path)).await?;
-        let launched = self.manager("kickstart", None).await?;
+        self.manager(ManagerAction::Bootstrap(&path)).await?;
+        let launched = self.manager(ManagerAction::Kickstart).await?;
         let launched = std::str::from_utf8(&launched)
             .ok()
             .and_then(|value| value.trim().parse::<u32>().ok())
@@ -768,11 +700,11 @@ impl Unit {
             return Ok(());
         }
         let cleanup = if let Some(scope) = &mut self.scope {
-            scope.stop(0).await
+            scope.stop(None).await
         } else {
             Ok(())
         };
-        let removal = self.manager("bootout", None).await;
+        let removal = self.manager(ManagerAction::Bootout).await;
         cleanup?;
         removal?;
         cleanup_storage(&self.root).await?;
@@ -813,7 +745,7 @@ pub(super) async fn execute(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
     mut cancellation: RunCancellation,
-    dispatched: &mut bool,
+    dispatched: &AtomicBool,
 ) -> Result<ToolObservation, ToolError> {
     let mut unit = Unit::new()?;
     crate::tools::fs::reject_overlap(&unit.root, &runtime.workspace)?;
@@ -823,68 +755,43 @@ pub(super) async fn execute(
                 .await
                 .map_err(|_| ToolError::Limit)??,
         );
-        let task = serde_json::to_vec(&Task {
+        let task = super::super::encode_task(&Task {
             config: runtime.config.clone(),
             intent: intent.clone(),
             workspace: runtime.workspace.clone(),
             guard_executable: runtime.guard_executable.clone(),
-        })
-        .map_err(|_| ToolError::Configuration)?;
-        if task.len() > 96 * 1024 {
-            return Err(ToolError::Limit);
-        }
+        })?;
         stream
             .get_mut()
             .write_all(&task)
-            .await
-            .map_err(|_| ToolError::Operation)?;
-        stream
-            .get_mut()
-            .write_all(b"\n")
             .await
             .map_err(|_| ToolError::Operation)?;
         let bytes = read_line_capped(&mut stream, 2048).await?;
         if let Ok(failure) = serde_json::from_slice::<BootstrapFailure>(&bytes) {
             return Err(ToolError::GuardBootstrap(failure));
         }
-        let ready: Ready =
-            serde_json::from_slice(&bytes).map_err(|_| ToolError::ProtectionUnavailable)?;
-        if ready.digest != intent.digest()
-            || ready.profile_digest != intent.enforcement_digest
-            || identity(ready.pid)?.coalition
-                != unit
-                    .scope
-                    .as_ref()
-                    .ok_or(ToolError::ProtectionUnavailable)?
-                    .coalition
+        let ready = super::super::parse_ready(&bytes, intent)?;
+        if identity(ready.pid)?.coalition
+            != unit
+                .scope
+                .as_ref()
+                .ok_or(ToolError::ProtectionUnavailable)?
+                .coalition
         {
             return Err(ToolError::ProtectionUnavailable);
         }
         unit.scope
             .as_mut()
             .ok_or(ToolError::ProtectionUnavailable)?
-            .observe()
+            .check_resources()
             .map_err(|_| ToolError::GuardRejected("resource attestation"))?;
-        *dispatched = true;
+        dispatched.store(true, Ordering::Release);
         stream
             .get_mut()
             .write_all(b"GO\n")
             .await
             .map_err(|_| ToolError::Operation)?;
-        let observation: ToolObservation =
-            serde_json::from_slice(&read_line_capped(&mut stream, CAPTURE_BYTES).await?)
-                .map_err(|_| ToolError::Operation)?;
-        if observation.intent != *intent
-            || !observation.valid()
-            || observation
-                .guard
-                .as_ref()
-                .is_none_or(|receipt| !receipt.valid_for(intent))
-            || !read_capped(stream, 1).await?.is_empty()
-        {
-            return Err(ToolError::Operation);
-        }
-        Ok(observation)
+        super::super::read_observation(&mut stream, intent).await
     };
     let deadline =
         Duration::from_millis(u64::from(intent.limits.runtime_ms)) + Duration::from_secs(5);
@@ -906,8 +813,8 @@ pub(super) fn helper_main() -> std::process::ExitCode {
         bootstrap()?;
         let path = std::env::args_os().nth(2).ok_or(ToolError::Configuration)?;
         let path = Path::new(&path);
-        let _root =
-            StateRoot::admit(path.parent().ok_or(ToolError::Path)?).map_err(|_| ToolError::Path)?;
+        let _root = open_directory(path.parent().ok_or(ToolError::Path)?, false)
+            .map_err(|_| ToolError::Path)?;
         let metadata = std::fs::symlink_metadata(path).map_err(|_| ToolError::Path)?;
         use std::os::unix::fs::FileTypeExt;
         if !metadata.file_type().is_socket()
@@ -935,21 +842,10 @@ pub(super) fn helper_main() -> std::process::ExitCode {
         serde_json::to_writer(&mut stream, &own).map_err(|_| ToolError::Operation)?;
         stream.write_all(b"\n").map_err(|_| ToolError::Operation)?;
         stage = super::super::BootstrapStage::Admission;
-        let mut task = Vec::new();
-        loop {
-            let mut byte = [0];
-            if stream.read(&mut byte).map_err(|_| ToolError::Operation)? != 1 {
-                return Err(ToolError::Operation);
-            }
-            if byte[0] == b'\n' {
-                break;
-            }
-            if task.len() == 96 * 1024 {
-                return Err(ToolError::Limit);
-            }
-            task.push(byte[0]);
-        }
-        let task: Task = serde_json::from_slice(&task).map_err(|_| ToolError::Configuration)?;
+        let task = {
+            let mut reader = std::io::BufReader::new(&mut stream);
+            super::super::read_task(&mut reader)?
+        };
         stage = super::super::BootstrapStage::Capabilities;
         if task.guard_executable
             != std::env::current_exe().map_err(|_| ToolError::ProtectionUnavailable)?
@@ -976,6 +872,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             .enable_all()
             .build()
             .map_err(|_| ToolError::Operation)?;
+        diagnostic = None;
         reactor.block_on(async {
             let stream =
                 tokio::net::UnixStream::from_std(stream).map_err(|_| ToolError::Operation)?;
@@ -993,10 +890,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             });
             let result = async {
                 stage = super::super::BootstrapStage::Workspace;
-                let _storage = if matches!(
-                    task.intent.call,
-                    ToolCall::Command { .. } | ToolCall::McpList { .. } | ToolCall::McpCall { .. }
-                ) {
+                let _storage = if task.intent.call.is_process() {
                     Some(
                         prepare_command_storage(path.parent().ok_or(ToolError::Path)?, &runtime)
                             .await?,
@@ -1017,7 +911,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 .await
             }
             .await;
-            let cleanup = scope.stop(std::process::id()).await;
+            let cleanup = scope.stop(Some(std::process::id())).await;
             let storage_cleanup = if cleanup.is_ok() {
                 cleanup_storage(path.parent().ok_or(ToolError::Path)?).await
             } else {
@@ -1066,8 +960,11 @@ pub(super) fn helper_main() -> std::process::ExitCode {
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)]
 mod tests {
     use super::*;
+    use std::io::Read;
+    use std::mem::MaybeUninit;
 
     const HELPER: &str = "tools::guard::macos::unit::tests::native_unit_helper";
     const MCP_SCRIPT: &str = r#"set -eu
@@ -1227,93 +1124,28 @@ done
         }
     }
 
-    #[tokio::test]
-    #[ignore = "native aggregate-resource and escaped-descendant gate; finite synthetic jobs"]
-    async fn native_unit_owns_descendants_and_supervises_resources() {
+    /// Compiles the native actor and returns its entitlement-signed and plain copies.
+    fn native_actors(directory: &Path) -> (PathBuf, PathBuf) {
         use crate::test_process::BoundedOutput;
 
-        let generated = tempfile::tempdir().unwrap();
-        let source = generated.path().join("child.c");
-        let executable = generated.path().join("child");
-        std::fs::write(&source, br#"#include <spawn.h>
-#include <stdio.h>
-#include <sys/wait.h>
-int main(void) {
-    char *arguments[] = {"/usr/bin/true", NULL};
-    char *environment[] = {NULL};
-    pid_t child = 0;
-    int status = 0;
-    if (posix_spawn(&child, arguments[0], NULL, NULL, arguments, environment) != 0) return 1;
-    if (waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0) return 2;
-    puts("native child success");
-    return 0;
-}
-"#).unwrap();
+        let actor = directory.join("actor");
+        let plain = directory.join("plain");
+        let entitlements = directory.join("entitlements.plist");
         let compiled = std::process::Command::new("/usr/bin/xcrun")
             .args([
                 "--sdk", "macosx", "clang", "-Wall", "-Wextra", "-Werror", "-O1",
             ])
-            .arg(&source)
-            .arg("-o")
-            .arg(&executable)
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("HOME", generated.path())
-            .env("TMPDIR", generated.path())
-            .current_dir(generated.path())
-            .bounded_output_for(Duration::from_secs(20), 16 * 1024)
-            .unwrap();
-        assert!(
-            compiled.status.success(),
-            "native fixture compilation: {compiled:?}"
-        );
-        assert!(compiled.stdout.is_empty() && compiled.stderr.is_empty());
-        let generated_bytes = std::fs::read(&executable).unwrap();
-        assert!(generated_bytes.len() < 1024 * 1024);
-        let actor_source = generated.path().join("actor.c");
-        let actor = generated.path().join("actor");
-        let plain = generated.path().join("plain");
-        let entitlements = generated.path().join("entitlements.plist");
-        std::fs::write(
-            &actor_source,
-            br#"#include <spawn.h>
-#include <stdio.h>
-#include <string.h>
-#include <sys/wait.h>
-#include <unistd.h>
-#include <errno.h>
-int main(int argc, char **argv) {
-    if (argc != 2) return 1;
-    int denied = strcmp(argv[1], "deny") == 0;
-    char *arguments[] = {"/usr/bin/true", NULL};
-    char *environment[] = {NULL};
-    pid_t child = 0;
-    int status = 0;
-    int result = posix_spawn(&child, arguments[0], NULL, NULL, arguments, environment);
-    if (denied ? result != EPERM : result != 0) return 2;
-    if (!result && (waitpid(child, &status, 0) != child || status != 0)) return 3;
-    child = fork();
-    if (child == 0) _exit(0);
-    if (denied ? child != -1 || errno != EPERM : child == -1) return 4;
-    if (child > 0 && (waitpid(child, &status, 0) != child || status != 0)) return 5;
-    puts("native actor success");
-    return 0;
-}
-"#,
-        )
-        .unwrap();
-        let compiled = std::process::Command::new("/usr/bin/xcrun")
-            .args([
-                "--sdk", "macosx", "clang", "-Wall", "-Wextra", "-Werror", "-O1",
-            ])
-            .arg(&actor_source)
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/macos-native-actor.c"
+            ))
             .arg("-o")
             .arg(&actor)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
-            .env("HOME", generated.path())
-            .env("TMPDIR", generated.path())
-            .current_dir(generated.path())
+            .env("HOME", directory)
+            .env("TMPDIR", directory)
+            .current_dir(directory)
             .bounded_output_for(Duration::from_secs(20), 16 * 1024)
             .unwrap();
         assert!(
@@ -1334,9 +1166,9 @@ int main(int argc, char **argv) {
             .arg(&entitlements)
             .arg(&actor)
             .env_clear()
-            .env("HOME", generated.path())
-            .env("TMPDIR", generated.path())
-            .current_dir(generated.path())
+            .env("HOME", directory)
+            .env("TMPDIR", directory)
+            .current_dir(directory)
             .bounded_output_for(Duration::from_secs(10), 16 * 1024)
             .unwrap();
         assert!(
@@ -1347,6 +1179,10 @@ int main(int argc, char **argv) {
         for executable in [&actor, &plain] {
             assert!(std::fs::metadata(executable).unwrap().len() < 1024 * 1024);
         }
+        (actor, plain)
+    }
+
+    async fn verify_uncertain_storage_is_retained() {
         let mut uncertain = Unit::new().unwrap();
         std::fs::write(uncertain.root.join(STORAGE_PENDING), []).unwrap();
         assert!(uncertain.stop().await.is_err());
@@ -1362,7 +1198,9 @@ int main(int argc, char **argv) {
             .unwrap()
             .remove_dir_all(uncertain_root.file_name().unwrap())
             .unwrap();
+    }
 
+    async fn verify_partial_storage_is_cleaned() {
         let mut partial = Unit::new().unwrap();
         let outside = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(outside.path(), partial.root.join("scratch")).unwrap();
@@ -1382,6 +1220,101 @@ int main(int argc, char **argv) {
         let partial_root = partial.root.clone();
         drop(partial);
         assert!(!partial_root.exists());
+    }
+
+    fn phase_workspace(script: &Path) -> tempfile::TempDir {
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("selected"), b"before edit").unwrap();
+        std::fs::write(source.path().join("omitted"), b"omitted synthetic data").unwrap();
+        std::fs::write(
+            source.path().join("runtime-input"),
+            b"pinned synthetic input",
+        )
+        .unwrap();
+        std::fs::create_dir(source.path().join("empty")).unwrap();
+        std::fs::write(source.path().join("server.sh"), MCP_SCRIPT).unwrap();
+        std::fs::copy(script, source.path().join("script")).unwrap();
+        std::fs::set_permissions(
+            source.path().join("script"),
+            std::fs::Permissions::from_mode(0o6755),
+        )
+        .unwrap();
+        source
+    }
+
+    /// Starts the helper as a launchd job in its own coalition and accepts its attestation.
+    async fn launch_helper(
+        unit: &mut Unit,
+        phase: &str,
+        workspace: &Path,
+    ) -> (Identity, UnixStream, tokio::net::UnixListener) {
+        let listener = UnixListener::bind(unit.root.join("s")).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let root = format!(
+            "ARANY_TEST_NATIVE_UNIT_ROOT={}",
+            unit.root.to_str().unwrap()
+        );
+        let phase_argument = format!("ARANY_TEST_NATIVE_UNIT_PHASE={phase}");
+        let source_argument = format!(
+            "ARANY_TEST_NATIVE_UNIT_WORKSPACE={}",
+            workspace.to_str().unwrap()
+        );
+        let outside = identity(std::process::id()).unwrap();
+        let outside_pid = format!("ARANY_TEST_NATIVE_UNIT_OUTSIDE_PID={}", outside.pid);
+        let outside_coalition = format!(
+            "ARANY_TEST_NATIVE_UNIT_OUTSIDE_COALITION={}",
+            outside.coalition
+        );
+        std::fs::write(unit.root.join("errors"), []).unwrap();
+        let path = unit
+            .write_job(
+                &[
+                    "/usr/bin/env",
+                    "-i",
+                    &root,
+                    &phase_argument,
+                    &source_argument,
+                    &outside_pid,
+                    &outside_coalition,
+                    "ARANY_TEST_NATIVE_UNIT_ARGUMENT=&<>\"'é😀\u{1}",
+                    executable.to_str().unwrap(),
+                    "--exact",
+                    HELPER,
+                    "--ignored",
+                    "--nocapture",
+                ],
+                unit.root.join("errors").to_str().unwrap(),
+            )
+            .unwrap();
+        unit.manager(ManagerAction::Bootstrap(&path)).await.unwrap();
+        let pid: u32 = std::str::from_utf8(&unit.manager(ManagerAction::Kickstart).await.unwrap())
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let root = identity(pid).unwrap();
+        assert_ne!(root.coalition, outside.coalition);
+        unit.scope = Some(Scope::new(root.coalition).unwrap());
+        let accepted = tokio::time::timeout(Duration::from_secs(10), listener.accept()).await;
+        assert!(
+            accepted.is_ok(),
+            "native {phase} readiness: {}",
+            diagnostic(&unit.root)
+        );
+        let attestation = accepted.unwrap().unwrap().0.into_std().unwrap();
+        assert_eq!(peer(&attestation).unwrap(), pid);
+        (root, attestation, listener)
+    }
+
+    #[tokio::test]
+    #[ignore = "native aggregate-resource and escaped-descendant gate; finite synthetic jobs"]
+    async fn native_unit_owns_descendants_and_supervises_resources() {
+        let generated = tempfile::tempdir().unwrap();
+        let (actor, plain) = native_actors(generated.path());
+        verify_uncertain_storage_is_retained().await;
+        verify_partial_storage_is_cleaned().await;
 
         for phase in [
             "descendants",
@@ -1394,6 +1327,7 @@ int main(int argc, char **argv) {
             "entitlement-profile",
         ] {
             let mut unit = Unit::new().unwrap();
+            assert_eq!(std::fs::read_dir(&unit.root).unwrap().count(), 0);
             if phase == "entitlement-profile" {
                 for (name, executable) in [("actor", &actor), ("plain", &plain)] {
                     std::fs::copy(executable, unit.root.join(name)).unwrap();
@@ -1404,83 +1338,9 @@ int main(int argc, char **argv) {
                     .unwrap();
                 }
             }
-            let source = tempfile::tempdir().unwrap();
-            std::fs::write(source.path().join("selected"), b"before edit").unwrap();
-            std::fs::write(source.path().join("omitted"), b"omitted synthetic data").unwrap();
-            std::fs::write(
-                source.path().join("runtime-input"),
-                b"pinned synthetic input",
-            )
-            .unwrap();
-            std::fs::create_dir(source.path().join("empty")).unwrap();
-            std::fs::write(source.path().join("server.sh"), MCP_SCRIPT).unwrap();
-            std::fs::write(source.path().join("script"), &generated_bytes).unwrap();
-            std::fs::set_permissions(
-                source.path().join("script"),
-                std::fs::Permissions::from_mode(0o6755),
-            )
-            .unwrap();
-            let listener = UnixListener::bind(unit.root.join("s")).unwrap();
-            listener.set_nonblocking(true).unwrap();
-            let listener = tokio::net::UnixListener::from_std(listener).unwrap();
-            let executable = std::env::current_exe().unwrap();
-            let root = format!(
-                "ARANY_TEST_NATIVE_UNIT_ROOT={}",
-                unit.root.to_str().unwrap()
-            );
-            let phase_argument = format!("ARANY_TEST_NATIVE_UNIT_PHASE={phase}");
-            let source_argument = format!(
-                "ARANY_TEST_NATIVE_UNIT_WORKSPACE={}",
-                source.path().to_str().unwrap()
-            );
-            let outside = identity(std::process::id()).unwrap();
-            let outside_pid = format!("ARANY_TEST_NATIVE_UNIT_OUTSIDE_PID={}", outside.pid);
-            let outside_coalition = format!(
-                "ARANY_TEST_NATIVE_UNIT_OUTSIDE_COALITION={}",
-                outside.coalition
-            );
-            std::fs::write(unit.root.join("errors"), []).unwrap();
-            let path = unit
-                .write_job(
-                    &[
-                        "/usr/bin/env",
-                        "-i",
-                        &root,
-                        &phase_argument,
-                        &source_argument,
-                        &outside_pid,
-                        &outside_coalition,
-                        "ARANY_TEST_NATIVE_UNIT_ARGUMENT=&<>\"'é😀\u{1}",
-                        executable.to_str().unwrap(),
-                        "--exact",
-                        HELPER,
-                        "--ignored",
-                        "--nocapture",
-                    ],
-                    unit.root.join("errors").to_str().unwrap(),
-                )
-                .unwrap();
-            unit.manager("bootstrap", Some(&path)).await.unwrap();
-            let pid: u32 = std::str::from_utf8(&unit.manager("kickstart", None).await.unwrap())
-                .unwrap()
-                .trim()
-                .parse()
-                .unwrap();
-            let root = identity(pid).unwrap();
-            assert_ne!(
-                root.coalition,
-                identity(std::process::id()).unwrap().coalition
-            );
-            unit.scope = Some(Scope::new(root.coalition).unwrap());
-            let accepted = tokio::time::timeout(Duration::from_secs(10), listener.accept()).await;
-            assert!(
-                accepted.is_ok(),
-                "native {phase} readiness: {}",
-                diagnostic(&unit.root)
-            );
-            let stream = accepted.unwrap().unwrap().0;
-            let mut attestation = stream.into_std().unwrap();
-            assert_eq!(peer(&attestation).unwrap(), pid);
+            let source = phase_workspace(&plain);
+            let (root, mut attestation, listener) =
+                launch_helper(&mut unit, phase, source.path()).await;
             if matches!(phase, "storage" | "storage-drop" | "command-profile") {
                 crate::tools::fs::native(
                     source.path(),
@@ -1529,7 +1389,7 @@ int main(int argc, char **argv) {
                 stale.signal(libc::SIGKILL).unwrap();
                 assert!(identity(members[0].pid).unwrap() == members[0]);
                 assert!(scope.members().unwrap().contains(&members[0]));
-                scope.observe().unwrap();
+                scope.check_resources().unwrap();
             } else if matches!(
                 phase,
                 "storage" | "storage-drop" | "command-profile" | "entitlement-profile"
@@ -1557,11 +1417,16 @@ int main(int argc, char **argv) {
                         } else {
                             "entitlement-receipt"
                         }))
-                        .unwrap(),
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "native {phase} receipt: {error}; helper={}",
+                                diagnostic(&unit.root)
+                            )
+                        }),
                         b"PROFILE\n"
                     );
                     tokio::time::timeout(Duration::from_secs(5), async {
-                        let mut samples = tokio::time::interval(Duration::from_millis(10));
+                        let mut samples = tokio::time::interval(SUPERVISION_INTERVAL);
                         loop {
                             samples.tick().await;
                             if scope.members().unwrap().is_empty() {
@@ -1572,9 +1437,9 @@ int main(int argc, char **argv) {
                     .await
                     .expect("native profile helper must complete and retire its coalition");
                     let output = diagnostic(&unit.root);
-                    assert!(
-                        output.contains("1 passed; 0 failed"),
-                        "native profile helper completion: {output}"
+                    crate::test_process::assert_single_test_completed(
+                        output.as_bytes(),
+                        "native profile helper completion",
                     );
                 } else {
                     assert_eq!(
@@ -1591,24 +1456,24 @@ int main(int argc, char **argv) {
                         b"FULL\n"
                     );
                 }
-                scope.observe().unwrap();
+                scope.check_resources().unwrap();
                 assert_eq!(
                     scope.members().unwrap().len(),
                     usize::from(!matches!(phase, "command-profile" | "entitlement-profile"))
                 );
                 if phase != "storage-drop" {
-                    scope.stop(0).await.unwrap();
+                    scope.stop(None).await.unwrap();
                     assert_eq!(
                         storage_mounted(&unit.root).unwrap(),
                         phase != "entitlement-profile"
                     );
                 }
             } else {
-                let mut samples = tokio::time::interval(Duration::from_millis(10));
+                let mut samples = tokio::time::interval(SUPERVISION_INTERVAL);
                 let observed = tokio::time::timeout(Duration::from_secs(60), async {
                     loop {
                         samples.tick().await;
-                        match scope.observe() {
+                        match scope.check_resources() {
                             Ok(()) => {}
                             Err(ToolError::Limit) => break,
                             Err(error) => panic!("{phase} observer failed: {error}"),
@@ -1669,14 +1534,6 @@ int main(int argc, char **argv) {
             libc::alarm(75);
             assert_ne!(libc::signal(libc::SIGXCPU, libc::SIG_IGN), libc::SIG_ERR);
         }
-        rustix::process::setrlimit(
-            rustix::process::Resource::Cpu,
-            rustix::process::Rlimit {
-                current: Some(15),
-                maximum: Some(15),
-            },
-        )
-        .unwrap();
         let root = std::env::var_os("ARANY_TEST_NATIVE_UNIT_ROOT").unwrap();
         let root = Path::new(&root);
         let phase = std::env::var("ARANY_TEST_NATIVE_UNIT_PHASE").unwrap();
@@ -1725,6 +1582,14 @@ int main(int argc, char **argv) {
                 barrier.wait();
             }
             if phase == "load-cpu" {
+                rustix::process::setrlimit(
+                    rustix::process::Resource::Cpu,
+                    rustix::process::Rlimit {
+                        current: Some(CPU_LIMIT.as_secs()),
+                        maximum: Some(CPU_LIMIT.as_secs()),
+                    },
+                )
+                .unwrap();
                 loop {
                     std::hint::black_box(1_u64.wrapping_add(std::hint::black_box(2)));
                 }
@@ -1768,7 +1633,7 @@ int main(int argc, char **argv) {
             stream.read_exact(&mut go).unwrap();
             assert_eq!(&go, b"G");
             // The runnable ad-hoc key proves the same dynamic predicate, not an Apple entitlement grant.
-            let mut profile = super::super::COMMAND_PROFILE.to_owned();
+            let mut profile = super::super::profile(COMMAND_PROFILE, COMMAND_DENIED_SYSCALLS);
             for key in [
                 "com.apple.private.coalition-spawn",
                 "com.apple.private.persona-mgmt",
@@ -1864,6 +1729,9 @@ int main(int argc, char **argv) {
                 wake_receiver.read_exact(&mut [0]).unwrap();
                 super::super::configure_resources().unwrap();
                 super::super::install(&task).unwrap();
+                let cpu = rustix::process::getrlimit(rustix::process::Resource::Cpu);
+                assert_eq!(cpu.current, None);
+                assert_eq!(cpu.maximum, None);
                 assert_eq!(
                     wake_sender.write(&[1]).unwrap_err().kind(),
                     std::io::ErrorKind::PermissionDenied
@@ -1899,6 +1767,22 @@ int main(int argc, char **argv) {
                     std::io::ErrorKind::PermissionDenied
                 );
                 assert_eq!(
+                    std::fs::metadata(runtime.workspace.join("selected"))
+                        .unwrap_err()
+                        .kind(),
+                    std::io::ErrorKind::PermissionDenied
+                );
+                assert_eq!(
+                    std::fs::read_dir(root.parent().unwrap())
+                        .unwrap_err()
+                        .kind(),
+                    std::io::ErrorKind::PermissionDenied
+                );
+                assert_eq!(
+                    std::fs::read_dir(root).unwrap_err().kind(),
+                    std::io::ErrorKind::PermissionDenied
+                );
+                assert_eq!(
                     std::fs::write(root.join("runtime/inputs/shell/fixture.txt"), b"forbidden")
                         .unwrap_err()
                         .kind(),
@@ -1911,6 +1795,7 @@ int main(int argc, char **argv) {
                     std::io::ErrorKind::PermissionDenied
                 );
                 let output = std::process::Command::new("/usr/bin/true")
+                    .current_dir(root.join("workspace"))
                     .bounded_output_for(Duration::from_secs(5), 1024)
                     .unwrap();
                 assert!(
@@ -1932,11 +1817,12 @@ int main(int argc, char **argv) {
                 }
                 for definition in [&runtime.config.commands[1], &runtime.config.commands[0]] {
                     let args = if definition.name == "native" {
-                        Vec::new()
+                        vec!["workspace".into()]
                     } else {
-                        vec!["-c".into(), "exec ./script".into()]
+                        vec!["-c".into(), "exec ./script workspace".into()]
                     };
-                    let mut command = super::super::super::payload(definition, &args, ".").unwrap();
+                    let mut command =
+                        super::super::super::payload(definition, &args, ".", root).unwrap();
                     let (status, stdout, stderr) = reactor
                         .block_on(async {
                             super::super::super::capture(
@@ -1952,13 +1838,18 @@ int main(int argc, char **argv) {
                         "{} native child: {status}; stderr={stderr:?}",
                         definition.name
                     );
-                    assert_eq!(stdout, b"native child success\n");
-                    assert!(stderr.is_empty());
+                    assert_eq!(stdout, b"native actor success\n");
+                    assert!(
+                        stderr.is_empty(),
+                        "{} native child stderr: {stderr:?}",
+                        definition.name
+                    );
                 }
                 let mut command = super::super::super::payload(
                     &runtime.config.commands[0],
                     &["-c".into(), "set -eu; /usr/bin/true; test \"$(/bin/cat \"$ARANY_TOOL_INPUTS/shell/fixture.txt\")\" = 'pinned synthetic input'; printf 'command change' > \"$1\"; printf 'native command success'".into(), "--".into(), "/workspace/selected".into()],
                     ".",
+                    root,
                 ).unwrap();
                 let (status, stdout, stderr) = reactor
                     .block_on(async {
@@ -1983,6 +1874,7 @@ int main(int argc, char **argv) {
                             server: "local".into(),
                         },
                         &runtime.config,
+                        root,
                     ))
                     .unwrap();
                 let catalog: serde_json::Value = serde_json::from_str(&catalog).unwrap();
@@ -1994,7 +1886,7 @@ int main(int argc, char **argv) {
                     arguments: "{}".into(),
                 };
                 let result = reactor
-                    .block_on(crate::tools::mcp::execute(&call, &runtime.config))
+                    .block_on(crate::tools::mcp::execute(&call, &runtime.config, root))
                     .unwrap();
                 let result: serde_json::Value = serde_json::from_str(&result).unwrap();
                 assert_eq!(result["content"][0]["text"], "native MCP success");

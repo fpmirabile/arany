@@ -1,6 +1,6 @@
 # Testing
 
-Load when continuing beta 1, adding or changing behavior, fixing a defect, editing tests or fixtures, changing user-visible output, or making a correctness, security, durability, provider, performance, or platform-support claim. The detailed rationale and beta evidence register live in `docs/research/testing-strategy-for-rust-cli-harness.md`; keep this file as the concise working contract.
+Load when continuing beta 1, adding or changing behavior, fixing a defect, editing tests or fixtures, changing user-visible output, or making a correctness, security, durability, provider, performance, or platform-support claim. The [testing strategy](../docs/research/testing-strategy-for-rust-cli-harness.md) explains the design rationale; keep this file as the concise working contract.
 
 ## Load for the affected task
 
@@ -13,6 +13,9 @@ Load when continuing beta 1, adding or changing behavior, fixing a defect, editi
 ## Evidence budget
 
 - Optimize for evidence per test, not test count or coverage percentage.
+- Report completed checks and their scope in the handoff/PR and CI; do not append
+  chronological result logs to strategy documents or plans. Keep only unresolved
+  defects and missing verification in `NEXT_STEPS.md`, removing closed items.
 - Add a test only when it protects a user-visible contract, durable or security invariant, protocol boundary, concurrency or failure mode, or demonstrated regression; no existing test may already catch the same defect with equally useful diagnostics.
 - State the owned claim and the defect the test would catch. If the test cannot be shown to fail for that defect, strengthen an existing test, type, or parser instead.
 - Prefer adding a row to an existing scenario, table, corpus, or failpoint harness over adding another test function or file.

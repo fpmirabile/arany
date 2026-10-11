@@ -21,5 +21,11 @@ Load for model-driven file operations, command execution, runtime Skills, local 
 - Read the [Tool spec](../docs/specs/tools.md) for observable behavior and acceptance scenarios. [Architecture](../docs/architecture/system-overview.md) owns physical responsibilities; research owns alternatives and [next steps](../NEXT_STEPS.md) owns scoped evidence and pending checks. Update these owners when the contract changes.
 - Load [Guard rules](./guard.md) before changing the separate worker or native adapters; its FFI and process-identity invariants are security boundaries.
 - Root file mutation must reopen `.` with a readable no-follow directory descriptor before syncing the parent; capability directory handles may be path-only and cannot prove durable completion through `fsync`.
+- On macOS, absolute handle traversal opens intermediate directories with native
+  search-only descriptors and the selected final directory readably. Readable
+  ancestor handles require directory-data grants and expose sibling listings;
+  metadata-only Seatbelt ancestors must still support no-follow traversal.
+  Absolute file admission also searches its final parent without listing it;
+  one pinned Skill resource must not imply access to its sibling files.
 - Folder trust belongs to bounded private OS-user state and pins exact path/device/inode, never Session facts. Human/AI approval only narrows an admitted immutable intent. AI review uses the existing Provider, journals phase/usage and asks a human on uncertainty/failure; no review text becomes an assistant answer.
 - Classify dispatch at the Guard GO write boundary, before attempting that write. Pre-GO failure has no operation effects and stops as Failed without a receipt; post-GO missing completion remains Uncertain. Engine continuation and strict replay share that stopping rule; an attested ordinary Failed result may continue. Historical failures do not prevent a newly authorized inspection, and never renew approval.

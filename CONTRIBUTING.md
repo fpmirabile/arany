@@ -10,7 +10,7 @@ Apply the [product and implementation priorities](./AGENTS.md#product-and-implem
 
 Documentation-only changes need prose, local-link and anchor review. For skill changes, also validate frontmatter, references and installation as described in the [skill workflow](./agents/skills/README.md#update-a-local-skill). These changes do not require rebuilding or testing the Rust executable.
 
-Use Rustup with the repository's [pinned toolchain](./rust-toolchain.toml). The [CI workflow](./.github/workflows/ci.yml) checks formatting and Clippy on Linux and runs native default tests in debug and release on Linux and macOS. Run the applicable checks locally before submitting:
+Use Rustup with the repository's [pinned toolchain](./rust-toolchain.toml). The [CI workflow](./.github/workflows/ci.yml) checks formatting on Linux, Clippy on Linux and macOS, and native default tests in debug and release on both platforms. Run the applicable checks locally before submitting:
 
 ```sh
 cargo fmt --all --check
@@ -21,7 +21,7 @@ cargo test --workspace --locked --offline --release
 
 Run `cargo fetch --locked` first when the locked dependencies are not already available. Linux terminal fixtures need Bubblewrap and util-linux `script`, with user and network namespaces enabled. On macOS, set `TMPDIR=/private/tmp` when running tests so private-state fixtures use a physical path rather than the rejected `/tmp` or `/var` symlink aliases. CI provisions its prerequisites on disposable GitHub-hosted runners.
 
-Default suites exercise only the scenarios enabled for their native OS. Ignored native, manual, performance, and live Provider gates remain separate; default CI uses no account credentials or paid calls. Passing compilation or an OS-specific subset does not prove platform parity. See [testing rules](./agents/testing.md) for evidence requirements.
+Default suites exercise only the scenarios enabled for their native OS. CI explicitly activates the macOS unit/resource and immutable file CPU-expiry owners after each default suite. Other ignored native, manual, performance, and live Provider gates remain separate; CI uses no account credentials or paid calls. Passing compilation or an OS-specific subset does not prove platform parity. See [testing rules](./agents/testing.md) for evidence requirements.
 
 ## Pull requests
 

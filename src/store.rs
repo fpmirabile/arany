@@ -85,6 +85,16 @@ impl From<io::Error> for StoreError {
     }
 }
 
+impl From<crate::private_fs::Error> for StoreError {
+    fn from(error: crate::private_fs::Error) -> Self {
+        match error {
+            crate::private_fs::Error::InvalidPath => Self::InvalidStateDirectory,
+            crate::private_fs::Error::NotPrivate => Self::StateNotPrivate,
+            crate::private_fs::Error::Io(error) => Self::Io(error),
+        }
+    }
+}
+
 impl From<rusqlite::Error> for StoreError {
     fn from(source: rusqlite::Error) -> Self {
         Self::Sqlite(source)

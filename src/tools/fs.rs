@@ -26,15 +26,52 @@ pub(crate) fn open_directory(path: &Path) -> Result<Dir, ToolError> {
     if !path.is_absolute() {
         return Err(ToolError::Path);
     }
-    let mut dir =
-        Dir::open_ambient_dir("/", cap_std::ambient_authority()).map_err(|_| ToolError::Path)?;
-    for component in path.components().skip(1) {
+    #[cfg(target_os = "macos")]
+    {
+        macos_directory(path, rustix::fs::OFlags::RDONLY)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut dir = Dir::open_ambient_dir("/", cap_std::ambient_authority())
+            .map_err(|_| ToolError::Path)?;
+        for component in path.components().skip(1) {
+            let std::path::Component::Normal(name) = component else {
+                return Err(ToolError::Path);
+            };
+            dir = dir.open_dir_nofollow(name).map_err(|_| ToolError::Path)?;
+        }
+        Ok(dir)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_directory(path: &Path, final_access: rustix::fs::OFlags) -> Result<Dir, ToolError> {
+    use rustix::fs::{Mode, OFlags, open, openat};
+
+    let common = OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW;
+    let search = OFlags::from_bits_retain(nix::libc::O_SEARCH as _);
+    let mut components = path.components().skip(1).peekable();
+    let access = if components.peek().is_none() {
+        final_access
+    } else {
+        search
+    };
+    let mut file =
+        File::from(open("/", common | access, Mode::empty()).map_err(|_| ToolError::Path)?);
+    while let Some(component) = components.next() {
         let std::path::Component::Normal(name) = component else {
             return Err(ToolError::Path);
         };
-        dir = dir.open_dir_nofollow(name).map_err(|_| ToolError::Path)?;
+        let access = if components.peek().is_none() {
+            final_access
+        } else {
+            search
+        };
+        file = File::from(
+            openat(&file, name, common | access, Mode::empty()).map_err(|_| ToolError::Path)?,
+        );
     }
-    Ok(dir)
+    Ok(Dir::from_std_file(file))
 }
 
 pub(crate) fn identity(dir: &Dir) -> Result<(u64, u64), ToolError> {
@@ -56,7 +93,14 @@ pub(crate) fn open_absolute(path: &str) -> Result<File, ToolError> {
         return Err(ToolError::Path);
     }
     let path = Path::new(path);
-    let parent = open_directory(path.parent().ok_or(ToolError::Path)?)?;
+    let parent = path.parent().ok_or(ToolError::Path)?;
+    #[cfg(target_os = "macos")]
+    let parent = macos_directory(
+        parent,
+        rustix::fs::OFlags::from_bits_retain(nix::libc::O_SEARCH as _),
+    )?;
+    #[cfg(not(target_os = "macos"))]
+    let parent = open_directory(parent)?;
     open_file(
         &parent,
         path.file_name()

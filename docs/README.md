@@ -6,7 +6,7 @@ Start with the task, then read the owning contract and editing rules. [AGENTS.md
 
 | Material | Authoritative home |
 |---|---|
-| Project introduction, goals, installation and development quickstart | [Repository README](../README.md); keep detailed contracts and verification history in their owners below |
+| Project introduction, goals, installation and development quickstart | [Repository README](../README.md); detailed contracts stay in their owners below |
 | Shared development rules and conditional loading | [AGENTS.md](../AGENTS.md) |
 | Module editing constraints, ownership invariants and recurring failure modes | `agents/<module>.md`, reached through AGENTS.md; task-specific details are linked from each module under `agents/references/` |
 | Agreed observable product behavior | [Domain specs](./specs/README.md); unmigrated contracts remain in their existing owners |
@@ -16,6 +16,8 @@ Start with the task, then read the owning contract and editing rules. [AGENTS.md
 | Security findings and scoped supply-chain evidence | [Dependency inventory](./security/beta-dependency-inventory.md) and `docs/security/findings/` |
 | Proposed changes and temporary execution work | [Planning](../planning/README.md) |
 | Open defects, deferred functionality and user-owned checks | [Next steps](../NEXT_STEPS.md) |
+| Completed changes and check results | Git/PR/CI history and the implementation handoff; no living chronological ledger |
+| Testing design and trade-offs | [Testing strategy](./research/testing-strategy-for-rust-cli-harness.md); working requirements remain in [testing rules](../agents/testing.md) |
 | User instructions | [Account setup](./setup.md), [local tools](./tools.md), [development diagnostics](./development-diagnostics.md) |
 | Repeatable development procedures | [Project skills](../agents/skills/README.md) |
 | Domain vocabulary | [CONTEXT.md](../CONTEXT.md) |
@@ -40,6 +42,6 @@ Follow relevant cross-boundary links before editing. A harmless prose correction
 
 ## Current milestone and evidence
 
-The current milestone is a personal Linux beta. [Next steps](../NEXT_STEPS.md) distinguishes a demonstrated defect from unperformed checks, missing functionality and beta-2/release work. [The active beta record](../planning/arany-beta/README.md), [next steps](../NEXT_STEPS.md) and scoped security/review records retain dated evidence. Completed execution plans are removed after their accepted behavior reaches the domain specs. Use the evidence owners for dated results; keep specs independent of test counts, artifact hashes and past run logs.
+The current milestone is a personal Linux beta. [Next steps](../NEXT_STEPS.md) distinguishes open defects, unperformed checks, missing functionality and release work. [The active beta plan](../planning/arany-beta/README.md) contains only remaining execution; accepted behavior belongs in specs. Remove completed plan sections and closed pending items instead of adding closeout narratives. Git/PR/CI and the implementation handoff preserve completed results. Scoped security/review records retain evidence only when needed for their reasoning; keep specs independent of test totals, artifact hashes and past run logs.
 
 The executable snapshots the exact Workspace-root AGENTS.md, with CLAUDE.md only as an absence fallback. This documentation workflow does not make Arany discover nested rules, follow spec links, or expand outbound content. Its admission contract remains in [Session input rules](../agents/session.md) and [security rules](../agents/security.md).

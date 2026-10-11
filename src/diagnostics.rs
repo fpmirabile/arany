@@ -441,14 +441,7 @@ mod tests {
                 .expect("bounded isolated diagnostic owner");
             assert!(output.status.success(), "isolated diagnostic owner failed");
             assert_eq!(output.stderr, b"");
-            let completed = b"test result: ok. 1 passed; 0 failed; 0 ignored;";
-            assert!(
-                output
-                    .stdout
-                    .windows(completed.len())
-                    .any(|part| part == completed),
-                "diagnostic child did not complete exactly one test"
-            );
+            crate::test_process::assert_single_test_completed(&output.stdout, "diagnostic");
             return;
         }
         let temp = tempfile::tempdir().unwrap();

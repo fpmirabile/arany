@@ -182,12 +182,7 @@ fn platform_tls_chain_and_name() {
             stdout.lines().any(|line| line == "running 1 test"),
             "TLS {mode} child did not run exactly one test"
         );
-        assert!(
-            stdout
-                .lines()
-                .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;")),
-            "TLS {mode} child did not complete its assertions"
-        );
+        process::assert_single_test_completed(&output.stdout, &format!("TLS {mode}"));
     }
 }
 

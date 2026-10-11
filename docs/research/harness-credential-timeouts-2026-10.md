@@ -31,7 +31,7 @@ Prompts belong to the client's D-Bus connection and become invalid on disconnect
 
 ## Arany's recorded parent-deadline miss
 
-The [Unicode editing closeout](../../planning/arany-beta/README.md#implemented-preserve-grapheme-boundaries-after-deletion) recorded one generic parent-deadline failure while other build work was running. Its output was subsequently recovered from the long-running development execution log, in the 2026-10-03 17:34:41 UTC record. The relevant failure, with the process ID omitted, was:
+One generic parent-deadline failure was recorded during the Unicode editing work while other build work was running. Its output was subsequently recovered from the long-running development execution log, in the 2026-10-03 17:34:41 UTC record. The relevant failure, with the process ID omitted, was:
 
 ```text
 thread 'setup::stalled_credential_bus_does_not_strand_unconfigured_start' panicked at tests/session_run/loopback.rs:44:9:
