@@ -1,6 +1,6 @@
 # Local coding tools
 
-In attached chat, select an account/model, then explicitly trust the folder when prompted. `/permissions` revisits that choice. A reviewed private grant can instead be selected with `--tools`:
+Attached startup asks for folder trust before account selection or setup unless that exact folder is already trusted. `/permissions` revisits that choice. A reviewed private grant can instead be selected with `--tools`:
 
 ```sh
 target/debug/arany --tools
@@ -35,6 +35,6 @@ Follow the [local MCP configuration](./specs/tools.md#local-mcp) for pinned serv
 
 The [limits and recovery contract](./specs/tools.md#limits-and-failure-behavior) describes quotas, exact file preconditions and uncertain effects. Inspect `arany show --output text SESSION_ID` and actual files before an intentional retry. Historical intents never execute on replay or resume.
 
-## Linux enforcement and verification
+## Native enforcement and verification
 
-Check the [native prerequisites and compatibility boundary](./specs/tools.md#linux-enforcement-and-compatibility). Missing enforcement rejects without an unsandboxed fallback. Native macOS containment is not implemented. [Next steps](../NEXT_STEPS.md) distinguishes demonstrated checks from remaining user-owned verification.
+Check the [Linux prerequisites](./specs/tools.md#linux-enforcement-and-compatibility) or [macOS prerequisites and compatibility](./specs/tools.md#macos-enforcement-and-compatibility). Both native profiles enforce offline isolation and owned cleanup, with the resource guarantees specified in their contracts. Missing enforcement rejects without an unsandboxed fallback. [Next steps](../NEXT_STEPS.md) distinguishes demonstrated checks from remaining user-owned verification.

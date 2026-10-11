@@ -20,7 +20,7 @@ A conversation is a **Session**. Each submitted task starts a bounded **Run**, l
 
 The current implementation includes OpenAI and Anthropic API-key routes, consented ChatGPT-plan access, and verified custom read-only profiles. Optional coding tools provide guarded file edits, offline commands, runtime Skills and local MCP integrations.
 
-**Status:** development beta. Linux is the initial implementation target; macOS supports ordinary chat while native Tool enforcement remains unavailable. Windows parity is a design goal, not a current support claim. See [next steps](./NEXT_STEPS.md) for remaining work.
+**Status:** development beta. Linux and macOS have native Tool enforcement; platform verification and release checks remain incomplete. Windows parity is a design goal, not a current support claim. See [next steps](./NEXT_STEPS.md) for remaining work.
 
 ## Install from source
 

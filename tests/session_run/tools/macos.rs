@@ -117,7 +117,11 @@ fn guarded_native_files_and_skills_survive_closed_replay() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
-    assert!(output.stderr.is_empty());
+    assert!(
+        output.stderr.is_empty(),
+        "native journey stderr: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[tokio::test]
@@ -205,7 +209,7 @@ async fn native_file_journey_helper() {
         },
         ToolCall::Command {
             program: "shell".into(),
-            args: vec!["-c".into(), "set -eu; test \"$(/bin/cat src/main.txt)\" = after; test \"$(/bin/cat src/generated/note.txt)\" = replaced; /usr/bin/true; printf discarded > src/command-output.txt; printf native-command-success".into()],
+            args: vec!["-c".into(), "set -eu; test \"$(/bin/cat src/main.txt)\" = after; test \"$(/bin/cat src/generated/note.txt)\" = replaced; i=0; while test \"$i\" -lt 128; do /usr/bin/true; i=$((i + 1)); done; printf discarded > src/command-output.txt; printf native-command-success".into()],
             cwd: "".into(),
         },
         ToolCall::McpList {

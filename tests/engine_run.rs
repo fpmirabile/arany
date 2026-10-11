@@ -883,90 +883,84 @@ fn subscription_account_and_local_bound_survive_run_and_compaction_replay() {
         .build()
         .expect("runtime");
     runtime.block_on(async {
-        for admission in [
-            ChatGptAdmission::AccountConsent,
-            ChatGptAdmission::AccountConsent,
-        ] {
-            let temp = tempfile::tempdir().expect("temporary root");
-            let workspace = temp.path().join("workspace");
-            std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-            std::fs::write(workspace.join("notes/facts.txt"), "Synthetic fact").expect("include");
-            let state_path = temp.path().join("state");
-            let account_id = Uuid::now_v7();
-            let fingerprint = [7; 32];
-            let mut provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-                summary: "Synthetic summary".into(),
-                result: "Synthetic answer".into(),
-            })])
-            .with_chatgpt_account(account_id, fingerprint)
-            .with_compactions(vec![Ok(CompactionResponse {
-                summary: "Compacted synthetic history".into(),
-                response_id: Some("resp_compact".into()),
-                input_tokens: Some(20),
-                output_tokens: Some(8),
-                wire_provenance: Some(
-                    arany::ProviderWireProvenance::ResponsesCompletedStoreFalseRequested,
-                ),
-            })]);
-            provider.chatgpt_provenance.as_mut().unwrap().admission = admission;
-            let mut engine = Engine::open(
-                StateRoot::admit(&state_path).expect("private state"),
-                provider,
-            )
-            .expect("engine");
-            let outcome = engine
-                .run(request(&workspace, "Synthetic objective"))
-                .await
-                .expect("committed Run");
-            assert_eq!(outcome.run.status, RunStatus::Finished);
-            let config = outcome.run.config.as_ref().expect("Run provenance");
-            assert_eq!(config.provider, "chatgpt");
-            assert_eq!(config.saved_api_account_id, None);
-            assert_eq!(
-                config.output_token_bound,
-                OutputTokenBound::LocalAcceptanceOnly
-            );
-            assert_eq!(
-                config.chatgpt_provenance,
-                Some(ChatGptProvenance {
-                    account_id,
-                    evidence_fingerprint: fingerprint,
-                    admission,
-                })
-            );
-            let compaction = engine
-                .compact_session(outcome.session_id, workspace)
-                .await
-                .expect("committed compaction");
-            assert!(matches!(
-                compaction.status,
-                CompactionStatus::Succeeded { .. }
-            ));
-            assert_eq!(compaction.chatgpt_provenance, config.chatgpt_provenance);
-            assert_eq!(
-                compaction.output_token_bound,
-                OutputTokenBound::LocalAcceptanceOnly
-            );
-            engine.close().await.expect("engine shutdown");
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
+        std::fs::write(workspace.join("notes/facts.txt"), "Synthetic fact").expect("include");
+        let state_path = temp.path().join("state");
+        let account_id = Uuid::now_v7();
+        let fingerprint = [7; 32];
+        let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
+            summary: "Synthetic summary".into(),
+            result: "Synthetic answer".into(),
+        })])
+        .with_chatgpt_account(account_id, fingerprint)
+        .with_compactions(vec![Ok(CompactionResponse {
+            summary: "Compacted synthetic history".into(),
+            response_id: Some("resp_compact".into()),
+            input_tokens: Some(20),
+            output_tokens: Some(8),
+            wire_provenance: Some(
+                arany::ProviderWireProvenance::ResponsesCompletedStoreFalseRequested,
+            ),
+        })]);
+        let mut engine = Engine::open(
+            StateRoot::admit(&state_path).expect("private state"),
+            provider,
+        )
+        .expect("engine");
+        let outcome = engine
+            .run(request(&workspace, "Synthetic objective"))
+            .await
+            .expect("committed Run");
+        assert_eq!(outcome.run.status, RunStatus::Finished);
+        let config = outcome.run.config.as_ref().expect("Run provenance");
+        assert_eq!(config.provider, "chatgpt");
+        assert_eq!(config.saved_api_account_id, None);
+        assert_eq!(
+            config.output_token_bound,
+            OutputTokenBound::LocalAcceptanceOnly
+        );
+        assert_eq!(
+            config.chatgpt_provenance,
+            Some(ChatGptProvenance {
+                account_id,
+                evidence_fingerprint: fingerprint,
+                admission: ChatGptAdmission::AccountConsent,
+            })
+        );
+        let compaction = engine
+            .compact_session(outcome.session_id, workspace)
+            .await
+            .expect("committed compaction");
+        assert!(matches!(
+            compaction.status,
+            CompactionStatus::Succeeded { .. }
+        ));
+        assert_eq!(compaction.chatgpt_provenance, config.chatgpt_provenance);
+        assert_eq!(
+            compaction.output_token_bound,
+            OutputTokenBound::LocalAcceptanceOnly
+        );
+        engine.close().await.expect("engine shutdown");
 
-            let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap())
-                .expect("read-only reopen");
-            let events = store
-                .load_session(outcome.session_id)
-                .await
-                .expect("canonical Events");
-            let view = SessionView::replay(outcome.session_id, &events)
-                .expect("strict replay")
-                .expect("Session");
-            assert_eq!(view.runs[0].config.as_ref(), Some(config));
-            assert!(events.iter().any(|event| matches!(
-                &event.event,
-                Event::ContextCompacted { record }
-                    if record.chatgpt_provenance == config.chatgpt_provenance
-                        && record.output_token_bound == OutputTokenBound::LocalAcceptanceOnly
-            )));
-            store.close().await.expect("store shutdown");
-        }
+        let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap())
+            .expect("read-only reopen");
+        let events = store
+            .load_session(outcome.session_id)
+            .await
+            .expect("canonical Events");
+        let view = SessionView::replay(outcome.session_id, &events)
+            .expect("strict replay")
+            .expect("Session");
+        assert_eq!(view.runs[0].config.as_ref(), Some(config));
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            Event::ContextCompacted { record }
+                if record.chatgpt_provenance == config.chatgpt_provenance
+                    && record.output_token_bound == OutputTokenBound::LocalAcceptanceOnly
+        )));
+        store.close().await.expect("store shutdown");
     });
 }
 

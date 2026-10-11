@@ -1100,3 +1100,32 @@ preferences; the earlier dated observations remain separate evidence. No live
 account, Provider or general clipboard was used. An initial release invocation
 omitted the documented physical `TMPDIR` and failed fixture path admission; the
 corrected invocation passed without weakening that admission.
+
+
+### Branch-review corrections — 2026-10-11
+
+Review of `feat/macos-native-support` against the merge base with `origin/main`
+reproduced intermittent post-GO uncertainty during an ordinary native command.
+A short-lived child disappeared between coalition enumeration and task sampling;
+the fallback observer rejected before the existing identity revalidation could
+confirm reaping. Resource samples now retain their result until identity is
+revalidated, including failed samples. Confirmed absence or reuse retires that
+member; missing live-process observation still rejects. The native Engine
+journey now launches 128 short-lived children and retains its receipt, effect,
+no-retry and closed-replay assertions. Temporary bounded diagnostics were removed.
+
+Two Linux setup assertions still expected the removed cursor-position queries;
+they now require no query in either presentation. Native Linux execution remains
+pending. The subscription Run/compaction journey no longer repeats the identical
+account-consent scenario twice. README, architecture and Tool guidance now agree
+on native command support, consent ordering and macOS anonymous-socket limits.
+The Tool contract and Guard rules record the resource-sampling exit invariant.
+
+Locked offline Apple Silicon suites pass 261 debug and 253 release tests, with
+22 and 20 explicitly ignored gates. The activated native unit/resource owner
+passes separately in both profiles, including escaped descendants, resource
+excess, native profile rejection and positive cleanup. The simplified replay
+owner passes again in debug and release. Formatting, strict all-target Clippy in
+both profiles and diff checks pass. These checks use synthetic fixtures and do
+not establish Linux/Windows execution, optimized full account isolation, live
+Provider compatibility or human accessibility evidence.

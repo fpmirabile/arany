@@ -13,7 +13,9 @@ resource semantics and unavailable-capability rejection.
 - Observe coalition membership through bounded kernel metadata, never process
   arguments or environments. A process unique ID survives exec; audit-token
   versions can change. Resource samples retain the process identity across exec,
-  while every signal selects the exact current PID/version atomically.
+  while every signal selects the exact current PID/version atomically. Revalidate
+  identity after failed resource samples too: confirmed reaping or PID reuse
+  retires that member; unavailable observation of a live member still rejects.
 - Convert native CPU counters through the validated Mach timebase. Aggregate
   resident memory and live threads, and enforce the accepted per-process CPU
   threshold outside the payload. Missing live observation fails closed.

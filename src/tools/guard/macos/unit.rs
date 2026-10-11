@@ -202,34 +202,38 @@ impl Scope {
         let mut memory = 0_u64;
         let mut threads = 0_u64;
         for member in self.members()? {
-            let task = match task_info(member.pid) {
-                Ok(task) => task,
-                Err(_) if !super::observe(member.pid)? => continue,
-                Err(error) => return Err(error),
-            };
-            let mut usage = MaybeUninit::<libc::rusage_info_v0>::uninit();
-            // The selected flavor writes the SDK's fixed rusage_info_v0 layout.
-            if unsafe {
-                libc::proc_pid_rusage(
-                    member.pid as i32,
-                    libc::RUSAGE_INFO_V0,
-                    usage.as_mut_ptr().cast(),
-                )
-            } != 0
-            {
-                if matches!(identity(member.pid), Err(ToolError::ChangedInput)) {
-                    continue;
+            let sample = (|| {
+                let task = match task_info(member.pid) {
+                    Ok(task) => task,
+                    Err(_) if !super::observe(member.pid)? => return Ok(None),
+                    Err(error) => return Err(error),
+                };
+                let mut usage = MaybeUninit::<libc::rusage_info_v0>::uninit();
+                // The selected flavor writes the SDK's fixed rusage_info_v0 layout.
+                if unsafe {
+                    libc::proc_pid_rusage(
+                        member.pid as i32,
+                        libc::RUSAGE_INFO_V0,
+                        usage.as_mut_ptr().cast(),
+                    )
+                } != 0
+                {
+                    return Err(ToolError::ProtectionUnavailable);
                 }
-                return Err(ToolError::ProtectionUnavailable);
-            }
-            // The successful flavor-specific write initializes every integer/byte-array field.
-            let usage = unsafe { usage.assume_init() };
+                // The successful flavor-specific write initializes every integer/byte-array field.
+                let usage = unsafe { usage.assume_init() };
+                Ok(Some((task, usage)))
+            })();
+            // Revalidate even failed samples: a reaped member has no remaining task metadata.
             match identity(member.pid) {
                 Ok(current) if current.same_process(member) => {}
                 Ok(current) if current.unique_id != member.unique_id => continue,
                 Err(ToolError::ChangedInput) => continue,
                 _ => return Err(ToolError::ProtectionUnavailable),
             }
+            let Some((task, usage)) = sample? else {
+                continue;
+            };
             if task.pti_threadnum < 1 {
                 return Err(ToolError::ProtectionUnavailable);
             }
