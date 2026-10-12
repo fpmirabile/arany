@@ -168,7 +168,8 @@ impl ProgressPublisher {
             })
             .sum();
         Ok(Some(PreviewContext {
-            call_index: agent.provider_calls.len() as u8,
+            call_index: u8::try_from(agent.provider_calls.len())
+                .map_err(|_| EngineError::CoordinatorFailed)?,
             chunks: run.display.len(),
             commentary_bytes,
             commentary_items: items.len(),

@@ -493,9 +493,10 @@ fn inline_model_catalog_at_width(width: u16) {
     let before_edit = transcript.len();
     input.write_all(b"X").expect("edit returned draft");
     let deadline = Instant::now() + Duration::from_secs(10);
+    // The Classic viewport row follows the cursor reply; the caret column proves draft restoration.
     while !transcript[before_edit..]
-        .windows(b"\x1b[22;7HX".len())
-        .any(|part| part == b"\x1b[22;7HX")
+        .windows(b";7HX".len())
+        .any(|part| part == b";7HX")
     {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
         assert!(
@@ -505,6 +506,17 @@ fn inline_model_catalog_at_width(width: u16) {
         );
         thread::yield_now();
     }
+    let edit = &transcript[before_edit..];
+    let caret = edit
+        .windows(b";7HX".len())
+        .position(|part| part == b";7HX")
+        .expect("restored caret");
+    let row = edit[..caret]
+        .windows(2)
+        .rposition(|part| part == b"\x1b[")
+        .expect("caret row");
+    let composer_caret = [&edit[row..caret], b";7H"].concat();
+    let composer_edit = [composer_caret.as_slice(), b"Y"].concat();
     let native_pid = (width == 40).then(|| {
         let text = String::from_utf8_lossy(&transcript);
         let shell = text
@@ -557,13 +569,13 @@ fn inline_model_catalog_at_width(width: u16) {
             ),
             (
                 &b"\x1b"[..],
-                &b"\x1b[22;7H"[..],
+                composer_caret.as_slice(),
                 false,
                 "cancel returns draft",
             ),
             (
                 &b"Y"[..],
-                &b"\x1b[22;7HY"[..],
+                composer_edit.as_slice(),
                 false,
                 "cancel restores caret",
             ),

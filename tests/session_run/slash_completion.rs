@@ -14,6 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[track_caller]
 fn wait_for(
     output: &mut impl Read,
     input: &mut impl Write,
@@ -24,6 +25,7 @@ fn wait_for(
     wait_for_after(output, input, transcript, answered, 0, needle);
 }
 
+#[track_caller]
 fn wait_for_after(
     output: &mut impl Read,
     input: &mut impl Write,
@@ -46,6 +48,57 @@ fn wait_for_after(
         );
         thread::yield_now();
     }
+}
+
+/// Waits for a frame whose final caret sits at `column`; Classic rows follow native insertion.
+#[track_caller]
+fn wait_for_caret(
+    output: &mut impl Read,
+    input: &mut impl Write,
+    transcript: &mut Vec<u8>,
+    answered: &mut crate::session_picker::PtyResponses,
+    from: usize,
+    column: u16,
+) {
+    let suffix = format!(";{column}H");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let frames = &transcript[from..];
+        if frames
+            .windows(b"\x1b[?25h\x1b[".len())
+            .enumerate()
+            .filter(|(_, part)| *part == b"\x1b[?25h\x1b[")
+            .any(|(start, part)| {
+                let rest = &frames[start + part.len()..];
+                let digits = rest.iter().take_while(|byte| byte.is_ascii_digit()).count();
+                digits > 0 && rest[digits..].starts_with(suffix.as_bytes())
+            })
+        {
+            return;
+        }
+        pump(output, input, transcript, answered);
+        assert!(
+            Instant::now() < deadline,
+            "caret column {column} missing: {}",
+            tail(transcript)
+        );
+        thread::yield_now();
+    }
+}
+
+/// Row of the latest drawn caret, for gates where the column alone is ambiguous.
+fn caret_row(transcript: &[u8]) -> String {
+    let marker = b"\x1b[?25h\x1b[";
+    let start = transcript
+        .windows(marker.len())
+        .rposition(|part| part == marker)
+        .expect("drawn caret")
+        + marker.len();
+    transcript[start..]
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .map(|byte| char::from(*byte))
+        .collect()
 }
 
 pub(super) fn saved_conversation(
@@ -616,15 +669,15 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut transcript,
         &mut answered,
         paste_at,
-        b"\x1b[21;3Hfirst",
+        b";3Hfirst",
     );
-    wait_for_after(
+    wait_for_caret(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         paste_at,
-        b"\x1b[22;9H",
+        9,
     );
     assert!(
         !String::from_utf8_lossy(&transcript[paste_at..]).contains("error:"),
@@ -640,35 +693,35 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         clipboard_at,
         b"unavailable;",
     );
-    wait_for_after(
+    wait_for_caret(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         clipboard_at,
-        b"\x1b[22;9H",
+        9,
     );
     let continued_at = transcript.len();
     input
         .write_all(b"Z")
         .expect("continue retained paste draft");
-    wait_for_after(
+    wait_for_caret(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         continued_at,
-        b"\x1b[22;10H",
+        10,
     );
     let clear_at = transcript.len();
     input.write_all(b"\x03").expect("clear pasted draft");
-    wait_for_after(
+    wait_for_caret(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         clear_at,
-        b"\x1b[?25h\x1b[22;3H",
+        3,
     );
     let tabs_at = transcript.len();
     input.write_all(b"/").expect("open default Commands tab");
@@ -680,13 +733,13 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         tabs_at,
         b"[Commands]",
     );
-    wait_for_after(
+    wait_for_caret(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         tabs_at,
-        b"\x1b[4;4H",
+        4,
     );
     let skill_at = transcript.len();
     input.write_all(b"\x1b[C").expect("switch to Skills");
@@ -698,55 +751,55 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         skill_at,
         b"> Skill /review",
     );
-    wait_for_after(
+    wait_for_caret(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         skill_at,
-        b"\x1b[20;4H",
+        4,
     );
     let commands_at = transcript.len();
     input.write_all(b"\x1b[D").expect("return to Commands");
-    wait_for_after(
+    wait_for_caret(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         commands_at,
-        b"\x1b[4;4H",
+        4,
     );
     let skill_at = transcript.len();
     input
         .write_all(b"\x1b[Crev")
         .expect("filter Skills locally");
-    wait_for_after(
+    wait_for_caret(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         skill_at,
-        b"\x1b[20;7H",
+        7,
     );
     let skill_accept_at = transcript.len();
     input.write_all(b"\t").expect("choose Skill as a draft");
-    wait_for_after(
+    wait_for_caret(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         skill_accept_at,
-        b"\x1b[22;11H",
+        11,
     );
     let skill_clear_at = transcript.len();
     input.write_all(b"\x03").expect("clear unsent Skill draft");
-    wait_for_after(
+    wait_for_caret(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         skill_clear_at,
-        b"\x1b[?25h\x1b[22;3H",
+        3,
     );
     let settings_at = transcript.len();
     input
@@ -770,13 +823,13 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         saved_at,
         b"combined",
     );
-    wait_for_after(
+    wait_for_caret(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         saved_at,
-        b"\x1b[?25h\x1b[22;3H",
+        3,
     );
     assert_eq!(
         StateRoot::open_existing(&state)
@@ -833,13 +886,13 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     );
     let menu_at = transcript.len();
     input.write_all(b"/s").expect("ambiguous command prefix");
-    wait_for_after(
+    wait_for_caret(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         menu_at,
-        b"\x1b[18;5H",
+        5,
     );
     input.write_all(b"\x1b[B").expect("focus status choice");
     wait_for(
@@ -853,13 +906,13 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     input
         .write_all(b"\r")
         .expect("complete focused status without submitting prefix");
-    wait_for_after(
+    wait_for_caret(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         status_at,
-        b"\x1b[22;10H",
+        10,
     );
     assert!(
         !String::from_utf8_lossy(&transcript[status_at..]).contains("error:"),
@@ -881,33 +934,34 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     input
         .write_all(b"alpha\x1b[13;2u")
         .expect("encoded Shift+Enter continues the chat draft");
-    wait_for_after(
+    wait_for_caret(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         newline_at,
-        b"\x1b[?25h\x1b[22;3H",
+        3,
     );
     let clear_at = transcript.len();
     input.write_all(b"\x03").expect("clear multiline draft");
-    wait_for_after(
+    wait_for_caret(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         clear_at,
-        b"\x1b[?25h\x1b[22;3H",
+        3,
     );
+    let idle_row = caret_row(&transcript);
     let model_menu_at = transcript.len();
     input.write_all(b"/s").expect("ambiguous Session prefix");
-    wait_for_after(
+    wait_for_caret(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         model_menu_at,
-        b"\x1b[18;5H",
+        5,
     );
     input.write_all(b"\x1b[B").expect("focus status choice");
     wait_for_after(
@@ -920,13 +974,14 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     );
     let closed_at = transcript.len();
     input.write_all(b"\x1b").expect("dismiss completion menu");
+    // The open menu also leaves the caret in column 5; only the idle row proves Escape was handled.
     wait_for_after(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         closed_at,
-        b"\x1b[22;5H",
+        format!("\x1b[?25h\x1b[{idle_row};5H").as_bytes(),
     );
     input
         .write_all(b"\x7f\x7f/model staged-model\r")
@@ -1031,7 +1086,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut transcript,
         &mut answered,
         corrected_at,
-        b"named Session:",
+        b"Renamed",
     );
     transcript.clear();
     answered = crate::session_picker::PtyResponses::default();
@@ -1061,48 +1116,48 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         restart_at,
         b"Ask Arany",
     );
-    wait_for_after(
+    wait_for_caret(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         restart_at,
-        b"\x1b[?25h\x1b[22;3H",
+        3,
     );
     let _restarted_product = ProductGuard::new(product_child_of(shell_pid), state.clone());
     let combined_at = transcript.len();
     input
         .write_all(b"/")
         .expect("remembered combined menu in fresh process");
-    wait_for_after(
+    wait_for_caret(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         combined_at,
-        b"\x1b[3;4H",
+        4,
     );
     let selected_at = transcript.len();
     input
         .write_all(b"rev\t")
         .expect("remembered combined mode exposes Skills without switching tabs");
-    wait_for_after(
+    wait_for_caret(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         selected_at,
-        b"\x1b[22;11H",
+        11,
     );
     let clear_at = transcript.len();
     input.write_all(b"\x03").expect("clear menu without a Run");
-    wait_for_after(
+    wait_for_caret(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         clear_at,
-        b"\x1b[?25h\x1b[22;3H",
+        3,
     );
     let pending = state.join("ui-preferences.pending");
     let outside = temp.path().join("outside-preference-canary");
@@ -1112,13 +1167,13 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     input
         .write_all(b"/settings tabs\r")
         .expect("unsafe replacement must retain current display");
-    wait_for_after(
+    wait_for_caret(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         rejected_at,
-        b"\x1b[?25h\x1b[22;3H",
+        3,
     );
     assert_eq!(
         StateRoot::open_existing(&state)
@@ -1142,36 +1197,36 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     input
         .write_all(b"/rev\t")
         .expect("failed save leaves combined display");
-    wait_for_after(
+    wait_for_caret(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         unchanged_at,
-        b"\x1b[22;11H",
+        11,
     );
     let clear_at = transcript.len();
     input.write_all(b"\x03").expect("clear retained display");
-    wait_for_after(
+    wait_for_caret(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         clear_at,
-        b"\x1b[?25h\x1b[22;3H",
+        3,
     );
     std::fs::remove_file(pending).unwrap();
     let tabs_at = transcript.len();
     input
         .write_all(b"/settings tabs\r")
         .expect("typed display selection");
-    wait_for_after(
+    wait_for_caret(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         tabs_at,
-        b"\x1b[?25h\x1b[22;3H",
+        3,
     );
     assert_eq!(
         StateRoot::open_existing(&state)

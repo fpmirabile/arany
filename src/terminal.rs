@@ -103,6 +103,16 @@ impl Drop for AlternateScreen {
     }
 }
 
+/// Committed facts already inserted above the Classic viewport for one Session.
+#[derive(Default)]
+struct NativeTranscript {
+    session: Option<crate::session::SessionId>,
+    objectives: HashSet<crate::session::RunId>,
+    answers: HashSet<crate::session::RunId>,
+    tools: HashSet<(crate::session::RunId, usize)>,
+    last_notice: Option<(u64, String)>,
+}
+
 #[derive(Clone, Copy)]
 enum SnapshotState {
     Session,
@@ -338,11 +348,8 @@ pub struct AttachedTerminal {
     mode: TerminalMode,
     alternate: Option<AlternateScreen>,
     transcript_open: bool,
-    native_session: Option<crate::session::SessionId>,
-    native_messages: HashSet<(crate::session::RunId, bool)>,
-    native_tools: HashSet<(crate::session::RunId, usize)>,
+    native: NativeTranscript,
     active_run: Option<crate::session::RunId>,
-    last_native_notice: Option<(u64, String)>,
     history: History,
     classic_history: History,
     input: Option<TerminalReader>,
@@ -565,11 +572,8 @@ impl AttachedTerminal {
             mode,
             alternate,
             transcript_open: false,
-            native_session: None,
-            native_messages: HashSet::new(),
-            native_tools: HashSet::new(),
+            native: NativeTranscript::default(),
             active_run: None,
-            last_native_notice: None,
             history: History::default(),
             classic_history: History::default(),
             input: Some(input),
@@ -679,7 +683,7 @@ impl AttachedTerminal {
     }
 
     pub fn user_run_recorded(&self, id: crate::session::RunId) -> bool {
-        self.native_messages.contains(&(id, false))
+        self.native.objectives.contains(&id)
     }
 
     pub fn finish_run_display(&mut self) {
@@ -724,45 +728,45 @@ impl AttachedTerminal {
         if self.mode != TerminalMode::Classic || self.transcript_open {
             return Ok(());
         }
-        if self.native_session != Some(session.id) {
-            self.native_session = Some(session.id);
-            self.native_messages.clear();
-            self.native_tools.clear();
-            self.last_native_notice = None;
+        if self.native.session != Some(session.id) {
+            self.native = NativeTranscript {
+                session: Some(session.id),
+                ..NativeTranscript::default()
+            };
         }
         for run in &session.runs {
-            if !self.native_messages.contains(&(run.id, false)) {
+            if !self.native.objectives.contains(&run.id) {
                 self.insert_native(
                     history::MessageKind::User,
                     &crate::presentation::image_message_text(&run.objective, &run.images),
                 )?;
-                self.native_messages.insert((run.id, false));
+                self.native.objectives.insert(run.id);
             }
             for (index, tool) in run.tools.iter().enumerate() {
-                if tool.observation.is_some() && !self.native_tools.contains(&(run.id, index)) {
+                if tool.observation.is_some() && !self.native.tools.contains(&(run.id, index)) {
                     self.insert_native(
                         history::MessageKind::Tool,
                         &crate::presentation::tool_summary(tool),
                     )?;
-                    self.native_tools.insert((run.id, index));
+                    self.native.tools.insert((run.id, index));
                 }
             }
             if !matches!(
                 run.status,
                 crate::session::RunStatus::Pending | crate::session::RunStatus::Active
             ) && run.assistant_message.is_none()
-                && !self.native_messages.contains(&(run.id, true))
+                && !self.native.answers.contains(&run.id)
                 && let Some(text) = crate::presentation::display_answer(run)
             {
                 self.insert_native(history::MessageKind::Incomplete, &text)?;
-                self.native_messages.insert((run.id, true));
+                self.native.answers.insert(run.id);
             }
             if self.active_run != Some(run.id)
                 && let Some(answer) = &run.assistant_message
-                && !self.native_messages.contains(&(run.id, true))
+                && !self.native.answers.contains(&run.id)
             {
                 self.insert_native(history::MessageKind::Assistant, answer)?;
-                self.native_messages.insert((run.id, true));
+                self.native.answers.insert(run.id);
             }
         }
         Ok(())
@@ -1123,12 +1127,14 @@ impl AttachedTerminal {
         {
             let text = history::bounded_notice_text(text).into_owned();
             if self
-                .last_native_notice
+                .native
+                .last_notice
                 .as_ref()
                 .is_none_or(|(sequence, prior)| *sequence != view.last_sequence || prior != &text)
             {
-                self.insert_native(history::MessageKind::Notice, &text)?;
-                self.last_native_notice = Some((view.last_sequence, text));
+                let (kind, body) = history::notice_kind(&text);
+                self.insert_native(kind, body)?;
+                self.native.last_notice = Some((view.last_sequence, text));
             }
         }
         let area = self
@@ -1914,11 +1920,8 @@ impl AttachedTerminal {
     fn replace_released(&mut self, mut replacement: Self) {
         replacement.history = std::mem::take(&mut self.history);
         replacement.classic_history = std::mem::take(&mut self.classic_history);
-        replacement.native_session = self.native_session;
-        replacement.native_messages = std::mem::take(&mut self.native_messages);
-        replacement.native_tools = std::mem::take(&mut self.native_tools);
+        replacement.native = std::mem::take(&mut self.native);
         replacement.active_run = self.active_run;
-        replacement.last_native_notice = self.last_native_notice.take();
         #[cfg(unix)]
         {
             // Preserve notifications received before the new listeners were registered.

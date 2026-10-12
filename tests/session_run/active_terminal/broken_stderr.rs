@@ -1,6 +1,6 @@
 use super::{ProductGuard, product_child_of, redacted_tail, transcript_field, tty_settings};
 use crate::loopback::{
-    ChildGuard, check_profile, read_request, send_response, wait_product, write_profile,
+    ChildGuard, check_profile, read_request, send_response_for, wait_product, write_profile,
 };
 use arany::{RunStatus, SessionId, SessionView, StateRoot, Store};
 use rustix::{
@@ -40,6 +40,9 @@ fn broken_stderr_during_active_run_restores_raw_mode_and_cancels_without_answer(
         run_broken_stderr_case(compaction);
     }
 }
+
+// Classic inserts the confirmed answer natively instead of a shell receipt.
+const NATIVE_ANSWER: &[u8] = "\u{25cf} \x1b[1mArany:".as_bytes();
 
 fn run_broken_stderr_case(compaction: bool) {
     let temp = tempfile::tempdir().expect("private test root");
@@ -117,7 +120,8 @@ fn run_broken_stderr_case(compaction: bool) {
                     serde_json::json!({"outcome":{"type":"finish","summary":"committed summary","result":"committed answer"}})
                 }
             };
-            send_response(&mut stream, index, text);
+            // The attached Classic Run requests a streamed answer preview.
+            send_response_for(&mut stream, index, text, index != 2);
         }
     });
     check_profile(&workspace, &state);
@@ -192,7 +196,7 @@ fn run_broken_stderr_case(compaction: bool) {
             input.write_all(b"\x1b[24;1R").expect("cursor response");
             answered_queries += 1;
         }
-        let receipt = b"Status: finished";
+        let receipt = NATIVE_ANSWER;
         if compaction
             && !compaction_sent
             && let Some(receipt_at) = stderr_bytes
@@ -301,7 +305,15 @@ fn run_broken_stderr_case(compaction: bool) {
     );
     if compaction {
         assert!(compaction_sent);
-        assert_eq!(transcript.matches("committed answer").count(), 1);
+        // Terminal stdout leaves the confirmed answer to Classic's native insertion.
+        assert!(!transcript.contains("committed answer"));
+        assert_eq!(
+            stderr_bytes
+                .windows(NATIVE_ANSWER.len())
+                .filter(|part| *part == NATIVE_ANSWER)
+                .count(),
+            1
+        );
     } else {
         assert!(!transcript.contains("Answer:"));
     }

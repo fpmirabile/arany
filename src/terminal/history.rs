@@ -400,10 +400,7 @@ impl History {
         let super::TerminalNotice::History(text) = notice else {
             return;
         };
-        let (kind, text) = match text.strip_prefix("Error:") {
-            Some(body) => (MessageKind::Error, body.trim_start()),
-            None => (MessageKind::Notice, text),
-        };
+        let (kind, text) = notice_kind(text);
         let bounded = bounded_notice_text(text);
         let text = bounded.as_ref();
         let after = self.messages.iter().rev().find_map(|message| {
@@ -626,6 +623,13 @@ impl History {
             }
         }
         visible
+    }
+}
+
+pub(super) fn notice_kind(text: &str) -> (MessageKind, &str) {
+    match text.strip_prefix("Error:") {
+        Some(body) => (MessageKind::Error, body.trim_start()),
+        None => (MessageKind::Notice, text),
     }
 }
 

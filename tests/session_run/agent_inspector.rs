@@ -418,7 +418,6 @@ fn inline_inspector(
         0,
         b"Ask Arany",
     );
-    let picker_start = transcript.len();
     input.write_all(b"/agents\r").expect("open inspector");
     wait_for_pty(
         &mut output,
@@ -429,22 +428,18 @@ fn inline_inspector(
         b"\x1b[?1000h",
     );
     let checkpoint = if width < 20 {
-        wait_for_pty(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            picker_start,
-            b"Esc Up/Dn P",
-        );
-        for cue in [b"Esc".as_slice(), b"Up/Dn"] {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !crate::session_picker::screen_rows(&transcript, width.into(), 24)
+            .iter()
+            .any(|line| line.starts_with("Esc Up/Dn P"))
+        {
+            pump(&mut output, &mut input, &mut transcript, &mut answered);
             assert!(
-                transcript[picker_start..]
-                    .windows(cue.len())
-                    .any(|part| part == cue),
-                "narrow inspector cue missing: {}",
+                Instant::now() < deadline,
+                "narrow inspector cues missing: {}",
                 tail(&transcript)
             );
+            thread::yield_now();
         }
         let checkpoint = transcript.len();
         input.write_all(b"\x1b[B").expect("select prior AgentRun");
@@ -460,9 +455,10 @@ fn inline_inspector(
         input.write_all(b"\x1b").expect("close inspector");
         checkpoint
     } else {
+        // The bottom Classic viewport lists Run 2 on row 14 and Run 1 on row 15.
         let checkpoint = transcript.len();
         input
-            .write_all(b"\x1b[<35;1;13M")
+            .write_all(b"\x1b[<35;1;15M")
             .expect("hover older AgentRun");
         wait_for_pty(
             &mut output,
@@ -474,7 +470,7 @@ fn inline_inspector(
         );
         let checkpoint = transcript.len();
         input
-            .write_all(b"\x1b[<64;1;13M")
+            .write_all(b"\x1b[<64;1;15M")
             .expect("wheel to newest AgentRun");
         wait_for_pty(
             &mut output,
@@ -486,7 +482,7 @@ fn inline_inspector(
         );
         let checkpoint = transcript.len();
         input
-            .write_all(b"\x1b[<0;1;13M")
+            .write_all(b"\x1b[<0;1;15M")
             .expect("click older AgentRun");
         wait_for_pty(
             &mut output,
@@ -498,7 +494,7 @@ fn inline_inspector(
         );
         let checkpoint = transcript.len();
         input
-            .write_all(b"\x1b[<65;1;2M\x1b[<35;1;12M")
+            .write_all(b"\x1b[<65;1;2M\x1b[<35;1;14M")
             .expect("off-list wheel then hover newest AgentRun");
         wait_for_pty(
             &mut output,
@@ -510,7 +506,7 @@ fn inline_inspector(
         );
         let checkpoint = transcript.len();
         input
-            .write_all(b"\x1b[<35;1;13M")
+            .write_all(b"\x1b[<35;1;15M")
             .expect("hover older AgentRun again");
         wait_for_pty(
             &mut output,

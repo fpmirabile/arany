@@ -1,5 +1,8 @@
 use super::*;
 
+// Classic inserts the confirmed answer above its viewport while retaining ownership.
+const NATIVE_ANSWER: &[u8] = "\u{25cf} \x1b[1mArany:".as_bytes();
+
 #[test]
 fn sigterm_during_restored_output_preserves_receipt_and_terminal() {
     let temp = tempfile::tempdir().expect("private test root");
@@ -38,7 +41,7 @@ fn sigterm_during_restored_output_preserves_receipt_and_terminal() {
                     serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"A".repeat(32 * 1024)}})
                 }
             };
-            send_response(&mut stream, index, text);
+            super::super::loopback::send_response_for(&mut stream, index, text, index != 2);
         }
     });
     check_profile(&workspace, &state);
@@ -109,8 +112,8 @@ fn sigterm_during_restored_output_preserves_receipt_and_terminal() {
             }
             if !answer_reported
                 && bytes
-                    .windows(b"Answer:\r\n".len())
-                    .any(|part| part == b"Answer:\r\n")
+                    .windows(NATIVE_ANSWER.len())
+                    .any(|part| part == NATIVE_ANSWER)
             {
                 stage_sender.send((1, bytes.clone())).expect("answer stage");
                 answer_reported = true;
@@ -140,10 +143,10 @@ fn sigterm_during_restored_output_preserves_receipt_and_terminal() {
         .recv_timeout(Duration::from_secs(10))
         .expect("restored output stage");
     assert_eq!(answer.0, 1);
-    assert_eq!(
+    assert_ne!(
         tty_settings(product_pid),
         before,
-        "terminal restored during output"
+        "Classic retains terminal ownership during native output"
     );
     kill_process(product_pid, Signal::TERM).expect("signal during restored output");
     resume_sender.send(()).expect("resume output drain");
@@ -155,24 +158,23 @@ fn sigterm_during_restored_output_preserves_receipt_and_terminal() {
     let transcript = String::from_utf8(output).expect("PTY transcript UTF-8");
     assert_eq!(transcript_field(&transcript, "TTY_AFTER:"), before);
     assert!(transcript.contains("error: terminated by SIGTERM"));
-    assert!(transcript.contains("Status: finished"));
+    assert!(
+        !transcript.contains("Status: "),
+        "Classic keeps no shell receipt"
+    );
     assert!(!transcript.contains("OMITTED_CANARY"));
     assert!(!transcript.contains("test-key"));
-    let receipt_start = transcript[..transcript.find("Status: finished").expect("receipt status")]
-        .rfind("Session: ")
-        .expect("receipt Session field");
-    let session_id = transcript[receipt_start..]
-        .lines()
-        .next()
-        .expect("receipt Session line")
-        .trim_end_matches('\r')
-        .strip_prefix("Session: ")
-        .expect("Session label")
-        .parse::<SessionId>()
-        .expect("Session ID");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("replay runtime");
+    let sessions = runtime
+        .block_on(arany::list_sessions(
+            StateRoot::open_existing(&state).expect("state reopen"),
+            workspace,
+        ))
+        .expect("list committed Sessions");
+    assert_eq!(sessions.len(), 1);
+    let session_id = sessions[0].id;
     let store = Store::open_read_only(StateRoot::open_existing(&state).expect("state reopen"))
         .expect("read-only Store");
     let events = runtime
@@ -187,10 +189,5 @@ fn sigterm_during_restored_output_preserves_receipt_and_terminal() {
         view.runs[0].assistant_message.as_ref().map(String::len),
         Some(32 * 1024)
     );
-    let receipt = format!(
-        "Session: {session_id}\r\nRun: {}\r\nStatus: finished\r\nProvider: custom verified\r\n",
-        view.runs[0].id
-    );
-    assert_eq!(transcript.matches(&receipt).count(), 1);
     runtime.block_on(store.close()).expect("close Store");
 }

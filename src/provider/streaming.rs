@@ -344,12 +344,7 @@ impl SseFramer {
                     b"event" if self.event.is_none() => {
                         let name =
                             std::str::from_utf8(value).map_err(|_| ProviderError::InvalidStream)?;
-                        if name.is_empty()
-                            || name.len() > 128
-                            || !name.bytes().all(|byte| {
-                                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
-                            })
-                        {
+                        if !is_event_type(name) {
                             return Err(ProviderError::InvalidStream);
                         }
                         self.event = Some(name.to_owned());
@@ -389,13 +384,7 @@ impl SseFramer {
                 .get("type")
                 .and_then(Value::as_str)
                 .ok_or(ProviderError::InvalidStream)?;
-            if kind.is_empty()
-                || kind.len() > 128
-                || !kind
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-                || event.as_deref().is_some_and(|event| event != kind)
-            {
+            if !is_event_type(kind) || event.as_deref().is_some_and(|event| event != kind) {
                 return Err(ProviderError::InvalidStream);
             }
             return Ok(Some(SseEvent { value, data }));
@@ -409,17 +398,34 @@ impl SseFramer {
     }
 }
 
+fn is_event_type(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
 enum ResponseItem {
-    Result(ResultDecoder, bool),
+    Result {
+        decoder: ResultDecoder,
+        function: bool,
+    },
     Commentary,
     Other,
+}
+
+struct StreamItem {
+    output_index: usize,
+    kind: ResponseItem,
+    closed: bool,
 }
 
 pub(super) struct ResponsesPreview<'a> {
     secret: &'a str,
     model: &'a str,
     publisher: ResponsePreview,
-    items: std::collections::HashMap<String, (usize, ResponseItem, bool)>,
+    items: std::collections::HashMap<String, StreamItem>,
     text: PreviewText,
     result_item: Option<String>,
 }
@@ -465,35 +471,46 @@ impl<'a> ResponsesPreview<'a> {
                     .and_then(Value::as_u64)
                     .filter(|index| *index < 8192)
                     .ok_or(ProviderError::InvalidStream)? as usize;
-                if self.items.values().any(|(prior, _, _)| *prior == index) {
+                if self.items.values().any(|item| item.output_index == index) {
                     return Err(ProviderError::InvalidStream);
                 }
                 let capture = match item.get("type").and_then(Value::as_str) {
                     Some("function_call")
                         if item.get("name").and_then(Value::as_str) == Some("arany_finish") =>
                     {
-                        ResponseItem::Result(ResultDecoder::new(true), true)
+                        ResponseItem::Result {
+                            decoder: ResultDecoder::new(true),
+                            function: true,
+                        }
                     }
                     Some("message")
                         if item.get("role").and_then(Value::as_str) == Some("assistant") =>
                     {
                         match item.get("phase").and_then(Value::as_str) {
                             Some("commentary") => ResponseItem::Commentary,
-                            Some("final_answer") | None => {
-                                ResponseItem::Result(ResultDecoder::new(false), false)
-                            }
+                            Some("final_answer") | None => ResponseItem::Result {
+                                decoder: ResultDecoder::new(false),
+                                function: false,
+                            },
                             _ => return Err(ProviderError::InvalidResponseContract),
                         }
                     }
                     _ => ResponseItem::Other,
                 };
-                if matches!(capture, ResponseItem::Result(_, _)) {
+                if matches!(capture, ResponseItem::Result { .. }) {
                     if self.result_item.is_some() {
                         return Err(ProviderError::InvalidResponseContract);
                     }
                     self.result_item = Some(id.to_owned());
                 }
-                self.items.insert(id.to_owned(), (index, capture, false));
+                self.items.insert(
+                    id.to_owned(),
+                    StreamItem {
+                        output_index: index,
+                        kind: capture,
+                        closed: false,
+                    },
+                );
             }
             Some("response.output_text.delta" | "response.function_call_arguments.delta") => {
                 let id = value
@@ -504,14 +521,14 @@ impl<'a> ResponsesPreview<'a> {
                     .get("delta")
                     .and_then(Value::as_str)
                     .ok_or(ProviderError::InvalidStream)?;
-                let (index, item, closed) =
-                    self.items.get_mut(id).ok_or(ProviderError::InvalidStream)?;
-                if *closed
-                    || value.get("output_index").and_then(Value::as_u64) != Some(*index as u64)
+                let item = self.items.get_mut(id).ok_or(ProviderError::InvalidStream)?;
+                if item.closed
+                    || value.get("output_index").and_then(Value::as_u64)
+                        != Some(item.output_index as u64)
                 {
                     return Err(ProviderError::InvalidStream);
                 }
-                if let ResponseItem::Result(decoder, function) = item {
+                if let ResponseItem::Result { decoder, function } = &mut item.kind {
                     if *function != (value["type"] == "response.function_call_arguments.delta")
                         || !*function
                             && value.get("content_index").and_then(Value::as_u64) != Some(0)
@@ -528,16 +545,16 @@ impl<'a> ResponsesPreview<'a> {
                     .get("id")
                     .and_then(Value::as_str)
                     .ok_or(ProviderError::InvalidStream)?;
-                let (index, captured, closed) =
-                    self.items.get_mut(id).ok_or(ProviderError::InvalidStream)?;
-                if *closed
-                    || value.get("output_index").and_then(Value::as_u64) != Some(*index as u64)
-                    || matches!(captured, ResponseItem::Commentary)
+                let stream_item = self.items.get_mut(id).ok_or(ProviderError::InvalidStream)?;
+                if stream_item.closed
+                    || value.get("output_index").and_then(Value::as_u64)
+                        != Some(stream_item.output_index as u64)
+                    || matches!(stream_item.kind, ResponseItem::Commentary)
                         != (item["phase"] == "commentary")
                 {
                     return Err(ProviderError::InvalidStream);
                 }
-                *closed = true;
+                stream_item.closed = true;
                 if item.get("type").and_then(Value::as_str) == Some("message")
                     && item.get("role").and_then(Value::as_str) == Some("assistant")
                     && item.get("status").and_then(Value::as_str) == Some("completed")
@@ -572,7 +589,7 @@ impl<'a> ResponsesPreview<'a> {
                     self.publisher.publish(self.text.clone())?;
                 }
             }
-            Some("response.completed") if self.items.values().any(|(_, _, closed)| !closed) => {
+            Some("response.completed") if self.items.values().any(|item| !item.closed) => {
                 return Err(ProviderError::InvalidStream);
             }
             _ => {}

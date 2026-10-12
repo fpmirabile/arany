@@ -295,8 +295,16 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     let expect_typo = matches!(exit, ActiveExit::TypoThenCtrlC);
     let expect_second_ctrl_c = matches!(exit, ActiveExit::SecondCtrlC);
     let expect_resume = matches!(exit, ActiveExit::SuspendThenSignal) && !inline;
+    // Classic returns to chat with a native notice instead of a shell receipt.
+    let classic_idle = inline && expect_idle;
+    let classic_label = if expect_failure {
+        "Arany \u{b7} error:"
+    } else {
+        "Arany \u{b7} notice:"
+    };
     let reader = thread::spawn(move || {
         let mut declined = false;
+        let mut answered = 0;
         let mut bytes = Vec::new();
         let mut patterns: Vec<&[u8]> = vec![
             b"SHELL_PID:",
@@ -334,7 +342,9 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                 b"Command: /exit; Exit Session; during Run: view-only\r\n"
             });
         }
-        patterns.push(if expect_failure {
+        patterns.push(if classic_idle {
+            classic_label.as_bytes()
+        } else if expect_failure {
             b"Status: failed"
         } else {
             b"Status: cancelled"
@@ -373,10 +383,16 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                 &bytes,
                 &mut declined,
             );
+            let queries = bytes.windows(4).filter(|part| *part == b"\x1b[6n").count();
             assert!(
-                !bytes.windows(4).any(|part| part == b"\x1b[6n"),
-                "terminal ownership must not query cursor input"
+                inline || queries == 0,
+                "linear ownership must not query cursor input"
             );
+            assert!(queries <= 32, "bounded cursor queries");
+            while answered < queries {
+                write_input(&reader_input, b"\x1b[1;1R");
+                answered += 1;
+            }
             while next < patterns.len() {
                 let Some(offset) = bytes[search_from..]
                     .windows(patterns[next].len())
@@ -800,11 +816,9 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     assert_eq!(result.status.success(), expect_idle, "attached exit class");
     assert_eq!(result.stderr, b"");
     let transcript = String::from_utf8(output).expect("PTY transcript UTF-8");
+    let restored = transcript.rfind("\x1b[?25h").unwrap_or(0);
     assert!(
-        !transcript
-            .as_bytes()
-            .windows(4)
-            .any(|part| part == b"\x1b[6n"),
+        !transcript[restored..].contains("\x1b[6n"),
         "terminal restoration must not query input after stopping its reader"
     );
     assert_eq!(
@@ -842,11 +856,14 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
         | ActiveExit::ProviderFailure => {}
         ActiveExit::PtyLoss => unreachable!("PTY loss returned after replay"),
     }
-    assert!(transcript.contains(&format!("Status: {expected_status}")));
+    let receipt_label = if classic_idle {
+        classic_label.to_owned()
+    } else {
+        format!("Status: {expected_status}")
+    };
+    assert!(transcript.contains(&receipt_label));
     if expect_feedback {
-        let receipt = transcript
-            .find(&format!("Status: {expected_status}"))
-            .expect("terminal receipt");
+        let receipt = transcript.find(&receipt_label).expect("terminal receipt");
         let mut after = receipt;
         if expect_failure {
             for word in ["Provider", "unavailable.", "Check", "the", "connection"] {
@@ -864,8 +881,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
         }
         assert!(
             transcript[receipt..].contains(match (inline, expect_failure) {
-                (true, true) => "Arany · error:",
-                (true, false) => "Arany · notice:",
+                (true, _) => classic_label,
                 (false, true) => "Notice: Error: Run failed.",
                 (false, false) => "Notice: Run cancelled.",
             }),
@@ -919,23 +935,34 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     assert!(!transcript.contains("Answer:"));
     assert!(!transcript.contains("OMITTED_CANARY"));
     assert!(!transcript.contains("test-key"));
-    let receipt_start = transcript[..transcript
-        .find(&format!("Status: {expected_status}"))
-        .expect("terminal receipt status")]
-        .rfind("Session: ")
-        .expect("receipt Session field");
-    let session_id = transcript[receipt_start..]
-        .lines()
-        .next()
-        .expect("receipt Session line")
-        .trim_end_matches('\r')
-        .strip_prefix("Session: ")
-        .expect("receipt Session label")
-        .parse::<SessionId>()
-        .expect("Session ID");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("read-only replay runtime");
+    let session_id = if classic_idle {
+        let sessions = runtime
+            .block_on(arany::list_sessions(
+                StateRoot::open_existing(&state).expect("state reopen"),
+                workspace.clone(),
+            ))
+            .expect("list committed Sessions");
+        assert_eq!(sessions.len(), 1);
+        sessions[0].id
+    } else {
+        let receipt_start = transcript[..transcript
+            .find(&receipt_label)
+            .expect("terminal receipt status")]
+            .rfind("Session: ")
+            .expect("receipt Session field");
+        transcript[receipt_start..]
+            .lines()
+            .next()
+            .expect("receipt Session line")
+            .trim_end_matches('\r')
+            .strip_prefix("Session: ")
+            .expect("receipt Session label")
+            .parse::<SessionId>()
+            .expect("Session ID")
+    };
     let store = Store::open_read_only(StateRoot::open_existing(&state).expect("state reopen"))
         .expect("read-only Store");
     let events = runtime
@@ -1010,8 +1037,8 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     );
     assert_eq!(
         transcript.matches(&receipt).count(),
-        1,
-        "one committed receipt"
+        usize::from(!classic_idle),
+        "one committed shell receipt outside Classic chat"
     );
     runtime.block_on(store.close()).expect("close Store");
 }

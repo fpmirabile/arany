@@ -422,15 +422,16 @@ fn run_picker_case(
 
 #[test]
 fn session_picker_selects_visible_rows_and_restores_capture() {
+    // The Classic viewport starts at the answered cursor row 2: Newer is row 3, Older row 4.
     run_picker_case(
         "hover and stale activation",
         80,
-        b"\x1b[<35;1;15M\r",
+        b"\x1b[<35;1;4M\r",
         true,
         true,
     );
-    run_picker_case("wheel", 80, b"\x1b[<65;1;14M\r", true, false);
-    run_picker_case("click", 80, b"\x1b[<0;1;15M", true, false);
+    run_picker_case("wheel", 80, b"\x1b[<65;1;3M\r", true, false);
+    run_picker_case("click", 80, b"\x1b[<0;1;4M", true, false);
     run_picker_case("off-surface wheel", 80, b"\x1b[<65;1;1M\r", false, false);
     run_picker_case("16-column keyboard", 16, b"\x1b[B\r", true, false);
 }
