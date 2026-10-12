@@ -187,7 +187,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         &mut transcript,
         &mut answered,
         settings_at,
-        b"empty Enter selects Tabs\r\nInput:\r\n",
+        b"empty Enter keeps them; type a choice name: tabs or combined or fullscreen or classic\r\nInput:\r\n",
     );
     let invalid_at = transcript.len();
     input
@@ -199,7 +199,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         &mut transcript,
         &mut answered,
         invalid_at,
-        b"Notice: Type tabs or combined; q closes\r\nInput:\r\n",
+        b"Notice: Type tabs, combined, fullscreen or classic; q closes\r\nInput:\r\n",
     );
     let selected_at = transcript.len();
     input
@@ -211,7 +211,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         &mut transcript,
         &mut answered,
         selected_at,
-        b"Notice: Slash menu: combined \xc2\xb7 saved\r\nInput:\r\n",
+        "Notice: Settings: slash menu combined · chat view fullscreen (visual sessions) · saved\r\nInput:\r\n".as_bytes(),
     );
     assert_eq!(
         StateRoot::open_existing(&state)
@@ -219,10 +219,9 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
             .read_ui_preferences_record()
             .unwrap()
             .unwrap(),
-        br#"{"version":1,"completion":"combined"}"#
+        br#"{"version":2,"completion":"combined","view":"fullscreen"}"#
     );
     for (command, feedback) in [
-        ("/settings tabs", "Slash menu: tabs · saved"),
         ("/provider anthropic", "Provider: anthropic; set /model"),
         ("/model claude-sonnet-5", "Model: claude-sonnet-5 · low"),
         (
@@ -408,7 +407,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
             b"Notice: Provider: anthropic\r\nInput:\r\n",
         );
     }
-    input.write_all(b"/quit\r").expect("quit");
+    input.write_all(b"/exit\r").expect("quit");
     let result = super::loopback::wait_product(child.take());
     pump(&mut output, &mut input, &mut transcript, &mut answered);
     assert!(result.status.success());
@@ -470,7 +469,7 @@ fn narrow_help_signal_restores_terminal_without_starting_a_run() {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
-    let shell = "stty rows 8 cols 16; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
+    let shell = "stty rows 8 cols 16; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
     let mut command =
         crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
     command
@@ -617,7 +616,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         std::fs::Permissions::from_mode(0o600),
     )
     .unwrap();
-    let shell = "stty rows 24 cols 40; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider anthropic --tools --no-color; first_code=$?; printf 'SETTINGS_RESTART\n'; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider openai --tools --no-color; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; test \"$first_code\" -eq 0 || exit \"$first_code\"; exit \"$exit_code\"";
+    let shell = "stty rows 24 cols 40; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider anthropic --tools --no-color; first_code=$?; printf 'SETTINGS_RESTART\n'; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider openai --tools --no-color; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; test \"$first_code\" -eq 0 || exit \"$first_code\"; exit \"$exit_code\"";
     let mut command =
         crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
     command
@@ -814,7 +813,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         b"closes",
     );
     let saved_at = transcript.len();
-    input.write_all(b"\x1b[B\r").expect("save combined menu");
+    input.write_all(b"\x1b[C\r").expect("save combined menu");
     wait_for_after(
         &mut output,
         &mut input,
@@ -837,7 +836,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
             .read_ui_preferences_record()
             .unwrap()
             .unwrap(),
-        br#"{"version":1,"completion":"combined"}"#
+        br#"{"version":2,"completion":"combined","view":"classic"}"#
     );
     let menu_at = transcript.len();
     input.write_all(b"/resum").expect("single command prefix");
@@ -1091,7 +1090,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     transcript.clear();
     answered = crate::session_picker::PtyResponses::default();
     input
-        .write_all(b"/quit\r")
+        .write_all(b"/exit\r")
         .expect("quit after corrected rename");
     let restart_at = transcript.len();
     wait_for_after(
@@ -1165,7 +1164,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     std::os::unix::fs::symlink(&outside, &pending).unwrap();
     let rejected_at = transcript.len();
     input
-        .write_all(b"/settings tabs\r")
+        .write_all(b"/settings\r\x1b[C\r")
         .expect("unsafe replacement must retain current display");
     wait_for_caret(
         &mut output,
@@ -1181,7 +1180,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
             .read_ui_preferences_record()
             .unwrap()
             .unwrap(),
-        br#"{"version":1,"completion":"combined"}"#
+        br#"{"version":2,"completion":"combined","view":"classic"}"#
     );
     assert_eq!(std::fs::read(&outside).unwrap(), b"unchanged");
     assert!(
@@ -1218,7 +1217,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     std::fs::remove_file(pending).unwrap();
     let tabs_at = transcript.len();
     input
-        .write_all(b"/settings tabs\r")
+        .write_all(b"/settings\r\x1b[C\r")
         .expect("typed display selection");
     wait_for_caret(
         &mut output,
@@ -1234,9 +1233,9 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
             .read_ui_preferences_record()
             .unwrap()
             .unwrap(),
-        br#"{"version":1,"completion":"tabs"}"#
+        br#"{"version":2,"completion":"tabs","view":"classic"}"#
     );
-    input.write_all(b"/quit\r").expect("quit fresh process");
+    input.write_all(b"/exit\r").expect("quit fresh process");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
@@ -1339,7 +1338,7 @@ fn inline_quick_selector_returns_to_the_same_draft_and_caret() {
         let outside = temp.path().join("outside.txt");
         std::fs::write(&outside, b"OUTSIDE_INPUT_CANARY").unwrap();
         std::os::unix::fs::symlink(&outside, workspace.join("unsafe.txtZ")).unwrap();
-        let shell = "stty rows 24 cols 40; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4 --no-color $ARANY_TEST_INCLUDES; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
+        let shell = "stty rows 24 cols 40; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4 --no-color $ARANY_TEST_INCLUDES; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
         let includes = if merged_overflow {
             (0..16)
                 .map(|index| format!("--include included-{index}.txt"))
@@ -1390,7 +1389,7 @@ fn inline_quick_selector_returns_to_the_same_draft_and_caret() {
         );
         let after_menu = transcript.len();
         input
-            .write_all(b"\x1b[200~INERT_MODAL_PASTE\r/quit\x03\x1b[201~\x1b")
+            .write_all(b"\x1b[200~INERT_MODAL_PASTE\r/exit\x03\x1b[201~\x1b")
             .expect("ignore paste in selector and close without changing draft");
         wait_for_after(
             &mut output,
@@ -1512,7 +1511,7 @@ fn inline_quick_selector_returns_to_the_same_draft_and_caret() {
             );
         }
         input
-            .write_all(b"\x03/quit\r")
+            .write_all(b"\x03/exit\r")
             .expect("clear draft and quit");
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -1582,7 +1581,7 @@ fn session_picker_close_case(quick: bool) {
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
     let saved_id = saved_conversation(&state, &workspace, SessionDefaults::default());
-    let shell = "stty rows 24 cols 40; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --no-color; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
+    let shell = "stty rows 24 cols 40; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --no-color; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
     let mut command =
         crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
     command
@@ -1674,7 +1673,7 @@ fn session_picker_close_case(quick: bool) {
         );
         thread::yield_now();
     }
-    input.write_all(b"/quit\r").expect("quit");
+    input.write_all(b"/exit\r").expect("quit");
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
@@ -2077,7 +2076,7 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
         b"Notice: Renamed Session: Corrected title\r\nInput:\r\n",
     );
     input
-        .write_all(b"/quit\r")
+        .write_all(b"/exit\r")
         .expect("quit after fresh rename");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -2552,7 +2551,7 @@ esac
             (
                 b"text/plain\n".to_vec(),
                 "success",
-                b"\x1b[31m/quit".to_vec(),
+                b"\x1b[31m/exit".to_vec(),
                 "paste contains unsupported control characters",
                 "types\npayload\n",
             ),
@@ -2834,7 +2833,7 @@ esac
             b"Input:\r\n",
         );
         input
-            .write_all(b"/quit\r")
+            .write_all(b"/exit\r")
             .expect("quit without submitting");
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {

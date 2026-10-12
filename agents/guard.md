@@ -36,8 +36,10 @@ limits and compatibility.
 - Grant ancestor metadata only, without directory-data access; unrelated host
   metadata and control-root listings must remain denied. The compiled policy
   fingerprint covers profile rules, admission algorithms and enforced constants.
-  For command/MCP grants, Tool admission checks one bounded system executable
-  catalogue per Run; process intents bind its contents and file metadata stamps
+  For command/MCP grants, Tool admission reuses one in-memory, process-wide
+  signature scan of the bounded system executable catalogue only while every
+  entry's no-follow stamp still matches, and rescans otherwise; never skip that
+  per-Run stamp check. Process intents bind its contents and file metadata stamps
   into the enforcement digest. Pass that typed catalogue only through the trusted
   controller/supervisor Task channel, never Workspace or payload input, and never
   persist it as an authority cache. Workers revalidate every entry through

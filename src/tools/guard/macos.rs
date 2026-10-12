@@ -493,6 +493,27 @@ pub(crate) fn macos_enforcement_digest(
 }
 
 impl SystemPrograms {
+    /// Reuses this process's signature scan while every pinned stamp still matches.
+    pub(crate) fn admit_current() -> Result<Arc<Self>, ToolError> {
+        static ADMITTED: std::sync::Mutex<Option<Arc<SystemPrograms>>> =
+            std::sync::Mutex::new(None);
+        let mut admitted = ADMITTED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(programs) = admitted.as_ref().filter(|programs| programs.current()) {
+            return Ok(programs.clone());
+        }
+        let programs = Arc::new(Self::admit()?);
+        *admitted = Some(programs.clone());
+        Ok(programs)
+    }
+
+    fn current(&self) -> bool {
+        self.programs.iter().all(|(path, expected)| {
+            matches!(system_program_metadata(path), Ok(Some(metadata)) if program_stamp(&metadata) == *expected)
+        })
+    }
+
     pub(crate) fn admit() -> Result<Self, ToolError> {
         use cap_std::fs::MetadataExt;
 
@@ -840,7 +861,13 @@ mod tests {
 
     #[test]
     fn system_catalogue_revalidates_pins_and_binds_the_profile() {
-        let programs = SystemPrograms::admit().unwrap();
+        let cached = SystemPrograms::admit_current().unwrap();
+        assert!(Arc::ptr_eq(
+            &cached,
+            &SystemPrograms::admit_current().unwrap()
+        ));
+        let programs: &SystemPrograms = &cached;
+        assert!(programs.current());
         let mut required = vec![PathBuf::from("/bin/sh"), PathBuf::from("/usr/bin/true")];
         let mut profile = String::new();
         programs.allow(&mut profile, &mut required).unwrap();
@@ -856,7 +883,7 @@ mod tests {
         let enforcement = macos_enforcement_digest(Some(&admitted)).unwrap();
         assert_eq!(
             enforcement,
-            macos_enforcement_digest(Some(&programs)).unwrap()
+            macos_enforcement_digest(Some(programs)).unwrap()
         );
         assert_ne!(enforcement, enforcement_digest().unwrap());
         for case in ["stale", "outside", "overflow"] {
@@ -869,6 +896,7 @@ mod tests {
                     .resize(SYSTEM_PROGRAMS_CAP + 1, programs.programs[0].clone()),
                 _ => unreachable!(),
             }
+            assert!(!admitted.current() || case == "overflow", "{case}");
             assert!(
                 matches!(
                     admitted.allow(&mut String::new(), &mut Vec::new()),

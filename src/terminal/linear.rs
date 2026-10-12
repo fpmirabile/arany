@@ -670,10 +670,8 @@ mod tests {
                 "Command: /provider <provider>; Choose Provider; during Run: view-only\n",
                 "Command: /model <model-id> [effort|default]; Choose model; during Run: view-only\n",
                 "Command: /permissions; Folder trust and approval settings; during Run: available\n",
-                "Command: /settings [tabs|combined]; Choose slash menu display; during Run: locked\n",
-                "Command: /view [classic|fullscreen]; Choose classic or fullscreen; during Run: locked\n",
+                "Command: /settings; Slash menu and chat view; during Run: locked\n",
                 "Command: /transcript; Show or hide transcript details; during Run: available\n",
-                "Command: /quit; Exit Session; during Run: view-only\n",
                 "Command: /exit; Exit Session; during Run: view-only\n",
             ).as_bytes()
         );

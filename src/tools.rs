@@ -172,7 +172,7 @@ impl ToolRuntime {
         let system_programs = if config.commands.is_empty() && config.mcp.is_empty() {
             None
         } else {
-            Some(std::sync::Arc::new(guard::SystemPrograms::admit()?))
+            Some(guard::SystemPrograms::admit_current()?)
         };
         #[cfg(target_os = "macos")]
         let process_enforcement_digest =

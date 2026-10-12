@@ -10,7 +10,6 @@ pub enum InteractiveCommand {
     Help,
     Setup,
     Settings,
-    View,
     Transcript,
     Paste,
     Status,
@@ -23,7 +22,7 @@ pub enum InteractiveCommand {
     Provider,
     Model,
     Permissions,
-    Quit,
+    Exit,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,12 +41,11 @@ impl InteractiveCommand {
             Self::Help | Self::Status | Self::Permissions | Self::Transcript => {
                 CommandAvailability::Available
             }
-            Self::Agents | Self::Provider | Self::Model | Self::Quit | Self::Paste => {
+            Self::Agents | Self::Provider | Self::Model | Self::Exit | Self::Paste => {
                 CommandAvailability::ViewOnly
             }
             Self::Setup
             | Self::Settings
-            | Self::View
             | Self::New
             | Self::Resume
             | Self::Fork
@@ -100,7 +98,7 @@ const fn spec(
     }
 }
 
-const COMMANDS: [CommandSpec; 19] = [
+const COMMANDS: [CommandSpec; 17] = [
     spec("help", InteractiveCommand::Help, None, &[]),
     spec("setup", InteractiveCommand::Setup, None, &[]),
     spec("paste", InteractiveCommand::Paste, None, &[]),
@@ -135,21 +133,9 @@ const COMMANDS: [CommandSpec; 19] = [
         &[],
     ),
     spec("permissions", InteractiveCommand::Permissions, None, &[]),
-    spec(
-        "settings",
-        InteractiveCommand::Settings,
-        Some("[tabs|combined]"),
-        &["tabs", "combined"],
-    ),
-    spec(
-        "view",
-        InteractiveCommand::View,
-        Some("[classic|fullscreen]"),
-        &["classic", "fullscreen"],
-    ),
+    spec("settings", InteractiveCommand::Settings, None, &[]),
     spec("transcript", InteractiveCommand::Transcript, None, &[]),
-    spec("quit", InteractiveCommand::Quit, None, &[]),
-    spec("exit", InteractiveCommand::Quit, None, &[]),
+    spec("exit", InteractiveCommand::Exit, None, &[]),
 ];
 
 pub(super) struct HelpEntry {
@@ -168,8 +154,7 @@ pub(super) fn help_entry(index: usize) -> Option<HelpEntry> {
     let description = match spec.command {
         InteractiveCommand::Help => "List commands",
         InteractiveCommand::Setup => "Set up an account",
-        InteractiveCommand::Settings => "Choose slash menu display",
-        InteractiveCommand::View => "Choose classic or fullscreen",
+        InteractiveCommand::Settings => "Slash menu and chat view",
         InteractiveCommand::Transcript => "Show or hide transcript details",
         InteractiveCommand::Paste => "Paste clipboard into draft",
         InteractiveCommand::Status => "Session status",
@@ -182,7 +167,7 @@ pub(super) fn help_entry(index: usize) -> Option<HelpEntry> {
         InteractiveCommand::Provider => "Choose Provider",
         InteractiveCommand::Model => "Choose model",
         InteractiveCommand::Permissions => "Folder trust and approval settings",
-        InteractiveCommand::Quit => "Exit Session",
+        InteractiveCommand::Exit => "Exit Session",
     };
     Some(HelpEntry {
         command: spec.command,
@@ -584,9 +569,6 @@ fn command_status(spec: &CommandSpec, choices: &CommandChoices) -> String {
 }
 
 fn suggest(name: &str) -> Option<&'static str> {
-    if name == "sessions" {
-        return Some("resume");
-    }
     if name.is_empty()
         || name.len() > MAX_COMMAND_NAME_BYTES
         || !name.bytes().all(|byte| byte.is_ascii_lowercase())
@@ -624,7 +606,7 @@ mod tests {
 
     #[test]
     fn closed_registry_aliases_completion_and_lifecycle_are_exact() {
-        assert_eq!(COMMANDS.len(), 19);
+        assert_eq!(COMMANDS.len(), 17);
         for spec in COMMANDS {
             assert_eq!(
                 parse_submission(&format!("/{}", spec.name)),
@@ -686,7 +668,18 @@ mod tests {
             );
         }
         assert_eq!(parse_submission("/clear"), parse_submission("/new"));
-        assert_eq!(parse_submission("/exit"), parse_submission("/quit"));
+        assert_eq!(
+            parse_submission("/settings tabs"),
+            Err(CommandParseError::UnexpectedArgument {
+                command: "settings"
+            })
+        );
+        for (retired, suggestion) in [("/quit", Some("exit")), ("/sessions", None)] {
+            assert_eq!(
+                parse_submission(retired),
+                Err(CommandParseError::Unknown { suggestion })
+            );
+        }
         assert_eq!(command_completions("/stat"), vec!["status"]);
         assert_eq!(command_completions("/hel"), vec!["help"]);
         assert_eq!(command_completions("/set"), vec!["setup", "settings"]);
@@ -696,12 +689,6 @@ mod tests {
             parse_submission("/models"),
             Err(CommandParseError::Unknown {
                 suggestion: Some("model"),
-            })
-        );
-        assert_eq!(
-            parse_submission("/sessions"),
-            Err(CommandParseError::Unknown {
-                suggestion: Some("resume")
             })
         );
         assert!(command_completions("/sessions").is_empty());

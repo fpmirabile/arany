@@ -277,8 +277,9 @@ including prior typed edits, and a separate read-only tree of pinned runtime
 resources. Writable project/scratch mounts prohibit set-ID behavior. Reviewed
 system executables must be immutable, root-owned, non-set-ID and unentitled;
 privileged process/credential/coalition changes remain denied even after exec.
-When a grant enables commands or MCP, admission checks the bounded system
-executable catalogue once per Run. Each process intent and receipt binds that
+When a grant enables commands or MCP, each Run's admission revalidates the
+bounded system executable catalogue's file stamps; the signature scan repeats
+only after a stamp changes or in a new process. Each process intent and receipt binds that
 catalogue to the compiled enforcement policy. Workers revalidate its no-follow
 file identities, ownership, permissions, size and modification/change timestamps
 before Ready; changed or oversized catalogues reject before dispatch without

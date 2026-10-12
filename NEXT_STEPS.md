@@ -9,14 +9,6 @@ history. Implementation status and verified support are separate claims.
 
 ## Open defects
 
-- **macOS guarded-chat admission deadline.** After integrating Guard changes,
-  `native_chat_preserves_turns_with_guarded_tools_and_rejects_invalid_admission`
-  exceeded its 30-second deadline in both a full debug run and an isolated repeat.
-  A sampled fixture was inspecting code signatures in `SystemPrograms::admit`,
-  before Provider invocation. A subsequent full debug run passed unchanged;
-  release also passed. Measure cold catalogue admission before attributing the
-  delay to terminal rendering or relaxing the fixture deadline.
-
 - **Native Engine stopped-command timeout investigation.** The macOS corpus
   timed out once at its unchanged 30-second case deadline; a diagnostic-enabled
   repeat passed without raising it. The first failure lacked case/stage
@@ -51,7 +43,7 @@ history. Implementation status and verified support are separate claims.
 
 ## Terminal continuity evidence
 
-- Exercise classic scrollback, narrow resize/reflow, temporary details, idle `/view` transitions and a 200-line streamed response in a real macOS emulator and native Linux/Windows terminals. Synthetic macOS PTYs prove controlled cursor ownership, transcript insertion and restoration; they do not emulate scrollback or prove other OS support.
+- Exercise classic scrollback, narrow resize/reflow, temporary details, idle `/settings` chat-view transitions and a 200-line streamed response in a real macOS emulator and native Linux/Windows terminals. Synthetic macOS PTYs prove controlled cursor ownership, transcript insertion and restoration; they do not emulate scrollback or prove other OS support.
 - With explicit usage consent, repeat OpenAI, Anthropic, ChatGPT and exact-custom streaming conformance against actual selected accounts/endpoints. Offline fixtures prove protocol/lifecycle behavior, not live compatibility. Keep incomplete answers outside future context and confirm recovery after cancellation/crash.
 - Check `--screen-reader`, `/transcript`, monochrome labels and managed following with real assistive technology. These usability claims remain unverified.
 

@@ -44,8 +44,8 @@ pub(crate) struct AttachedArgs {
     effort: Option<Effort>,
     #[arg(long)]
     screen_reader: bool,
-    #[arg(long, help = "Use fullscreen conversation history")]
-    fullscreen: bool,
+    #[arg(long, help = "Use the classic chat view instead of the saved one")]
+    classic: bool,
     #[arg(long)]
     no_color: bool,
     #[arg(long, help = "Open account setup before starting a new Session")]
@@ -125,7 +125,7 @@ struct Admission {
     workspace_permissions: Option<arany::WorkspacePermissions>,
     defaults: SessionDefaults,
     screen_reader: bool,
-    fullscreen: bool,
+    classic: bool,
     no_color: bool,
     setup_requested: bool,
     entry: EntryMode,
@@ -140,7 +140,7 @@ impl AttachedArgs {
             && self.model.is_none()
             && self.effort.is_none()
             && !self.screen_reader
-            && !self.fullscreen
+            && !self.classic
             && !self.no_color
             && !self.setup
             && self.include_paths.is_empty()
@@ -233,7 +233,7 @@ impl AttachedArgs {
             tools: self.tools,
             workspace_permissions: None,
             defaults,
-            fullscreen: self.fullscreen,
+            classic: self.classic,
             screen_reader: self.screen_reader
                 || std::env::var("ARANY_SCREEN_READER").ok().as_deref() == Some("1"),
             no_color: self.no_color || std::env::var_os("NO_COLOR").is_some(),
@@ -246,12 +246,14 @@ impl AttachedArgs {
 
 pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), String> {
     let mut admission = args.admit(telemetry)?;
+    let restored_settings = controls::restore_settings(&admission).await;
+    let mut preferences = restored_settings.as_ref().copied().unwrap_or_default();
     let mut terminal = AttachedTerminal::acquire_with_mode(
         admission.screen_reader,
-        if admission.fullscreen {
-            arany::TerminalMode::Fullscreen
-        } else {
+        if admission.classic {
             arany::TerminalMode::Classic
+        } else {
+            preferences.view
         },
     )
     .map_err(|error| error.to_string())?;
@@ -400,9 +402,12 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         )
         .await?;
     }
-    match controls::restore_settings(&admission).await {
-        Ok(layout) => composer.set_completion_layout(layout),
-        Err(error) => append_notice(&mut setup_notice, &format!("Error: {error}; using tabs")),
+    match restored_settings {
+        Ok(restored) => composer.set_completion_layout(restored.completion),
+        Err(error) => append_notice(
+            &mut setup_notice,
+            &format!("Error: {error}; using default settings"),
+        ),
     }
     let (mut session_id, mut view) = start_session(&admission).await?;
     if !matches!(admission.entry, EntryMode::New) {
@@ -840,7 +845,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                         }
                     }
                     Submission::Command { command, argument } => {
-                        if command == InteractiveCommand::Quit {
+                        if command == InteractiveCommand::Exit {
                             break;
                         }
                         if command == InteractiveCommand::Paste {
@@ -856,33 +861,13 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                             terminal
                                 .toggle_transcript(&view)
                                 .map_err(|error| error.to_string())?;
-                        } else if command == InteractiveCommand::View {
-                            if terminal.is_linear() {
-                                notice = Some(if argument.is_some() {
-                                    Feedback::History("Error: Visual mode changes are unavailable in linear presentation; use /transcript for details".into())
-                                } else {
-                                    Feedback::Transient(
-                                        "View: linear · /transcript for details".into(),
-                                    )
-                                });
-                                continue;
-                            }
-                            if let Some(mode) = argument.and_then(arany::TerminalMode::parse) {
-                                terminal
-                                    .set_mode(mode, composer.text().len())
-                                    .map_err(|error| error.to_string())?;
-                            }
-                            notice = Some(Feedback::Transient(format!(
-                                "View: {} · Ctrl+T details",
-                                terminal.mode().label()
-                            )));
                         } else if command == InteractiveCommand::Settings {
                             notice = Some(Feedback::History(
                                 controls::settings(
                                     &mut terminal,
                                     &admission,
                                     &mut composer,
-                                    argument,
+                                    &mut preferences,
                                 )
                                 .await?,
                             ));
@@ -1924,7 +1909,7 @@ mod tests {
             workspace_permissions: None,
             defaults: defaults.clone(),
             screen_reader: false,
-            fullscreen: false,
+            classic: false,
             no_color: false,
             setup_requested: false,
             entry: EntryMode::New,
@@ -1961,7 +1946,7 @@ mod tests {
                 policy: CollaborationPolicy::Single,
             },
             screen_reader: false,
-            fullscreen: false,
+            classic: false,
             no_color: false,
             setup_requested: false,
             entry: EntryMode::Resume(original_id),
@@ -1981,7 +1966,7 @@ mod tests {
             workspace_permissions: None,
             defaults: SessionDefaults::default(),
             screen_reader: false,
-            fullscreen: false,
+            classic: false,
             no_color: false,
             setup_requested: false,
             entry: EntryMode::Continue,
@@ -2023,7 +2008,7 @@ mod tests {
             workspace_permissions: None,
             defaults: SessionDefaults::default(),
             screen_reader: false,
-            fullscreen: false,
+            classic: false,
             no_color: false,
             setup_requested: false,
             entry: EntryMode::Fork(original_id),

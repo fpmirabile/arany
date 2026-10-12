@@ -53,10 +53,11 @@ use view::{
 
 const MIN_INTERACTIVE_HEIGHT: u16 = 8;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TerminalMode {
-    #[default]
     Classic,
+    #[default]
     Fullscreen,
 }
 
@@ -1185,7 +1186,7 @@ impl AttachedTerminal {
         let history_status =
             if self.mode == TerminalMode::Classic && !self.transcript_open && !view.runs.is_empty()
             {
-                Some("Classic · Ctrl+T details · /view fullscreen".to_owned())
+                Some("Classic · Ctrl+T details · /settings".to_owned())
             } else {
                 self.history_mut().status()
             };

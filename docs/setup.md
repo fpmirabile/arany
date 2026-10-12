@@ -59,9 +59,9 @@ history and JSONL exports; human history shows metadata. See [paste and
 attachments](./specs/terminal.md#paste-and-attachments) for transport, privacy and
 model limitations.
 
-Classic mode inserts confirmed turns into native scrollback. `/view fullscreen`
-provides managed history with a visible composer; `/view classic` returns while
-idle. Ctrl+T or `/transcript` shows Tool details and public commentary. Visual
+Fullscreen, the default chat view, provides managed history with a visible
+composer. Classic inserts confirmed turns into native scrollback; choose it with
+`--classic` for one process or save it as the chat view in `/settings`. Ctrl+T or `/transcript` shows Tool details and public commentary. Visual
 streaming is provisional: interrupted saved prefixes remain incomplete and
 outside later model context. `--screen-reader` uses linear confirmed output.
 [Terminal continuity](./specs/terminal.md#terminal-continuity-and-provisional-text)

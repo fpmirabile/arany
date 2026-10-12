@@ -1113,13 +1113,7 @@ mod tests {
                 assert_eq!(composer.text(), prefix);
                 assert_eq!(composer.cursor_byte_offset(), cursor);
                 assert_eq!(composer.apply(accept), ComposerEdit::Changed);
-                assert_eq!(
-                    composer.text(),
-                    format!(
-                        "/{expected}{}",
-                        if expected == "settings" { " " } else { "" }
-                    )
-                );
+                assert_eq!(composer.text(), format!("/{expected}"));
                 assert!(composer.completion_menu().is_none());
                 assert_eq!(
                     composer.apply(TerminalInput::Submit),

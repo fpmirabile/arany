@@ -511,41 +511,41 @@ mod tests {
                         Reply("/setup\n"),
                         Reply("ChatGPT plan\n"),
                         Reply("\n"),
-                        Reply("/quit\n"),
+                        Reply("/exit\n"),
                     ],
                     Case::InvalidChatgptReset => &[
                         Reply("/setup\n"),
                         Reply("ChatGPT plan\n"),
                         Reply("Reset local setup\n"),
                         Reply("\n"),
-                        Reply("/quit\n"),
+                        Reply("/exit\n"),
                     ],
                     Case::InvalidNative => &[
                         Reply("/setup\n"),
                         Reply("API key\n"),
                         Reply("\n"),
-                        Reply("/quit\n"),
+                        Reply("/exit\n"),
                     ],
                     Case::InvalidNativeReset => &[
                         Reply("/setup\n"),
                         Reply("API key\n"),
                         Reply("Reset local setup\n"),
                         Reply("\n"),
-                        Reply("/quit\n"),
+                        Reply("/exit\n"),
                     ],
-                    Case::InvalidPreferences => &[Reply("/setup\n"), Reply("\n"), Reply("/quit\n")],
+                    Case::InvalidPreferences => &[Reply("/setup\n"), Reply("\n"), Reply("/exit\n")],
                     Case::InvalidPreferencesReset => &[
                         Reply("/setup\n"),
                         Reply("Reset local setup\n"),
                         Interrupt,
-                        Reply("/quit\n"),
+                        Reply("/exit\n"),
                     ],
-                    Case::InitialSetupFailure => &[Reply("ChatGPT plan\n"), Reply("/quit\n")],
+                    Case::InitialSetupFailure => &[Reply("ChatGPT plan\n"), Reply("/exit\n")],
                     Case::InvalidHistory | Case::InvalidHistorySameRoot | Case::CorruptHistory => {
                         &[
                             Reply("Reset history\n"),
                             Reply("Accept\n"),
-                            Reply("/quit\n"),
+                            Reply("/exit\n"),
                         ]
                     }
                     Case::InvalidHistoryCancel => {
@@ -553,7 +553,7 @@ mod tests {
                     }
                     Case::UnsafeHistory => &[Reply("Exit\n")],
                     Case::ResumeLocked | Case::ContinueMissing | Case::Cancel => &[],
-                    _ => &[Reply("/quit\n")],
+                    _ => &[Reply("/exit\n")],
                 };
                 let mut inputs = dialogue.iter();
                 let temp = tempfile::tempdir().unwrap();

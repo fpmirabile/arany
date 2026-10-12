@@ -182,7 +182,7 @@ fn run_picker_case(
         ""
     };
     let command = format!(
-        "stty rows 24 cols {width}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" {no_color}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
+        "stty rows 24 cols {width}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic {no_color}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
     let mut attached = crate::isolation::isolated_script(temp.path());
     attached
@@ -353,7 +353,7 @@ fn run_picker_case(
         );
     }
     input
-        .write_all(b"/rename Mouse\r/quit\r")
+        .write_all(b"/rename Mouse\r/exit\r")
         .expect("rename selected Session and exit");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -505,7 +505,7 @@ fn screen_reader_entry(
         }
         std::fs::set_permissions(state, original_mode).expect("restore fixture State mode");
     }
-    input.write_all(b"/quit\r").expect("quit Session");
+    input.write_all(b"/exit\r").expect("quit Session");
     let result = wait_product(child.take());
     pump(&mut output, &mut input, &mut transcript, &mut answered);
     assert!(

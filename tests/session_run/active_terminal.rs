@@ -249,7 +249,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     check_profile(&workspace, &state);
 
     let command = if inline {
-        "trap ':' INT; stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 cancel; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
+        "trap ':' INT; stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 cancel; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     } else {
         "trap ':' INT; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 cancel; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     };
@@ -774,7 +774,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                 9
             );
         }
-        write_input(&input, if inline { b"/quit\r" } else { b"/quit\n" });
+        write_input(&input, if inline { b"/exit\r" } else { b"/exit\n" });
     }
     let restored_stage = match stages.recv_timeout(Duration::from_secs(10)) {
         Ok(stage) => stage,

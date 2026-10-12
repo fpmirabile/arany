@@ -220,7 +220,7 @@ fn screen_reader_model_catalog_selects_exact_profile_without_provider_egress() {
         .write_all(b"/model gpt-6-astra high\n")
         .expect("restore atomic defaults");
     stage(23);
-    input.write_all(b"/quit\n").expect("exit attached mode");
+    input.write_all(b"/exit\n").expect("exit attached mode");
     drop(input);
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -359,7 +359,7 @@ fn inline_model_catalog_at_width(width: u16) {
     )
     .expect("updated profile file");
     let command = format!(
-        "stty rows 24 cols {width}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --no-color --provider custom:local --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
+        "stty rows 24 cols {width}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic --no-color --provider custom:local --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
     let mut attached =
         crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
@@ -640,7 +640,7 @@ fn inline_model_catalog_at_width(width: u16) {
             );
         }
     }
-    input.write_all(b"/quit\r").expect("exit attached mode");
+    input.write_all(b"/exit\r").expect("exit attached mode");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
@@ -754,7 +754,7 @@ fn run_model_catalog_cancel_then_sigterm_case(columns: u16, rows: u16) {
     let state = temp.path().join("state");
     write_profile(&state, 9321);
     let command = format!(
-        "stty rows {rows} cols {columns}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --provider custom:local --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
+        "stty rows {rows} cols {columns}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic --provider custom:local --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
     let mut attached =
         crate::isolation::account_isolated_script(state.parent().expect("fixture root"));

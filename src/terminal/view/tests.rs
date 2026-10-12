@@ -1440,13 +1440,13 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
                     if width >= 79 && height == 24 && !skills_tab && !last {
                         assert_eq!(
                             labels.len(),
-                            19,
+                            18,
                             "large Commands list includes the entire registry"
                         );
                         assert!(
                             labels
                                 .iter()
-                                .any(|row| row.contains("Choose slash menu display"))
+                                .any(|row| row.contains("Slash menu and chat view"))
                         );
                     }
                     if !color {

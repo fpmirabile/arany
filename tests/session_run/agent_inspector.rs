@@ -86,7 +86,7 @@ fn screen_reader_agent_inspector_opens_and_closes_without_provider_access() {
     stage(1);
     input.write_all(b"q\n").expect("close inspector");
     stage(2);
-    input.write_all(b"/quit\n").expect("exit attached mode");
+    input.write_all(b"/exit\n").expect("exit attached mode");
     drop(input);
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -308,7 +308,7 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
     stage(5);
     release_run.send(()).expect("release active response");
     stage(6);
-    input.write_all(b"/quit\n").expect("exit attached mode");
+    input.write_all(b"/exit\n").expect("exit attached mode");
     drop(input);
     let result = wait_product(attached.take());
     let output = reader.join().expect("PTY output reader");
@@ -386,7 +386,7 @@ fn inline_inspector(
 ) {
     let no_color = if width < 20 { "--no-color " } else { "" };
     let command = format!(
-        "stty rows 24 cols {width}; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" {no_color}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
+        "stty rows 24 cols {width}; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic {no_color}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
     let mut command_line =
         crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
@@ -527,7 +527,7 @@ fn inline_inspector(
         checkpoint,
         b"\x1b[?1000l",
     );
-    input.write_all(b"/quit\r").expect("exit attached mode");
+    input.write_all(b"/exit\r").expect("exit attached mode");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         pump(&mut output, &mut input, &mut transcript, &mut answered);

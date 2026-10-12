@@ -11,7 +11,6 @@ use std::{
 };
 
 fn own_terminal(command: &mut Command) {
-    command.arg("--fullscreen");
     use std::os::unix::process::CommandExt;
     // The child has an admitted PTY on fd 0; only async-signal-safe syscalls run before exec.
     unsafe {

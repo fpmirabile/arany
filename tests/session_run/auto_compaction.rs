@@ -587,7 +587,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
         std::fs::set_permissions(&profile_path, std::fs::Permissions::from_mode(0o600))
             .expect("restore private fixture profile");
     }
-    input.write_all(b"/quit\n").expect("exit command");
+    input.write_all(b"/exit\n").expect("exit command");
     drop(input);
     let result = wait_product(attached.take());
     let output = reader.join().expect("PTY output reader");

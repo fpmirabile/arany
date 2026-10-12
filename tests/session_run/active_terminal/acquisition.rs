@@ -129,7 +129,7 @@ fn startup_case(case: &str, signal: Option<Signal>) {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
-    let command = "stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --fullscreen --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
+    let command = "stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
     let mut attached =
         crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
     attached
@@ -288,7 +288,7 @@ fn broken_stderr_during_folder_consent_restores_raw_mode_without_session() {
     let flags = fcntl_getfl(&stderr_master).expect("stderr master flags");
     fcntl_setfl(&stderr_master, flags | OFlags::NONBLOCK).expect("nonblocking stderr master");
 
-    let command = "stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; exec 2>\"$ARANY_TEST_STDERR_PTY\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
+    let command = "stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; exec 2>\"$ARANY_TEST_STDERR_PTY\"; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
     let mut attached =
         crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
     attached
@@ -449,7 +449,7 @@ fn lost_pty_case(screen_reader: bool) {
     let command = if screen_reader {
         "stty rows 24 cols 80; printf 'PRODUCT_PID:%s\n' \"$$\"; exec \"$ARANY_TEST_EXE\" --screen-reader --setup --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\""
     } else {
-        "stty rows 24 cols 80; printf 'PRODUCT_PID:%s\n' \"$$\"; exec \"$ARANY_TEST_EXE\" --setup --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\""
+        "stty rows 24 cols 80; printf 'PRODUCT_PID:%s\n' \"$$\"; exec \"$ARANY_TEST_EXE\" --classic --setup --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\""
     };
     let mut attached =
         crate::isolation::account_isolated_script(state.parent().expect("fixture root"));

@@ -237,7 +237,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
     let color_flag = if no_color_flag { " --no-color" } else { "" };
     std::fs::write(
         &wrapper,
-        format!("#!/bin/sh\nstty -g > \"$ARANY_TEST_BEFORE\"\n\"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4{color_flag}\nresult=$?\nstty -g > \"$ARANY_TEST_AFTER\"\nprintf '%s\\n' \"$result\" > \"$ARANY_TEST_EXIT\"\nexit \"$result\"\n"),
+        format!("#!/bin/sh\nstty -g > \"$ARANY_TEST_BEFORE\"\n\"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4{color_flag}\nresult=$?\nstty -g > \"$ARANY_TEST_AFTER\"\nprintf '%s\\n' \"$result\" > \"$ARANY_TEST_EXIT\"\nexit \"$result\"\n"),
     )
     .expect("tmux pane wrapper");
     std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))
@@ -873,7 +873,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
         );
         thread::yield_now();
     }
-    input.write_all(b"/quit\r").expect("tmux client /quit");
+    input.write_all(b"/exit\r").expect("tmux client /exit");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         pump_pty(&mut output, &mut input, &mut transcript, &mut answered);
@@ -929,7 +929,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
             sessions[0].id,
         ))
         .expect("strict Session replay");
-    assert!(view.runs.is_empty(), "no Provider Run from /quit");
+    assert!(view.runs.is_empty(), "no Provider Run from /exit");
 
     let _ = server.run(&["kill-server"]);
     let remaining = server.run(&["list-sessions"]);
@@ -1017,7 +1017,7 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     let wrapper = temp.path().join("tmux-pane.sh");
     std::fs::write(
         &wrapper,
-        "#!/bin/sh\nstty -g > \"$ARANY_TEST_BEFORE\"\n\"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 --no-color\nresult=$?\nstty -g > \"$ARANY_TEST_AFTER\"\nprintf '%s\\n' \"$result\" > \"$ARANY_TEST_EXIT\"\nexit \"$result\"\n",
+        "#!/bin/sh\nstty -g > \"$ARANY_TEST_BEFORE\"\n\"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 --no-color\nresult=$?\nstty -g > \"$ARANY_TEST_AFTER\"\nprintf '%s\\n' \"$result\" > \"$ARANY_TEST_EXIT\"\nexit \"$result\"\n",
     )
     .expect("tmux pane wrapper");
     std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))
@@ -2211,7 +2211,7 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     });
     assert!(
         server
-            .run(&["send-keys", "-t", "arany-test:0.0", "/quit", "Enter"])
+            .run(&["send-keys", "-t", "arany-test:0.0", "/exit", "Enter"])
             .status
             .success()
     );
