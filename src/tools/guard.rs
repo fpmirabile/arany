@@ -117,6 +117,46 @@ impl BootstrapFailure {
     }
 }
 
+/// A Guard stage that failed after bootstrap reported success, or outside its child.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuardStage {
+    ResourceAttestation,
+    ProcessCleanup,
+    LauncherReap,
+    OutputEof,
+    NamespaceBootstrap,
+    NativeManager,
+    ControlProtocol,
+}
+
+impl GuardStage {
+    pub(super) fn failure_stage(self) -> &'static str {
+        match self {
+            Self::ResourceAttestation => "resource attestation",
+            Self::ProcessCleanup => "process cleanup",
+            Self::LauncherReap => "launcher reap",
+            Self::OutputEof => "output EOF",
+            Self::NamespaceBootstrap => "namespace bootstrap",
+            Self::NativeManager => "native manager",
+            Self::ControlProtocol => "control protocol",
+        }
+    }
+}
+
+impl std::fmt::Display for GuardStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ResourceAttestation => "resource attestation",
+            Self::ProcessCleanup => "process-unit cleanup",
+            Self::LauncherReap => "launcher reap",
+            Self::OutputEof => "stderr EOF",
+            Self::NamespaceBootstrap => "namespace bootstrap",
+            Self::NativeManager => "native manager",
+            Self::ControlProtocol => "bounded control protocol",
+        })
+    }
+}
+
 pub(super) fn check_available() -> Result<(), ToolError> {
     #[cfg(target_os = "linux")]
     {
@@ -167,14 +207,11 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
 fn manager_command(executable: &str) -> Command {
     let mut command = Command::new(executable);
     command.env_clear().env("PATH", "/usr/bin:/bin");
-    #[cfg(target_os = "linux")]
-    {
-        let runtime = format!("/run/user/{}", rustix::process::geteuid().as_raw());
-        command.env("XDG_RUNTIME_DIR", &runtime).env(
-            "DBUS_SESSION_BUS_ADDRESS",
-            format!("unix:path={runtime}/bus"),
-        );
-    }
+    let runtime = format!("/run/user/{}", rustix::process::geteuid().as_raw());
+    command.env("XDG_RUNTIME_DIR", &runtime).env(
+        "DBUS_SESSION_BUS_ADDRESS",
+        format!("unix:path={runtime}/bus"),
+    );
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -578,7 +615,7 @@ async fn execute_inner(
         }
         unit.admit()
             .await
-            .map_err(|_| ToolError::GuardRejected("resource attestation"))?;
+            .map_err(|_| ToolError::GuardRejected(GuardStage::ResourceAttestation))?;
         *dispatched = true;
         stdin
             .write_all(b"GO\n")
@@ -607,40 +644,54 @@ async fn execute_inner(
     }
     let _ = child.start_kill();
     let reaped = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
-    let drained = tokio::time::timeout(Duration::from_secs(2), &mut stderr_task).await;
-    if drained.is_err() {
-        stderr_task.abort();
-        let _ = stderr_task.await;
-    }
+    let drained = drain_stderr(&mut stderr_task).await;
     if result.is_err()
-        && let Ok(Ok(Ok(stderr))) = &drained
-        && let Ok(failure) = serde_json::from_slice::<BootstrapFailure>(stderr)
+        && let Some(failure) = drained.as_deref().and_then(bootstrap_failure)
     {
-        return Err(ToolError::GuardBootstrap(failure));
+        return Err(failure);
     }
     if !matches!(cleanup, Ok(Ok(()))) {
-        return Err(ToolError::GuardRejected("process-unit cleanup"));
+        return Err(ToolError::GuardRejected(GuardStage::ProcessCleanup));
     }
     if !matches!(reaped, Ok(Ok(_))) {
-        return Err(ToolError::GuardRejected("launcher reap"));
+        return Err(ToolError::GuardRejected(GuardStage::LauncherReap));
     }
-    if !matches!(drained, Ok(Ok(Ok(_)))) {
-        return Err(ToolError::GuardRejected("stderr EOF"));
-    }
-    if result.is_err()
-        && let Ok(Ok(Ok(stderr))) = &drained
-    {
-        let diagnostic = std::str::from_utf8(stderr).unwrap_or_default();
+    let Some(stderr) = drained else {
+        return Err(ToolError::GuardRejected(GuardStage::OutputEof));
+    };
+    if result.is_err() {
+        let diagnostic = std::str::from_utf8(&stderr).unwrap_or_default();
         let stage = if diagnostic.contains("bwrap:") {
-            "namespace bootstrap"
+            GuardStage::NamespaceBootstrap
         } else if diagnostic.contains("Failed to") {
-            "native manager"
+            GuardStage::NativeManager
         } else {
-            "bounded control protocol"
+            GuardStage::ControlProtocol
         };
         return Err(ToolError::GuardRejected(stage));
     }
     result
+}
+
+/// Waits briefly for the launcher's bounded stderr; `None` means it did not reach EOF.
+pub(super) async fn drain_stderr(
+    task: &mut tokio::task::JoinHandle<Result<Vec<u8>, ToolError>>,
+) -> Option<Vec<u8>> {
+    match tokio::time::timeout(Duration::from_secs(2), &mut *task).await {
+        Ok(Ok(Ok(stderr))) => Some(stderr),
+        Ok(_) => None,
+        Err(_) => {
+            task.abort();
+            let _ = task.await;
+            None
+        }
+    }
+}
+
+pub(super) fn bootstrap_failure(stderr: &[u8]) -> Option<ToolError> {
+    serde_json::from_slice::<BootstrapFailure>(stderr)
+        .ok()
+        .map(ToolError::GuardBootstrap)
 }
 
 pub(super) async fn read_capped<R: tokio::io::AsyncRead + Unpin>(

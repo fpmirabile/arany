@@ -1,10 +1,10 @@
 use super::{chatgpt, exec::ProviderArg};
 use arany::{
-    AttachedTerminal, CollaborationPolicy, Composer, ComposerEdit, Effort, InteractiveCommand,
-    RunOutcome, RunStatus, SessionDefaults, SessionId, SessionView, StateRoot, Store, Submission,
-    Telemetry, TerminalInput, continue_session, create_session, fork_session,
-    native_protection_supported, parse_submission, render_run_feedback, resume_session,
-    set_session_defaults,
+    AttachedTerminal, CollaborationPolicy, Composer, ComposerEdit, Effort, EngineError,
+    InteractiveCommand, RunOutcome, RunStatus, SessionDefaults, SessionId, SessionView, StateRoot,
+    Store, StoreError, Submission, Telemetry, TerminalInput, continue_session, create_session,
+    fork_session, native_protection_supported, parse_submission, render_run_feedback,
+    resume_session, set_session_defaults,
 };
 use clap::Args;
 use std::{
@@ -295,12 +295,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         match chatgpt::selected_account_id() {
             Ok(id) => admission.defaults.account_id = Some(id),
             Err(error) => {
-                append_notice(
-                    &mut setup_notice,
-                    &format!(
-                        "Saved access could not be restored: {error}; use /setup to choose or reset access"
-                    ),
-                );
+                append_notice(&mut setup_notice, &restore_failure_notice(error));
                 admission.defaults = SessionDefaults::default();
             }
         }
@@ -310,7 +305,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
     let mut access_checked = false;
     if matches!(admission.entry, EntryMode::New) && !explicit_provider {
         if admission.setup_requested {
-            match setup::resolve(&mut terminal, &admission.state_dir, &admission.workspace).await {
+            match setup::resolve(&mut terminal, &admission.workspace).await {
                 Ok(Some(setup::SetupSelection::Native {
                     defaults,
                     notice,
@@ -348,12 +343,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                 Ok(setup::SavedDefaults::Cancelled) => return Ok(()),
                 Ok(setup::SavedDefaults::Unconfigured) => {}
                 Err(setup::SetupError::Recoverable(error)) => {
-                    append_notice(
-                        &mut setup_notice,
-                        &format!(
-                            "Saved access could not be restored: {error}; use /setup to choose or reset access"
-                        ),
-                    );
+                    append_notice(&mut setup_notice, &restore_failure_notice(error));
                 }
                 Err(error) => return Err(error.into()),
             }
@@ -1147,35 +1137,34 @@ async fn configure_account(
     view: &mut SessionView,
     composer: &mut Composer,
 ) -> Result<Feedback, String> {
-    let (defaults, notice, catalog) =
-        match setup::resolve(terminal, &admission.state_dir, &admission.workspace).await {
-            Ok(Some(setup::SetupSelection::Native {
-                defaults,
-                notice,
-                catalog,
-            })) => (defaults, notice, catalog),
-            Ok(Some(setup::SetupSelection::ChatGpt {
-                defaults,
-                notice,
-                catalog,
-            })) => {
-                let notice = notice.unwrap_or_else(|| {
-                    if defaults.model.is_some() {
-                        "ChatGPT account and model/effort ready".into()
-                    } else {
-                        "ChatGPT account ready; use /model to select a model and effort".into()
-                    }
-                });
-                (defaults, notice, catalog)
-            }
-            Ok(None) => {
-                return Ok(Feedback::Transient("Setup closed".into()));
-            }
-            Err(setup::SetupError::Recoverable(error)) => {
-                return Ok(Feedback::History(format!("Error: {error}")));
-            }
-            Err(error) => return Err(error.into()),
-        };
+    let (defaults, notice, catalog) = match setup::resolve(terminal, &admission.workspace).await {
+        Ok(Some(setup::SetupSelection::Native {
+            defaults,
+            notice,
+            catalog,
+        })) => (defaults, notice, catalog),
+        Ok(Some(setup::SetupSelection::ChatGpt {
+            defaults,
+            notice,
+            catalog,
+        })) => {
+            let notice = notice.unwrap_or_else(|| {
+                if defaults.model.is_some() {
+                    "ChatGPT account and model/effort ready".into()
+                } else {
+                    "ChatGPT account ready; use /model to select a model and effort".into()
+                }
+            });
+            (defaults, notice, catalog)
+        }
+        Ok(None) => {
+            return Ok(Feedback::Transient("Setup closed".into()));
+        }
+        Err(setup::SetupError::Recoverable(error)) => {
+            return Ok(Feedback::History(format!("Error: {error}")));
+        }
+        Err(error) => return Err(error.into()),
+    };
     update_defaults(admission, session_id, view, defaults.clone()).await?;
     admission.defaults = defaults;
     seed_setup_catalog(composer, &view.defaults, Some(&catalog));
@@ -1320,33 +1309,64 @@ async fn start_session(admission: &Admission) -> Result<(SessionId, SessionView)
             Ok((view.id, view))
         }
         EntryMode::Resume(id) => {
-            let root = StateRoot::open_existing(&admission.state_dir)
-                .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+            let root = open_source_state(&admission.state_dir, Some(id))?;
             let view = resume_session(root, admission.workspace.clone(), id)
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| source_error(Some(id), error))?;
             finish_existing_start(admission, view).await
         }
         EntryMode::Fork(source_id) => {
-            let root = StateRoot::open_existing(&admission.state_dir)
-                .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+            let root = open_source_state(&admission.state_dir, Some(source_id))?;
             let id = fork_session(root, admission.workspace.clone(), source_id, None)
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| source_error(Some(source_id), error))?;
             if admission.defaults != SessionDefaults::default() {
                 persist_defaults(admission, id, admission.defaults.clone()).await?;
             }
             finish_existing_start(admission, load_view(&admission.state_dir, id).await?).await
         }
         EntryMode::Continue => {
-            let root = StateRoot::open_existing(&admission.state_dir)
-                .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+            let root = open_source_state(&admission.state_dir, None)?;
             let view = continue_session(root, admission.workspace.clone())
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| source_error(None, error))?;
             finish_existing_start(admission, view).await
         }
         EntryMode::PickSession => Err("Session selection was not resolved".into()),
+    }
+}
+
+// A State without history is a missing source, not an unsafe State; ownership and
+// permission failures keep the unsafe message.
+fn open_source_state(state_dir: &Path, id: Option<SessionId>) -> Result<StateRoot, String> {
+    StateRoot::open_existing(state_dir).map_err(|error| match error {
+        StoreError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            source_not_found(id)
+        }
+        _ => "state directory unavailable or unsafe".to_owned(),
+    })
+}
+
+fn source_error(id: Option<SessionId>, error: EngineError) -> String {
+    match error {
+        EngineError::MissingSession | EngineError::NoSessionForWorkspace => source_not_found(id),
+        EngineError::ForkNotAtRunBoundary => format!(
+            "the source conversation has no completed Run to fork; fork a conversation with a completed Run, or {SOURCE_HINT}"
+        ),
+        other => other.to_string(),
+    }
+}
+
+const SOURCE_HINT: &str = "list conversations with arany --resume or /resume, or check --state-dir";
+
+fn source_not_found(id: Option<SessionId>) -> String {
+    match id {
+        Some(id) => {
+            format!("conversation {id} was not found in this State/Workspace; {SOURCE_HINT}")
+        }
+        None => {
+            format!("no conversation was found for this Workspace in this State; {SOURCE_HINT}")
+        }
     }
 }
 
@@ -1430,6 +1450,15 @@ fn require_access(authorized: bool, notice: Option<impl std::fmt::Display>) -> R
         || "Saved access was not authorized".into(),
         |notice| notice.to_string(),
     ))
+}
+
+/// Replaces the exec-only `arany --setup` hint with the in-chat `/setup` one.
+fn restore_failure_notice(error: impl std::fmt::Display) -> String {
+    let error = error.to_string();
+    let error = error
+        .strip_suffix("; use arany --setup to choose or reset access")
+        .unwrap_or(&error);
+    format!("Saved access could not be restored: {error}; use /setup to choose or reset access")
 }
 
 /// Selects the missing-selection hints, which only a new conversation can act on.
@@ -1898,7 +1927,10 @@ mod tests {
             Ok(_) => panic!("empty Session cannot be forked"),
             Err(error) => error,
         };
-        assert_eq!(error, "Session has no committed Run boundary to fork");
+        assert_eq!(
+            error,
+            "the source conversation has no completed Run to fork; fork a conversation with a completed Run, or list conversations with arany --resume or /resume, or check --state-dir"
+        );
         let reopened = load_view(&forked.state_dir, original_id)
             .await
             .expect("original Session intact");

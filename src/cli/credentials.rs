@@ -685,8 +685,15 @@ mod tests {
 
     #[cfg(all(target_os = "macos", debug_assertions))]
     #[tokio::test]
-    #[ignore = "isolated native macOS Keychain gate; requires ARANY_TEST_EXE pointing to debug arany"]
+    #[cfg_attr(
+        not(arany_ci),
+        ignore = "isolated native macOS Keychain gate; requires ARANY_TEST_EXE pointing to debug arany"
+    )]
+    #[allow(clippy::await_holding_lock)]
     async fn native_store_round_trips_an_isolated_synthetic_account() {
+        let _gate = crate::test_process::NATIVE_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         super::macos_tests::roundtrip().await;
     }
 

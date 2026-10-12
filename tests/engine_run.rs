@@ -2246,7 +2246,10 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
 
 #[test]
 #[cfg(unix)]
-#[ignore = "file-backed 256 MiB database-capacity admission and recovery"]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "file-backed 256 MiB database-capacity admission and recovery"
+)]
 fn database_capacity_is_admitted_before_provider_usage() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()

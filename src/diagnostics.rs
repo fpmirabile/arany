@@ -503,7 +503,7 @@ mod tests {
         engine_failure(&crate::engine::EngineError::Store(
             crate::store::StoreError::Io(std::io::Error::other(CANARY)),
         ));
-        guard_failure(&crate::tools::ToolError::GuardRejected(CANARY));
+        guard_failure(&crate::tools::ToolError::Operation);
         event_failure(&crate::session::Event::ProviderCallRecorded {
             run_id: Default::default(),
             agent_run_id: Default::default(),

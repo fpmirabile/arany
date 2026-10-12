@@ -419,8 +419,16 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "explicit human-interaction deadline gate; six-second synthetic helper, no OS store access"]
+    #[cfg_attr(
+        not(arany_ci),
+        ignore = "explicit human-interaction deadline gate; six-second synthetic helper, no OS store access"
+    )]
+    #[allow(clippy::await_holding_lock)]
     async fn authorization_wait_accepts_human_latency() {
+        let _gate = crate::test_process::NATIVE_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
         let mut command = Command::new("/bin/sh");
         command
             .args(["-c", "exec /bin/sleep 6"])
@@ -433,8 +441,15 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "explicit Unix credential write-timeout gate; no OS store access"]
+    #[cfg_attr(
+        not(arany_ci),
+        ignore = "explicit Unix credential write-timeout gate; no OS store access"
+    )]
     fn timed_out_write_is_uncertain_and_reaps_helper() {
+        let _gate = crate::test_process::NATIVE_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
         const SOCKET: &str = "ARANY_TEST_STALLED_WRITE_SOCKET";
         if let Some(path) = std::env::var_os(SOCKET) {
             let mut record = Vec::new();
@@ -469,7 +484,7 @@ mod tests {
             .args([
                 "--exact",
                 "cli::credentials::keyring_helper::tests::timed_out_write_is_uncertain_and_reaps_helper",
-                "--ignored",
+                "--include-ignored",
                 "--nocapture",
             ])
             .env_clear()
@@ -486,7 +501,8 @@ mod tests {
             )
         });
 
-        let accept_deadline = Instant::now() + Duration::from_secs(4);
+        // Bounds a stuck helper, not normal startup; a loaded host can take seconds to spawn it.
+        let accept_deadline = Instant::now() + Duration::from_secs(30);
         let mut connection = loop {
             match listener.accept() {
                 Ok((connection, _)) => break connection,

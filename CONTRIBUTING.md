@@ -1,16 +1,25 @@
 # Contributing to Arany
 
-Contributions are welcome. Fork the repository, create a focused branch from `main`, and open a pull request against `fpmirabile/arany:main`. Explain the problem, the resulting behavior, and how you verified it.
+Bug reports, focused fixes, documentation improvements and native platform testing are welcome.
 
-Read [AGENTS.md](./AGENTS.md) and the relevant [documentation](./docs/README.md) before changing code. Repository content must be in English. Changes to product behavior must follow the [spec workflow](./docs/specs/README.md).
+## Get started
 
-Apply the [product and implementation priorities](./AGENTS.md#product-and-implementation-priorities): preserve Arany's harness responsibilities, design for OS parity, and use Ponytail for every implementation and code review. Install the [project development skills](./agents/skills/README.md#install-for-a-harness) before coding; their checked-in sources and generated installations have different roles.
+1. Fork the repository and create a focused branch from `main`.
+2. Install Rustup and native build tools, including a C compiler. The repository selects its [pinned toolchain](./rust-toolchain.toml).
+3. From the checkout, run:
+
+```sh
+cargo fetch --locked
+cargo run --locked
+```
+
+Keep repository content in English. For behavior changes, update the relevant [product spec](./docs/specs/README.md). The [documentation map](./docs/README.md) helps you find it.
 
 ## Verification
 
-Documentation-only changes need prose, local-link and anchor review. For skill changes, also validate frontmatter, references and installation as described in the [skill workflow](./agents/skills/README.md#update-a-local-skill). These changes do not require rebuilding or testing the Rust executable.
+For documentation-only changes, review the text, local links and anchors; no Rust build is needed. For development skill changes, follow the [skill workflow](./agents/skills/README.md#update-a-local-skill).
 
-Use Rustup with the repository's [pinned toolchain](./rust-toolchain.toml). The [CI workflow](./.github/workflows/ci.yml) checks formatting on Linux, Clippy on Linux and macOS, and native default tests in debug and release on both platforms. Run the applicable checks locally before submitting:
+For code changes, run the applicable checks before submitting:
 
 ```sh
 cargo fmt --all --check
@@ -19,12 +28,12 @@ cargo test --workspace --locked --offline
 cargo test --workspace --locked --offline --release
 ```
 
-Run `cargo fetch --locked` first when the locked dependencies are not already available. Linux terminal fixtures need Bubblewrap and util-linux `script`, with user and network namespaces enabled. On macOS, set `TMPDIR=/private/tmp` when running tests so private-state fixtures use a physical path rather than the rejected `/tmp` or `/var` symlink aliases. CI provisions its prerequisites on disposable GitHub-hosted runners.
+Linux terminal tests need Bubblewrap and util-linux `script`, with user and network namespaces enabled. On macOS, set `TMPDIR=/private/tmp` when running tests.
 
-Default suites exercise only the scenarios enabled for their native OS. CI explicitly activates the macOS unit/resource and immutable file CPU-expiry owners after each default suite. Other ignored native, manual, performance, and live Provider gates remain separate; CI uses no account credentials or paid calls. Passing compilation or an OS-specific subset does not prove platform parity. See [testing rules](./agents/testing.md) for evidence requirements.
+The [CI workflow](./.github/workflows/ci.yml) checks Linux and macOS. See [native test and CI reproduction notes](./agents/references/testing-details.md#local-verification-and-ci) for checks ignored locally and platform-specific setup.
 
 ## Pull requests
 
-Changes reach `main` through pull requests. Resolve review conversations and pass the required checks before merging. External contributors do not need repository write access. GitHub may require a maintainer to approve CI for a first-time contributor; fork pull requests receive no repository secrets and use a read-only token.
+Open a pull request against `fpmirabile/arany:main`. Explain the problem, what changed and how you verified it, including checks you could not run. Resolve review conversations and pass the required checks before merging. First-time contributors may need a maintainer to approve CI.
 
-[Dependabot configuration](./.github/dependabot.yml) owns the version-update schedule and open-PR limits for Cargo and GitHub Actions. Review proposed dependency changes and pass the required checks before merging.
+If you are an AI agent, read [AGENTS.md](./AGENTS.md) before making changes.

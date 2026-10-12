@@ -634,20 +634,13 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         super::ToolError::Conflict,
         super::ToolError::Operation,
         super::ToolError::Uncertain,
-        super::ToolError::GuardRejected("admission"),
-        super::ToolError::GuardRejected("Workspace identity"),
-        super::ToolError::GuardRejected("kernel capability"),
-        super::ToolError::GuardRejected("handshake"),
-        super::ToolError::GuardRejected("payload"),
-        super::ToolError::GuardRejected("receipt"),
-        super::ToolError::GuardRejected("resource attestation"),
-        super::ToolError::GuardRejected("process-unit cleanup"),
-        super::ToolError::GuardRejected("launcher reap"),
-        super::ToolError::GuardRejected("stderr EOF"),
-        super::ToolError::GuardRejected("namespace bootstrap"),
-        super::ToolError::GuardRejected("native manager"),
-        super::ToolError::GuardRejected("bounded control protocol"),
-        super::ToolError::GuardRejected("arbitrary text is not a durable diagnostic"),
+        super::ToolError::GuardRejected(super::guard::GuardStage::ResourceAttestation),
+        super::ToolError::GuardRejected(super::guard::GuardStage::ProcessCleanup),
+        super::ToolError::GuardRejected(super::guard::GuardStage::LauncherReap),
+        super::ToolError::GuardRejected(super::guard::GuardStage::OutputEof),
+        super::ToolError::GuardRejected(super::guard::GuardStage::NamespaceBootstrap),
+        super::ToolError::GuardRejected(super::guard::GuardStage::NativeManager),
+        super::ToolError::GuardRejected(super::guard::GuardStage::ControlProtocol),
     ];
     for (stage, label) in [
         ("admission", "admission"),
@@ -679,7 +672,6 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         assert!(uncertain.guard.is_none());
         assert!(uncertain.valid(), "minimum-budget uncertainty receipt");
         assert!(uncertain.output.ends_with("Do not retry automatically."));
-        assert!(!uncertain.output.contains("arbitrary text"));
     }
     let mut oversized = observation;
     oversized.output = "x".repeat(MAX_TOOL_RESULT_BYTES + 1);

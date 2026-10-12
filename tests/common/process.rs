@@ -2,8 +2,13 @@ use std::{
     io::{self, Read},
     os::fd::AsFd,
     process::{Child, Command, Output, Stdio},
+    sync::Mutex,
     time::{Duration, Instant},
 };
+
+/// Serializes heavy native gates that share one test binary.
+#[allow(dead_code)]
+pub static NATIVE_GATE: Mutex<()> = Mutex::new(());
 
 pub trait BoundedOutput {
     fn bounded_output(&mut self) -> io::Result<Output>;

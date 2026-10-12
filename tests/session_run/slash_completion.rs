@@ -1804,7 +1804,7 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
                 &mut answered,
                 selection_at,
                 if malformed {
-                    b"Notice: Error: invalid authorization identity\r\nInput:\r\n"
+                    b"Notice: Error: saved ChatGPT setup is incompatible or damaged; use /setup or arany --setup to reset it and sign in again\r\nInput:\r\n"
                 } else {
                     b"Notice: Error: no selected ChatGPT account; use /setup to connect\r\nInput:\r\n"
                 },

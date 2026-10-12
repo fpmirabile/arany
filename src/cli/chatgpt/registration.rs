@@ -48,7 +48,13 @@ impl Record {
 }
 
 pub(crate) fn validate_saved_setup(workspace: &Path) -> Result<(), AuthorizationError> {
-    let state = default_state()?;
+    let path = StateRoot::account_path().map_err(|_| AuthorizationError::Unavailable)?;
+    // Without State there is no saved host or registration to validate.
+    let Some(state) =
+        crate::cli::open_optional_state(&path).map_err(|_| AuthorizationError::Unavailable)?
+    else {
+        return Ok(());
+    };
     state
         .with_account_replacement_lock(workspace, || {
             let host = account::saved_host_at(&state)?;

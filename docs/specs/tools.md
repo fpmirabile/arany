@@ -8,7 +8,7 @@ Folder consent and native Tool capability are independent. On platforms without 
 
 The native macOS profile admits checked file operations, pinned Skill data,
 host-native commands and local MCP through a separate trusted Guard worker.
-An intermittent rejection of MCP before GO remains an
+An intermittent rejection of MCP or commands before GO under host load remains an
 [open defect](../../NEXT_STEPS.md#open-defects).
 File/Skill dispatch prohibits program execution. Commands and MCP use private
 disposable storage and retain ordinary native child launches. Both preserve
@@ -236,10 +236,18 @@ partial setup, cancellation and unwind require positively established process
 termination before detachment. Unexpected mount targets reject without following
 them. Unfinished attachment or failed cleanup retains the private control root
 and rejects completion rather than recursively deleting through a live or
-uncertain mount. Each unit's owner-only root is `/private/tmp/arany-u-<uuid>`;
-no later Run reclaims a retained root and no count or byte cap applies, so
-retained roots accumulate until an operator removes them. A filename-prefix
-sweep is unsafe; positive ownership recovery is tracked as
+uncertain mount. Each unit's owner-only root is `/private/tmp/arany-u-<uuid>`.
+Each live unit holds an exclusive lock on its root's `unit.lock`; the kernel
+releases it when the owner exits, including on a crash. Before creating a root,
+admission counts entries named `arany-u-*` whose no-follow metadata owner is the
+effective uid and whose lock is not held, scanning at most 4096 directory
+entries; concurrent live units never count. Eight retained roots reject further native unit creation before any
+root or storage is created; eight bounds retained fixed images to 1 GiB. That
+rejection names `/private/tmp/arany-u-*` for manual removal. A listing that
+cannot be read or exceeds the scan bound rejects as unavailable native
+protection, without that removal advice. No Run reclaims or
+deletes a retained root, and a filename-prefix sweep is unsafe; positive
+ownership recovery is tracked as
 [macOS crash recovery](../../NEXT_STEPS.md#next-functional-priority).
 
 Commands and MCP receive a fresh checked snapshot of the selected Workspace,
@@ -296,4 +304,4 @@ Byte/entry bounds on synchronous local snapshot preparation do not guarantee a f
 | Uncertainty, cancellation, receipt bounds and fresh resumed work | Missing post-GO completion remains uncertain; bounded receipts persist; fresh inspection/edit does not execute old intents | [Native Tool journeys](../../tests/session_run/tools.rs), [Tool corpus](../../src/tools/tests.rs), [replay](../../src/store/replay.rs) |
 | Slash Skill insertion and file mentions | Browsing loads no guidance or effects; selecting stages a task; file includes carry path/digest and directory references grant no authority | [Terminal contract](./terminal.md), [slash journey](../../tests/session_run/slash_completion.rs), [Engine Run corpus](../../tests/engine_run.rs) |
 
-Native Linux and macOS owners exercise their actual enforcers with synthetic Providers; pure wire/configuration/replay corpora do not launch effects. Live model/account loops, optimized macOS Engine/account isolation, Linux ARM64 and human terminal/accessibility checks need separate evidence. [Next steps](../../NEXT_STEPS.md) owns open checks; completed outcomes belong in the handoff and Git/CI history; [dependency review](../security/local-tool-dependency-review.md) owns scoped supply-chain evidence. Activation and test-lane requirements remain in [testing rules](../../agents/testing.md).
+CI runs the debug-only fixture journeys in the debug macOS profile; the release profile omits the debug-only account-root and Keychain fixtures. The activated unit owner and CPU-expiry gate run under `--cfg arany_ci` in both profiles. Native Linux and macOS owners exercise their actual enforcers with synthetic Providers; pure wire/configuration/replay corpora do not launch effects. Live model/account loops, optimized macOS Engine/account isolation, Linux ARM64 and human terminal/accessibility checks need separate evidence. [Next steps](../../NEXT_STEPS.md) owns open checks; completed outcomes belong in the handoff and Git/CI history; [dependency review](../security/local-tool-dependency-review.md) owns scoped supply-chain evidence. Activation and test-lane requirements remain in [testing rules](../../agents/testing.md).

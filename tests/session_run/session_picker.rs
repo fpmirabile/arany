@@ -22,6 +22,60 @@ pub(super) fn tail(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// Replays cursor addressing, erasure and printable cells so differential frames read as displayed.
+pub(super) fn screen_rows(transcript: &[u8], columns: usize, rows: usize) -> Vec<String> {
+    let mut grid = vec![vec![' '; columns]; rows];
+    let (mut row, mut column) = (0, 0);
+    let text = String::from_utf8_lossy(transcript);
+    let mut chars = text.chars().peekable();
+    while let Some(character) = chars.next() {
+        match character {
+            '\x1b' if chars.peek() == Some(&'[') => {
+                chars.next();
+                let mut parameters = String::new();
+                let mut command = None;
+                for next in chars.by_ref() {
+                    if ('@'..='~').contains(&next) {
+                        command = Some(next);
+                        break;
+                    }
+                    parameters.push(next);
+                }
+                let mut values = parameters
+                    .trim_start_matches('?')
+                    .split(';')
+                    .map(|value| value.parse::<usize>().unwrap_or(0));
+                let first = values.next().unwrap_or(0);
+                match command {
+                    Some('H') => {
+                        row = first.max(1).min(rows) - 1;
+                        column = values.next().unwrap_or(1).max(1).min(columns) - 1;
+                    }
+                    Some('J') if first == 2 || first == 3 => {
+                        grid.iter_mut().for_each(|line| line.fill(' '));
+                    }
+                    Some('J') => {
+                        grid[row][column..].fill(' ');
+                        grid[row + 1..].iter_mut().for_each(|line| line.fill(' '));
+                    }
+                    Some('K') => grid[row][column..].fill(' '),
+                    _ => {}
+                }
+            }
+            '\r' => column = 0,
+            '\n' => row = (row + 1).min(rows - 1),
+            character if !character.is_control() && column < columns => {
+                grid[row][column] = character;
+                column += 1;
+            }
+            _ => {}
+        }
+    }
+    grid.into_iter()
+        .map(|line| line.into_iter().collect())
+        .collect()
+}
+
 pub(super) struct PtyResponses {
     pub(super) cursor_queries: usize,
     consent_from: usize,
@@ -176,10 +230,11 @@ fn run_picker_case(
     if width < 20 {
         let cues: [&[u8]; 5] = [b"Up/Dn", b"Enter", b"Esc", b"Older", b"Newer"];
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !cues
-            .iter()
-            .all(|cue| transcript.windows(cue.len()).any(|part| part == *cue))
-        {
+        while !cues.iter().all(|cue| {
+            screen_rows(&transcript, width.into(), 24)
+                .iter()
+                .any(|line| line.contains(std::str::from_utf8(cue).unwrap()))
+        }) {
             pump(&mut output, &mut input, &mut transcript, &mut answered);
             assert!(
                 Instant::now() < deadline,

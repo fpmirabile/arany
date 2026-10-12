@@ -474,8 +474,15 @@ function run(args) {
     }
 
     #[test]
-    #[ignore = "native named-pasteboard service gate; never accesses the general clipboard"]
+    #[cfg_attr(
+        not(arany_ci),
+        ignore = "native named-pasteboard service gate; never accesses the general clipboard"
+    )]
     fn native_named_pasteboard_png_text_and_rejection() {
+        let _gate = crate::test_process::NATIVE_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
         let board = Board(format!("dev.Arany.test.{}", uuid::Uuid::now_v7()));
         let fixture = tempfile::tempdir().unwrap();
         let payload = fixture.path().join("payload");

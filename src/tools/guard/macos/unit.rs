@@ -22,6 +22,14 @@ const _: () = assert!(STORAGE_BYTES_CAP.is_multiple_of(BYTES_PER_MEBIBYTE));
 const STORAGE_NAMES: [&str; 2] = ["workspace", "scratch"];
 const STORAGE_PENDING: &str = "storage.pending";
 const AVAILABILITY_DEADLINE: Duration = Duration::from_secs(3);
+const UNIT_ROOT_PARENT: &str = "/private/tmp";
+const UNIT_ROOT_PREFIX: &str = "arany-u-";
+// A live unit holds an exclusive lock here; the kernel releases it when the owner exits.
+const UNIT_LIVENESS_LOCK: &str = "unit.lock";
+// Each retained root holds two 64 MiB images; eight bounds retained storage to 1 GiB.
+const RETAINED_ROOT_LIMIT: usize = 8;
+// Bounds the directory scan itself; an unverifiable listing fails closed.
+const UNIT_ROOT_SCAN_LIMIT: usize = 4096;
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -497,6 +505,7 @@ async fn cleanup_storage(root: &Path) -> Result<(), ToolError> {
 struct Unit {
     root: PathBuf,
     _directory: PrivateDirectory,
+    _liveness: cap_std::fs::File,
     target: String,
     scope: Option<Scope>,
     stopped: bool,
@@ -508,10 +517,92 @@ enum ManagerAction<'a> {
     Bootout,
 }
 
+// Retained roots are never reclaimed automatically; counting is the only bound until
+// positive ownership recovery exists.
+fn check_retained_roots(parent: &Path, owner: u32) -> Result<(), ToolError> {
+    let mut retained = 0;
+    for (scanned, entry) in std::fs::read_dir(parent)
+        .map_err(|_| ToolError::ProtectionUnavailable)?
+        .enumerate()
+    {
+        if scanned == UNIT_ROOT_SCAN_LIMIT {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        let entry = entry.map_err(|_| ToolError::ProtectionUnavailable)?;
+        if !entry
+            .file_name()
+            .as_encoded_bytes()
+            .starts_with(UNIT_ROOT_PREFIX.as_bytes())
+        {
+            continue;
+        }
+        match std::fs::symlink_metadata(entry.path()) {
+            Ok(metadata) if metadata.uid() == owner && !unit_is_live(&entry.path())? => {
+                retained += 1;
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(ToolError::ProtectionUnavailable),
+        }
+    }
+    if retained >= RETAINED_ROOT_LIMIT {
+        return Err(ToolError::RetainedRoots);
+    }
+    Ok(())
+}
+
+// A root without a held liveness lock was left by a finished or crashed owner.
+fn unit_is_live(root: &Path) -> Result<bool, ToolError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let lock = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(root.join(UNIT_LIVENESS_LOCK))
+    {
+        Ok(lock) => lock,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(false);
+        }
+        Err(_) => return Err(ToolError::ProtectionUnavailable),
+    };
+    match rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockShared) {
+        Ok(()) => Ok(false),
+        Err(rustix::io::Errno::WOULDBLOCK) => Ok(true),
+        Err(_) => Err(ToolError::ProtectionUnavailable),
+    }
+}
+
+fn hold_liveness_lock(directory: &PrivateDirectory) -> Result<cap_std::fs::File, ToolError> {
+    use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+    use cap_std::fs::OpenOptionsExt;
+    let mut options = cap_std::fs::OpenOptions::new();
+    options
+        .write(true)
+        .create_new(true)
+        .follow(FollowSymlinks::No)
+        .mode(0o600);
+    let lock = directory
+        .dir
+        .open_with(UNIT_LIVENESS_LOCK, &options)
+        .map_err(|_| ToolError::Operation)?;
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+        .map_err(|_| ToolError::Operation)?;
+    Ok(lock)
+}
+
 impl Unit {
     fn new() -> Result<Self, ToolError> {
-        let name = format!("arany-u-{}", uuid::Uuid::now_v7());
-        let root = Path::new("/private/tmp").join(&name);
+        check_retained_roots(
+            Path::new(UNIT_ROOT_PARENT),
+            rustix::process::geteuid().as_raw(),
+        )?;
+        let name = format!("{UNIT_ROOT_PREFIX}{}", uuid::Uuid::now_v7());
+        let root = Path::new(UNIT_ROOT_PARENT).join(&name);
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(&root)
@@ -523,9 +614,17 @@ impl Unit {
                 return Err(ToolError::Path);
             }
         };
+        let liveness = match hold_liveness_lock(&directory) {
+            Ok(liveness) => liveness,
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(&root);
+                return Err(error);
+            }
+        };
         Ok(Self {
             root,
             _directory: directory,
+            _liveness: liveness,
             target: format!(
                 "user/{}/dev.arany.tool.{name}",
                 rustix::process::geteuid().as_raw()
@@ -784,7 +883,7 @@ pub(super) async fn execute(
             .as_mut()
             .ok_or(ToolError::ProtectionUnavailable)?
             .check_resources()
-            .map_err(|_| ToolError::GuardRejected("resource attestation"))?;
+            .map_err(|_| ToolError::GuardRejected(GuardStage::ResourceAttestation))?;
         dispatched.store(true, Ordering::Release);
         stream
             .get_mut()
@@ -802,7 +901,7 @@ pub(super) async fn execute(
     };
     unit.stop()
         .await
-        .map_err(|_| ToolError::GuardRejected("native unit cleanup"))?;
+        .map_err(|_| ToolError::GuardRejected(GuardStage::ProcessCleanup))?;
     result
 }
 
@@ -963,6 +1062,46 @@ pub(super) fn helper_main() -> std::process::ExitCode {
 mod tests {
     use super::*;
     use std::io::Read;
+
+    #[test]
+    fn retained_root_bound_counts_only_this_users_unit_roots() {
+        let parent = tempfile::tempdir().unwrap();
+        let owner = rustix::process::geteuid().as_raw();
+        std::fs::create_dir(parent.path().join("unrelated")).unwrap();
+        for index in 0..RETAINED_ROOT_LIMIT - 1 {
+            std::fs::create_dir(parent.path().join(format!("{UNIT_ROOT_PREFIX}{index}"))).unwrap();
+        }
+        check_retained_roots(parent.path(), owner).expect("below the retained-root cap");
+        std::fs::create_dir(parent.path().join(format!("{UNIT_ROOT_PREFIX}last"))).unwrap();
+        assert!(matches!(
+            check_retained_roots(parent.path(), owner),
+            Err(ToolError::RetainedRoots)
+        ));
+        assert!(
+            check_retained_roots(parent.path(), owner.wrapping_add(1)).is_ok(),
+            "roots owned by another uid are not counted"
+        );
+        let live = parent.path().join(format!("{UNIT_ROOT_PREFIX}last"));
+        std::fs::set_permissions(&live, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let held = hold_liveness_lock(&open_directory(&live, false).unwrap()).unwrap();
+        check_retained_roots(parent.path(), owner).expect("a live unit root is not retained");
+        drop(held);
+        assert!(
+            matches!(
+                check_retained_roots(parent.path(), owner),
+                Err(ToolError::RetainedRoots)
+            ),
+            "a released lock marks its root retained"
+        );
+        let scanned = tempfile::tempdir().unwrap();
+        for index in 0..=UNIT_ROOT_SCAN_LIMIT {
+            std::fs::File::create(scanned.path().join(format!("entry-{index}"))).unwrap();
+        }
+        assert!(matches!(
+            check_retained_roots(scanned.path(), owner),
+            Err(ToolError::ProtectionUnavailable)
+        ));
+    }
 
     const HELPER: &str = "tools::guard::macos::unit::tests::native_unit_helper";
     const MCP_SCRIPT: &str = r#"set -eu
@@ -1273,8 +1412,16 @@ done
     }
 
     #[tokio::test]
-    #[ignore = "native aggregate-resource and escaped-descendant gate; finite synthetic jobs"]
+    #[cfg_attr(
+        not(arany_ci),
+        ignore = "native aggregate-resource and escaped-descendant gate; finite synthetic jobs"
+    )]
+    #[allow(clippy::await_holding_lock)]
     async fn native_unit_owns_descendants_and_supervises_resources() {
+        let _gate = crate::test_process::NATIVE_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
         let generated = tempfile::tempdir().unwrap();
         let (actor, plain) = native_actors(generated.path());
         verify_uncertain_storage_is_retained().await;
@@ -1291,7 +1438,7 @@ done
             "entitlement-profile",
         ] {
             let mut unit = Unit::new().unwrap();
-            assert_eq!(std::fs::read_dir(&unit.root).unwrap().count(), 0);
+            assert_eq!(std::fs::read_dir(&unit.root).unwrap().count(), 1);
             if phase == "entitlement-profile" {
                 for (name, executable) in [("actor", &actor), ("plain", &plain)] {
                     std::fs::copy(executable, unit.root.join(name)).unwrap();

@@ -190,7 +190,7 @@ pub(super) async fn roundtrip() {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
-        .args(["--exact", TEST, "--ignored", "--nocapture"])
+        .args(["--exact", TEST, "--include-ignored", "--nocapture"])
         .env_clear()
         .env("ARANY_TEST_EXE", executable)
         .env(keyring_helper::macos::TEST_KEYCHAIN_ROOT_ENV, root.path())

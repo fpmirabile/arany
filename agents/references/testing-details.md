@@ -2,6 +2,18 @@
 
 Load the section named by [testing rules](../testing.md) when its task applies. Those rules remain in force; these details retain the same contract owners.
 
+## Local verification and CI
+
+Use the standard checks in [CONTRIBUTING](../../CONTRIBUTING.md#verification). The [CI workflow](../../.github/workflows/ci.yml) runs on pull requests: formatting and Clippy on Linux, and Clippy plus debug and release default tests on Linux and macOS. CI provisions prerequisites on disposable GitHub-hosted runners. Linux terminal fixtures need Bubblewrap and util-linux `script`, with user and network namespaces enabled. For macOS temporary-root and account-isolation requirements, read [host and account isolation](#host-and-account-isolation).
+
+Default suites exercise only the scenarios enabled for their native OS. The heavy native Guard, clipboard, credential-helper and database-capacity gates use the activation rules in [testing rules](../testing.md#evidence-lanes). To reproduce CI locally, set `RUSTFLAGS=--cfg arany_ci` for the test invocation; in a POSIX shell:
+
+```sh
+RUSTFLAGS='--cfg arany_ci' cargo test --workspace --locked --offline
+```
+
+Repeat with `--release` for the optimized profile. To run one ignored gate, use `cargo test <path> -- --exact --ignored`. The isolated macOS Keychain gate also needs `ARANY_TEST_EXE` set to a built debug `arany`. Other ignored native, manual, performance and live Provider gates remain separate; CI uses no account credentials or paid calls. Passing compilation or an OS-specific subset does not prove platform parity.
+
 ## Beta continuation and deferred evidence
 
 - Beta 1 delivery order is functional implementation, consolidated local verification, then final user-owned testing. At each continuation, select the next implementable functional item before reviewing verification debt. While functionality remains, run only focused local/synthetic checks needed for a changed invariant or known failure; collect remaining checks for implementation closeout rather than starting another verification-only cycle.

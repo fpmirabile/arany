@@ -2,6 +2,11 @@
 
 mod cli;
 
+#[cfg(all(test, unix))]
+#[allow(dead_code)]
+#[path = "../tests/common/process.rs"]
+mod test_process;
+
 use arany::{RunId, SessionId, SessionView, StateRoot, Store, Telemetry, render_session};
 use clap::{ColorChoice, Parser, Subcommand, error::ErrorKind};
 use cli::{

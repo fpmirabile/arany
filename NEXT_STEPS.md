@@ -9,9 +9,10 @@ history. Implementation status and verified support are separate claims.
 
 ## Open defects
 
-- **macOS MCP preparation.** One full native debug run rejected MCP before GO
-  with native protection unavailable, after file/Skill/command success. The
-  focused journey and final suite succeeded; the cause remains unlocalized.
+- **macOS native preparation under load.** Full native debug runs have rejected
+  MCP and, once while a Linux container build loaded the host, a command before
+  GO with native protection unavailable after earlier Tool success. Focused
+  reruns succeed; the cause remains unlocalized.
   Capture bounded preparation/observer stages and host load in the existing
   [native Tool journey](./tests/session_run/tools/macos.rs). Keep fail-closed
   dispatch and zero automatic retries.
@@ -29,8 +30,9 @@ history. Implementation status and verified support are separate claims.
 - **macOS crash recovery.** Retained uncertain Guard roots need a positively
   owned job/device/mount recovery protocol. Establish termination and mount
   ownership before detachment/deletion; a filename-prefix sweep is unsafe.
-  The [Tool contract](./docs/specs/tools.md#macos-enforcement-and-compatibility)
-  owns current fail-closed retention.
+  Until then, eight retained roots block new native units and the user removes
+  them manually. The [Tool contract](./docs/specs/tools.md#macos-enforcement-and-compatibility)
+  owns the bound and fail-closed retention.
 - **Larger coding workloads.** Add reviewed runtime/cache mounts, bounded build
   profiles and explicit artifact integration when actual workloads need them.
   Remote MCP/OAuth, network/disclosure grants, interactive/background jobs,
@@ -92,12 +94,12 @@ to the user's credential store or clipboard.
 
 | Pending gate | Completion condition and owner |
 | --- | --- |
-| Hosted CI and native Linux regression checks | Publish when authorized, verify all enabled Linux/macOS jobs, and run the Linux debug/release and native consent, terminal, setup, Session picker, pinned-Skill and Tool owners. [Workflow](./.github/workflows/ci.yml), [testing rules](./agents/testing.md) |
+| Hosted CI and native Linux regression checks | Publish when authorized, verify the pull-request jobs on a hosted runner (format and Clippy, Linux and macOS debug/release tests with `--cfg arany_ci`), and run the native consent, terminal, setup, Session picker, pinned-Skill and Tool owners. [Workflow](./.github/workflows/ci.yml), [testing rules](./agents/testing.md) |
 | macOS optimized product/account isolation | On a disposable effective-user home, run the full optimized Engine/active-CLI and account setup/refresh/logout/cross-user gates. Changing HOME does not isolate account paths; debug fixtures and override refusal do not prove this gate. [Fixture rules](./agents/references/testing-details.md#host-and-account-isolation) |
 | Native TLS to compiled endpoints | Provide isolated resolution/routing and ordinary trust for a compiled-endpoint HTTPS journey. Generated-anchor chain/name rejection alone does not prove a public trusted chain or production-endpoint success. [Security rules](./agents/security.md) |
 | Native terminal faults and tmux | Run available native tmux and acquisition/output/input-loss owners, including optimized macOS and supported architectures; verify restoration on the exact distributed binary. [Terminal fixture rules](./agents/references/testing-details.md#terminal-process-fixtures), [PTY finding](./docs/security/findings/terminal-pty-hangup-spin.md) |
 | Native stores and clipboard | Finish isolated Linux keyring-backed product setup and native store lifecycle gates; human general-pasteboard and selected-item dialog checks remain in the checklist above. [Credentials](./docs/specs/credentials.md), [clipboard](./agents/clipboard.md) |
-| Readiness, load and observer faults | Measure cancellation/cleanup and resource enforcement under declared load. Investigate the open MCP preparation failure through its existing owner. [Guard unit rules](./agents/guard-unit.md) |
+| Readiness, load and observer faults | Measure cancellation/cleanup and resource enforcement under declared load. Investigate the open native preparation failure under load through its existing owner. [Guard unit rules](./agents/guard-unit.md) |
 | Performance | Measure history/input latency, RSS and telemetry on named hosts. Measure the bounded macOS host-PID scan at its nominal supervision interval before choosing another membership primitive or interval. [Native measurement rules](./agents/references/testing-details.md#native-and-live-evidence) |
 | Distribution and dependency policy | Verify fresh advisories, license/source bundles, exact source/binary pairing, compiler/native provenance and MSRV. Resolve changed notice exceptions and the unreached standard-library gate without weakening pins. [Release review](./docs/security/beta-license-release-review.md#current-result), [dependency inventory](./docs/security/beta-dependency-inventory.md) |
 | Other platforms and enforcers | Verify native Linux ARM64, implement Windows and alternative Linux-native enforcement, and require actual platform behavior evidence before support claims. Windows CI remains deferred. [OS-parity priority](./AGENTS.md#product-and-implementation-priorities) |

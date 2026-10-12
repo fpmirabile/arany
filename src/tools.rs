@@ -77,6 +77,10 @@ pub enum ToolError {
     Configuration,
     #[error("required native Tool protection is unavailable")]
     ProtectionUnavailable,
+    #[error(
+        "native Tools are disabled until this user's retained Guard roots are removed: delete the arany-u-* directories this user owns in /private/tmp, then retry"
+    )]
+    RetainedRoots,
     #[error("pinned Tool input changed")]
     ChangedInput,
     #[error("Tool path is not admitted")]
@@ -90,7 +94,7 @@ pub enum ToolError {
     #[error("Tool effect completion is uncertain")]
     Uncertain,
     #[error("Guard rejected its {0} stage")]
-    GuardRejected(&'static str),
+    GuardRejected(guard::GuardStage),
     #[error("Guard rejected at {0}")]
     GuardBootstrap(guard::BootstrapFailure),
 }
@@ -229,22 +233,10 @@ impl ToolRuntime {
 pub(crate) fn failure_stage(error: &ToolError) -> &'static str {
     match error {
         ToolError::GuardBootstrap(failure) => failure.failure_stage(),
-        ToolError::GuardRejected("admission") | ToolError::Configuration => "admission",
-        ToolError::GuardRejected("Workspace identity")
-        | ToolError::ChangedInput
-        | ToolError::Path => "pinned input",
-        ToolError::GuardRejected("kernel capability") | ToolError::ProtectionUnavailable => {
-            "native protection"
-        }
-        ToolError::GuardRejected("handshake") => "handshake",
-        ToolError::GuardRejected("receipt") => "receipt",
-        ToolError::GuardRejected("resource attestation") => "resource attestation",
-        ToolError::GuardRejected("process-unit cleanup") => "process cleanup",
-        ToolError::GuardRejected("launcher reap") => "launcher reap",
-        ToolError::GuardRejected("stderr EOF") => "output EOF",
-        ToolError::GuardRejected("namespace bootstrap") => "namespace bootstrap",
-        ToolError::GuardRejected("native manager") => "native manager",
-        ToolError::GuardRejected("bounded control protocol") => "control protocol",
+        ToolError::GuardRejected(stage) => stage.failure_stage(),
+        ToolError::Configuration => "admission",
+        ToolError::ChangedInput | ToolError::Path => "pinned input",
+        ToolError::ProtectionUnavailable | ToolError::RetainedRoots => "native protection",
         ToolError::Limit => "resource limit",
         _ => "execution",
     }
@@ -255,10 +247,13 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
     ToolObservation {
         intent,
         disposition: ToolDisposition::Failed,
-        output: format!(
-            "Guard {} unavailable before dispatch; no operation was dispatched.",
-            failure_stage(&error)
-        ),
+        output: match error {
+            ToolError::RetainedRoots => format!("{error}. No operation was dispatched."),
+            _ => format!(
+                "Guard {} unavailable before dispatch; no operation was dispatched.",
+                failure_stage(&error)
+            ),
+        },
         guard: None,
     }
 }

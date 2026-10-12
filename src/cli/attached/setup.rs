@@ -120,14 +120,6 @@ impl ChatGptSetupAccount {
     }
 }
 
-pub(super) async fn resolve(
-    terminal: &mut AttachedTerminal,
-    state_dir: &Path,
-    workspace: &Path,
-) -> Result<Option<SetupSelection>, SetupError> {
-    wizard(terminal, state_dir, workspace).await
-}
-
 pub(super) async fn admit_history(
     terminal: &mut AttachedTerminal,
     state_dir: &Path,
@@ -397,9 +389,8 @@ async fn inspect_or_file() -> Result<credentials::InspectedAccount, CredentialEr
     })
 }
 
-async fn wizard(
+pub(super) async fn resolve(
     terminal: &mut AttachedTerminal,
-    _state_dir: &Path,
     workspace: &Path,
 ) -> Result<Option<SetupSelection>, SetupError> {
     if super::models::preferences_need_reset(workspace)?
@@ -419,106 +410,121 @@ async fn wizard(
         return Ok(None);
     };
     if access == b'2' {
-        match chatgpt::registration::validate_saved_setup(workspace) {
-            Ok(()) => {}
-            Err(chatgpt::AuthorizationError::InvalidSavedState) => {
-                if !reset_saved_setup(terminal, workspace, credentials::SetupData::ChatGpt).await? {
-                    return Ok(None);
-                }
+        chatgpt_setup(terminal, workspace).await
+    } else {
+        native_setup(terminal, workspace).await
+    }
+}
+
+async fn chatgpt_setup(
+    terminal: &mut AttachedTerminal,
+    workspace: &Path,
+) -> Result<Option<SetupSelection>, SetupError> {
+    match chatgpt::registration::validate_saved_setup(workspace) {
+        Ok(()) => {}
+        Err(chatgpt::AuthorizationError::InvalidSavedState) => {
+            if !reset_saved_setup(terminal, workspace, credentials::SetupData::ChatGpt).await? {
+                return Ok(None);
             }
-            Err(error) => return Err(error.to_string().into()),
         }
-        let account = match chatgpt::selected_registration() {
-            Ok((saved, true)) => match choose(
-                terminal,
-                2,
-                "ChatGPT account",
-                "Reuse, reconnect, or add",
+        Err(error) => return Err(error.to_string().into()),
+    }
+    let account = match chatgpt::selected_registration() {
+        Ok((saved, true)) => match choose(
+            terminal,
+            2,
+            "ChatGPT account",
+            "Reuse, reconnect, or add",
+            &[
+                (b'1', "Use saved"),
+                (b'2', "Reconnect"),
+                (b'3', "Connect new"),
+            ],
+        )
+        .await?
+        {
+            Some(b'1') => choose_saved_chatgpt(terminal, workspace, saved).await?,
+            Some(b'2') => {
+                let target = chatgpt::selected_reauthorization_target(saved)
+                    .map_err(|error| error.to_string())?;
+                reconnect_chatgpt(terminal, workspace, target).await?
+            }
+            Some(b'3') => connect_chatgpt(terminal, workspace).await?,
+            None => None,
+            Some(_) => return Err("invalid ChatGPT account choice".into()),
+        },
+        Ok((saved, false)) => {
+            let target = chatgpt::selected_reauthorization_target(saved)
+                .map_err(|error| error.to_string())?;
+            let permission_missing = target.plan_permission_missing;
+            let reconnect_label = if permission_missing {
+                "Enable plan"
+            } else {
+                "Reconnect"
+            };
+            let (_, ids) = chatgpt::saved_account_ids().map_err(|error| error.to_string())?;
+            let other_saved = ids.len() > 1;
+            let reconnect_choice = if other_saved { b'2' } else { b'1' };
+            let new_choice = if other_saved { b'3' } else { b'2' };
+            let choices = if other_saved {
                 &[
                     (b'1', "Use saved"),
-                    (b'2', "Reconnect"),
+                    (b'2', reconnect_label),
                     (b'3', "Connect new"),
-                ],
+                ][..]
+            } else {
+                &[(b'1', reconnect_label), (b'2', "Connect new")][..]
+            };
+            match choose(
+                terminal,
+                2,
+                if permission_missing {
+                    "ChatGPT plan disabled"
+                } else {
+                    "ChatGPT account disconnected"
+                },
+                if permission_missing {
+                    "Enable plan or choose another account"
+                } else {
+                    "Reconnect or add"
+                },
+                choices,
             )
             .await?
             {
-                Some(b'1') => choose_saved_chatgpt(terminal, workspace, saved).await?,
-                Some(b'2') => {
-                    let target = chatgpt::selected_reauthorization_target(saved)
-                        .map_err(|error| error.to_string())?;
+                Some(b'1') if other_saved => {
+                    choose_saved_chatgpt(terminal, workspace, saved).await?
+                }
+                Some(choice) if choice == reconnect_choice => {
                     reconnect_chatgpt(terminal, workspace, target).await?
                 }
-                Some(b'3') => connect_chatgpt(terminal, workspace).await?,
+                Some(choice) if choice == new_choice => {
+                    connect_chatgpt(terminal, workspace).await?
+                }
                 None => None,
                 Some(_) => return Err("invalid ChatGPT account choice".into()),
-            },
-            Ok((saved, false)) => {
-                let target = chatgpt::selected_reauthorization_target(saved)
-                    .map_err(|error| error.to_string())?;
-                let permission_missing = target.plan_permission_missing;
-                let reconnect_label = if permission_missing {
-                    "Enable plan"
-                } else {
-                    "Reconnect"
-                };
-                let (_, ids) = chatgpt::saved_account_ids().map_err(|error| error.to_string())?;
-                let other_saved = ids.len() > 1;
-                let reconnect_choice = if other_saved { b'2' } else { b'1' };
-                let new_choice = if other_saved { b'3' } else { b'2' };
-                let choices = if other_saved {
-                    &[
-                        (b'1', "Use saved"),
-                        (b'2', reconnect_label),
-                        (b'3', "Connect new"),
-                    ][..]
-                } else {
-                    &[(b'1', reconnect_label), (b'2', "Connect new")][..]
-                };
-                match choose(
-                    terminal,
-                    2,
-                    if permission_missing {
-                        "ChatGPT plan disabled"
-                    } else {
-                        "ChatGPT account disconnected"
-                    },
-                    if permission_missing {
-                        "Enable plan or choose another account"
-                    } else {
-                        "Reconnect or add"
-                    },
-                    choices,
-                )
-                .await?
-                {
-                    Some(b'1') if other_saved => {
-                        choose_saved_chatgpt(terminal, workspace, saved).await?
-                    }
-                    Some(choice) if choice == reconnect_choice => {
-                        reconnect_chatgpt(terminal, workspace, target).await?
-                    }
-                    Some(choice) if choice == new_choice => {
-                        connect_chatgpt(terminal, workspace).await?
-                    }
-                    None => None,
-                    Some(_) => return Err("invalid ChatGPT account choice".into()),
-                }
             }
-            Err(chatgpt::AuthorizationError::NoSelectedAccount) => {
-                connect_chatgpt(terminal, workspace).await?
-            }
-            Err(error) => return Err(error.to_string().into()),
-        };
-        let Some(account) = account else {
-            return Ok(None);
-        };
-        let (defaults, notice, catalog) = configure_chatgpt(terminal, workspace, &account).await?;
-        let mut selection = account.finish(defaults, notice).map_err(SetupError::from)?;
-        if let Some(SetupSelection::ChatGpt { catalog: rows, .. }) = &mut selection {
-            *rows = catalog;
         }
-        return Ok(selection);
+        Err(chatgpt::AuthorizationError::NoSelectedAccount) => {
+            connect_chatgpt(terminal, workspace).await?
+        }
+        Err(error) => return Err(error.to_string().into()),
+    };
+    let Some(account) = account else {
+        return Ok(None);
+    };
+    let (defaults, notice, catalog) = configure_chatgpt(terminal, workspace, &account).await?;
+    let mut selection = account.finish(defaults, notice).map_err(SetupError::from)?;
+    if let Some(SetupSelection::ChatGpt { catalog: rows, .. }) = &mut selection {
+        *rows = catalog;
     }
+    Ok(selection)
+}
+
+async fn native_setup(
+    terminal: &mut AttachedTerminal,
+    workspace: &Path,
+) -> Result<Option<SetupSelection>, SetupError> {
     let inspected = match inspect_or_file().await {
         Ok(inspected) => inspected,
         Err(CredentialError::InvalidAccount) => {
@@ -593,9 +599,6 @@ async fn wizard(
     let Some(items) = load_catalog(terminal, provider, &credentials).await? else {
         return Ok(None);
     };
-    if items.is_empty() {
-        return Err("selected account has no visible models; use /setup to retry".into());
-    }
     let (model, preferred) = native_catalog_default(provider, &items)
         .ok_or("selected account has no visible models; use /setup to retry")?;
     let notice = if preferred {

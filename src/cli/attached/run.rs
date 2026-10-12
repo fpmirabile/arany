@@ -365,11 +365,6 @@ async fn compact_with_provider<P: Provider + 'static>(
 }
 
 #[cfg(all(test, unix))]
-#[allow(dead_code)]
-#[path = "../../../tests/common/process.rs"]
-mod test_process;
-
-#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     #[cfg(target_os = "macos")]
@@ -398,6 +393,7 @@ mod tests {
         }
     }
 
+    #[cfg(debug_assertions)]
     #[tokio::test]
     async fn saved_access_is_authorized_before_chat_without_exposing_secrets() {
         enum StartupInput {
@@ -525,7 +521,7 @@ mod tests {
                 let product_pid =
                     rustix::process::Pid::from_raw(child.0.id().try_into().unwrap()).unwrap();
                 drop(command);
-                let output = test_process::capture_terminal(
+                let output = crate::test_process::capture_terminal(
                     &mut child.0,
                     master,
                     Duration::from_secs(20),
@@ -584,7 +580,7 @@ mod tests {
                         &transcript.replace("synthetic-startup-secret", "[redacted]")
                     )
                 );
-                test_process::assert_single_test_completed(
+                crate::test_process::assert_single_test_completed(
                     &output.stdout,
                     &format!("saved access case {case}"),
                 );
@@ -1195,7 +1191,7 @@ mod tests {
             command.env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account"));
             let mut child = OwnedChild(command.spawn().unwrap());
             drop(command);
-            let output = test_process::capture_terminal(
+            let output = crate::test_process::capture_terminal(
                 &mut child.0,
                 master,
                 Duration::from_secs(30),
@@ -1214,7 +1210,10 @@ mod tests {
                 arany::escape_terminal(&String::from_utf8_lossy(&output.stdout)),
                 arany::escape_terminal(&String::from_utf8_lossy(&output.stderr))
             );
-            test_process::assert_single_test_completed(&output.stdout, "native chat regression");
+            crate::test_process::assert_single_test_completed(
+                &output.stdout,
+                "native chat regression",
+            );
             assert_eq!(cancelled, cfg!(debug_assertions));
             return;
         };

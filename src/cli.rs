@@ -58,7 +58,9 @@ fn admit_workspace(
     Ok((workspace, state))
 }
 
-fn open_optional_state(path: &std::path::Path) -> Result<Option<StateRoot>, arany::StoreError> {
+pub(crate) fn open_optional_state(
+    path: &std::path::Path,
+) -> Result<Option<StateRoot>, arany::StoreError> {
     match StateRoot::open_existing(path) {
         Ok(root) => Ok(Some(root)),
         Err(arany::StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {

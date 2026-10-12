@@ -58,7 +58,7 @@ fn account_command(
             "--symlink",
             "usr/lib",
             "/lib",
-            "--ro-bind",
+            "--ro-bind-try",
             "/lib64",
             "/lib64",
         ])

@@ -1,6 +1,6 @@
 use super::{
-    BootstrapFailure, CAPTURE_BYTES, TASK_BYTES_CAP, Task, parse_ready, read_capped,
-    read_line_capped, read_observation,
+    BootstrapFailure, CAPTURE_BYTES, GuardStage, TASK_BYTES_CAP, Task, bootstrap_failure,
+    drain_stderr, parse_ready, read_capped, read_line_capped, read_observation,
 };
 use crate::engine::RunCancellation;
 use crate::tools::types::{MAX_PROCESSES_OR_THREADS, MEMORY_BYTES, digest};
@@ -623,9 +623,9 @@ async fn execute_worker(
             return Err(ToolError::ProtectionUnavailable);
         }
         if !check_process_resources(pid)
-            .map_err(|_| ToolError::GuardRejected("resource attestation"))?
+            .map_err(|_| ToolError::GuardRejected(GuardStage::ResourceAttestation))?
         {
-            return Err(ToolError::GuardRejected("resource attestation"));
+            return Err(ToolError::GuardRejected(GuardStage::ResourceAttestation));
         }
         let ready = serde_json::to_vec(&ready).map_err(|_| ToolError::Operation)?;
         control
@@ -686,25 +686,20 @@ async fn execute_worker(
         let _ = child.start_kill();
         let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
     }
-    let drained = tokio::time::timeout(Duration::from_secs(2), &mut stderr_task).await;
-    if drained.is_err() {
-        stderr_task.abort();
-        let _ = stderr_task.await;
-    }
+    let drained = drain_stderr(&mut stderr_task).await;
     if result.is_err()
-        && let Ok(Ok(Ok(stderr))) = &drained
-        && let Ok(failure) = serde_json::from_slice::<BootstrapFailure>(stderr)
+        && let Some(failure) = drained.as_deref().and_then(bootstrap_failure)
     {
-        return Err(ToolError::GuardBootstrap(failure));
+        return Err(failure);
     }
     if !matches!(reaped, Ok(Ok(_))) {
-        return Err(ToolError::GuardRejected("launcher reap"));
+        return Err(ToolError::GuardRejected(GuardStage::LauncherReap));
     }
     if result.is_ok() && !matches!(reaped, Ok(Ok(status)) if status.success()) {
         return Err(ToolError::Operation);
     }
-    if !matches!(drained, Ok(Ok(Ok(_)))) {
-        return Err(ToolError::GuardRejected("stderr EOF"));
+    if drained.is_none() {
+        return Err(ToolError::GuardRejected(GuardStage::OutputEof));
     }
     result
 }
@@ -757,8 +752,15 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "native 15-second CPU expiry; finite isolated process"]
+    #[cfg_attr(
+        not(arany_ci),
+        ignore = "native 15-second CPU expiry; finite isolated process"
+    )]
     fn native_file_profile_cpu_expiry_cannot_be_disabled() {
+        let _gate = crate::test_process::NATIVE_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
         let output = probe(true);
         assert_eq!(output.status.signal(), Some(libc::SIGXCPU));
         assert!(String::from_utf8_lossy(&output.stdout).contains("CPU readiness"));
@@ -845,11 +847,18 @@ mod tests {
                 .kind(),
             std::io::ErrorKind::PermissionDenied
         );
-        assert_eq!(
+        // macOS 15 reports the denied bind as ENOENT; later releases report EPERM.
+        assert!(matches!(
             std::os::unix::net::UnixListener::bind(root.join("workspace/socket"))
                 .unwrap_err()
                 .kind(),
-            std::io::ErrorKind::PermissionDenied
+            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
+        ));
+        assert_eq!(
+            std::fs::symlink_metadata(root.join("workspace/socket"))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
         );
         assert_eq!(
             std::process::Command::new("/usr/bin/true")

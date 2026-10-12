@@ -584,17 +584,20 @@ fn folder_consent_precedes_setup_and_remembers_only_the_exact_trusted_directory(
             !state.exists(),
             "startup cancellation must precede Session admission"
         );
-        for entry in std::fs::read_dir(&account).unwrap() {
-            let name = entry.unwrap().file_name();
-            assert!(
-                name == "workspace-permissions.json"
-                    || name == "account-credentials.lock"
-                    || name == "history.lock"
-                    || name == "events.sqlite3",
-                "startup must not create account metadata: {name:?}"
-            );
-            if name == "events.sqlite3" || name == "history.lock" {
-                assert_eq!(std::fs::metadata(account.join(name)).unwrap().len(), 0);
+        // Reading folder trust creates no account root; only an explicit remember may.
+        if account.exists() {
+            for entry in std::fs::read_dir(&account).unwrap() {
+                let name = entry.unwrap().file_name();
+                assert!(
+                    name == "workspace-permissions.json"
+                        || name == "account-credentials.lock"
+                        || name == "history.lock"
+                        || name == "events.sqlite3",
+                    "startup must not create account metadata: {name:?}"
+                );
+                if name == "events.sqlite3" || name == "history.lock" {
+                    assert_eq!(std::fs::metadata(account.join(name)).unwrap().len(), 0);
+                }
             }
         }
         String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n")

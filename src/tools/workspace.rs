@@ -2,7 +2,7 @@ use super::approval::ApprovalMode;
 use super::config::{Config, Program};
 use super::types::{MAX_SNAPSHOT_BYTES, hex_digest};
 use super::{ToolError, fs};
-use crate::store::StateRoot;
+use crate::store::{StateRoot, StoreError};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -118,10 +118,23 @@ impl WorkspacePermissions {
         self.identity == identity
     }
     pub fn open(path: &Path) -> Result<Self, ToolError> {
-        let root =
-            StateRoot::admit(&StateRoot::account_path().map_err(|_| ToolError::Configuration)?)
-                .map_err(|_| ToolError::Configuration)?;
-        Self::load(path, &root)
+        let account = StateRoot::account_path().map_err(|_| ToolError::Configuration)?;
+        match StateRoot::open_existing(&account) {
+            Ok(root) => Self::load(path, &root),
+            // Reading never creates State; without a History database no trust can be remembered.
+            Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                let directory = fs::open_directory(path)?;
+                let identity = fs::identity(&directory)?;
+                fs::reject_overlap(path, &account)?;
+                Ok(Self {
+                    path: path.to_owned(),
+                    identity,
+                    trusted: false,
+                    mode: ApprovalMode::AutoEdits,
+                })
+            }
+            Err(_) => Err(ToolError::Configuration),
+        }
     }
 
     fn load(path: &Path, root: &StateRoot) -> Result<Self, ToolError> {
