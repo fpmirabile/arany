@@ -1047,19 +1047,31 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_refuses_unowned_records_and_live_roots() {
+        #[derive(Debug)]
+        enum Case {
+            Missing,
+            Malformed,
+            Version,
+            Identity,
+            Boot,
+            Oversized,
+            Link,
+            Hardlink,
+            Live,
+        }
         let parent = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("keep"), b"outside").unwrap();
         for case in [
-            "missing",
-            "malformed",
-            "version",
-            "identity",
-            "boot",
-            "oversized",
-            "link",
-            "hardlink",
-            "live",
+            Case::Missing,
+            Case::Malformed,
+            Case::Version,
+            Case::Identity,
+            Case::Boot,
+            Case::Oversized,
+            Case::Link,
+            Case::Hardlink,
+            Case::Live,
         ] {
             let root = parent
                 .path()
@@ -1077,23 +1089,28 @@ mod tests {
                 supervisor: None,
             };
             match case {
-                "version" => record.version += 1,
-                "identity" => record.root.1 += 1,
-                "boot" => record.boot = uuid::Uuid::nil(),
-                _ => {}
+                Case::Version => record.version += 1,
+                Case::Identity => record.root.1 += 1,
+                Case::Boot => record.boot = uuid::Uuid::nil(),
+                Case::Missing
+                | Case::Malformed
+                | Case::Oversized
+                | Case::Link
+                | Case::Hardlink
+                | Case::Live => {}
             }
             write_record(&directory.dir, RECOVERY_RECORD, &record).unwrap();
             match case {
-                "missing" => std::fs::remove_file(root.join(RECOVERY_RECORD)).unwrap(),
-                "malformed" => {
+                Case::Missing => std::fs::remove_file(root.join(RECOVERY_RECORD)).unwrap(),
+                Case::Malformed => {
                     std::fs::write(root.join(RECOVERY_RECORD), b"{\"version\":").unwrap()
                 }
-                "oversized" => std::fs::write(
+                Case::Oversized => std::fs::write(
                     root.join(RECOVERY_RECORD),
                     vec![b' '; super::super::storage::RECORD_BYTES_CAP + 1],
                 )
                 .unwrap(),
-                "link" => {
+                Case::Link => {
                     std::fs::remove_file(root.join(RECOVERY_RECORD)).unwrap();
                     std::os::unix::fs::symlink(
                         outside.path().join("keep"),
@@ -1101,12 +1118,12 @@ mod tests {
                     )
                     .unwrap();
                 }
-                "hardlink" => {
+                Case::Hardlink => {
                     std::fs::hard_link(root.join(RECOVERY_RECORD), root.join("alias")).unwrap()
                 }
-                _ => {}
+                Case::Version | Case::Identity | Case::Boot | Case::Live => {}
             }
-            let held = if case == "live" {
+            let held = if matches!(case, Case::Live) {
                 Some(lock)
             } else {
                 drop(lock);
@@ -1114,9 +1131,9 @@ mod tests {
             };
             assert!(
                 recover_root(&root).await.is_err(),
-                "recovery must reject {case}"
+                "recovery must reject {case:?}"
             );
-            assert!(root.exists(), "rejected {case} root must remain intact");
+            assert!(root.exists(), "rejected {case:?} root must remain intact");
             assert_eq!(
                 std::fs::read(outside.path().join("keep")).unwrap(),
                 b"outside"
