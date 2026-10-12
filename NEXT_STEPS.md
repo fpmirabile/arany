@@ -9,6 +9,14 @@ history. Implementation status and verified support are separate claims.
 
 ## Open defects
 
+- **macOS guarded-chat admission deadline.** After integrating Guard changes,
+  `native_chat_preserves_turns_with_guarded_tools_and_rejects_invalid_admission`
+  exceeded its 30-second deadline in both a full debug run and an isolated repeat.
+  A sampled fixture was inspecting code signatures in `SystemPrograms::admit`,
+  before Provider invocation. A subsequent full debug run passed unchanged;
+  release also passed. Measure cold catalogue admission before attributing the
+  delay to terminal rendering or relaxing the fixture deadline.
+
 - **Native Engine stopped-command timeout investigation.** The macOS corpus
   timed out once at its unchanged 30-second case deadline; a diagnostic-enabled
   repeat passed without raising it. The first failure lacked case/stage
