@@ -62,15 +62,6 @@ Missing real accounts, OS services, toolchains or another machine do not pause
 unaffected implementation. Synthetic tests do not authorize live calls or access
 to the user's credential store or clipboard.
 
-- **Native Linux shared-capacity recovery before PR #6 merge.** Run the
-  retained failed-unit owner
-  `tools::guard::linux::tests::retained_failed_unit_is_reset_before_capacity_is_reclaimed`
-  with `--ignored` on an isolated Linux account with a systemd user manager and
-  delegated cgroup v2. Verify native termination, failed-job reset and reservation
-  reclamation alongside the existing Tool journey. The Linux ARM64 container
-  proves compilation and cross-process FIFO/settings behavior, not those native
-  manager guarantees.
-
 1. **Broader ChatGPT workflows.** For other accounts/models, verify sign-in,
    visible model/effort, a direct task, follow-up, team and cancellation with
    closed Session inspection. Review the selected billing route and local-only
