@@ -10,7 +10,9 @@ mod agents;
 mod model;
 pub(crate) use agents::AgentInspectorModel;
 pub(crate) use model::{DraftAction, PresentationModel};
-pub(crate) use model::{linear_session_lines, model_id_preview, safe_truncate};
+pub(crate) use model::{
+    linear_session_lines, model_id_preview, safe_truncate, tool_capacity_notice,
+};
 
 impl std::fmt::Display for crate::session::CollaborationPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

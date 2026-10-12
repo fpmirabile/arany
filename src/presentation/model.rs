@@ -173,6 +173,21 @@ impl PresentationModel {
     }
 }
 
+pub(crate) fn tool_capacity_notice(
+    view: &SessionView,
+    id: Option<uuid::Uuid>,
+) -> Option<&'static str> {
+    let id = id?;
+    let run = view
+        .runs
+        .last()
+        .filter(|run| run.status == RunStatus::Active)?;
+    run.tools
+        .last()
+        .filter(|tool| tool.intent.id == id && tool.observation.is_none())?;
+    Some("Tool queued · waiting for capacity · Ctrl+C cancels")
+}
+
 pub(crate) fn linear_session_lines(view: &SessionView) -> Vec<String> {
     let run = view.runs.last();
     let pinned = run
@@ -463,6 +478,45 @@ mod tests {
         });
         let model = PresentationModel::from_session(&view, 80);
         assert_eq!(model.draft_action, DraftAction::InspectRun);
+        let id = uuid::Uuid::now_v7();
+        assert!(tool_capacity_notice(&view, Some(id)).is_none());
+        let run = view.runs.last_mut().unwrap();
+        let intent = crate::tools::EffectIntent {
+            id,
+            run_id,
+            agent_run_id: run.agents[0].id,
+            policy_digest: [1; 32],
+            enforcement_digest: [1; 32],
+            workspace_device: 1,
+            workspace_inode: 1,
+            call: crate::tools::ToolCall::List { path: ".".into() },
+            limits: Default::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        };
+        run.tools.push(crate::session::ToolView {
+            intent: intent.clone(),
+            observation: None,
+        });
+        assert!(
+            tool_capacity_notice(&view, Some(id))
+                .unwrap()
+                .contains("queued")
+        );
+        assert!(tool_capacity_notice(&view, None).is_none());
+        assert!(tool_capacity_notice(&view, Some(uuid::Uuid::now_v7())).is_none());
+        view.runs.last_mut().unwrap().tools[0].observation = Some(crate::tools::ToolObservation {
+            intent,
+            disposition: crate::tools::ToolDisposition::Succeeded,
+            output: String::new(),
+            guard: None,
+        });
+        assert!(tool_capacity_notice(&view, Some(id)).is_none());
+        view.runs.last_mut().unwrap().tools[0].observation = None;
+        view.runs.last_mut().unwrap().status = RunStatus::Finished;
+        assert!(tool_capacity_notice(&view, Some(id)).is_none());
+        view.runs.last_mut().unwrap().status = RunStatus::Active;
+        view.runs.last_mut().unwrap().tools.clear();
         assert!(model.status_line.contains("anthropic/claude-sonnet-5"));
         assert!(!model.status_line.contains("context "));
         for (used, budget, percent) in [(0, 65_536, 0), (1, 2, 50), (65_536, 65_536, 100)] {

@@ -8,7 +8,6 @@ use cap_std::fs::MetadataExt as _;
 use core_foundation::{base::CFType, dictionary::CFDictionary, string::CFString};
 use nix::libc;
 use serde::{Deserialize, Serialize};
-use std::io::Write;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -19,83 +18,29 @@ const BYTES_PER_MEBIBYTE: u64 = 1024 * 1024;
 const _: () = assert!(STORAGE_BYTES_CAP.is_multiple_of(BYTES_PER_MEBIBYTE));
 const STORAGE_NAMES: [&str; 2] = ["workspace", "scratch"];
 pub(super) const STORAGE_PENDING: &str = "storage.pending";
-pub(super) const RECORD_BYTES_CAP: usize = 2048;
 
-pub(super) fn read_record<T: serde::de::DeserializeOwned>(
-    directory: &cap_std::fs::Dir,
-    name: &str,
-) -> Result<T, ToolError> {
-    use cap_fs_ext::OpenOptionsFollowExt;
-    use cap_std::fs::{MetadataExt, OpenOptionsExt};
-    use std::io::Read;
-    let file = directory
-        .open_with(
-            name,
-            cap_std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NONBLOCK)
-                .follow(cap_fs_ext::FollowSymlinks::No),
-        )
-        .map_err(|_| ToolError::Path)?;
-    let metadata = file.metadata().map_err(|_| ToolError::Path)?;
-    if !metadata.is_file()
-        || metadata.uid() != rustix::process::geteuid().as_raw()
-        || metadata.mode() & 0o7777 != 0o600
-        || metadata.nlink() != 1
-        || metadata.len() > RECORD_BYTES_CAP as u64
-        || crate::private_fs::check_acl(&file, true).is_err()
-    {
-        return Err(ToolError::Path);
-    }
-    let mut bytes = Vec::new();
-    file.take(RECORD_BYTES_CAP as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| ToolError::Path)?;
-    if bytes.len() > RECORD_BYTES_CAP {
-        return Err(ToolError::Limit);
-    }
-    serde_json::from_slice(&bytes).map_err(|_| ToolError::ProtectionUnavailable)
-}
-
-pub(super) fn write_record(
-    directory: &cap_std::fs::Dir,
-    name: &str,
-    record: &impl Serialize,
-) -> Result<(), ToolError> {
-    use cap_fs_ext::OpenOptionsFollowExt;
-    use cap_std::fs::OpenOptionsExt;
-    let bytes = serde_json::to_vec(record).map_err(|_| ToolError::Operation)?;
-    if bytes.len() > RECORD_BYTES_CAP {
-        return Err(ToolError::Limit);
-    }
-    let temporary = format!("{name}.next");
-    let mut file = directory
-        .open_with(
-            &temporary,
-            cap_std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .follow(cap_fs_ext::FollowSymlinks::No),
-        )
-        .map_err(|_| ToolError::Operation)?;
-    file.write_all(&bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|_| ToolError::Operation)?;
-    directory
-        .rename(&temporary, directory, name)
-        .map_err(|_| ToolError::Operation)?;
-    directory
-        .open(".")
-        .and_then(|file| file.sync_all())
-        .map_err(|_| ToolError::Operation)
-}
+pub(super) use super::super::admission::{read_record, write_record};
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ImageIdentity {
     pub(super) device: u64,
     pub(super) inode: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PendingAttachment {
+    pub(super) version: u32,
+    pub(super) image: String,
+    pub(super) boot: uuid::Uuid,
+    pub(super) state: AttachmentState,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+pub(super) enum AttachmentState {
+    Attaching,
+    Observed,
 }
 
 async fn disk_command(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, ToolError> {
@@ -155,6 +100,12 @@ pub(super) async fn prepare_storage(root: &Path) -> Result<[cap_std::fs::Dir; 2]
         let image_path = image.to_str().ok_or(ToolError::Path)?;
         let mount_path = mount.to_str().ok_or(ToolError::Path)?;
         let size = format!("{}m", STORAGE_BYTES_CAP / BYTES_PER_MEBIBYTE);
+        let volume_name = format!(
+            "{}-{name}",
+            root.file_name()
+                .and_then(|name| name.to_str())
+                .ok_or(ToolError::Path)?
+        );
         disk_command(
             root,
             &[
@@ -170,7 +121,7 @@ pub(super) async fn prepare_storage(root: &Path) -> Result<[cap_std::fs::Dir; 2]
                 "Case-sensitive HFS+",
                 "-nospotlight",
                 "-volname",
-                name,
+                &volume_name,
                 image_path,
             ],
         )
@@ -203,16 +154,16 @@ pub(super) async fn prepare_storage(root: &Path) -> Result<[cap_std::fs::Dir; 2]
                 inode: metadata.ino(),
             },
         )?;
-        directory
-            .open_with(
-                STORAGE_PENDING,
-                cap_std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .follow(cap_fs_ext::FollowSymlinks::No),
-            )
-            .map_err(|_| ToolError::Operation)?;
+        write_record(
+            &directory,
+            STORAGE_PENDING,
+            &PendingAttachment {
+                version: 1,
+                image: name.to_owned(),
+                boot: super::ffi::boot_session()?,
+                state: AttachmentState::Attaching,
+            },
+        )?;
         disk_command(
             root,
             &[
@@ -354,10 +305,31 @@ pub(super) async fn cleanup_storage(root: &Path) -> Result<(), ToolError> {
         };
     }
     let mut devices = Vec::new();
-    let pending = directory.symlink_metadata(STORAGE_PENDING).is_ok();
+    let mut pending: Option<PendingAttachment> = match directory.symlink_metadata(STORAGE_PENDING) {
+        Ok(_) => Some(read_record(&directory, STORAGE_PENDING)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return Err(ToolError::Path),
+    };
     let mut admitted_image = false;
     let attached = disk_command(root, &["info", "-plist"]).await?;
     let owned_attachments = attachments(&attached, root)?;
+    if let Some(pending) = &pending {
+        if pending.version != 1 || !STORAGE_NAMES.contains(&pending.image.as_str()) {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        if pending.boot.is_nil() {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        verify_image(&directory, &pending.image)?;
+        if pending.boot == super::ffi::boot_session()?
+            && pending.state == AttachmentState::Attaching
+            && !owned_attachments
+                .iter()
+                .any(|attachment| attachment.name == pending.image)
+        {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+    }
     for name in STORAGE_NAMES {
         let metadata = match directory.symlink_metadata(name) {
             Ok(metadata) => metadata,
@@ -404,6 +376,14 @@ pub(super) async fn cleanup_storage(root: &Path) -> Result<(), ToolError> {
     }) {
         return Err(ToolError::ProtectionUnavailable);
     }
+    if let Some(pending) = &mut pending
+        && owned_attachments
+            .iter()
+            .any(|attachment| attachment.name == pending.image)
+    {
+        pending.state = AttachmentState::Observed;
+        super::super::admission::replace_record(&directory, STORAGE_PENDING, pending)?;
+    }
     for device in devices {
         // Recheck OS ownership immediately before acting on a potentially reused disk number.
         let current = disk_command(root, &["info", "-plist"]).await?;
@@ -424,27 +404,17 @@ pub(super) async fn cleanup_storage(root: &Path) -> Result<(), ToolError> {
         )
         .await?;
     }
-    if pending && !admitted_image {
+    if pending.is_some() && !admitted_image {
         return Err(ToolError::ProtectionUnavailable);
     }
     let remaining = disk_command(root, &["info", "-plist"]).await?;
     if !attachments(&remaining, root)?.is_empty() {
         return Err(ToolError::ProtectionUnavailable);
     }
-    match directory.symlink_metadata(STORAGE_PENDING) {
-        Ok(metadata)
-            if metadata.is_file()
-                && metadata.uid() == rustix::process::geteuid().as_raw()
-                && metadata.nlink() == 1
-                && metadata.len() == 0 =>
-        {
-            // Empty OS inventory after process termination settles an interrupted attach.
-            directory
-                .remove_file(STORAGE_PENDING)
-                .map_err(|_| ToolError::Operation)?;
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        _ => return Err(ToolError::ProtectionUnavailable),
+    if pending.is_some() {
+        directory
+            .remove_file(STORAGE_PENDING)
+            .map_err(|_| ToolError::Operation)?;
     }
     if storage_mounted(root)? {
         Err(ToolError::ProtectionUnavailable)
@@ -555,6 +525,48 @@ fn attachments(bytes: &[u8], root: &Path) -> Result<Vec<Attachment>, ToolError> 
         });
     }
     Ok(result)
+}
+
+#[cfg(test)]
+pub(super) async fn owned_devices(root: &Path) -> Result<Vec<std::path::PathBuf>, ToolError> {
+    let directory = crate::tools::fs::open_directory(root)?;
+    let bytes = disk_command(root, &["info", "-plist"]).await?;
+    let attached = attachments(&bytes, root)?;
+    for attachment in &attached {
+        verify_image(&directory, attachment.name)?;
+    }
+    Ok(attached
+        .into_iter()
+        .map(|attachment| attachment.device)
+        .collect())
+}
+
+#[cfg(test)]
+pub(super) async fn detach_owned_image(root: &Path, name: &str) -> Result<(), ToolError> {
+    let directory = crate::tools::fs::open_directory(root)?;
+    verify_image(&directory, name)?;
+    let bytes = disk_command(root, &["info", "-plist"]).await?;
+    let attached = attachments(&bytes, root)?;
+    let Some(attachment) = attached.iter().find(|attachment| attachment.name == name) else {
+        return Ok(());
+    };
+    if super::ffi::mounts()?
+        .iter()
+        .any(|(device, target)| device == &attachment.device && target != &root.join(name))
+    {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    disk_command(
+        root,
+        &[
+            "detach",
+            "-force",
+            "-quiet",
+            attachment.device.to_str().ok_or(ToolError::Path)?,
+        ],
+    )
+    .await?;
+    Ok(())
 }
 
 #[cfg(test)]

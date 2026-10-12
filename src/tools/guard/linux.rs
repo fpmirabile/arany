@@ -35,7 +35,7 @@ pub(super) fn check_available() -> Result<(), ToolError> {
 }
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
-    let mut bytes = b"arany-guard-v3:no-buffered-go-before-ready;pinned-skill-digest-pre-go;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account".to_vec();
+    let mut bytes = b"arany-guard-v4:shared-fifo-capacity;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account".to_vec();
     bytes.extend_from_slice(&profile::profile_digest()?);
     Ok(digest(&bytes))
 }
@@ -109,7 +109,7 @@ impl Unit {
     async fn properties(&self) -> Result<serde_json::Value, ToolError> {
         let mut command = manager_command("/usr/bin/systemctl");
         command.args(["--user", "--no-ask-password", "show", &self.name,
-            "--property=Id,InvocationID,ControlGroup,MainPID,ActiveState,SubState,ExecMainCode,ExecMainStatus"]);
+            "--property=Id,LoadState,InvocationID,ControlGroup,MainPID,ActiveState,SubState,ExecMainCode,ExecMainStatus"]);
         let (status, stdout, _) = capture(
             command
                 .spawn()
@@ -309,12 +309,50 @@ impl Drop for Unit {
     }
 }
 
+pub(super) async fn recover_reservation(id: uuid::Uuid) -> Result<bool, ToolError> {
+    let mut unit = Unit {
+        name: format!("arany-tool-{id}.service"),
+        invocation: None,
+        group: None,
+        kill: None,
+    };
+    let values = unit.properties().await?;
+    // No loaded unit cannot settle a controller interrupted during its launch request.
+    if values["Id"].as_str() != Some(&unit.name) || values["LoadState"] != "loaded" {
+        return Ok(false);
+    }
+    if matches!(values["ActiveState"].as_str(), Some("inactive" | "failed"))
+        && values["MainPID"] == "0"
+        && values["ControlGroup"] == ""
+    {
+        unit.stop().await?;
+        return Ok(true);
+    }
+    let group = values["ControlGroup"]
+        .as_str()
+        .ok_or(ToolError::ProtectionUnavailable)?;
+    if !group.starts_with("/user.slice/") || !group.ends_with(&unit.name) || group.contains("..") {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    unit.group = Some(crate::tools::fs::open_directory(
+        &Path::new("/sys/fs/cgroup").join(group.trim_start_matches('/')),
+    )?);
+    unit.invocation = values["InvocationID"].as_str().map(str::to_owned);
+    unit.stop().await?;
+    unit.empty()
+}
+
 pub(super) async fn execute_inner(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
     mut cancellation: RunCancellation,
     dispatched: &mut bool,
 ) -> Result<ToolObservation, ToolError> {
+    let mut permit = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(ToolError::Operation),
+        permit = super::admission::acquire(intent.id, intent.expires_at_ms, |queued| runtime.queue_changed(intent.id, queued)) => permit?,
+    };
     let deadline = tokio::time::Instant::now()
         + Duration::from_millis(u64::from(intent.limits.runtime_ms))
         + Duration::from_secs(5);
@@ -323,7 +361,7 @@ pub(super) async fn execute_inner(
     let snapshot =
         crate::tools::fs::Snapshot::create(&workspace, &runtime.config, intent.call.is_process())?;
     let mut unit = Unit {
-        name: format!("arany-tool-{}.service", intent.id),
+        name: format!("arany-tool-{}.service", permit.id),
         invocation: None,
         group: None,
         kill: None,
@@ -445,6 +483,7 @@ pub(super) async fn execute_inner(
     let mut child = command
         .spawn()
         .map_err(|_| ToolError::ProtectionUnavailable)?;
+    permit.launched();
     let mut stdin = child.stdin.take().ok_or(ToolError::Operation)?;
     let mut stdout = BufReader::new(child.stdout.take().ok_or(ToolError::Operation)?);
     let stderr = child.stderr.take().ok_or(ToolError::Operation)?;
@@ -495,6 +534,9 @@ pub(super) async fn execute_inner(
     if !matches!(cleanup, Ok(Ok(()))) {
         unit.kill_group();
     }
+    if matches!(cleanup, Ok(Ok(()))) {
+        permit.release();
+    }
     let _ = child.start_kill();
     let reaped = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
     let drained = drain_stderr(&mut stderr_task).await;
@@ -524,4 +566,62 @@ pub(super) async fn execute_inner(
         return Err(ToolError::GuardRejected(stage));
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "native Linux retained failed-unit recovery; requires systemd user manager and delegated cgroup v2"]
+    async fn retained_failed_unit_is_reset_before_capacity_is_reclaimed() {
+        check_available().unwrap();
+        let id = uuid::Uuid::now_v7();
+        let unit = Unit {
+            name: format!("arany-tool-{id}.service"),
+            invocation: None,
+            group: None,
+            kill: None,
+        };
+        let name = unit.name.clone();
+        let result = tokio::spawn(async move {
+            let mut command = manager_command("/usr/bin/systemd-run");
+            command.args([
+                "--user",
+                "--no-ask-password",
+                "--quiet",
+                "--wait",
+                "--service-type=exec",
+                "--unit",
+                &unit.name,
+                "--property=Restart=no",
+                "--property=KillMode=control-group",
+                "--property=TimeoutStopSec=2s",
+                "--property=RuntimeMaxSec=5s",
+                "/usr/bin/false",
+            ]);
+            let (status, _, _) = capture(command.spawn().unwrap(), 4096, Duration::from_secs(10))
+                .await
+                .unwrap();
+            assert!(!status.success());
+            let failed = unit.properties().await.unwrap();
+            assert_eq!(failed["ActiveState"], "failed");
+            assert_eq!(failed["MainPID"], "0");
+            assert_eq!(failed["ControlGroup"], "");
+            assert!(recover_reservation(id).await.unwrap());
+            let reset = unit.properties().await.unwrap();
+            assert_ne!(reset["ActiveState"], "failed");
+            assert_eq!(reset["MainPID"], "0");
+            assert_eq!(reset["ControlGroup"], "");
+        })
+        .await;
+        for action in ["stop", "reset-failed"] {
+            let mut command = manager_command("/usr/bin/systemctl");
+            command.args(["--user", "--no-ask-password", action, &name]);
+            if let Ok(child) = command.spawn() {
+                let _ = capture(child, 4096, MANAGER_DEADLINE).await;
+            }
+        }
+        result.unwrap();
+    }
 }

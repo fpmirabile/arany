@@ -23,6 +23,9 @@ mod profile;
 #[cfg(target_os = "macos")]
 mod macos;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod admission;
+
 pub(super) fn runtime_roots() -> &'static [&'static str] {
     if cfg!(target_os = "macos") {
         &["/System/Library", "/usr/lib", "/bin", "/usr/bin"]

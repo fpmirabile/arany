@@ -92,7 +92,8 @@ The current-thread Tokio coordinator owns async lifecycle. One named standard-li
 Store and Guard share a private filesystem admission module for checked
 directory handles and native ACL validation. This module knows neither history
 nor Tool policy. Store creates its database, records and leases after admission;
-Guard admits only its temporary control directory and retains its handle.
+Guard admits its private capacity/settings directory and temporary control roots,
+retaining their checked handles independently of history.
 
 ## 3. Physical beta shape
 
@@ -413,6 +414,14 @@ The private attached model owner persists token-free `model-preferences.json` un
 The attached command owner persists token-free `ui-preferences.json` at the selected admitted state root through the existing private replacement lock and atomic file transport. Its closed versioned 1 KiB record selects slash completion tabs or a combined list; defaults and malformed-record recovery use tabs. The Composer owns tab/focus state and the frame places the bounded list below input, sharing history-capacity geometry with the lifecycle owner. Preferences never enter canonical Events, account authority, Tool grants or Provider context.
 
 The Engine publishes the latest acknowledged RunView and committed sequence through a one-slot coalescing progress handle. Skipped display intermediates never skip canonical Events. Before Engine admission, preparing feedback remains presentation-local; afterward activity derives solely from committed current-Run facts. Closed replay, terminal restoration and typed CLI classification precede receipt/answer output.
+
+Guard's shared capacity wait is a separate one-slot intent-ID hint, validated
+against the committed pending Tool before display. It cannot enter history or
+authorize/replay work. Linux/macOS Guard own user-level private FIFO/reservations
+and validated settings independently of Session roots; Engine owns immutable
+intent/approval and aggregate Run deadlines. No native lock or process type
+crosses into Engine. [Shared capacity](../specs/tools.md#shared-native-capacity-and-settings)
+owns defaults, configuration, resource bounds and interruption semantics.
 
 A terminal-owned clipboard worker has bounded trusted OS-client ownership distinct from the reader and Engine. Immutable image values cross semantic Provider/Session boundaries; human drawing receives metadata. Canonical image bytes, multimodal context and compaction remain under the image/Session/Store owners.
 

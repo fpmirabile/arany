@@ -61,6 +61,9 @@ resource semantics and unavailable-capability rejection.
 - Pin backing image inodes before attachment. Detachment cross-checks bounded
   `hdiutil info -plist` output with the kernel mount table, rejects foreign/nested
   mount targets and verifies device absence before clearing an attach marker.
+  Record the interrupted image/boot and persist its observed phase before
+  detachment. Empty inventory cannot settle an unobserved same-boot attachment;
+  cancellation after observed detachment must remain recoverable.
   Root removal checks the admitted directory identity and every descendant mount.
   Keep the eight-attempt, 4096-entry and 30-second recovery bounds off the terminal
   reactor, and retain records on cancellation or incomplete observation.

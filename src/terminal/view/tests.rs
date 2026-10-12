@@ -579,6 +579,21 @@ fn inline_frame_keeps_composer_and_status_in_the_viewport() {
         let row = |y| buffer_row(buffer, y);
         assert!(row(2).contains("hello\\u{202e}[31m"));
         assert!(row(4).contains("Error: retry"));
+        terminal
+            .draw(|frame| {
+                draw_frame(
+                    frame,
+                    &model,
+                    &composer,
+                    Some("Tool queued · waiting for capacity · Ctrl+C cancels"),
+                    Palette { color: false },
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!(buffer_row(buffer, 4).contains("Tool queued"));
+        assert!(buffer_row(buffer, 4).contains("waiting for capacity"));
+        assert!(buffer_row(buffer, 2).contains("hello\\u{202e}[31m"));
     }
 
     let mut terminal = Terminal::new(TestBackend::new(80, 5)).expect("test terminal");

@@ -65,6 +65,7 @@ pub(super) async fn submit_objective(
     let starting_sequence = view.last_sequence;
     let cancellation = RunCancellation::new();
     let mut progress = RunProgress::new();
+    let mut waiting_progress = progress.clone();
     let (approvals, mut inbox) =
         arany::ToolApprovals::new(composer.approval_mode().unwrap_or_default());
     let mut pending: Option<arany::ToolApproval> = None;
@@ -120,6 +121,7 @@ pub(super) async fn submit_objective(
                 approval_answer.clear();
             }
             result = &mut future => {
+                terminal.set_waiting_tool(None);
                 composer.set_file_candidates(None, Vec::new());
                 if terminal.close_agents_at_run_end().is_err() {
                     return Ok(RunSubmission::Shutdown(
@@ -155,6 +157,12 @@ pub(super) async fn submit_objective(
                     view.runs.push(update.run);
                 }
                 view.last_sequence = update.sequence;
+                if draw_active_snapshot(terminal, view, composer, user_recorded, cancelling, None).is_err() {
+                    break "terminal rendering failed".to_owned();
+                }
+            }
+            waiting = waiting_progress.waiting_changed() => {
+                terminal.set_waiting_tool(waiting);
                 if draw_active_snapshot(terminal, view, composer, user_recorded, cancelling, None).is_err() {
                     break "terminal rendering failed".to_owned();
                 }

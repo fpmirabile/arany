@@ -20,12 +20,27 @@ history. Implementation status and verified support are separate claims.
   Reduce the per-call signature scan, for example by pinning the checked catalogue
   at Tool admission, after a security review of the
   [Guard rules](./agents/guard.md). Keep fail-closed dispatch and zero automatic retries.
+  The native Engine's stopped-command corpus also timed out once at its unchanged
+  30-second case deadline; a diagnostic-enabled repeat passed without raising it.
+  The first failure lacked case/stage evidence, so its cause is unestablished.
+  On recurrence use the case, committed progress and queued hint now reported by
+  that owner, then capture native preparation/recovery/cleanup stages before
+  attributing the timeout to admission, cancellation or host load.
 - **Credential-bus deadline investigation.** The [parent-deadline investigation](./docs/research/harness-credential-timeouts-2026-10.md#aranys-recorded-parent-deadline-miss)
   lacks contemporaneous acceptance/helper/reap/composer/exit/EOF and load
   metadata for the reported miss. Capture those bounded stages on recurrence
   before attributing a product regression or changing a deadline.
 
 ## Next functional priority
+
+- **Linux host seed ownership after controller death.** Existing
+  `/tmp/arany-tools-*` snapshots contain selected Workspace/runtime data and use
+  Drop-only removal. `SIGKILL` can retain those private files indefinitely after
+  the systemd/cgroup unit ends; the shared unit quota does not bound cumulative
+  host seed storage. Bind new snapshots' checked path/device/inode to their
+  reservation before copying, retain capacity until validated deletion, and
+  prove recovery after actual native termination. Existing unrecorded roots
+  must remain untouched; a filename-prefix sweep cannot authorize deletion.
 
 - **Deferred Anthropic consumer subscriptions.** Native Claude-plan access is
   missing and user-deferred behind the [route/authorization gate](./docs/research/subscription-provider-routes-2026-10.md#decision-boundary-for-beta-1).
@@ -46,6 +61,15 @@ Perform these after implementation handoff with deliberate consent for usage.
 Missing real accounts, OS services, toolchains or another machine do not pause
 unaffected implementation. Synthetic tests do not authorize live calls or access
 to the user's credential store or clipboard.
+
+- **Native Linux shared-capacity recovery before PR #6 merge.** Run the
+  retained failed-unit owner
+  `tools::guard::linux::tests::retained_failed_unit_is_reset_before_capacity_is_reclaimed`
+  with `--ignored` on an isolated Linux account with a systemd user manager and
+  delegated cgroup v2. Verify native termination, failed-job reset and reservation
+  reclamation alongside the existing Tool journey. The Linux ARM64 container
+  proves compilation and cross-process FIFO/settings behavior, not those native
+  manager guarantees.
 
 1. **Broader ChatGPT workflows.** For other accounts/models, verify sign-in,
    visible model/effort, a direct task, follow-up, team and cancellation with

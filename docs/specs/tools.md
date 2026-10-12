@@ -257,19 +257,22 @@ Storage cleanup requires the pinned backing image inode, OS disk-image inventory
 and exact kernel device/mount correspondence. Unexpected or nested mount targets
 reject before detachment; even an attached but unmounted owned image must be
 detached. An interrupted attachment marker is cleared only after positive
-absence of owned attachments. Root deletion additionally requires absence of
+absence after detaching the positively identified interrupted image, or evidence
+that its recorded boot has ended. Empty inventory alone cannot settle an
+unfinished attachment from the current boot. The marker identifies its image
+and boot. Recovery durably records positive observation before detachment so
+cancellation after detach cannot strand a settled marker. Root deletion additionally requires absence of
 all mounts beneath the checked root. Cancellation or failure leaves recoverable
 records in place and never retries an old Tool intent.
 
 Unlocked roots without valid ownership records, including older retained roots,
-remain untouched and count toward the existing eight-root admission limit. Eight
-unrecovered roots reject further native unit creation before any new root or
-storage is created, bounding retained fixed images to 1 GiB. That rejection
-names `/private/tmp/arany-u-*` for manual inspection/removal. Unreadable or
+remain untouched and count toward shared capacity, together with live/recovering
+roots. Valid records are selected before the eight recovery-attempt budget is
+spent. Unreadable or
 over-limit listings and recovery deadline expiry reject as unavailable native
 protection without removal advice. A filename prefix alone never authorizes
-cleanup; there is no stored-format migration or compatibility fallback. Roots
-without a lock, abandoned before storage admission, never count.
+cleanup; there is no stored-format migration or compatibility fallback. Counting
+all owned roots conservatively includes roots interrupted before lock publication.
 
 Commands and MCP receive a fresh checked snapshot of the selected Workspace,
 including prior typed edits, and a separate read-only tree of pinned runtime
@@ -297,6 +300,51 @@ and `ARANY_TOOL_SKILLS`, or project-relative paths, inside scripts. `HOME` and
 `TMPDIR` point to private scratch. Checked system binaries execute at their
 original paths because native relocation is not universally supported.
 
+## Shared native capacity and settings
+
+Linux and macOS coordinate Guard capacity across processes and Session roots
+using the effective user's fixed account root. The owner-only file
+`guard/limits.json` is created on first native admission with:
+
+```json
+{"version":1,"units":8,"queued":32}
+```
+
+Edit that private file to change capacity; preserve mode `0600` and the private
+directory. On macOS the fixed account root is
+`~/Library/Application Support/dev.Arany.arany`; on Linux it is
+`~/.local/state/arany`, resolved from the effective user's account rather than
+environment-selected Session storage. `units` accepts 1–64 and `queued` accepts
+1–1024. Unknown fields/versions, unsafe files and invalid ranges reject admission.
+Every admission rereads settings. Lowering a limit never kills admitted units or
+registered waiters; no new admission exceeds the selected limit. Existing usage
+may therefore temporarily exceed a newly lowered value.
+
+Every Guard unit, including file-only units, reserves one slot before native
+launch. Live, recovering and retained units count. At defaults, newly admitted
+macOS units reserve at most 1 GiB of backing images in aggregate (two 64 MiB images
+per unit); the configured ceiling is `units × 128 MiB`. Existing excess roots
+from a previous implementation are retained and prevent further admission.
+Linux's per-unit mount/cgroup limits remain unchanged; a slot is released only
+after positive native-unit termination. Linux's existing host seed snapshots have
+Drop-only cleanup; controller death can retain them without a cumulative disk
+bound. Their ownership/recovery gap is tracked in [Next steps](../../NEXT_STEPS.md).
+A dead Linux reservation is recovered using its exact
+recorded unit, resetting a failed transient job before reclaiming capacity, or
+retired after its boot ends. A nil boot identity cannot establish that transition.
+Uncertain startup remains reserved.
+
+When capacity is occupied, the approved Tool remains pending in its current Run.
+Up to `queued` Tools register in one shared FIFO, ordered by registration under
+the namespace lock. Newcomers cannot overtake registered waiters. Cancellation,
+original intent expiry and process death remove the participant's position.
+Overflow rejects before effects. Waiting never renews an intent, approval or Run
+budget and is not a durable task queue; restart never resumes old permissions.
+There is one pending Tool per Run. A temporary `queued` indication is display-only
+and absent from Events, replay and Provider context. Native recovery retains its
+30-second deadline within the original intent lifetime; local filesystem bounds
+remain cooperative rather than hard-real-time guarantees.
+
 ## Linux enforcement and compatibility
 
 The first enforcer requires installed non-set-ID, root-owned `/usr/bin/bwrap`, `/usr/bin/systemd-run`, `/usr/bin/systemctl` and `/usr/bin/env`, working unprivileged user namespaces, a systemd user manager and cgroup v2 with effective memory/swap/PID/CPU limits and owned cgroup termination. This is a kernel/native-capability contract, not a GNOME/KDE dependency. Other Linux init systems need a separately enforcing adapter; Arany does not pretend the present implementation works without these facilities. Unsupported architecture or missing enforcement fails closed, with no unsandboxed fallback. macOS uses the separate native profiles described above.
@@ -309,6 +357,8 @@ Byte/entry bounds on synchronous local snapshot preparation do not guarantee a f
 
 | Scenario | Required observation | Existing owner |
 |---|---|---|
+| Shared native capacity, settings and FIFO | Simultaneous first creation succeeds; eight default units and 32 registered waiters remain bounded across processes; overflow rejects before launch; cancellation, expiry and dead heads advance FIFO without newcomer overtaking. Valid settings change admission and invalid ranges fail closed; a queued macOS head can recover capacity abandoned during its wait. | [Shared admission corpus](../../src/tools/guard/admission.rs) |
+| Retained Linux failed native unit | The exact failed transient job has no payload/cgroup; recovery resets its failure before reclaiming capacity. Unknown startup is retained. Native execution remains pending under [Next steps](../../NEXT_STEPS.md). | [Native retained-unit owner](../../src/tools/guard/linux.rs) |
 | Folder admission before account setup | Every attached entry resolves folder access first, including without an account and with explicit flags. Ctrl+C enters no account flow and creates no Session. Read-only/dismissal asks again next time; remembered trust skips the prompt only for the same directory identity. macOS retains ordinary chat after consent and admits granted Tools only after native protection attests. Explicit `--tools` discloses retained private-config authority at the choice. An initially unconfigured trusted conversation restores its displayed approval mode when a supported native Provider is selected. | [Startup consent journey](../../tests/session_run/startup_trust.rs), [native macOS attached composition](../../src/cli/attached/run.rs) |
 | Native macOS attached capability | Remembered trust offers file/Skill Tools, the pinned native shell and approval controls while ordinary/resumed greetings retain history without effect Events; stale executable pins reject before inference and preserve the committed prefix | [Native macOS attached composition](../../src/cli/attached/run.rs) |
 | Private grant and project discovery | Only selected roots and `.agents/skills` contribute pinned guidance; private names take precedence; unsafe paths and overflow reject | [Tool configuration and discovery corpus](../../src/tools/tests.rs), [native Skill journey](../../tests/session_run/tools.rs) |
@@ -320,7 +370,7 @@ Byte/entry bounds on synchronous local snapshot preparation do not guarantee a f
 | Guard task framing | Truncated, malformed and oversized task frames reject before Ready and effects; the exact-capacity valid frame reaches Ready but still requires GO | [Native refusal corpus](../../tests/session_run/tools_macos.rs) |
 | Native macOS owned unit and supervised resources | Escaped orphan descendants remain owned; stale audit tokens cannot signal another incarnation; aggregate memory/task excess and per-process CPU excess with ignored SIGXCPU terminate the complete unit; cleanup confirms the coalition empty and the job absent | [Activated native unit owner](../../src/tools/guard/macos/unit.rs) |
 | Native macOS private-storage lifecycle | Both private filesystems enforce their 64-MiB capacities through actual `ENOSPC`; storage survives supervisor termination for clean detachment; partial setup and unwind clean owned mounts; unsafe targets remain untouched and uncertain cleanup retains its control root | [Activated native unit owner](../../src/tools/guard/macos/unit.rs) |
-| Native macOS crash recovery | Abrupt controller death releases its lock; the next admission terminates escaped descendants, removes the job, detaches owned images and permits another unit. Live/foreign roots, malformed or missing records, root/image identity drift and unexpected mounts remain untouched; cross-boot recovery never signals stale identities | [Activated native unit owner and refusal corpus](../../src/tools/guard/macos/unit.rs), [disk inventory corpus](../../src/tools/guard/macos/storage.rs) |
+| Native macOS crash recovery | Abrupt controller death during real attachment releases its lock; admission terminates escaped descendants and the live attachment worker, removes the job, detaches positively owned images and permits another unit. Real recovery-detach cancellation retains records/ownership and succeeds on retry, including an interrupted-attachment marker. Empty inventory without prior observation retains uncertain roots. Live/foreign roots, malformed/missing records, identity drift and unexpected mounts remain untouched; invalid records do not consume valid-candidate attempts; cross-boot recovery never signals stale identities | [Activated native unit owner and refusal corpus](../../src/tools/guard/macos/unit.rs), [disk inventory corpus](../../src/tools/guard/macos/storage.rs) |
 | Native macOS command/MCP lifecycle | Ordinary native child launches, including bursts of short-lived children, succeed with current selected snapshots and discarded changes; unselected host metadata, ancestor listings, network/signals/privilege changes reject; commands retain signal compatibility without inheriting the file-worker CPU limit; bounded protocol/output failures retain receipts; approval cancellation and missing post-GO completion retain closed replay without retry | [Native Engine journey](../../tests/session_run/tools_macos.rs), [activated native unit owner](../../src/tools/guard/macos/unit.rs) |
 | Approval, denial and uncertain review | Only a granted immutable action can dispatch once; failed/uncertain AI review asks a human; denial/cancellation stops and closed replay agrees | [Native approval journeys](../../tests/session_run/tools.rs), [approval policy](../../src/tools/approval.rs) |
 | Uncertainty, cancellation, receipt bounds and fresh resumed work | Missing post-GO completion remains uncertain; bounded receipts persist; fresh inspection/edit does not execute old intents | [Native Tool journeys](../../tests/session_run/tools.rs), [Tool corpus](../../src/tools/tests.rs), [replay](../../src/store/replay.rs) |

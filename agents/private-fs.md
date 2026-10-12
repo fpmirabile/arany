@@ -8,6 +8,8 @@ Guard share this internal filesystem boundary; it has no history or Tool policy.
   New components use mode `0700`; existing leaves require the current owner and
   private permissions. Root-owned sticky temporary ancestors remain admissible.
   Symlinked ancestors reject too, including macOS `/tmp` and `/var` aliases.
+  Concurrent creation may return `AlreadyExists`; still reopen through the same
+  no-follow handle and apply every ordinary directory/owner/ACL check.
   Select physical paths such as `/private/tmp`; never canonicalize an untrusted
   supplied path to bypass this admission rule. Native fixtures use a physical
   temporary root, and user-selected State/account paths follow the same rule.
