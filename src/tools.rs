@@ -106,6 +106,10 @@ pub(crate) struct ToolRuntime {
     workspace_identity: (u64, u64),
     guard_executable: PathBuf,
     enforcement_digest: [u8; 32],
+    #[cfg(target_os = "macos")]
+    system_programs: Option<std::sync::Arc<guard::SystemPrograms>>,
+    #[cfg(target_os = "macos")]
+    process_enforcement_digest: [u8; 32],
 }
 
 impl ToolRuntime {
@@ -151,12 +155,25 @@ impl ToolRuntime {
             fs::reject_overlap(Path::new(path), state.path())?;
             fs::reject_overlap(Path::new(path), &account)?;
         }
+        #[cfg(target_os = "macos")]
+        let system_programs = if config.commands.is_empty() && config.mcp.is_empty() {
+            None
+        } else {
+            Some(std::sync::Arc::new(guard::SystemPrograms::admit()?))
+        };
+        #[cfg(target_os = "macos")]
+        let process_enforcement_digest =
+            guard::macos_enforcement_digest(system_programs.as_deref())?;
         Ok(Self {
             config,
             workspace: workspace.to_owned(),
             workspace_identity,
             guard_executable,
             enforcement_digest,
+            #[cfg(target_os = "macos")]
+            system_programs,
+            #[cfg(target_os = "macos")]
+            process_enforcement_digest,
         })
     }
 
@@ -195,12 +212,19 @@ impl ToolRuntime {
         agent_run_id: AgentRunId,
         call: ToolCall,
     ) -> EffectIntent {
+        let enforcement_digest = self.enforcement_digest;
+        #[cfg(target_os = "macos")]
+        let enforcement_digest = if call.is_process() {
+            self.process_enforcement_digest
+        } else {
+            enforcement_digest
+        };
         EffectIntent {
             id: uuid::Uuid::now_v7(),
             run_id,
             agent_run_id,
             policy_digest: self.config.digest(),
-            enforcement_digest: self.enforcement_digest,
+            enforcement_digest,
             workspace_device: self.workspace_identity.0,
             workspace_inode: self.workspace_identity.1,
             call,

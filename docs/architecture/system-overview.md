@@ -45,6 +45,14 @@ owner with a private reactor. Native teardown, including synchronous unwind,
 does not occupy the terminal reactor. Abandoning that await cancels the owner;
 the dispatch marker still distinguishes pre-GO refusal from uncertain execution.
 
+macOS Tool admission owns one transient signature-checked system executable
+catalogue per command/MCP-enabled Run. Process intents bind that catalogue into
+their enforcement digest; the controller passes it through the authenticated
+unit Task channel, and each Seatbelt worker revalidates its no-follow metadata
+pins before Ready. File/Skill workers retain the compiled policy digest without
+carrying a catalogue. The [Guard rules](../../agents/guard.md) own cache and
+admission constraints.
+
 ```mermaid
 flowchart LR
     User([User or script]) --> CLI[Arany CLI]

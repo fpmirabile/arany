@@ -22,6 +22,8 @@ mod profile;
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+pub(super) use macos::{SystemPrograms, macos_enforcement_digest};
 
 pub(super) fn runtime_roots() -> &'static [&'static str] {
     if cfg!(target_os = "macos") {
@@ -54,6 +56,21 @@ struct Task {
     workspace: std::path::PathBuf,
     #[cfg(target_os = "macos")]
     guard_executable: std::path::PathBuf,
+    #[cfg(target_os = "macos")]
+    system_programs: Option<SystemPrograms>,
+}
+
+impl Task {
+    fn enforcement_digest(&self) -> Result<[u8; 32], ToolError> {
+        #[cfg(target_os = "macos")]
+        {
+            macos_enforcement_digest(self.system_programs.as_ref())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            enforcement_digest()
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -403,7 +420,7 @@ pub(super) fn helper_main() -> ExitCode {
             || task.intent.policy_digest != task.config.digest()
             || task.intent.expires_at_ms <= now_ms()
             || !task.config.allows(&task.intent.call)
-            || task.intent.enforcement_digest != enforcement_digest()?
+            || task.intent.enforcement_digest != task.enforcement_digest()?
             || task.intent.limits.resource_profile != ToolLimits::default().resource_profile
         {
             return Err(ToolError::Configuration);
@@ -442,7 +459,7 @@ pub(super) fn helper_main() -> ExitCode {
             #[cfg(target_os = "linux")]
             namespaces: profile::Namespaces::read()?,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            profile_digest: enforcement_digest()?,
+            profile_digest: task.enforcement_digest()?,
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             profile_digest: [0; 32],
         };
