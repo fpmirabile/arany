@@ -20,10 +20,6 @@ history. Implementation status and verified support are separate claims.
   Reduce the per-call signature scan, for example by pinning the checked catalogue
   at Tool admission, after a security review of the
   [Guard rules](./agents/guard.md). Keep fail-closed dispatch and zero automatic retries.
-- **Credential-bus deadline investigation.** The [parent-deadline investigation](./docs/research/harness-credential-timeouts-2026-10.md#aranys-recorded-parent-deadline-miss)
-  lacks contemporaneous acceptance/helper/reap/composer/exit/EOF and load
-  metadata for the reported miss. Capture those bounded stages on recurrence
-  before attributing a product regression or changing a deadline.
 
 ## Next functional priority
 
