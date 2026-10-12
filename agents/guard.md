@@ -34,10 +34,20 @@ limits and compatibility.
   once. Never parse or print arbitrary native diagnostics. The syscall-number
   filter and explicit Darwin syscall numbers support only reviewed 64-bit ABIs.
 - Grant ancestor metadata only, without directory-data access; unrelated host
-  metadata and control-root listings must remain denied. The policy fingerprint
-  covers profile rules, admission algorithms and enforced constants. Fresh
-  executable catalogues instantiate that policy; configured pins and selected
-  resources are bound separately by the normalized intent and configuration.
+  metadata and control-root listings must remain denied. The compiled policy
+  fingerprint covers profile rules, admission algorithms and enforced constants.
+  For command/MCP grants, Tool admission checks one bounded system executable
+  catalogue per Run; process intents bind its contents and file metadata stamps
+  into the enforcement digest. Pass that typed catalogue only through the trusted
+  controller/supervisor Task channel, never Workspace or payload input, and never
+  persist it as an authority cache. Workers revalidate every entry through
+  no-follow handles: root ownership, non-writable non-set-ID permissions,
+  device/inode, size and modification/change timestamps. Reject drift before
+  Ready; do not repeat the signature scan or refresh a stale catalogue within an
+  admitted Run. Keep the catalogue inside the existing Task byte/entry bounds;
+  overflow rejects without dispatch. File/Skill intents retain the compiled
+  digest and carry no catalogue. Configured pins and selected resources remain
+  bound by the normalized intent and configuration.
   The command profile additionally reads the literal filesystem root for the
   native loader; this does not grant reads beneath that directory. Do not
   remove it without native launch evidence: the loader opens `/` and aborts

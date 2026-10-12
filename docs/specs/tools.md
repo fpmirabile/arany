@@ -8,8 +8,6 @@ Folder consent and native Tool capability are independent. On platforms without 
 
 The native macOS profile admits checked file operations, pinned Skill data,
 host-native commands and local MCP through a separate trusted Guard worker.
-An intermittent rejection of MCP or commands before GO under host load remains an
-[open defect](../../NEXT_STEPS.md#open-defects).
 File/Skill dispatch prohibits program execution. Commands and MCP use private
 disposable storage and retain ordinary native child launches. Both preserve
 approval, GO, offline credential/state exclusion, supervised process ownership,
@@ -279,6 +277,14 @@ including prior typed edits, and a separate read-only tree of pinned runtime
 resources. Writable project/scratch mounts prohibit set-ID behavior. Reviewed
 system executables must be immutable, root-owned, non-set-ID and unentitled;
 privileged process/credential/coalition changes remain denied even after exec.
+When a grant enables commands or MCP, admission checks the bounded system
+executable catalogue once per Run. Each process intent and receipt binds that
+catalogue to the compiled enforcement policy. Workers revalidate its no-follow
+file identities, ownership, permissions, size and modification/change timestamps
+before Ready; changed or oversized catalogues reject before dispatch without
+refresh or retry. The catalogue is transient trusted-controller data and shares
+the existing Task byte cap. File/Skill workers carry no catalogue. Privileged OS
+mutation remains outside the current-user attacker boundary.
 The runtime excludes host account and Session roots, network destinations and
 Mach services. Root or mismatched real/effective identities reject process
 dispatch. Ordinary unprivileged `fork`, `exec` and `posix_spawn` remain available.
@@ -345,7 +351,7 @@ remain cooperative rather than hard-real-time guarantees.
 
 ## Linux enforcement and compatibility
 
-The first enforcer requires installed non-set-ID, root-owned `/usr/bin/bwrap`, `/usr/bin/systemd-run`, `/usr/bin/systemctl` and `/usr/bin/env`, working unprivileged user namespaces, a systemd user manager and cgroup v2 with effective memory/swap/PID/CPU limits and owned cgroup termination. This is a kernel/native-capability contract, not a GNOME/KDE dependency. Other Linux init systems need a separately enforcing adapter; Arany does not pretend the present implementation works without these facilities. Unsupported architecture or missing enforcement fails closed, with no unsandboxed fallback. macOS uses the separate native profiles described above.
+The first enforcer requires installed non-set-ID, root-owned `/usr/bin/bwrap`, `/usr/bin/systemd-run`, `/usr/bin/systemctl` and `/usr/bin/env`, working unprivileged user namespaces, a systemd user manager and cgroup v2 with effective memory/swap/PID/CPU limits and owned cgroup termination. `systemd-run` must support `--expand-environment=no`; installation alone does not establish compatible launch capabilities. This is a kernel/native-capability contract, not a GNOME/KDE dependency. Other Linux init systems need a separately enforcing adapter; Arany does not pretend the present implementation works without these facilities. Unsupported architecture or missing enforcement fails closed, with no unsandboxed fallback. macOS uses the separate native profiles described above.
 
 The Guard verifies isolated mount/network/PID/user/IPC/UTS namespaces, dropped capabilities, no-new-privileges, inherited syscall filters and effective limits before releasing a one-use intent. It owns the exact transient unit, invocation and retained cgroup identity, including double-fork/setsid descendants, and verifies termination before accepting completion. Normal transient-unit garbage collection is handled using the retained group's empty/removed state. The compiled seccomp deny profile is defense in depth, not a universal syscall allowlist. ARM64's profile is source-supported; native runner evidence is required before claiming platform support.
 
@@ -371,6 +377,7 @@ Byte/entry bounds on synchronous local snapshot preparation do not guarantee a f
 | Native macOS crash recovery | Abrupt controller death during real attachment releases its lock; admission terminates escaped descendants and the live attachment worker, removes the job, detaches positively owned images and permits another unit. Real recovery-detach cancellation retains records/ownership and succeeds on retry, including an interrupted-attachment marker. Empty inventory without prior observation retains uncertain roots. Live/foreign roots, malformed/missing records, identity drift and unexpected mounts remain untouched; invalid records do not consume valid-candidate attempts; cross-boot recovery never signals stale identities | [Activated native unit owner and refusal corpus](../../src/tools/guard/macos/unit.rs), [disk inventory corpus](../../src/tools/guard/macos/storage.rs) |
 | Native macOS command/MCP lifecycle | Ordinary native child launches, including bursts of short-lived children, succeed with current selected snapshots and discarded changes; unselected host metadata, ancestor listings, network/signals/privilege changes reject; commands retain signal compatibility without inheriting the file-worker CPU limit; bounded protocol/output failures retain receipts; approval cancellation and missing post-GO completion retain closed replay without retry | [Native Engine journey](../../tests/session_run/tools_macos.rs), [activated native unit owner](../../src/tools/guard/macos/unit.rs) |
 | Approval, denial and uncertain review | Only a granted immutable action can dispatch once; failed/uncertain AI review asks a human; denial/cancellation stops and closed replay agrees | [Native approval journeys](../../tests/session_run/tools.rs), [approval policy](../../src/tools/approval.rs) |
+| Native macOS catalogue reuse | Repeated commands/MCP in one admitted Run reuse the signature-checked catalogue; stale metadata, catalogue tampering and bound overflow reject before dispatch; privileged system programs remain excluded | [Native catalogue corpus](../../src/tools/guard/macos.rs), [native refusal and Engine journey](../../tests/session_run/tools_macos.rs) |
 | Uncertainty, cancellation, receipt bounds and fresh resumed work | Missing post-GO completion remains uncertain; bounded receipts persist; fresh inspection/edit does not execute old intents | [Native Tool journeys](../../tests/session_run/tools.rs), [Tool corpus](../../src/tools/tests.rs), [replay](../../src/store/replay.rs) |
 | Slash Skill insertion and file mentions | Browsing loads no guidance or effects; selecting stages a task; file includes carry path/digest and directory references grant no authority | [Terminal contract](./terminal.md), [slash journey](../../tests/session_run/slash_completion.rs), [Engine Run corpus](../../tests/engine_run.rs) |
 

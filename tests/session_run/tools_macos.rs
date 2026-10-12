@@ -584,6 +584,7 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
         ("early_go", "admission"),
         ("stale_workspace", "workspace"),
         ("resource_mismatch", "admission"),
+        ("catalogue_tamper", "admission"),
         ("truncated_task", "admission"),
         ("malformed_task", "admission"),
         ("oversized_task", "admission"),
@@ -611,11 +612,13 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
         if case == "resource_mismatch" {
             intent.limits.resource_profile = ToolResourceProfile::LinuxKernel;
         }
-        let mut task = serde_json::to_vec(
-            &json!({"config":serde_json::from_slice::<serde_json::Value>(config_bytes).unwrap(),
-            "intent":intent,"workspace":workspace,"guard_executable":env!("CARGO_BIN_EXE_arany")}),
-        )
-        .unwrap();
+        let mut task_value = json!({"config":serde_json::from_slice::<serde_json::Value>(config_bytes).unwrap(),
+            "intent":intent,"workspace":workspace,"guard_executable":env!("CARGO_BIN_EXE_arany")});
+        if case == "catalogue_tamper" {
+            task_value["system_programs"] =
+                json!({"programs":[["/bin/launchctl",[0,0,0,0,0,0,0]]]});
+        }
+        let mut task = serde_json::to_vec(&task_value).unwrap();
         const TASK_BYTES_CAP: usize = 96 * 1024;
         match case {
             "malformed_task" => task = b"{".to_vec(),

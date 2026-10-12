@@ -39,8 +39,6 @@ const CPU_LIMIT: Duration = Duration::from_secs(15);
 const SYSTEM_PROGRAMS_CAP: usize = 2048;
 const PROFILE_BYTES_CAP: usize = 96 * 1024;
 pub(super) const SUPERVISION_INTERVAL: Duration = Duration::from_millis(10);
-// Command/MCP workers check every system program's signature before Ready: about 1.5-6 s on
-// an idle host and over 20 s with all cores saturated.
 pub(super) const PREPARATION_DEADLINE: Duration = Duration::from_secs(30);
 const PROCESS_LIMITS: &[(rustix::process::Resource, u64)] = &[
     (rustix::process::Resource::Nofile, 64),
@@ -197,7 +195,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     let mut bytes = b"arany-macos-guard-v7:shared-fifo-capacity;durable-observed-attachment;boot-bound-locked-root-recovery;persisted-supervisor-before-task;image-inode-device-mount-ownership;no-buffered-go-before-ready;typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;metadata-only-directory-ancestors;workspace-call-write;guard-read-only;file-cpu-default-unblocked-immutable;supervised-resources;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;bounded-go-receipt".to_vec();
     bytes.extend_from_slice(profile(PROFILE, FILE_DENIED_SYSCALLS).as_bytes());
     bytes.extend_from_slice(profile(COMMAND_PROFILE, COMMAND_DENIED_SYSCALLS).as_bytes());
-    bytes.extend_from_slice(b"native-commands-mcp:checked-private-cwd;fixed-capacity-nosuid-project-scratch;fresh-selected-snapshot;read-only-pinned-runtime;bounded-positive-root-owned-non-setid-unentitled-system-exec;dynamic-coalition-persona-entitlement-fork-denial;null-bootstrap-registered-ports;child-only-signals;supervised-cpu");
+    bytes.extend_from_slice(b"native-commands-mcp:checked-private-cwd;fixed-capacity-nosuid-project-scratch;fresh-selected-snapshot;read-only-pinned-runtime;bounded-positive-root-owned-non-setid-unentitled-system-exec;admission-catalogue-bound-to-enforcement;per-worker-no-follow-metadata-revalidation;dynamic-coalition-persona-entitlement-fork-denial;null-bootstrap-registered-ports;child-only-signals;supervised-cpu");
     bytes.extend_from_slice(&CPU_LIMIT.as_nanos().to_le_bytes());
     bytes.extend_from_slice(&SUPERVISION_INTERVAL.as_nanos().to_le_bytes());
     bytes.extend_from_slice(&MEMORY_BYTES.to_le_bytes());
@@ -344,12 +342,16 @@ fn command_root(task: &Task) -> Result<PathBuf, ToolError> {
 }
 
 pub(super) fn system_program(path: &str) -> Result<bool, ToolError> {
+    Ok(system_program_metadata(path)?.is_some())
+}
+
+fn system_program_metadata(path: &str) -> Result<Option<std::fs::Metadata>, ToolError> {
     use std::os::unix::fs::MetadataExt;
 
     let path = Path::new(path);
     if !matches!(path.parent(), Some(parent) if [Path::new("/bin"), Path::new("/usr/bin")].contains(&parent))
     {
-        return Ok(false);
+        return Ok(None);
     }
     let parent = crate::tools::fs::open_directory(path.parent().ok_or(ToolError::Path)?)?;
     let parent = parent
@@ -369,7 +371,7 @@ pub(super) fn system_program(path: &str) -> Result<bool, ToolError> {
     {
         return Err(ToolError::ProtectionUnavailable);
     }
-    Ok(true)
+    Ok(Some(metadata))
 }
 
 fn system_directory(uid: u32, mode: u32) -> bool {
@@ -424,7 +426,10 @@ fn install_command(task: &Task) -> Result<PathBuf, ToolError> {
         quoted(&resources)?,
         quoted(&resources.join("programs"))?
     ));
-    allow_system_programs(&mut profile, &mut required_system_programs)?;
+    task.system_programs
+        .as_ref()
+        .ok_or(ToolError::ProtectionUnavailable)?
+        .allow(&mut profile, &mut required_system_programs)?;
     if !required_system_programs.is_empty() {
         return Err(ToolError::ProtectionUnavailable);
     }
@@ -449,65 +454,128 @@ fn install_command(task: &Task) -> Result<PathBuf, ToolError> {
     Ok(root)
 }
 
-/// Grants each unentitled system program in `/bin` and `/usr/bin` that passes ownership
-/// checks, removing it from `required`.
-fn allow_system_programs(
-    profile: &mut String,
-    required: &mut Vec<PathBuf>,
-) -> Result<(), ToolError> {
-    use cap_std::fs::MetadataExt;
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SystemPrograms {
+    // Compact stamps keep the catalogue inside the shared Task byte cap.
+    programs: Vec<(String, [u64; 7])>,
+}
 
-    let mut count = 0;
-    for directory in ["/bin", "/usr/bin"] {
-        let dir = crate::tools::fs::open_directory(Path::new(directory))?;
-        let metadata = dir
-            .dir_metadata()
-            .map_err(|_| ToolError::ProtectionUnavailable)?;
-        if !system_directory(metadata.uid(), metadata.mode()) {
+fn program_stamp(metadata: &std::fs::Metadata) -> [u64; 7] {
+    use std::os::unix::fs::MetadataExt;
+    [
+        metadata.dev(),
+        metadata.ino(),
+        metadata.len(),
+        metadata.mtime() as u64,
+        metadata.mtime_nsec() as u64,
+        metadata.ctime() as u64,
+        metadata.ctime_nsec() as u64,
+    ]
+}
+
+pub(crate) fn macos_enforcement_digest(
+    programs: Option<&SystemPrograms>,
+) -> Result<[u8; 32], ToolError> {
+    let policy = enforcement_digest()?;
+    let Some(programs) = programs else {
+        return Ok(policy);
+    };
+    if programs.programs.len() > SYSTEM_PROGRAMS_CAP {
+        return Err(ToolError::Limit);
+    }
+    let mut bytes = policy.to_vec();
+    bytes.extend_from_slice(&serde_json::to_vec(programs).map_err(|_| ToolError::Configuration)?);
+    if bytes.len() > TASK_BYTES_CAP {
+        return Err(ToolError::Limit);
+    }
+    Ok(digest(&bytes))
+}
+
+impl SystemPrograms {
+    pub(crate) fn admit() -> Result<Self, ToolError> {
+        use cap_std::fs::MetadataExt;
+
+        let mut count = 0;
+        let mut programs = Vec::new();
+        for directory in ["/bin", "/usr/bin"] {
+            let dir = crate::tools::fs::open_directory(Path::new(directory))?;
+            let metadata = dir
+                .dir_metadata()
+                .map_err(|_| ToolError::ProtectionUnavailable)?;
+            if !system_directory(metadata.uid(), metadata.mode()) {
+                return Err(ToolError::ProtectionUnavailable);
+            }
+            for entry in dir
+                .entries()
+                .map_err(|_| ToolError::ProtectionUnavailable)?
+            {
+                count += 1;
+                if count > SYSTEM_PROGRAMS_CAP {
+                    return Err(ToolError::Limit);
+                }
+                let entry = entry.map_err(|_| ToolError::ProtectionUnavailable)?;
+                if !entry
+                    .file_type()
+                    .map_err(|_| ToolError::ProtectionUnavailable)?
+                    .is_file()
+                {
+                    continue;
+                }
+                let metadata = entry
+                    .metadata()
+                    .map_err(|_| ToolError::ProtectionUnavailable)?;
+                if !system_file(
+                    metadata.is_file(),
+                    metadata.uid(),
+                    metadata.nlink(),
+                    metadata.mode(),
+                ) {
+                    continue;
+                }
+                let path = Path::new(directory).join(entry.file_name());
+                let path = path.to_str().ok_or(ToolError::Path)?;
+                let before =
+                    system_program_metadata(path)?.ok_or(ToolError::ProtectionUnavailable)?;
+                if !ffi::unentitled_code(Path::new(path))? {
+                    continue;
+                }
+                let metadata =
+                    system_program_metadata(path)?.ok_or(ToolError::ProtectionUnavailable)?;
+                if program_stamp(&metadata) != program_stamp(&before) {
+                    return Err(ToolError::ChangedInput);
+                }
+                programs.push((path.to_owned(), program_stamp(&metadata)));
+            }
+        }
+        programs.sort_unstable();
+        let programs = Self { programs };
+        macos_enforcement_digest(Some(&programs))?;
+        Ok(programs)
+    }
+
+    fn allow(&self, profile: &mut String, required: &mut Vec<PathBuf>) -> Result<(), ToolError> {
+        if self.programs.is_empty() || self.programs.len() > SYSTEM_PROGRAMS_CAP {
             return Err(ToolError::ProtectionUnavailable);
         }
-        for entry in dir
-            .entries()
-            .map_err(|_| ToolError::ProtectionUnavailable)?
-        {
-            count += 1;
-            if count > SYSTEM_PROGRAMS_CAP {
-                return Err(ToolError::Limit);
+        for (path, expected) in &self.programs {
+            let metadata =
+                system_program_metadata(path)?.ok_or(ToolError::ProtectionUnavailable)?;
+            if program_stamp(&metadata) != *expected {
+                return Err(ToolError::ChangedInput);
             }
-            let entry = entry.map_err(|_| ToolError::ProtectionUnavailable)?;
-            if !entry
-                .file_type()
-                .map_err(|_| ToolError::ProtectionUnavailable)?
-                .is_file()
-            {
-                continue;
-            }
-            let metadata = entry
-                .metadata()
-                .map_err(|_| ToolError::ProtectionUnavailable)?;
-            if !system_file(
-                metadata.is_file(),
-                metadata.uid(),
-                metadata.nlink(),
-                metadata.mode(),
-            ) {
-                continue;
-            }
-            let path = Path::new(directory).join(entry.file_name());
-            if !ffi::unentitled_code(&path)? {
-                continue;
-            }
-            required.retain(|required| required != &path);
+            let path = Path::new(path);
+            required.retain(|required| required != path);
             profile.push_str(&format!(
                 "(allow file-read* file-map-executable process-exec (literal {}))\n",
-                quoted(&path)?
+                quoted(path)?
             ));
             if profile.len() > PROFILE_BYTES_CAP {
                 return Err(ToolError::Limit);
             }
         }
+        Ok(())
     }
-    Ok(())
 }
 
 fn attest_policy(operations: &[(&CStr, i32)], denied_syscalls: &[i32]) -> Result<(), ToolError> {
@@ -607,6 +675,11 @@ impl Task {
             intent: intent.clone(),
             workspace: runtime.workspace.clone(),
             guard_executable: runtime.guard_executable.clone(),
+            system_programs: if intent.call.is_process() {
+                runtime.system_programs.as_deref().cloned()
+            } else {
+                None
+            },
         }
     }
 
@@ -618,6 +691,8 @@ impl Task {
             workspace_identity: (self.intent.workspace_device, self.intent.workspace_inode),
             guard_executable: self.guard_executable,
             enforcement_digest: self.intent.enforcement_digest,
+            system_programs: self.system_programs.map(Arc::new),
+            process_enforcement_digest: self.intent.enforcement_digest,
         };
         (runtime, self.intent)
     }
@@ -763,6 +838,59 @@ mod tests {
     use std::io::Write;
     use std::os::unix::process::ExitStatusExt;
 
+    #[test]
+    fn system_catalogue_revalidates_pins_and_binds_the_profile() {
+        let programs = SystemPrograms::admit().unwrap();
+        let mut required = vec![PathBuf::from("/bin/sh"), PathBuf::from("/usr/bin/true")];
+        let mut profile = String::new();
+        programs.allow(&mut profile, &mut required).unwrap();
+        assert!(required.is_empty());
+        assert!(
+            !programs
+                .programs
+                .iter()
+                .any(|(path, _)| path == "/usr/bin/sudo")
+        );
+        let bytes = serde_json::to_vec(&programs).unwrap();
+        let mut admitted: SystemPrograms = serde_json::from_slice(&bytes).unwrap();
+        let enforcement = macos_enforcement_digest(Some(&admitted)).unwrap();
+        assert_eq!(
+            enforcement,
+            macos_enforcement_digest(Some(&programs)).unwrap()
+        );
+        assert_ne!(enforcement, enforcement_digest().unwrap());
+        for case in ["stale", "outside", "overflow"] {
+            admitted.programs = programs.programs.clone();
+            match case {
+                "stale" => admitted.programs[0].1[1] ^= 1,
+                "outside" => admitted.programs[0].0 = "/etc/passwd".into(),
+                "overflow" => admitted
+                    .programs
+                    .resize(SYSTEM_PROGRAMS_CAP + 1, programs.programs[0].clone()),
+                _ => unreachable!(),
+            }
+            assert!(
+                matches!(
+                    admitted.allow(&mut String::new(), &mut Vec::new()),
+                    Err(ToolError::ChangedInput | ToolError::ProtectionUnavailable)
+                ),
+                "{case}"
+            );
+            if case == "overflow" {
+                assert!(matches!(
+                    macos_enforcement_digest(Some(&admitted)),
+                    Err(ToolError::Limit)
+                ));
+            } else {
+                assert_ne!(
+                    enforcement,
+                    macos_enforcement_digest(Some(&admitted)).unwrap(),
+                    "{case}"
+                );
+            }
+        }
+    }
+
     fn probe(cpu: bool) -> std::process::Output {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir(temp.path().join("workspace")).unwrap();
@@ -855,6 +983,7 @@ mod tests {
             config,
             workspace,
             guard_executable: std::env::current_exe().unwrap(),
+            system_programs: None,
         };
         assert!(Path::new("/usr/bin/true").is_file());
         configure_resources().unwrap();
