@@ -30,6 +30,8 @@ Repeat with `--release` for the optimized profile. To run one ignored gate, use 
 
 - Native Linux Tool fixtures inside containers still need a compatible systemd
   user manager, delegated cgroup v2 controllers and usable namespace controls.
+  Their host temporary filesystem must permit execution of pinned snapshots;
+  Docker tmpfs defaults can include `noexec`, preventing command/MCP launch.
   An inherited read-only `/proc/sys` can prevent Bubblewrap from restricting its
   new user namespace. Configure only the disposable fixture's own procfs/cgroup
   namespaces; never drop production namespace restrictions to obtain a pass.
