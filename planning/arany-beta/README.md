@@ -4,7 +4,7 @@
 
 - Status: `In progress`
 - Owner: Codex
-- Last updated: 2026-10-11
+- Last updated: 2026-10-12
 
 ## Goal
 
@@ -16,7 +16,7 @@ platform/release support requires its own native evidence.
 ## Remaining execution
 
 [Next steps](../../NEXT_STEPS.md) is the single pending-work list: open defects,
-user-deferred Anthropic subscription access, Guard crash recovery, final user
+user-deferred Anthropic subscription access, final user
 checks and release/platform gates. Select the next authorized implementable
 item there; keep unavailable live/native/user checks in the final handoff.
 

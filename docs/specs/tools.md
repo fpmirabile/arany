@@ -238,18 +238,38 @@ them. Unfinished attachment or failed cleanup retains the private control root
 and rejects completion rather than recursively deleting through a live or
 uncertain mount. Each unit's owner-only root is `/private/tmp/arany-u-<uuid>`.
 Each live unit creates and locks its root's `unit.lock` in one exclusive open;
-the kernel releases the lock when the owner exits, including on a crash. Before
-creating a root, admission counts entries named `arany-u-*` whose no-follow
-metadata owner is the effective uid and whose existing lock is not held,
-scanning at most 4096 directory entries; concurrent live units and roots without
-a lock, which hold no storage yet, never count. Eight retained roots reject further native unit creation before any
-root or storage is created; eight bounds retained fixed images to 1 GiB. That
-rejection names `/private/tmp/arany-u-*` for manual removal. A listing that
-cannot be read or exceeds the scan bound rejects as unavailable native
-protection, without that removal advice. No Run reclaims or
-deletes a retained root, and a filename-prefix sweep is unsafe; positive
-ownership recovery is tracked as
-[macOS crash recovery](../../NEXT_STEPS.md#next-functional-priority).
+the kernel releases the lock when the controller exits, including on a crash.
+Before launching its job, the controller durably records the root's device/inode
+and macOS boot identity. The authenticated supervisor durably records its
+process/coalition identity before receiving a task; no payload or attachment
+may precede this record.
+
+Before creating a new unit, admission scans at most 4096 directory entries and
+attempts recovery of at most eight unlocked roots owned by the effective uid,
+within one 30-second recovery deadline. Recovery takes an exclusive lock and
+validates private no-follow records and root identity before any cleanup. Live
+controllers and competing recovery owners are excluded. Within the recorded
+boot, recovery removes the exact one-use job and positively empties its recorded
+coalition using current audit-token identities. After a reboot it never signals
+persisted process/coalition identities or removes a job from the later boot.
+
+Storage cleanup requires the pinned backing image inode, OS disk-image inventory
+and exact kernel device/mount correspondence. Unexpected or nested mount targets
+reject before detachment; even an attached but unmounted owned image must be
+detached. An interrupted attachment marker is cleared only after positive
+absence of owned attachments. Root deletion additionally requires absence of
+all mounts beneath the checked root. Cancellation or failure leaves recoverable
+records in place and never retries an old Tool intent.
+
+Unlocked roots without valid ownership records, including older retained roots,
+remain untouched and count toward the existing eight-root admission limit. Eight
+unrecovered roots reject further native unit creation before any new root or
+storage is created, bounding retained fixed images to 1 GiB. That rejection
+names `/private/tmp/arany-u-*` for manual inspection/removal. Unreadable or
+over-limit listings and recovery deadline expiry reject as unavailable native
+protection without removal advice. A filename prefix alone never authorizes
+cleanup; there is no stored-format migration or compatibility fallback. Roots
+without a lock, abandoned before storage admission, never count.
 
 Commands and MCP receive a fresh checked snapshot of the selected Workspace,
 including prior typed edits, and a separate read-only tree of pinned runtime
@@ -300,6 +320,7 @@ Byte/entry bounds on synchronous local snapshot preparation do not guarantee a f
 | Guard task framing | Truncated, malformed and oversized task frames reject before Ready and effects; the exact-capacity valid frame reaches Ready but still requires GO | [Native refusal corpus](../../tests/session_run/tools_macos.rs) |
 | Native macOS owned unit and supervised resources | Escaped orphan descendants remain owned; stale audit tokens cannot signal another incarnation; aggregate memory/task excess and per-process CPU excess with ignored SIGXCPU terminate the complete unit; cleanup confirms the coalition empty and the job absent | [Activated native unit owner](../../src/tools/guard/macos/unit.rs) |
 | Native macOS private-storage lifecycle | Both private filesystems enforce their 64-MiB capacities through actual `ENOSPC`; storage survives supervisor termination for clean detachment; partial setup and unwind clean owned mounts; unsafe targets remain untouched and uncertain cleanup retains its control root | [Activated native unit owner](../../src/tools/guard/macos/unit.rs) |
+| Native macOS crash recovery | Abrupt controller death releases its lock; the next admission terminates escaped descendants, removes the job, detaches owned images and permits another unit. Live/foreign roots, malformed or missing records, root/image identity drift and unexpected mounts remain untouched; cross-boot recovery never signals stale identities | [Activated native unit owner and refusal corpus](../../src/tools/guard/macos/unit.rs), [disk inventory corpus](../../src/tools/guard/macos/storage.rs) |
 | Native macOS command/MCP lifecycle | Ordinary native child launches, including bursts of short-lived children, succeed with current selected snapshots and discarded changes; unselected host metadata, ancestor listings, network/signals/privilege changes reject; commands retain signal compatibility without inheriting the file-worker CPU limit; bounded protocol/output failures retain receipts; approval cancellation and missing post-GO completion retain closed replay without retry | [Native Engine journey](../../tests/session_run/tools_macos.rs), [activated native unit owner](../../src/tools/guard/macos/unit.rs) |
 | Approval, denial and uncertain review | Only a granted immutable action can dispatch once; failed/uncertain AI review asks a human; denial/cancellation stops and closed replay agrees | [Native approval journeys](../../tests/session_run/tools.rs), [approval policy](../../src/tools/approval.rs) |
 | Uncertainty, cancellation, receipt bounds and fresh resumed work | Missing post-GO completion remains uncertain; bounded receipts persist; fresh inspection/edit does not execute old intents | [Native Tool journeys](../../tests/session_run/tools.rs), [Tool corpus](../../src/tools/tests.rs), [replay](../../src/store/replay.rs) |

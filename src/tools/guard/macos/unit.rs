@@ -1,5 +1,7 @@
 use super::super::{BootstrapFailure, GuardStage, Task, read_line_capped};
-use super::storage::{cleanup_storage, prepare_command_storage, storage_mounted};
+use super::storage::{
+    cleanup_storage, prepare_command_storage, read_record, storage_mounted, write_record,
+};
 use super::{
     CPU_LIMIT, PREPARATION_DEADLINE, SUPERVISION_INTERVAL, bootstrap, ffi, system_program,
 };
@@ -40,6 +42,34 @@ const UNIT_LIVENESS_LOCK: &str = "unit.lock";
 const RETAINED_ROOT_LIMIT: usize = 8;
 // Bounds the directory scan itself; an unverifiable listing fails closed.
 const UNIT_ROOT_SCAN_LIMIT: usize = 4096;
+const RECOVERY_RECORD: &str = "recovery.json";
+const RECOVERY_DEADLINE: Duration = Duration::from_secs(30);
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Recovery {
+    version: u32,
+    root: (u64, u64),
+    boot: uuid::Uuid,
+    supervisor: Option<Identity>,
+}
+
+fn recovery(directory: &PrivateDirectory) -> Result<Recovery, ToolError> {
+    let record: Recovery = read_record(&directory.dir, RECOVERY_RECORD)?;
+    if record.version != 1
+        || record.boot.is_nil()
+        || record.root != crate::tools::fs::identity(&directory.dir)?
+        || record.supervisor.is_some_and(|identity| {
+            identity.pid <= 1
+                || identity.pid > i32::MAX as u32
+                || identity.unique_id == 0
+                || identity.coalition <= 1
+        })
+    {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok(record)
+}
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -268,8 +298,6 @@ enum ManagerAction<'a> {
     Bootout,
 }
 
-// Retained roots are never reclaimed automatically; counting is the only bound until
-// positive ownership recovery exists.
 fn check_retained_roots(parent: &Path, owner: u32) -> Result<(), ToolError> {
     let mut retained = 0;
     for (scanned, entry) in std::fs::read_dir(parent)
@@ -302,15 +330,125 @@ fn check_retained_roots(parent: &Path, owner: u32) -> Result<(), ToolError> {
     Ok(())
 }
 
+async fn recover_retained_roots(parent: &Path, owner: u32) -> Result<(), ToolError> {
+    let mut candidates = Vec::new();
+    for (scanned, entry) in std::fs::read_dir(parent)
+        .map_err(|_| ToolError::ProtectionUnavailable)?
+        .enumerate()
+    {
+        if scanned == UNIT_ROOT_SCAN_LIMIT {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        let entry = entry.map_err(|_| ToolError::ProtectionUnavailable)?;
+        if !entry
+            .file_name()
+            .as_encoded_bytes()
+            .starts_with(UNIT_ROOT_PREFIX.as_bytes())
+        {
+            continue;
+        }
+        let metadata = match std::fs::symlink_metadata(entry.path()) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(ToolError::ProtectionUnavailable),
+        };
+        if metadata.uid() == owner && is_retained(&entry.path())? {
+            candidates.push(entry.path());
+        }
+    }
+    for root in candidates.iter().take(RETAINED_ROOT_LIMIT) {
+        // A failed recovery retains the root and contributes to the ordinary admission bound.
+        let _ = recover_root(root).await;
+    }
+    check_retained_roots(parent, owner)
+}
+
+async fn recover_root(root: &Path) -> Result<(), ToolError> {
+    use cap_fs_ext::OpenOptionsFollowExt;
+    use cap_std::fs::{MetadataExt, OpenOptionsExt};
+    let name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(ToolError::Path)?;
+    let uuid = name.strip_prefix(UNIT_ROOT_PREFIX).ok_or(ToolError::Path)?;
+    if uuid::Uuid::parse_str(uuid).is_err() {
+        return Err(ToolError::Path);
+    }
+    let directory = open_directory(root, false).map_err(|_| ToolError::Path)?;
+    let lock = directory
+        .dir
+        .open_with(
+            UNIT_LIVENESS_LOCK,
+            cap_std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .follow(cap_fs_ext::FollowSymlinks::No),
+        )
+        .map_err(|_| ToolError::Path)?;
+    let metadata = lock.metadata().map_err(|_| ToolError::Path)?;
+    if !metadata.is_file()
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o7777 != 0o600
+        || crate::private_fs::check_acl(&lock, true).is_err()
+    {
+        return Err(ToolError::Path);
+    }
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+        .map_err(|_| ToolError::ProtectionUnavailable)?;
+    let initial = recovery(&directory)?;
+    let same_boot = initial.boot == ffi::boot_session()?;
+    if same_boot {
+        manager(
+            &format!("user/{}", rustix::process::geteuid().as_raw()),
+            &format!("dev.arany.tool.{name}"),
+            ManagerAction::Bootout,
+        )
+        .await?;
+        // A bootstrapping supervisor may publish its identity while bootout is running.
+        let current = recovery(&directory)?;
+        if current.boot != initial.boot
+            || current.root != initial.root
+            || (initial.supervisor.is_some() && initial.supervisor != current.supervisor)
+        {
+            return Err(ToolError::ChangedInput);
+        }
+        if let Some(supervisor) = current.supervisor {
+            if supervisor.coalition == identity(std::process::id())?.coalition {
+                return Err(ToolError::ProtectionUnavailable);
+            }
+            Scope::new(supervisor.coalition)?.stop(None).await?;
+        }
+    }
+    cleanup_storage(root).await?;
+    remove_root(root, &directory)?;
+    if root.exists() {
+        return Err(ToolError::Operation);
+    }
+    Ok(())
+}
+
 // An unlocked liveness lock was left by a finished or crashed owner. A root without the
 // lock is still being created or was abandoned before it could hold storage.
 fn is_retained(root: &Path) -> Result<bool, ToolError> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let lock = match std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(root.join(UNIT_LIVENESS_LOCK))
-    {
+    use cap_fs_ext::OpenOptionsFollowExt;
+    use cap_std::fs::OpenOptionsExt;
+    let directory = match open_directory(root, false) {
+        Ok(directory) => directory,
+        Err(crate::private_fs::Error::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            return Ok(false);
+        }
+        Err(_) => return Err(ToolError::Path),
+    };
+    let lock = match directory.dir.open_with(
+        UNIT_LIVENESS_LOCK,
+        cap_std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .follow(cap_fs_ext::FollowSymlinks::No),
+    ) {
         Ok(lock) => lock,
         Err(error)
             if matches!(
@@ -322,6 +460,9 @@ fn is_retained(root: &Path) -> Result<bool, ToolError> {
         }
         Err(_) => return Err(ToolError::ProtectionUnavailable),
     };
+    if !lock.metadata().map_err(|_| ToolError::Path)?.is_file() {
+        return Err(ToolError::ProtectionUnavailable);
+    }
     match rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockShared) {
         Ok(()) => Ok(true),
         Err(rustix::io::Errno::WOULDBLOCK) => Ok(false),
@@ -346,12 +487,59 @@ fn hold_liveness_lock(directory: &PrivateDirectory) -> Result<cap_std::fs::File,
         .map_err(|_| ToolError::Operation)
 }
 
+async fn manager(
+    domain: &str,
+    label: &str,
+    action: ManagerAction<'_>,
+) -> Result<Vec<u8>, ToolError> {
+    if !system_program("/bin/launchctl")? {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    let bootout = matches!(action, ManagerAction::Bootout);
+    let mut command = Command::new("/bin/launchctl");
+    command.env_clear().current_dir("/");
+    match action {
+        ManagerAction::Bootstrap(path) => {
+            command.arg("bootstrap").arg(domain).arg(path);
+        }
+        ManagerAction::Kickstart => {
+            command.args(["kickstart", "-p", &format!("{domain}/{label}")]);
+        }
+        ManagerAction::Bootout => {
+            command.args(["bootout", &format!("{domain}/{label}")]);
+        }
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let (status, stdout, _) = super::super::capture(
+        command
+            .spawn()
+            .map_err(|_| ToolError::ProtectionUnavailable)?,
+        4096,
+        Duration::from_secs(3),
+    )
+    .await?;
+    if status.success() || (bootout && status.code() == Some(libc::ESRCH)) {
+        Ok(stdout)
+    } else {
+        Err(ToolError::ProtectionUnavailable)
+    }
+}
+
 impl Unit {
-    fn new() -> Result<Self, ToolError> {
-        check_retained_roots(
-            Path::new(UNIT_ROOT_PARENT),
-            rustix::process::geteuid().as_raw(),
-        )?;
+    async fn new() -> Result<Self, ToolError> {
+        tokio::time::timeout(
+            RECOVERY_DEADLINE,
+            recover_retained_roots(
+                Path::new(UNIT_ROOT_PARENT),
+                rustix::process::geteuid().as_raw(),
+            ),
+        )
+        .await
+        .map_err(|_| ToolError::ProtectionUnavailable)??;
         let name = format!("{UNIT_ROOT_PREFIX}{}", uuid::Uuid::now_v7());
         let root = Path::new(UNIT_ROOT_PARENT).join(&name);
         std::fs::DirBuilder::new()
@@ -372,7 +560,7 @@ impl Unit {
                 return Err(error);
             }
         };
-        Ok(Self {
+        let unit = Self {
             root,
             _directory: directory,
             _liveness: liveness,
@@ -380,11 +568,18 @@ impl Unit {
             label: format!("dev.arany.tool.{name}"),
             scope: None,
             stopped: false,
-        })
-    }
-
-    fn target(&self) -> String {
-        format!("{}/{}", self.domain, self.label)
+        };
+        write_record(
+            &unit._directory.dir,
+            RECOVERY_RECORD,
+            &Recovery {
+                version: 1,
+                root: crate::tools::fs::identity(&unit._directory.dir)?,
+                boot: ffi::boot_session()?,
+                supervisor: None,
+            },
+        )?;
+        Ok(unit)
     }
 
     fn write_job(&self, arguments: &[&str], stderr: &str) -> Result<PathBuf, ToolError> {
@@ -438,41 +633,7 @@ impl Unit {
     }
 
     async fn manager(&self, action: ManagerAction<'_>) -> Result<Vec<u8>, ToolError> {
-        if !system_program("/bin/launchctl")? {
-            return Err(ToolError::ProtectionUnavailable);
-        }
-        let bootout = matches!(action, ManagerAction::Bootout);
-        let mut command = Command::new("/bin/launchctl");
-        command.env_clear().current_dir("/");
-        match action {
-            ManagerAction::Bootstrap(path) => {
-                command.arg("bootstrap").arg(&self.domain).arg(path);
-            }
-            ManagerAction::Kickstart => {
-                command.args(["kickstart", "-p", &self.target()]);
-            }
-            ManagerAction::Bootout => {
-                command.args(["bootout", &self.target()]);
-            }
-        }
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        let (status, stdout, _) = super::super::capture(
-            command
-                .spawn()
-                .map_err(|_| ToolError::ProtectionUnavailable)?,
-            4096,
-            Duration::from_secs(3),
-        )
-        .await?;
-        if status.success() || (bootout && status.code() == Some(libc::ESRCH)) {
-            Ok(stdout)
-        } else {
-            Err(ToolError::ProtectionUnavailable)
-        }
+        manager(&self.domain, &self.label, action).await
     }
 
     async fn connect(
@@ -531,6 +692,10 @@ impl Unit {
         if received != child {
             return Err(ToolError::ProtectionUnavailable);
         }
+        let record = recovery(&self._directory)?;
+        if record.boot != ffi::boot_session()? || record.supervisor != Some(child) {
+            return Err(ToolError::ProtectionUnavailable);
+        }
         Ok(stream.into_inner())
     }
 
@@ -552,6 +717,24 @@ impl Unit {
     }
 }
 
+fn remove_root(root: &Path, admitted: &PrivateDirectory) -> Result<(), ToolError> {
+    if storage_mounted(root)?
+        || ffi::mounts()?
+            .iter()
+            .any(|(_, target)| target.starts_with(root))
+    {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    let current = open_directory(root, false).map_err(|_| ToolError::Path)?;
+    if crate::tools::fs::identity(&current.dir)? != crate::tools::fs::identity(&admitted.dir)? {
+        return Err(ToolError::ChangedInput);
+    }
+    let parent = crate::tools::fs::open_directory(root.parent().ok_or(ToolError::Path)?)?;
+    parent
+        .remove_dir_all(root.file_name().ok_or(ToolError::Path)?)
+        .map_err(|_| ToolError::Operation)
+}
+
 impl Drop for Unit {
     fn drop(&mut self) {
         if !self.stopped {
@@ -568,14 +751,8 @@ impl Drop for Unit {
                 }
             });
         }
-        if self.stopped
-            && !storage_mounted(&self.root).unwrap_or(true)
-            && let (Ok(tmp), Some(name)) = (
-                crate::tools::fs::open_directory(Path::new("/private/tmp")),
-                self.root.file_name(),
-            )
-        {
-            let _ = tmp.remove_dir_all(name);
+        if self.stopped {
+            let _ = remove_root(&self.root, &self._directory);
         }
     }
 }
@@ -586,7 +763,11 @@ pub(super) async fn execute(
     mut cancellation: RunCancellation,
     dispatched: &AtomicBool,
 ) -> Result<ToolObservation, ToolError> {
-    let mut unit = Unit::new()?;
+    let mut unit = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(ToolError::Operation),
+        unit = Unit::new() => unit?,
+    };
     crate::tools::fs::reject_overlap(&unit.root, &runtime.workspace)?;
     let execution = async {
         let mut stream = BufReader::new(
@@ -665,7 +846,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
         bootstrap()?;
         let path = std::env::args_os().nth(2).ok_or(ToolError::Configuration)?;
         let path = Path::new(&path);
-        let (_root, mut stream) = connect_control(path)?;
+        let (root, mut stream) = connect_control(path)?;
         diagnostic = Some(stream.try_clone().map_err(|_| ToolError::Operation)?);
         stage = super::super::BootstrapStage::Capabilities;
         let parent = peer(&stream)?;
@@ -674,6 +855,12 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             return Err(ToolError::ProtectionUnavailable);
         }
         let mut scope = Scope::new(own.coalition)?;
+        let mut record = recovery(&root)?;
+        if record.boot != ffi::boot_session()? || record.supervisor.is_some() {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        record.supervisor = Some(own);
+        write_record(&root.dir, RECOVERY_RECORD, &record)?;
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .map_err(|_| ToolError::Operation)?;
@@ -806,17 +993,24 @@ mod tests {
     #[test]
     fn retained_root_bound_counts_only_this_users_unit_roots() {
         let parent = tempfile::tempdir().unwrap();
+        assert!(!is_retained(&parent.path().join("already-removed")).unwrap());
         let owner = rustix::process::geteuid().as_raw();
         let abandoned = |name: &str| {
             let root = parent.path().join(format!("{UNIT_ROOT_PREFIX}{name}"));
-            std::fs::create_dir(&root).unwrap();
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&root)
+                .unwrap();
             std::fs::File::create(root.join(UNIT_LIVENESS_LOCK)).unwrap();
         };
         std::fs::create_dir(parent.path().join("unrelated")).unwrap();
         for index in 0..RETAINED_ROOT_LIMIT - 1 {
             abandoned(&index.to_string());
         }
-        std::fs::create_dir(parent.path().join(format!("{UNIT_ROOT_PREFIX}creating"))).unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(parent.path().join(format!("{UNIT_ROOT_PREFIX}creating")))
+            .unwrap();
         check_retained_roots(parent.path(), owner)
             .expect("a root without its liveness lock holds no storage");
         abandoned("last");
@@ -849,6 +1043,95 @@ mod tests {
             check_retained_roots(scanned.path(), owner),
             Err(ToolError::ProtectionUnavailable)
         ));
+    }
+
+    #[tokio::test]
+    async fn recovery_refuses_unowned_records_and_live_roots() {
+        let parent = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("keep"), b"outside").unwrap();
+        for case in [
+            "missing",
+            "malformed",
+            "version",
+            "identity",
+            "boot",
+            "oversized",
+            "link",
+            "hardlink",
+            "live",
+        ] {
+            let root = parent
+                .path()
+                .join(format!("{UNIT_ROOT_PREFIX}{}", uuid::Uuid::now_v7()));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&root)
+                .unwrap();
+            let directory = open_directory(&root, false).unwrap();
+            let lock = hold_liveness_lock(&directory).unwrap();
+            let mut record = Recovery {
+                version: 1,
+                root: crate::tools::fs::identity(&directory.dir).unwrap(),
+                boot: uuid::Uuid::now_v7(),
+                supervisor: None,
+            };
+            match case {
+                "version" => record.version += 1,
+                "identity" => record.root.1 += 1,
+                "boot" => record.boot = uuid::Uuid::nil(),
+                _ => {}
+            }
+            write_record(&directory.dir, RECOVERY_RECORD, &record).unwrap();
+            match case {
+                "missing" => std::fs::remove_file(root.join(RECOVERY_RECORD)).unwrap(),
+                "malformed" => {
+                    std::fs::write(root.join(RECOVERY_RECORD), b"{\"version\":").unwrap()
+                }
+                "oversized" => std::fs::write(
+                    root.join(RECOVERY_RECORD),
+                    vec![b' '; super::super::storage::RECORD_BYTES_CAP + 1],
+                )
+                .unwrap(),
+                "link" => {
+                    std::fs::remove_file(root.join(RECOVERY_RECORD)).unwrap();
+                    std::os::unix::fs::symlink(
+                        outside.path().join("keep"),
+                        root.join(RECOVERY_RECORD),
+                    )
+                    .unwrap();
+                }
+                "hardlink" => {
+                    std::fs::hard_link(root.join(RECOVERY_RECORD), root.join("alias")).unwrap()
+                }
+                _ => {}
+            }
+            let held = if case == "live" {
+                Some(lock)
+            } else {
+                drop(lock);
+                None
+            };
+            assert!(
+                recover_root(&root).await.is_err(),
+                "recovery must reject {case}"
+            );
+            assert!(root.exists(), "rejected {case} root must remain intact");
+            assert_eq!(
+                std::fs::read(outside.path().join("keep")).unwrap(),
+                b"outside"
+            );
+            drop(held);
+        }
+        let alias = parent
+            .path()
+            .join(format!("{UNIT_ROOT_PREFIX}{}", uuid::Uuid::now_v7()));
+        std::os::unix::fs::symlink(outside.path(), &alias).unwrap();
+        assert!(recover_root(&alias).await.is_err());
+        assert_eq!(
+            std::fs::read(outside.path().join("keep")).unwrap(),
+            b"outside"
+        );
     }
 
     const HELPER: &str = "tools::guard::macos::unit::tests::native_unit_helper";
@@ -1034,7 +1317,7 @@ done
     }
 
     async fn verify_uncertain_storage_is_retained() {
-        let mut uncertain = Unit::new().unwrap();
+        let mut uncertain = Unit::new().await.unwrap();
         std::fs::write(uncertain.root.join(STORAGE_PENDING), []).unwrap();
         assert!(uncertain.stop().await.is_err());
         let uncertain_root = uncertain.root.clone();
@@ -1052,7 +1335,7 @@ done
     }
 
     async fn verify_partial_storage_is_cleaned() {
-        let mut partial = Unit::new().unwrap();
+        let mut partial = Unit::new().await.unwrap();
         let outside = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(outside.path(), partial.root.join("scratch")).unwrap();
         let preparation = prepare_storage(&partial.root).await;
@@ -1071,6 +1354,226 @@ done
         let partial_root = partial.root.clone();
         drop(partial);
         assert!(!partial_root.exists());
+    }
+
+    async fn verify_storage_ownership() {
+        use super::super::storage::ImageIdentity;
+        let mut unit = Unit::new().await.unwrap();
+        let _volumes = prepare_storage(&unit.root).await.unwrap();
+        let mut image: ImageIdentity =
+            read_record(&unit._directory.dir, "scratch.image.json").unwrap();
+        image.inode = image.inode.wrapping_add(1);
+        write_record(&unit._directory.dir, "scratch.image.json", &image).unwrap();
+        let mounted = ffi::mounts().unwrap();
+        assert!(
+            unit.stop().await.is_err(),
+            "a mismatched backing inode must reject before any detach"
+        );
+        assert_eq!(
+            ffi::mounts()
+                .unwrap()
+                .iter()
+                .filter(|(_, target)| target.starts_with(&unit.root))
+                .count(),
+            2
+        );
+        assert!(
+            mounted
+                .iter()
+                .filter(|(_, target)| target.starts_with(&unit.root))
+                .all(|mount| ffi::mounts().unwrap().contains(mount))
+        );
+        image.inode = image.inode.wrapping_sub(1);
+        write_record(&unit._directory.dir, "scratch.image.json", &image).unwrap();
+        use crate::test_process::BoundedOutput;
+        let unmounted = std::process::Command::new("/usr/bin/hdiutil")
+            .args(["unmount", "-force", "-quiet"])
+            .arg(unit.root.join("workspace"))
+            .env_clear()
+            .current_dir(&unit.root)
+            .bounded_output_for(Duration::from_secs(20), 4096)
+            .unwrap();
+        assert!(unmounted.status.success(), "owned image unmount fixture");
+        assert!(
+            !ffi::mounts()
+                .unwrap()
+                .iter()
+                .any(|(_, target)| target == &unit.root.join("workspace"))
+        );
+        unit.stop().await.unwrap();
+    }
+
+    async fn verify_storage_free_cleanup() {
+        use crate::test_process::BoundedOutput;
+        let mut unit = Unit::new().await.unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", HELPER, "--ignored", "--nocapture"])
+            .env_clear()
+            .env("ARANY_TEST_NATIVE_UNIT_ROOT", &unit.root)
+            .env("ARANY_TEST_NATIVE_UNIT_PHASE", "storage-free-cleanup")
+            .current_dir("/")
+            .bounded_output_for(Duration::from_secs(10), 16 * 1024)
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "storage-free cleanup with hdiutil exec denied: {output:?}"
+        );
+        crate::test_process::assert_single_test_completed(
+            &output.stdout,
+            "storage-free cleanup helper",
+        );
+        unit.stop().await.unwrap();
+    }
+
+    async fn verify_previous_boot_never_signals() {
+        let parent = tempfile::tempdir().unwrap();
+        let own = identity(std::process::id()).unwrap();
+        let mut roots = Vec::new();
+        for _ in 0..RETAINED_ROOT_LIMIT {
+            let root = parent
+                .path()
+                .join(format!("{UNIT_ROOT_PREFIX}{}", uuid::Uuid::now_v7()));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&root)
+                .unwrap();
+            let directory = open_directory(&root, false).unwrap();
+            let lock = hold_liveness_lock(&directory).unwrap();
+            write_record(
+                &directory.dir,
+                RECOVERY_RECORD,
+                &Recovery {
+                    version: 1,
+                    root: crate::tools::fs::identity(&directory.dir).unwrap(),
+                    boot: uuid::Uuid::now_v7(),
+                    supervisor: Some(own),
+                },
+            )
+            .unwrap();
+            drop(lock);
+            roots.push(root);
+        }
+        assert!(matches!(
+            check_retained_roots(parent.path(), rustix::process::geteuid().as_raw()),
+            Err(ToolError::RetainedRoots)
+        ));
+        recover_retained_roots(parent.path(), rustix::process::geteuid().as_raw())
+            .await
+            .unwrap();
+        assert!(roots.iter().all(|root| !root.exists()));
+        assert!(identity(own.pid).unwrap().same_process(own));
+    }
+
+    async fn verify_controller_crash_recovery(script: &Path) {
+        struct Controller(std::process::Child);
+        impl Drop for Controller {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let fixture = tempfile::tempdir().unwrap();
+        let source = phase_workspace(script);
+        std::fs::write(fixture.path().join("errors"), []).unwrap();
+        let listener = UnixListener::bind(fixture.path().join("crash")).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+        // The controller drops before this fallback, even when an assertion unwinds.
+        let mut fallback: Option<Unit> = None;
+        let mut controller = Controller(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", HELPER, "--ignored", "--nocapture"])
+                .env_clear()
+                .env("ARANY_TEST_NATIVE_UNIT_ROOT", fixture.path())
+                .env("ARANY_TEST_NATIVE_UNIT_PHASE", "recovery-controller")
+                .env("ARANY_TEST_NATIVE_UNIT_WORKSPACE", source.path())
+                .current_dir("/")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(fixture.path().join("errors"))
+                        .unwrap(),
+                )
+                .spawn()
+                .unwrap(),
+        );
+        let stream = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+            .await
+            .unwrap()
+            .unwrap()
+            .0;
+        let mut stream = BufReader::new(stream);
+        let root: PathBuf =
+            serde_json::from_slice(&read_line_capped(&mut stream, 1024).await.unwrap()).unwrap();
+        let directory = open_directory(&root, false).unwrap();
+        let record = recovery(&directory).unwrap();
+        fallback.replace(Unit {
+            root: root.clone(),
+            _liveness: directory.dir.open(UNIT_LIVENESS_LOCK).unwrap(),
+            _directory: directory,
+            domain: format!("user/{}", rustix::process::geteuid().as_raw()),
+            label: format!(
+                "dev.arany.tool.{}",
+                root.file_name().unwrap().to_str().unwrap()
+            ),
+            scope: record
+                .supervisor
+                .map(|supervisor| Scope::new(supervisor.coalition).unwrap()),
+            stopped: false,
+        });
+        stream.get_mut().write_all(b"G").await.unwrap();
+        let members: Vec<Identity> = serde_json::from_slice(
+            &tokio::time::timeout(Duration::from_secs(30), read_line_capped(&mut stream, 2048))
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let record = recovery(&fallback.as_ref().unwrap()._directory).unwrap();
+        let coalition = record.supervisor.unwrap().coalition;
+        fallback.as_mut().unwrap().scope = Some(Scope::new(coalition).unwrap());
+        assert!(storage_mounted(&root).unwrap());
+        assert!(!is_retained(&root).unwrap());
+        assert!(
+            recover_root(&root).await.is_err(),
+            "a live controller's lock must exclude recovery"
+        );
+        controller.0.kill().unwrap();
+        let status =
+            crate::test_process::capture(&mut controller.0, Duration::from_secs(5), 16 * 1024)
+                .status;
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
+        assert!(
+            is_retained(&root).unwrap(),
+            "process death releases the liveness lock"
+        );
+        // The restarted admission path must recover storage and escaped descendants together.
+        recover_retained_roots(
+            Path::new(UNIT_ROOT_PARENT),
+            rustix::process::geteuid().as_raw(),
+        )
+        .await
+        .unwrap();
+        assert!(!root.exists());
+        assert!(Scope::new(coalition).unwrap().members().unwrap().is_empty());
+        for member in members {
+            assert!(
+                matches!(identity(member.pid), Err(ToolError::ChangedInput))
+                    || identity(member.pid).is_ok_and(|current| !current.same_process(member))
+            );
+        }
+        assert!(
+            !ffi::mounts()
+                .unwrap()
+                .iter()
+                .any(|(_, target)| target.starts_with(&root))
+        );
+        fallback.as_mut().unwrap().stopped = true;
+        let mut next = Unit::new().await.unwrap();
+        next.stop().await.unwrap();
     }
 
     fn phase_workspace(script: &Path) -> tempfile::TempDir {
@@ -1146,6 +1649,9 @@ done
             .parse()
             .unwrap();
         let root = identity(pid).unwrap();
+        let mut record = recovery(&unit._directory).unwrap();
+        record.supervisor = Some(root);
+        write_record(&unit._directory.dir, RECOVERY_RECORD, &record).unwrap();
         assert_ne!(root.coalition, outside.coalition);
         unit.scope = Some(Scope::new(root.coalition).unwrap());
         let accepted = tokio::time::timeout(Duration::from_secs(10), listener.accept()).await;
@@ -1174,6 +1680,10 @@ done
         let (actor, plain) = native_actors(generated.path());
         verify_uncertain_storage_is_retained().await;
         verify_partial_storage_is_cleaned().await;
+        verify_storage_ownership().await;
+        verify_storage_free_cleanup().await;
+        verify_previous_boot_never_signals().await;
+        verify_controller_crash_recovery(&plain).await;
 
         for phase in [
             "descendants",
@@ -1185,8 +1695,8 @@ done
             "command-profile",
             "entitlement-profile",
         ] {
-            let mut unit = Unit::new().unwrap();
-            assert_eq!(std::fs::read_dir(&unit.root).unwrap().count(), 1);
+            let mut unit = Unit::new().await.unwrap();
+            assert_eq!(std::fs::read_dir(&unit.root).unwrap().count(), 2);
             if phase == "entitlement-profile" {
                 for (name, executable) in [("actor", &actor), ("plain", &plain)] {
                     std::fs::copy(executable, unit.root.join(name)).unwrap();
@@ -1393,6 +1903,50 @@ done
         let root = std::env::var_os("ARANY_TEST_NATIVE_UNIT_ROOT").unwrap();
         let root = Path::new(&root);
         let phase = std::env::var("ARANY_TEST_NATIVE_UNIT_PHASE").unwrap();
+        if phase == "storage-free-cleanup" {
+            let reactor = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            super::super::install_profile("(version 1)\n(allow default)\n(deny process-exec (literal \"/usr/bin/hdiutil\"))\n".into()).unwrap();
+            reactor.block_on(cleanup_storage(root)).unwrap();
+            return;
+        }
+        if phase == "recovery-controller" {
+            let source = std::env::var_os("ARANY_TEST_NATIVE_UNIT_WORKSPACE").unwrap();
+            let reactor = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            reactor.block_on(async {
+                let mut unit = Unit::new().await.unwrap();
+                let stream = UnixStream::connect(root.join("crash")).unwrap();
+                stream.set_nonblocking(true).unwrap();
+                let mut stream = tokio::net::UnixStream::from_std(stream).unwrap();
+                stream
+                    .write_all(&serde_json::to_vec(&unit.root).unwrap())
+                    .await
+                    .unwrap();
+                stream.write_all(b"\n").await.unwrap();
+                stream.read_exact(&mut [0]).await.unwrap();
+                let (_, mut attestation, listener) =
+                    launch_helper(&mut unit, "descendants", Path::new(&source)).await;
+                attestation.write_all(b"G").unwrap();
+                let child = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .0;
+                let mut child = BufReader::new(child);
+                let members = read_line_capped(&mut child, 2048).await.unwrap();
+                child.get_mut().write_all(b"G").await.unwrap();
+                let _volumes = prepare_storage(&unit.root).await.unwrap();
+                std::fs::write(unit.root.join(STORAGE_PENDING), []).unwrap();
+                stream.write_all(&members).await.unwrap();
+                assert_eq!(stream.read(&mut [0]).await.unwrap(), 0);
+            });
+            return;
+        }
         if phase == "detach" {
             rustix::process::setsid().unwrap();
             // The fixture deliberately orphans this child; the coalition owner verifies its removal.

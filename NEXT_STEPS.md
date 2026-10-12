@@ -31,12 +31,6 @@ history. Implementation status and verified support are separate claims.
   missing and user-deferred behind the [route/authorization gate](./docs/research/subscription-provider-routes-2026-10.md#decision-boundary-for-beta-1).
   Continue unaffected implementation. API-key billing is a separate route;
   another harness's implementation or credentials do not authorize Arany access.
-- **macOS crash recovery.** Retained uncertain Guard roots need a positively
-  owned job/device/mount recovery protocol. Establish termination and mount
-  ownership before detachment/deletion; a filename-prefix sweep is unsafe.
-  Until then, eight retained roots block new native units and the user removes
-  them manually. The [Tool contract](./docs/specs/tools.md#macos-enforcement-and-compatibility)
-  owns the bound and fail-closed retention.
 - **Larger coding workloads.** Add reviewed runtime/cache mounts, bounded build
   profiles and explicit artifact integration when actual workloads need them.
   Remote MCP/OAuth, network/disclosure grants, interactive/background jobs,
