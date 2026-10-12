@@ -33,6 +33,11 @@ Follow the [local MCP configuration](./specs/tools.md#local-mcp) for pinned serv
 
 ## Limits and failure behavior
 
+On Linux and macOS, edit the private user-level `guard/limits.json` to change
+simultaneous Guard units and waiting Tools.
+The [shared capacity/settings contract](./specs/tools.md#shared-native-capacity-and-settings)
+gives exact paths, JSON, defaults, ranges and waiting behavior.
+
 The [limits and recovery contract](./specs/tools.md#limits-and-failure-behavior) describes quotas, exact file preconditions and uncertain effects. Inspect `arany show --output text SESSION_ID` and actual files before an intentional retry. Historical intents never execute on replay or resume.
 
 ## Native enforcement and verification

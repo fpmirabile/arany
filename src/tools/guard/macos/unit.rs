@@ -1,5 +1,7 @@
 use super::super::{BootstrapFailure, GuardStage, Task, read_line_capped};
-use super::storage::{cleanup_storage, prepare_command_storage, storage_mounted};
+use super::storage::{
+    cleanup_storage, prepare_command_storage, read_record, storage_mounted, write_record,
+};
 use super::{
     CPU_LIMIT, PREPARATION_DEADLINE, SUPERVISION_INTERVAL, bootstrap, ffi, system_program,
 };
@@ -36,10 +38,37 @@ const UNIT_ROOT_PARENT: &str = "/private/tmp";
 const UNIT_ROOT_PREFIX: &str = "arany-u-";
 // A live unit holds an exclusive lock here; the kernel releases it when the owner exits.
 const UNIT_LIVENESS_LOCK: &str = "unit.lock";
-// Each retained root holds two 64 MiB images; eight bounds retained storage to 1 GiB.
-const RETAINED_ROOT_LIMIT: usize = 8;
+#[cfg(test)]
+const RECOVERY_ATTEMPT_LIMIT: usize = super::super::admission::RECOVERY_ATTEMPTS;
 // Bounds the directory scan itself; an unverifiable listing fails closed.
 const UNIT_ROOT_SCAN_LIMIT: usize = 4096;
+const RECOVERY_RECORD: &str = "recovery.json";
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Recovery {
+    version: u32,
+    root: (u64, u64),
+    boot: uuid::Uuid,
+    supervisor: Option<Identity>,
+}
+
+fn recovery(directory: &PrivateDirectory) -> Result<Recovery, ToolError> {
+    let record: Recovery = read_record(&directory.dir, RECOVERY_RECORD)?;
+    if record.version != 1
+        || record.boot.is_nil()
+        || record.root != crate::tools::fs::identity(&directory.dir)?
+        || record.supervisor.is_some_and(|identity| {
+            identity.pid <= 1
+                || identity.pid > i32::MAX as u32
+                || identity.unique_id == 0
+                || identity.coalition <= 1
+        })
+    {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok(record)
+}
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -260,6 +289,7 @@ struct Unit {
     label: String,
     scope: Option<Scope>,
     stopped: bool,
+    _permit: Option<super::super::admission::Permit>,
 }
 
 enum ManagerAction<'a> {
@@ -268,10 +298,18 @@ enum ManagerAction<'a> {
     Bootout,
 }
 
-// Retained roots are never reclaimed automatically; counting is the only bound until
-// positive ownership recovery exists.
-fn check_retained_roots(parent: &Path, owner: u32) -> Result<(), ToolError> {
-    let mut retained = 0;
+#[cfg(test)]
+async fn recover_retained_roots(parent: &Path, owner: u32) -> Result<(), ToolError> {
+    let mut attempts = RECOVERY_ATTEMPT_LIMIT;
+    recover_retained_roots_with_budget(parent, owner, &mut attempts).await
+}
+
+pub(super) async fn recover_retained_roots_with_budget(
+    parent: &Path,
+    owner: u32,
+    attempts: &mut usize,
+) -> Result<(), ToolError> {
+    let mut candidates = Vec::new();
     for (scanned, entry) in std::fs::read_dir(parent)
         .map_err(|_| ToolError::ProtectionUnavailable)?
         .enumerate()
@@ -287,17 +325,77 @@ fn check_retained_roots(parent: &Path, owner: u32) -> Result<(), ToolError> {
         {
             continue;
         }
-        match std::fs::symlink_metadata(entry.path()) {
-            Ok(metadata) if metadata.uid() == owner && is_retained(&entry.path())? => {
-                retained += 1;
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        let metadata = match std::fs::symlink_metadata(entry.path()) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(_) => return Err(ToolError::ProtectionUnavailable),
+        };
+        if metadata.uid() == owner
+            && matches!(is_retained(&entry.path()), Ok(true))
+            && open_directory(&entry.path(), false)
+                .ok()
+                .and_then(|directory| recovery(&directory).ok())
+                .is_some()
+        {
+            candidates.push(entry.path());
         }
     }
-    if retained >= RETAINED_ROOT_LIMIT {
-        return Err(ToolError::RetainedRoots);
+    for root in candidates {
+        if *attempts == 0 {
+            break;
+        }
+        *attempts -= 1;
+        // A failed recovery retains the root and contributes to the ordinary admission bound.
+        let _ = recover_root(&root).await;
+    }
+    Ok(())
+}
+
+async fn recover_root(root: &Path) -> Result<(), ToolError> {
+    let name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(ToolError::Path)?;
+    let uuid = name.strip_prefix(UNIT_ROOT_PREFIX).ok_or(ToolError::Path)?;
+    if uuid::Uuid::parse_str(uuid).is_err() {
+        return Err(ToolError::Path);
+    }
+    let directory = open_directory(root, false).map_err(|_| ToolError::Path)?;
+    let lock = super::super::admission::open_file(&directory.dir, UNIT_LIVENESS_LOCK, false)?
+        .ok_or(ToolError::Path)?;
+    if lock.metadata().map_err(|_| ToolError::Path)?.len() != 0 {
+        return Err(ToolError::Path);
+    }
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+        .map_err(|_| ToolError::ProtectionUnavailable)?;
+    let initial = recovery(&directory)?;
+    let same_boot = initial.boot == ffi::boot_session()?;
+    if same_boot {
+        manager(
+            &format!("user/{}", rustix::process::geteuid().as_raw()),
+            &format!("dev.arany.tool.{name}"),
+            ManagerAction::Bootout,
+        )
+        .await?;
+        // A bootstrapping supervisor may publish its identity while bootout is running.
+        let current = recovery(&directory)?;
+        if current.boot != initial.boot
+            || current.root != initial.root
+            || (initial.supervisor.is_some() && initial.supervisor != current.supervisor)
+        {
+            return Err(ToolError::ChangedInput);
+        }
+        if let Some(supervisor) = current.supervisor {
+            if supervisor.coalition == identity(std::process::id())?.coalition {
+                return Err(ToolError::ProtectionUnavailable);
+            }
+            Scope::new(supervisor.coalition)?.stop(None).await?;
+        }
+    }
+    cleanup_storage(root).await?;
+    remove_root(root, &directory)?;
+    if root.exists() {
+        return Err(ToolError::Operation);
     }
     Ok(())
 }
@@ -305,23 +403,22 @@ fn check_retained_roots(parent: &Path, owner: u32) -> Result<(), ToolError> {
 // An unlocked liveness lock was left by a finished or crashed owner. A root without the
 // lock is still being created or was abandoned before it could hold storage.
 fn is_retained(root: &Path) -> Result<bool, ToolError> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let lock = match std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(root.join(UNIT_LIVENESS_LOCK))
-    {
-        Ok(lock) => lock,
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-            ) =>
+    let directory = match open_directory(root, false) {
+        Ok(directory) => directory,
+        Err(crate::private_fs::Error::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound =>
         {
             return Ok(false);
         }
-        Err(_) => return Err(ToolError::ProtectionUnavailable),
+        Err(_) => return Err(ToolError::Path),
     };
+    let Some(lock) = super::super::admission::open_file(&directory.dir, UNIT_LIVENESS_LOCK, false)?
+    else {
+        return Ok(false);
+    };
+    if lock.metadata().map_err(|_| ToolError::Path)?.len() != 0 {
+        return Err(ToolError::Path);
+    }
     match rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockShared) {
         Ok(()) => Ok(true),
         Err(rustix::io::Errno::WOULDBLOCK) => Ok(false),
@@ -346,14 +443,77 @@ fn hold_liveness_lock(directory: &PrivateDirectory) -> Result<cap_std::fs::File,
         .map_err(|_| ToolError::Operation)
 }
 
+async fn manager(
+    domain: &str,
+    label: &str,
+    action: ManagerAction<'_>,
+) -> Result<Vec<u8>, ToolError> {
+    if !system_program("/bin/launchctl")? {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    let bootout = matches!(action, ManagerAction::Bootout);
+    let mut command = Command::new("/bin/launchctl");
+    command.env_clear().current_dir("/");
+    match action {
+        ManagerAction::Bootstrap(path) => {
+            command.arg("bootstrap").arg(domain).arg(path);
+        }
+        ManagerAction::Kickstart => {
+            command.args(["kickstart", "-p", &format!("{domain}/{label}")]);
+        }
+        ManagerAction::Bootout => {
+            command.args(["bootout", &format!("{domain}/{label}")]);
+        }
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let (status, stdout, _) = super::super::capture(
+        command
+            .spawn()
+            .map_err(|_| ToolError::ProtectionUnavailable)?,
+        4096,
+        Duration::from_secs(3),
+    )
+    .await?;
+    if status.success() || (bootout && status.code() == Some(libc::ESRCH)) {
+        Ok(stdout)
+    } else {
+        Err(ToolError::ProtectionUnavailable)
+    }
+}
+
 impl Unit {
-    fn new() -> Result<Self, ToolError> {
-        check_retained_roots(
-            Path::new(UNIT_ROOT_PARENT),
-            rustix::process::geteuid().as_raw(),
-        )?;
-        let name = format!("{UNIT_ROOT_PREFIX}{}", uuid::Uuid::now_v7());
-        let root = Path::new(UNIT_ROOT_PARENT).join(&name);
+    #[cfg(test)]
+    async fn new(fixture: &Path) -> Result<Self, ToolError> {
+        let directory =
+            open_directory(&fixture.join("guard"), true).map_err(|_| ToolError::Path)?;
+        let permit = super::super::admission::acquire_in(
+            &directory,
+            fixture,
+            uuid::Uuid::now_v7(),
+            u64::MAX,
+            |_| {},
+            crate::tools::now_ms,
+        )
+        .await?;
+        Self::create(permit, fixture)
+    }
+
+    async fn admit(
+        id: uuid::Uuid,
+        expires_at_ms: u64,
+        queued: impl Fn(bool),
+    ) -> Result<Self, ToolError> {
+        let permit = super::super::admission::acquire(id, expires_at_ms, queued).await?;
+        Self::create(permit, Path::new(UNIT_ROOT_PARENT))
+    }
+
+    fn create(permit: super::super::admission::Permit, parent: &Path) -> Result<Self, ToolError> {
+        let name = format!("{UNIT_ROOT_PREFIX}{}", permit.id);
+        let root = parent.join(&name);
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(&root)
@@ -372,7 +532,7 @@ impl Unit {
                 return Err(error);
             }
         };
-        Ok(Self {
+        let unit = Self {
             root,
             _directory: directory,
             _liveness: liveness,
@@ -380,11 +540,19 @@ impl Unit {
             label: format!("dev.arany.tool.{name}"),
             scope: None,
             stopped: false,
-        })
-    }
-
-    fn target(&self) -> String {
-        format!("{}/{}", self.domain, self.label)
+            _permit: Some(permit),
+        };
+        write_record(
+            &unit._directory.dir,
+            RECOVERY_RECORD,
+            &Recovery {
+                version: 1,
+                root: crate::tools::fs::identity(&unit._directory.dir)?,
+                boot: ffi::boot_session()?,
+                supervisor: None,
+            },
+        )?;
+        Ok(unit)
     }
 
     fn write_job(&self, arguments: &[&str], stderr: &str) -> Result<PathBuf, ToolError> {
@@ -438,41 +606,7 @@ impl Unit {
     }
 
     async fn manager(&self, action: ManagerAction<'_>) -> Result<Vec<u8>, ToolError> {
-        if !system_program("/bin/launchctl")? {
-            return Err(ToolError::ProtectionUnavailable);
-        }
-        let bootout = matches!(action, ManagerAction::Bootout);
-        let mut command = Command::new("/bin/launchctl");
-        command.env_clear().current_dir("/");
-        match action {
-            ManagerAction::Bootstrap(path) => {
-                command.arg("bootstrap").arg(&self.domain).arg(path);
-            }
-            ManagerAction::Kickstart => {
-                command.args(["kickstart", "-p", &self.target()]);
-            }
-            ManagerAction::Bootout => {
-                command.args(["bootout", &self.target()]);
-            }
-        }
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        let (status, stdout, _) = super::super::capture(
-            command
-                .spawn()
-                .map_err(|_| ToolError::ProtectionUnavailable)?,
-            4096,
-            Duration::from_secs(3),
-        )
-        .await?;
-        if status.success() || (bootout && status.code() == Some(libc::ESRCH)) {
-            Ok(stdout)
-        } else {
-            Err(ToolError::ProtectionUnavailable)
-        }
+        manager(&self.domain, &self.label, action).await
     }
 
     async fn connect(
@@ -531,6 +665,10 @@ impl Unit {
         if received != child {
             return Err(ToolError::ProtectionUnavailable);
         }
+        let record = recovery(&self._directory)?;
+        if record.boot != ffi::boot_session()? || record.supervisor != Some(child) {
+            return Err(ToolError::ProtectionUnavailable);
+        }
         Ok(stream.into_inner())
     }
 
@@ -552,6 +690,24 @@ impl Unit {
     }
 }
 
+fn remove_root(root: &Path, admitted: &PrivateDirectory) -> Result<(), ToolError> {
+    if storage_mounted(root)?
+        || ffi::mounts()?
+            .iter()
+            .any(|(_, target)| target.starts_with(root))
+    {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    let current = open_directory(root, false).map_err(|_| ToolError::Path)?;
+    if crate::tools::fs::identity(&current.dir)? != crate::tools::fs::identity(&admitted.dir)? {
+        return Err(ToolError::ChangedInput);
+    }
+    let parent = crate::tools::fs::open_directory(root.parent().ok_or(ToolError::Path)?)?;
+    parent
+        .remove_dir_all(root.file_name().ok_or(ToolError::Path)?)
+        .map_err(|_| ToolError::Operation)
+}
+
 impl Drop for Unit {
     fn drop(&mut self) {
         if !self.stopped {
@@ -568,14 +724,8 @@ impl Drop for Unit {
                 }
             });
         }
-        if self.stopped
-            && !storage_mounted(&self.root).unwrap_or(true)
-            && let (Ok(tmp), Some(name)) = (
-                crate::tools::fs::open_directory(Path::new("/private/tmp")),
-                self.root.file_name(),
-            )
-        {
-            let _ = tmp.remove_dir_all(name);
+        if self.stopped {
+            let _ = remove_root(&self.root, &self._directory);
         }
     }
 }
@@ -586,7 +736,11 @@ pub(super) async fn execute(
     mut cancellation: RunCancellation,
     dispatched: &AtomicBool,
 ) -> Result<ToolObservation, ToolError> {
-    let mut unit = Unit::new()?;
+    let mut unit = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(ToolError::Operation),
+        unit = Unit::admit(intent.id, intent.expires_at_ms, |queued| runtime.queue_changed(intent.id, queued)) => unit?,
+    };
     crate::tools::fs::reject_overlap(&unit.root, &runtime.workspace)?;
     let execution = async {
         let mut stream = BufReader::new(
@@ -665,7 +819,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
         bootstrap()?;
         let path = std::env::args_os().nth(2).ok_or(ToolError::Configuration)?;
         let path = Path::new(&path);
-        let (_root, mut stream) = connect_control(path)?;
+        let (root, mut stream) = connect_control(path)?;
         diagnostic = Some(stream.try_clone().map_err(|_| ToolError::Operation)?);
         stage = super::super::BootstrapStage::Capabilities;
         let parent = peer(&stream)?;
@@ -674,6 +828,12 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             return Err(ToolError::ProtectionUnavailable);
         }
         let mut scope = Scope::new(own.coalition)?;
+        let mut record = recovery(&root)?;
+        if record.boot != ffi::boot_session()? || record.supervisor.is_some() {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        record.supervisor = Some(own);
+        write_record(&root.dir, RECOVERY_RECORD, &record)?;
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .map_err(|_| ToolError::Operation)?;
@@ -804,75 +964,177 @@ mod tests {
     use std::io::Read;
 
     #[test]
-    fn retained_root_bound_counts_only_this_users_unit_roots() {
+    fn recovery_refuses_unowned_records_and_live_roots() {
         use crate::test_process::BoundedOutput;
 
         let root = tempfile::tempdir().unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "tools::guard::macos::unit::tests::retained_root_bound_helper",
+                "tools::guard::macos::unit::tests::recovery_refusal_helper",
                 "--ignored",
                 "--nocapture",
             ])
             .env_clear()
             .env("TMPDIR", root.path())
-            .env("ARANY_TEST_RETAINED_ROOT", root.path())
+            .env("ARANY_TEST_RECOVERY_ROOT", root.path())
             .bounded_output_for(Duration::from_secs(10), 16 * 1024)
             .unwrap();
-        assert!(output.status.success(), "retained-root corpus: {output:?}");
-        crate::test_process::assert_single_test_completed(&output.stdout, "retained-root corpus");
+        assert!(
+            output.status.success(),
+            "recovery refusal corpus: {output:?}"
+        );
+        crate::test_process::assert_single_test_completed(
+            &output.stdout,
+            "recovery refusal corpus",
+        );
         assert!(output.stderr.is_empty());
     }
 
-    #[test]
-    #[ignore = "isolated liveness-lock corpus owned by retained-root test"]
-    fn retained_root_bound_helper() {
-        std::env::var_os("ARANY_TEST_RETAINED_ROOT").expect("private retained-root fixture");
+    #[tokio::test]
+    #[ignore = "isolated liveness-lock corpus owned by recovery refusal test"]
+    async fn recovery_refusal_helper() {
+        std::env::var_os("ARANY_TEST_RECOVERY_ROOT").expect("private recovery fixture");
+        #[derive(Debug)]
+        enum Case {
+            Missing,
+            Malformed,
+            Version,
+            Identity,
+            Boot,
+            Oversized,
+            Link,
+            Hardlink,
+            Live,
+        }
         let parent = tempfile::tempdir().unwrap();
-        let owner = rustix::process::geteuid().as_raw();
-        let abandoned = |name: &str| {
-            let root = parent.path().join(format!("{UNIT_ROOT_PREFIX}{name}"));
-            std::fs::create_dir(&root).unwrap();
-            std::fs::File::create(root.join(UNIT_LIVENESS_LOCK)).unwrap();
-        };
-        std::fs::create_dir(parent.path().join("unrelated")).unwrap();
-        for index in 0..RETAINED_ROOT_LIMIT - 1 {
-            abandoned(&index.to_string());
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("keep"), b"outside").unwrap();
+        for case in [
+            Case::Missing,
+            Case::Malformed,
+            Case::Version,
+            Case::Identity,
+            Case::Boot,
+            Case::Oversized,
+            Case::Link,
+            Case::Hardlink,
+            Case::Live,
+        ] {
+            let root = parent
+                .path()
+                .join(format!("{UNIT_ROOT_PREFIX}{}", uuid::Uuid::now_v7()));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&root)
+                .unwrap();
+            let directory = open_directory(&root, false).unwrap();
+            let lock = hold_liveness_lock(&directory).unwrap();
+            let mut record = Recovery {
+                version: 1,
+                root: crate::tools::fs::identity(&directory.dir).unwrap(),
+                boot: uuid::Uuid::now_v7(),
+                supervisor: None,
+            };
+            match case {
+                Case::Version => record.version += 1,
+                Case::Identity => record.root.1 += 1,
+                Case::Boot => record.boot = uuid::Uuid::nil(),
+                Case::Missing
+                | Case::Malformed
+                | Case::Oversized
+                | Case::Link
+                | Case::Hardlink
+                | Case::Live => {}
+            }
+            write_record(&directory.dir, RECOVERY_RECORD, &record).unwrap();
+            match case {
+                Case::Missing => std::fs::remove_file(root.join(RECOVERY_RECORD)).unwrap(),
+                Case::Malformed => {
+                    std::fs::write(root.join(RECOVERY_RECORD), b"{\"version\":").unwrap()
+                }
+                Case::Oversized => std::fs::write(
+                    root.join(RECOVERY_RECORD),
+                    vec![b' '; super::super::super::admission::RECORD_BYTES_CAP + 1],
+                )
+                .unwrap(),
+                Case::Link => {
+                    std::fs::remove_file(root.join(RECOVERY_RECORD)).unwrap();
+                    std::os::unix::fs::symlink(
+                        outside.path().join("keep"),
+                        root.join(RECOVERY_RECORD),
+                    )
+                    .unwrap();
+                }
+                Case::Hardlink => {
+                    std::fs::hard_link(root.join(RECOVERY_RECORD), root.join("alias")).unwrap()
+                }
+                Case::Version | Case::Identity | Case::Boot | Case::Live => {}
+            }
+            let held = if matches!(case, Case::Live) {
+                Some(lock)
+            } else {
+                drop(lock);
+                None
+            };
+            assert!(
+                recover_root(&root).await.is_err(),
+                "recovery must reject {case:?}"
+            );
+            assert!(root.exists(), "rejected {case:?} root must remain intact");
+            assert_eq!(
+                std::fs::read(outside.path().join("keep")).unwrap(),
+                b"outside"
+            );
+            drop(held);
         }
-        std::fs::create_dir(parent.path().join(format!("{UNIT_ROOT_PREFIX}creating"))).unwrap();
-        check_retained_roots(parent.path(), owner)
-            .expect("a root without its liveness lock holds no storage");
-        abandoned("last");
-        assert!(matches!(
-            check_retained_roots(parent.path(), owner),
-            Err(ToolError::RetainedRoots)
-        ));
-        assert!(
-            check_retained_roots(parent.path(), owner.wrapping_add(1)).is_ok(),
-            "roots owned by another uid are not counted"
+        let alias = parent
+            .path()
+            .join(format!("{UNIT_ROOT_PREFIX}{}", uuid::Uuid::now_v7()));
+        std::os::unix::fs::symlink(outside.path(), &alias).unwrap();
+        assert!(recover_root(&alias).await.is_err());
+        assert_eq!(
+            std::fs::read(outside.path().join("keep")).unwrap(),
+            b"outside"
         );
-        let live = parent.path().join(format!("{UNIT_ROOT_PREFIX}last"));
-        std::fs::set_permissions(&live, std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::remove_file(live.join(UNIT_LIVENESS_LOCK)).unwrap();
-        let held = hold_liveness_lock(&open_directory(&live, false).unwrap()).unwrap();
-        check_retained_roots(parent.path(), owner).expect("a live unit root is not retained");
-        drop(held);
-        assert!(
-            matches!(
-                check_retained_roots(parent.path(), owner),
-                Err(ToolError::RetainedRoots)
-            ),
-            "a released lock marks its root retained"
-        );
-        let scanned = tempfile::tempdir().unwrap();
-        for index in 0..=UNIT_ROOT_SCAN_LIMIT {
-            std::fs::File::create(scanned.path().join(format!("entry-{index}"))).unwrap();
+        let priority = tempfile::tempdir().unwrap();
+        for _ in 0..=RECOVERY_ATTEMPT_LIMIT {
+            let root = priority
+                .path()
+                .join(format!("{UNIT_ROOT_PREFIX}{}", uuid::Uuid::now_v7()));
+            let directory = open_directory(&root, true).unwrap();
+            drop(hold_liveness_lock(&directory).unwrap());
         }
-        assert!(matches!(
-            check_retained_roots(scanned.path(), owner),
-            Err(ToolError::ProtectionUnavailable)
-        ));
+        let roots: Vec<_> = std::fs::read_dir(priority.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        let valid = roots.last().unwrap();
+        let directory = open_directory(valid, false).unwrap();
+        write_record(
+            &directory.dir,
+            RECOVERY_RECORD,
+            &Recovery {
+                version: 1,
+                root: crate::tools::fs::identity(&directory.dir).unwrap(),
+                boot: uuid::Uuid::now_v7(),
+                supervisor: None,
+            },
+        )
+        .unwrap();
+        recover_retained_roots(priority.path(), rustix::process::geteuid().as_raw())
+            .await
+            .unwrap();
+        assert!(
+            !valid.exists(),
+            "invalid records cannot consume the valid-candidate recovery budget"
+        );
+        assert!(
+            roots
+                .iter()
+                .take(RECOVERY_ATTEMPT_LIMIT)
+                .all(|root| root.exists())
+        );
     }
 
     const HELPER: &str = "tools::guard::macos::unit::tests::native_unit_helper";
@@ -951,6 +1213,7 @@ done
         let process_enforcement_digest =
             super::super::macos_enforcement_digest(Some(&system_programs)).unwrap();
         ToolRuntime {
+            queue_progress: None,
             config: crate::tools::config::Config {
                 version: 1,
                 workspace_paths: vec!["selected".into(), "empty".into(), "script".into()],
@@ -1062,8 +1325,8 @@ done
         (actor, plain)
     }
 
-    async fn verify_uncertain_storage_is_retained() {
-        let mut uncertain = Unit::new().unwrap();
+    async fn verify_uncertain_storage_is_retained(fixture: &Path) {
+        let mut uncertain = Unit::new(fixture).await.unwrap();
         std::fs::write(uncertain.root.join(STORAGE_PENDING), []).unwrap();
         assert!(uncertain.stop().await.is_err());
         let uncertain_root = uncertain.root.clone();
@@ -1074,14 +1337,14 @@ done
             .remove_file(STORAGE_PENDING)
             .unwrap();
         assert!(!storage_mounted(&uncertain_root).unwrap());
-        crate::tools::fs::open_directory(Path::new("/private/tmp"))
+        crate::tools::fs::open_directory(fixture)
             .unwrap()
             .remove_dir_all(uncertain_root.file_name().unwrap())
             .unwrap();
     }
 
-    async fn verify_partial_storage_is_cleaned() {
-        let mut partial = Unit::new().unwrap();
+    async fn verify_partial_storage_is_cleaned(fixture: &Path) {
+        let mut partial = Unit::new(fixture).await.unwrap();
         let outside = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(outside.path(), partial.root.join("scratch")).unwrap();
         let preparation = prepare_storage(&partial.root).await;
@@ -1100,6 +1363,433 @@ done
         let partial_root = partial.root.clone();
         drop(partial);
         assert!(!partial_root.exists());
+    }
+
+    async fn verify_storage_ownership(fixture: &Path) {
+        use super::super::storage::ImageIdentity;
+        let mut unit = Unit::new(fixture).await.unwrap();
+        let _volumes = prepare_storage(&unit.root).await.unwrap();
+        let mut image: ImageIdentity =
+            read_record(&unit._directory.dir, "scratch.image.json").unwrap();
+        image.inode = image.inode.wrapping_add(1);
+        write_record(&unit._directory.dir, "scratch.image.json", &image).unwrap();
+        let mounted = ffi::mounts().unwrap();
+        assert!(
+            unit.stop().await.is_err(),
+            "a mismatched backing inode must reject before any detach"
+        );
+        assert_eq!(
+            ffi::mounts()
+                .unwrap()
+                .iter()
+                .filter(|(_, target)| target.starts_with(&unit.root))
+                .count(),
+            2
+        );
+        assert!(
+            mounted
+                .iter()
+                .filter(|(_, target)| target.starts_with(&unit.root))
+                .all(|mount| ffi::mounts().unwrap().contains(mount))
+        );
+        image.inode = image.inode.wrapping_sub(1);
+        write_record(&unit._directory.dir, "scratch.image.json", &image).unwrap();
+        use crate::test_process::BoundedOutput;
+        let unmounted = std::process::Command::new("/usr/bin/hdiutil")
+            .args(["unmount", "-force", "-quiet"])
+            .arg(unit.root.join("workspace"))
+            .env_clear()
+            .current_dir(&unit.root)
+            .bounded_output_for(Duration::from_secs(20), 4096)
+            .unwrap();
+        assert!(unmounted.status.success(), "owned image unmount fixture");
+        assert!(
+            !ffi::mounts()
+                .unwrap()
+                .iter()
+                .any(|(_, target)| target == &unit.root.join("workspace"))
+        );
+        unit.stop().await.unwrap();
+    }
+
+    async fn verify_storage_free_cleanup(fixture: &Path) {
+        use crate::test_process::BoundedOutput;
+        let mut unit = Unit::new(fixture).await.unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", HELPER, "--ignored", "--nocapture"])
+            .env_clear()
+            .env("ARANY_TEST_NATIVE_UNIT_ROOT", &unit.root)
+            .env("ARANY_TEST_NATIVE_UNIT_PHASE", "storage-free-cleanup")
+            .current_dir("/")
+            .bounded_output_for(Duration::from_secs(10), 16 * 1024)
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "storage-free cleanup with hdiutil exec denied: {output:?}"
+        );
+        crate::test_process::assert_single_test_completed(
+            &output.stdout,
+            "storage-free cleanup helper",
+        );
+        unit.stop().await.unwrap();
+    }
+
+    async fn verify_previous_boot_never_signals() {
+        let parent = tempfile::tempdir().unwrap();
+        let own = identity(std::process::id()).unwrap();
+        let mut roots = Vec::new();
+        for _ in 0..RECOVERY_ATTEMPT_LIMIT {
+            let root = parent
+                .path()
+                .join(format!("{UNIT_ROOT_PREFIX}{}", uuid::Uuid::now_v7()));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&root)
+                .unwrap();
+            let directory = open_directory(&root, false).unwrap();
+            let lock = hold_liveness_lock(&directory).unwrap();
+            write_record(
+                &directory.dir,
+                RECOVERY_RECORD,
+                &Recovery {
+                    version: 1,
+                    root: crate::tools::fs::identity(&directory.dir).unwrap(),
+                    boot: uuid::Uuid::now_v7(),
+                    supervisor: Some(own),
+                },
+            )
+            .unwrap();
+            drop(lock);
+            roots.push(root);
+        }
+        recover_retained_roots(parent.path(), rustix::process::geteuid().as_raw())
+            .await
+            .unwrap();
+        assert!(roots.iter().all(|root| !root.exists()));
+        assert!(identity(own.pid).unwrap().same_process(own));
+    }
+
+    struct DiskGate {
+        child: tokio::process::Child,
+        output: BufReader<tokio::process::ChildStdout>,
+    }
+
+    impl DiskGate {
+        async fn start(executable: &Path, action: &str, root: &Path, image: &str) -> Self {
+            let name = format!("{}-{image}", root.file_name().unwrap().to_str().unwrap());
+            let mut child = Command::new(executable)
+                .args([action, &name])
+                .env_clear()
+                .current_dir("/")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let output = BufReader::new(child.stdout.take().unwrap());
+            let mut gate = Self { child, output };
+            assert_eq!(gate.message().await, b"READY\n");
+            gate
+        }
+
+        async fn message(&mut self) -> Vec<u8> {
+            tokio::time::timeout(
+                Duration::from_secs(8),
+                read_line_capped(&mut self.output, 128),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+        }
+
+        async fn blocked(&mut self) -> PathBuf {
+            let message = self.message().await;
+            let device = std::str::from_utf8(&message)
+                .unwrap()
+                .trim()
+                .strip_prefix("BLOCKED ")
+                .unwrap();
+            assert!(device.starts_with("/dev/disk"));
+            device.into()
+        }
+
+        async fn release(mut self) {
+            self.child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"G")
+                .await
+                .unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_secs(5), self.child.wait())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .success()
+            );
+        }
+    }
+
+    fn disk_gate_actor(directory: &Path) -> PathBuf {
+        use crate::test_process::BoundedOutput;
+        let executable = directory.join("disk-gate");
+        let compiled = std::process::Command::new("/usr/bin/xcrun")
+            .args([
+                "--sdk",
+                "macosx",
+                "clang",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-O1",
+                "-framework",
+                "DiskArbitration",
+                "-framework",
+                "CoreFoundation",
+            ])
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/macos-disk-approval-gate.c"
+            ))
+            .arg("-o")
+            .arg(&executable)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", directory)
+            .env("TMPDIR", directory)
+            .current_dir(directory)
+            .bounded_output_for(Duration::from_secs(20), 16 * 1024)
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "disk gate compilation: {compiled:?}"
+        );
+        assert!(compiled.stdout.is_empty() && compiled.stderr.is_empty());
+        executable
+    }
+
+    async fn verify_recovery_cancellation(gate: &Path, fixture: &Path) {
+        let mut unit = Unit::new(fixture).await.unwrap();
+        let _volumes = prepare_storage(&unit.root).await.unwrap();
+        let record = unit._directory.dir.read(RECOVERY_RECORD).unwrap();
+        write_record(
+            &unit._directory.dir,
+            STORAGE_PENDING,
+            &super::super::storage::PendingAttachment {
+                version: 1,
+                image: "workspace".into(),
+                boot: ffi::boot_session().unwrap(),
+                state: super::super::storage::AttachmentState::Attaching,
+            },
+        )
+        .unwrap();
+        let mut observer = DiskGate::start(gate, "unmount", &unit.root, "workspace").await;
+        rustix::fs::flock(&unit._liveness, rustix::fs::FlockOperation::Unlock).unwrap();
+        let mut recovering = Box::pin(recover_root(&unit.root));
+        let device = tokio::select! {
+            result = &mut recovering => panic!("recovery finished before native unmount gate: {result:?}"),
+            device = observer.blocked() => device,
+        };
+        assert!(
+            super::super::storage::owned_devices(&unit.root)
+                .await
+                .unwrap()
+                .contains(&device)
+        );
+        drop(recovering);
+        assert!(unit.root.exists());
+        assert_eq!(unit._directory.dir.read(RECOVERY_RECORD).unwrap(), record);
+        assert!(is_retained(&unit.root).unwrap());
+        let pending: super::super::storage::PendingAttachment =
+            read_record(&unit._directory.dir, STORAGE_PENDING).unwrap();
+        assert!(pending.state == super::super::storage::AttachmentState::Observed);
+        observer.release().await;
+        super::super::storage::detach_owned_image(&unit.root, "workspace")
+            .await
+            .unwrap();
+        assert!(
+            !super::super::storage::owned_devices(&unit.root)
+                .await
+                .unwrap()
+                .contains(&device)
+        );
+        assert!(
+            unit._directory
+                .dir
+                .symlink_metadata(STORAGE_PENDING)
+                .is_ok()
+        );
+        recover_root(&unit.root).await.unwrap();
+        assert!(!unit.root.exists());
+        unit.stopped = true;
+    }
+
+    async fn verify_controller_crash_recovery(script: &Path, gate: &Path) {
+        struct Controller(std::process::Child);
+        impl Drop for Controller {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut fixture = tempfile::tempdir().unwrap();
+        fixture.disable_cleanup(true);
+        let source = phase_workspace(script);
+        std::fs::write(fixture.path().join("errors"), []).unwrap();
+        let listener = UnixListener::bind(fixture.path().join("crash")).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+        // The controller drops before this fallback, even when an assertion unwinds.
+        let mut fallback: Option<Unit> = None;
+        let mut controller = Controller(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", HELPER, "--ignored", "--nocapture"])
+                .env_clear()
+                .env("ARANY_TEST_NATIVE_UNIT_ROOT", fixture.path())
+                .env("ARANY_TEST_NATIVE_UNIT_PHASE", "recovery-controller")
+                .env("ARANY_TEST_NATIVE_UNIT_WORKSPACE", source.path())
+                .current_dir("/")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(fixture.path().join("errors"))
+                        .unwrap(),
+                )
+                .spawn()
+                .unwrap(),
+        );
+        let stream = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+            .await
+            .unwrap()
+            .unwrap()
+            .0;
+        let mut stream = BufReader::new(stream);
+        let root: PathBuf =
+            serde_json::from_slice(&read_line_capped(&mut stream, 1024).await.unwrap()).unwrap();
+        let directory = open_directory(&root, false).unwrap();
+        let record = recovery(&directory).unwrap();
+        fallback.replace(Unit {
+            _permit: None,
+            root: root.clone(),
+            _liveness: directory.dir.open(UNIT_LIVENESS_LOCK).unwrap(),
+            _directory: directory,
+            domain: format!("user/{}", rustix::process::geteuid().as_raw()),
+            label: format!(
+                "dev.arany.tool.{}",
+                root.file_name().unwrap().to_str().unwrap()
+            ),
+            scope: record
+                .supervisor
+                .map(|supervisor| Scope::new(supervisor.coalition).unwrap()),
+            stopped: false,
+        });
+        let mut observer = DiskGate::start(gate, "mount", &root, "scratch").await;
+        stream.get_mut().write_all(b"G").await.unwrap();
+        let members: Vec<Identity> = serde_json::from_slice(
+            &tokio::time::timeout(Duration::from_secs(30), read_line_capped(&mut stream, 2048))
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let record = recovery(&fallback.as_ref().unwrap()._directory).unwrap();
+        let coalition = record.supervisor.unwrap().coalition;
+        fallback.as_mut().unwrap().scope = Some(Scope::new(coalition).unwrap());
+        let device = observer.blocked().await;
+        assert!(storage_mounted(&root).unwrap());
+        assert!(
+            super::super::storage::owned_devices(&root)
+                .await
+                .unwrap()
+                .contains(&device)
+        );
+        assert!(
+            !ffi::mounts()
+                .unwrap()
+                .iter()
+                .any(|(_, target)| target == &root.join("scratch"))
+        );
+        let pending: super::super::storage::PendingAttachment =
+            read_record(&fallback.as_ref().unwrap()._directory.dir, STORAGE_PENDING).unwrap();
+        assert_eq!(pending.image, "scratch");
+        assert!(Scope::new(coalition).unwrap().members().unwrap().len() > members.len() + 1);
+        assert!(!is_retained(&root).unwrap());
+        assert!(
+            recover_root(&root).await.is_err(),
+            "a live controller's lock must exclude recovery"
+        );
+        controller.0.kill().unwrap();
+        let status =
+            crate::test_process::capture(&mut controller.0, Duration::from_secs(5), 16 * 1024)
+                .status;
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
+        assert!(
+            is_retained(&root).unwrap(),
+            "process death releases the liveness lock"
+        );
+        // The restarted admission path must recover storage and escaped descendants together.
+        let mut recovering = Box::pin(recover_retained_roots(
+            fixture.path(),
+            rustix::process::geteuid().as_raw(),
+        ));
+        let emptied = async {
+            let mut samples = tokio::time::interval(SUPERVISION_INTERVAL);
+            loop {
+                if Scope::new(coalition).unwrap().members().unwrap().is_empty() {
+                    break;
+                }
+                samples.tick().await;
+            }
+        };
+        tokio::select! {
+            result = &mut recovering => panic!("recovery ended before attachment gate release: {result:?}"),
+            result = tokio::time::timeout(Duration::from_secs(5), emptied) => result.unwrap(),
+        }
+        observer.release().await;
+        recovering.await.unwrap();
+        assert!(!root.exists());
+        assert!(Scope::new(coalition).unwrap().members().unwrap().is_empty());
+        for member in members {
+            assert!(
+                matches!(identity(member.pid), Err(ToolError::ChangedInput))
+                    || identity(member.pid).is_ok_and(|current| !current.same_process(member))
+            );
+        }
+        assert!(
+            !ffi::mounts()
+                .unwrap()
+                .iter()
+                .any(|(_, target)| target.starts_with(&root))
+        );
+        fallback.as_mut().unwrap().stopped = true;
+        let mut next = Unit::new(fixture.path()).await.unwrap();
+        next.stop().await.unwrap();
+        drop(next);
+        drop(fallback);
+        close_unit_fixture(fixture);
+    }
+
+    fn close_unit_fixture(fixture: tempfile::TempDir) {
+        assert!(
+            !ffi::mounts()
+                .unwrap()
+                .iter()
+                .any(|(_, target)| target.starts_with(fixture.path()))
+        );
+        assert!(std::fs::read_dir(fixture.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_str()
+                .unwrap()
+                .starts_with(UNIT_ROOT_PREFIX)
+        }));
+        fixture.close().unwrap();
     }
 
     fn phase_workspace(script: &Path) -> tempfile::TempDir {
@@ -1175,6 +1865,9 @@ done
             .parse()
             .unwrap();
         let root = identity(pid).unwrap();
+        let mut record = recovery(&unit._directory).unwrap();
+        record.supervisor = Some(root);
+        write_record(&unit._directory.dir, RECOVERY_RECORD, &record).unwrap();
         assert_ne!(root.coalition, outside.coalition);
         unit.scope = Some(Scope::new(root.coalition).unwrap());
         let accepted = tokio::time::timeout(Duration::from_secs(10), listener.accept()).await;
@@ -1199,10 +1892,17 @@ done
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        let generated = tempfile::tempdir().unwrap();
+        let mut generated = tempfile::tempdir().unwrap();
+        generated.disable_cleanup(true);
         let (actor, plain) = native_actors(generated.path());
-        verify_uncertain_storage_is_retained().await;
-        verify_partial_storage_is_cleaned().await;
+        let disk_gate = disk_gate_actor(generated.path());
+        verify_uncertain_storage_is_retained(generated.path()).await;
+        verify_partial_storage_is_cleaned(generated.path()).await;
+        verify_storage_ownership(generated.path()).await;
+        verify_storage_free_cleanup(generated.path()).await;
+        verify_previous_boot_never_signals().await;
+        verify_controller_crash_recovery(&plain, &disk_gate).await;
+        verify_recovery_cancellation(&disk_gate, generated.path()).await;
 
         for phase in [
             "descendants",
@@ -1214,8 +1914,8 @@ done
             "command-profile",
             "entitlement-profile",
         ] {
-            let mut unit = Unit::new().unwrap();
-            assert_eq!(std::fs::read_dir(&unit.root).unwrap().count(), 1);
+            let mut unit = Unit::new(generated.path()).await.unwrap();
+            assert_eq!(std::fs::read_dir(&unit.root).unwrap().count(), 2);
             if phase == "entitlement-profile" {
                 for (name, executable) in [("actor", &actor), ("plain", &plain)] {
                     std::fs::copy(executable, unit.root.join(name)).unwrap();
@@ -1412,6 +2112,7 @@ done
                 );
             }
         }
+        close_unit_fixture(generated);
     }
 
     #[test]
@@ -1422,6 +2123,48 @@ done
         let root = std::env::var_os("ARANY_TEST_NATIVE_UNIT_ROOT").unwrap();
         let root = Path::new(&root);
         let phase = std::env::var("ARANY_TEST_NATIVE_UNIT_PHASE").unwrap();
+        if phase == "storage-free-cleanup" {
+            let reactor = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            super::super::install_profile("(version 1)\n(allow default)\n(deny process-exec (literal \"/usr/bin/hdiutil\"))\n".into()).unwrap();
+            reactor.block_on(cleanup_storage(root)).unwrap();
+            return;
+        }
+        if phase == "recovery-controller" {
+            let source = std::env::var_os("ARANY_TEST_NATIVE_UNIT_WORKSPACE").unwrap();
+            let reactor = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            reactor.block_on(async {
+                let mut unit = Unit::new(root).await.unwrap();
+                let stream = UnixStream::connect(root.join("crash")).unwrap();
+                stream.set_nonblocking(true).unwrap();
+                let mut stream = tokio::net::UnixStream::from_std(stream).unwrap();
+                stream
+                    .write_all(&serde_json::to_vec(&unit.root).unwrap())
+                    .await
+                    .unwrap();
+                stream.write_all(b"\n").await.unwrap();
+                stream.read_exact(&mut [0]).await.unwrap();
+                let (_, mut attestation, listener) =
+                    launch_helper(&mut unit, "attachment", Path::new(&source)).await;
+                attestation.write_all(b"G").unwrap();
+                let child = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .0;
+                let mut child = BufReader::new(child);
+                let members = read_line_capped(&mut child, 2048).await.unwrap();
+                child.get_mut().write_all(b"G").await.unwrap();
+                stream.write_all(&members).await.unwrap();
+                assert_eq!(stream.read(&mut [0]).await.unwrap(), 0);
+            });
+            return;
+        }
         if phase == "detach" {
             rustix::process::setsid().unwrap();
             // The fixture deliberately orphans this child; the coalition owner verifies its removal.
@@ -1805,7 +2548,7 @@ done
             children.push(child(
                 root,
                 match phase.as_str() {
-                    "descendants" => "detach",
+                    "descendants" | "attachment" => "detach",
                     "threads" => "load-threads",
                     "memory" => "load-memory",
                     "cpu" => "load-cpu",
@@ -1823,7 +2566,7 @@ done
             identities.extend(receive(&mut stream));
             controls.push(stream);
         }
-        if phase == "descendants" {
+        if matches!(phase.as_str(), "descendants" | "attachment") {
             assert!(children[0].wait().unwrap().success());
         }
         let mut stream = UnixStream::connect(root.join("s")).unwrap();
@@ -1833,6 +2576,14 @@ done
         assert_eq!(&go, b"G");
         for control in &mut controls {
             control.write_all(b"G").unwrap();
+        }
+        if phase == "attachment" {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(prepare_storage(root))
+                .unwrap();
         }
         assert_eq!(stream.read(&mut [0]).unwrap(), 0);
     }

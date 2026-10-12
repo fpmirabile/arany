@@ -8,6 +8,104 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
+/// Returns the boot identity used to keep persisted coalitions out of later boots.
+pub(super) fn boot_session() -> Result<uuid::Uuid, ToolError> {
+    let mut bytes = [0_u8; 37];
+    let mut length = bytes.len();
+    // The fixed SDK string buffer lives through the query and includes its terminator.
+    if unsafe {
+        libc::sysctlbyname(
+            c"kern.bootsessionuuid".as_ptr(),
+            bytes.as_mut_ptr().cast(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+        || length != bytes.len()
+        || bytes[36] != 0
+    {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    uuid::Uuid::try_parse_ascii(&bytes[..36]).map_err(|_| ToolError::ProtectionUnavailable)
+}
+
+/// Copies the kernel mount table into a bounded, caller-owned buffer.
+pub(super) fn mounts() -> Result<Vec<(std::path::PathBuf, std::path::PathBuf)>, ToolError> {
+    use std::os::unix::ffi::OsStringExt;
+    const MOUNT_CAP: usize = 4096;
+    let mut mounts = Vec::<MaybeUninit<libc::statfs>>::with_capacity(MOUNT_CAP);
+    // getfsstat initializes only the reported records in this aligned, fixed-capacity buffer.
+    let count = unsafe {
+        libc::getfsstat(
+            mounts.as_mut_ptr().cast(),
+            (MOUNT_CAP * size_of::<libc::statfs>()) as i32,
+            libc::MNT_NOWAIT,
+        )
+    };
+    if count <= 0 || count as usize >= MOUNT_CAP {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    // Each record in this prefix was fully initialized by the successful kernel call.
+    unsafe { mounts.set_len(count as usize) };
+    let path = |bytes: &[libc::c_char]| -> Result<std::path::PathBuf, ToolError> {
+        let end = bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .ok_or(ToolError::Path)?;
+        Ok(
+            std::ffi::OsString::from_vec(bytes[..end].iter().map(|byte| *byte as u8).collect())
+                .into(),
+        )
+    };
+    mounts
+        .into_iter()
+        .map(|mount| {
+            // Only initialized records from the kernel's reported prefix reach this read.
+            let mount = unsafe { mount.assume_init() };
+            Ok((path(&mount.f_mntfromname)?, path(&mount.f_mntonname)?))
+        })
+        .collect()
+}
+
+/// Parses bounded OS-produced plist output, transferring its Create ownership once.
+pub(super) fn property_list(bytes: &[u8]) -> Result<core_foundation::base::CFType, ToolError> {
+    use core_foundation::data::CFData;
+    use core_foundation::propertylist::{create_with_data, kCFPropertyListImmutable};
+    let (value, _) = create_with_data(CFData::from_buffer(bytes), kCFPropertyListImmutable)
+        .map_err(|_| ToolError::ProtectionUnavailable)?;
+    // The successful Create returned a non-null owned CF object; this wrapper releases it once.
+    Ok(unsafe { core_foundation::base::TCFType::wrap_under_create_rule(value) })
+}
+
+pub(super) fn dictionary(
+    value: &core_foundation::base::CFType,
+) -> Result<
+    core_foundation::dictionary::CFDictionary<
+        core_foundation::string::CFString,
+        core_foundation::base::CFType,
+    >,
+    ToolError,
+> {
+    use core_foundation::{base::TCFType, dictionary::CFDictionary};
+    let dictionary = value
+        .downcast::<CFDictionary>()
+        .ok_or(ToolError::ProtectionUnavailable)?;
+    // Plist dictionary keys are strings and all values are CF objects; the checked Get is retained.
+    Ok(unsafe { CFDictionary::wrap_under_get_rule(dictionary.as_concrete_TypeRef()) })
+}
+
+pub(super) fn array(
+    value: &core_foundation::base::CFType,
+) -> Result<core_foundation::array::CFArray<core_foundation::base::CFType>, ToolError> {
+    use core_foundation::{array::CFArray, base::TCFType};
+    let array = value
+        .downcast::<CFArray>()
+        .ok_or(ToolError::ProtectionUnavailable)?;
+    // Plist arrays contain only CF objects; retain the checked Get while the original stays live.
+    Ok(unsafe { CFArray::wrap_under_get_rule(array.as_concrete_TypeRef()) })
+}
+
 const PROCESS_IDENTITY_INFO: i32 = 17;
 const PROCESS_COALITION_INFO: i32 = 20;
 const ALL_PROCESSES: u32 = 1;

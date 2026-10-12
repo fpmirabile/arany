@@ -19,6 +19,7 @@ must be read before using an old recommendation as implementation guidance.
 | [Current harness effect loops](./effectful-harness-tool-loops-2026-10.md) | Codex, Claude Code, Pi and OpenCode proposal/observation/recovery ownership |
 | [MCP and runtime Skills](./mcp-and-runtime-skills-2026-10.md) | Current MCP versions, complete legacy tools flow, portable progressive Skills, bounded parser choices |
 | [Platform effect Guard](./effect-guard-platform-base-2026-10.md) | Kernel filesystem/namespace/cgroup enforcement, lifecycle, quotas and immutable receipts |
+| [macOS Guard crash recovery in other harnesses](./macos-guard-crash-recovery-in-harnesses-2026-10.md) | Owner-side cleanup versus persistent launchd/coalition/image recovery, source comparisons and verification limits |
 | [Rust core feasibility](./rust-core-feasibility.md) | Engine language, storage, latency, async runtime, process protocol |
 | [Agent-state persistence](./agent-state-persistence.md) | SQLite versus files, Rust KV stores, RocksDB, and PostgreSQL; crash/durability contract |
 | [Rust foundation and Engine contract](./rust-foundation-and-engine-contract.md) | Runtime ownership, semantic Provider seam and blocking integration trade-offs |

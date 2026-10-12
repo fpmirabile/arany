@@ -275,9 +275,24 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             }
         }
         let observation = if approved {
-            runtime
-                .execute(intent, self.controls.cancellation.clone())
-                .await
+            let runtime =
+                runtime.with_queue_progress(self.progress.map(ProgressPublisher::tool_queue));
+            let worker_cancellation = RunCancellation::new();
+            let mut run_cancellation = self.controls.cancellation.clone();
+            let execution = runtime.execute(intent, worker_cancellation.clone());
+            tokio::pin!(execution);
+            tokio::select! {
+                biased;
+                () = run_cancellation.cancelled() => {
+                    worker_cancellation.cancel();
+                    execution.await
+                }
+                _ = tokio::time::sleep_until(deadline - Duration::from_secs(15)) => {
+                    worker_cancellation.cancel();
+                    execution.await
+                }
+                observation = &mut execution => observation,
+            }
         } else {
             crate::tools::ToolObservation {
                 intent,
@@ -286,6 +301,9 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                 guard: None,
             }
         };
+        if let Some(progress) = self.progress {
+            progress.tool_queue().send_replace(None);
+        }
         self.append(Event::ToolFinished {
             run_id: self.run_id,
             agent_run_id: self.primary_id,

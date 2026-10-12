@@ -1,11 +1,13 @@
-//! Fixed-size private disk images that hold a command unit's Workspace snapshot and scratch.
+//! Private unit records and fixed-size disk images for Workspace snapshots and scratch.
 
 use super::super::CAPTURE_BYTES;
 use super::system_program;
 use crate::private_fs::open_directory;
 use crate::tools::{ToolError, ToolRuntime};
 use cap_std::fs::MetadataExt as _;
+use core_foundation::{base::CFType, dictionary::CFDictionary, string::CFString};
 use nix::libc;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -17,7 +19,31 @@ const _: () = assert!(STORAGE_BYTES_CAP.is_multiple_of(BYTES_PER_MEBIBYTE));
 const STORAGE_NAMES: [&str; 2] = ["workspace", "scratch"];
 pub(super) const STORAGE_PENDING: &str = "storage.pending";
 
-async fn disk_command(root: &Path, arguments: &[&str]) -> Result<(), ToolError> {
+pub(super) use super::super::admission::{read_record, write_record};
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ImageIdentity {
+    pub(super) device: u64,
+    pub(super) inode: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PendingAttachment {
+    pub(super) version: u32,
+    pub(super) image: String,
+    pub(super) boot: uuid::Uuid,
+    pub(super) state: AttachmentState,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+pub(super) enum AttachmentState {
+    Attaching,
+    Observed,
+}
+
+async fn disk_command(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, ToolError> {
     if !system_program("/usr/bin/hdiutil")? {
         return Err(ToolError::ProtectionUnavailable);
     }
@@ -33,7 +59,7 @@ async fn disk_command(root: &Path, arguments: &[&str]) -> Result<(), ToolError> 
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let (status, _, _) = super::super::capture(
+    let (status, stdout, _) = super::super::capture(
         command
             .spawn()
             .map_err(|_| ToolError::ProtectionUnavailable)?,
@@ -42,7 +68,7 @@ async fn disk_command(root: &Path, arguments: &[&str]) -> Result<(), ToolError> 
     )
     .await?;
     if status.success() {
-        Ok(())
+        Ok(stdout)
     } else {
         Err(ToolError::ProtectionUnavailable)
     }
@@ -74,6 +100,12 @@ pub(super) async fn prepare_storage(root: &Path) -> Result<[cap_std::fs::Dir; 2]
         let image_path = image.to_str().ok_or(ToolError::Path)?;
         let mount_path = mount.to_str().ok_or(ToolError::Path)?;
         let size = format!("{}m", STORAGE_BYTES_CAP / BYTES_PER_MEBIBYTE);
+        let volume_name = format!(
+            "{}-{name}",
+            root.file_name()
+                .and_then(|name| name.to_str())
+                .ok_or(ToolError::Path)?
+        );
         disk_command(
             root,
             &[
@@ -89,7 +121,7 @@ pub(super) async fn prepare_storage(root: &Path) -> Result<[cap_std::fs::Dir; 2]
                 "Case-sensitive HFS+",
                 "-nospotlight",
                 "-volname",
-                name,
+                &volume_name,
                 image_path,
             ],
         )
@@ -114,16 +146,24 @@ pub(super) async fn prepare_storage(root: &Path) -> Result<[cap_std::fs::Dir; 2]
         image
             .set_permissions(cap_std::fs::Permissions::from_mode(0o600))
             .map_err(|_| ToolError::Path)?;
-        directory
-            .open_with(
-                STORAGE_PENDING,
-                cap_std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .follow(cap_fs_ext::FollowSymlinks::No),
-            )
-            .map_err(|_| ToolError::Operation)?;
+        write_record(
+            &directory,
+            &format!("{name}.image.json"),
+            &ImageIdentity {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            },
+        )?;
+        write_record(
+            &directory,
+            STORAGE_PENDING,
+            &PendingAttachment {
+                version: 1,
+                image: name.to_owned(),
+                boot: super::ffi::boot_session()?,
+                state: AttachmentState::Attaching,
+            },
+        )?;
         disk_command(
             root,
             &[
@@ -241,6 +281,55 @@ pub(super) fn storage_mounted(root: &Path) -> Result<bool, ToolError> {
 pub(super) async fn cleanup_storage(root: &Path) -> Result<(), ToolError> {
     let directory = crate::tools::fs::open_directory(root)?;
     let parent = crate::tools::fs::identity(&directory)?;
+    let mut has_images = false;
+    for name in STORAGE_NAMES
+        .into_iter()
+        .flat_map(|name| [format!("{name}.dmg"), format!("{name}.image.json")])
+        .chain([STORAGE_PENDING.to_owned()])
+    {
+        match directory.symlink_metadata(name) {
+            Ok(_) => has_images = true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(ToolError::Path),
+        }
+    }
+    if !has_images {
+        return if !storage_mounted(root)?
+            && !super::ffi::mounts()?
+                .iter()
+                .any(|(_, target)| target.starts_with(root))
+        {
+            Ok(())
+        } else {
+            Err(ToolError::ProtectionUnavailable)
+        };
+    }
+    let mut devices = Vec::new();
+    let mut pending: Option<PendingAttachment> = match directory.symlink_metadata(STORAGE_PENDING) {
+        Ok(_) => Some(read_record(&directory, STORAGE_PENDING)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return Err(ToolError::Path),
+    };
+    let mut admitted_image = false;
+    let attached = disk_command(root, &["info", "-plist"]).await?;
+    let owned_attachments = attachments(&attached, root)?;
+    if let Some(pending) = &pending {
+        if pending.version != 1 || !STORAGE_NAMES.contains(&pending.image.as_str()) {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        if pending.boot.is_nil() {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        verify_image(&directory, &pending.image)?;
+        if pending.boot == super::ffi::boot_session()?
+            && pending.state == AttachmentState::Attaching
+            && !owned_attachments
+                .iter()
+                .any(|attachment| attachment.name == pending.image)
+        {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+    }
     for name in STORAGE_NAMES {
         let metadata = match directory.symlink_metadata(name) {
             Ok(metadata) => metadata,
@@ -250,23 +339,310 @@ pub(super) async fn cleanup_storage(root: &Path) -> Result<(), ToolError> {
         if !metadata.is_dir() || metadata.uid() != rustix::process::geteuid().as_raw() {
             return Err(ToolError::Path);
         }
-        if metadata.dev() != parent.0 {
-            let mount = root.join(name);
-            disk_command(
-                root,
-                &[
-                    "detach",
-                    "-force",
-                    "-quiet",
-                    mount.to_str().ok_or(ToolError::Path)?,
-                ],
-            )
-            .await?;
+        if directory
+            .symlink_metadata(format!("{name}.image.json"))
+            .is_ok()
+        {
+            verify_image(&directory, name)?;
+            admitted_image = true;
         }
+        let owned = owned_attachments
+            .iter()
+            .find(|attachment| attachment.name == name);
+        if let Some(attachment) = owned {
+            verify_image(&directory, name)?;
+            let mounts = super::ffi::mounts()?;
+            for (device, target) in &mounts {
+                if device == &attachment.device && target != &root.join(name) {
+                    return Err(ToolError::ProtectionUnavailable);
+                }
+            }
+            if metadata.dev() != parent.0 {
+                if !mounts.iter().any(|(device, target)| {
+                    device == &attachment.device && target == &root.join(name)
+                }) {
+                    return Err(ToolError::ProtectionUnavailable);
+                }
+            } else if mounts.iter().any(|(_, target)| target == &root.join(name)) {
+                return Err(ToolError::ProtectionUnavailable);
+            }
+            devices.push(attachment.device.clone());
+        } else if metadata.dev() != parent.0 {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+    }
+    if super::ffi::mounts()?.iter().any(|(_, target)| {
+        target.starts_with(root) && !STORAGE_NAMES.iter().any(|name| target == &root.join(name))
+    }) {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    if let Some(pending) = &mut pending
+        && owned_attachments
+            .iter()
+            .any(|attachment| attachment.name == pending.image)
+    {
+        pending.state = AttachmentState::Observed;
+        super::super::admission::replace_record(&directory, STORAGE_PENDING, pending)?;
+    }
+    for device in devices {
+        // Recheck OS ownership immediately before acting on a potentially reused disk number.
+        let current = disk_command(root, &["info", "-plist"]).await?;
+        if !attachments(&current, root)?
+            .iter()
+            .any(|attachment| attachment.device == device)
+        {
+            return Err(ToolError::ChangedInput);
+        }
+        disk_command(
+            root,
+            &[
+                "detach",
+                "-force",
+                "-quiet",
+                device.to_str().ok_or(ToolError::Path)?,
+            ],
+        )
+        .await?;
+    }
+    if pending.is_some() && !admitted_image {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    let remaining = disk_command(root, &["info", "-plist"]).await?;
+    if !attachments(&remaining, root)?.is_empty() {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    if pending.is_some() {
+        directory
+            .remove_file(STORAGE_PENDING)
+            .map_err(|_| ToolError::Operation)?;
     }
     if storage_mounted(root)? {
         Err(ToolError::ProtectionUnavailable)
     } else {
         Ok(())
+    }
+}
+
+fn verify_image(directory: &cap_std::fs::Dir, name: &str) -> Result<(), ToolError> {
+    use cap_fs_ext::OpenOptionsFollowExt;
+    use cap_std::fs::OpenOptionsExt;
+    let recorded: ImageIdentity = read_record(directory, &format!("{name}.image.json"))?;
+    let image = directory
+        .open_with(
+            format!("{name}.dmg"),
+            cap_std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .follow(cap_fs_ext::FollowSymlinks::No),
+        )
+        .map_err(|_| ToolError::Path)?;
+    let metadata = image.metadata().map_err(|_| ToolError::Path)?;
+    if !metadata.is_file()
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o7777 != 0o600
+        || metadata.len() != STORAGE_BYTES_CAP
+        || metadata.dev() != recorded.device
+        || metadata.ino() != recorded.inode
+        || crate::private_fs::check_acl(&image, true).is_err()
+    {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok(())
+}
+
+struct Attachment {
+    name: &'static str,
+    device: std::path::PathBuf,
+}
+
+fn value(dictionary: &CFDictionary<CFString, CFType>, key: &str) -> Result<CFType, ToolError> {
+    dictionary
+        .find(CFString::new(key))
+        .map(|value| value.clone())
+        .ok_or(ToolError::ProtectionUnavailable)
+}
+
+fn attachments(bytes: &[u8], root: &Path) -> Result<Vec<Attachment>, ToolError> {
+    let dictionary = super::ffi::dictionary(&super::ffi::property_list(bytes)?)?;
+    let images = super::ffi::array(&value(&dictionary, "images")?)?;
+    if images.len() > 1024 {
+        return Err(ToolError::Limit);
+    }
+    let mut result = Vec::new();
+    for image in images.iter() {
+        let image = super::ffi::dictionary(&image)?;
+        let image_path = value(&image, "image-path")?
+            .downcast::<CFString>()
+            .ok_or(ToolError::ProtectionUnavailable)?
+            .to_string();
+        if image_path.len() > 4096 {
+            return Err(ToolError::Limit);
+        }
+        let Some(name) = STORAGE_NAMES
+            .into_iter()
+            .find(|name| root.join(format!("{name}.dmg")) == Path::new(&image_path))
+        else {
+            continue;
+        };
+        if result
+            .iter()
+            .any(|attachment: &Attachment| attachment.name == name)
+        {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        let entities = super::ffi::array(&value(&image, "system-entities")?)?;
+        if entities.len() != 1 {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        let entry = entities.get(0).ok_or(ToolError::ProtectionUnavailable)?;
+        let entity = super::ffi::dictionary(&entry)?;
+        let device = value(&entity, "dev-entry")?
+            .downcast::<CFString>()
+            .ok_or(ToolError::ProtectionUnavailable)?
+            .to_string();
+        let number = device
+            .strip_prefix("/dev/disk")
+            .ok_or(ToolError::ProtectionUnavailable)?;
+        if number.is_empty()
+            || number.len() > 10
+            || !number.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        if let Some(mount) = entity.find(CFString::new("mount-point")) {
+            let mount = mount
+                .downcast::<CFString>()
+                .ok_or(ToolError::ProtectionUnavailable)?
+                .to_string();
+            if Path::new(&mount) != root.join(name) {
+                return Err(ToolError::ProtectionUnavailable);
+            }
+        }
+        result.push(Attachment {
+            name,
+            device: device.into(),
+        });
+    }
+    Ok(result)
+}
+
+#[cfg(test)]
+pub(super) async fn owned_devices(root: &Path) -> Result<Vec<std::path::PathBuf>, ToolError> {
+    let directory = crate::tools::fs::open_directory(root)?;
+    let bytes = disk_command(root, &["info", "-plist"]).await?;
+    let attached = attachments(&bytes, root)?;
+    for attachment in &attached {
+        verify_image(&directory, attachment.name)?;
+    }
+    Ok(attached
+        .into_iter()
+        .map(|attachment| attachment.device)
+        .collect())
+}
+
+#[cfg(test)]
+pub(super) async fn detach_owned_image(root: &Path, name: &str) -> Result<(), ToolError> {
+    let directory = crate::tools::fs::open_directory(root)?;
+    verify_image(&directory, name)?;
+    let bytes = disk_command(root, &["info", "-plist"]).await?;
+    let attached = attachments(&bytes, root)?;
+    let Some(attachment) = attached.iter().find(|attachment| attachment.name == name) else {
+        return Ok(());
+    };
+    if super::ffi::mounts()?
+        .iter()
+        .any(|(device, target)| device == &attachment.device && target != &root.join(name))
+    {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    disk_command(
+        root,
+        &[
+            "detach",
+            "-force",
+            "-quiet",
+            attachment.device.to_str().ok_or(ToolError::Path)?,
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disk_inventory_requires_exact_owned_device_and_mount() {
+        let root = Path::new("/private/tmp/arany-inventory-fixture");
+        for (case, image, device, mount, duplicate, accepted) in [
+            (
+                "owned",
+                "workspace.dmg",
+                "/dev/disk12",
+                "workspace",
+                false,
+                true,
+            ),
+            ("foreign", "other.dmg", "/dev/disk12", "other", false, true),
+            (
+                "foreign mount",
+                "workspace.dmg",
+                "/dev/disk12",
+                "other",
+                false,
+                false,
+            ),
+            (
+                "partition",
+                "workspace.dmg",
+                "/dev/disk12s1",
+                "workspace",
+                false,
+                false,
+            ),
+            (
+                "invalid device",
+                "workspace.dmg",
+                "/dev/null",
+                "workspace",
+                false,
+                false,
+            ),
+            (
+                "duplicate",
+                "workspace.dmg",
+                "/dev/disk12",
+                "workspace",
+                true,
+                false,
+            ),
+        ] {
+            let image = format!(
+                "<dict><key>image-path</key><string>{}/{image}</string><key>system-entities</key><array><dict><key>dev-entry</key><string>{device}</string><key>mount-point</key><string>{}/{mount}</string></dict></array></dict>",
+                root.display(),
+                root.display()
+            );
+            let xml = format!(
+                "<plist version=\"1.0\"><dict><key>images</key><array>{image}{}</array></dict></plist>",
+                if duplicate { image.as_str() } else { "" }
+            );
+            let result = attachments(xml.as_bytes(), root);
+            assert_eq!(result.is_ok(), accepted, "inventory case {case}");
+            if case == "foreign" {
+                assert!(result.as_ref().unwrap().is_empty());
+            }
+            if case == "owned" {
+                assert_eq!(result.unwrap()[0].device, Path::new(device));
+            }
+        }
+        for bytes in [
+            b"not a plist".as_slice(),
+            b"<plist><dict/></plist>",
+            b"<plist><array/></plist>",
+        ] {
+            assert!(attachments(bytes, root).is_err());
+        }
     }
 }

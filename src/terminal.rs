@@ -277,6 +277,7 @@ impl Drop for BracketedPaste {
 }
 
 pub struct AttachedTerminal {
+    waiting_tool: Option<uuid::Uuid>,
     terminal: Option<Terminal<CrosstermBackend<TerminalOutput>>>,
     history: History,
     input: Option<TerminalReader>,
@@ -307,6 +308,9 @@ pub struct AttachedTerminal {
 }
 
 impl AttachedTerminal {
+    pub fn set_waiting_tool(&mut self, id: Option<uuid::Uuid>) {
+        self.waiting_tool = id;
+    }
     pub fn draw_workspace_permissions(
         &mut self,
         id: uuid::Uuid,
@@ -463,6 +467,7 @@ impl AttachedTerminal {
             .transpose()?;
         Ok(Self {
             terminal,
+            waiting_tool: None,
             history: History::default(),
             input: Some(input),
             _raw_mode: raw_mode,
@@ -746,6 +751,10 @@ impl AttachedTerminal {
         state: SnapshotState,
         picker: Option<&ModelPicker<'_>>,
     ) -> Result<(), TerminalError> {
+        let notice = notice.or_else(|| {
+            crate::presentation::tool_capacity_notice(view, self.waiting_tool)
+                .map(TerminalNotice::Transient)
+        });
         if let Some(selected) = self.help_selected {
             return self.draw_help(selected);
         }

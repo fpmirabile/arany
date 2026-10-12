@@ -5,11 +5,13 @@ use crate::telemetry::{RunTrace, TraceEventKind};
 use std::sync::Mutex;
 use tokio::sync::watch;
 
-/// Latest committed Run snapshot; older display snapshots may be coalesced.
+/// Committed Run snapshots and separate temporary Tool capacity hints.
 #[derive(Clone)]
 pub struct RunProgress {
     sender: watch::Sender<Option<RunUpdate>>,
     receiver: watch::Receiver<Option<RunUpdate>>,
+    waiting_sender: watch::Sender<Option<uuid::Uuid>>,
+    waiting_receiver: watch::Receiver<Option<uuid::Uuid>>,
 }
 
 /// An acknowledged Event sequence and the Run state reduced through it.
@@ -23,7 +25,22 @@ impl RunProgress {
     #[must_use]
     pub fn new() -> Self {
         let (sender, receiver) = watch::channel(None);
-        Self { sender, receiver }
+        let (waiting_sender, waiting_receiver) = watch::channel(None);
+        Self {
+            sender,
+            receiver,
+            waiting_sender,
+            waiting_receiver,
+        }
+    }
+
+    /// Latest temporary capacity wait, keyed to a committed pending Tool; never replayed.
+    pub async fn waiting_changed(&mut self) -> Option<uuid::Uuid> {
+        self.waiting_receiver
+            .changed()
+            .await
+            .expect("RunProgress retains a sender");
+        *self.waiting_receiver.borrow_and_update()
     }
 
     /// Waits for a newer committed snapshot and returns the latest one.
@@ -57,6 +74,9 @@ pub(super) struct ProgressPublisher {
 }
 
 impl ProgressPublisher {
+    pub(super) fn tool_queue(&self) -> watch::Sender<Option<uuid::Uuid>> {
+        self.progress.waiting_sender.clone()
+    }
     pub(super) fn new(view: SessionView, progress: RunProgress, run_id: RunId) -> Self {
         Self {
             view: Mutex::new(view),

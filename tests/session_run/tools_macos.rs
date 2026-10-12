@@ -487,7 +487,8 @@ int main(void) {
                 action.decide(false);
             }
         };
-        let (outcome, ()) = tokio::time::timeout(Duration::from_secs(30), async {
+        let mut progress = arany::RunProgress::new();
+        let result = tokio::time::timeout(Duration::from_secs(30), async {
             tokio::join!(
                 engine.run_with_progress(
                     RunRequest {
@@ -500,13 +501,34 @@ int main(void) {
                         policy: CollaborationPolicy::Single,
                     },
                     cancellation,
-                    arany::RunProgress::new()
+                    progress.clone()
                 ),
                 decision
             )
         })
-        .await
-        .expect("bounded stopped native command");
+        .await;
+        let (outcome, ()) = match result {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                let update = tokio::time::timeout(Duration::from_millis(10), progress.changed())
+                    .await
+                    .ok();
+                let waiting =
+                    tokio::time::timeout(Duration::from_millis(10), progress.waiting_changed())
+                        .await
+                        .ok()
+                        .flatten();
+                panic!(
+                    "bounded stopped native command {case}: progress={:?}, queued={}",
+                    update.map(|update| (
+                        update.sequence,
+                        update.run.status,
+                        update.run.tools.len()
+                    )),
+                    waiting.is_some()
+                );
+            }
+        };
         let outcome = outcome.unwrap();
         engine.close().await.unwrap();
         assert_eq!(

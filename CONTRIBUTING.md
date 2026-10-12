@@ -32,8 +32,14 @@ Linux terminal tests need Bubblewrap and util-linux `script`, with user and netw
 
 The [CI workflow](./.github/workflows/ci.yml) checks Linux and macOS. See [native test and CI reproduction notes](./agents/references/testing-details.md#local-verification-and-ci) for checks ignored locally and platform-specific setup.
 
+## Issues
+
+Use the [bug report](./.github/ISSUE_TEMPLATE/bug_report.md) or [improvement/task](./.github/ISSUE_TEMPLATE/improvement.md) template, including when creating issues through the CLI or API. Each template includes guidance for humans and agents. Keep the report in English and TL;DR: lead with the point, aim for 1–3 short bullets per section, and link or collapse longer evidence. Mark missing facts as `unknown`; sanitize commands, logs and screenshots before sharing.
+
 ## Pull requests
 
 Open a pull request against `fpmirabile/arany:main`. Explain the problem, what changed and how you verified it, including checks you could not run. Resolve review conversations and pass the required checks before merging. First-time contributors may need a maintainer to approve CI.
+
+Use the [PR template](./.github/pull_request_template.md), including when publishing through the CLI or API. Follow the same brief writing style as issues, report only checks actually run, and use `N/A` with a short reason for sections that do not apply.
 
 If you are an AI agent, read [AGENTS.md](./AGENTS.md) before making changes.

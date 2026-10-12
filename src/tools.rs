@@ -77,10 +77,8 @@ pub enum ToolError {
     Configuration,
     #[error("required native Tool protection is unavailable")]
     ProtectionUnavailable,
-    #[error(
-        "native Tools are disabled until this user's retained Guard roots are removed: delete the arany-u-* directories this user owns in /private/tmp, then retry"
-    )]
-    RetainedRoots,
+    #[error("Guard waiting queue is full; retry when capacity is available")]
+    QueueFull,
     #[error("pinned Tool input changed")]
     ChangedInput,
     #[error("Tool path is not admitted")]
@@ -106,6 +104,7 @@ pub(crate) struct ToolRuntime {
     workspace_identity: (u64, u64),
     guard_executable: PathBuf,
     enforcement_digest: [u8; 32],
+    queue_progress: Option<tokio::sync::watch::Sender<Option<uuid::Uuid>>>,
     #[cfg(target_os = "macos")]
     system_programs: Option<std::sync::Arc<guard::SystemPrograms>>,
     #[cfg(target_os = "macos")]
@@ -113,6 +112,20 @@ pub(crate) struct ToolRuntime {
 }
 
 impl ToolRuntime {
+    pub(crate) fn with_queue_progress(
+        &self,
+        sender: Option<tokio::sync::watch::Sender<Option<uuid::Uuid>>>,
+    ) -> Self {
+        let mut runtime = self.clone();
+        runtime.queue_progress = sender;
+        runtime
+    }
+
+    pub(crate) fn queue_changed(&self, id: uuid::Uuid, queued: bool) {
+        if let Some(sender) = &self.queue_progress {
+            sender.send_replace(queued.then_some(id));
+        }
+    }
     pub(crate) fn workspace_identity(&self) -> (u64, u64) {
         self.workspace_identity
     }
@@ -166,6 +179,7 @@ impl ToolRuntime {
             guard::macos_enforcement_digest(system_programs.as_deref())?;
         Ok(Self {
             config,
+            queue_progress: None,
             workspace: workspace.to_owned(),
             workspace_identity,
             guard_executable,
@@ -260,8 +274,8 @@ pub(crate) fn failure_stage(error: &ToolError) -> &'static str {
         ToolError::GuardRejected(stage) => stage.failure_stage(),
         ToolError::Configuration => "admission",
         ToolError::ChangedInput | ToolError::Path => "pinned input",
-        ToolError::ProtectionUnavailable | ToolError::RetainedRoots => "native protection",
-        ToolError::Limit => "resource limit",
+        ToolError::ProtectionUnavailable => "native protection",
+        ToolError::Limit | ToolError::QueueFull => "resource limit",
         _ => "execution",
     }
 }
@@ -272,7 +286,7 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
         intent,
         disposition: ToolDisposition::Failed,
         output: match error {
-            ToolError::RetainedRoots => format!("{error}. No operation was dispatched."),
+            ToolError::QueueFull => format!("{error}. No operation was dispatched."),
             _ => format!(
                 "Guard {} unavailable before dispatch; no operation was dispatched.",
                 failure_stage(&error)

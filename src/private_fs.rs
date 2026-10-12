@@ -61,7 +61,11 @@ pub(crate) fn open_directory(path: &Path, create: bool) -> Result<PrivateDirecto
                     use cap_std::fs::DirBuilderExt;
                     builder.mode(0o700);
                 }
-                dir.create_dir_with(name, &builder)?;
+                match dir.create_dir_with(name, &builder) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(Error::Io(error)),
+                }
                 dir = dir.open_dir_nofollow(name)?;
             }
             Err(error) => return Err(Error::Io(error)),

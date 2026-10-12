@@ -100,7 +100,8 @@ The current-thread Tokio coordinator owns async lifecycle. One named standard-li
 Store and Guard share a private filesystem admission module for checked
 directory handles and native ACL validation. This module knows neither history
 nor Tool policy. Store creates its database, records and leases after admission;
-Guard admits only its temporary control directory and retains its handle.
+Guard admits its private capacity/settings directory and temporary control roots,
+retaining their checked handles independently of history.
 
 ## 3. Physical beta shape
 
@@ -422,6 +423,14 @@ The attached command owner persists token-free `ui-preferences.json` at the sele
 
 The Engine publishes the latest acknowledged RunView and committed sequence through a one-slot coalescing progress handle. Skipped display intermediates never skip canonical Events. Before Engine admission, preparing feedback remains presentation-local; afterward activity derives solely from committed current-Run facts. Closed replay, terminal restoration and typed CLI classification precede receipt/answer output.
 
+Guard's shared capacity wait is a separate one-slot intent-ID hint, validated
+against the committed pending Tool before display. It cannot enter history or
+authorize/replay work. Linux/macOS Guard own user-level private FIFO/reservations
+and validated settings independently of Session roots; Engine owns immutable
+intent/approval and aggregate Run deadlines. No native lock or process type
+crosses into Engine. [Shared capacity](../specs/tools.md#shared-native-capacity-and-settings)
+owns defaults, configuration, resource bounds and interruption semantics.
+
 A terminal-owned clipboard worker has bounded trusted OS-client ownership distinct from the reader and Engine. Immutable image values cross semantic Provider/Session boundaries; human drawing receives metadata. Canonical image bytes, multimodal context and compaction remain under the image/Session/Store owners.
 
 The released terminal owner retains signal listeners through committed output and transfers them to reacquisition. Raw/canonical input is stopped and joined before modes/flags are restored; suspension retains the pinned Run future and bounded draft. Lifecycle failures cannot manufacture a committed outcome. Detailed fault ownership remains in [terminal rules](../../agents/terminal.md); [next steps](../../NEXT_STEPS.md) owns unverified claims.
@@ -498,7 +507,7 @@ The release boundary includes:
 - inert terminal output, no alternate screen, transient picker-only mouse, and one RAII terminal owner that restores every enabled mode on every exit path; and
 - pinned/reviewed dependencies, lockfile, build/proc-macro/native inventory, binary-forbidden and library-denied `unsafe` with scoped native Guard/ACL exceptions.
 
-The first local effectful base implements immutable typed effects, deterministic restrict-only Policy and a separately enforcing Guard. Private reviewed configuration or explicit user folder trust supplies upfront grants. Attached Request approvals, Auto edits and AI-reviewed Auto approval narrow dispatch through a bounded one-shot control channel; AI reviews use the existing Provider seam and canonical phase/usage, never a new authority. The terminal owns vertical choices and mode keys. Replay retains review/effect facts without renewing permission. Universal host/same-UID protection is not claimed. Native macOS Guard, Keychain, private-filesystem ACL and clipboard adapters are implemented and exercised by CI on hosted macOS; optimized account isolation, human Keychain/pasteboard checks and crash recovery of retained Guard roots remain open in [NEXT_STEPS](../../NEXT_STEPS.md). Remote MCP/network disclosure and larger runtimes require separate admission/evidence.
+The first local effectful base implements immutable typed effects, deterministic restrict-only Policy and a separately enforcing Guard. Private reviewed configuration or explicit user folder trust supplies upfront grants. Attached Request approvals, Auto edits and AI-reviewed Auto approval narrow dispatch through a bounded one-shot control channel; AI reviews use the existing Provider seam and canonical phase/usage, never a new authority. The terminal owns vertical choices and mode keys. Replay retains review/effect facts without renewing permission. Universal host/same-UID protection is not claimed. Native macOS Guard, Keychain, private-filesystem ACL and clipboard adapters are implemented and exercised by CI on hosted macOS; optimized account isolation and human Keychain/pasteboard checks remain open in [NEXT_STEPS](../../NEXT_STEPS.md). Remote MCP/network disclosure and larger runtimes require separate admission/evidence.
 
 ## 12. Evidence-dense proof
 

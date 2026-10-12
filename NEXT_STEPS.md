@@ -7,18 +7,31 @@ in [domain specs](./docs/specs/README.md); setup instructions live in
 item when its completion condition is met; completed work belongs in Git/CI
 history. Implementation status and verified support are separate claims.
 
+## Open defects
+
+- **Native Engine stopped-command timeout investigation.** The macOS corpus
+  timed out once at its unchanged 30-second case deadline; a diagnostic-enabled
+  repeat passed without raising it. The first failure lacked case/stage
+  evidence, so its cause is unestablished. On recurrence capture the reported
+  case, committed progress and queued hint together with native
+  preparation/recovery/cleanup stages before attributing the timeout to
+  admission, cancellation or host load.
+
 ## Next functional priority
+
+- **Linux host seed ownership after controller death.** Existing
+  `/tmp/arany-tools-*` snapshots contain selected Workspace/runtime data and use
+  Drop-only removal. `SIGKILL` can retain those private files indefinitely after
+  the systemd/cgroup unit ends; the shared unit quota does not bound cumulative
+  host seed storage. Bind new snapshots' checked path/device/inode to their
+  reservation before copying, retain capacity until validated deletion, and
+  prove recovery after actual native termination. Existing unrecorded roots
+  must remain untouched; a filename-prefix sweep cannot authorize deletion.
 
 - **Deferred Anthropic consumer subscriptions.** Native Claude-plan access is
   missing and user-deferred behind the [route/authorization gate](./docs/research/subscription-provider-routes-2026-10.md#decision-boundary-for-beta-1).
   Continue unaffected implementation. API-key billing is a separate route;
   another harness's implementation or credentials do not authorize Arany access.
-- **macOS crash recovery.** Retained uncertain Guard roots need a positively
-  owned job/device/mount recovery protocol. Establish termination and mount
-  ownership before detachment/deletion; a filename-prefix sweep is unsafe.
-  Until then, eight retained roots block new native units and the user removes
-  them manually. The [Tool contract](./docs/specs/tools.md#macos-enforcement-and-compatibility)
-  owns the bound and fail-closed retention.
 - **Larger coding workloads.** Add reviewed runtime/cache mounts, bounded build
   profiles and explicit artifact integration when actual workloads need them.
   Remote MCP/OAuth, network/disclosure grants, interactive/background jobs,
@@ -34,6 +47,15 @@ Perform these after implementation handoff with deliberate consent for usage.
 Missing real accounts, OS services, toolchains or another machine do not pause
 unaffected implementation. Synthetic tests do not authorize live calls or access
 to the user's credential store or clipboard.
+
+- **Native Linux shared-capacity recovery before PR #6 merge.** Run the
+  retained failed-unit owner
+  `tools::guard::linux::tests::retained_failed_unit_is_reset_before_capacity_is_reclaimed`
+  with `--ignored` on an isolated Linux account with a systemd user manager and
+  delegated cgroup v2. Verify native termination, failed-job reset and reservation
+  reclamation alongside the existing Tool journey. The Linux ARM64 container
+  proves compilation and cross-process FIFO/settings behavior, not those native
+  manager guarantees.
 
 1. **Broader ChatGPT workflows.** For other accounts/models, verify sign-in,
    visible model/effort, a direct task, follow-up, team and cancellation with
