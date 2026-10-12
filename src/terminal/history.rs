@@ -18,6 +18,11 @@ pub(super) enum MessageKind {
     Assistant,
     Notice,
     Error,
+    Preview,
+    Incomplete,
+    Tool,
+    ToolDetails,
+    Commentary,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,6 +30,8 @@ enum MessageSource {
     User(usize),
     Assistant(usize),
     Notice(u64),
+    Tool(usize, usize),
+    Commentary(usize, u8, u8),
 }
 
 struct Notice {
@@ -39,6 +46,7 @@ struct MessageIndex {
     kind: MessageKind,
     start: usize,
     rows: usize,
+    text: Option<String>,
 }
 
 struct MessageRow {
@@ -72,6 +80,11 @@ pub(super) struct History {
     matched_row: Option<usize>,
     notices: VecDeque<Notice>,
     next_notice: u64,
+    sequence: u64,
+    details: bool,
+    dirty: bool,
+    preview_dirty: bool,
+    preview: Option<crate::engine::DisplayUpdate>,
 }
 
 impl History {
@@ -89,22 +102,9 @@ impl History {
             || self.run_count != view.runs.len()
             || self.last_run != last_run
             || self.last_answered != last_answered;
-        let previous_last = self
-            .run_count
-            .checked_sub(1)
-            .and_then(|index| view.runs.get(index).map(|run| (index, run)));
-        let can_append = !new_session
-            && !width_changed
-            && self.run_count <= view.runs.len()
-            && match previous_last {
-                None => self.run_count == 0,
-                Some((_, run)) => {
-                    Some(run.id) == self.last_run
-                        && (!self.last_answered || run.assistant_message.is_some())
-                        && (view.runs.len() == self.run_count || run.assistant_message.is_some())
-                }
-            };
-        let anchor = if !new_session && width_changed && !self.follow_tail {
+        let rebuild =
+            rebuild || self.dirty || self.preview_dirty || self.sequence != view.last_sequence;
+        let anchor = if !new_session && rebuild && !self.follow_tail {
             self.messages.iter().find_map(|message| {
                 (message.start <= self.top && self.top < message.start + message.rows).then(|| {
                     let offset = self.top - message.start;
@@ -120,34 +120,110 @@ impl History {
             None
         };
         if rebuild {
+            let previous_rows = self.total_rows;
+            let full = new_session
+                || width_changed
+                || self.dirty
+                || self.run_count > view.runs.len()
+                || self.last_run != previous_run(view, self.run_count);
             if new_session {
                 self.follow_tail = true;
                 self.unseen_new_content = false;
                 self.find = None;
                 self.matched_row = None;
                 self.notices.clear();
+                self.preview = None;
             }
-            let previous_rows = self.total_rows;
-            if can_append {
-                if let Some((index, run)) = previous_last
-                    && !self.last_answered
-                    && let Some(answer) = &run.assistant_message
-                {
-                    self.push(
-                        MessageSource::Assistant(index),
-                        MessageKind::Assistant,
-                        answer,
-                        width,
+            let first = if full {
+                0
+            } else {
+                self.run_count.saturating_sub(1)
+            };
+            let retain = self
+                .messages
+                .iter()
+                .position(|message| match message.source {
+                    MessageSource::User(run)
+                    | MessageSource::Assistant(run)
+                    | MessageSource::Tool(run, _)
+                    | MessageSource::Commentary(run, _, _) => run >= first,
+                    MessageSource::Notice(_) => false,
+                })
+                .unwrap_or(self.messages.len());
+            if full {
+                self.messages.clear();
+                self.total_rows = 0;
+                self.push_notices_after(None, width);
+            } else {
+                self.messages.truncate(retain);
+                self.total_rows = self.messages.last().map_or(0, |m| m.start + m.rows);
+            }
+            let counts = full.then(|| run_row_counts(&view.runs, width));
+            for (index, run) in view.runs.iter().enumerate().skip(first) {
+                if let Some(counts) = &counts {
+                    self.push_count(
+                        MessageSource::User(index),
+                        MessageKind::User,
+                        counts[index].0,
                     );
-                }
-                for (index, run) in view.runs.iter().enumerate().skip(self.run_count) {
+                } else {
                     self.push(
                         MessageSource::User(index),
                         MessageKind::User,
                         &image_message_text(&run.objective, &run.images),
                         width,
                     );
-                    if let Some(answer) = &run.assistant_message {
+                }
+                self.push_notices_after(Some(MessageSource::User(index)), width);
+                for (tool_index, tool) in run.tools.iter().enumerate() {
+                    let text = if self.details {
+                        crate::presentation::tool_detail_text(tool)
+                    } else {
+                        crate::presentation::tool_summary(tool)
+                    };
+                    self.push(
+                        MessageSource::Tool(index, tool_index),
+                        if self.details {
+                            MessageKind::ToolDetails
+                        } else {
+                            MessageKind::Tool
+                        },
+                        &text,
+                        width,
+                    );
+                    self.push_notices_after(Some(MessageSource::Tool(index, tool_index)), width);
+                }
+                if self.details {
+                    for (call, item, text) in crate::presentation::display_commentary(run) {
+                        self.push(
+                            MessageSource::Commentary(index, call, item),
+                            MessageKind::Commentary,
+                            &text,
+                            width,
+                        );
+                    }
+                }
+                if self.details
+                    && run
+                        .display
+                        .iter()
+                        .any(|chunk| chunk.category == crate::session::DisplayCategory::Limit)
+                {
+                    self.push_owned(
+                        MessageSource::Commentary(index, u8::MAX, 0),
+                        MessageKind::Notice,
+                        crate::session::DISPLAY_LIMIT_TEXT.to_owned(),
+                        width,
+                    );
+                }
+                if let Some(answer) = &run.assistant_message {
+                    if let Some(counts) = &counts {
+                        self.push_count(
+                            MessageSource::Assistant(index),
+                            MessageKind::Assistant,
+                            counts[index].1.expect("accepted answer"),
+                        );
+                    } else {
                         self.push(
                             MessageSource::Assistant(index),
                             MessageKind::Assistant,
@@ -155,30 +231,64 @@ impl History {
                             width,
                         );
                     }
-                }
-            } else {
-                self.messages.clear();
-                self.total_rows = 0;
-                self.push_notices_after(None, width);
-                for (index, (user_rows, answer_rows)) in
-                    run_row_counts(&view.runs, width).into_iter().enumerate()
-                {
-                    let source = MessageSource::User(index);
-                    self.push_count(source, MessageKind::User, user_rows);
-                    self.push_notices_after(Some(source), width);
-                    if let Some(answer_rows) = answer_rows {
-                        let source = MessageSource::Assistant(index);
-                        self.push_count(source, MessageKind::Assistant, answer_rows);
-                        self.push_notices_after(Some(source), width);
+                } else {
+                    let live = self
+                        .preview
+                        .as_ref()
+                        .filter(|preview| {
+                            preview.run_id == run.id
+                                && run.status == crate::session::RunStatus::Active
+                                && crate::presentation::display_call_visible(
+                                    run,
+                                    preview.call_index,
+                                )
+                        })
+                        .cloned();
+                    let text = live
+                        .as_ref()
+                        .map(|preview| preview.text.answer.clone())
+                        .filter(|text| !text.is_empty())
+                        .or_else(|| crate::presentation::display_answer(run));
+                    if let Some(text) = text {
+                        let kind = if run.status == crate::session::RunStatus::Active {
+                            MessageKind::Preview
+                        } else {
+                            MessageKind::Incomplete
+                        };
+                        if live.is_some() {
+                            self.push_owned(MessageSource::Assistant(index), kind, text, width);
+                        } else {
+                            self.push(MessageSource::Assistant(index), kind, &text, width);
+                        }
+                    }
+                    if self.details
+                        && let Some(preview) = live
+                    {
+                        for (item, text) in preview.text.commentary.iter().enumerate() {
+                            let source =
+                                MessageSource::Commentary(index, preview.call_index, item as u8);
+                            if !self.messages.iter().any(|message| message.source == source) {
+                                self.push_owned(
+                                    source,
+                                    MessageKind::Commentary,
+                                    text.clone(),
+                                    width,
+                                );
+                            }
+                        }
                     }
                 }
+                self.push_notices_after(Some(MessageSource::Assistant(index)), width);
             }
             self.session = Some(view.id);
             self.width = width;
             self.last_run = last_run;
             self.run_count = view.runs.len();
             self.last_answered = last_answered;
-            if !self.follow_tail && !width_changed && self.total_rows > previous_rows {
+            self.sequence = view.last_sequence;
+            self.dirty = false;
+            self.preview_dirty = false;
+            if !self.follow_tail && self.total_rows > previous_rows {
                 self.unseen_new_content = true;
             }
             if let Some((source, byte, heading)) = anchor
@@ -215,12 +325,61 @@ impl History {
         self.push_count(source, kind, rows);
     }
 
+    pub(super) fn set_preview(&mut self, preview: Option<crate::engine::DisplayUpdate>) {
+        self.preview = preview;
+        self.preview_dirty = true;
+    }
+
+    pub(super) fn set_details(&mut self, details: bool) {
+        if self.details != details {
+            self.details = details;
+            self.dirty = true;
+        }
+    }
+
+    fn push_owned(&mut self, source: MessageSource, kind: MessageKind, text: String, width: usize) {
+        self.push(source, kind, &text, width);
+        self.messages
+            .last_mut()
+            .expect("added display message")
+            .text = Some(text);
+    }
+
+    pub(super) fn live_rows(&self, view: &SessionView) -> Vec<HistoryRow> {
+        let Some(run) = view
+            .runs
+            .last()
+            .filter(|run| run.status == crate::session::RunStatus::Active)
+        else {
+            return Vec::new();
+        };
+        let text = self
+            .preview
+            .as_ref()
+            .filter(|preview| preview.run_id == run.id)
+            .map(|preview| preview.text.answer.clone())
+            .filter(|text| !text.is_empty())
+            .or_else(|| crate::presentation::display_answer(run));
+        let Some(text) = text else {
+            return Vec::new();
+        };
+        let rows = display_rows(MessageKind::Preview, &text, self.width);
+        rows.into_iter()
+            .rev()
+            .take(self.height)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
+    }
+
     fn push_count(&mut self, source: MessageSource, kind: MessageKind, rows: usize) {
         self.messages.push(MessageIndex {
             source,
             kind,
             start: self.total_rows,
             rows,
+            text: None,
         });
         self.total_rows = self.total_rows.saturating_add(rows);
     }
@@ -245,14 +404,8 @@ impl History {
             Some(body) => (MessageKind::Error, body.trim_start()),
             None => (MessageKind::Notice, text),
         };
-        let shortened = (text.len() > MAX_NOTICE_BYTES).then(|| {
-            let mut end = MAX_NOTICE_BYTES - '…'.len_utf8();
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            format!("{}…", &text[..end])
-        });
-        let text = shortened.as_deref().unwrap_or(text);
+        let bounded = bounded_notice_text(text);
+        let text = bounded.as_ref();
         let after = self.messages.iter().rev().find_map(|message| {
             (!matches!(message.source, MessageSource::Notice(_))).then_some(message.source)
         });
@@ -347,21 +500,26 @@ impl History {
             return true;
         }
         match input {
-            TerminalInput::PageUp => {
-                let top = self
-                    .top
-                    .saturating_sub(self.height.saturating_sub(1).max(1));
+            TerminalInput::PageUp | TerminalInput::PointerScrollUp { .. } => {
+                let amount = if input == TerminalInput::PageUp {
+                    self.height.saturating_sub(1).max(1)
+                } else {
+                    3
+                };
+                let top = self.top.saturating_sub(amount);
                 if top < self.top {
                     self.top = top;
                     self.follow_tail = false;
                 }
                 true
             }
-            TerminalInput::PageDown => {
-                self.top = self
-                    .top
-                    .saturating_add(self.height.saturating_sub(1).max(1))
-                    .min(self.tail());
+            TerminalInput::PageDown | TerminalInput::PointerScrollDown { .. } => {
+                let amount = if input == TerminalInput::PageDown {
+                    self.height.saturating_sub(1).max(1)
+                } else {
+                    3
+                };
+                self.top = self.top.saturating_add(amount).min(self.tail());
                 self.follow_tail = self.top == self.tail();
                 if self.follow_tail {
                     self.unseen_new_content = false;
@@ -399,6 +557,10 @@ impl History {
             }
         }
         false
+    }
+
+    pub(super) fn find_open(&self) -> bool {
+        self.find.is_some()
     }
 
     pub(super) fn status(&self) -> Option<String> {
@@ -467,6 +629,17 @@ impl History {
     }
 }
 
+pub(super) fn bounded_notice_text(text: &str) -> Cow<'_, str> {
+    if text.len() <= MAX_NOTICE_BYTES {
+        return Cow::Borrowed(text);
+    }
+    let mut end = MAX_NOTICE_BYTES - '…'.len_utf8();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    Cow::Owned(format!("{}…", &text[..end]))
+}
+
 fn find_preview(query: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
@@ -522,20 +695,48 @@ fn run_row_counts(runs: &[RunView], width: usize) -> Vec<(usize, Option<usize>)>
     })
 }
 
+fn previous_run(view: &SessionView, count: usize) -> Option<RunId> {
+    count
+        .checked_sub(1)
+        .and_then(|index| view.runs.get(index))
+        .map(|run| run.id)
+}
+
 fn message_text<'a>(
     view: &'a SessionView,
-    message: &MessageIndex,
+    message: &'a MessageIndex,
     notices: &'a VecDeque<Notice>,
 ) -> Cow<'a, str> {
+    if let Some(text) = &message.text {
+        return Cow::Borrowed(text);
+    }
     match message.source {
+        MessageSource::Tool(run, tool) => Cow::Owned(if message.kind == MessageKind::ToolDetails {
+            crate::presentation::tool_detail_text(&view.runs[run].tools[tool])
+        } else {
+            crate::presentation::tool_summary(&view.runs[run].tools[tool])
+        }),
+        MessageSource::Commentary(_, u8::MAX, _) => {
+            Cow::Borrowed(crate::session::DISPLAY_LIMIT_TEXT)
+        }
+        MessageSource::Commentary(run, call, item) => Cow::Owned(
+            view.runs[run]
+                .display
+                .iter()
+                .filter(|chunk| {
+                    chunk.call_index == call
+                        && chunk.item == item
+                        && chunk.category == crate::session::DisplayCategory::Commentary
+                })
+                .map(|chunk| chunk.text.as_str())
+                .collect(),
+        ),
         MessageSource::User(run) => {
             image_message_text(&view.runs[run].objective, &view.runs[run].images)
         }
-        MessageSource::Assistant(run) => Cow::Borrowed(
-            view.runs[run]
-                .assistant_message
-                .as_deref()
-                .expect("indexed answer"),
+        MessageSource::Assistant(run) => view.runs[run].assistant_message.as_deref().map_or_else(
+            || Cow::Owned(crate::presentation::display_answer(&view.runs[run]).unwrap_or_default()),
+            Cow::Borrowed,
         ),
         MessageSource::Notice(id) => Cow::Borrowed(
             &notices
@@ -547,6 +748,19 @@ fn message_text<'a>(
     }
 }
 
+pub(super) fn display_rows(kind: MessageKind, text: &str, width: usize) -> Vec<HistoryRow> {
+    message_rows(kind, text, width)
+        .into_iter()
+        .enumerate()
+        .map(|(index, row)| HistoryRow {
+            text: row.text,
+            speaker: kind,
+            heading: index == 0,
+            matched: false,
+        })
+        .collect()
+}
+
 fn message_rows(kind: MessageKind, text: &str, width: usize) -> Vec<MessageRow> {
     let width = width.min(MAX_ROW_CELLS);
     let heading = match kind {
@@ -554,6 +768,10 @@ fn message_rows(kind: MessageKind, text: &str, width: usize) -> Vec<MessageRow> 
         MessageKind::Assistant => "Arany:",
         MessageKind::Notice => "Arany · notice:",
         MessageKind::Error => "Arany · error:",
+        MessageKind::Preview => "Arany · provisional:",
+        MessageKind::Incomplete => "Arany · incomplete:",
+        MessageKind::Tool | MessageKind::ToolDetails => "Tool:",
+        MessageKind::Commentary => "Arany · commentary:",
     };
     let mut rows = vec![MessageRow {
         text: safe_truncate(heading, width),
@@ -673,7 +891,75 @@ mod tests {
             accepted_sequence: 2,
             finished_sequence: Some(3),
             tools: Vec::new(),
+            display: Vec::new(),
         }
+    }
+
+    #[test]
+    fn streaming_two_hundred_lines_preserves_reading_anchor_and_replaces_preview() {
+        let mut view = session();
+        let mut active = run("question", "");
+        active.assistant_message = None;
+        active.status = crate::session::RunStatus::Active;
+        let id = active.id;
+        view.runs.push(active);
+        let text = (0..200)
+            .map(|line| format!("UNIQUE_LINE_{line:03}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut history = History::default();
+        history.sync(&view, 40, 10);
+        for lines in [50, 100, 200] {
+            let answer = text.lines().take(lines).collect::<Vec<_>>().join("\n");
+            history.set_preview(Some(crate::engine::DisplayUpdate {
+                run_id: id,
+                agent_run_id: crate::session::AgentRunId::new(),
+                call_index: 0,
+                text: std::sync::Arc::new(crate::provider::PreviewText {
+                    answer,
+                    ..Default::default()
+                }),
+            }));
+            let before = history.visible(&view).first().map(|row| row.text.clone());
+            history.sync(&view, 40, 10);
+            if lines > 50 {
+                assert_eq!(
+                    history.visible(&view).first().map(|row| row.text.clone()),
+                    before
+                );
+            } else {
+                history.handle(super::super::TerminalInput::PageUp, &view);
+            }
+        }
+        let anchored = history.visible(&view)[0].text.clone();
+        view.runs[0].assistant_message = Some(text.clone());
+        view.runs[0].status = crate::session::RunStatus::Finished;
+        view.last_sequence += 1;
+        history.set_preview(None);
+        history.sync(&view, 40, 10);
+        assert_eq!(history.visible(&view)[0].text, anchored);
+        assert_eq!(
+            history
+                .messages
+                .iter()
+                .filter(|message| message.source == MessageSource::Assistant(0))
+                .count(),
+            1
+        );
+        assert_eq!(
+            history.messages.last().unwrap().kind,
+            MessageKind::Assistant
+        );
+        history.sync(&view, 40, 1000);
+        let rows = history.visible(&view);
+        for line in text.lines() {
+            assert_eq!(
+                rows.iter().filter(|row| row.text.trim() == line).count(),
+                1,
+                "{line}"
+            );
+        }
+        assert!(rows.iter().all(|row| !row.text.contains("provisional")));
     }
 
     #[test]

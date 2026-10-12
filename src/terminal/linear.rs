@@ -619,6 +619,7 @@ mod tests {
             accepted_sequence: 2,
             finished_sequence: None,
             tools: Vec::new(),
+            display: Vec::new(),
         });
         let mut progress = Vec::new();
         linear
@@ -670,6 +671,8 @@ mod tests {
                 "Command: /model <model-id> [effort|default]; Choose model; during Run: view-only\n",
                 "Command: /permissions; Folder trust and approval settings; during Run: available\n",
                 "Command: /settings [tabs|combined]; Choose slash menu display; during Run: locked\n",
+                "Command: /view [classic|fullscreen]; Choose classic or fullscreen; during Run: locked\n",
+                "Command: /transcript; Show or hide transcript details; during Run: available\n",
                 "Command: /quit; Exit Session; during Run: view-only\n",
                 "Command: /exit; Exit Session; during Run: view-only\n",
             ).as_bytes()

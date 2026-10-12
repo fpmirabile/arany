@@ -249,6 +249,55 @@ impl Provider for OpenAiProvider {
         }
     }
 
+    async fn invoke_with_preview(
+        &self,
+        request: ProviderRequest,
+        preview: super::ResponsePreview,
+    ) -> Result<ProviderResponse, ProviderError> {
+        request.validate_scope()?;
+        super::image::validate_images(&request)?;
+        if request.model != self.model || !(1..=4096).contains(&request.max_output_tokens) {
+            return Err(ProviderError::Rejected);
+        }
+        let mut body = wire::run_body_with_effort(&request, self.effort);
+        body["stream"] = Value::Bool(true);
+        let mut response = self
+            .client
+            .post(ENDPOINT)
+            .bearer_auth(&self.key)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
+            .body(wire::encode_request(&body)?)
+            .send()
+            .await
+            .map_err(|_| ProviderError::Unavailable)?;
+        if !response.status().is_success() {
+            return Err(if response.status().is_server_error() {
+                ProviderError::Unavailable
+            } else {
+                ProviderError::Rejected
+            });
+        }
+        let bytes =
+            read_streamed_reply(&mut response, &self.key, &self.model, Some(preview)).await?;
+        let decoded = if request.tools.is_some() {
+            wire::decode_streamed_tool_run(&bytes, &self.model)
+        } else {
+            wire::decode_streamed_run(&bytes, &self.model)
+        }
+        .map_err(wire::ResponseError::provider_error)?;
+        if !valid_usage(
+            decoded.input_tokens,
+            decoded.output_tokens,
+            request.max_output_tokens,
+        ) || decoded.reflects_secret(&self.key)
+        {
+            return Err(ProviderError::InvalidOutcome);
+        }
+        Ok(decoded)
+    }
+
     async fn compact(
         &self,
         request: CompactionRequest,
@@ -261,6 +310,15 @@ impl Provider for OpenAiProvider {
             .await?;
         self.decode_compaction(&response, request.max_output_tokens)
     }
+}
+
+pub(crate) async fn read_streamed_reply(
+    response: &mut reqwest::Response,
+    key: &str,
+    model: &str,
+    preview: Option<super::ResponsePreview>,
+) -> Result<Vec<u8>, ProviderError> {
+    subscription::read_completed_response(response, key, model, preview).await
 }
 
 #[cfg(test)]

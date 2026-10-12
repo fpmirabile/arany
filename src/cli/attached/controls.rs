@@ -294,6 +294,7 @@ pub(super) enum ActiveSubmission {
     Notice(String),
     OpenAgents,
     OpenHelp,
+    OpenTranscript,
     ReadClipboard,
 }
 
@@ -303,6 +304,13 @@ pub(super) fn handle_active_submission(
     starting_sequence: u64,
 ) -> ActiveSubmission {
     let notice = match composer.submission() {
+        Ok(Submission::Command {
+            command: InteractiveCommand::Transcript,
+            argument: None,
+        }) => {
+            composer.take();
+            return ActiveSubmission::OpenTranscript;
+        }
         Ok(Submission::Objective(_)) => return ActiveSubmission::RetainedDraft,
         Ok(Submission::Command {
             command: InteractiveCommand::Paste,
@@ -347,6 +355,11 @@ pub(super) fn validate_idle_command(
     argument: Option<&str>,
 ) -> Result<(), &'static str> {
     match command {
+        InteractiveCommand::View
+            if argument.is_some_and(|value| arany::TerminalMode::parse(value).is_none()) =>
+        {
+            Err("Usage: /view [classic|fullscreen]")
+        }
         InteractiveCommand::Settings if argument.is_some() => {
             settings_argument(argument.expect("settings argument")).map(|_| ())
         }
@@ -856,6 +869,7 @@ mod tests {
             accepted_sequence: 2,
             finished_sequence: None,
             tools: Vec::new(),
+            display: Vec::new(),
         });
         assert_eq!(
             active_command_notice(&view, InteractiveCommand::Status, starting_sequence),
@@ -1125,6 +1139,7 @@ mod tests {
             workspace_permissions: None,
             defaults: SessionDefaults::default(),
             screen_reader: false,
+            fullscreen: false,
             no_color: false,
             setup_requested: false,
             entry: EntryMode::New,
@@ -1218,6 +1233,7 @@ mod tests {
             workspace_permissions: None,
             defaults: SessionDefaults::default(),
             screen_reader: false,
+            fullscreen: false,
             no_color: false,
             setup_requested: false,
             entry: EntryMode::New,

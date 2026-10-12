@@ -1,6 +1,6 @@
 use super::commands::{Submission, help_entry, help_len, parse_submission};
 use super::history::{HistoryRow, MAX_ROW_CELLS, MessageKind};
-use super::{Composer, TerminalOutput};
+use super::{Composer, TerminalMode, backend::TerminalBackend, input::CursorQuery};
 use crate::presentation::{
     AgentInspectorModel, DraftAction, PresentationModel, model_id_preview, safe_truncate,
 };
@@ -9,7 +9,6 @@ use crate::provider::ModelEntry;
 use crate::session::SessionListItem;
 use ratatui::{
     Frame, Terminal, TerminalOptions, Viewport,
-    backend::CrosstermBackend,
     layout::{Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -248,14 +247,22 @@ fn accent_lead(line: String, palette: Palette) -> Line<'static> {
     }
 }
 
-pub(super) fn screen_terminal() -> io::Result<Terminal<CrosstermBackend<TerminalOutput>>> {
+pub(super) fn screen_terminal(
+    mode: TerminalMode,
+    cursor: Option<CursorQuery>,
+) -> io::Result<Terminal<TerminalBackend>> {
     let mut terminal = Terminal::with_options(
-        CrosstermBackend::new(TerminalOutput(Some(io::stderr()))),
+        TerminalBackend::new(mode, cursor),
         TerminalOptions {
-            viewport: Viewport::Fullscreen,
+            viewport: match mode {
+                TerminalMode::Classic => Viewport::Inline(crossterm::terminal::size()?.1.min(12)),
+                TerminalMode::Fullscreen => Viewport::Fullscreen,
+            },
         },
     )?;
-    ratatui::backend::Backend::clear(terminal.backend_mut())?;
+    let area = terminal.get_frame().area();
+    terminal.backend_mut().set_area(area);
+    terminal.backend_mut().clear_owned()?;
     Ok(terminal)
 }
 
@@ -681,7 +688,12 @@ pub(super) fn draw_frame_with_history(
         } else if line.heading {
             match line.speaker {
                 MessageKind::User => Style::default().add_modifier(Modifier::BOLD),
-                MessageKind::Assistant => palette.selection(),
+                MessageKind::Assistant | MessageKind::Preview | MessageKind::Incomplete => {
+                    palette.selection()
+                }
+                MessageKind::Tool | MessageKind::ToolDetails | MessageKind::Commentary => {
+                    palette.accent()
+                }
                 MessageKind::Notice => palette.accent().add_modifier(Modifier::BOLD),
                 MessageKind::Error => palette.error().add_modifier(Modifier::BOLD),
             }
@@ -919,6 +931,31 @@ pub(super) fn draw_frame_with_history(
             Rect::new(area.x, status_y, area.width, 1),
         );
     }
+}
+
+pub(super) fn native_line(row: &HistoryRow, width: u16, palette: Palette) -> Line<'static> {
+    let marker = match (row.speaker, row.heading) {
+        (MessageKind::User, true) => "› ",
+        (MessageKind::Assistant, true) => "● ",
+        (MessageKind::User, false) if !row.text.is_empty() => "│ ",
+        _ => "",
+    };
+    let text = if row.speaker == MessageKind::User && !row.heading {
+        row.text.strip_prefix("  ").unwrap_or(&row.text)
+    } else {
+        &row.text
+    };
+    Line::from(vec![
+        Span::styled(marker, palette.accent()),
+        Span::styled(
+            safe_truncate(text, usize::from(width).saturating_sub(marker.width())),
+            if row.heading {
+                palette.selection()
+            } else {
+                Style::default()
+            },
+        ),
+    ])
 }
 
 pub(super) fn draw_session_picker_frame(

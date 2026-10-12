@@ -15,12 +15,14 @@ Arany is a Rust-first, CLI-only agent harness. The product and executable are na
 | Git operations, including planned steps | [Git](./agents/git.md) |
 | Auth, secrets, I/O, APIs, Tools, processes, MCP, memory, transports, untrusted rendering | [Security](./agents/security.md) |
 | Providers, models, capabilities, credentials, routing, conformance | [Provider](./agents/provider.md) |
+| SSE framing, provisional answer extraction and credential-safe streaming | [Provider streaming](./agents/provider-streaming.md) |
 | Saved accounts, keyrings, credential transport | [Credential spec](./docs/specs/credentials.md), [credential rules](./agents/credentials.md) |
 | ChatGPT-plan OAuth, consent, tokens, weaker output bounds | [ChatGPT](./agents/chatgpt.md) |
 | Sessions, resume/fork/compaction, collaboration, topology, context | [Session](./agents/session.md) |
 | SQLite admission, Events, replay | [Store](./agents/store.md) |
 | Shared private-directory admission and native ACL checks | [Private filesystem](./agents/private-fs.md) |
 | Terminal behavior, output, accessibility, restoration, presentation | [Terminal](./agents/terminal.md) |
+| Ratatui backend, Inline cursor responses and scoped clearing | [Terminal backend](./agents/terminal-backend.md) |
 | Clipboard transport, clients, workers, results | [Clipboard](./agents/clipboard.md) |
 | Image admission, multimodal context, replay | [Image](./agents/image.md) |
 | History indexing, navigation, find, anchors | [History](./agents/history.md) |

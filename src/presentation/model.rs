@@ -475,6 +475,7 @@ mod tests {
             accepted_sequence: 2,
             finished_sequence: None,
             tools: Vec::new(),
+            display: Vec::new(),
         });
         let model = PresentationModel::from_session(&view, 80);
         assert_eq!(model.draft_action, DraftAction::InspectRun);

@@ -2,6 +2,8 @@ use super::{DEADLINE, ENDPOINT, wire};
 use crate::diagnostics::{
     ResponseShape, StreamCounts, SubscriptionFailureStage as Stage, subscription_failure,
 };
+use crate::provider::ResponsePreview;
+use crate::provider::streaming::{FramingStage, ResponsesPreview, SseEvent, SseFramer};
 use crate::provider::{
     AgentPhase, ChatGptProvenance, CompactionItem, CompactionRequest, CompactionResponse, Effort,
     HistoryTurn, MAX_REPORTED_INPUT_TOKENS, MAX_RESPONSE_BYTES, OutputTokenBound, Provider,
@@ -104,6 +106,30 @@ impl Provider for ChatGptProvider {
                 StreamCounts::default(),
             )
         })?
+    }
+
+    async fn invoke_with_preview(
+        &self,
+        request: ProviderRequest,
+        preview: ResponsePreview,
+    ) -> Result<ProviderResponse, ProviderError> {
+        request.validate_scope()?;
+        if request.model != self.model {
+            return Err(ProviderError::Rejected);
+        }
+        timeout(
+            DEADLINE,
+            invoke_at_with_preview(
+                &self.client,
+                Url::parse(ENDPOINT).expect("compiled Responses endpoint"),
+                &self.access_token,
+                &request,
+                self.effort,
+                Some(preview),
+            ),
+        )
+        .await
+        .map_err(|_| ProviderError::Unavailable)?
     }
 
     async fn compact(
@@ -242,11 +268,29 @@ async fn invoke_at(
     request: &ProviderRequest,
     effort: Effort,
 ) -> Result<ProviderResponse, ProviderError> {
+    invoke_at_with_preview(client, endpoint, access_token, request, effort, None).await
+}
+
+async fn invoke_at_with_preview(
+    client: &Client,
+    endpoint: Url,
+    access_token: &str,
+    request: &ProviderRequest,
+    effort: Effort,
+    preview: Option<ResponsePreview>,
+) -> Result<ProviderResponse, ProviderError> {
     if !(1..=4096).contains(&request.max_output_tokens) {
         return Err(ProviderError::Rejected);
     }
     let body = subscription_body(request, effort)?;
-    let (completed, counts) = completed_at(client, endpoint, access_token, body).await?;
+    let (completed, counts) = completed_at_with_preview(
+        client,
+        endpoint,
+        access_token,
+        body,
+        preview.map(|preview| (preview, request.model.as_str())),
+    )
+    .await?;
     let decoded = if request.tools.is_some() {
         wire::decode_streamed_tool_run(&completed, &request.model)
     } else {
@@ -339,6 +383,16 @@ async fn completed_at(
     access_token: &str,
     body: Vec<u8>,
 ) -> Result<(Vec<u8>, StreamCounts), ProviderError> {
+    completed_at_with_preview(client, endpoint, access_token, body, None).await
+}
+
+async fn completed_at_with_preview(
+    client: &Client,
+    endpoint: Url,
+    access_token: &str,
+    body: Vec<u8>,
+    preview: Option<(ResponsePreview, &str)>,
+) -> Result<(Vec<u8>, StreamCounts), ProviderError> {
     if access_token.is_empty()
         || access_token.len() > MAX_ACCESS_TOKEN_BYTES
         || !access_token.bytes().all(|byte| byte.is_ascii_graphic())
@@ -406,7 +460,10 @@ async fn completed_at(
             counts,
         ));
     }
-    let mut decoder = StreamDecoder::new(access_token);
+    let mut decoder = match preview {
+        Some((preview, model)) => StreamDecoder::with_preview(access_token, model, Some(preview)),
+        None => StreamDecoder::new(access_token),
+    };
     while let Some(chunk) = response.chunk().await.map_err(|error| {
         failure(
             if error.is_timeout() {
@@ -435,6 +492,26 @@ async fn completed_at(
 fn failure(stage: Stage, error: ProviderError, counts: StreamCounts) -> ProviderError {
     subscription_failure(stage, counts);
     error
+}
+
+pub(super) async fn read_completed_response(
+    response: &mut reqwest::Response,
+    key: &str,
+    model: &str,
+    preview: Option<ResponsePreview>,
+) -> Result<Vec<u8>, ProviderError> {
+    crate::provider::streaming::validate_stream_response(response)?;
+    let mut decoder = StreamDecoder::with_preview(key, model, preview);
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| ProviderError::Unavailable)?
+    {
+        if let Some(completed) = decoder.feed(&chunk)? {
+            return Ok(completed);
+        }
+    }
+    Err(ProviderError::InvalidStream)
 }
 
 fn response_failure(error: wire::ResponseError, counts: StreamCounts) -> ProviderError {
@@ -485,12 +562,8 @@ fn streaming_body(mut body: Value) -> Result<Vec<u8>, ProviderError> {
 
 struct StreamDecoder<'a> {
     token: &'a str,
-    total_bytes: usize,
-    events: usize,
-    line: Vec<u8>,
-    after_cr: bool,
-    event: Option<String>,
-    data: Vec<u8>,
+    framer: SseFramer,
+    preview: Option<ResponsesPreview<'a>>,
     stage: Stage,
     response_shape: ResponseShape,
     response_id: Option<String>,
@@ -517,12 +590,8 @@ impl<'a> StreamDecoder<'a> {
     fn new(token: &'a str) -> Self {
         Self {
             token,
-            total_bytes: 0,
-            events: 0,
-            line: Vec::new(),
-            after_cr: false,
-            event: None,
-            data: Vec::new(),
+            framer: SseFramer::new(),
+            preview: None,
             stage: Stage::EventFraming,
             response_shape: ResponseShape::default(),
             response_id: None,
@@ -530,118 +599,45 @@ impl<'a> StreamDecoder<'a> {
         }
     }
 
+    fn with_preview(token: &'a str, model: &'a str, preview: Option<ResponsePreview>) -> Self {
+        let mut decoder = Self::new(token);
+        decoder.preview = preview.map(|preview| ResponsesPreview::new(token, model, preview));
+        decoder
+    }
+
     fn feed(&mut self, chunk: &[u8]) -> Result<Option<Vec<u8>>, ProviderError> {
-        self.stage = Stage::StreamLimit;
-        self.total_bytes = self
-            .total_bytes
-            .checked_add(chunk.len())
-            .filter(|count| *count <= MAX_RESPONSE_BYTES)
-            .ok_or(ProviderError::InvalidStream)?;
+        self.framer.admit(chunk.len()).inspect_err(|_| {
+            self.stage = Stage::StreamLimit;
+        })?;
         for &byte in chunk {
-            if self.after_cr {
-                self.after_cr = false;
-                if byte == b'\n' {
-                    continue;
-                }
-            }
-            if byte == b'\n' || byte == b'\r' {
-                self.after_cr = byte == b'\r';
-                let line = std::mem::take(&mut self.line);
-                if line.is_empty() {
-                    if let Some(completed) = self.finish_event()? {
-                        return Ok(Some(completed));
-                    }
-                } else {
-                    self.accept_line(&line)?;
-                }
-            } else {
-                self.stage = Stage::StreamLimit;
-                if self.line.len() == MAX_RESPONSE_BYTES {
-                    return Err(ProviderError::InvalidStream);
-                }
-                self.line.push(byte);
+            let event = self.framer.byte(byte, self.token).inspect_err(|_| {
+                self.stage = match self.framer.stage {
+                    FramingStage::Limit => Stage::StreamLimit,
+                    FramingStage::Framing => Stage::EventFraming,
+                    FramingStage::Json => Stage::EventJson,
+                    FramingStage::Credential => Stage::CredentialReflection,
+                    FramingStage::Type => Stage::EventType,
+                };
+            })?;
+            if let Some(event) = event
+                && let Some(completed) = self.finish_event(event)?
+            {
+                return Ok(Some(completed));
             }
         }
         Ok(None)
     }
 
-    fn accept_line(&mut self, line: &[u8]) -> Result<(), ProviderError> {
-        self.stage = Stage::EventFraming;
-        if line.contains(&b'\r') || line.contains(&0) {
-            return Err(ProviderError::InvalidStream);
-        }
-        if line[0] == b':' {
-            return Ok(());
-        }
-        if let Some(value) = line.strip_prefix(b"event:") {
-            let value = value.strip_prefix(b" ").unwrap_or(value);
-            let name = std::str::from_utf8(value).map_err(|_| ProviderError::InvalidStream)?;
-            if self.event.is_some()
-                || name.is_empty()
-                || name.len() > 128
-                || !name
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-            {
-                return Err(ProviderError::InvalidStream);
-            }
-            self.event = Some(name.to_owned());
-        } else if let Some(value) = line.strip_prefix(b"data:") {
-            let value = value.strip_prefix(b" ").unwrap_or(value);
-            if !self.data.is_empty() {
-                self.data.push(b'\n');
-            }
-            if value.len() > MAX_RESPONSE_BYTES - self.data.len() {
-                self.stage = Stage::StreamLimit;
-                return Err(ProviderError::InvalidStream);
-            }
-            self.data.extend_from_slice(value);
-        }
-        Ok(())
-    }
-
-    fn finish_event(&mut self) -> Result<Option<Vec<u8>>, ProviderError> {
-        if self.event.is_none() && self.data.is_empty() {
-            return Ok(None);
-        }
-        self.events += 1;
-        self.stage = Stage::StreamLimit;
-        if self.events > MAX_EVENTS {
-            return Err(ProviderError::InvalidStream);
-        }
-        self.stage = Stage::EventFraming;
-        if self.data.is_empty() {
-            return Err(ProviderError::InvalidStream);
-        }
-        let event = self.event.take();
-        let data = std::mem::take(&mut self.data);
-        self.stage = Stage::CredentialReflection;
-        if data
-            .windows(self.token.len())
-            .any(|window| window == self.token.as_bytes())
-        {
-            return Err(ProviderError::InvalidOutcome);
-        }
-        self.stage = Stage::EventJson;
-        let value: Value =
-            serde_json::from_slice(&data).map_err(|_| ProviderError::InvalidStream)?;
-        self.stage = Stage::CredentialReflection;
-        if reflects_token(&value, self.token) {
-            return Err(ProviderError::InvalidOutcome);
-        }
-        self.stage = Stage::EventType;
+    fn finish_event(&mut self, event: SseEvent) -> Result<Option<Vec<u8>>, ProviderError> {
+        let SseEvent { value, data } = event;
         let kind = value
             .get("type")
             .and_then(Value::as_str)
             .ok_or(ProviderError::InvalidStream)?;
-        if kind.is_empty()
-            || kind.len() > 128
-            || !kind
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-            || event.as_deref().is_some_and(|event| event != kind)
-        {
-            return Err(ProviderError::InvalidStream);
+        if let Some(preview) = &mut self.preview {
+            preview.event(&value).inspect_err(|_| {
+                self.stage = Stage::OutcomeContract;
+            })?;
         }
         match kind {
             "response.created" => {
@@ -768,8 +764,8 @@ impl<'a> StreamDecoder<'a> {
 
     fn counts(&self) -> StreamCounts {
         StreamCounts {
-            bytes: self.total_bytes,
-            events: self.events,
+            bytes: self.framer.bytes,
+            events: self.framer.events,
             http_status: Some(200),
             response_shape: Some(self.response_shape),
             tool_arguments: None,
@@ -795,17 +791,6 @@ fn remote_stream_error(value: &Value, event: &str) -> ProviderError {
             ProviderError::RemoteStreamCode(code.to_owned())
         }
         _ => ProviderError::Rejected,
-    }
-}
-
-fn reflects_token(value: &Value, token: &str) -> bool {
-    match value {
-        Value::String(text) => text.contains(token),
-        Value::Array(items) => items.iter().any(|item| reflects_token(item, token)),
-        Value::Object(fields) => fields
-            .iter()
-            .any(|(name, value)| name.contains(token) || reflects_token(value, token)),
-        _ => false,
     }
 }
 

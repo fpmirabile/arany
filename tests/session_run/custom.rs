@@ -249,11 +249,18 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
                 "model": "model-1",
                 "output": [{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":wire_text}]}],
                 "usage": {"input_tokens":20,"output_tokens":10}
-            })
-            .to_string();
+            });
+            let (content_type, response) = if body["stream"] == true {
+                (
+                    "text/event-stream",
+                    super::loopback::responses_stream(response),
+                )
+            } else {
+                ("application/json", response.to_string())
+            };
             write!(
                 stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
                 response.len()
             )
             .expect("synthetic response");
@@ -792,7 +799,7 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
 #[cfg(target_os = "linux")]
 #[test]
 fn custom_effort_profile_pins_selected_effort_after_synthetic_conformance() {
-    use super::loopback::{read_request, send_response, wait_product, write_profile};
+    use super::loopback::{read_request, wait_product, write_profile};
     use std::{
         net::TcpListener,
         os::unix::fs::PermissionsExt,
@@ -852,7 +859,7 @@ fn custom_effort_profile_pins_selected_effort_after_synthetic_conformance() {
                     serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"answer"}})
                 }
             };
-            send_response(&mut stream, index, outcome);
+            super::loopback::send_response_for(&mut stream, index, outcome, body["stream"] == true);
         }
     });
 

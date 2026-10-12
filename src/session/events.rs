@@ -1,3 +1,4 @@
+use crate::provider::AgentPhase;
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 use uuid::{Uuid, Version};
@@ -944,6 +945,49 @@ mod provider_call_tests {
     }
 }
 
+pub const MAX_DISPLAY_CHUNKS: usize = 64;
+pub const MAX_DISPLAY_CHUNK_BYTES: usize = 2 * 1024;
+pub const MAX_DISPLAY_TEXT_BYTES: usize = 32 * 1024;
+pub const MAX_DISPLAY_COMMENTARY_ITEMS: usize = 32;
+pub const DISPLAY_LIMIT_TEXT: &str = "Some public commentary was omitted.";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplayCategory {
+    Answer,
+    Commentary,
+    Limit,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisplayChunk {
+    pub call_index: u8,
+    pub phase: AgentPhase,
+    pub category: DisplayCategory,
+    pub item: u8,
+    pub offset: u32,
+    pub text: String,
+}
+
+impl DisplayChunk {
+    fn validate(&self) -> Result<(), ReplayError> {
+        if self.call_index as usize >= crate::tools::MAX_MODEL_STEPS
+            || !matches!(self.phase, AgentPhase::RootPlan | AgentPhase::RootSynthesis)
+            || self.item as usize >= MAX_DISPLAY_COMMENTARY_ITEMS
+            || self.category == DisplayCategory::Answer && self.item != 0
+            || self.category == DisplayCategory::Limit
+                && (self.item != 0 || self.offset != 0 || self.text != DISPLAY_LIMIT_TEXT)
+            || self.text.is_empty()
+            || self.text.len() > MAX_DISPLAY_CHUNK_BYTES
+            || self.offset as usize + self.text.len() > MAX_DISPLAY_TEXT_BYTES
+        {
+            return Err(ReplayError::InvalidPayload);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Event {
     SessionStarted {
@@ -986,6 +1030,11 @@ pub enum Event {
         run_id: RunId,
         agent_run_id: AgentRunId,
         record: ProviderCallRecord,
+    },
+    AssistantDisplayRecorded {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        chunk: DisplayChunk,
     },
     ToolStarted {
         run_id: RunId,
@@ -1125,6 +1174,7 @@ impl Event {
             Self::RunStarted { .. } => "RunStarted",
             Self::AgentSpawned { .. } => "AgentSpawned",
             Self::ProviderCallRecorded { .. } => "ProviderCallRecorded",
+            Self::AssistantDisplayRecorded { .. } => "AssistantDisplayRecorded",
             Self::ToolStarted { .. } => "ToolStarted",
             Self::ToolFinished { .. } => "ToolFinished",
             Self::AgentFinished { .. } => "AgentFinished",
@@ -1150,6 +1200,11 @@ impl Event {
                 ..
             }
             | Self::ProviderCallRecorded {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::AssistantDisplayRecorded {
                 run_id,
                 agent_run_id,
                 ..
@@ -1218,6 +1273,7 @@ impl Event {
                 objective: objective.clone(),
             }),
             Self::ProviderCallRecorded { record, .. } => serialize(record),
+            Self::AssistantDisplayRecorded { chunk, .. } => serialize(chunk),
             Self::ToolStarted { intent, .. } => serialize(intent),
             Self::ToolFinished { observation, .. } => serialize(observation),
             Self::AgentFinished {
@@ -1323,6 +1379,13 @@ impl Event {
                 agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
                 intent: parse(payload)?,
             },
+            "AssistantDisplayRecorded" if run_id.is_some() && agent_run_id.is_some() => {
+                Self::AssistantDisplayRecorded {
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                    chunk: parse(payload)?,
+                }
+            }
             "ToolFinished" if run_id.is_some() && agent_run_id.is_some() => Self::ToolFinished {
                 run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
                 agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
@@ -1347,6 +1410,7 @@ impl Event {
             | "RunStarted"
             | "AgentSpawned"
             | "ProviderCallRecorded"
+            | "AssistantDisplayRecorded"
             | "ToolStarted"
             | "ToolFinished"
             | "AgentFinished"
@@ -1400,6 +1464,7 @@ impl Event {
                 _ => Err(ReplayError::InvalidPayload),
             },
             Self::ProviderCallRecorded { record, .. } => record.validate(),
+            Self::AssistantDisplayRecorded { chunk, .. } => chunk.validate(),
             Self::ToolStarted {
                 run_id,
                 agent_run_id,

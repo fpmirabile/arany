@@ -11,6 +11,7 @@ use std::{
 };
 
 fn own_terminal(command: &mut Command) {
+    command.arg("--fullscreen");
     use std::os::unix::process::CommandExt;
     // The child has an admitted PTY on fd 0; only async-signal-safe syscalls run before exec.
     unsafe {
@@ -887,10 +888,11 @@ fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
                             release_tx.send(()).unwrap();
                             suspended = true;
                         }
-                        let expected = if matches!(exit, Exit::Failure) {
-                            b"Status: failed".as_slice()
-                        } else {
-                            b"Status: cancelled".as_slice()
+                        let expected = match (linear, matches!(exit, Exit::Failure)) {
+                            (true, true) => b"Status: failed".as_slice(),
+                            (true, false) => b"Status: cancelled".as_slice(),
+                            (false, true) => b"failed.".as_slice(),
+                            (false, false) => b"cancelled.".as_slice(),
                         };
                         if released
                             && !exited

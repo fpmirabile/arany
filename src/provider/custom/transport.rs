@@ -40,6 +40,25 @@ impl CustomTransport {
         request: &ProviderRequest,
         effort: Option<Effort>,
     ) -> Result<ProviderResponse, TransportError> {
+        self.run_request(request, effort, false, None).await
+    }
+
+    pub(super) async fn run_streamed(
+        &self,
+        request: &ProviderRequest,
+        effort: Option<Effort>,
+        preview: Option<crate::provider::ResponsePreview>,
+    ) -> Result<ProviderResponse, TransportError> {
+        self.run_request(request, effort, true, preview).await
+    }
+
+    async fn run_request(
+        &self,
+        request: &ProviderRequest,
+        effort: Option<Effort>,
+        stream: bool,
+        preview: Option<crate::provider::ResponsePreview>,
+    ) -> Result<ProviderResponse, TransportError> {
         if request.tools.is_some()
             || !request.images.is_empty()
             || request.validate_scope().is_err()
@@ -49,13 +68,22 @@ impl CustomTransport {
         if !(1..=4096).contains(&request.max_output_tokens) {
             return Err(TransportError::InvalidOutcome);
         }
-        let body = effort.map_or_else(
+        let mut body = effort.map_or_else(
             || wire::run_body(request),
             |value| wire::run_body_with_effort(request, value),
         );
-        let bytes = self.send(body).await?;
-        let response =
-            wire::decode_run(&bytes, &request.model).map_err(|_| TransportError::InvalidOutcome)?;
+        let bytes = if stream {
+            body["stream"] = Value::Bool(true);
+            self.send_streamed(body, &request.model, preview).await?
+        } else {
+            self.send(body).await?
+        };
+        let response = if stream {
+            wire::decode_streamed_run(&bytes, &request.model)
+                .map_err(|_| TransportError::InvalidOutcome)?
+        } else {
+            wire::decode_run(&bytes, &request.model).map_err(|_| TransportError::InvalidOutcome)?
+        };
         if !valid_usage(
             response.input_tokens,
             response.output_tokens,
@@ -95,6 +123,42 @@ impl CustomTransport {
             return Err(TransportError::InvalidOutcome);
         }
         Ok(response)
+    }
+
+    async fn send_streamed(
+        &self,
+        request: Value,
+        model: &str,
+        preview: Option<crate::provider::ResponsePreview>,
+    ) -> Result<Vec<u8>, TransportError> {
+        let body = wire::encode_request(&request).map_err(|_| TransportError::InvalidOutcome)?;
+        let mut response = self
+            .client
+            .post(&self.endpoint)
+            .bearer_auth(&self.key)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ACCEPT, "text/event-stream")
+            .header(header::ACCEPT_ENCODING, "identity")
+            .body(body)
+            .send()
+            .await
+            .map_err(|_| TransportError::Unavailable)?;
+        if response.url().as_str() != self.endpoint || !response.status().is_success() {
+            return Err(if response.status().is_server_error() {
+                TransportError::Unavailable
+            } else {
+                TransportError::Rejected
+            });
+        }
+        crate::provider::openai::read_streamed_reply(&mut response, &self.key, model, preview)
+            .await
+            .map_err(|error| {
+                if error.failure_class() == crate::provider::ProviderFailureClass::Unavailable {
+                    TransportError::Unavailable
+                } else {
+                    TransportError::InvalidOutcome
+                }
+            })
     }
 
     async fn send(&self, request: Value) -> Result<Vec<u8>, TransportError> {

@@ -273,6 +273,49 @@ impl Provider for AnthropicProvider {
         self.decode_run(&response, request.max_output_tokens)
     }
 
+    async fn invoke_with_preview(
+        &self,
+        request: ProviderRequest,
+        preview: super::ResponsePreview,
+    ) -> Result<ProviderResponse, ProviderError> {
+        request.validate_scope()?;
+        super::image::validate_images(&request)?;
+        if request.model != self.model || !(1..=4096).contains(&request.max_output_tokens) {
+            return Err(ProviderError::Rejected);
+        }
+        let mut body = wire::run_body(&request, self.effort);
+        body["stream"] = Value::Bool(true);
+        let mut response = self
+            .request(body)?
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .send()
+            .await
+            .map_err(|_| ProviderError::Unavailable)?;
+        if !response.status().is_success() {
+            return Err(
+                if response.status().is_server_error()
+                    || response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+                {
+                    ProviderError::Unavailable
+                } else {
+                    ProviderError::Rejected
+                },
+            );
+        }
+        super::streaming::validate_stream_response(&response)?;
+        let mut decoder = wire::MessageStream::new(&self.key, &self.model, preview);
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| ProviderError::Unavailable)?
+        {
+            if let Some(bytes) = decoder.feed(&chunk)? {
+                return self.decode_run(&bytes, request.max_output_tokens);
+            }
+        }
+        Err(ProviderError::InvalidStream)
+    }
+
     async fn compact(
         &self,
         request: CompactionRequest,

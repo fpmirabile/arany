@@ -20,8 +20,8 @@ pub use lifecycle::{
     set_session_defaults,
 };
 use lifecycle::{ensure_session_workspace, fork_with_store, lock_session};
+pub use progress::{DisplayUpdate, RunPreview, RunProgress, RunUpdate};
 use progress::{ProgressPublisher, append_observed};
-pub use progress::{RunProgress, RunUpdate};
 use run_loop::{RunControls, RunIdentity, RunLoop};
 
 /// Checks bounded Workspace input before an attached draft becomes a saved Session.
@@ -355,7 +355,13 @@ impl<P: Provider + 'static> Engine<P> {
         self.store
             .admit_operation(
                 session_id,
-                lifecycle_slots + tool_slots + usize::from(request.session_id.is_none()),
+                lifecycle_slots
+                    + tool_slots
+                    + usize::from(request.session_id.is_none())
+                    + progress
+                        .as_ref()
+                        .filter(|progress| progress.previews_enabled())
+                        .map_or(0, |_| crate::session::MAX_DISPLAY_CHUNKS),
             )
             .await?;
         if let Some(permissions) = &self.workspace_permissions {

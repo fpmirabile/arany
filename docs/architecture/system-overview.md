@@ -16,7 +16,7 @@ The full product contract is successful when it proves all of these together:
 2. `single`, `auto`, and `team` policies all use the primary coordination loop and a generic ordered child collection rather than a fixed two-worker shape;
 3. the primary cannot finish team work before every required child has a persisted terminal disposition;
 4. the default terminal keeps a navigable committed transcript in the primary screen, conditional agent activity above a bottom composer, a slash menu below input when open, and a compact status row;
-5. keyboard access is complete, while mouse reporting exists only transiently inside an open picker or detail panel;
+5. keyboard access is complete, while mouse reporting exists only in fullscreen or transiently inside an open picker or detail panel;
 6. native OpenAI and Anthropic plus every admitted exact custom endpoint/model profile satisfy the same semantic Provider contract;
 7. exact Workspace-root `AGENTS.md` loads first, with exact `CLAUDE.md` as absence-only fallback;
 8. `exec` and `show` expose the same committed facts without terminal initialization; and
@@ -421,7 +421,7 @@ The private attached model owner persists token-free `model-preferences.json` un
 
 The attached command owner persists token-free `ui-preferences.json` at the selected admitted state root through the existing private replacement lock and atomic file transport. Its closed versioned 1 KiB record selects slash completion tabs or a combined list; defaults and malformed-record recovery use tabs. The Composer owns tab/focus state and the frame places the bounded list below input, sharing history-capacity geometry with the lifecycle owner. Preferences never enter canonical Events, account authority, Tool grants or Provider context.
 
-The Engine publishes the latest acknowledged RunView and committed sequence through a one-slot coalescing progress handle. Skipped display intermediates never skip canonical Events. Before Engine admission, preparing feedback remains presentation-local; afterward activity derives solely from committed current-Run facts. Closed replay, terminal restoration and typed CLI classification precede receipt/answer output.
+The Engine publishes the latest acknowledged RunView and committed sequence through a one-slot coalescing progress handle. Skipped display intermediates never skip canonical Events. Before Engine admission, preparing feedback remains presentation-local; afterward activity derives solely from committed current-Run facts. Closed replay and typed CLI classification precede receipt/answer output. Linear output restores ownership first; visual modes retain their owned viewport while inserting classic transcript or emitting redirected confirmed stdout.
 
 Guard's shared capacity wait is a separate one-slot intent-ID hint, validated
 against the committed pending Tool before display. It cannot enter history or
@@ -434,6 +434,10 @@ owns defaults, configuration, resource bounds and interruption semantics.
 A terminal-owned clipboard worker has bounded trusted OS-client ownership distinct from the reader and Engine. Immutable image values cross semantic Provider/Session boundaries; human drawing receives metadata. Canonical image bytes, multimodal context and compaction remain under the image/Session/Store owners.
 
 The released terminal owner retains signal listeners through committed output and transfers them to reacquisition. Raw/canonical input is stopped and joined before modes/flags are restored; suspension retains the pinned Run future and bounded draft. Lifecycle failures cannot manufacture a committed outcome. Detailed fault ownership remains in [terminal rules](../../agents/terminal.md); [next steps](../../NEXT_STEPS.md) owns unverified claims.
+
+### Display observations and terminal continuity
+
+Provider adapters may publish a bounded typed preview to attached primary execution. The Engine coalesces transient observations, checkpoints safe text through canonical Events and validates the complete outcome before accepting an answer. Display-only checkpoints never enter future Provider context or compaction. Terminal owns provisional labels, sanitized Tool details, reading anchors and classic/fullscreen mode changes. Classic uses Ratatui Inline and native insertion while fullscreen owns an alternate screen; a narrow backend routes cursor observation through the sole input reader and scopes primary-screen clearing. This adds no process, terminal engine or second canonical history store.
 
 ## 9. Provider profiles and custom endpoints
 
@@ -504,7 +508,7 @@ The release boundary includes:
 - private no-follow SQLite state outside the Workspace, strict data-only replay, aggregate growth admission, and no encryption-at-rest claim;
 - one immutable aggregate Run budget for calls, output tokens, bytes, time, memory, disk, `N`, and concurrency;
 - only admitted fixed native or exact verified custom Provider requests, with phase-minimal content and origin-bound credentials; standard OS TLS validation may make auxiliary certificate-related connections, never an Arany payload destination;
-- inert terminal output, no alternate screen, transient picker-only mouse, and one RAII terminal owner that restores every enabled mode on every exit path; and
+- inert terminal output, classic primary-screen and explicit alternate-screen fullscreen/detail ownership, scoped mouse, and one RAII terminal owner that restores every enabled mode on every exit path; and
 - pinned/reviewed dependencies, lockfile, build/proc-macro/native inventory, binary-forbidden and library-denied `unsafe` with scoped native Guard/ACL exceptions.
 
 The first local effectful base implements immutable typed effects, deterministic restrict-only Policy and a separately enforcing Guard. Private reviewed configuration or explicit user folder trust supplies upfront grants. Attached Request approvals, Auto edits and AI-reviewed Auto approval narrow dispatch through a bounded one-shot control channel; AI reviews use the existing Provider seam and canonical phase/usage, never a new authority. The terminal owns vertical choices and mode keys. Replay retains review/effect facts without renewing permission. Universal host/same-UID protection is not claimed. Native macOS Guard, Keychain, private-filesystem ACL and clipboard adapters are implemented and exercised by CI on hosted macOS; optimized account isolation and human Keychain/pasteboard checks remain open in [NEXT_STEPS](../../NEXT_STEPS.md). Remote MCP/network disclosure and larger runtimes require separate admission/evidence.
@@ -555,7 +559,7 @@ It does not force private users or hosted services to show a public “Powered b
 3. Implement trusted startup, private state admission, Workspace snapshots, Session identity, Event schema, reducers, deterministic output, and hostile-content handling.
 4. Make create/exit/resume/multi-Run/fork and deterministic context compilation pass with the scripted Provider.
 5. Implement ordered bounded `0..N` children and prove `single`, `auto`, `team`, aggregate budgets, join, and cancellation.
-6. Add a primary-screen committed transcript, fixed-bottom composer/status, conditional activity shelf, keyboard-complete Session/agent pickers, and native history/restoration PTY proof; add transient picker mouse only after restoration gates pass.
+6. Add a primary-screen committed transcript, fixed-bottom composer/status, classic native scrollback and optional fullscreen managed history, conditional activity shelf, keyboard-complete Session/agent pickers, and native history/restoration PTY proof; limit mouse ownership to fullscreen and explicit panels.
 7. Add native OpenAI and Anthropic API-key adapters and their offline/live conformance.
 8. Add trusted custom `openai-responses` profiles plus data-free `provider check`; do not admit unverified endpoints.
 9. Add slash-command Tab completion and persistent argument previews without changing the trusted command boundary.

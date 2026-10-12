@@ -10,6 +10,8 @@ pub enum InteractiveCommand {
     Help,
     Setup,
     Settings,
+    View,
+    Transcript,
     Paste,
     Status,
     New,
@@ -37,12 +39,15 @@ impl InteractiveCommand {
             return CommandAvailability::Available;
         }
         match self {
-            Self::Help | Self::Status | Self::Permissions => CommandAvailability::Available,
+            Self::Help | Self::Status | Self::Permissions | Self::Transcript => {
+                CommandAvailability::Available
+            }
             Self::Agents | Self::Provider | Self::Model | Self::Quit | Self::Paste => {
                 CommandAvailability::ViewOnly
             }
             Self::Setup
             | Self::Settings
+            | Self::View
             | Self::New
             | Self::Resume
             | Self::Fork
@@ -95,7 +100,7 @@ const fn spec(
     }
 }
 
-const COMMANDS: [CommandSpec; 17] = [
+const COMMANDS: [CommandSpec; 19] = [
     spec("help", InteractiveCommand::Help, None, &[]),
     spec("setup", InteractiveCommand::Setup, None, &[]),
     spec("paste", InteractiveCommand::Paste, None, &[]),
@@ -136,6 +141,13 @@ const COMMANDS: [CommandSpec; 17] = [
         Some("[tabs|combined]"),
         &["tabs", "combined"],
     ),
+    spec(
+        "view",
+        InteractiveCommand::View,
+        Some("[classic|fullscreen]"),
+        &["classic", "fullscreen"],
+    ),
+    spec("transcript", InteractiveCommand::Transcript, None, &[]),
     spec("quit", InteractiveCommand::Quit, None, &[]),
     spec("exit", InteractiveCommand::Quit, None, &[]),
 ];
@@ -157,6 +169,8 @@ pub(super) fn help_entry(index: usize) -> Option<HelpEntry> {
         InteractiveCommand::Help => "List commands",
         InteractiveCommand::Setup => "Set up an account",
         InteractiveCommand::Settings => "Choose slash menu display",
+        InteractiveCommand::View => "Choose classic or fullscreen",
+        InteractiveCommand::Transcript => "Show or hide transcript details",
         InteractiveCommand::Paste => "Paste clipboard into draft",
         InteractiveCommand::Status => "Session status",
         InteractiveCommand::New => "New Session",
@@ -610,7 +624,7 @@ mod tests {
 
     #[test]
     fn closed_registry_aliases_completion_and_lifecycle_are_exact() {
-        assert_eq!(COMMANDS.len(), 17);
+        assert_eq!(COMMANDS.len(), 19);
         for spec in COMMANDS {
             assert_eq!(
                 parse_submission(&format!("/{}", spec.name)),

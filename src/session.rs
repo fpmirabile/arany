@@ -19,9 +19,10 @@ pub(crate) use context::CompiledContext;
 pub(crate) use events::ReplayError;
 pub use events::{
     AgentDisposition, AgentRole, AgentRunId, CollaborationPolicy, CompactionFailure,
-    CompactionRecord, CompactionStatus, ContextUsage, Event, EventEnvelope, ForkLineage,
-    ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition, RunId, SessionDefaults,
-    SessionId,
+    CompactionRecord, CompactionStatus, ContextUsage, DISPLAY_LIMIT_TEXT, DisplayCategory,
+    DisplayChunk, Event, EventEnvelope, ForkLineage, MAX_DISPLAY_CHUNK_BYTES, MAX_DISPLAY_CHUNKS,
+    MAX_DISPLAY_COMMENTARY_ITEMS, MAX_DISPLAY_TEXT_BYTES, ProviderCallDisposition,
+    ProviderCallRecord, RunConfig, RunDisposition, RunId, SessionDefaults, SessionId,
 };
 pub(crate) use lineage::prefix_digest;
 pub use reducer::{

@@ -2118,14 +2118,16 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(workspace.join("notes")).unwrap();
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").unwrap();
-        for (index, (prefix, policy, admitted, tools, branch)) in [
-            (9995, CollaborationPolicy::Single, false, false, false),
-            (9993, CollaborationPolicy::Single, true, false, false),
-            (9990, CollaborationPolicy::Team { max_active_children: 1 }, false, false, false),
-            (9989, CollaborationPolicy::Team { max_active_children: 1 }, true, false, false),
-            (9950, CollaborationPolicy::Single, false, true, false),
-            (9993, CollaborationPolicy::Single, false, false, true),
-            (9992, CollaborationPolicy::Single, true, false, true),
+        for (index, (prefix, policy, admitted, tools, branch, previews)) in [
+            (9995, CollaborationPolicy::Single, false, false, false, false),
+            (9993, CollaborationPolicy::Single, true, false, false, false),
+            (9990, CollaborationPolicy::Team { max_active_children: 1 }, false, false, false, false),
+            (9989, CollaborationPolicy::Team { max_active_children: 1 }, true, false, false, false),
+            (9950, CollaborationPolicy::Single, false, true, false, false),
+            (9993, CollaborationPolicy::Single, false, false, true, false),
+            (9992, CollaborationPolicy::Single, true, false, true, false),
+            (9930, CollaborationPolicy::Single, false, false, false, true),
+            (9929, CollaborationPolicy::Single, true, false, false, true),
         ].into_iter().enumerate() {
             let path = temp.path().join(format!("state-{index}"));
             let finish = || ProviderOutcome::Finish(Finish { summary: "done".into(), result: "answer".into() });
@@ -2157,7 +2159,9 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             next.session_id = Some(id);
             next.title = None;
             next.policy = policy;
-            let result = engine.run(next).await;
+            let result = if previews {
+                engine.run_with_progress(next, RunCancellation::new(), RunProgress::with_previews()).await
+            } else { engine.run(next).await };
             if admitted {
                 assert_eq!(result.unwrap().run.status, RunStatus::Finished, "case {index}");
             } else {
@@ -2167,7 +2171,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             let phases: Vec<_> = requests.lock().unwrap().iter().map(|request| request.phase).collect();
             assert_eq!(phases, if !admitted { vec![] } else if matches!(policy, CollaborationPolicy::Single) { vec![AgentPhase::RootPlan] } else { vec![AgentPhase::RootPlan, AgentPhase::ChildWork, AgentPhase::RootSynthesis] }, "case {index}");
             let store = Store::open_read_only(StateRoot::open_existing(&path).unwrap()).unwrap();
-            assert_eq!(store.load_session(id).await.unwrap().len(), if branch { if admitted { 8 } else { 1 } } else if admitted { 10_000 } else { prefix as usize });
+            assert_eq!(store.load_session(id).await.unwrap().len(), if branch { if admitted { 8 } else { 1 } } else if admitted { if previews { prefix as usize + 7 } else { 10_000 } } else { prefix as usize });
             let view = store.load_view(id).await.unwrap().unwrap();
             assert_eq!(view.runs.len(), if admitted { 2 } else { 1 });
             assert!(view.runs.iter().all(|run| run.status == RunStatus::Finished));
@@ -4732,4 +4736,423 @@ fn workspace_limits_and_state_overlap_fail_before_provider_disclosure() {
         ));
         engine.close().await.expect("engine shutdown");
     });
+}
+
+struct PreviewProvider {
+    text: arany::PreviewText,
+    completion: Option<ProviderOutcome>,
+}
+
+impl Provider for PreviewProvider {
+    fn max_concurrent_calls(&self) -> u8 {
+        1
+    }
+    fn profile_name(&self) -> &str {
+        "preview"
+    }
+    fn model_name(&self) -> &str {
+        "test-model"
+    }
+    async fn invoke(&self, _: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        panic!("attached primary must use the preview invocation")
+    }
+    async fn invoke_with_preview(
+        &self,
+        _: ProviderRequest,
+        preview: arany::ResponsePreview,
+    ) -> Result<ProviderResponse, ProviderError> {
+        preview.publish(self.text.clone())?;
+        match &self.completion {
+            Some(outcome) => Ok(ProviderResponse {
+                outcome: outcome.clone(),
+                response_id: None,
+                input_tokens: None,
+                output_tokens: Some(8),
+                wire_provenance: None,
+            }),
+            None => std::future::pending().await,
+        }
+    }
+}
+
+#[tokio::test]
+async fn attached_previews_checkpoint_cancel_reopen_and_stay_out_of_context() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = temp.path().join("state");
+    let text = format!("INCOMPLETE_CANARY:{}", "x".repeat(2300));
+    let provider = PreviewProvider {
+        text: arany::PreviewText {
+            answer: text.clone(),
+            commentary: vec!["PUBLIC_COMMENTARY_CANARY".into()],
+            commentary_limited: false,
+        },
+        completion: None,
+    };
+    let mut engine = Engine::open(StateRoot::admit(&state).unwrap(), provider).unwrap();
+    let mut objective = request(&workspace, "question");
+    objective.include_paths.clear();
+    let cancel = RunCancellation::new();
+    let mut progress = RunProgress::with_previews();
+    let observer = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+    let cancellation = cancel.clone();
+    let run_progress = progress.clone();
+    let task = tokio::spawn(async move {
+        let outcome = engine
+            .run_with_progress(objective, cancellation, run_progress)
+            .await;
+        engine.close().await.unwrap();
+        outcome.unwrap()
+    });
+    let session_id = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let update = progress.changed().await;
+            if update.run.display.iter().any(|chunk| chunk.category == arany::DisplayCategory::Answer) {
+                let session_id = observer.session_for_run(update.run.id).await.unwrap().unwrap();
+                let events = observer.load_session(session_id).await.unwrap();
+                assert!(events.iter().any(|event| matches!(&event.event, Event::AssistantDisplayRecorded { chunk, .. } if chunk.text.len() == 2048)));
+                break events[0].session_id;
+            }
+        }
+    }).await.unwrap();
+    cancel.cancel();
+    let outcome = task.await.unwrap();
+    assert_eq!(outcome.run.status, RunStatus::Cancelled);
+    assert!(outcome.run.assistant_message.is_none());
+    observer.close().await.unwrap();
+    let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+    let events = store.load_session(session_id).await.unwrap();
+    let view = SessionView::replay(session_id, &events).unwrap().unwrap();
+    let run = &view.runs[0];
+    assert!(
+        run.display
+            .iter()
+            .filter(|chunk| chunk.category == arany::DisplayCategory::Answer)
+            .map(|chunk| chunk.text.as_str())
+            .collect::<String>()
+            == text,
+        "reopened checkpoints must retain the safe answer prefix"
+    );
+    let mut invalid = events.clone();
+    let recorded = invalid
+        .iter_mut()
+        .find_map(|event| match &mut event.event {
+            Event::AssistantDisplayRecorded { chunk, .. } => Some(chunk),
+            _ => None,
+        })
+        .unwrap();
+    recorded.offset = 1;
+    assert!(SessionView::replay(session_id, &invalid).is_err());
+    let export = arany::render_session(&view, &events, arany::Output::Jsonl);
+    assert!(export.contains("AssistantDisplayRecorded"));
+    assert!(export.contains("PUBLIC_COMMENTARY_CANARY"));
+    store.close().await.unwrap();
+    let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
+        summary: "done".into(),
+        result: "accepted answer".into(),
+    })]);
+    let provider = provider.with_compactions(vec![Ok(CompactionResponse {
+        summary: "safe summary".into(),
+        response_id: None,
+        input_tokens: None,
+        output_tokens: Some(8),
+        wire_provenance: None,
+    })]);
+    let compact_requests = provider.compact_requests.clone();
+    let requests = provider.requests.clone();
+    let mut engine = Engine::open(StateRoot::open_existing(&state).unwrap(), provider).unwrap();
+    let mut next = request(&workspace, "next question");
+    next.include_paths.clear();
+    next.session_id = Some(session_id);
+    next.title = None;
+    let accepted = engine.run(next).await.unwrap();
+    assert_eq!(accepted.run.status, RunStatus::Finished);
+    let captured = format!("{:?}", requests.lock().unwrap());
+    assert!(
+        !captured.contains("INCOMPLETE_CANARY"),
+        "incomplete display text must stay outside model input"
+    );
+    assert!(
+        !captured.contains("PUBLIC_COMMENTARY_CANARY"),
+        "public commentary must stay outside model input"
+    );
+    assert!(matches!(
+        engine
+            .compact_session(session_id, workspace.clone())
+            .await
+            .unwrap()
+            .status,
+        CompactionStatus::Succeeded { .. }
+    ));
+    let compacted = format!("{:?}", compact_requests.lock().unwrap());
+    assert!(
+        !compacted.contains("INCOMPLETE_CANARY"),
+        "incomplete display text must stay outside compaction"
+    );
+    assert!(
+        !compacted.contains("PUBLIC_COMMENTARY_CANARY"),
+        "public commentary must stay outside compaction"
+    );
+    engine.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn provisional_text_is_reconciled_before_an_answer_can_commit() {
+    for valid in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let result = if valid {
+            "preview complete"
+        } else {
+            "different answer"
+        };
+        let provider = PreviewProvider {
+            text: arany::PreviewText {
+                answer: "preview".into(),
+                ..Default::default()
+            },
+            completion: Some(ProviderOutcome::Finish(Finish {
+                summary: "done".into(),
+                result: result.into(),
+            })),
+        };
+        let mut engine = Engine::open(
+            StateRoot::admit(&temp.path().join("state")).unwrap(),
+            provider,
+        )
+        .unwrap();
+        let mut objective = request(&workspace, "question");
+        objective.include_paths.clear();
+        let outcome = engine
+            .run_with_progress(
+                objective,
+                RunCancellation::new(),
+                RunProgress::with_previews(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome.run.status,
+            if valid {
+                RunStatus::Finished
+            } else {
+                RunStatus::Failed
+            }
+        );
+        assert_eq!(
+            outcome.run.assistant_message.as_deref(),
+            valid.then_some(result)
+        );
+        if !valid {
+            assert!(outcome.run.display.is_empty());
+        }
+        engine.close().await.unwrap();
+        if valid {
+            let store = Store::open_read_only(
+                StateRoot::open_existing(&temp.path().join("state")).unwrap(),
+            )
+            .unwrap();
+            let mut events = store.load_session(outcome.session_id).await.unwrap();
+            assert!(SessionView::replay(outcome.session_id, &events).is_ok());
+            let candidate = events
+                .iter_mut()
+                .find_map(|event| match &mut event.event {
+                    Event::AssistantDisplayRecorded { chunk, .. }
+                        if chunk.category == arany::DisplayCategory::Answer =>
+                    {
+                        Some(chunk)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            candidate.text = "changed".into();
+            assert!(
+                SessionView::replay(outcome.session_id, &events).is_err(),
+                "replay must reject a contradictory accepted result"
+            );
+            store.close().await.unwrap();
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn preview_checkpoint_survives_abrupt_process_death() {
+    const CASE: &str = "ARANY_TEST_PREVIEW_CRASH_ROOT";
+    const TEST: &str = "preview_checkpoint_survives_abrupt_process_death";
+    if let Some(root) = std::env::var_os(CASE) {
+        let root = std::path::PathBuf::from(root);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let provider = PreviewProvider {
+                text: arany::PreviewText {
+                    answer: format!("DURABLE_CRASH_CANARY:{}", "x".repeat(2300)),
+                    ..Default::default()
+                },
+                completion: None,
+            };
+            let mut engine =
+                Engine::open(StateRoot::admit(&root.join("state")).unwrap(), provider).unwrap();
+            let mut objective = request(&root.join("workspace"), "interrupted question");
+            objective.include_paths.clear();
+            let mut progress = RunProgress::with_previews();
+            let observed = progress.clone();
+            let observer =
+                Store::open_read_only(StateRoot::open_existing(&root.join("state")).unwrap())
+                    .unwrap();
+            let _task = tokio::spawn(async move {
+                engine
+                    .run_with_progress(objective, RunCancellation::new(), observed)
+                    .await
+            });
+            loop {
+                let update = progress.changed().await;
+                if !update.run.display.is_empty() {
+                    let id = observer
+                        .session_for_run(update.run.id)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    let view = observer.load_view(id).await.unwrap().unwrap();
+                    assert_eq!(view.runs[0].display[0].text.len(), 2048);
+                    std::fs::write(root.join("checkpoint-ready"), id.to_string()).unwrap();
+                    std::future::pending::<()>().await;
+                }
+            }
+        });
+        return;
+    }
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .env_clear()
+        .env(CASE, temp.path())
+        .env("TMPDIR", "/private/tmp")
+        .args(["--exact", TEST, "--nocapture", "--test-threads", "1"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    let mut child = Child(command.spawn().unwrap());
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let id = loop {
+        if let Ok(text) = std::fs::read_to_string(temp.path().join("checkpoint-ready"))
+            && let Ok(id) = text.parse::<SessionId>()
+        {
+            break id;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "durable checkpoint gate"
+        );
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "child must reach its committed checkpoint"
+        );
+        std::thread::yield_now();
+    };
+    child.0.kill().unwrap();
+    assert!(!child.0.wait().unwrap().success());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let store =
+            Store::open_read_only(StateRoot::open_existing(&temp.path().join("state")).unwrap())
+                .unwrap();
+        let view = store.load_view(id).await.unwrap().unwrap();
+        let run = &view.runs[0];
+        assert_eq!(run.status, RunStatus::Interrupted);
+        assert!(run.assistant_message.is_none());
+        assert_eq!(run.display.len(), 1);
+        assert_eq!(run.display[0].text.len(), 2048);
+        assert!(run.display[0].text.starts_with("DURABLE_CRASH_CANARY:"));
+        store.close().await.unwrap();
+        let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
+            summary: "done".into(),
+            result: "recovered".into(),
+        })]);
+        let requests = provider.requests.clone();
+        let mut engine = Engine::open(
+            StateRoot::open_existing(&temp.path().join("state")).unwrap(),
+            provider,
+        )
+        .unwrap();
+        let mut next = request(&workspace, "continue");
+        next.include_paths.clear();
+        next.session_id = Some(id);
+        next.title = None;
+        assert_eq!(
+            engine.run(next).await.unwrap().run.status,
+            RunStatus::Finished
+        );
+        assert!(!format!("{:?}", requests.lock().unwrap()).contains("DURABLE_CRASH_CANARY"));
+        engine.close().await.unwrap();
+    });
+}
+
+#[tokio::test]
+async fn display_limits_preserve_a_maximal_answer_and_record_omitted_commentary() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let answer = format!("{}a", "ࠀ".repeat(10922));
+    let mut commentary = vec!["ࠀ".repeat(10912)];
+    commentary.extend((0..31).map(|_| "x".into()));
+    let provider = PreviewProvider {
+        text: arany::PreviewText {
+            answer: answer.clone(),
+            commentary,
+            commentary_limited: false,
+        },
+        completion: Some(ProviderOutcome::Finish(Finish {
+            summary: "done".into(),
+            result: answer.clone(),
+        })),
+    };
+    let mut engine = Engine::open(
+        StateRoot::admit(&temp.path().join("state")).unwrap(),
+        provider,
+    )
+    .unwrap();
+    let mut objective = request(&workspace, "question");
+    objective.include_paths.clear();
+    let outcome = engine
+        .run_with_progress(
+            objective,
+            RunCancellation::new(),
+            RunProgress::with_previews(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    assert_eq!(
+        outcome.run.assistant_message.as_deref(),
+        Some(answer.as_str())
+    );
+    assert!(outcome.run.display.len() <= 64);
+    assert_eq!(
+        outcome
+            .run
+            .display
+            .iter()
+            .filter(|chunk| chunk.category == arany::DisplayCategory::Limit)
+            .count(),
+        1
+    );
+    engine.close().await.unwrap();
 }

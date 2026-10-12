@@ -9,7 +9,7 @@ use arany::{
 use clap::Args;
 use std::ops::ControlFlow;
 use std::{
-    io::Write,
+    io::{IsTerminal, Write},
     path::{Path, PathBuf},
     str::FromStr,
     time::Instant,
@@ -44,6 +44,8 @@ pub(crate) struct AttachedArgs {
     effort: Option<Effort>,
     #[arg(long)]
     screen_reader: bool,
+    #[arg(long, help = "Use fullscreen conversation history")]
+    fullscreen: bool,
     #[arg(long)]
     no_color: bool,
     #[arg(long, help = "Open account setup before starting a new Session")]
@@ -123,6 +125,7 @@ struct Admission {
     workspace_permissions: Option<arany::WorkspacePermissions>,
     defaults: SessionDefaults,
     screen_reader: bool,
+    fullscreen: bool,
     no_color: bool,
     setup_requested: bool,
     entry: EntryMode,
@@ -137,6 +140,7 @@ impl AttachedArgs {
             && self.model.is_none()
             && self.effort.is_none()
             && !self.screen_reader
+            && !self.fullscreen
             && !self.no_color
             && !self.setup
             && self.include_paths.is_empty()
@@ -229,6 +233,7 @@ impl AttachedArgs {
             tools: self.tools,
             workspace_permissions: None,
             defaults,
+            fullscreen: self.fullscreen,
             screen_reader: self.screen_reader
                 || std::env::var("ARANY_SCREEN_READER").ok().as_deref() == Some("1"),
             no_color: self.no_color || std::env::var_os("NO_COLOR").is_some(),
@@ -241,8 +246,15 @@ impl AttachedArgs {
 
 pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), String> {
     let mut admission = args.admit(telemetry)?;
-    let mut terminal = AttachedTerminal::acquire_with_preference(admission.screen_reader)
-        .map_err(|error| error.to_string())?;
+    let mut terminal = AttachedTerminal::acquire_with_mode(
+        admission.screen_reader,
+        if admission.fullscreen {
+            arany::TerminalMode::Fullscreen
+        } else {
+            arany::TerminalMode::Classic
+        },
+    )
+    .map_err(|error| error.to_string())?;
     if admission.no_color {
         terminal.disable_color();
     }
@@ -533,6 +545,12 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
             && !matches!(input, TerminalInput::Suspend | TerminalInput::Shutdown(_))
         {
             terminal.help_input(input);
+            continue;
+        }
+        if terminal
+            .handle_transcript_input(input, &view)
+            .map_err(|error| error.to_string())?
+        {
             continue;
         }
         if terminal.handle_history_input(input, &view) {
@@ -834,6 +852,30 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                     Feedback::History(format!("Error: {error}; draft unchanged"))
                                 }
                             });
+                        } else if command == InteractiveCommand::Transcript {
+                            terminal
+                                .toggle_transcript(&view)
+                                .map_err(|error| error.to_string())?;
+                        } else if command == InteractiveCommand::View {
+                            if terminal.is_linear() {
+                                notice = Some(if argument.is_some() {
+                                    Feedback::History("Error: Visual mode changes are unavailable in linear presentation; use /transcript for details".into())
+                                } else {
+                                    Feedback::Transient(
+                                        "View: linear · /transcript for details".into(),
+                                    )
+                                });
+                                continue;
+                            }
+                            if let Some(mode) = argument.and_then(arany::TerminalMode::parse) {
+                                terminal
+                                    .set_mode(mode, composer.text().len())
+                                    .map_err(|error| error.to_string())?;
+                            }
+                            notice = Some(Feedback::Transient(format!(
+                                "View: {} · Ctrl+T details",
+                                terminal.mode().label()
+                            )));
                         } else if command == InteractiveCommand::Settings {
                             notice = Some(Feedback::History(
                                 controls::settings(
@@ -1204,28 +1246,42 @@ async fn finish_submission(
         });
     let linear = terminal.is_linear();
     let preview_already_printed = user_recorded && linear;
-    terminal.restore().map_err(|error| error.to_string())?;
-    emit_outcome(
-        &admission.state_dir,
-        outcome,
-        preview_already_printed,
-        !linear,
-    )
-    .await?;
-    if automatic.is_some() {
-        writeln!(
-            std::io::stderr(),
-            "Context threshold reached; attempting automatic compaction"
+    let confirmed = if linear {
+        terminal.restore().map_err(|error| error.to_string())?;
+        emit_outcome(
+            &admission.state_dir,
+            outcome,
+            preview_already_printed,
+            false,
+            None,
         )
-        .map_err(|_| "output failed".to_owned())?;
+        .await?;
+        terminal
+            .reacquire_after_output()
+            .map_err(|error| error.to_string())?;
+        load_confirmed_outcome(&admission.state_dir, outcome).await?
+    } else {
+        let confirmed = load_confirmed_outcome(&admission.state_dir, outcome).await?;
+        if !std::io::stdout().is_terminal() {
+            AttachedTerminal::print_assistant_run(&outcome.run)
+                .map_err(|_| "output failed".to_owned())?;
+        }
+        terminal.finish_run_display();
+        confirmed
+    };
+    if automatic.is_some() {
+        terminal
+            .draw(
+                &confirmed,
+                composer,
+                Some("Context threshold reached; attempting automatic compaction"),
+            )
+            .map_err(|error| error.to_string())?;
     }
-    terminal
-        .reacquire_after_output()
-        .map_err(|error| error.to_string())?;
     terminal
         .restore_draft_input(composer.text().len())
         .map_err(|error| error.to_string())?;
-    let mut view = load_view(&admission.state_dir, outcome.session_id).await?;
+    let mut view = confirmed;
     let mut notice = retained_draft_notice(composer);
     let feedback = render_run_feedback(&outcome.run);
     if let Some(feedback) = feedback {
@@ -1708,13 +1764,32 @@ async fn finish_existing_start(
     Ok((id, view))
 }
 
+async fn load_confirmed_outcome(
+    state_dir: &Path,
+    outcome: &RunOutcome,
+) -> Result<SessionView, String> {
+    let view = load_view(state_dir, outcome.session_id).await?;
+    if !view.runs.iter().any(|run| {
+        run.id == outcome.run.id
+            && run == &outcome.run
+            && matches!(
+                run.status,
+                RunStatus::Finished | RunStatus::Failed | RunStatus::Cancelled
+            )
+    }) {
+        return Err("Run history unavailable or invalid".into());
+    }
+    Ok(view)
+}
+
 async fn emit_outcome(
     state_dir: &Path,
     outcome: &RunOutcome,
     user_recorded: bool,
     inline: bool,
+    visual_mode: Option<arany::TerminalMode>,
 ) -> Result<(), String> {
-    let view = load_view(state_dir, outcome.session_id).await?;
+    let view = load_confirmed_outcome(state_dir, outcome).await?;
     let run = view
         .runs
         .iter()
@@ -1726,10 +1801,21 @@ async fn emit_outcome(
         RunStatus::Cancelled => "cancelled",
         _ => return Err("Run did not reach a terminal state".into()),
     };
-    if !user_recorded {
+    if !user_recorded && visual_mode != Some(arany::TerminalMode::Fullscreen) {
         AttachedTerminal::print_user_run(run, inline).map_err(|_| "output failed".to_owned())?;
     }
-    AttachedTerminal::print_assistant_run(run).map_err(|_| "output failed".to_owned())?;
+    if visual_mode != Some(arany::TerminalMode::Fullscreen) || !std::io::stdout().is_terminal() {
+        AttachedTerminal::print_assistant_run(run).map_err(|_| "output failed".to_owned())?;
+    }
+    if visual_mode == Some(arany::TerminalMode::Fullscreen) {
+        writeln!(
+            std::io::stderr(),
+            "Session: {} · Status: {status}",
+            outcome.session_id
+        )
+        .map_err(|_| "output failed".to_owned())?;
+        return Ok(());
+    }
     write!(
         std::io::stderr(),
         "Session: {}\nRun: {}\nStatus: {status}\n{}",
@@ -1838,6 +1924,7 @@ mod tests {
             workspace_permissions: None,
             defaults: defaults.clone(),
             screen_reader: false,
+            fullscreen: false,
             no_color: false,
             setup_requested: false,
             entry: EntryMode::New,
@@ -1874,6 +1961,7 @@ mod tests {
                 policy: CollaborationPolicy::Single,
             },
             screen_reader: false,
+            fullscreen: false,
             no_color: false,
             setup_requested: false,
             entry: EntryMode::Resume(original_id),
@@ -1893,6 +1981,7 @@ mod tests {
             workspace_permissions: None,
             defaults: SessionDefaults::default(),
             screen_reader: false,
+            fullscreen: false,
             no_color: false,
             setup_requested: false,
             entry: EntryMode::Continue,
@@ -1934,6 +2023,7 @@ mod tests {
             workspace_permissions: None,
             defaults: SessionDefaults::default(),
             screen_reader: false,
+            fullscreen: false,
             no_color: false,
             setup_requested: false,
             entry: EntryMode::Fork(original_id),

@@ -20,7 +20,7 @@ use std::io::Read;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::sync::{
-    Arc,
+    Arc, Condvar, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use std::thread::JoinHandle;
@@ -77,6 +77,7 @@ pub enum TerminalInput {
     QuickActions,
     HistoryFind,
     HistoryLive,
+    Transcript,
     Submit,
     Escape,
     Interrupt,
@@ -99,6 +100,13 @@ pub(super) enum TerminalReader {
 }
 
 impl TerminalReader {
+    pub(super) fn cursor_query(&self) -> Option<CursorQuery> {
+        match self {
+            Self::Keys(reader) => Some(reader.cursor.clone()),
+            #[cfg(unix)]
+            Self::Lines(_) => None,
+        }
+    }
     pub(super) fn start(linear: bool) -> io::Result<Self> {
         #[cfg(unix)]
         if linear {
@@ -365,6 +373,77 @@ fn validate_segment(bytes: Vec<u8>, draft_bytes: usize) -> Option<String> {
 enum ReaderEvent {
     Event(Event),
     Paste(Result<String, &'static str>),
+    #[cfg(unix)]
+    CursorPosition(u16, u16),
+}
+
+#[derive(Clone, Default)]
+pub(super) struct CursorQuery(Arc<(Mutex<CursorState>, Condvar)>);
+
+#[derive(Default)]
+struct CursorState {
+    #[cfg(unix)]
+    waiting: bool,
+    #[cfg(unix)]
+    position: Option<(u16, u16)>,
+    closed: bool,
+}
+
+impl CursorQuery {
+    #[cfg(unix)]
+    pub(super) fn query(&self, output: &mut impl io::Write) -> io::Result<(u16, u16)> {
+        let (state, ready) = &*self.0;
+        let mut state = state
+            .lock()
+            .map_err(|_| io::Error::other("cursor owner failed"))?;
+        if state.closed {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "terminal input closed",
+            ));
+        }
+        state.waiting = true;
+        state.position = None;
+        if let Err(error) = output.write_all(b"\x1b[6n").and_then(|()| output.flush()) {
+            state.waiting = false;
+            return Err(error);
+        }
+        let (mut state, _) = ready
+            .wait_timeout_while(state, Duration::from_secs(1), |state| {
+                state.position.is_none() && !state.closed
+            })
+            .map_err(|_| io::Error::other("cursor owner failed"))?;
+        state.waiting = false;
+        state.position.take().ok_or_else(|| {
+            io::Error::new(
+                if state.closed {
+                    io::ErrorKind::UnexpectedEof
+                } else {
+                    io::ErrorKind::TimedOut
+                },
+                "terminal cursor response unavailable",
+            )
+        })
+    }
+
+    #[cfg(unix)]
+    pub(super) fn respond(&self, column: u16, row: u16) {
+        let (state, ready) = &*self.0;
+        if let Ok(mut state) = state.lock()
+            && state.waiting
+        {
+            state.position = Some((column, row));
+            ready.notify_one();
+        }
+    }
+
+    pub(super) fn close(&self) {
+        let (state, ready) = &*self.0;
+        if let Ok(mut state) = state.lock() {
+            state.closed = true;
+            ready.notify_one();
+        }
+    }
 }
 
 pub(super) struct InputReader {
@@ -372,6 +451,7 @@ pub(super) struct InputReader {
     shutdown: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     paste: Option<Result<String, &'static str>>,
+    cursor: CursorQuery,
 }
 
 impl InputReader {
@@ -379,8 +459,9 @@ impl InputReader {
         let (sender, receiver) = mpsc::channel(INPUT_QUEUE_CAPACITY);
         let shutdown = Arc::new(AtomicBool::new(false));
         let should_stop = Arc::clone(&shutdown);
+        let cursor = CursorQuery::default();
         #[cfg(unix)]
-        let thread = raw::start(sender, should_stop)?;
+        let thread = raw::start(sender, should_stop, cursor.clone())?;
         #[cfg(not(unix))]
         let thread = std::thread::Builder::new()
             .name("arany-terminal-input".into())
@@ -408,11 +489,13 @@ impl InputReader {
             shutdown,
             thread: Some(thread),
             paste: None,
+            cursor,
         })
     }
 
     pub(super) fn stop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
+        self.cursor.close();
         self.receiver.close();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -438,6 +521,8 @@ impl InputReader {
                     self.paste = Some(text);
                     return Ok(TerminalInput::Paste);
                 }
+                #[cfg(unix)]
+                ReaderEvent::CursorPosition(_, _) => {}
             }
         }
     }
@@ -490,6 +575,7 @@ fn map_key(key: KeyEvent) -> Option<TerminalInput> {
             KeyCode::Char('k' | 'K') => Some(TerminalInput::QuickActions),
             KeyCode::Char('f' | 'F') => Some(TerminalInput::HistoryFind),
             KeyCode::Char('l' | 'L') => Some(TerminalInput::HistoryLive),
+            KeyCode::Char('t' | 'T') => Some(TerminalInput::Transcript),
             KeyCode::Char('o' | 'O') => Some(TerminalInput::Newline),
             KeyCode::Left => Some(TerminalInput::WordLeft),
             KeyCode::Right => Some(TerminalInput::WordRight),
@@ -916,6 +1002,9 @@ mod tests {
                     .map(|event| match event {
                         ReaderEvent::Event(event) => map_input(event).expect("admitted raw key"),
                         ReaderEvent::Paste(_) => panic!("ordinary sequence became a paste"),
+                        ReaderEvent::CursorPosition(_, _) => {
+                            panic!("ordinary sequence became a cursor response")
+                        }
                     })
                     .collect::<Vec<_>>();
                 assert_eq!(events, expected, "raw keyboard/pointer sequence");

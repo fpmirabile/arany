@@ -7,18 +7,22 @@ use crate::session::{RunStatus, SessionListItem, SessionView};
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, size},
+    terminal::{
+        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, size,
+    },
 };
-use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
+use ratatui::{Terminal, backend::Backend, layout::Rect};
 #[cfg(unix)]
 use rustix::process::{Signal, getpid, kill_process};
 #[cfg(unix)]
 use rustix::termios::{
     LocalModes, OptionalActions, QueueSelector, Termios, tcflush, tcgetattr, tcsetattr,
 };
+use std::collections::HashSet;
 use std::io::{self, IsTerminal, Stderr, Write};
 
 mod agents;
+mod backend;
 mod clipboard;
 mod commands;
 mod composer;
@@ -27,6 +31,7 @@ mod input;
 mod linear;
 mod view;
 use agents::{AgentPanel, PanelUpdate};
+use backend::TerminalBackend;
 use clipboard::{ClipboardContent, ClipboardRead};
 use commands::help_len;
 pub use commands::{
@@ -47,6 +52,56 @@ use view::{
 };
 
 const MIN_INTERACTIVE_HEIGHT: u16 = 8;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TerminalMode {
+    #[default]
+    Classic,
+    Fullscreen,
+}
+
+impl TerminalMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "classic" => Some(Self::Classic),
+            "fullscreen" => Some(Self::Fullscreen),
+            _ => None,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Classic => "classic",
+            Self::Fullscreen => "fullscreen",
+        }
+    }
+}
+
+struct AlternateScreen {
+    active: bool,
+}
+
+impl AlternateScreen {
+    fn acquire() -> io::Result<Self> {
+        let guard = Self { active: true };
+        execute!(io::stderr(), EnterAlternateScreen)?;
+        Ok(guard)
+    }
+
+    fn release(&mut self) -> io::Result<()> {
+        if self.active {
+            execute!(io::stderr(), LeaveAlternateScreen)?;
+            self.active = false;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for AlternateScreen {
+    fn drop(&mut self) {
+        let _ = self.release();
+    }
+}
 
 #[derive(Clone, Copy)]
 enum SnapshotState {
@@ -278,8 +333,18 @@ impl Drop for BracketedPaste {
 
 pub struct AttachedTerminal {
     waiting_tool: Option<uuid::Uuid>,
-    terminal: Option<Terminal<CrosstermBackend<TerminalOutput>>>,
+    terminal: Option<Terminal<TerminalBackend>>,
+    parked_terminal: Option<Terminal<TerminalBackend>>,
+    mode: TerminalMode,
+    alternate: Option<AlternateScreen>,
+    transcript_open: bool,
+    native_session: Option<crate::session::SessionId>,
+    native_messages: HashSet<(crate::session::RunId, bool)>,
+    native_tools: HashSet<(crate::session::RunId, usize)>,
+    active_run: Option<crate::session::RunId>,
+    last_native_notice: Option<(u64, String)>,
     history: History,
+    classic_history: History,
     input: Option<TerminalReader>,
     _raw_mode: Option<RawMode>,
     mouse_capture: Option<MouseCapture>,
@@ -428,6 +493,13 @@ impl AttachedTerminal {
     }
 
     pub fn acquire_with_preference(screen_reader: bool) -> Result<Self, TerminalError> {
+        Self::acquire_with_mode(screen_reader, TerminalMode::Classic)
+    }
+
+    pub fn acquire_with_mode(
+        screen_reader: bool,
+        mode: TerminalMode,
+    ) -> Result<Self, TerminalError> {
         if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
             return Err(TerminalError::Ineligible);
         }
@@ -442,7 +514,7 @@ impl AttachedTerminal {
         #[cfg(unix)]
         let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let height = size().ok().map(|(_, height)| height);
-        let mode_label = if screen_reader {
+        let mut mode_label = if screen_reader {
             Some("screen-reader")
         } else if std::env::var("TERM").ok().as_deref() == Some("dumb") {
             Some("linear fallback (TERM=dumb)")
@@ -453,13 +525,34 @@ impl AttachedTerminal {
         } else {
             None
         };
-        let raw_mode = mode_label.is_none().then(RawMode::acquire).transpose()?;
+        #[cfg(not(unix))]
+        if mode == TerminalMode::Classic && !io::stdout().is_terminal() && mode_label.is_none() {
+            mode_label = Some("linear fallback (console cursor unavailable)");
+        }
+        let mut raw_mode = mode_label.is_none().then(RawMode::acquire).transpose()?;
+        let mut input = TerminalReader::start(mode_label.is_some())?;
+        let alternate = (mode_label.is_none() && mode == TerminalMode::Fullscreen)
+            .then(AlternateScreen::acquire)
+            .transpose()?;
         let terminal = if mode_label.is_none() {
-            Some(screen_terminal()?)
+            match screen_terminal(mode, input.cursor_query()) {
+                Ok(terminal) => Some(terminal),
+                Err(error)
+                    if mode == TerminalMode::Classic && error.kind() == io::ErrorKind::TimedOut =>
+                {
+                    input.stop();
+                    if let Some(mut raw) = raw_mode.take() {
+                        raw.release()?;
+                    }
+                    input = TerminalReader::start(true)?;
+                    mode_label = Some("linear fallback (cursor response unavailable)");
+                    None
+                }
+                Err(error) => return Err(error.into()),
+            }
         } else {
             None
         };
-        let input = TerminalReader::start(mode_label.is_some())?;
         #[cfg(unix)]
         let bracketed_paste = mode_label
             .is_none()
@@ -468,7 +561,17 @@ impl AttachedTerminal {
         Ok(Self {
             terminal,
             waiting_tool: None,
+            parked_terminal: None,
+            mode,
+            alternate,
+            transcript_open: false,
+            native_session: None,
+            native_messages: HashSet::new(),
+            native_tools: HashSet::new(),
+            active_run: None,
+            last_native_notice: None,
             history: History::default(),
+            classic_history: History::default(),
             input: Some(input),
             _raw_mode: raw_mode,
             mouse_capture: None,
@@ -571,6 +674,220 @@ impl AttachedTerminal {
         self.linear.is_some()
     }
 
+    pub fn mode(&self) -> TerminalMode {
+        self.mode
+    }
+
+    pub fn user_run_recorded(&self, id: crate::session::RunId) -> bool {
+        self.native_messages.contains(&(id, false))
+    }
+
+    pub fn finish_run_display(&mut self) {
+        self.active_run = None;
+        self.history.set_preview(None);
+        self.classic_history.set_preview(None);
+    }
+
+    pub fn set_preview(&mut self, preview: Option<crate::engine::DisplayUpdate>) {
+        if !self.is_linear() {
+            self.history.set_preview(preview.clone());
+            self.classic_history.set_preview(preview);
+        }
+    }
+
+    fn insert_native(
+        &mut self,
+        kind: history::MessageKind,
+        text: &str,
+    ) -> Result<(), TerminalError> {
+        let palette = self.palette();
+        let terminal = self.terminal.as_mut().expect("owned terminal");
+        let width = terminal.get_frame().area().width;
+        let rows = history::display_rows(kind, text, usize::from(width));
+        for chunk in rows.chunks(64) {
+            terminal.insert_before(chunk.len() as u16, |buffer| {
+                use ratatui::widgets::Widget;
+                let lines = chunk
+                    .iter()
+                    .map(|row| view::native_line(row, width, palette))
+                    .collect::<Vec<_>>();
+                ratatui::widgets::Paragraph::new(lines).render(buffer.area, buffer);
+            })?;
+        }
+        terminal.insert_before(1, |_| {})?;
+        let area = terminal.get_frame().area();
+        terminal.backend_mut().set_area(area);
+        Ok(())
+    }
+
+    fn sync_native(&mut self, session: &SessionView) -> Result<(), TerminalError> {
+        if self.mode != TerminalMode::Classic || self.transcript_open {
+            return Ok(());
+        }
+        if self.native_session != Some(session.id) {
+            self.native_session = Some(session.id);
+            self.native_messages.clear();
+            self.native_tools.clear();
+            self.last_native_notice = None;
+        }
+        for run in &session.runs {
+            if !self.native_messages.contains(&(run.id, false)) {
+                self.insert_native(
+                    history::MessageKind::User,
+                    &crate::presentation::image_message_text(&run.objective, &run.images),
+                )?;
+                self.native_messages.insert((run.id, false));
+            }
+            for (index, tool) in run.tools.iter().enumerate() {
+                if tool.observation.is_some() && !self.native_tools.contains(&(run.id, index)) {
+                    self.insert_native(
+                        history::MessageKind::Tool,
+                        &crate::presentation::tool_summary(tool),
+                    )?;
+                    self.native_tools.insert((run.id, index));
+                }
+            }
+            if !matches!(
+                run.status,
+                crate::session::RunStatus::Pending | crate::session::RunStatus::Active
+            ) && run.assistant_message.is_none()
+                && !self.native_messages.contains(&(run.id, true))
+                && let Some(text) = crate::presentation::display_answer(run)
+            {
+                self.insert_native(history::MessageKind::Incomplete, &text)?;
+                self.native_messages.insert((run.id, true));
+            }
+            if self.active_run != Some(run.id)
+                && let Some(answer) = &run.assistant_message
+                && !self.native_messages.contains(&(run.id, true))
+            {
+                self.insert_native(history::MessageKind::Assistant, answer)?;
+                self.native_messages.insert((run.id, true));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn toggle_transcript(&mut self, view: &SessionView) -> Result<(), TerminalError> {
+        self.cancel_clipboard_paste();
+        if self.is_linear() {
+            writeln!(io::stderr(), "Transcript details:")?;
+            let mut remaining = 64 * 1024;
+            for run in view.runs.iter().rev().take(16).rev() {
+                let mut parts = Vec::new();
+                if run.assistant_message.is_none()
+                    && let Some(answer) = crate::presentation::display_answer(run)
+                {
+                    parts.push(format!("Arany · incomplete:\n{answer}"));
+                }
+                parts.extend(
+                    crate::presentation::display_commentary(run)
+                        .into_iter()
+                        .map(|(_, _, text)| format!("Arany · public commentary:\n{text}")),
+                );
+                if run
+                    .display
+                    .iter()
+                    .any(|chunk| chunk.category == crate::session::DisplayCategory::Limit)
+                {
+                    parts.push(crate::session::DISPLAY_LIMIT_TEXT.to_owned());
+                }
+                let parts = parts
+                    .into_iter()
+                    .chain(run.tools.iter().map(crate::presentation::tool_detail_text));
+                for text in parts {
+                    let text = crate::presentation::escape_terminal(&text);
+                    if text.len() > remaining {
+                        writeln!(
+                            io::stderr(),
+                            "Transcript detail limit reached; use show --output jsonl for the complete journal."
+                        )?;
+                        return Ok(());
+                    }
+                    remaining = remaining.saturating_sub(text.len() + 1);
+                    writeln!(io::stderr(), "{text}")?;
+                }
+            }
+            return Ok(());
+        }
+        if self.transcript_open {
+            if self.parked_terminal.is_some() {
+                let mut panel = self.terminal.take().expect("detail viewport");
+                panel.backend_mut().clear_owned()?;
+                panel.backend_mut().detach();
+                if let Some(mut alternate) = self.alternate.take() {
+                    alternate.release()?;
+                }
+                self.terminal = self.parked_terminal.take();
+                self.terminal.as_mut().expect("classic viewport").clear()?;
+            }
+            if self.mode == TerminalMode::Classic
+                && let Some(mut mouse) = self.mouse_capture.take()
+            {
+                mouse.release()?;
+            }
+            self.transcript_open = false;
+        } else {
+            if self.mode == TerminalMode::Classic {
+                let terminal = self.terminal.as_mut().expect("classic viewport");
+                terminal.backend_mut().clear_owned()?;
+                let alternate = AlternateScreen::acquire()?;
+                let panel = screen_terminal(
+                    TerminalMode::Fullscreen,
+                    self.input.as_ref().and_then(TerminalReader::cursor_query),
+                )?;
+                self.parked_terminal = self.terminal.replace(panel);
+                self.alternate = Some(alternate);
+            }
+            self.transcript_open = true;
+        }
+        let details = self.transcript_open;
+        self.history_mut().set_details(details);
+        Ok(())
+    }
+
+    pub fn handle_transcript_input(
+        &mut self,
+        input: TerminalInput,
+        view: &SessionView,
+    ) -> Result<bool, TerminalError> {
+        if input == TerminalInput::Escape && self.history_mut().find_open() {
+            return Ok(false);
+        }
+        if input == TerminalInput::Transcript
+            || (self.transcript_open && input == TerminalInput::Escape)
+        {
+            self.toggle_transcript(view)?;
+            return Ok(true);
+        }
+        if self.mode == TerminalMode::Classic
+            && !self.transcript_open
+            && matches!(input, TerminalInput::PageUp | TerminalInput::HistoryFind)
+        {
+            self.toggle_transcript(view)?;
+            self.history_mut().handle(input, view);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub fn set_mode(
+        &mut self,
+        mode: TerminalMode,
+        draft_bytes: usize,
+    ) -> Result<(), TerminalError> {
+        if self.is_linear() {
+            return Err(TerminalError::Io(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "visual modes are unavailable in linear presentation",
+            )));
+        }
+        self.release()?;
+        self.mode = mode;
+        self.reacquire_after_output()?;
+        self.restore_draft_input(draft_bytes)
+    }
+
     /// Whether an accepted canonical segment has finished delivering its input events.
     #[must_use]
     pub fn input_boundary_ready(&self) -> bool {
@@ -587,8 +904,18 @@ impl AttachedTerminal {
         }
     }
 
+    fn history_mut(&mut self) -> &mut History {
+        if self.mode == TerminalMode::Fullscreen {
+            &mut self.history
+        } else {
+            &mut self.classic_history
+        }
+    }
+
     pub fn handle_history_input(&mut self, input: TerminalInput, view: &SessionView) -> bool {
-        let handled = !self.is_linear() && self.history.handle(input, view);
+        let handled = !self.is_linear()
+            && (self.mode == TerminalMode::Fullscreen || self.transcript_open)
+            && self.history_mut().handle(input, view);
         if handled && input == TerminalInput::HistoryFind {
             self.cancel_clipboard_paste();
         }
@@ -684,7 +1011,7 @@ impl AttachedTerminal {
                 "terminal is still active",
             )));
         }
-        let mut replacement = Self::acquire_with_preference(self.requested_screen_reader)?;
+        let mut replacement = Self::acquire_with_mode(self.requested_screen_reader, self.mode)?;
         replacement.color_enabled = self.color_enabled;
         self.replace_released(replacement);
         Ok(())
@@ -701,7 +1028,7 @@ impl AttachedTerminal {
         }
         self.release()?;
         kill_process(getpid(), Signal::STOP).map_err(io::Error::from)?;
-        let mut resumed = Self::acquire_with_preference(screen_reader)?;
+        let mut resumed = Self::acquire_with_mode(screen_reader, self.mode)?;
         resumed.color_enabled = self.color_enabled;
         if secret_input {
             resumed.begin_secret_input()?;
@@ -780,7 +1107,36 @@ impl AttachedTerminal {
                 .as_ref()
                 .map(|_| TerminalNotice::Transient("Reading clipboard... draft retained"))
         });
-        let area = self.terminal.as_mut().expect("inline terminal").size()?;
+        self.terminal
+            .as_mut()
+            .expect("owned terminal")
+            .autoresize()?;
+        self.sync_native(view)?;
+        if (self.mode == TerminalMode::Fullscreen || self.transcript_open)
+            && self.mouse_capture.is_none()
+        {
+            self.mouse_capture = Some(MouseCapture::acquire()?);
+        }
+        if self.mode == TerminalMode::Classic
+            && !self.transcript_open
+            && let Some(TerminalNotice::History(text)) = notice
+        {
+            let text = history::bounded_notice_text(text).into_owned();
+            if self
+                .last_native_notice
+                .as_ref()
+                .is_none_or(|(sequence, prior)| *sequence != view.last_sequence || prior != &text)
+            {
+                self.insert_native(history::MessageKind::Notice, &text)?;
+                self.last_native_notice = Some((view.last_sequence, text));
+            }
+        }
+        let area = self
+            .terminal
+            .as_mut()
+            .expect("inline terminal")
+            .get_frame()
+            .area();
         let mut model = match state {
             SnapshotState::Preparing => PresentationModel::preparing(view, area.width),
             _ => PresentationModel::from_session(view, area.width),
@@ -803,20 +1159,30 @@ impl AttachedTerminal {
                 usize::from(area.width),
             );
         }
-        let composer_height = composer_height(composer, area.into());
+        let composer_height = composer_height(composer, area);
         let above_composer = area.height.saturating_sub(1 + composer_height);
         let above_composer = above_composer - completion_height(composer, above_composer);
         let activity_height =
             above_composer.min(u16::try_from(model.activity_lines.len()).unwrap_or(u16::MAX));
         let history_height = above_composer - activity_height;
         let history_height = history_height - history_top_padding(history_height);
-        self.history
+        self.history_mut()
             .sync(view, usize::from(area.width), usize::from(history_height));
         if let Some(notice) = notice {
-            self.history.record_notice(notice);
+            self.history_mut().record_notice(notice);
         }
-        let history_rows = self.history.visible(view);
-        let history_status = self.history.status();
+        let history_rows = if self.mode == TerminalMode::Fullscreen || self.transcript_open {
+            self.history_mut().visible(view)
+        } else {
+            self.classic_history.live_rows(view)
+        };
+        let history_status =
+            if self.mode == TerminalMode::Classic && !self.transcript_open && !view.runs.is_empty()
+            {
+                Some("Classic · Ctrl+T details · /view fullscreen".to_owned())
+            } else {
+                self.history_mut().status()
+            };
         let palette = self.palette();
         self.terminal
             .as_mut()
@@ -839,6 +1205,9 @@ impl AttachedTerminal {
                     draw_model_catalog_frame(frame, picker, composer, &model, palette);
                 }
             })?;
+        let terminal = self.terminal.as_mut().expect("owned terminal");
+        let area = terminal.get_frame().area();
+        terminal.backend_mut().set_area(area);
         Ok(())
     }
 
@@ -856,6 +1225,7 @@ impl AttachedTerminal {
     }
 
     pub fn record_user_run(&mut self, run: &crate::session::RunView) -> Result<(), TerminalError> {
+        self.active_run = Some(run.id);
         self.record_user_message(&run.objective)?;
         if self.linear.is_some() {
             let mut writer = io::stderr();
@@ -1509,7 +1879,7 @@ impl AttachedTerminal {
         if let Some(mut terminal) = self.terminal.take() {
             for result in [
                 // Cleanup must not query input after stopping its reader.
-                ratatui::backend::Backend::clear(terminal.backend_mut()),
+                terminal.backend_mut().clear_owned(),
                 terminal.show_cursor(),
                 terminal.backend_mut().flush(),
             ] {
@@ -1518,7 +1888,15 @@ impl AttachedTerminal {
                 }
             }
             // Ratatui's Drop prints to stderr if cursor restoration fails.
-            *terminal.backend_mut() = CrosstermBackend::new(TerminalOutput(None));
+            terminal.backend_mut().detach();
+        }
+        if let Some(mut terminal) = self.parked_terminal.take() {
+            terminal.backend_mut().detach();
+        }
+        if let Some(mut alternate) = self.alternate.take()
+            && let Err(error) = alternate.release()
+        {
+            first_error.get_or_insert(error);
         }
         if self.linear.take().is_some_and(|linear| linear.line_open)
             && let Err(error) = writeln!(io::stderr())
@@ -1535,6 +1913,12 @@ impl AttachedTerminal {
 
     fn replace_released(&mut self, mut replacement: Self) {
         replacement.history = std::mem::take(&mut self.history);
+        replacement.classic_history = std::mem::take(&mut self.classic_history);
+        replacement.native_session = self.native_session;
+        replacement.native_messages = std::mem::take(&mut self.native_messages);
+        replacement.native_tools = std::mem::take(&mut self.native_tools);
+        replacement.active_run = self.active_run;
+        replacement.last_native_notice = self.last_native_notice.take();
         #[cfg(unix)]
         {
             // Preserve notifications received before the new listeners were registered.

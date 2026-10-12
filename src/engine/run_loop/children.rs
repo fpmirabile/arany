@@ -248,13 +248,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         for _ in 0..=crate::tools::MAX_TOOL_CALLS {
             let synthesis_trace =
                 primary.begin_provider(AgentPhase::RootSynthesis, &root_request.model);
-            let synthesis = invoke_bounded(
-                self.provider.as_ref(),
-                root_request.clone(),
-                deadline,
-                self.controls.cancellation.clone(),
-            )
-            .await;
+            let synthesis = self.invoke_primary(root_request.clone(), deadline).await?;
             let (input_tokens, output_tokens) = call_trace_usage(&synthesis);
             let valid_response = matches!(
                 &synthesis,

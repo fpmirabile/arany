@@ -41,6 +41,12 @@ history. Implementation status and verified support are separate claims.
   archival/new-Session policy before histories reach existing admission quotas.
   Preserve canonical Events, fork lineage and append acknowledgement semantics.
 
+## Terminal continuity evidence
+
+- Exercise classic scrollback, narrow resize/reflow, temporary details, idle `/view` transitions and a 200-line streamed response in a real macOS emulator and native Linux/Windows terminals. Synthetic macOS PTYs prove controlled cursor ownership, transcript insertion and restoration; they do not emulate scrollback or prove other OS support.
+- With explicit usage consent, repeat OpenAI, Anthropic, ChatGPT and exact-custom streaming conformance against actual selected accounts/endpoints. Offline fixtures prove protocol/lifecycle behavior, not live compatibility. Keep incomplete answers outside future context and confirm recovery after cancellation/crash.
+- Check `--screen-reader`, `/transcript`, monochrome labels and managed following with real assistive technology. These usability claims remain unverified.
+
 ## Beta 1: final user-owned checks
 
 Perform these after implementation handoff with deliberate consent for usage.

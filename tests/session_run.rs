@@ -105,14 +105,14 @@ mod performance;
 #[cfg(unix)]
 #[test]
 fn terminal_readers_preserve_shared_output_and_setup_redraw() {
-    use arany::{AttachedTerminal, Composer, TerminalInput};
+    use arany::{AttachedTerminal, Composer, TerminalInput, TerminalMode};
     use rustix::fs::{OFlags, fcntl_getfl};
     use std::{io::Write, process::Stdio, time::Duration};
 
     const CASE: &str = "ARANY_TEST_TERMINAL_READER_CASE";
     const TEST: &str = "terminal_readers_preserve_shared_output_and_setup_redraw";
     if let Some(case) = std::env::var_os(CASE) {
-        let linear = case == "linear" || case == "linear-panic";
+        let linear = case == "linear" || case == "linear-panic" || case == "cursor-timeout";
         let unwind = case == "inline-panic" || case == "linear-panic";
         let flags = fcntl_getfl(std::io::stdin()).expect("inherited input flags");
         assert!(!flags.contains(OFlags::NONBLOCK));
@@ -123,7 +123,14 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
             .build()
             .unwrap();
         runtime.block_on(async {
-            let mut terminal = AttachedTerminal::acquire_with_preference(linear).unwrap();
+            let mode = if case == "fullscreen" {
+                TerminalMode::Fullscreen
+            } else {
+                TerminalMode::Classic
+            };
+            let mut terminal =
+                AttachedTerminal::acquire_with_mode(linear && case != "cursor-timeout", mode)
+                    .unwrap();
             assert_eq!(terminal.is_linear(), linear);
             for cycle in 0..2 {
                 assert_eq!(
@@ -135,7 +142,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                 terminal
                     .draw_setup(4, "Synthetic setup", "Returning to chat", 0, None)
                     .unwrap();
-                let view = SessionView {
+                let mut view = SessionView {
                     id: SessionId::new(),
                     title: "New Session".into(),
                     title_is_explicit: false,
@@ -148,6 +155,79 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                     runs: Vec::new(),
                     compactions: Vec::new(),
                 };
+                if case == "inline-long" && cycle == 0 {
+                    let answer = (0..200)
+                        .map(|line| format!("NATIVE_LINE_{line:03}"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let run_id = RunId::new();
+                    view.runs.push(arany::RunView {
+                        id: run_id,
+                        objective: "Synthetic long response".into(),
+                        images: Vec::new(),
+                        config: None,
+                        agents: Vec::new(),
+                        assistant_message: None,
+                        status: RunStatus::Active,
+                        accepted_sequence: 1,
+                        finished_sequence: None,
+                        tools: Vec::new(),
+                        display: Vec::new(),
+                    });
+                    terminal.record_user_run(&view.runs[0]).unwrap();
+                    for lines in [50, 100, 200] {
+                        terminal.set_preview(Some(arany::DisplayUpdate {
+                            run_id,
+                            agent_run_id: AgentRunId::new(),
+                            call_index: 0,
+                            text: std::sync::Arc::new(arany::PreviewText {
+                                answer: answer.lines().take(lines).collect::<Vec<_>>().join("\n"),
+                                ..Default::default()
+                            }),
+                        }));
+                        terminal.draw(&view, &Composer::default(), None).unwrap();
+                    }
+                    println!("LONG_CONFIRMED");
+                    view.runs[0].assistant_message = Some(answer);
+                    view.runs[0].status = RunStatus::Finished;
+                    view.last_sequence = 2;
+                    terminal.finish_run_display();
+                    for _ in 0..3 {
+                        terminal.draw(&view, &Composer::default(), None).unwrap();
+                    }
+                    let mut draft = Composer::default();
+                    for character in "retained 🚀 draft".chars() {
+                        draft.apply(TerminalInput::Character(character));
+                    }
+                    terminal.toggle_transcript(&view).unwrap();
+                    terminal.draw(&view, &draft, None).unwrap();
+                    terminal.toggle_transcript(&view).unwrap();
+                    terminal
+                        .set_mode(TerminalMode::Fullscreen, draft.text().len())
+                        .unwrap();
+                    terminal.draw(&view, &draft, None).unwrap();
+                    terminal.handle_history_input(TerminalInput::PageUp, &view);
+                    terminal
+                        .set_mode(TerminalMode::Classic, draft.text().len())
+                        .unwrap();
+                    terminal.draw(&view, &draft, None).unwrap();
+                    assert_eq!(draft.text(), "retained 🚀 draft");
+                    for _ in 0..2 {
+                        terminal
+                            .draw(&view, &draft, Some("RepeatedFeedback"))
+                            .unwrap();
+                    }
+                    let mut next = view.runs[0].clone();
+                    next.id = RunId::new();
+                    next.objective = "Next task".into();
+                    next.assistant_message = None;
+                    next.status = RunStatus::Cancelled;
+                    view.runs.push(next);
+                    view.last_sequence += 1;
+                    terminal
+                        .draw(&view, &draft, Some("RepeatedFeedback"))
+                        .unwrap();
+                }
                 terminal
                     .draw(&view, &Composer::default(), Some("Synthetic setup ready"))
                     .unwrap();
@@ -181,7 +261,16 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
         return;
     }
 
-    for case in ["inline", "linear", "inline-panic", "linear-panic"] {
+    for case in [
+        "inline",
+        "inline-long",
+        "inline-query-key",
+        "cursor-timeout",
+        "fullscreen",
+        "linear",
+        "inline-panic",
+        "linear-panic",
+    ] {
         let unwind = case.ends_with("-panic");
         let temp = tempfile::tempdir().unwrap();
         let geometry = nix::pty::Winsize {
@@ -215,6 +304,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
             probe,
         );
         drop(command);
+        let mut queries = 0;
         let mut submissions = 0;
         let mut observed_tail = String::new();
         let mut observed_bytes = 0;
@@ -233,10 +323,20 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                                 .collect();
                         observed_bytes = bytes.len();
                     }
-                    assert!(
-                        !bytes.windows(4).any(|part| part == b"\x1b[6n"),
-                        "terminal ownership does not require cursor replies"
-                    );
+                    let count = bytes.windows(4).filter(|part| *part == b"\x1b[6n").count();
+                    while queries < count {
+                        assert!(
+                            case.starts_with("inline") || case == "cursor-timeout",
+                            "only classic queries the admitted terminal"
+                        );
+                        if case != "cursor-timeout" {
+                            if case == "inline-query-key" {
+                                input.write_all(b"x").unwrap();
+                            }
+                            input.write_all(b"\x1b[1;1R").unwrap();
+                        }
+                        queries += 1;
+                    }
                     let marker = format!("INPUT_READY:{submissions}");
                     if submissions < if unwind { 1 } else { 2 }
                         && bytes
@@ -257,7 +357,13 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                             }
                         }
                         input
-                            .write_all(if unwind { b"p\r" } else { b"x\r" })
+                            .write_all(if unwind {
+                                b"p\r"
+                            } else if case == "inline-query-key" {
+                                b"\r"
+                            } else {
+                                b"x\r"
+                            })
                             .unwrap();
                         submissions += 1;
                     }
@@ -282,6 +388,36 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
             before,
             "{case} restoration"
         );
+        if case == "inline-long" {
+            let text = String::from_utf8_lossy(&output.stderr);
+            let mut primary = String::new();
+            let mut rest = text.as_ref();
+            while let Some((before, alternate)) = rest.split_once("\x1b[?1049h") {
+                primary.push_str(before);
+                rest = alternate
+                    .split_once("\x1b[?1049l")
+                    .expect("alternate-screen restoration")
+                    .1;
+            }
+            primary.push_str(rest);
+            let confirmed = primary
+                .split_once("LONG_CONFIRMED")
+                .expect("confirmation boundary")
+                .1;
+            assert_eq!(
+                confirmed.matches("RepeatedFeedback").count(),
+                2,
+                "feedback belongs to its committed boundary"
+            );
+            for line in 0..200 {
+                let expected = format!("NATIVE_LINE_{line:03}");
+                assert_eq!(
+                    confirmed.matches(&expected).count(),
+                    1,
+                    "native final transcript {expected}"
+                );
+            }
+        }
         assert!(output.stdout.is_empty());
         let completion: &[u8] = if unwind {
             b"0 passed; 1 failed; 0 ignored"

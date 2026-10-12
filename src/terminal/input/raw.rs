@@ -1,4 +1,6 @@
-use super::{INPUT_POLL_INTERVAL, MAX_DRAFT_BYTES, ReaderEvent, map_input, terminal_input};
+use super::{
+    CursorQuery, INPUT_POLL_INTERVAL, MAX_DRAFT_BYTES, ReaderEvent, map_input, terminal_input,
+};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -23,6 +25,7 @@ const PASTE_END: &[u8; 6] = b"\x1b[201~";
 pub(super) fn start(
     sender: mpsc::Sender<io::Result<ReaderEvent>>,
     shutdown: Arc<AtomicBool>,
+    cursor: CursorQuery,
 ) -> io::Result<JoinHandle<()>> {
     let mut input = terminal_input()?;
     let mut poll = Poll::new()?;
@@ -32,9 +35,10 @@ pub(super) fn start(
     std::thread::Builder::new()
         .name("arany-terminal-input".into())
         .spawn(move || {
-            if let Err(error) = read(&mut poll, &mut input, &sender, &shutdown) {
+            if let Err(error) = read(&mut poll, &mut input, &sender, &shutdown, &cursor) {
                 let _ = sender.blocking_send(Err(error));
             }
+            cursor.close();
         })
 }
 
@@ -43,6 +47,7 @@ fn read(
     input: &mut File,
     sender: &mpsc::Sender<io::Result<ReaderEvent>>,
     shutdown: &AtomicBool,
+    cursor: &CursorQuery,
 ) -> io::Result<()> {
     let fd = input.as_raw_fd();
     let mut events = Events::with_capacity(4);
@@ -86,10 +91,12 @@ fn read(
                     if shutdown.load(Ordering::Acquire) {
                         return Ok(());
                     }
-                    if let Some(event) = decoder.feed(byte, now)
-                        && sender.blocking_send(Ok(event)).is_err()
-                    {
-                        return Ok(());
+                    if let Some(event) = decoder.feed(byte, now) {
+                        if let ReaderEvent::CursorPosition(column, row) = event {
+                            cursor.respond(column, row);
+                        } else if sender.blocking_send(Ok(event)).is_err() {
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -412,6 +419,18 @@ fn codepoint(value: u32) -> Option<KeyCode> {
 fn sequence_event(bytes: &[u8]) -> Option<ReaderEvent> {
     let end = *bytes.last()?;
     let text = std::str::from_utf8(&bytes[2..bytes.len() - 1]).ok()?;
+    if end == b'R' && bytes.starts_with(b"\x1b[") {
+        let (row, column) = text.split_once(';')?;
+        if !row.bytes().all(|byte| byte.is_ascii_digit())
+            || !column.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        return Some(ReaderEvent::CursorPosition(
+            column.parse::<u16>().ok()?.checked_sub(1)?,
+            row.parse::<u16>().ok()?.checked_sub(1)?,
+        ));
+    }
     if text.starts_with('<') && matches!(end, b'M' | b'm') {
         let mut parts = text[1..].split(';');
         let button = parts.next()?.parse().ok()?;

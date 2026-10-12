@@ -230,6 +230,7 @@ mod tests {
             accepted_sequence: ordinal as u64,
             finished_sequence: Some(ordinal as u64 + 1),
             tools: Vec::new(),
+            display: Vec::new(),
         }
     }
 
