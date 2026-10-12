@@ -487,8 +487,19 @@ async fn manager(
 
 impl Unit {
     #[cfg(test)]
-    async fn new() -> Result<Self, ToolError> {
-        Self::admit(uuid::Uuid::now_v7(), u64::MAX, |_| {}).await
+    async fn new(fixture: &Path) -> Result<Self, ToolError> {
+        let directory =
+            open_directory(&fixture.join("guard"), true).map_err(|_| ToolError::Path)?;
+        let permit = super::super::admission::acquire_in(
+            &directory,
+            fixture,
+            uuid::Uuid::now_v7(),
+            u64::MAX,
+            |_| {},
+            crate::tools::now_ms,
+        )
+        .await?;
+        Self::create(permit, fixture)
     }
 
     async fn admit(
@@ -497,12 +508,12 @@ impl Unit {
         queued: impl Fn(bool),
     ) -> Result<Self, ToolError> {
         let permit = super::super::admission::acquire(id, expires_at_ms, queued).await?;
-        Self::create(permit)
+        Self::create(permit, Path::new(UNIT_ROOT_PARENT))
     }
 
-    fn create(permit: super::super::admission::Permit) -> Result<Self, ToolError> {
+    fn create(permit: super::super::admission::Permit, parent: &Path) -> Result<Self, ToolError> {
         let name = format!("{UNIT_ROOT_PREFIX}{}", permit.id);
-        let root = Path::new(UNIT_ROOT_PARENT).join(&name);
+        let root = parent.join(&name);
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(&root)
@@ -1314,8 +1325,8 @@ done
         (actor, plain)
     }
 
-    async fn verify_uncertain_storage_is_retained() {
-        let mut uncertain = Unit::new().await.unwrap();
+    async fn verify_uncertain_storage_is_retained(fixture: &Path) {
+        let mut uncertain = Unit::new(fixture).await.unwrap();
         std::fs::write(uncertain.root.join(STORAGE_PENDING), []).unwrap();
         assert!(uncertain.stop().await.is_err());
         let uncertain_root = uncertain.root.clone();
@@ -1326,14 +1337,14 @@ done
             .remove_file(STORAGE_PENDING)
             .unwrap();
         assert!(!storage_mounted(&uncertain_root).unwrap());
-        crate::tools::fs::open_directory(Path::new("/private/tmp"))
+        crate::tools::fs::open_directory(fixture)
             .unwrap()
             .remove_dir_all(uncertain_root.file_name().unwrap())
             .unwrap();
     }
 
-    async fn verify_partial_storage_is_cleaned() {
-        let mut partial = Unit::new().await.unwrap();
+    async fn verify_partial_storage_is_cleaned(fixture: &Path) {
+        let mut partial = Unit::new(fixture).await.unwrap();
         let outside = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(outside.path(), partial.root.join("scratch")).unwrap();
         let preparation = prepare_storage(&partial.root).await;
@@ -1354,9 +1365,9 @@ done
         assert!(!partial_root.exists());
     }
 
-    async fn verify_storage_ownership() {
+    async fn verify_storage_ownership(fixture: &Path) {
         use super::super::storage::ImageIdentity;
-        let mut unit = Unit::new().await.unwrap();
+        let mut unit = Unit::new(fixture).await.unwrap();
         let _volumes = prepare_storage(&unit.root).await.unwrap();
         let mut image: ImageIdentity =
             read_record(&unit._directory.dir, "scratch.image.json").unwrap();
@@ -1401,9 +1412,9 @@ done
         unit.stop().await.unwrap();
     }
 
-    async fn verify_storage_free_cleanup() {
+    async fn verify_storage_free_cleanup(fixture: &Path) {
         use crate::test_process::BoundedOutput;
-        let mut unit = Unit::new().await.unwrap();
+        let mut unit = Unit::new(fixture).await.unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", HELPER, "--ignored", "--nocapture"])
             .env_clear()
@@ -1559,8 +1570,8 @@ done
         executable
     }
 
-    async fn verify_recovery_cancellation(gate: &Path) {
-        let mut unit = Unit::new().await.unwrap();
+    async fn verify_recovery_cancellation(gate: &Path, fixture: &Path) {
+        let mut unit = Unit::new(fixture).await.unwrap();
         let _volumes = prepare_storage(&unit.root).await.unwrap();
         let record = unit._directory.dir.read(RECOVERY_RECORD).unwrap();
         write_record(
@@ -1623,7 +1634,8 @@ done
                 let _ = self.0.wait();
             }
         }
-        let fixture = tempfile::tempdir().unwrap();
+        let mut fixture = tempfile::tempdir().unwrap();
+        fixture.disable_cleanup(true);
         let source = phase_workspace(script);
         std::fs::write(fixture.path().join("errors"), []).unwrap();
         let listener = UnixListener::bind(fixture.path().join("crash")).unwrap();
@@ -1722,7 +1734,7 @@ done
         );
         // The restarted admission path must recover storage and escaped descendants together.
         let mut recovering = Box::pin(recover_retained_roots(
-            Path::new(UNIT_ROOT_PARENT),
+            fixture.path(),
             rustix::process::geteuid().as_raw(),
         ));
         let emptied = async {
@@ -1755,8 +1767,29 @@ done
                 .any(|(_, target)| target.starts_with(&root))
         );
         fallback.as_mut().unwrap().stopped = true;
-        let mut next = Unit::new().await.unwrap();
+        let mut next = Unit::new(fixture.path()).await.unwrap();
         next.stop().await.unwrap();
+        drop(next);
+        drop(fallback);
+        close_unit_fixture(fixture);
+    }
+
+    fn close_unit_fixture(fixture: tempfile::TempDir) {
+        assert!(
+            !ffi::mounts()
+                .unwrap()
+                .iter()
+                .any(|(_, target)| target.starts_with(fixture.path()))
+        );
+        assert!(std::fs::read_dir(fixture.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_str()
+                .unwrap()
+                .starts_with(UNIT_ROOT_PREFIX)
+        }));
+        fixture.close().unwrap();
     }
 
     fn phase_workspace(script: &Path) -> tempfile::TempDir {
@@ -1859,16 +1892,17 @@ done
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        let generated = tempfile::tempdir().unwrap();
+        let mut generated = tempfile::tempdir().unwrap();
+        generated.disable_cleanup(true);
         let (actor, plain) = native_actors(generated.path());
         let disk_gate = disk_gate_actor(generated.path());
-        verify_uncertain_storage_is_retained().await;
-        verify_partial_storage_is_cleaned().await;
-        verify_storage_ownership().await;
-        verify_storage_free_cleanup().await;
+        verify_uncertain_storage_is_retained(generated.path()).await;
+        verify_partial_storage_is_cleaned(generated.path()).await;
+        verify_storage_ownership(generated.path()).await;
+        verify_storage_free_cleanup(generated.path()).await;
         verify_previous_boot_never_signals().await;
         verify_controller_crash_recovery(&plain, &disk_gate).await;
-        verify_recovery_cancellation(&disk_gate).await;
+        verify_recovery_cancellation(&disk_gate, generated.path()).await;
 
         for phase in [
             "descendants",
@@ -1880,7 +1914,7 @@ done
             "command-profile",
             "entitlement-profile",
         ] {
-            let mut unit = Unit::new().await.unwrap();
+            let mut unit = Unit::new(generated.path()).await.unwrap();
             assert_eq!(std::fs::read_dir(&unit.root).unwrap().count(), 2);
             if phase == "entitlement-profile" {
                 for (name, executable) in [("actor", &actor), ("plain", &plain)] {
@@ -2078,6 +2112,7 @@ done
                 );
             }
         }
+        close_unit_fixture(generated);
     }
 
     #[test]
@@ -2104,7 +2139,7 @@ done
                 .build()
                 .unwrap();
             reactor.block_on(async {
-                let mut unit = Unit::new().await.unwrap();
+                let mut unit = Unit::new(root).await.unwrap();
                 let stream = UnixStream::connect(root.join("crash")).unwrap();
                 stream.set_nonblocking(true).unwrap();
                 let mut stream = tokio::net::UnixStream::from_std(stream).unwrap();

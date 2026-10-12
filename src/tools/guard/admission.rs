@@ -385,7 +385,7 @@ fn reserve(directory: &PrivateDirectory, id: uuid::Uuid) -> Result<Permit, ToolE
     Ok(permit)
 }
 
-fn waiting(dir: &cap_std::fs::Dir) -> Result<Vec<u64>, ToolError> {
+fn waiting(dir: &cap_std::fs::Dir, now_ms: u64) -> Result<Vec<u64>, ToolError> {
     let mut waiters = Vec::new();
     for (scanned, entry) in dir.entries().map_err(|_| ToolError::Path)?.enumerate() {
         if scanned >= MAX_WAITERS + 80 {
@@ -412,7 +412,7 @@ fn waiting(dir: &cap_std::fs::Dir) -> Result<Vec<u64>, ToolError> {
         if waiter.version != 1 {
             return Err(ToolError::ProtectionUnavailable);
         }
-        if waiter.expires_at_ms <= crate::tools::now_ms() {
+        if waiter.expires_at_ms <= now_ms {
             remove(dir, name)?;
             continue;
         }
@@ -513,6 +513,7 @@ pub(super) async fn acquire(
         id,
         expires_at_ms,
         queued,
+        crate::tools::now_ms,
     )
     .await
 }
@@ -567,13 +568,14 @@ impl RecoveryBudget {
         directory: &PrivateDirectory,
         root_parent: &Path,
         expiry: u64,
+        now_ms: u64,
     ) -> Result<(), ToolError> {
         if self.attempts == 0 || self.remaining.is_zero() {
             return Ok(());
         }
-        let deadline = self.remaining.min(Duration::from_millis(
-            expiry.saturating_sub(crate::tools::now_ms()),
-        ));
+        let deadline = self
+            .remaining
+            .min(Duration::from_millis(expiry.saturating_sub(now_ms)));
         let started = tokio::time::Instant::now();
         #[cfg(target_os = "macos")]
         let recovery = super::macos::recover_abandoned(root_parent, &mut self.attempts);
@@ -591,12 +593,13 @@ impl RecoveryBudget {
     }
 }
 
-async fn acquire_in(
+pub(super) async fn acquire_in(
     directory: &PrivateDirectory,
     root_parent: &Path,
     id: uuid::Uuid,
     expires_at_ms: u64,
     queued: impl Fn(bool),
+    now: impl Fn() -> u64,
 ) -> Result<Permit, ToolError> {
     let mut ticket: Option<Ticket> = None;
     let mut recovery = RecoveryBudget {
@@ -604,10 +607,10 @@ async fn acquire_in(
         attempts: RECOVERY_ATTEMPTS,
     };
     recovery
-        .recover(directory, root_parent, expires_at_ms)
+        .recover(directory, root_parent, expires_at_ms, now())
         .await?;
     loop {
-        if crate::tools::now_ms() >= expires_at_ms {
+        if now() >= expires_at_ms {
             return Err(ToolError::Limit);
         }
         let file = checked_file(&directory.dir, "admission.lock", true)?;
@@ -618,13 +621,13 @@ async fn acquire_in(
         if let Some(_lock) = try_lock(file)? {
             reap_publications(&directory.dir)?;
             let limits = limits(&directory.dir)?;
-            let waiters = waiting(&directory.dir)?;
+            let waiters = waiting(&directory.dir, now())?;
             let first = match &ticket {
                 Some(ticket) => waiters.first() == Some(&ticket.sequence),
                 None => waiters.is_empty(),
             };
             if first && reserved(&directory.dir, root_parent)? < limits.units {
-                if crate::tools::now_ms() >= expires_at_ms {
+                if now() >= expires_at_ms {
                     return Err(ToolError::Limit);
                 }
                 let unit = reserve(directory, id)?;
@@ -643,7 +646,7 @@ async fn acquire_in(
         }
         if recover_capacity {
             recovery
-                .recover(directory, root_parent, expires_at_ms)
+                .recover(directory, root_parent, expires_at_ms, now())
                 .await?;
         }
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -751,12 +754,19 @@ mod tests {
                 .unwrap();
             let directory = open_directory(&path.join("guard"), true).unwrap();
             let expiry = std::env::var("ARANY_TEST_EXPIRY").unwrap().parse().unwrap();
-            let acquire = acquire_in(&directory, path, uuid::Uuid::now_v7(), expiry, |queued| {
-                if queued {
-                    let mut writer = &stream;
-                    writer.write_all(b"Q\n").unwrap();
-                }
-            });
+            let acquire = acquire_in(
+                &directory,
+                path,
+                uuid::Uuid::now_v7(),
+                expiry,
+                |queued| {
+                    if queued {
+                        let mut writer = &stream;
+                        writer.write_all(b"Q\n").unwrap();
+                    }
+                },
+                crate::tools::now_ms,
+            );
             tokio::pin!(acquire);
             let mut signal = [0];
             let result = tokio::select! {
@@ -932,7 +942,12 @@ mod tests {
         }
         let mut overflow = participant(fixture.path(), &listener, expiry, true).await;
         assert_eq!(overflow.message().await, b"F");
-        assert_eq!(waiting(&directory.dir).unwrap().len(), 32);
+        assert_eq!(
+            waiting(&directory.dir, crate::tools::now_ms())
+                .unwrap()
+                .len(),
+            32
+        );
         queue.remove(0).child.kill().unwrap();
         active.pop().unwrap().release().await;
         #[cfg(target_os = "macos")]
@@ -960,7 +975,11 @@ mod tests {
         let lock = try_lock(checked_file(&directory.dir, "admission.lock", true).unwrap())
             .unwrap()
             .unwrap();
-        assert!(waiting(&directory.dir).unwrap().is_empty());
+        assert!(
+            waiting(&directory.dir, crate::tools::now_ms())
+                .unwrap()
+                .is_empty()
+        );
         replace_record(
             &directory.dir,
             "limits.json",
@@ -978,19 +997,38 @@ mod tests {
             uuid::Uuid::now_v7(),
             expiry,
             |_| {},
+            crate::tools::now_ms,
         )
         .await
         .unwrap();
-        let mut expired = participant(
+        let clock = std::cell::Cell::new(crate::tools::now_ms());
+        let (queued, ready) = tokio::sync::oneshot::channel();
+        let queued = std::cell::RefCell::new(Some(queued));
+        let mut expired = Box::pin(acquire_in(
+            &directory,
             fixture.path(),
-            &listener,
-            crate::tools::now_ms() + 1_000,
-            true,
-        )
-        .await;
-        assert_eq!(expired.message().await, b"Q");
-        assert_eq!(expired.message().await, b"E");
-        assert!(waiting(&directory.dir).unwrap().is_empty());
+            uuid::Uuid::now_v7(),
+            expiry,
+            |is_queued| {
+                if is_queued {
+                    queued.borrow_mut().take().unwrap().send(()).unwrap();
+                }
+            },
+            || clock.get(),
+        ));
+        tokio::select! {
+            result = &mut expired => panic!("admission completed before queued readiness: {}", result.is_ok()),
+            result = ready => result.unwrap(),
+        }
+        clock.set(expiry);
+        tokio::time::pause();
+        tokio::time::advance(POLL_INTERVAL).await;
+        assert!(matches!(expired.await, Err(ToolError::Limit)));
+        assert!(
+            waiting(&directory.dir, crate::tools::now_ms())
+                .unwrap()
+                .is_empty()
+        );
         drop(permit);
     }
 
