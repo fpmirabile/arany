@@ -805,6 +805,30 @@ mod tests {
 
     #[test]
     fn retained_root_bound_counts_only_this_users_unit_roots() {
+        use crate::test_process::BoundedOutput;
+
+        let root = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tools::guard::macos::unit::tests::retained_root_bound_helper",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("TMPDIR", root.path())
+            .env("ARANY_TEST_RETAINED_ROOT", root.path())
+            .bounded_output_for(Duration::from_secs(10), 16 * 1024)
+            .unwrap();
+        assert!(output.status.success(), "retained-root corpus: {output:?}");
+        crate::test_process::assert_single_test_completed(&output.stdout, "retained-root corpus");
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    #[ignore = "isolated liveness-lock corpus owned by retained-root test"]
+    fn retained_root_bound_helper() {
+        std::env::var_os("ARANY_TEST_RETAINED_ROOT").expect("private retained-root fixture");
         let parent = tempfile::tempdir().unwrap();
         let owner = rustix::process::geteuid().as_raw();
         let abandoned = |name: &str| {
@@ -923,6 +947,9 @@ done
     fn snapshot_runtime(workspace: &Path) -> ToolRuntime {
         let directory = crate::tools::fs::open_directory(workspace).unwrap();
         let shell = "/bin/sh";
+        let system_programs = super::super::SystemPrograms::admit().unwrap();
+        let process_enforcement_digest =
+            super::super::macos_enforcement_digest(Some(&system_programs)).unwrap();
         ToolRuntime {
             config: crate::tools::config::Config {
                 version: 1,
@@ -972,6 +999,8 @@ done
             workspace_identity: crate::tools::fs::identity(&directory).unwrap(),
             guard_executable: std::env::current_exe().unwrap(),
             enforcement_digest: super::super::enforcement_digest().unwrap(),
+            system_programs: Some(std::sync::Arc::new(system_programs)),
+            process_enforcement_digest,
         }
     }
 
@@ -1565,7 +1594,7 @@ done
                         run_id: crate::session::RunId::default(),
                         agent_run_id: crate::session::AgentRunId::default(),
                         policy_digest: runtime.config.digest(),
-                        enforcement_digest: runtime.enforcement_digest,
+                        enforcement_digest: runtime.process_enforcement_digest,
                         workspace_device: runtime.workspace_identity.0,
                         workspace_inode: runtime.workspace_identity.1,
                         call: ToolCall::Command {
@@ -1579,6 +1608,7 @@ done
                     },
                     workspace: runtime.workspace.clone(),
                     guard_executable: runtime.guard_executable.clone(),
+                    system_programs: runtime.system_programs.as_deref().cloned(),
                 };
                 let (mut wake_sender, mut wake_receiver) = UnixStream::pair().unwrap();
                 wake_sender.write_all(&[1]).unwrap();

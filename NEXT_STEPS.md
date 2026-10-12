@@ -7,20 +7,6 @@ in [domain specs](./docs/specs/README.md); setup instructions live in
 item when its completion condition is met; completed work belongs in Git/CI
 history. Implementation status and verified support are separate claims.
 
-## Open defects
-
-- **macOS command/MCP preparation latency.** Each command or MCP call rebuilds its
-  Seatbelt profile by checking the code signature of every program in `/bin` and
-  `/usr/bin` before Ready. Measured on an 8-core host in a debug build: about 20 ms
-  for file/Skill workers, 1.4-5.9 s for command/MCP workers when idle and 23-27 s
-  with every core saturated. The fixed 5-second Ready bound therefore rejected
-  commands intermittently, reported as unavailable native protection. Preparation
-  now has a separate 30-second bound and a timeout reports the handshake stage.
-  Full-core saturation can still exceed it and fails closed before dispatch.
-  Reduce the per-call signature scan, for example by pinning the checked catalogue
-  at Tool admission, after a security review of the
-  [Guard rules](./agents/guard.md). Keep fail-closed dispatch and zero automatic retries.
-
 ## Next functional priority
 
 - **Deferred Anthropic consumer subscriptions.** Native Claude-plan access is
@@ -107,7 +93,7 @@ to the user's credential store or clipboard.
 | Native TLS to compiled endpoints | Provide isolated resolution/routing and ordinary trust for a compiled-endpoint HTTPS journey. Generated-anchor chain/name rejection alone does not prove a public trusted chain or production-endpoint success. [Security rules](./agents/security.md) |
 | Native terminal faults and tmux | Run available native tmux and acquisition/output/input-loss owners, including optimized macOS and supported architectures; verify restoration on the exact distributed binary. [Terminal fixture rules](./agents/references/testing-details.md#terminal-process-fixtures), [PTY finding](./docs/security/findings/terminal-pty-hangup-spin.md) |
 | Native stores and clipboard | Finish isolated Linux keyring-backed product setup and native store lifecycle gates; human Keychain dialog and general-pasteboard checks remain in checklist item 8. [Credentials](./docs/specs/credentials.md), [clipboard](./agents/clipboard.md) |
-| Readiness, load and observer faults | Measure cancellation/cleanup and resource enforcement under declared load. Reduce the measured macOS command/MCP preparation latency through its open defect above. [Guard unit rules](./agents/guard-unit.md) |
+| Readiness, load and observer faults | Measure cancellation/cleanup and resource enforcement under declared load. [Guard unit rules](./agents/guard-unit.md) |
 | Performance | Measure history/input latency, RSS and telemetry on named hosts. Measure the bounded macOS host-PID scan at its nominal supervision interval before choosing another membership primitive or interval. [Native measurement rules](./agents/references/testing-details.md#native-and-live-evidence) |
 | Distribution and dependency policy | Verify fresh advisories, license/source bundles, exact source/binary pairing, compiler/native provenance and MSRV. Resolve changed notice exceptions and the unreached standard-library gate without weakening pins. [Release review](./docs/security/beta-license-release-review.md#current-result), [dependency inventory](./docs/security/beta-dependency-inventory.md) |
 | Other platforms and enforcers | Verify native Linux ARM64, implement Windows and alternative Linux-native enforcement, and require actual platform behavior evidence before support claims. Windows CI remains deferred. [OS-parity priority](./AGENTS.md#product-and-implementation-priorities) |
