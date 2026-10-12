@@ -2,7 +2,7 @@
 
 Load when touching authentication, authorization, secrets, provider APIs, external I/O, LLM cost, tool execution, child processes, MCP, sandboxing, file paths, memory, retrieval, remote transports, or rendering untrusted content. Also load for security audits.
 
-Security plans, audits, and findings live under `docs/security/` when created. The incident-derived rationale and phased control matrix live in `docs/research/harness-security-lessons-and-controls.md`; keep this file as the concise implementation contract.
+Security plans, audits, and findings live under `docs/security/` when created. The [incident research](../docs/research/harness-security-lessons-and-controls.md) retains source evidence and the reasons behind controls; keep this file as the concise implementation contract.
 
 ## Trust bootstrap
 

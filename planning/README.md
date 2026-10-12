@@ -1,8 +1,13 @@
 # Planning
 
-Use `planning/` for implementation plans, rollout plans, investigations, migrations, and other maintained execution work. Architecture decisions belong in `docs/adr/`; research belongs in `docs/research/`.
+Use `planning/` for implementation plans, rollout plans, investigations, migrations, and other maintained execution work. Investigation findings belong in `docs/research/`; accepted architectural choices remain in the [decision register](../docs/research/next-step-decision-register.md), or a focused ADR when warranted. Do not create a parallel decision record for an already owned choice.
 
 Read [PLANNING.md](./PLANNING.md) before writing a plan and start from [TEMPLATE.md](./TEMPLATE.md).
+
+Scale the artifact to the task. A bounded change can use a concrete plan in the
+conversation; create a repository plan when work needs durable coordination,
+multiple slices or a later handoff. Keep only substantive template sections.
+Neither a template nor an unresolved proposal expands the user's authorized scope.
 
 ## Mechanism
 

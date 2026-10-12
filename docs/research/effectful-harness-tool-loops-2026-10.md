@@ -1,10 +1,10 @@
 # Effectful harness tool loops
 
-**Reviewed:** 2026-10-04  
-**Status:** primary-source research and implementation recommendations, not implementation or containment proof  
+**Reviewed:** 2026-10-04
+**Status:** retained primary-source comparison, not implementation or containment proof
 **Scope:** Codex, official Claude Code documentation, and current upstream Pi; functional beta 1 tools and commands, without a new UX requirement
 
-The user has expanded beta 1 beyond the read-only milestone to working Tools, commands, Skills and MCP. This note supplies the loop and Tool recommendations; the implementation plan must still reconcile the canonical architecture and satisfy the existing [effectful execution gate](../../agents/security.md#effectful-execution-gate). No provider call, account operation, installer, foreign project code or tool execution was performed for this research.
+The [Tool spec](../specs/tools.md), [Engine rules](../../agents/engine.md) and [security gate](../../agents/security.md#effectful-execution-gate) own the accepted lifecycle. This note retains source comparisons behind the adopted loop; implementation steps and acceptance requirements live in those owners. No provider call, account operation, installer, foreign project code or tool execution was performed for this research.
 
 ## What the primary sources establish
 
@@ -46,35 +46,17 @@ Pi's current security guide states that normal tool execution uses the caller's 
 
 Pi Skills advertise names/descriptions and load full instructions when needed; scripts/references/assets may accompany them. This is progressive disclosure of guidance, not an execution privilege. [Current Skills documentation](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/skills.md).
 
-## Difference from the inspected Arany baseline
+## Retained design implications
 
-At inspection, [Provider](../../src/provider.rs) accepts one semantic `Finish | Delegate` outcome and [RunLoop](../../src/engine/run_loop.rs) invokes one root call, followed by optional one-call children and synthesis. Requests carry accepted text history, images and child results, but no Tool catalog or call/result transcript. The [canonical architecture](../architecture/system-overview.md) still describes that read-only milestone. This is the baseline being extended, not a claim about work landing concurrently with this note.
+The comparisons support one Engine-owned effect lifecycle, correlated call/results
+and a separate enforcement boundary. Provider adapters translate complete native
+continuations; they do not execute effects. Approval UX, process cancellation and
+persisted history answer different questions and cannot stand in for containment
+or exactly-once execution.
 
-| Existing ownership | Necessary extension | Keep unchanged |
-|---|---|---|
-| Provider semantic boundary | Typed bounded Tool step and catalog/context values | Provider wire objects remain private; no effect execution in adapters |
-| AgentRun loop | Multiple model/tool iterations with shared budget | Primary final-answer ownership; ordered flat children |
-| SQLite Events/reducer | Proposal, authorization/dispatch and observed result facts | Commit-before-feedback; strict replay; interrupted prefixes |
-| Workspace snapshot owner | Handle-relative reads and mutation preconditions | No path-string authority; no-follow admission |
-| Trusted startup | Explicit host-approved tool/runtime manifests | Workspace guidance cannot widen permissions |
-
-## Recommended implementation decisions
-
-These are **Arany recommendations**, not claims that another harness implements the same guarantees.
-
-1. Deepen the current loop rather than embedding another harness. Add a bounded semantic Tool step alongside `Finish` and `Delegate`; start with sequential dispatch. Schema validation, current-policy evaluation, immutable intent admission, budget reservation, committed dispatch and Guard execution precede any effect. A second Provider call receives exact correlated results, including safe denials/failures, so the model can repair its plan.
-2. Keep one authoritative Tool router and a separately privileged same-binary Guard. Native filesystem tools, explicit command processes, Skill scripts and MCP all use it. The process seam is justified by privilege isolation; new crates, a daemon and a general plugin VM are not prerequisites.
-3. Prefer closed `read`, `list/search`, `write`, `edit`, and `command` operations. Reads page under byte/work bounds. Edits require an expected content digest and unique original-text matches; replacement cannot follow a stale read. Writes use pinned parents, exclusive/atomic publication as appropriate and explicit create-versus-replace semantics. Preserve failure/partial-effect information rather than promising rollback.
-4. Commands are explicit executable identity plus argument vector, admitted working-directory capability and minimal environment. A model-generated shell string is not normalized argv, and recognizing a harmless executable name cannot constrain its children. If shell/script execution is supported, grant a dedicated interpreter capability and enforce its filesystem/network/process limits in the OS. Do not expose provider credentials or StateRoot to that process.
-5. Pin finite model iterations, tool calls, total input/output bytes, filesystem read work, mutations, process time, capture, artifacts, children and concurrency for the Run. Reserve capacity before dispatch. No hidden retries after ambiguous process/MCP effects; recover uncertain dispatch as interrupted/unknown rather than executing it again on resume.
-6. Persist enough typed call/result context to explain each next model decision, but exclude raw secrets, environment dumps and uncontrolled upstream errors. Compaction selects complete exchanges, cannot orphan result IDs and retains unresolved/uncertain effect facts. Replay reconstructs knowledge, never executable authority or resumed approval.
-7. Keep child tools read-only initially; the primary is the sole integration writer. Effective child authority is global policy intersected with parent authority and the task grant. Flat children may run the same iterative loop but cannot spawn or self-approve. Allowing tools must not accidentally turn today's one-call child limit into unbounded calls.
-8. Runtime discovery begins in trusted host configuration outside the Workspace: an administrator/user explicitly chooses reviewed binaries, roots, server identities, immutable versions/digests and available capabilities. A Workspace's Skill, executable, `.mcp.json`, manifest, test configuration or package file remains hostile input. Listing availability neither installs code nor grants effects. Loading Skill guidance does not execute bundled scripts or activate MCP automatically.
-
-The current forced semantic-outcome JSON Schema can encode that Tool step without making native provider wire calls public or introducing prompt-only parsing. If native function-call encoding is selected instead, each adapter must own complete call/result continuation items and strict selection evidence. Either choice changes the exact outcome contract: version its schema/check fingerprint, keep old journals readable and do not relabel a custom profile's old read-only conformance as approval for the new tool-capable encoding.
-
-## Verification and non-claims
-
-Extend existing semantic Engine scenarios with a read/edit/command/result/final-answer journey, exact correlated observations and closed Store replay. Add negative rows for unknown Tool, invalid/truncated arguments, changed-file precondition, denied roots, symlink/special file, replaced executable, child-write attempt, quota/deadline, inherited pipe, descendant cancellation, uncertain dispatch and hostile results. A scripted Provider must assert the complete next request and exact call count; its panic must not masquerade as an expected failure.
-
-Actual containment needs native adversarial Guard tests, not mocked capability flags. Unavailable platform enforcement fails closed and remains explicitly unverified; manual/live/macOS checks stay at the final user handoff. This research establishes architectural patterns only. It proves no sandbox, exactly-once remote effect, complete rollback, secret-free Workspace, native provider compatibility, private Claude Code implementation, MCP server safety or package provenance.
+The original implementation sequence and regression checklist are now absorbed
+by the [Tool spec](../specs/tools.md), [architecture](../architecture/system-overview.md)
+and [testing rules](../../agents/testing.md). Current uncertainty and unperformed
+native/live checks belong in [next steps](../../NEXT_STEPS.md). These comparisons
+prove no Arany platform support, remote rollback, paid compatibility or package
+provenance.

@@ -94,8 +94,11 @@ Primary-screen history and compact conditional activity keep ordinary chat
 readable while allowing team inspection. Complete keyboard access and transient
 picker mouse reporting avoid imposing a permanent control room or pointer
 requirement. [The terminal spec](../specs/terminal.md) owns interaction and
-restoration; [terminal research](./beta-terminal-interface-and-multi-agent-feedback.md)
-retains the comparative evidence.
+restoration. Source precedents reviewed on 2026-09-29:
+[linear accessibility](https://code.claude.com/docs/en/accessibility),
+[fullscreen and scrollback](https://code.claude.com/docs/en/fullscreen), and
+[noninteractive output](https://developers.openai.com/codex/noninteractive).
+They inform the choice; they do not prove Arany's accessibility.
 
 ### D-11 — Configuration, credentials, and custom endpoints
 
@@ -113,6 +116,11 @@ usage or an already dispatched effect. Automatic retries and fallback would add
 billable attempts and recovery ambiguity. [Execution](../specs/execution.md),
 [Tools](../specs/tools.md) and [Provider rules](../../agents/provider.md) own the
 applicable outcomes and retry policy.
+
+The [transactional-outbox comparison](https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html)
+(reviewed 2026-09-28) explains the dual-write problem: a local commit and an
+external effect are not one atomic transaction. A crash after the effect can
+leave uncertainty. This rationale does not introduce an outbox or retry worker.
 
 ### D-13 — Dependency boundary
 
@@ -155,6 +163,10 @@ plus NOTICE supplies standard attribution and patent terms without a custom
 license. It does not require private users or hosted services to display credit.
 [LICENSE](../../LICENSE), [NOTICE](../../NOTICE) and [project priorities](../../AGENTS.md)
 own the current obligations.
+
+The [Apache license](https://www.apache.org/licenses/LICENSE-2.0) and
+[official FAQ](https://www.apache.org/foundation/license-faq.html), reviewed on
+2026-09-29, retain the source basis for this choice.
 
 ### D-18 — Explicitly accepted ChatGPT-plan route is beta scope
 

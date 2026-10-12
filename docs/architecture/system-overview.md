@@ -1,10 +1,17 @@
 # Arany beta architecture
 
-**Status:** canonical first implementation  
-**Date:** 2026-10-06
+**Status:** maintained architecture; implementation and verification gaps remain in next steps
+
 **Design rule:** build a familiar durable harness, then deepen it without replacing its Engine
 
 This document owns physical architecture, data model and responsibility boundaries. [Product specs](../specs/README.md) own migrated observable contracts; other domains retain their existing module contracts. [The documentation map](../README.md) locates those owners, and [next steps](../../NEXT_STEPS.md) owns current defects and verification debt. Research and the [decision register](../research/next-step-decision-register.md) retain source evidence and rationale. Anything absent here is not an empty module waiting to be scaffolded.
+
+Read the section for the affected boundary:
+[runtime ownership](#2-runtime-architecture), [module entry points](#3-physical-beta-shape),
+[Session lifecycle](#5-session-run-and-collaboration-lifecycle),
+[context and effects](#6-context-and-compaction), [persistence](#7-canonical-persistence),
+[presentation](#8-terminal-presentation), [Providers](#9-provider-profiles-and-custom-endpoints),
+[telemetry](#10-otlp-ships-last-in-beta), or [security](#11-security-boundary).
 
 ## 1. What the beta must prove
 
@@ -105,185 +112,23 @@ retaining their checked handles independently of history.
 
 ## 3. Physical beta shape
 
-```text
-Cargo.toml
-src/
-├── main.rs          CLI grammar, mode selection, exit mapping
-├── cli.rs           shared CLI output and state-path selection
-├── cli/
-│   ├── attached.rs  attached Session lifecycle and composer loop
-│   ├── attached/
-│   │   ├── active.rs    active Run and compaction terminal handling
-│   │   ├── agents.rs    agent inspector command handling
-│   │   ├── controls.rs  trusted local command handlers
-│   │   ├── picker.rs    private Session picker input and selection
-│   │   ├── models.rs    bounded attached model catalog browsing
-│   │   ├── run.rs       selected native Provider Run composition
-│   │   └── setup.rs     attached account selection
-│   ├── chatgpt.rs  consented OAuth account access and selected catalog
-│   ├── chatgpt/
-│   │   ├── account.rs  bounded protected subscription account records
-│   │   ├── account/
-│   │   │   └── tests.rs synthetic renewal and storage cases
-│   │   ├── callback.rs bounded one-result loopback HTTP callback
-│   │   ├── catalog.rs  bounded account-scoped subscription model listing
-│   │   ├── consent.rs  versioned account-bound warning acceptance
-│   │   ├── exchange.rs bounded token/JWKS redemption
-│   │   ├── exchange/
-│   │   │   ├── revoke.rs private discovered-endpoint token revocation
-│   │   │   └── tests.rs synthetic issuer and signed-identity corpus
-│   │   ├── identity.rs strict signed ID-token admission
-│   │   └── registration.rs stable host and issued-client registration
-│   ├── credentials.rs protected default native API account access
-│   ├── credentials/
-│   │   ├── keyring_helper.rs supervised bounded OS-store process
-│   │   ├── keyring_helper/
-│   │   │   └── macos.rs  Keychain item access for the helper
-│   │   └── macos_tests.rs isolated test-keychain helper gates
-│   ├── exec.rs      one-Run command composition and durable receipt
-│   └── provider.rs  model catalog and data-free custom profile check commands
-├── lib.rs           small public interface for the deep Engine
-├── private_fs.rs    shared no-follow private-directory admission
-├── private_fs/
-│   └── acl.rs       native macOS descriptor-based ACL checks
-├── diagnostics.rs   closed local debug failure stages and bounded stack frames
-├── engine.rs        Run admission, budgets, Provider outcomes
-├── engine/
-│   ├── compaction.rs private manual and duplicate-safe automatic compaction
-│   ├── lifecycle.rs private Session create/resume/fork/default operations
-│   ├── progress.rs  committed bounded Run observation
-│   ├── run_loop.rs  private Run orchestration and terminal transitions
-│   └── run_loop/
-│       └── children.rs private bounded child scheduling and synthesis
-├── session.rs       Session module interface
-├── session/
-│   ├── events.rs    typed canonical facts and scope validation
-│   ├── reducer.rs   strict Session/Run/AgentRun replay
-│   ├── input.rs     pinned no-follow Workspace snapshots
-│   ├── input/
-│   │   └── race_tests.rs ignored Linux component-replacement gate
-│   ├── context.rs   deterministic bounded history selection
-│   ├── lineage.rs   canonical Event-prefix digest for fork replay
-│   └── compaction.rs bounded summary input and snapshot validation
-├── provider.rs      Provider semantic contract and adapter selection
-├── provider/
-│   ├── custom.rs     private exact custom-profile admission
-│   ├── custom/
-│   │   ├── adapter.rs      verified semantic custom Provider
-│   │   ├── destination.rs  bounded resolution and pinned HTTP destination
-│   │   ├── check.rs        synthetic conformance and evidence orchestration
-│   │   └── transport.rs    shared bounded custom wire and egress
-│   ├── anthropic.rs  native Messages key and bounded HTTP behavior
-│   ├── anthropic/
-│   │   ├── wire.rs  strict Messages documents and decoding
-│   │   └── wire/
-│   │       └── tests.rs  offline wire corpus
-│   ├── effort.rs     reviewed native model-specific effort admission
-│   ├── image.rs      bounded immutable PNG values and semantic origin
-│   ├── catalog.rs    bounded account-scoped native model discovery
-│   ├── native_check.rs  exact-key synthetic conformance and evidence admission
-│   ├── openai.rs     native Responses key and bounded HTTP behavior
-│   └── openai/
-│       ├── subscription.rs bounded ChatGPT-plan Provider and synthetic probe
-│       ├── subscription/
-│       │   └── tests.rs synthetic stream and local-limit corpus
-│       ├── wire.rs  strict Responses documents and decoding
-│       └── wire/
-│           └── tests.rs  offline wire corpus
-├── tools.rs         private grant admission and concrete effect router
-├── tools/
-│   ├── config.rs    private closed configuration and resource pins
-│   ├── types.rs     semantic calls, immutable intents and receipts
-│   ├── fs.rs        no-follow snapshots and atomic native mutations
-│   ├── guard.rs     shared Task/Ready/GO protocol, helper entry and payload dispatch
-│   ├── guard/
-│   │   ├── linux.rs systemd unit, Bubblewrap launch and capability hardening
-│   │   ├── macos.rs trusted native worker and Seatbelt enforcement
-│   │   ├── macos/
-│   │   │   ├── ffi.rs  isolated unsafe Darwin, Seatbelt and Security bindings
-│   │   │   ├── storage.rs fixed-size private disk images for command units
-│   │   │   └── unit.rs one-use native coalition ownership and supervision
-│   │   └── profile.rs Linux namespace facts and compiled seccomp profile
-│   ├── mcp.rs       bounded legacy stdio tools protocol and schema checks
-│   ├── skills.rs    bounded portable metadata, inside the Guard only
-│   └── tests.rs     deterministic grant/schema/receipt corpus
-├── store.rs         private SQLite owner and Store interface
-├── store/
-│   ├── evidence.rs  bounded expiring custom and native Provider evidence
-│   ├── journal.rs   SQLite setup, append, fork writes
-│   ├── journal/
-│   │   └── crash_tests.rs ignored Linux append transaction-death gate
-│   ├── replay.rs    bounded strict Event loading and lineage resolution
-│   ├── state.rs     private State records and checked history reset
-│   └── state/
-│       └── lock.rs  per-Session and account-replacement locks, private file checks
-├── presentation.rs  pure linear projections and sanitization
-├── presentation/
-│   ├── agents.rs    bounded semantic agent inspection
-│   └── model.rs     bounded semantic status and activity rows
-├── terminal.rs      attached terminal ownership and lifecycle
-├── terminal/
-│   ├── agents.rs    agent inspector navigation and state
-│   ├── commands.rs  closed trusted slash registry and parser
-│   ├── clipboard.rs explicit bounded local OS-client lifecycle
-│   ├── clipboard.js macOS pasteboard reader run by the system osascript
-│   ├── composer.rs  bounded grapheme-safe draft editing
-│   ├── input.rs     bounded reader ownership and semantic input mapping
-│   ├── input/
-│   │   └── raw.rs   bounded Unix keys, pointer events and paste framing
-│   ├── linear.rs    labeled append-only terminal output
-│   ├── view.rs      inline Ratatui frame drawing
-│   └── view/
-│       └── tests.rs  inline frame and picker TestBackend cases
-├── telemetry.rs     private opt-in OTLP trace lifecycle and SDK owner
-└── telemetry/
-    ├── config.rs    numeric-loopback endpoint admission
-    ├── tests.rs     topology, privacy, and transport fixtures
-    └── tests/
-        └── performance.rs ignored Linux release queue-saturation measurement
-tests/
-├── session_run.rs   journal, replay, and process-level output
-├── session_run/
-│   ├── active_terminal.rs Linux signals, cancellation, suspend, and restoration PTYs
-│   ├── active_terminal/
-│   │   ├── acquisition.rs  Linux partial-acquisition restoration PTY
-│   │   ├── broken_stderr.rs Linux active-renderer fault PTY
-│   │   ├── panic.rs Linux terminal-owner panic-unwind PTY
-│   │   └── output_window.rs Linux signal during restored-output PTY
-│   ├── agent_inspector.rs Linux active/idle inspector PTYs
-│   ├── auto_compaction.rs Linux attached threshold and compaction process journey
-│   ├── custom.rs    exact custom-profile process journey in the same test target
-│   ├── disk_fault.rs Linux Store file-growth recovery release gate
-│   ├── disk_fault/
-│   │   ├── enospc.rs ignored Linux private-tmpfs ENOSPC recovery gate
-│   │   ├── enospc/
-│   │   │   └── product.rs ignored shipped-exec private-tmpfs ENOSPC gate
-│   │   └── product.rs ignored Linux shipped-exec failure-channel gate
-│   ├── live.rs      ignored paid native direct/team conformance journeys
-│   ├── loopback.rs  shared bounded local Provider process fixture
-│   ├── performance.rs ignored Linux release replay and team process measurements
-│   ├── performance/
-│   │   ├── memory.rs  ignored Linux two-file and capped-response RSS measurement
-│   │   └── startup.rs ignored two-file startup upper-bound measurement
-│   ├── session_picker.rs Linux transient mouse-capture picker PTY
-│   ├── session_picker/
-│   │   └── termination.rs Linux picker signal and suspend restoration PTY
-│   ├── slash_completion.rs Linux Tab, ghost placeholder, and restoration PTY
-│   ├── setup.rs    Linux hidden-key cancellation and terminal restoration PTY
-│   ├── startup_trust.rs Linux adversarial repository-startup process gate
-│   ├── tools.rs     native effect journey, hostile peers, quotas and replay
-│   ├── tools/
-│   │   └── native_exec.rs shipped native-adapter command continuation over local TLS
-│   └── telemetry.rs product-process trace and canonical replay journey
-├── common/
-│   └── process.rs   bounded concurrent product-output capture including exit/EOF
-├── engine_run.rs   scripted Provider and Workspace input journey
-└── engine_run/
-    ├── performance.rs ignored release two-child core Run measurement
-    ├── workspace_security.rs explicit include admission corpus
-    └── performance/
-        └── cancellation.rs ignored release team cancellation measurement
-```
+The package's main boundaries are listed below. Follow source modules for their
+current private file layout; this document does not mirror the repository tree.
+
+| Responsibility | Entry point | Editing rules |
+|---|---|---|
+| CLI grammar and composition | [main](../../src/main.rs), [CLI](../../src/cli.rs) | [CLI](../../agents/cli.md) |
+| Run and Session orchestration | [Engine](../../src/engine.rs) | [Engine](../../agents/engine.md) |
+| Events, replay and context | [Session](../../src/session.rs) | [Session](../../agents/session.md) |
+| Semantic inference and wire adapters | [Provider](../../src/provider.rs) | [Provider](../../agents/provider.md) |
+| Saved API and subscription accounts | [Credentials](../../src/cli/credentials.rs), [ChatGPT](../../src/cli/chatgpt.rs) | [Credentials](../../agents/credentials.md), [ChatGPT](../../agents/chatgpt.md) |
+| Tool admission, Policy and dispatch | [Tools](../../src/tools.rs) | [Tools](../../agents/tools.md) |
+| Separate native effect enforcement | [Guard](../../src/tools/guard.rs) | [Guard](../../agents/guard.md) |
+| Canonical SQLite and private records | [Store](../../src/store.rs) | [Store](../../agents/store.md) |
+| Shared no-follow and ACL admission | [Private filesystem](../../src/private_fs.rs) | [Private filesystem](../../agents/private-fs.md) |
+| Semantic presentation and terminal ownership | [Presentation](../../src/presentation.rs), [terminal](../../src/terminal.rs) | [Terminal](../../agents/terminal.md) |
+| Lossy export and private failure inspection | [Telemetry](../../src/telemetry.rs), [diagnostics](../../src/diagnostics.rs) | [Telemetry](../../agents/telemetry.md), [diagnostics](../../agents/diagnostics.md) |
+| Product acceptance and Engine evidence | [Session journey](../../tests/session_run.rs), [Engine corpus](../../tests/engine_run.rs) | [Testing](../../agents/testing.md) |
 
 This remains one package and one long-lived process. OS credentials use a supervised same-binary helper; explicitly requested clipboard access uses a bounded trusted OS-client child under terminal ownership. Neither becomes an agent Tool. The private `tools` implementation is one concrete router with deterministic Policy and a native Guard privilege seam, not a generic execution framework or fakeable second Engine behavior seam. The `session/` files remain one deep module, and ChatGPT's stream remains private OpenAI implementation. `engine.rs` holds orchestration behind `Engine::run`, keeping `lib.rs` readable. Add a crate only after measured release, privilege, ownership, dependency or compile pressure.
 
@@ -504,7 +349,7 @@ On Unix, the Workspace input loader rejects an opened instruction or explicit-in
 
 The release boundary includes:
 
-- untrusted/headless read-only Runs; folder-trusted or explicitly configured model-driven files/commands/Skills/local MCP only through the typed private grant/Guard path; no arbitrary fetch, runtime plugin, self-update or unsandboxed fallback; account setup owns its compiled browser/callback route, and only the credential helper accesses the OS store;
+- Runs without an admitted Tool grant remain read-only; folder-trusted or explicitly configured model-driven files/commands/Skills/local MCP use only the typed private grant/Guard path, including explicit headless `--tools`; no arbitrary fetch, runtime plugin, self-update or unsandboxed fallback; account setup owns its compiled browser/callback route, and only the credential helper accesses the OS store;
 - private no-follow SQLite state outside the Workspace, strict data-only replay, aggregate growth admission, and no encryption-at-rest claim;
 - one immutable aggregate Run budget for calls, output tokens, bytes, time, memory, disk, `N`, and concurrency;
 - only admitted fixed native or exact verified custom Provider requests, with phase-minimal content and origin-bound credentials; standard OS TLS validation may make auxiliary certificate-related connections, never an Arany payload destination;
@@ -554,17 +399,9 @@ It does not force private users or hosted services to show a public “Powered b
 
 ## 15. Implementation order
 
-1. Write the implementation plan with this Session/team contract, security claims/non-claims, and evidence owners.
-2. Keep the package's binary-forbidden and library-denied `unsafe` policy, scoped reviewed native Guard/ACL exceptions, pinned toolchain/lockfile, minimal features, and reviewed supply chain.
-3. Implement trusted startup, private state admission, Workspace snapshots, Session identity, Event schema, reducers, deterministic output, and hostile-content handling.
-4. Make create/exit/resume/multi-Run/fork and deterministic context compilation pass with the scripted Provider.
-5. Implement ordered bounded `0..N` children and prove `single`, `auto`, `team`, aggregate budgets, join, and cancellation.
-6. Add a primary-screen committed transcript, fixed-bottom composer/status, classic native scrollback and optional fullscreen managed history, conditional activity shelf, keyboard-complete Session/agent pickers, and native history/restoration PTY proof; limit mouse ownership to fullscreen and explicit panels.
-7. Add native OpenAI and Anthropic API-key adapters and their offline/live conformance.
-8. Add trusted custom `openai-responses` profiles plus data-free `provider check`; do not admit unverified endpoints.
-9. Add slash-command Tab completion and persistent argument previews without changing the trusted command boundary.
-10. Complete the official ChatGPT-plan account, consent, model/effort admission, and synthetic Engine turns on a locally built Linux executable; preserve independent API-key routes and hand real sign-in, plan-consuming checks, and turns to the user.
-11. Pursue Anthropic subscription only after provider authorization or a published supported route. Then run the broader Linux/macOS security, PTY/accessibility, fault, distribution, license, and performance gates, with native macOS on a macOS machine after this goal.
-12. Verify the existing opt-in OTLP trace export still meets topology, privacy, bounds, failure-isolation, and shutdown gates after the new routes.
-
-The beta 1 implementation handoff follows step 10's security/offline checks and local executable build. Actual account compatibility and usability remain unverified until the user's final checks; implementation completion does not waive those checks or turn synthetic evidence into live support. Later steps complete the broader product contract without being misreported as beta 1 evidence.
+The [active beta plan](../../planning/arany-beta/README.md) routes remaining
+execution through [next steps](../../NEXT_STEPS.md). This architecture does not
+retain a second task sequence for already implemented foundations. Accepted
+contracts stay with their mapped owners; completed work and checks stay in the
+handoff and Git/PR/CI history. Missing live, native or accessibility evidence
+remains an explicit gap rather than an inferred support claim.

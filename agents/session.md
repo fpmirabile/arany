@@ -2,7 +2,7 @@
 
 Load when changing Session lifecycle, resume/fork/rename, compaction, context reconstruction, collaboration policy, agent topology, queued input, or per-Run budgets.
 
-The evidence and rationale live in `docs/research/beta-sessions-teams-terminal-providers-and-license.md` and `docs/research/context-memory-and-compaction.md`. This file retains the unmigrated Session lifecycle/context contract and editing constraints; the [execution spec](../docs/specs/execution.md) owns bounded Run coordination and delegation.
+The [decision register](../docs/research/next-step-decision-register.md) and [context research](../docs/research/context-memory-and-compaction.md) retain reasons and alternatives. This file retains the unmigrated Session lifecycle/context contract and editing constraints; the [execution spec](../docs/specs/execution.md) owns bounded Run coordination and delegation.
 
 ## Domain boundaries
 
@@ -23,8 +23,8 @@ The evidence and rationale live in `docs/research/beta-sessions-teams-terminal-p
 
 - Pin exactly one `single`, `auto(max_active_children = N)`, or `team(max_active_children = N)` policy before each Run. `SessionDefaultChanged` records a complete validated next-Run selection only while idle; every Run still re-admits its selected Provider before Workspace input.
 - The primary AgentRun owns the final answer and an ordered `0..N` collection of direct read-only children. Children cannot spawn nested teams in beta.
-- `N` is generic but never unbounded. Child admission is the minimum of the Session policy, process safety ceiling, remaining call/token/byte/time budgets, and Provider concurrency limit.
-- Default `auto` to at most three active children. `single` admits none. `team` requests team-oriented decomposition but still cannot exceed effective capacity.
+- `N` bounds total direct children, despite the field name `max_active_children`. Admission respects Session policy, process safety and remaining call/token/byte/time budgets. The separately pinned Provider concurrency ceiling limits simultaneous calls; admitted children may wait in the ordered queue.
+- Default `auto` to at most three total direct children. `single` admits none. `team` requests team-oriented decomposition but still cannot exceed effective capacity. The [execution spec](../docs/specs/execution.md#collaboration) owns this distinction.
 - Every child has a causal assignment, stable identity, isolated context, and persisted terminal disposition. Cancellation reaches every admitted child.
 
 ## Session commands

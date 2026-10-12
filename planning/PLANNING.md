@@ -15,6 +15,7 @@ Rules for maintained execution plans. [README.md](./README.md) defines the folde
   starting the next slice; completed work stays in Git/PR/CI history.
 - Close completed implementation using the [planning lifecycle](./README.md#lifecycle), including local uncommitted work.
 - Cite adjacent rules and research instead of restating them.
+- Match the plan's detail to the work. Use the compact template for ordinary changes; add ownership, protocol or rollout detail only when those decisions are affected. Empty headings and repeated repository rules do not make a plan implementation-ready.
 - For behavior work, link the owning spec or unmigrated contract and its existing evidence owner. Describe proposed changes with successful and meaningful rejection/failure/recovery scenarios before implementation. Review contract impact after each planning pass using [the spec workflow](../docs/specs/README.md), which owns acceptance, updates, extraction and evidence status.
 
 ## Harness-specific questions

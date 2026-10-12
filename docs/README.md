@@ -7,12 +7,14 @@ Start with the task, then read the owning contract and editing rules. [AGENTS.md
 | Material | Authoritative home |
 |---|---|
 | Project introduction, goals, installation and development quickstart | [Repository README](../README.md); detailed contracts stay in their owners below |
+| Human contribution workflow, issues and pull requests | [Contribution guide](../CONTRIBUTING.md) |
+| Shared development commands and prerequisites | [Development guide](./development.md) |
 | Shared development rules and conditional loading | [AGENTS.md](../AGENTS.md) |
 | Module editing constraints, ownership invariants and recurring failure modes | `agents/<module>.md`, reached through AGENTS.md; task-specific details are linked from each module under `agents/references/` |
 | Agreed observable product behavior | [Domain specs](./specs/README.md); unmigrated contracts remain in their existing owners |
 | Physical architecture, data model and dependency direction | [System overview](./architecture/system-overview.md) |
 | Architectural decisions, reasons and trade-offs | [Decision register](./research/next-step-decision-register.md), or a focused ADR when warranted |
-| Source investigation and alternatives | [Research index](./research/README.md) |
+| Source investigation, alternatives and research retention | [Research index](./research/README.md) and its [completion policy](./research/README.md#retention-and-completion) |
 | Security findings and scoped supply-chain evidence | [Dependency inventory](./security/beta-dependency-inventory.md) and `docs/security/findings/` |
 | Proposed changes and temporary execution work | [Planning](../planning/README.md) |
 | Open defects, deferred functionality and user-owned checks | [Next steps](../NEXT_STEPS.md) |
@@ -36,9 +38,18 @@ Specs state the agreed contract. Source and tests establish implementation and e
 | Trace export or local diagnostics | [Diagnostic spec](./specs/diagnostics.md), [Telemetry rules](../agents/telemetry.md) or [diagnostic rules](../agents/diagnostics.md) | Security and CLI admission |
 | Behavior change, defect fix or release claim | The owning contract and [testing rules](../agents/testing.md) | Existing evidence owner and current handoff |
 | Architecture or ownership change | [System overview](./architecture/system-overview.md) | Relevant module rules and [planning workflow](../planning/PLANNING.md) |
-| Development instructions or skill setup | [AGENTS.md](../AGENTS.md), [project skills](../agents/skills/README.md) | [Contribution guide](../CONTRIBUTING.md), [planning workflow](../planning/PLANNING.md); runtime Skill behavior remains in the Tool contract |
+| Development instructions or skill setup | [AGENTS.md](../AGENTS.md), [project skills](../agents/skills/README.md) | [Development commands](./development.md), [planning workflow](../planning/PLANNING.md); runtime Skill behavior remains in the Tool contract |
 
 Follow relevant cross-boundary links before editing. A harmless prose correction does not require loading every contract. A linked file must actually be opened when its trigger applies; Markdown links and `@` text are not portable automatic imports.
+
+## Read for the task
+
+1. Identify the requested outcome and affected boundary. Use the table above or search headings and paths; read the owning contract and the rules triggered by [AGENTS.md](../AGENTS.md).
+2. Locate the relevant implementation and acceptance evidence. Read linked references when that boundary applies; a link is a navigation aid, not a request to load its entire subtree.
+3. Open research or decision records when the task needs rationale, source facts or alternatives. Check their scope and date before reusing time-sensitive claims. Consult a plan only for the initiative being continued and next steps for open work.
+4. Update the existing owner when knowledge changes. User guides explain actions, specs define outcomes, rules constrain edits, and Skills describe repeatable procedures. Link between them instead of copying the same contract or command block.
+
+This is a reading strategy, not a relaxation of security, testing or cross-boundary rules. Spec requirements, implementation state and completed verification are distinct: report disagreements rather than choosing whichever document is newer. Preserve accepted decisions unless the task authorizes changing them.
 
 ## Current milestone and evidence
 

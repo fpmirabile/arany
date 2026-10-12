@@ -67,48 +67,21 @@ To enable file edits, commands, runtime Skills or MCP, follow the [local Tool se
 
 ## Develop
 
-Read [AGENTS.md](./AGENTS.md) for the project rules, then follow the documents relevant to your change. Keep harness behavior independent of terminal and OS details, consider platform differences, and prefer the simplest complete implementation.
+Start with the [contribution guide](./CONTRIBUTING.md) to find work, prepare a change and submit it for review. Coding agents start with [AGENTS.md](./AGENTS.md). Both use the shared [development setup and checks](./docs/development.md).
 
 ### Install development skills
 
-These skills guide agents working on Arany's source. You need Node.js/npm for this setup; the Arany executable itself is Rust.
-
-From the repository root, disable Skills CLI telemetry in your shell:
-
-```sh
-export DISABLE_TELEMETRY=1
-```
-
-In PowerShell, use `$env:DISABLE_TELEMETRY = "1"` instead. Then run:
-
-```sh
-npx --yes skills@1.7.0 add ./agents/skills --agent codex claude-code --yes
-npx --yes skills@1.7.0 add https://github.com/DietrichGebert/ponytail/tree/e3ba2aa6f1e6f0bc4d69eb09c9f0d0a93af56156/skills/ponytail --skill ponytail --agent codex claude-code --yes
-npx --yes skills@1.7.0 list
-```
-
-This installs the four core skills: **Ponytail**, **Rust Clean Code**, **Arany Terminal Design** and **Clean Architecture Review**, with links for Claude Code. Keep only your desired agents in `--agent`; use `--copy` if symlinks are unavailable.
-
-The project also uses **Matt Pocock's skills** and **find-skills**, recorded in `skills-lock.json`. Restore the complete set into `.agents/skills/` with:
-
-```sh
-npx --yes skills@1.7.0 experimental_install
-```
-
-Edit local skill sources in `agents/skills/`. Generated installations in `.agents/skills/` are gitignored. See the [skill workflow](./agents/skills/README.md) for updates and restoration. Installing development skills does not enable Arany's runtime Tools.
+Follow the [development skill setup](./agents/skills/README.md#install-for-a-harness)
+for Ponytail, Rust Clean Code, Arany Terminal Design and Clean Architecture Review.
+The same guide owns [restoration of the complete adopted set](./agents/skills/README.md#restore-the-lockfile)
+and [source updates](./agents/skills/README.md#update-a-local-skill). Installation
+uses Node.js/npm; the Arany executable itself is Rust. Development skills do not
+enable runtime Tools.
 
 ### Run and check changes
 
-```sh
-cargo fetch --locked
-cargo run --locked
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --locked --offline -- -D warnings
-cargo test --workspace --locked --offline
-cargo test --workspace --locked --offline --release
-```
-
-Linux terminal tests require Bubblewrap and util-linux `script`, with user and network namespaces enabled. Follow [verification guidance](./CONTRIBUTING.md#verification) and the relevant [platform test notes](./agents/testing.md) for your host. Documentation-only edits need prose and link review.
+Use the [development guide](./docs/development.md) for setup, verification commands
+and native prerequisites. Documentation-only edits need prose and link review.
 
 ## Contribute
 
@@ -119,7 +92,7 @@ Bug reports, focused fixes, documentation improvements and native platform testi
 3. Implement the change, run the applicable checks and update the owning documentation.
 4. Open a pull request explaining what changed, why, and how you verified it.
 
-Use English for repository content. Apply Ponytail without dropping requirements or weakening safety, accessibility or verification. The [contribution guide](./CONTRIBUTING.md) covers the full workflow.
+Use English for repository content. Prefer the simplest complete change while preserving safety, accessibility and verification. The [contribution guide](./CONTRIBUTING.md) covers the full workflow.
 
 ## Documentation
 

@@ -4,6 +4,19 @@ Maintain Arany's development skill sources here: `rust-clean-code` for Rust, `ar
 
 `agents/skills/` contains editable, checked-in sources. `.agents/skills/` contains generated, gitignored installations discovered by Codex and other compatible agents; agent-specific directories can link to them. These are different directories, not alternative spellings. [`skills-lock.json`](../../skills-lock.json) is the single manifest, with portable local source paths. These skills guide development agents; they do not enable runtime Skills or Tool permissions in Arany.
 
+## Select and load
+
+Use the description to choose a Skill for the actual task, then read its
+`SKILL.md` and only the supporting references that apply. Installation is not
+an instruction to run every workflow. Explicit user requests and Arany's
+mandatory Ponytail rule still apply. A Skill supplies procedure; the repository's
+contracts, permission boundaries and verification owners remain authoritative.
+
+During documentation reviews, inspect checked-in sources and their manifest.
+Do not maintain ignored installations, vendored external Skills or new copies
+of an upstream workflow as project policy. Updating an external source or its
+pin is a separate reviewed supply-chain change.
+
 ## Install for a harness
 
 Run from the repository root with Node.js/npm available. Use the reviewed Skills CLI version below. Disable telemetry for the invoking shell:
