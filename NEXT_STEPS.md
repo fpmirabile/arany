@@ -26,10 +26,6 @@ history. Implementation status and verified support are separate claims.
   On recurrence use the case, committed progress and queued hint now reported by
   that owner, then capture native preparation/recovery/cleanup stages before
   attributing the timeout to admission, cancellation or host load.
-- **Credential-bus deadline investigation.** The [parent-deadline investigation](./docs/research/harness-credential-timeouts-2026-10.md#aranys-recorded-parent-deadline-miss)
-  lacks contemporaneous acceptance/helper/reap/composer/exit/EOF and load
-  metadata for the reported miss. Capture those bounded stages on recurrence
-  before attributing a product regression or changing a deadline.
 
 ## Next functional priority
 
