@@ -621,7 +621,7 @@ mod tests {
             model: "gpt-5.4".into(),
             prompt_version: 1,
             schema_version: 1,
-            compiler_version: 1,
+            compiler_version: 3,
             source_bytes: 4,
             source_tokens_estimate: 1,
             input_tokens: Some(12),

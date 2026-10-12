@@ -1,14 +1,23 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
+
+#[cfg(all(test, unix))]
+#[allow(dead_code)]
+#[path = "../tests/common/process.rs"]
+mod test_process;
 
 mod diagnostics;
 mod engine;
 mod presentation;
+mod private_fs;
 mod provider;
 mod session;
 mod store;
 mod telemetry;
 mod terminal;
 mod tools;
+
+#[cfg(target_os = "macos")]
+pub use tools::tool_guard_unit_main;
 
 pub use diagnostics::{
     DevelopmentFailure, enable_development_diagnostics, record_development_failure,
@@ -40,7 +49,7 @@ pub use session::{
     RunDisposition, RunId, RunStatus, RunView, SessionDefaults, SessionId, SessionListItem,
     SessionView, ToolView,
 };
-pub use store::{StateRoot, Store, StoreError};
+pub use store::{HistoryReset, StateRoot, Store, StoreError};
 pub use telemetry::{Telemetry, TelemetryConfigError};
 pub use terminal::{
     AttachedTerminal, CommandAvailability, CommandParseError, CompletionLayout, Composer,
@@ -50,6 +59,7 @@ pub use terminal::{
 pub use tools::{
     ApprovalInbox, ApprovalMode, EffectIntent, GuardReceipt, MAX_SKILLS, NetworkGrant,
     ProjectSkills, ToolApproval, ToolApprovals, ToolCall, ToolContext, ToolDisposition, ToolError,
-    ToolLimits, ToolObservation, ToolPolicyReceipt, WorkspacePermissions, configured_skill_names,
-    list_workspace_entries, mention_paths, project_skills, runtime_skill_names, tool_guard_main,
+    ToolLimits, ToolObservation, ToolPolicyReceipt, ToolResourceProfile, WorkspacePermissions,
+    configured_skill_names, list_workspace_entries, mention_paths, native_protection_supported,
+    project_skills, runtime_skill_names, tool_guard_main,
 };

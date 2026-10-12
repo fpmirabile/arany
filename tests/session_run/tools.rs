@@ -1,3 +1,4 @@
+use crate::{hash, private_file};
 use arany::{
     AgentPhase, CollaborationPolicy, CompactionItem, CompactionRequest, CompactionResponse, Engine,
     Finish, Provider, ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse,
@@ -12,18 +13,6 @@ use std::time::Duration;
 
 #[path = "tools/native_exec.rs"]
 mod native_exec;
-
-fn hash(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn private_file(path: &Path, bytes: &[u8]) {
-    std::fs::write(path, bytes).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
-}
 
 struct Journey {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
@@ -535,7 +524,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     let prefix = [
         Event::SessionStarted {
             title: "Historical tool facts".into(),
-            workspace_identity: None,
+            workspace_identity: (1, 2),
         },
         Event::MessageAccepted {
             run_id: run,

@@ -330,6 +330,7 @@ fn setup_warning_pages_every_line_before_showing_acceptance_actions() {
                 .draw(|frame| {
                     has_more = draw_setup_warning_frame(
                         frame,
+                        "ChatGPT plan consent",
                         &warning,
                         page,
                         false,
@@ -384,6 +385,7 @@ fn setup_warning_pages_every_line_before_showing_acceptance_actions() {
                     .draw(|frame| {
                         assert!(!draw_setup_warning_frame(
                             frame,
+                            "ChatGPT plan consent",
                             &warning,
                             usize::MAX,
                             accept,

@@ -7,16 +7,41 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{ExitCode, Stdio};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::process::{Child, Command};
 
 const CAPTURE_BYTES: usize = 48 * 1024;
-const MANAGER_DEADLINE: Duration = Duration::from_secs(4);
+const TASK_BYTES_CAP: usize = 96 * 1024;
 const PAYLOAD_DEADLINE: Duration = Duration::from_secs(50);
 pub(super) const RUNTIME_ROOT: &str = "/usr";
 
 #[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
 mod profile;
+
+#[cfg(target_os = "macos")]
+mod macos;
+
+pub(super) fn runtime_roots() -> &'static [&'static str] {
+    if cfg!(target_os = "macos") {
+        &["/System/Library", "/usr/lib", "/bin", "/usr/bin"]
+    } else {
+        &[RUNTIME_ROOT]
+    }
+}
+
+pub(super) fn native_system_program(path: &str) -> Result<bool, ToolError> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::system_program(path)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        Ok(false)
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,6 +50,10 @@ struct Task {
     intent: EffectIntent,
     #[cfg(target_os = "linux")]
     parent_namespaces: profile::Namespaces,
+    #[cfg(target_os = "macos")]
+    workspace: std::path::PathBuf,
+    #[cfg(target_os = "macos")]
+    guard_executable: std::path::PathBuf,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -37,7 +66,7 @@ struct Ready {
     profile_digest: [u8; 32],
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum BootstrapStage {
     Admission,
@@ -86,26 +115,48 @@ impl BootstrapFailure {
     }
 }
 
+/// A Guard stage that failed after bootstrap reported success, or outside its child.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuardStage {
+    ResourceAttestation,
+    ProcessCleanup,
+    LauncherReap,
+    OutputEof,
+    NamespaceBootstrap,
+    NativeManager,
+    ControlProtocol,
+}
+
+impl GuardStage {
+    pub(super) fn failure_stage(self) -> &'static str {
+        match self {
+            Self::ResourceAttestation => "resource attestation",
+            Self::ProcessCleanup => "process cleanup",
+            Self::LauncherReap => "launcher reap",
+            Self::OutputEof => "output EOF",
+            Self::NamespaceBootstrap => "namespace bootstrap",
+            Self::NativeManager => "native manager",
+            Self::ControlProtocol => "control protocol",
+        }
+    }
+}
+
+impl std::fmt::Display for GuardStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.failure_stage())
+    }
+}
+
 pub(super) fn check_available() -> Result<(), ToolError> {
     #[cfg(target_os = "linux")]
     {
-        profile::programs()?;
-        use std::os::unix::fs::MetadataExt;
-        for path in [
-            "/usr/bin/bwrap",
-            "/usr/bin/systemd-run",
-            "/usr/bin/systemctl",
-            "/usr/bin/env",
-        ] {
-            let metadata =
-                std::fs::symlink_metadata(path).map_err(|_| ToolError::ProtectionUnavailable)?;
-            if !metadata.is_file() || metadata.uid() != 0 || metadata.mode() & 0o6022 != 0 {
-                return Err(ToolError::ProtectionUnavailable);
-            }
-        }
-        Ok(())
+        linux::check_available()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        macos::check_available()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         Err(ToolError::ProtectionUnavailable)
     }
@@ -114,243 +165,15 @@ pub(super) fn check_available() -> Result<(), ToolError> {
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     #[cfg(target_os = "linux")]
     {
-        let mut bytes = b"arany-guard-v1:private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account".to_vec();
-        bytes.extend_from_slice(&profile::profile_digest()?);
-        Ok(digest(&bytes))
+        linux::enforcement_digest()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        macos::enforcement_digest()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         Err(ToolError::ProtectionUnavailable)
-    }
-}
-
-fn manager_command(executable: &str) -> Command {
-    let mut command = Command::new(executable);
-    command.env_clear().env("PATH", "/usr/bin:/bin");
-    #[cfg(target_os = "linux")]
-    {
-        let runtime = format!("/run/user/{}", rustix::process::geteuid().as_raw());
-        command.env("XDG_RUNTIME_DIR", &runtime).env(
-            "DBUS_SESSION_BUS_ADDRESS",
-            format!("unix:path={runtime}/bus"),
-        );
-    }
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    command
-}
-
-struct Unit {
-    name: String,
-    invocation: Option<String>,
-    group: Option<cap_std::fs::Dir>,
-    kill: Option<cap_std::fs::File>,
-}
-
-impl Unit {
-    async fn properties(&self) -> Result<serde_json::Value, ToolError> {
-        let mut command = manager_command("/usr/bin/systemctl");
-        command.args(["--user", "--no-ask-password", "show", &self.name,
-            "--property=Id,InvocationID,ControlGroup,MainPID,ActiveState,SubState,ExecMainCode,ExecMainStatus"]);
-        let (status, stdout, _) = capture(
-            command
-                .spawn()
-                .map_err(|_| ToolError::ProtectionUnavailable)?,
-            4096,
-            MANAGER_DEADLINE,
-        )
-        .await?;
-        if !status.success() {
-            return Err(ToolError::ProtectionUnavailable);
-        }
-        let text = std::str::from_utf8(&stdout).map_err(|_| ToolError::ProtectionUnavailable)?;
-        let mut values = serde_json::Map::new();
-        for line in text.lines() {
-            let (key, value) = line
-                .split_once('=')
-                .ok_or(ToolError::ProtectionUnavailable)?;
-            if values
-                .insert(key.to_owned(), serde_json::Value::String(value.to_owned()))
-                .is_some()
-            {
-                return Err(ToolError::ProtectionUnavailable);
-            }
-        }
-        Ok(serde_json::Value::Object(values))
-    }
-
-    async fn admit(&mut self) -> Result<(), ToolError> {
-        let values = self.properties().await?;
-        let group = values["ControlGroup"]
-            .as_str()
-            .ok_or(ToolError::ProtectionUnavailable)?;
-        let invocation = values["InvocationID"]
-            .as_str()
-            .filter(|value| value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
-            .ok_or(ToolError::ProtectionUnavailable)?;
-        if values["Id"].as_str() != Some(&self.name)
-            || values["ActiveState"] != "active"
-            || !group.ends_with(&self.name)
-            || !group.starts_with("/user.slice/")
-            || group.contains("..")
-        {
-            return Err(ToolError::ProtectionUnavailable);
-        }
-        let dir = super::fs::open_directory(
-            &Path::new("/sys/fs/cgroup").join(group.trim_start_matches('/')),
-        )?;
-        self.invocation = Some(invocation.to_owned());
-        self.group = Some(
-            dir.try_clone()
-                .map_err(|_| ToolError::ProtectionUnavailable)?,
-        );
-        let mut options = cap_std::fs::OpenOptions::new();
-        options.write(true);
-        self.kill = Some(
-            dir.open_with("cgroup.kill", &options)
-                .map_err(|_| ToolError::ProtectionUnavailable)?,
-        );
-        for (name, expected) in [
-            ("memory.max", MEMORY_BYTES.to_string()),
-            ("memory.swap.max", "0".into()),
-            ("memory.oom.group", "1".into()),
-            ("pids.max", MAX_PROCESSES.to_string()),
-            ("cpu.max", "25000 100000".into()),
-        ] {
-            let mut file = dir
-                .open(name)
-                .map_err(|_| ToolError::ProtectionUnavailable)?;
-            let mut actual = String::new();
-            Read::by_ref(&mut file)
-                .take(256)
-                .read_to_string(&mut actual)
-                .map_err(|_| ToolError::ProtectionUnavailable)?;
-            if actual.trim() != expected {
-                return Err(ToolError::ProtectionUnavailable);
-            }
-        }
-        let main_pid = values["MainPID"]
-            .as_str()
-            .and_then(|value| value.parse::<u32>().ok())
-            .filter(|pid| *pid > 0)
-            .ok_or(ToolError::ProtectionUnavailable)?;
-        let mut members = String::new();
-        dir.open("cgroup.procs")
-            .map_err(|_| ToolError::ProtectionUnavailable)?
-            .take(4096)
-            .read_to_string(&mut members)
-            .map_err(|_| ToolError::ProtectionUnavailable)?;
-        if members.lines().count() > MAX_PROCESSES as usize
-            || !members
-                .lines()
-                .any(|line| line.parse::<u32>() == Ok(main_pid))
-        {
-            return Err(ToolError::ProtectionUnavailable);
-        }
-        Ok(())
-    }
-
-    async fn stop(&self) -> Result<(), ToolError> {
-        let values = match self.properties().await {
-            Ok(values) => values,
-            Err(_) if self.empty()? => return Ok(()),
-            Err(error) => return Err(error),
-        };
-        if values["ActiveState"] == "inactive" && self.empty()? {
-            return Ok(());
-        }
-        if !matches!(values["ActiveState"].as_str(), Some("inactive" | "failed"))
-            && self
-                .invocation
-                .as_ref()
-                .is_some_and(|id| values["InvocationID"].as_str() != Some(id))
-        {
-            return Err(ToolError::ProtectionUnavailable);
-        }
-        let mut command = manager_command("/usr/bin/systemctl");
-        command.args(["--user", "--no-ask-password", "stop", &self.name]);
-        let (status, _, _) = capture(
-            command.spawn().map_err(|_| ToolError::Operation)?,
-            4096,
-            MANAGER_DEADLINE,
-        )
-        .await?;
-        if !status.success() {
-            if self.empty()? {
-                return Ok(());
-            }
-            return Err(ToolError::Operation);
-        }
-        if self.group.is_some() && !self.empty()? {
-            return Err(ToolError::Operation);
-        }
-        let values = match self.properties().await {
-            Ok(values) => values,
-            Err(_) if self.empty()? => return Ok(()),
-            Err(error) => return Err(error),
-        };
-        if !matches!(values["ActiveState"].as_str(), Some("inactive" | "failed")) {
-            return Err(ToolError::Operation);
-        }
-        if values["ActiveState"] == "failed" {
-            let mut command = manager_command("/usr/bin/systemctl");
-            command.args(["--user", "--no-ask-password", "reset-failed", &self.name]);
-            let (status, _, _) = capture(
-                command.spawn().map_err(|_| ToolError::Operation)?,
-                4096,
-                MANAGER_DEADLINE,
-            )
-            .await?;
-            if !status.success() {
-                return Err(ToolError::Operation);
-            }
-        }
-        Ok(())
-    }
-
-    fn empty(&self) -> Result<bool, ToolError> {
-        if let Some(group) = &self.group {
-            let mut actual = String::new();
-            match group.open("cgroup.events") {
-                Ok(mut file) => {
-                    Read::by_ref(&mut file)
-                        .take(1024)
-                        .read_to_string(&mut actual)
-                        .map_err(|_| ToolError::Operation)?;
-                    if !actual.lines().any(|line| line == "populated 0") {
-                        return Ok(false);
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(_) => return Err(ToolError::Operation),
-            }
-            return Ok(true);
-        }
-        Ok(false)
-    }
-
-    fn kill_group(&self) {
-        if let Some(kill) = &self.kill {
-            let mut file = kill;
-            let _ = file.write_all(b"1");
-            return;
-        }
-        if let Some(group) = &self.group {
-            let mut options = cap_std::fs::OpenOptions::new();
-            options.write(true);
-            if let Ok(mut file) = group.open_with("cgroup.kill", &options) {
-                let _ = file.write_all(b"1");
-            }
-        }
-    }
-}
-
-impl Drop for Unit {
-    fn drop(&mut self) {
-        self.kill_group();
     }
 }
 
@@ -360,270 +183,37 @@ pub(super) async fn execute(
     cancellation: RunCancellation,
 ) -> Result<ToolObservation, ToolError> {
     let mut dispatched = false;
-    match execute_inner(runtime, intent, cancellation, &mut dispatched).await {
+    #[cfg(target_os = "macos")]
+    let result = macos::execute_inner(runtime, intent, cancellation, &mut dispatched).await;
+    #[cfg(target_os = "linux")]
+    let result = linux::execute_inner(runtime, intent, cancellation, &mut dispatched).await;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let result = Err(ToolError::ProtectionUnavailable);
+    match result {
         Err(error) if !dispatched => Ok(super::unstarted_observation(intent.clone(), error)),
         result => result,
     }
 }
 
-async fn execute_inner(
-    runtime: &ToolRuntime,
-    intent: &EffectIntent,
-    mut cancellation: RunCancellation,
-    dispatched: &mut bool,
-) -> Result<ToolObservation, ToolError> {
-    let deadline = tokio::time::Instant::now()
-        + Duration::from_millis(u64::from(intent.limits.runtime_ms))
-        + Duration::from_secs(5);
-    super::fs::validate_workspace(runtime)?;
-    let workspace = super::fs::open_directory(&runtime.workspace)?;
-    let snapshot = super::fs::Snapshot::create(
-        &workspace,
-        &runtime.config,
-        matches!(
-            intent.call,
-            ToolCall::Command { .. } | ToolCall::McpList { .. } | ToolCall::McpCall { .. }
-        ),
-    )?;
-    let mut unit = Unit {
-        name: format!("arany-tool-{}.service", intent.id),
-        invocation: None,
-        group: None,
-        kill: None,
-    };
-    let mut command = manager_command("/usr/bin/systemd-run");
-    command.args([
-        "--user",
-        "--no-ask-password",
-        "--quiet",
-        "--description=Arany bounded Tool worker",
-        "--pipe",
-        "--wait",
-        "--expand-environment=no",
-        "--service-type=exec",
-        "--unit",
-        &unit.name,
-        "--property=Restart=no",
-        "--property=KillMode=control-group",
-        "--property=SendSIGKILL=yes",
-        "--property=FinalKillSignal=SIGKILL",
-        "--property=TimeoutStartSec=5s",
-        "--property=TimeoutStopSec=2s",
-        "--property=RuntimeRandomizedExtraSec=0",
-        "--property=RemainAfterExit=no",
-        "--property=MemoryMax=536870912",
-        "--property=MemorySwapMax=0",
-        "--property=OOMPolicy=kill",
-        "--property=TasksMax=64",
-        "--property=CPUQuota=25%",
-        "--property=CPUQuotaPeriodSec=100ms",
-    ]);
-    command
-        .arg(format!(
-            "--property=RuntimeMaxSec={}ms",
-            intent.limits.runtime_ms
-        ))
-        .args([
-            "/usr/bin/env",
-            "-i",
-            "PATH=/usr/bin:/bin",
-            "/usr/bin/bwrap",
-            "--unshare-all",
-            "--unshare-user",
-            "--disable-userns",
-            "--assert-userns-disabled",
-            "--new-session",
-            "--die-with-parent",
-            "--cap-drop",
-            "ALL",
-            "--clearenv",
-            "--setenv",
-            "PATH",
-            "/usr/bin:/bin",
-            "--setenv",
-            "HOME",
-            "/scratch",
-            "--setenv",
-            "TMPDIR",
-            "/scratch",
-            "--setenv",
-            "CARGO_TARGET_DIR",
-            "/scratch/target",
-            "--ro-bind",
-            RUNTIME_ROOT,
-            RUNTIME_ROOT,
-            "--symlink",
-            "usr/lib",
-            "/lib",
-            "--symlink",
-            "usr/lib",
-            "/lib64",
-            "--proc",
-            "/proc",
-            "--dev",
-            "/dev",
-            "--size",
-            "67108864",
-            "--tmpfs",
-            "/scratch",
-            "--ro-bind",
-        ]);
-    command.arg(&snapshot.path).arg("/seed");
-    for folder in ["programs", "inputs", "skills"] {
-        if snapshot.dir.symlink_metadata(folder).is_ok() {
-            command
-                .args(["--ro-bind"])
-                .arg(snapshot.path.join(folder))
-                .arg(format!("/{folder}"));
+/// Waits briefly for the launcher's bounded stderr; `None` means it did not reach EOF.
+pub(super) async fn drain_stderr(
+    task: &mut tokio::task::JoinHandle<Result<Vec<u8>, ToolError>>,
+) -> Option<Vec<u8>> {
+    match tokio::time::timeout(Duration::from_secs(2), &mut *task).await {
+        Ok(Ok(Ok(stderr))) => Some(stderr),
+        Ok(_) => None,
+        Err(_) => {
+            task.abort();
+            let _ = task.await;
+            None
         }
     }
-    let native = matches!(
-        intent.call,
-        ToolCall::List { .. }
-            | ToolCall::Read { .. }
-            | ToolCall::Search { .. }
-            | ToolCall::Write { .. }
-            | ToolCall::Edit { .. }
-            | ToolCall::Mkdir { .. }
-    );
-    if native {
-        command
-            .arg(if intent.call.mutates() {
-                "--bind"
-            } else {
-                "--ro-bind"
-            })
-            .arg(&runtime.workspace)
-            .arg("/workspace");
-    } else {
-        command.args(["--size", "67108864", "--tmpfs", "/workspace"]);
-    }
-    command
-        .arg("--ro-bind")
-        .arg(&runtime.guard_executable)
-        .arg("/arany")
-        .args(["--chdir", "/", "/arany", "--internal-tool-guard"]);
-    command.stdin(Stdio::piped());
-    #[cfg(target_os = "linux")]
-    let parent_namespaces = profile::Namespaces::read()?;
-    let mut child = command
-        .spawn()
-        .map_err(|_| ToolError::ProtectionUnavailable)?;
-    let mut stdin = child.stdin.take().ok_or(ToolError::Operation)?;
-    let mut stdout = BufReader::new(child.stdout.take().ok_or(ToolError::Operation)?);
-    let stderr = child.stderr.take().ok_or(ToolError::Operation)?;
-    let mut stderr_task = tokio::spawn(read_capped(stderr, CAPTURE_BYTES));
-    let execution = async {
-        let task = serde_json::to_vec(&Task {
-            config: runtime.config.clone(),
-            intent: intent.clone(),
-            #[cfg(target_os = "linux")]
-            parent_namespaces: parent_namespaces.clone(),
-        })
-        .map_err(|_| ToolError::Configuration)?;
-        if task.len() > 96 * 1024 {
-            return Err(ToolError::Limit);
-        }
-        stdin
-            .write_all(&task)
-            .await
-            .map_err(|_| ToolError::Operation)?;
-        stdin
-            .write_all(b"\n")
-            .await
-            .map_err(|_| ToolError::Operation)?;
-        let ready_bytes = read_line_capped(&mut stdout, 2048).await?;
-        let ready: Ready =
-            serde_json::from_slice(&ready_bytes).map_err(|_| ToolError::ProtectionUnavailable)?;
-        if ready.digest != intent.digest() || ready.pid != 1 && ready.pid != 2 {
-            return Err(ToolError::ProtectionUnavailable);
-        }
-        #[cfg(target_os = "linux")]
-        if !ready.namespaces.isolated_from(&parent_namespaces)
-            || ready.profile_digest != intent.enforcement_digest
-        {
-            return Err(ToolError::ProtectionUnavailable);
-        }
-        unit.admit()
-            .await
-            .map_err(|_| ToolError::GuardRejected("resource attestation"))?;
-        *dispatched = true;
-        stdin
-            .write_all(b"GO\n")
-            .await
-            .map_err(|_| ToolError::Operation)?;
-        stdin.shutdown().await.map_err(|_| ToolError::Operation)?;
-        let bytes = read_line_capped(&mut stdout, CAPTURE_BYTES).await?;
-        let observation: ToolObservation =
-            serde_json::from_slice(&bytes).map_err(|_| ToolError::Operation)?;
-        if observation.intent != *intent
-            || !observation.valid()
-            || observation
-                .guard
-                .as_ref()
-                .is_none_or(|receipt| !receipt.valid_for(intent))
-        {
-            return Err(ToolError::Operation);
-        }
-        let tail = read_capped(stdout, 1).await?;
-        if !tail.is_empty() {
-            return Err(ToolError::Operation);
-        }
-        if !child
-            .wait()
-            .await
-            .map_err(|_| ToolError::Operation)?
-            .success()
-        {
-            return Err(ToolError::Operation);
-        }
-        Ok(observation)
-    };
-    let result = tokio::select! {
-        biased;
-        () = cancellation.cancelled() => Err(ToolError::Operation),
-        result = tokio::time::timeout_at(deadline, execution) => result.unwrap_or(Err(ToolError::Limit)),
-    };
-    let cleanup = tokio::time::timeout(Duration::from_secs(5), unit.stop()).await;
-    if !matches!(cleanup, Ok(Ok(()))) {
-        unit.kill_group();
-    }
-    let _ = child.start_kill();
-    let reaped = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
-    let drained = tokio::time::timeout(Duration::from_secs(2), &mut stderr_task).await;
-    if drained.is_err() {
-        stderr_task.abort();
-        let _ = stderr_task.await;
-    }
-    if result.is_err()
-        && let Ok(Ok(Ok(stderr))) = &drained
-        && let Ok(failure) = serde_json::from_slice::<BootstrapFailure>(stderr)
-    {
-        return Err(ToolError::GuardBootstrap(failure));
-    }
-    if !matches!(cleanup, Ok(Ok(()))) {
-        return Err(ToolError::GuardRejected("process-unit cleanup"));
-    }
-    if !matches!(reaped, Ok(Ok(_))) {
-        return Err(ToolError::GuardRejected("launcher reap"));
-    }
-    if !matches!(drained, Ok(Ok(Ok(_)))) {
-        return Err(ToolError::GuardRejected("stderr EOF"));
-    }
-    if result.is_err()
-        && let Ok(Ok(Ok(stderr))) = &drained
-    {
-        let diagnostic = std::str::from_utf8(stderr).unwrap_or_default();
-        let stage = if diagnostic.contains("bwrap:") {
-            "namespace bootstrap"
-        } else if diagnostic.contains("Failed to") {
-            "native manager"
-        } else {
-            "bounded control protocol"
-        };
-        return Err(ToolError::GuardRejected(stage));
-    }
-    result
+}
+
+pub(super) fn bootstrap_failure(stderr: &[u8]) -> Option<ToolError> {
+    serde_json::from_slice::<BootstrapFailure>(stderr)
+        .ok()
+        .map(ToolError::GuardBootstrap)
 }
 
 pub(super) async fn read_capped<R: tokio::io::AsyncRead + Unpin>(
@@ -673,6 +263,48 @@ pub(super) async fn read_line_capped<R: tokio::io::AsyncBufRead + Unpin>(
     }
 }
 
+fn parse_ready(bytes: &[u8], intent: &EffectIntent) -> Result<Ready, ToolError> {
+    let ready: Ready =
+        serde_json::from_slice(bytes).map_err(|_| ToolError::ProtectionUnavailable)?;
+    if ready.digest != intent.digest() || ready.profile_digest != intent.enforcement_digest {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok(ready)
+}
+
+async fn read_observation<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    intent: &EffectIntent,
+) -> Result<ToolObservation, ToolError> {
+    let bytes = read_line_capped(reader, CAPTURE_BYTES).await?;
+    let observation: ToolObservation =
+        serde_json::from_slice(&bytes).map_err(|_| ToolError::Operation)?;
+    if !observation.attested_for(intent) || !read_capped(&mut *reader, 1).await?.is_empty() {
+        return Err(ToolError::Operation);
+    }
+    Ok(observation)
+}
+
+/// Reaps a child this process owns. On macOS it closes stdin first and polls `try_wait`
+/// at the supervision interval, because Seatbelt blocks Tokio's signal wake socket;
+/// elsewhere it awaits exit.
+pub(super) async fn reap_owned_child(
+    child: &mut Child,
+) -> std::io::Result<std::process::ExitStatus> {
+    #[cfg(target_os = "macos")]
+    {
+        drop(child.stdin.take());
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Ok(status);
+            }
+            tokio::time::sleep(macos::SUPERVISION_INTERVAL).await;
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    child.wait().await
+}
+
 async fn capture(
     mut child: Child,
     cap: usize,
@@ -682,7 +314,11 @@ async fn capture(
     let err = child.stderr.take().ok_or(ToolError::Operation)?;
     let result = tokio::time::timeout(deadline, async {
         tokio::try_join!(
-            async { child.wait().await.map_err(|_| ToolError::Operation) },
+            async {
+                reap_owned_child(&mut child)
+                    .await
+                    .map_err(|_| ToolError::Operation)
+            },
             read_capped(out, cap),
             read_capped(err, cap)
         )
@@ -694,40 +330,88 @@ async fn capture(
         Err(_) => ToolError::Limit,
     };
     let _ = child.start_kill();
-    let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), reap_owned_child(&mut child)).await;
     Err(error)
+}
+
+fn encode_task(task: &Task) -> Result<Vec<u8>, ToolError> {
+    let mut bytes = serde_json::to_vec(task).map_err(|_| ToolError::Configuration)?;
+    if bytes.len() > TASK_BYTES_CAP {
+        return Err(ToolError::Limit);
+    }
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+fn read_task(reader: &mut std::io::BufReader<impl Read>) -> Result<Task, ToolError> {
+    let mut task = Vec::new();
+    std::io::BufRead::read_until(
+        &mut Read::take(&mut *reader, (TASK_BYTES_CAP + 1) as u64),
+        b'\n',
+        &mut task,
+    )
+    .map_err(|_| ToolError::Operation)?;
+    if task.last() != Some(&b'\n') {
+        return Err(if task.len() > TASK_BYTES_CAP {
+            ToolError::Limit
+        } else {
+            ToolError::Operation
+        });
+    }
+    if !reader.buffer().is_empty() {
+        return Err(ToolError::Configuration);
+    }
+    serde_json::from_slice(&task).map_err(|_| ToolError::Configuration)
+}
+
+/// Returns the payload root and the Workspace this helper's call operates on.
+#[cfg(target_os = "macos")]
+fn bootstrap_locations(
+    task: &Task,
+    stage: &mut BootstrapStage,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), ToolError> {
+    *stage = BootstrapStage::Capabilities;
+    let root = macos::install(task)?;
+    let workspace = if task.intent.call.is_process() {
+        root.join("workspace")
+    } else {
+        task.workspace.clone()
+    };
+    Ok((root, workspace))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn bootstrap_locations(
+    _task: &Task,
+    _stage: &mut BootstrapStage,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), ToolError> {
+    Ok((
+        Path::new("/").to_owned(),
+        Path::new("/workspace").to_owned(),
+    ))
 }
 
 pub(super) fn helper_main() -> ExitCode {
     let mut stage = BootstrapStage::Admission;
     let result = (|| -> Result<(), ToolError> {
-        let mut stdin = std::io::stdin().lock();
-        let mut task = Vec::new();
-        loop {
-            let mut byte = [0];
-            if stdin.read(&mut byte).map_err(|_| ToolError::Operation)? != 1 {
-                return Err(ToolError::Operation);
-            }
-            if byte[0] == b'\n' {
-                break;
-            }
-            if task.len() == 96 * 1024 {
-                return Err(ToolError::Limit);
-            }
-            task.push(byte[0]);
-        }
-        let task: Task = serde_json::from_slice(&task).map_err(|_| ToolError::Configuration)?;
+        #[cfg(target_os = "macos")]
+        macos::bootstrap()?;
+        let mut stdin = std::io::BufReader::new(std::io::stdin().lock());
+        let task = read_task(&mut stdin)?;
         task.config.validate()?;
         if !task.intent.valid()
             || task.intent.policy_digest != task.config.digest()
             || task.intent.expires_at_ms <= now_ms()
             || !task.config.allows(&task.intent.call)
             || task.intent.enforcement_digest != enforcement_digest()?
+            || task.intent.limits.resource_profile != ToolLimits::default().resource_profile
         {
             return Err(ToolError::Configuration);
         }
+        let (root, workspace) = bootstrap_locations(&task, &mut stage)?;
+        let workspace = workspace.as_path();
         stage = BootstrapStage::Workspace;
-        if matches!(
+        if (matches!(
             task.intent.call,
             ToolCall::List { .. }
                 | ToolCall::Read { .. }
@@ -735,51 +419,21 @@ pub(super) fn helper_main() -> ExitCode {
                 | ToolCall::Write { .. }
                 | ToolCall::Edit { .. }
                 | ToolCall::Mkdir { .. }
-        ) && super::fs::identity(&super::fs::open_directory(Path::new("/workspace"))?)?
-            != (task.intent.workspace_device, task.intent.workspace_inode)
+        ) || cfg!(target_os = "macos") && matches!(task.intent.call, ToolCall::Skill { .. }))
+            && super::fs::identity(&super::fs::open_directory(workspace)?)?
+                != (task.intent.workspace_device, task.intent.workspace_inode)
         {
             return Err(ToolError::ChangedInput);
         }
+        let skill = if matches!(task.intent.call, ToolCall::Skill { .. }) {
+            Some(load_skill_bytes(&task)?)
+        } else {
+            None
+        };
         #[cfg(target_os = "linux")]
         {
             stage = BootstrapStage::Capabilities;
-            rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
-                .map_err(|_| ToolError::ProtectionUnavailable)?;
-            use rustix::process::{Resource, Rlimit, setrlimit};
-            setrlimit(
-                Resource::Nofile,
-                Rlimit {
-                    current: Some(64),
-                    maximum: Some(64),
-                },
-            )
-            .map_err(|_| ToolError::ProtectionUnavailable)?;
-            profile::install()?;
-            setrlimit(
-                Resource::Core,
-                Rlimit {
-                    current: Some(0),
-                    maximum: Some(0),
-                },
-            )
-            .map_err(|_| ToolError::ProtectionUnavailable)?;
-            let status = std::fs::read_to_string("/proc/self/status")
-                .map_err(|_| ToolError::ProtectionUnavailable)?;
-            let field = |name: &str| {
-                status.lines().find_map(|line| {
-                    let (key, value) = line.split_once(':')?;
-                    (key == name).then_some(value.trim())
-                })
-            };
-            if field("NoNewPrivs") != Some("1")
-                || field("CapEff") != Some("0000000000000000")
-                || field("CapPrm") != Some("0000000000000000")
-                || field("CapInh") != Some("0000000000000000")
-                || field("CapAmb") != Some("0000000000000000")
-                || field("Seccomp") != Some("2")
-            {
-                return Err(ToolError::ProtectionUnavailable);
-            }
+            linux::harden()?;
         }
         stage = BootstrapStage::Handshake;
         let ready = Ready {
@@ -787,9 +441,9 @@ pub(super) fn helper_main() -> ExitCode {
             pid: std::process::id(),
             #[cfg(target_os = "linux")]
             namespaces: profile::Namespaces::read()?,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             profile_digest: enforcement_digest()?,
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             profile_digest: [0; 32],
         };
         #[cfg(target_os = "linux")]
@@ -811,10 +465,8 @@ pub(super) fn helper_main() -> ExitCode {
         }
         drop(stdin);
         stage = BootstrapStage::Payload;
-        if matches!(
-            task.intent.call,
-            ToolCall::Command { .. } | ToolCall::McpList { .. } | ToolCall::McpCall { .. }
-        ) {
+        #[cfg(not(target_os = "macos"))]
+        if task.intent.call.is_process() {
             super::fs::copy_seed()?;
         }
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -825,18 +477,13 @@ pub(super) fn helper_main() -> ExitCode {
             match &task.intent.call {
                 ToolCall::Command { program, args, cwd } => {
                     let definition = task.config.commands.iter().find(|value| &value.name == program).ok_or(ToolError::Configuration)?;
-                    let mut command = payload(definition, args, cwd)?;
+                    let mut command = payload(definition, args, cwd, &root)?;
                     let (status, out, err) = capture(command.spawn().map_err(|_| ToolError::Operation)?, (task.intent.limits.result_bytes as usize / 2).saturating_sub(128), PAYLOAD_DEADLINE).await?;
                     Ok(serde_json::json!({"exit_code":status.code(),"stdout":String::from_utf8(out).map_err(|_| ToolError::Operation)?,"stderr":String::from_utf8(err).map_err(|_| ToolError::Operation)?,"workspace_changes":"discarded"}).to_string())
                 }
-                ToolCall::Skill { name, resource } => {
-                    let path = format!("/skills/{name}/{}", resource.as_deref().unwrap_or("SKILL.md"));
-                    let bytes = super::fs::read_regular(super::fs::open_absolute(&path)?, MAX_TOOL_RESULT_BYTES)?;
-                    if resource.is_none() || resource.as_deref() == Some("SKILL.md") { super::skills::metadata(name, &bytes)?; }
-                    String::from_utf8(bytes).map_err(|_| ToolError::Operation)
-                }
-                ToolCall::McpList { .. } | ToolCall::McpCall { .. } => super::mcp::execute(&task.intent.call, &task.config).await,
-                call => super::fs::native(call, &task.config),
+                ToolCall::Skill { name, resource } => skill_text(name, resource.as_deref(), skill.ok_or(ToolError::Configuration)?),
+                ToolCall::McpList { .. } | ToolCall::McpCall { .. } => super::mcp::execute(&task.intent.call, &task.config, &root).await,
+                call => super::fs::native(workspace, call, &task.config),
             }
         });
         let (disposition, output) = match result {
@@ -914,27 +561,106 @@ pub(super) fn helper_main() -> ExitCode {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub(super) fn unit_main() -> ExitCode {
+    macos::unit_main()
+}
+
+fn load_skill_bytes(task: &Task) -> Result<Vec<u8>, ToolError> {
+    let ToolCall::Skill { name, resource } = &task.intent.call else {
+        return Err(ToolError::Configuration);
+    };
+    let resource = resource.as_deref().unwrap_or("SKILL.md");
+    #[cfg(target_os = "macos")]
+    let path = {
+        let skill = task
+            .config
+            .skills
+            .iter()
+            .find(|skill| &skill.name == name)
+            .ok_or(ToolError::Configuration)?;
+        Path::new(&skill.directory)
+            .join(resource)
+            .to_str()
+            .ok_or(ToolError::Path)?
+            .to_owned()
+    };
+    #[cfg(not(target_os = "macos"))]
+    let path = format!("/skills/{name}/{resource}");
+    let bytes = super::fs::read_regular(super::fs::open_absolute(&path)?, MAX_TOOL_RESULT_BYTES)?;
+    if task
+        .config
+        .skills
+        .iter()
+        .find(|skill| &skill.name == name)
+        .and_then(|skill| skill.files.get(resource))
+        != Some(&hex_digest(&bytes))
+    {
+        return Err(ToolError::ChangedInput);
+    }
+    Ok(bytes)
+}
+
+fn skill_text(name: &str, resource: Option<&str>, bytes: Vec<u8>) -> Result<String, ToolError> {
+    if resource.unwrap_or("SKILL.md") == "SKILL.md" {
+        super::skills::metadata(name, &bytes)?;
+    }
+    String::from_utf8(bytes).map_err(|_| ToolError::Operation)
+}
+
 pub(super) fn payload(
     program: &super::config::Program,
     args: &[String],
     cwd: &str,
+    root: &Path,
 ) -> Result<Command, ToolError> {
-    let executable = format!("/programs/{}", program.name);
-    let bytes =
-        super::fs::read_regular(super::fs::open_absolute(&executable)?, MAX_SNAPSHOT_BYTES)?;
+    let resources = if cfg!(target_os = "macos") {
+        root.join("runtime")
+    } else {
+        root.to_owned()
+    };
+    let workspace = root.join("workspace");
+    let scratch = root.join("scratch");
+    let executable = if native_system_program(&program.executable)? {
+        Path::new(&program.executable).to_owned()
+    } else {
+        resources.join("programs").join(&program.name)
+    };
+    let bytes = super::fs::read_regular(
+        super::fs::open_absolute(executable.to_str().ok_or(ToolError::Path)?)?,
+        MAX_SNAPSHOT_BYTES,
+    )?;
     if hex_digest(&bytes) != program.sha256 {
         return Err(ToolError::ChangedInput);
     }
     let mut command = Command::new(executable);
     command
-        .args(args)
-        .current_dir(Path::new("/workspace").join(cwd))
+        .args(args.iter().map(|arg| {
+            if cfg!(target_os = "macos") {
+                for (alias, target) in [
+                    ("workspace", &workspace),
+                    ("scratch", &scratch),
+                    ("inputs", &resources.join("inputs")),
+                    ("skills", &resources.join("skills")),
+                    ("programs", &resources.join("programs")),
+                ] {
+                    if let Ok(relative) = Path::new(arg).strip_prefix(format!("/{alias}")) {
+                        return target.join(relative).into_os_string();
+                    }
+                }
+            }
+            std::ffi::OsString::from(arg)
+        }))
+        .current_dir(workspace.join(cwd))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
-        .env("HOME", "/scratch")
-        .env("TMPDIR", "/scratch")
-        .env("CARGO_HOME", "/scratch/cargo")
-        .env("CARGO_TARGET_DIR", "/scratch/target")
+        .env("HOME", &scratch)
+        .env("TMPDIR", &scratch)
+        .env("CARGO_HOME", scratch.join("cargo"))
+        .env("CARGO_TARGET_DIR", scratch.join("target"))
+        .env("ARANY_TOOL_WORKSPACE", &workspace)
+        .env("ARANY_TOOL_INPUTS", resources.join("inputs"))
+        .env("ARANY_TOOL_SKILLS", resources.join("skills"))
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

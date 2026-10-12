@@ -1,11 +1,10 @@
 use super::{DATABASE_FILE, MAX_DATABASE_BYTES, StoreError};
-use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
-use cap_std::fs::{Dir, DirBuilder, OpenOptions};
+use cap_std::fs::{Dir, OpenOptions};
 use directories::ProjectDirs;
 use std::io::{self, Read, Write};
-use std::path::{Component, Path, PathBuf};
-
+use std::path::{Path, PathBuf};
 mod lock;
 pub(crate) use lock::SessionRunLock;
 
@@ -17,10 +16,59 @@ const CHATGPT_REGISTRATION_FILE: &str = "chatgpt-registration.json";
 const PENDING_CHATGPT_REGISTRATION_FILE: &str = "chatgpt-registration.pending";
 const CHATGPT_ACCOUNTS_FILE: &str = "chatgpt-accounts.json";
 const PENDING_CHATGPT_ACCOUNTS_FILE: &str = "chatgpt-accounts.pending";
+const HISTORY_FILES: [&str; 4] = [
+    "events.sqlite3-journal",
+    "events.sqlite3-wal",
+    "events.sqlite3-shm",
+    DATABASE_FILE,
+];
+
+pub struct HistoryReset {
+    state: StateRoot,
+    _lock: lock::HistoryLock,
+    records: [Option<cap_std::fs::Metadata>; 4],
+}
+
+impl HistoryReset {
+    pub fn apply(self) -> Result<(), StoreError> {
+        #[cfg(unix)]
+        {
+            use cap_std::fs::MetadataExt;
+
+            let current = self.state.history_records()?;
+            for (expected, current) in self.records.iter().zip(&current) {
+                match (expected, current) {
+                    (None, None) => {}
+                    (Some(expected), Some(current))
+                        if expected.dev() == current.dev()
+                            && expected.ino() == current.ino()
+                            && expected.len() == current.len()
+                            && expected.modified()? == current.modified()? => {}
+                    _ => return Err(StoreError::HistoryChanged),
+                }
+            }
+            for (name, record) in HISTORY_FILES.iter().zip(&self.records) {
+                if record.is_some() {
+                    self.state.dir.remove_file(name)?;
+                }
+            }
+            prepare_database_file(&self.state.dir, true)?;
+            self.state
+                .dir
+                .open_with(".", OpenOptions::new().read(true))?
+                .sync_all()?;
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            Err(StoreError::InvalidStateDirectory)
+        }
+    }
+}
 
 pub struct StateRoot {
     path: PathBuf,
-    _dir: Dir,
+    dir: Dir,
     #[cfg(unix)]
     ancestors: Vec<(u64, u64)>,
 }
@@ -34,7 +82,7 @@ impl StateRoot {
     pub(crate) fn try_clone(&self) -> Result<Self, StoreError> {
         Ok(Self {
             path: self.path.clone(),
-            _dir: self._dir.try_clone()?,
+            dir: self.dir.try_clone()?,
             #[cfg(unix)]
             ancestors: self.ancestors.clone(),
         })
@@ -47,11 +95,22 @@ impl StateRoot {
         let path = dirs.state_dir().ok_or(StoreError::InvalidStateDirectory)?;
         #[cfg(not(target_os = "linux"))]
         let path = dirs.data_local_dir();
+        #[cfg(all(debug_assertions, any(target_os = "linux", target_os = "macos")))]
+        if let Some(fixture) = std::env::var_os("ARANY_TEST_ACCOUNT_ROOT") {
+            let fixture = PathBuf::from(fixture);
+            let parent = fixture
+                .parent()
+                .filter(|parent| fixture.is_absolute() && *parent != Path::new("/"))
+                .ok_or(StoreError::InvalidStateDirectory)?;
+            if !path.starts_with(parent) {
+                return Err(StoreError::InvalidStateDirectory);
+            }
+        }
         Ok(path.to_path_buf())
     }
 
     pub fn account_path() -> Result<PathBuf, StoreError> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             use nix::unistd::{User, geteuid};
 
@@ -74,9 +133,13 @@ impl StateRoot {
             if !user.dir.is_absolute() {
                 return Err(StoreError::InvalidStateDirectory);
             }
-            Ok(user.dir.join(".local/state/arany"))
+            #[cfg(target_os = "linux")]
+            let suffix = ".local/state/arany";
+            #[cfg(target_os = "macos")]
+            let suffix = "Library/Application Support/dev.Arany.arany";
+            Ok(user.dir.join(suffix))
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             Self::default_path()
         }
@@ -91,58 +154,45 @@ impl StateRoot {
     }
 
     fn open(path: &Path, create: bool) -> Result<Self, StoreError> {
-        if !path.is_absolute() {
-            return Err(StoreError::InvalidStateDirectory);
-        }
-        let mut components = path.components();
-        if components.next() != Some(Component::RootDir) {
-            return Err(StoreError::InvalidStateDirectory);
-        }
-        let mut names = Vec::new();
-        let mut normalized = PathBuf::from("/");
-        for component in components {
-            let Component::Normal(name) = component else {
-                return Err(StoreError::InvalidStateDirectory);
-            };
-            names.push(name);
-            normalized.push(name);
-        }
-        if names.is_empty() || normalized != path {
-            return Err(StoreError::InvalidStateDirectory);
-        }
-        let mut dir = Dir::open_ambient_dir(Path::new("/"), ambient_authority())?;
+        let directory = crate::private_fs::open_directory(path, create)?;
         #[cfg(unix)]
-        let mut ancestors = vec![directory_identity(&dir)?];
-        for (index, name) in names.iter().enumerate() {
-            match dir.open_dir_nofollow(name) {
-                Ok(next) => dir = next,
-                Err(error) if create && error.kind() == io::ErrorKind::NotFound => {
-                    let mut builder = DirBuilder::new();
-                    #[cfg(unix)]
-                    {
-                        use cap_std::fs::DirBuilderExt;
-                        builder.mode(0o700);
-                    }
-                    dir.create_dir_with(name, &builder)?;
-                    dir = dir.open_dir_nofollow(name)?;
-                }
-                Err(error) => return Err(StoreError::Io(error)),
-            }
-            check_directory(&dir, index + 1 == names.len())?;
-            #[cfg(unix)]
-            ancestors.push(directory_identity(&dir)?);
+        if create {
+            lock::prepare_history_lock(&directory.dir)?;
         }
-        prepare_database_file(&dir, create)?;
+        prepare_database_file(&directory.dir, create)?;
         Ok(Self {
-            path: normalized,
-            _dir: dir,
+            path: directory.path,
+            dir: directory.dir,
             #[cfg(unix)]
-            ancestors,
+            ancestors: directory.ancestors,
         })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn prepare_history_reset(self, workspace: &Path) -> Result<HistoryReset, StoreError> {
+        let workspace = Dir::open_ambient_dir(workspace, ambient_authority())?;
+        self.ensure_outside_workspace(&workspace)?;
+        let lock = self.lock_history(true)?;
+        let records = self.history_records()?;
+        Ok(HistoryReset {
+            state: self,
+            _lock: lock,
+            records,
+        })
+    }
+
+    fn history_records(&self) -> Result<[Option<cap_std::fs::Metadata>; 4], StoreError> {
+        let mut records = std::array::from_fn(|_| None);
+        for (name, record) in HISTORY_FILES.iter().zip(&mut records) {
+            *record = self
+                .open_private_record(name, MAX_DATABASE_BYTES as usize)?
+                .map(|file| file.metadata())
+                .transpose()?;
+        }
+        Ok(records)
     }
 
     pub(crate) fn append_development_diagnostic(&self, record: &[u8]) -> Result<(), StoreError> {
@@ -157,11 +207,11 @@ impl StateRoot {
             let mut options = OpenOptions::new();
             options.read(true).write(true).follow(FollowSymlinks::No);
             nonblocking(&mut options);
-            let mut file = match self._dir.open_with("development.log", &options) {
+            let mut file = match self.dir.open_with("development.log", &options) {
                 Ok(file) => file,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     options.create_new(true).mode(0o600);
-                    self._dir.open_with("development.log", &options)?
+                    self.dir.open_with("development.log", &options)?
                 }
                 Err(error) => return Err(error.into()),
             };
@@ -250,6 +300,22 @@ impl StateRoot {
         )
     }
 
+    pub fn remove_saved_account_record(&self) -> Result<(), StoreError> {
+        self.remove_private_record(
+            SAVED_ACCOUNT_FILE,
+            PENDING_ACCOUNT_FILE,
+            Self::MAX_ACCOUNT_RECORD_BYTES,
+        )
+    }
+
+    pub fn remove_model_preferences_record(&self) -> Result<(), StoreError> {
+        self.remove_private_record(
+            "model-preferences.json",
+            "model-preferences.pending",
+            Self::MAX_MODEL_PREFERENCES_BYTES,
+        )
+    }
+
     pub fn read_chatgpt_registration_record(&self) -> Result<Option<Vec<u8>>, StoreError> {
         self.read_private_record(
             CHATGPT_REGISTRATION_FILE,
@@ -285,6 +351,50 @@ impl StateRoot {
         )
     }
 
+    pub fn remove_chatgpt_accounts_record(&self) -> Result<(), StoreError> {
+        self.remove_private_record(
+            CHATGPT_ACCOUNTS_FILE,
+            PENDING_CHATGPT_ACCOUNTS_FILE,
+            Self::MAX_CHATGPT_ACCOUNTS_BYTES,
+        )
+    }
+
+    pub fn remove_chatgpt_registration_record(&self) -> Result<(), StoreError> {
+        self.remove_private_record(
+            CHATGPT_REGISTRATION_FILE,
+            PENDING_CHATGPT_REGISTRATION_FILE,
+            Self::MAX_CHATGPT_REGISTRATION_BYTES,
+        )
+    }
+
+    fn remove_private_record(
+        &self,
+        name: &str,
+        pending: &str,
+        limit: usize,
+    ) -> Result<(), StoreError> {
+        #[cfg(unix)]
+        {
+            let record = self.open_private_record(name, limit)?;
+            let staged = self.open_private_record(pending, limit)?;
+            if staged.is_some() {
+                self.dir.remove_file(pending)?;
+            }
+            if record.is_some() {
+                self.dir.remove_file(name)?;
+            }
+            self.dir
+                .open_with(".", OpenOptions::new().read(true))?
+                .sync_all()?;
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (name, pending, limit);
+            Err(StoreError::InvalidStateDirectory)
+        }
+    }
+
     fn read_private_record(&self, name: &str, limit: usize) -> Result<Option<Vec<u8>>, StoreError> {
         let Some(mut file) = self.open_private_record(name, limit)? else {
             return Ok(None);
@@ -310,7 +420,7 @@ impl StateRoot {
             options.read(true);
             options.follow(FollowSymlinks::No);
             nonblocking(&mut options);
-            let file = match self._dir.open_with(name, &options) {
+            let file = match self.dir.open_with(name, &options) {
                 Ok(file) => file,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
                 Err(error) => return Err(StoreError::Io(error)),
@@ -344,14 +454,14 @@ impl StateRoot {
             existing.read(true).write(true);
             existing.follow(FollowSymlinks::No);
             nonblocking(&mut existing);
-            let mut file = match self._dir.open_with(pending, &existing) {
+            let mut file = match self.dir.open_with(pending, &existing) {
                 Ok(file) => file,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     let mut create = OpenOptions::new();
                     create.read(true).write(true).create_new(true).mode(0o600);
                     create.follow(FollowSymlinks::No);
                     nonblocking(&mut create);
-                    self._dir.open_with(pending, &create)?
+                    self.dir.open_with(pending, &create)?
                 }
                 Err(error) => return Err(StoreError::Io(error)),
             };
@@ -359,8 +469,8 @@ impl StateRoot {
             file.set_len(0)?;
             file.write_all(record)?;
             file.sync_all()?;
-            self._dir.rename(pending, &self._dir, name)?;
-            self._dir
+            self.dir.rename(pending, &self.dir, name)?;
+            self.dir
                 .open_with(".", OpenOptions::new().read(true))?
                 .sync_all()?;
             Ok(())
@@ -384,6 +494,7 @@ impl StateRoot {
 
 #[cfg(unix)]
 fn check_private_record_file(file: &cap_std::fs::File, limit: usize) -> Result<(), StoreError> {
+    crate::private_fs::check_acl(file, true)?;
     use cap_std::fs::MetadataExt;
 
     let metadata = file.metadata()?;
@@ -409,30 +520,6 @@ fn directory_identity(dir: &Dir) -> Result<(u64, u64), StoreError> {
     use cap_std::fs::MetadataExt;
     let metadata = dir.dir_metadata()?;
     Ok((metadata.dev(), metadata.ino()))
-}
-
-#[cfg(unix)]
-fn check_directory(dir: &Dir, leaf: bool) -> Result<(), StoreError> {
-    use cap_std::fs::MetadataExt;
-    let meta = dir.dir_metadata()?;
-    let mode = meta.mode();
-    let current_uid = rustix::process::geteuid().as_raw();
-    if !meta.is_dir() || (meta.uid() != current_uid && meta.uid() != 0) {
-        return Err(StoreError::StateNotPrivate);
-    }
-    if leaf {
-        if meta.uid() != current_uid || mode & 0o077 != 0 {
-            return Err(StoreError::StateNotPrivate);
-        }
-    } else if mode & 0o022 != 0 && !(meta.uid() == 0 && mode & 0o1000 != 0) {
-        return Err(StoreError::StateNotPrivate);
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn check_directory(_dir: &Dir, _leaf: bool) -> Result<(), StoreError> {
-    Err(StoreError::InvalidStateDirectory)
 }
 
 fn prepare_database_file(dir: &Dir, create: bool) -> Result<(), StoreError> {
@@ -461,6 +548,8 @@ fn prepare_database_file(dir: &Dir, create: bool) -> Result<(), StoreError> {
     #[cfg(unix)]
     nonblocking(&mut existing);
     let file = dir.open_with(DATABASE_FILE, &existing)?;
+    #[cfg(unix)]
+    crate::private_fs::check_acl(&file, true)?;
     let meta = file.metadata()?;
     if !meta.is_file() || meta.len() > MAX_DATABASE_BYTES as u64 {
         return Err(StoreError::StateNotPrivate);
@@ -468,7 +557,10 @@ fn prepare_database_file(dir: &Dir, create: bool) -> Result<(), StoreError> {
     #[cfg(unix)]
     {
         use cap_std::fs::MetadataExt;
-        if meta.uid() != rustix::process::geteuid().as_raw() || meta.mode() & 0o077 != 0 {
+        if meta.uid() != rustix::process::geteuid().as_raw()
+            || meta.mode() & 0o077 != 0
+            || meta.nlink() != 1
+        {
             return Err(StoreError::StateNotPrivate);
         }
     }
@@ -478,81 +570,9 @@ fn prepare_database_file(dir: &Dir, create: bool) -> Result<(), StoreError> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use rustix::fs::{CWD, Mode, mkfifoat};
-    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn account_path_ignores_session_state_environment() {
-        use nix::unistd::{User, geteuid};
-
-        const EXPECTED: &str = "ARANY_TEST_EXPECTED_ACCOUNT_PATH";
-        #[cfg(not(debug_assertions))]
-        const REJECT_OVERRIDE: &str = "ARANY_TEST_REJECT_ACCOUNT_OVERRIDE";
-        #[cfg(not(debug_assertions))]
-        if std::env::var_os(REJECT_OVERRIDE).is_some() {
-            assert!(matches!(
-                StateRoot::account_path(),
-                Err(StoreError::InvalidStateDirectory)
-            ));
-            return;
-        }
-        if let Some(expected) = std::env::var_os(EXPECTED) {
-            assert_eq!(
-                StateRoot::account_path().expect("OS user account path"),
-                PathBuf::from(expected)
-            );
-            return;
-        }
-        let expected = User::from_uid(geteuid())
-            .expect("OS user lookup")
-            .expect("OS user")
-            .dir
-            .join(".local/state/arany");
-        let temp = tempfile::tempdir().expect("temporary environment root");
-        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
-            .args([
-                "--exact",
-                "store::state::tests::account_path_ignores_session_state_environment",
-                "--nocapture",
-            ])
-            .env(EXPECTED, expected)
-            .env_remove("ARANY_TEST_ACCOUNT_ROOT")
-            .env("HOME", temp.path().join("different-home"))
-            .env("XDG_STATE_HOME", temp.path().join("different-state"))
-            .output()
-            .expect("isolated child");
-        assert!(
-            output.status.success(),
-            "account path changed with the Session environment"
-        );
-        assert!(
-            String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
-            "account-path child did not run its test"
-        );
-        #[cfg(not(debug_assertions))]
-        {
-            let output =
-                std::process::Command::new(std::env::current_exe().expect("test executable"))
-                    .args([
-                        "--exact",
-                        "store::state::tests::account_path_ignores_session_state_environment",
-                        "--nocapture",
-                    ])
-                    .env(REJECT_OVERRIDE, "1")
-                    .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
-                    .output()
-                    .expect("isolated release child");
-            assert!(
-                output.status.success(),
-                "release account override was accepted"
-            );
-            assert!(
-                String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
-                "release override child did not run its test"
-            );
-        }
-    }
+    use nix::{sys::stat::Mode, unistd::mkfifo};
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, symlink};
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -604,9 +624,9 @@ mod tests {
                             .take(1024)
                             .collect::<String>()
                     );
-                    assert!(
-                        String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
-                        "second OS user did not exercise the account boundary"
+                    crate::test_process::assert_single_test_completed(
+                        &output.stdout,
+                        "second OS user",
                     );
                     assert_eq!(
                         state.read_saved_account_record().unwrap().as_deref(),
@@ -712,10 +732,7 @@ mod tests {
                 .take(1024)
                 .collect::<String>()
         );
-        assert!(
-            String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
-            "cross-user child did not run its test"
-        );
+        crate::test_process::assert_single_test_completed(&output.stdout, "cross-user");
     }
 
     #[test]
@@ -755,12 +772,26 @@ mod tests {
             0
         );
         assert!(!path.join(PENDING_ACCOUNT_FILE).exists());
+        std::fs::write(path.join(PENDING_ACCOUNT_FILE), b"aborted-replacement").unwrap();
+        std::fs::set_permissions(
+            path.join(PENDING_ACCOUNT_FILE),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        state.remove_saved_account_record().unwrap();
+        assert!(state.read_saved_account_record().unwrap().is_none());
+        assert!(!path.join(PENDING_ACCOUNT_FILE).exists());
+        state.remove_saved_account_record().unwrap();
+        state
+            .replace_saved_account_record(b"synthetic-second")
+            .unwrap();
 
         let file = path.join(SAVED_ACCOUNT_FILE);
         let outside = temp.path().join("outside");
         std::fs::write(&outside, b"outside-stays").expect("outside fixture");
         std::fs::remove_file(&file).expect("remove test record");
         symlink(&outside, &file).expect("symlink fixture");
+        assert!(state.remove_saved_account_record().is_err());
         assert!(state.saved_account_record_present().is_err());
         assert!(state.read_saved_account_record().is_err());
         assert!(state.replace_saved_account_record(b"new").is_err());
@@ -771,12 +802,14 @@ mod tests {
         std::fs::remove_file(&file).expect("remove test symlink");
 
         std::fs::hard_link(&outside, &file).expect("hard-link fixture");
+        assert!(state.remove_saved_account_record().is_err());
         assert!(state.saved_account_record_present().is_err());
         assert!(state.read_saved_account_record().is_err());
         assert!(state.replace_saved_account_record(b"new").is_err());
         std::fs::remove_file(&file).expect("remove test hard link");
 
         symlink(&outside, path.join(PENDING_ACCOUNT_FILE)).expect("pending symlink fixture");
+        assert!(state.remove_saved_account_record().is_err());
         assert!(state.replace_saved_account_record(b"new").is_err());
         assert_eq!(
             std::fs::read(&outside).expect("outside file"),
@@ -808,19 +841,27 @@ mod tests {
             0
         );
         assert!(!path.join(PENDING_CHATGPT_REGISTRATION_FILE).exists());
+        state.remove_chatgpt_registration_record().unwrap();
+        assert!(state.read_chatgpt_registration_record().unwrap().is_none());
+        state
+            .replace_chatgpt_registration_record(b"synthetic-second")
+            .unwrap();
 
         let outside = temp.path().join("outside");
         std::fs::write(&outside, b"outside-stays").unwrap();
         let file = path.join(CHATGPT_REGISTRATION_FILE);
         std::fs::remove_file(&file).unwrap();
         symlink(&outside, &file).unwrap();
+        assert!(state.remove_chatgpt_registration_record().is_err());
         assert!(state.read_chatgpt_registration_record().is_err());
         assert!(state.replace_chatgpt_registration_record(b"new").is_err());
         std::fs::remove_file(&file).unwrap();
         std::fs::hard_link(&outside, &file).unwrap();
+        assert!(state.remove_chatgpt_registration_record().is_err());
         assert!(state.read_chatgpt_registration_record().is_err());
         std::fs::remove_file(&file).unwrap();
         symlink(&outside, path.join(PENDING_CHATGPT_REGISTRATION_FILE)).unwrap();
+        assert!(state.remove_chatgpt_registration_record().is_err());
         assert!(state.replace_chatgpt_registration_record(b"new").is_err());
         assert_eq!(std::fs::read(&outside).unwrap(), b"outside-stays");
         assert!(
@@ -846,6 +887,11 @@ mod tests {
             0
         );
         assert!(!path.join(PENDING_CHATGPT_ACCOUNTS_FILE).exists());
+        state.remove_chatgpt_accounts_record().unwrap();
+        assert!(state.read_chatgpt_accounts_record().unwrap().is_none());
+        state
+            .replace_chatgpt_accounts_record(b"synthetic-token-index")
+            .unwrap();
         assert!(
             state
                 .replace_chatgpt_accounts_record(&vec![
@@ -857,15 +903,18 @@ mod tests {
         let file = path.join(CHATGPT_ACCOUNTS_FILE);
         std::fs::remove_file(&file).unwrap();
         symlink(&outside, &file).unwrap();
+        assert!(state.remove_chatgpt_accounts_record().is_err());
         assert!(state.chatgpt_accounts_record_present().is_err());
         assert!(state.read_chatgpt_accounts_record().is_err());
         assert!(state.replace_chatgpt_accounts_record(b"new").is_err());
         std::fs::remove_file(&file).unwrap();
         std::fs::hard_link(&outside, &file).unwrap();
+        assert!(state.remove_chatgpt_accounts_record().is_err());
         assert!(state.chatgpt_accounts_record_present().is_err());
         assert!(state.read_chatgpt_accounts_record().is_err());
         std::fs::remove_file(&file).unwrap();
         symlink(&outside, path.join(PENDING_CHATGPT_ACCOUNTS_FILE)).unwrap();
+        assert!(state.remove_chatgpt_accounts_record().is_err());
         assert!(state.replace_chatgpt_accounts_record(b"new").is_err());
         assert_eq!(std::fs::read(outside).unwrap(), b"outside-stays");
     }
@@ -885,9 +934,22 @@ mod tests {
             PROVIDER_PROFILES_FILE,
             "model-preferences.json",
             "ui-preferences.json",
+            "events.sqlite3-journal",
+            "events.sqlite3-wal",
+            "events.sqlite3-shm",
         ] {
-            mkfifoat(CWD, path.join(name), Mode::RUSR | Mode::WUSR).expect("test FIFO");
+            mkfifo(&path.join(name), Mode::S_IRUSR | Mode::S_IWUSR).expect("test FIFO");
         }
+        assert!(state.remove_saved_account_record().is_err());
+        assert!(state.remove_chatgpt_registration_record().is_err());
+        assert!(state.remove_chatgpt_accounts_record().is_err());
+        assert!(state.remove_model_preferences_record().is_err());
+        assert!(matches!(
+            StateRoot::open_existing(&path)
+                .unwrap()
+                .prepare_history_reset(&workspace),
+            Err(StoreError::StateNotPrivate)
+        ));
         assert!(matches!(
             state.read_saved_account_record(),
             Err(StoreError::StateNotPrivate)
@@ -932,7 +994,7 @@ mod tests {
             "model-preferences.pending",
             "ui-preferences.pending",
         ] {
-            mkfifoat(CWD, path.join(name), Mode::RUSR | Mode::WUSR).expect("test FIFO");
+            mkfifo(&path.join(name), Mode::S_IRUSR | Mode::S_IWUSR).expect("test FIFO");
         }
         assert!(matches!(
             state.replace_saved_account_record(b"synthetic"),
@@ -960,8 +1022,14 @@ mod tests {
             Err(StoreError::StateNotPrivate)
         ));
         drop(state);
+        let alias = path.join("database-alias");
+        std::fs::hard_link(path.join(DATABASE_FILE), &alias).expect("database hard link");
+        for result in [StateRoot::open_existing(&path), StateRoot::admit(&path)] {
+            assert!(matches!(result, Err(StoreError::StateNotPrivate)));
+        }
+        std::fs::remove_file(alias).expect("remove database hard link");
         std::fs::remove_file(path.join(DATABASE_FILE)).expect("remove database");
-        mkfifoat(CWD, path.join(DATABASE_FILE), Mode::RUSR | Mode::WUSR).expect("test FIFO");
+        mkfifo(&path.join(DATABASE_FILE), Mode::S_IRUSR | Mode::S_IWUSR).expect("test FIFO");
         assert!(matches!(
             StateRoot::open_existing(&path),
             Err(StoreError::StateNotPrivate)

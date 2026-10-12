@@ -75,24 +75,16 @@ fn panic_unwind_restores_the_exact_terminal_settings() {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     let mut attached = ChildGuard::new(attached.spawn().expect("supervised panic PTY"));
-    let mut input = attached.child().stdin.take().expect("PTY query input");
+    let _input = attached
+        .child()
+        .stdin
+        .take()
+        .expect("PTY input remains open");
     let mut output = attached.child().stdout.take().expect("PTY transcript");
     let flags = fcntl_getfl(&output).expect("transcript flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking transcript");
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut transcript = Vec::new();
-    loop {
-        drain_nonblocking(&mut output, &mut transcript);
-        if transcript.windows(4).any(|part| part == b"\x1b[6n") {
-            break;
-        }
-        assert!(Instant::now() < deadline, "terminal cursor query missing");
-        thread::yield_now();
-    }
-    input
-        .write_all(b"\x1b[1;1R")
-        .expect("cursor-position reply");
-
     let mut gate_stream = loop {
         drain_nonblocking(&mut output, &mut transcript);
         match gate.accept() {

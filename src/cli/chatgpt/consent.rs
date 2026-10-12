@@ -137,7 +137,10 @@ mod tests {
         assert!(warning.len() <= 1024);
         assert!(warning.contains("remote output-token limit"));
         assert!(warning.contains("app-specific usage limit"));
+        #[cfg(target_os = "linux")]
         assert!(warning.contains("another application running as your user"));
+        #[cfg(not(target_os = "linux"))]
+        assert!(warning.contains("for your user account, not exclusively for Arany"));
         let receipt = RiskPrompt::new(AccountStorage::Keyring)
             .accept("Accept")
             .expect("explicit acceptance")

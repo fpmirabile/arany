@@ -45,7 +45,7 @@ Security plans, audits, and findings live under `docs/security/` when created. T
 - Pin every MCP server, plugin, Skill, and update to reviewed provenance and an immutable version or digest. Never accept an arbitrary package specification or run install/lifecycle scripts through an update endpoint. New versions require permission-diff and dependency review.
 - Bind MCP credentials to the intended server, issuer, audience, scopes, and session; never pass Provider or ambient credentials through. Authorize per server, Tool, resource, and operation, and treat manifests, tool descriptions, and results as untrusted.
 - Render future Markdown, HTML, SVG, links, and model output without active content by default. A browser Client requires CSP, safe templating, origin isolation, and a new threat model before it receives any privileged operation.
-- Security-version and configuration migrations may preserve or reduce authority only. An unknown version, unsupported platform capability, failed attestation, or ambiguous merge fails closed; there is no silent unsandboxed fallback.
+- Unsupported security/configuration versions, unavailable platform capabilities and failed attestations reject; there is no silent unsandboxed fallback.
 
 ## Universal rules
 

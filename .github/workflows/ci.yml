@@ -16,22 +16,12 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Enables the native gates marked `cfg_attr(not(arany_ci), ignore)`; one fingerprint for every job.
+  RUSTFLAGS: --cfg arany_ci
 
 jobs:
-  format:
-    name: Format
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install repository Rust toolchain
-        run: rustup show
-      - run: cargo fmt --all --check
-
-  clippy:
-    name: Clippy
+  format-and-clippy:
+    name: Linux Format and Clippy
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -40,27 +30,28 @@ jobs:
           persist-credentials: false
       - name: Install repository Rust toolchain
         run: rustup show
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo fmt --all --check
       - run: cargo fetch --locked
       - run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 
   tests:
-    name: Tests (${{ matrix.profile }})
+    name: Linux Tests (${{ matrix.profile }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - profile: debug
-            cargo-flags: ""
-          - profile: release
-            cargo-flags: --release
+        profile: [debug, release]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install repository Rust toolchain
         run: rustup show
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.profile }}
       - name: Prepare isolated Linux terminal fixtures
         run: |
           sudo apt-get update
@@ -68,4 +59,30 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           bwrap --unshare-user --unshare-net --ro-bind / / -- true
       - run: cargo fetch --locked
-      - run: cargo test --workspace --locked --offline ${{ matrix.cargo-flags }}
+      - run: cargo test --workspace --locked --offline ${{ matrix.profile == 'release' && '--release' || '' }}
+
+  macos-tests:
+    name: macOS tests (${{ matrix.profile }})
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      TMPDIR: /private/tmp
+      ARANY_TEST_EXE: ${{ github.workspace }}/target/${{ matrix.profile }}/arany
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [debug, release]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install repository Rust toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.profile }}
+      - run: cargo fetch --locked
+      - name: Clippy on macOS
+        if: matrix.profile == 'debug'
+        run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
+      - run: cargo test --workspace --locked --offline ${{ matrix.profile == 'release' && '--release' || '' }}

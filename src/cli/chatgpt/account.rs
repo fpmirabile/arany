@@ -105,17 +105,11 @@ struct AccountEntry {
     subject: String,
     storage: AccountStorage,
     renewal_pending: bool,
-    #[serde(default)]
     signout_pending: bool,
-    #[serde(default)]
     disconnected: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
     plan_permission_missing: bool,
+    #[serde(deserialize_with = "Option::deserialize")]
     token: Option<TokenRecord>,
-}
-
-fn is_false(value: &bool) -> bool {
-    !value
 }
 
 #[derive(Deserialize, Serialize)]
@@ -136,6 +130,23 @@ impl ModelCheck {
 }
 
 impl AccountEntry {
+    fn ensure_usable(&self) -> Result<(), AuthorizationError> {
+        if self.disconnected {
+            return Err(if self.plan_permission_missing {
+                AuthorizationError::PermissionMissing
+            } else {
+                AuthorizationError::NoSelectedAccount
+            });
+        }
+        if self.signout_pending {
+            return Err(AuthorizationError::SignOutPending);
+        }
+        if self.renewal_pending {
+            return Err(AuthorizationError::RenewalStorageUncertain);
+        }
+        Ok(())
+    }
+
     fn valid(&self) -> bool {
         self.id.get_version() == Some(Version::SortRand)
             && self.host_id.get_version() == Some(Version::Random)
@@ -166,9 +177,10 @@ impl AccountEntry {
 #[serde(deny_unknown_fields)]
 struct AccountIndex {
     schema: u8,
+    #[serde(deserialize_with = "Option::deserialize")]
     selected: Option<Uuid>,
     accounts: Vec<AccountEntry>,
-    #[serde(default, deserialize_with = "bounded_model_checks")]
+    #[serde(deserialize_with = "bounded_model_checks")]
     model_checks: Vec<ModelCheck>,
 }
 
@@ -264,9 +276,15 @@ impl AccountIndex {
         else {
             return Ok(Self::empty());
         };
+        Self::decode(&bytes)
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, AuthorizationError> {
         let index: Self =
-            serde_json::from_slice(&bytes).map_err(|_| AuthorizationError::InvalidIdentity)?;
-        index.validate()?;
+            serde_json::from_slice(bytes).map_err(|_| AuthorizationError::InvalidSavedState)?;
+        index
+            .validate()
+            .map_err(|_| AuthorizationError::InvalidSavedState)?;
         Ok(index)
     }
 
@@ -346,19 +364,7 @@ fn verify_selected_snapshot(
         .iter()
         .find(|entry| entry.id == selected.id)
         .ok_or(AuthorizationError::InvalidIdentity)?;
-    if entry.disconnected {
-        return Err(if entry.plan_permission_missing {
-            AuthorizationError::PermissionMissing
-        } else {
-            AuthorizationError::NoSelectedAccount
-        });
-    }
-    if entry.signout_pending {
-        return Err(AuthorizationError::SignOutPending);
-    }
-    if entry.renewal_pending {
-        return Err(AuthorizationError::RenewalStorageUncertain);
-    }
+    entry.ensure_usable()?;
     if entry.storage != selected.storage
         || entry.host_id != selected.credentials.host_id
         || entry.client_id != selected.credentials.client_id
@@ -886,19 +892,7 @@ pub(super) fn load_selected_private_file_at(
     if entry.storage != AccountStorage::PrivateFile {
         return Err(AuthorizationError::InvalidIdentity);
     }
-    if entry.disconnected {
-        return Err(if entry.plan_permission_missing {
-            AuthorizationError::PermissionMissing
-        } else {
-            AuthorizationError::NoSelectedAccount
-        });
-    }
-    if entry.signout_pending {
-        return Err(AuthorizationError::SignOutPending);
-    }
-    if entry.renewal_pending {
-        return Err(AuthorizationError::RenewalStorageUncertain);
-    }
+    entry.ensure_usable()?;
     let token = entry.token.ok_or(AuthorizationError::InvalidIdentity)?;
     if !token.valid_for(AccountStorage::PrivateFile) {
         return Err(AuthorizationError::ConsentRequired);
@@ -922,19 +916,7 @@ pub(super) fn load_selected_keyring_at(
     if entry.storage != AccountStorage::Keyring {
         return Err(AuthorizationError::InvalidIdentity);
     }
-    if entry.disconnected {
-        return Err(if entry.plan_permission_missing {
-            AuthorizationError::PermissionMissing
-        } else {
-            AuthorizationError::NoSelectedAccount
-        });
-    }
-    if entry.signout_pending {
-        return Err(AuthorizationError::SignOutPending);
-    }
-    if entry.renewal_pending {
-        return Err(AuthorizationError::RenewalStorageUncertain);
-    }
+    entry.ensure_usable()?;
     Ok(read_keyring_token(&entry.client_id, &entry.subject, entry.host_id)?.credentials)
 }
 
@@ -967,6 +949,19 @@ fn read_keyring_token(
         return Err(AuthorizationError::ConsentRequired);
     }
     Ok(token)
+}
+
+pub(super) fn selected_keyring_slot(
+    expected_id: Uuid,
+) -> Result<Option<String>, AuthorizationError> {
+    let state = open_account_state()?;
+    let index = AccountIndex::read(&state)?;
+    if index.selected != Some(expected_id) {
+        return Err(AuthorizationError::SelectedAccountChanged);
+    }
+    let entry = &index.accounts[index.account_position(expected_id)?];
+    entry.ensure_usable()?;
+    Ok((entry.storage == AccountStorage::Keyring).then(|| keyring_slot(&entry.client_id)))
 }
 
 pub(super) async fn selected_for_use(
@@ -1236,19 +1231,7 @@ fn refresh_selected_with(
             }
             let position = index.account_position(id)?;
             let entry = &index.accounts[position];
-            if entry.disconnected {
-                return Err(if entry.plan_permission_missing {
-                    AuthorizationError::PermissionMissing
-                } else {
-                    AuthorizationError::NoSelectedAccount
-                });
-            }
-            if entry.signout_pending {
-                return Err(AuthorizationError::SignOutPending);
-            }
-            if entry.renewal_pending {
-                return Err(AuthorizationError::RenewalStorageUncertain);
-            }
+            entry.ensure_usable()?;
             let client_id = entry.client_id.clone();
             let subject = entry.subject.clone();
             let storage = entry.storage;

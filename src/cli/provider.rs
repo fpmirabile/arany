@@ -104,10 +104,7 @@ pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
             let (models, exact_custom) = match profile.as_str() {
                 "openai" | "anthropic" => {
                     let key = if saved_account {
-                        let workspace = std::env::current_dir()
-                            .and_then(std::fs::canonicalize)
-                            .map_err(|_| "Workspace unavailable".to_owned())?;
-                        let account = credentials::load(&workspace)
+                        let account = credentials::load()
                             .await
                             .map_err(|error| error.to_string())?
                             .ok_or("no saved native API account")?;
@@ -221,7 +218,7 @@ pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
                 let model = model.expect("native model checked above");
                 let effort = effort.expect("native effort checked above");
                 if saved_account {
-                    let account = credentials::load(&workspace)
+                    let account = credentials::load()
                         .await
                         .map_err(|error| error.to_string())?
                         .ok_or("no saved native API account")?;

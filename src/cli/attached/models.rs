@@ -75,9 +75,29 @@ fn read_preferences(root: &StateRoot) -> Result<ModelPreferences, String> {
             sources: Vec::new(),
         });
     };
+    decode_preferences(&record)
+}
+
+fn decode_preferences(record: &[u8]) -> Result<ModelPreferences, String> {
     let preferences: ModelPreferences =
-        serde_json::from_slice(&record).map_err(|_| "invalid saved model preferences")?;
+        serde_json::from_slice(record).map_err(|_| "invalid saved model preferences")?;
     validate_preferences(preferences)
+}
+
+pub(super) fn preferences_need_reset(workspace: &Path) -> Result<bool, String> {
+    let path = StateRoot::account_path().map_err(|_| "saved model preferences unavailable")?;
+    let Some(root) = crate::cli::open_optional_state(&path)
+        .map_err(|_| "saved model preferences unavailable or unsafe")?
+    else {
+        return Ok(false);
+    };
+    root.with_account_replacement_lock(workspace, || {
+        let record = root
+            .read_model_preferences_record()
+            .map_err(|_| "saved model preferences unavailable or unsafe")?;
+        Ok(record.is_some_and(|bytes| decode_preferences(&bytes).is_err()))
+    })
+    .map_err(|_| "saved model preferences unavailable".to_owned())?
 }
 
 fn validate_preferences(preferences: ModelPreferences) -> Result<ModelPreferences, String> {
@@ -487,7 +507,7 @@ async fn load_catalog_inner(
     let result = match profile {
         "openai" | "anthropic" => {
             let key = match view.defaults.account_id {
-                Some(id) => credentials::load_selected(&admission.workspace, id, profile)
+                Some(id) => credentials::load_selected(id, profile)
                     .await
                     .map_err(|error| error.to_string())?,
                 None => {

@@ -230,7 +230,7 @@ mod tests {
             endpoint: "http://127.0.0.1:9321/v1/responses".into(),
             model: "model-1".into(),
             credential_env: "ARANY_PROVIDER_LOCAL_KEY".into(),
-            capability_evidence_version: 1,
+            capability_evidence_version: 2,
             efforts: Vec::new(),
         };
         let pinned = profile.resolve_destination().await.unwrap();

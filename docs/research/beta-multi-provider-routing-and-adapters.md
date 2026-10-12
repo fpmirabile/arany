@@ -234,35 +234,11 @@ For example, require `ARANY_RUN_LIVE_PROVIDER_TESTS=1` plus the selected provide
 
 **Exact recommended beta set after the staged gates:** deterministic fake for tests; native `openai` and `anthropic`; and conformance-gated exact custom profiles using explicitly supported protocol families. Built-in `openrouter` and `zai` profiles remain outside beta compatibility claims.
 
-## Reconciliation with current repository decisions
+## Current contract owners
 
-| Current assumption | Decision after this research |
-| --- | --- |
-| OpenAI-only beta | Change: beta provider selection is explicit; native OpenAI and Anthropic launch first, exact custom profiles are conformance-gated, and built-in OpenRouter/Z.AI remain gated |
-| Fixed Provider-call count | Replace with admitted semantics: one direct call or `N + 2` team calls; discovery/conformance is explicit outside the Run; one provider/model/route is pinned for every admitted call |
-| Strict Structured Outputs | Preserve: response JSON Schema or documented strict forced tool only; JSON mode/local repair is insufficient |
-| `ARANY_OPENAI_MODEL` | Preserve for OpenAI; add provider-specific model variables and `ARANY_PROVIDER`; `--model` applies only to the selected provider |
-| Fixed OpenAI origin | Generalize to native compiled origins plus trusted exact custom profiles; no arbitrary per-request URL, redirects, ambient proxy, or header injection |
-| No retries | Preserve, including disabling OpenRouter upstream fallbacks |
-| One Provider trait | Preserve; adapters deepen the existing seam, while shared HTTP code remains a private concrete implementation detail |
-
-## Canonical documents that must change
-
-This report changes no existing decision by itself. Before implementation, update these authoritative documents together so they do not disagree:
-
-| Document | Required change |
-| --- | --- |
-| `AGENTS.md` | Replace “scripted fake and OpenAI are real adapters” with the staged adapter set while preserving Provider as the only Engine behavior seam |
-| `docs/architecture/system-overview.md` | Update the physical component map, provider construction/preflight, configuration, canonical provenance, fixed-origin matrix, and rollout order |
-| `docs/architecture/arany-conceptual-overview.md` | Update the beta backend table, diagrams, file sketch, risks, and milestone/gate descriptions |
-| `docs/research/next-step-decision-register.md` | Supersede the OpenAI-only V1 provider/config decisions with explicit staged decisions and gates |
-| `docs/research/cli-inputs-configuration-and-operability.md` | Define `--provider`, provider-specific models/keys, diagnostics, endpoint profiles, OpenRouter route controls, and help text |
-| `agents/security.md` | Generalize fixed Provider egress to a compiled provider/region origin allowlist and add broker/upstream privacy and provenance invariants |
-| `agents/testing.md` | Replace the single OpenAI-only live-smoke rule with the explicit per-adapter, opt-in conformance matrix while retaining one scripted Engine double |
-| `docs/research/rust-foundation-and-engine-contract.md` | Amend the concrete adapter, config, provenance, error, and direct-HTTP sections without changing the Engine workflow |
-| `docs/research/testing-strategy-for-rust-cli-harness.md` | Amend fixture ownership and the ignored live-test matrix |
-| `docs/research/provider-and-tool-runtime.md` | Supersede its OpenAI-only scope amendment and link this narrower decision; retain its general warning against universal wire formats |
-| `docs/research/research-closure-audit.md` | Update provider parity and rollout gates so the closure claim reflects the strict Z.AI gap and constrained OpenRouter route |
-| `docs/research/README.md` | Index this report and replace the current “fake and OpenAI” decision summary |
-
-Older exploratory research that merely records investigated alternatives should not be rewritten as current architecture. Any file that presents the superseded OpenAI-only choice as a current decision, however, needs an explicit dated amendment or a link to the updated canonical decision rather than silent historical residue.
+[Provider rules](../../agents/provider.md) own current profile admission and
+capabilities; [the credential contract](../specs/credentials.md) owns account
+selection and storage. [The decision register](./next-step-decision-register.md)
+retains accepted reasons. This dated comparison does not maintain a parallel
+command grammar, document-update checklist or implementation status. Current
+subscription-policy evidence belongs to [the route review](./subscription-provider-routes-2026-10.md).

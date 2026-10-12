@@ -7,6 +7,211 @@ fn config_value() -> Value {
     json!({"version":1,"workspace_paths":["src","Cargo.toml"],"write":false,"commands":[],"skills":[],"mcp":[]})
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn checked_tool_files_reject_links_traversal_and_special_objects() {
+    use nix::{sys::stat::Mode, unistd::mkfifo};
+    let temp = tempfile::tempdir().unwrap();
+    let root_path = temp.path().join("project");
+    std::fs::create_dir_all(root_path.join("nested")).unwrap();
+    std::fs::write(root_path.join("nested/file"), b"admitted").unwrap();
+    let root = super::fs::open_directory(&root_path).unwrap();
+    std::os::unix::fs::symlink("nested", root_path.join("linked")).unwrap();
+    std::os::unix::fs::symlink("file", root_path.join("nested/link")).unwrap();
+    std::fs::hard_link(root_path.join("nested/file"), root_path.join("hardlink")).unwrap();
+    mkfifo(&root_path.join("fifo"), Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
+    for path in [
+        "linked/file",
+        "nested/link",
+        "hardlink",
+        "fifo",
+        "../outside",
+        "nested/../nested/file",
+        "/etc/passwd",
+    ] {
+        assert!(
+            super::fs::open_file(&root, path)
+                .and_then(|file| super::fs::read_regular(file, 32))
+                .is_err(),
+            "hostile file case {path}"
+        );
+    }
+    std::fs::remove_file(root_path.join("hardlink")).unwrap();
+    assert_eq!(
+        super::fs::read_regular(super::fs::open_file(&root, "nested/file").unwrap(), 32).unwrap(),
+        b"admitted"
+    );
+    assert!(
+        super::fs::open_file(&root, ".")
+            .unwrap()
+            .metadata()
+            .unwrap()
+            .is_dir()
+    );
+    let config: Config = serde_json::from_value(json!({
+        "version":1,"workspace_paths":["."],"write":true,
+        "commands":[],"skills":[],"mcp":[]
+    }))
+    .unwrap();
+    let write = ToolCall::Write {
+        path: "nested/created".into(),
+        expected_digest: None,
+        content: "created".into(),
+    };
+    let result = super::fs::native(&root_path, &write, &config).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&result).unwrap(),
+        json!({"sha256":hex_digest(b"created"),"bytes":7})
+    );
+    assert!(super::fs::native(&root_path, &write, &config).is_err());
+    let original = super::fs::open_file(&root, "nested/file").unwrap();
+    let edit = ToolCall::Edit {
+        path: "nested/file".into(),
+        expected_digest: hex_digest(b"admitted"),
+        old: "admitted".into(),
+        new: "replaced".into(),
+    };
+    super::fs::native(&root_path, &edit, &config).unwrap();
+    let mut old_bytes = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(original, 32), &mut old_bytes).unwrap();
+    assert_eq!(
+        old_bytes, b"admitted",
+        "atomic publication preserves the opened original inode"
+    );
+    assert_eq!(
+        std::fs::read(root_path.join("nested/file")).unwrap(),
+        b"replaced"
+    );
+    assert!(
+        super::fs::native(&root_path, &edit, &config).is_err(),
+        "stale digest cannot repeat a mutation"
+    );
+    for path in ["linked/file", "nested/link", "fifo", "../outside"] {
+        let denied = ToolCall::Write {
+            path: path.into(),
+            expected_digest: Some(hex_digest(b"replaced")),
+            content: "not admitted".into(),
+        };
+        assert!(
+            super::fs::native(&root_path, &denied, &config).is_err(),
+            "hostile mutation case {path}"
+        );
+    }
+    let mut pinned = super::config::Program {
+        name: "sh".into(),
+        executable: std::fs::canonicalize(if cfg!(target_os = "macos") {
+            "/bin/sh"
+        } else {
+            "/usr/bin/sh"
+        })
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .into(),
+        sha256: String::new(),
+        interpreter: true,
+        inputs: Vec::new(),
+    };
+    let bytes = super::fs::read_regular(
+        super::fs::open_absolute(&pinned.executable).unwrap(),
+        MAX_SNAPSHOT_BYTES,
+    )
+    .unwrap();
+    pinned.sha256 = hex_digest(&bytes);
+    pinned.verify().unwrap();
+    pinned.sha256 = "0".repeat(64);
+    assert!(pinned.verify().is_err(), "changed executable pin rejects");
+
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir(root_path.join("empty")).unwrap();
+    std::fs::write(root_path.join("script"), b"synthetic executable data").unwrap();
+    std::fs::set_permissions(
+        root_path.join("script"),
+        std::fs::Permissions::from_mode(0o6755),
+    )
+    .unwrap();
+    let input = temp.path().join("runtime-input");
+    std::fs::write(&input, b"pinned input").unwrap();
+    pinned.sha256 = hex_digest(&bytes);
+    pinned.inputs.push(super::config::ProgramInput {
+        path: input.to_str().unwrap().into(),
+        destination: "data".into(),
+        sha256: hex_digest(b"pinned input"),
+    });
+    let copied = temp.path().join("copied-program");
+    std::fs::write(&copied, &bytes).unwrap();
+    let copied_program = super::config::Program {
+        name: "copied".into(),
+        executable: copied.to_str().unwrap().into(),
+        sha256: hex_digest(&bytes),
+        interpreter: true,
+        inputs: Vec::new(),
+    };
+    let snapshot_config = Config {
+        version: 1,
+        workspace_paths: vec!["nested/file".into(), "empty".into(), "script".into()],
+        write: true,
+        commands: vec![pinned, copied_program],
+        skills: Vec::new(),
+        mcp: Vec::new(),
+    };
+    for (case, drift) in [("fresh", false), ("changed-input", true)] {
+        let target = temp.path().join(case);
+        std::fs::create_dir_all(target.join("project")).unwrap();
+        std::fs::create_dir(target.join("runtime")).unwrap();
+        let project = super::fs::open_directory(&target.join("project")).unwrap();
+        let resources = super::fs::open_directory(&target.join("runtime")).unwrap();
+        if drift {
+            std::fs::write(&input, b"changed after admission").unwrap();
+        }
+        let result = super::fs::snapshot_into(&root, &snapshot_config, Some(&project), &resources);
+        if drift {
+            assert!(
+                matches!(result, Err(super::ToolError::ChangedInput)),
+                "{case}"
+            );
+            continue;
+        }
+        result.unwrap();
+        assert_eq!(
+            std::fs::read(target.join("project/nested/file")).unwrap(),
+            b"replaced"
+        );
+        assert!(target.join("project/empty").is_dir());
+        assert_eq!(
+            std::fs::metadata(target.join("project/script"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o700
+        );
+        assert!(!target.join("project/linked").exists());
+        assert!(!target.join("project/fifo").exists());
+        if cfg!(target_os = "macos") {
+            assert!(!target.join("runtime/programs/sh").exists());
+        } else {
+            assert_eq!(
+                std::fs::read(target.join("runtime/programs/sh")).unwrap(),
+                bytes
+            );
+        }
+        assert_eq!(
+            std::fs::read(target.join("runtime/programs/copied")).unwrap(),
+            bytes
+        );
+        assert_eq!(
+            std::fs::read(target.join("runtime/inputs/sh/data")).unwrap(),
+            b"pinned input"
+        );
+        std::fs::write(target.join("project/nested/file"), b"disposable").unwrap();
+        assert_eq!(
+            std::fs::read(root_path.join("nested/file")).unwrap(),
+            b"replaced"
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn project_skill_discovery_preserves_grants_and_reports_missing_installation() {
@@ -84,6 +289,25 @@ fn project_skill_discovery_preserves_grants_and_reports_missing_installation() {
             }
         }
         let discovery = super::project_skills(&workspace);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        if !matches!(layout, "absent" | "lock") {
+            assert!(
+                matches!(&discovery, Err(super::ToolError::ProtectionUnavailable)),
+                "{layout}: {:?}",
+                discovery.as_ref().err()
+            );
+            let mut value = config_value();
+            value["workspace_paths"] = json!(["."]);
+            let mut config: Config = serde_json::from_value(value).unwrap();
+            assert!(
+                matches!(
+                    config.discover_skills(&workspace),
+                    Err(super::ToolError::ProtectionUnavailable)
+                ),
+                "{layout}"
+            );
+            continue;
+        }
         if matches!(
             layout,
             "linked-directory" | "linked-file" | "oversized" | "too-many"
@@ -327,6 +551,38 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         use_count: 1,
     };
     assert!(intent.valid());
+    let mut limits = json!({
+        "result_bytes": MAX_TOOL_RESULT_BYTES,
+        "runtime_ms": 60_000,
+        "memory_bytes": MEMORY_BYTES,
+        "max_processes": MAX_PROCESSES_OR_THREADS,
+        "scratch_bytes": SCRATCH_BYTES,
+        "network": "none"
+    });
+    assert!(serde_json::from_value::<ToolLimits>(limits.clone()).is_err());
+    let mut native = intent.clone();
+    native.limits.resource_profile = ToolResourceProfile::LinuxKernel;
+    let linux_intent = native.digest();
+    native.limits.resource_profile = ToolResourceProfile::MacosSupervised;
+    for profile in [
+        ToolResourceProfile::LinuxKernel,
+        ToolResourceProfile::MacosSupervised,
+    ] {
+        limits["resource_profile"] = serde_json::to_value(profile).unwrap();
+        let decoded: ToolLimits = serde_json::from_value(limits.clone()).unwrap();
+        assert_eq!(decoded.resource_profile, profile);
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), limits);
+    }
+    assert!(native.valid());
+    assert_ne!(
+        native.digest(),
+        linux_intent,
+        "resource semantics bind the intent"
+    );
+    assert_eq!(
+        serde_json::from_value::<EffectIntent>(serde_json::to_value(&native).unwrap()).unwrap(),
+        native
+    );
     let guard = GuardReceipt {
         contract_version: 1,
         intent_digest: intent.digest(),
@@ -340,6 +596,22 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         guard: Some(guard),
     };
     assert!(observation.valid());
+    let mut profile_mismatch = observation.clone();
+    profile_mismatch
+        .guard
+        .as_mut()
+        .unwrap()
+        .limits
+        .resource_profile =
+        if intent.limits.resource_profile == ToolResourceProfile::MacosSupervised {
+            ToolResourceProfile::LinuxKernel
+        } else {
+            ToolResourceProfile::MacosSupervised
+        };
+    assert!(
+        !profile_mismatch.valid(),
+        "receipt cannot relabel resource guarantees"
+    );
     let mut missing = observation.clone();
     missing.guard = None;
     assert!(!missing.valid());
@@ -362,20 +634,13 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         super::ToolError::Conflict,
         super::ToolError::Operation,
         super::ToolError::Uncertain,
-        super::ToolError::GuardRejected("admission"),
-        super::ToolError::GuardRejected("Workspace identity"),
-        super::ToolError::GuardRejected("kernel capability"),
-        super::ToolError::GuardRejected("handshake"),
-        super::ToolError::GuardRejected("payload"),
-        super::ToolError::GuardRejected("receipt"),
-        super::ToolError::GuardRejected("resource attestation"),
-        super::ToolError::GuardRejected("process-unit cleanup"),
-        super::ToolError::GuardRejected("launcher reap"),
-        super::ToolError::GuardRejected("stderr EOF"),
-        super::ToolError::GuardRejected("namespace bootstrap"),
-        super::ToolError::GuardRejected("native manager"),
-        super::ToolError::GuardRejected("bounded control protocol"),
-        super::ToolError::GuardRejected("arbitrary text is not a durable diagnostic"),
+        super::ToolError::GuardRejected(super::guard::GuardStage::ResourceAttestation),
+        super::ToolError::GuardRejected(super::guard::GuardStage::ProcessCleanup),
+        super::ToolError::GuardRejected(super::guard::GuardStage::LauncherReap),
+        super::ToolError::GuardRejected(super::guard::GuardStage::OutputEof),
+        super::ToolError::GuardRejected(super::guard::GuardStage::NamespaceBootstrap),
+        super::ToolError::GuardRejected(super::guard::GuardStage::NativeManager),
+        super::ToolError::GuardRejected(super::guard::GuardStage::ControlProtocol),
     ];
     for (stage, label) in [
         ("admission", "admission"),
@@ -407,7 +672,6 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         assert!(uncertain.guard.is_none());
         assert!(uncertain.valid(), "minimum-budget uncertainty receipt");
         assert!(uncertain.output.ends_with("Do not retry automatically."));
-        assert!(!uncertain.output.contains("arbitrary text"));
     }
     let mut oversized = observation;
     oversized.output = "x".repeat(MAX_TOOL_RESULT_BYTES + 1);

@@ -6,8 +6,11 @@ use cap_std::fs::{Dir, DirBuilder, OpenOptions};
 use serde_json::json;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(target_os = "macos"))]
+use std::path::PathBuf;
 
+#[cfg(not(target_os = "macos"))]
 pub(super) struct Snapshot {
     pub path: PathBuf,
     pub dir: Dir,
@@ -23,15 +26,52 @@ pub(crate) fn open_directory(path: &Path) -> Result<Dir, ToolError> {
     if !path.is_absolute() {
         return Err(ToolError::Path);
     }
-    let mut dir =
-        Dir::open_ambient_dir("/", cap_std::ambient_authority()).map_err(|_| ToolError::Path)?;
-    for component in path.components().skip(1) {
+    #[cfg(target_os = "macos")]
+    {
+        macos_directory(path, rustix::fs::OFlags::RDONLY)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut dir = Dir::open_ambient_dir("/", cap_std::ambient_authority())
+            .map_err(|_| ToolError::Path)?;
+        for component in path.components().skip(1) {
+            let std::path::Component::Normal(name) = component else {
+                return Err(ToolError::Path);
+            };
+            dir = dir.open_dir_nofollow(name).map_err(|_| ToolError::Path)?;
+        }
+        Ok(dir)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_directory(path: &Path, final_access: rustix::fs::OFlags) -> Result<Dir, ToolError> {
+    use rustix::fs::{Mode, OFlags, open, openat};
+
+    let common = OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW;
+    let search = OFlags::from_bits_retain(nix::libc::O_SEARCH as _);
+    let mut components = path.components().skip(1).peekable();
+    let access = if components.peek().is_none() {
+        final_access
+    } else {
+        search
+    };
+    let mut file =
+        File::from(open("/", common | access, Mode::empty()).map_err(|_| ToolError::Path)?);
+    while let Some(component) = components.next() {
         let std::path::Component::Normal(name) = component else {
             return Err(ToolError::Path);
         };
-        dir = dir.open_dir_nofollow(name).map_err(|_| ToolError::Path)?;
+        let access = if components.peek().is_none() {
+            final_access
+        } else {
+            search
+        };
+        file = File::from(
+            openat(&file, name, common | access, Mode::empty()).map_err(|_| ToolError::Path)?,
+        );
     }
-    Ok(dir)
+    Ok(Dir::from_std_file(file))
 }
 
 pub(crate) fn identity(dir: &Dir) -> Result<(u64, u64), ToolError> {
@@ -53,7 +93,14 @@ pub(crate) fn open_absolute(path: &str) -> Result<File, ToolError> {
         return Err(ToolError::Path);
     }
     let path = Path::new(path);
-    let parent = open_directory(path.parent().ok_or(ToolError::Path)?)?;
+    let parent = path.parent().ok_or(ToolError::Path)?;
+    #[cfg(target_os = "macos")]
+    let parent = macos_directory(
+        parent,
+        rustix::fs::OFlags::from_bits_retain(nix::libc::O_SEARCH as _),
+    )?;
+    #[cfg(not(target_os = "macos"))]
+    let parent = open_directory(parent)?;
     open_file(
         &parent,
         path.file_name()
@@ -63,6 +110,9 @@ pub(crate) fn open_absolute(path: &str) -> Result<File, ToolError> {
 }
 
 pub(super) fn open_file(root: &Dir, path: &str) -> Result<File, ToolError> {
+    if path != "." && !valid_relative(path, false) {
+        return Err(ToolError::Path);
+    }
     #[cfg(target_os = "linux")]
     {
         use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
@@ -79,7 +129,35 @@ pub(super) fn open_file(root: &Dir, path: &str) -> Result<File, ToolError> {
         .map_err(|_| ToolError::Path)?;
         Ok(File::from(fd))
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        use rustix::fs::{Mode, OFlags, openat};
+        use std::os::unix::fs::MetadataExt;
+        let device = identity(root)?.0;
+        let mut file = root
+            .try_clone()
+            .map_err(|_| ToolError::Path)?
+            .into_std_file();
+        for component in path.split('/') {
+            if !file.metadata().map_err(|_| ToolError::Path)?.is_dir() {
+                return Err(ToolError::Path);
+            }
+            file = File::from(
+                openat(
+                    &file,
+                    component,
+                    OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
+                    Mode::empty(),
+                )
+                .map_err(|_| ToolError::Path)?,
+            );
+            if file.metadata().map_err(|_| ToolError::Path)?.dev() != device {
+                return Err(ToolError::Path);
+            }
+        }
+        Ok(file)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = (root, path);
         Err(ToolError::ProtectionUnavailable)
@@ -181,13 +259,14 @@ fn put_entry(root: &Dir, entry: Entry) -> Result<(), ToolError> {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 impl Snapshot {
     pub(super) fn create(
         workspace: &Dir,
         config: &Config,
         include_workspace: bool,
     ) -> Result<Self, ToolError> {
-        let tmp = open_directory(Path::new("/tmp"))?;
+        let tmp = open_directory(snapshot_root())?;
         let name = format!("arany-tools-{}", uuid::Uuid::now_v7());
         let mut builder = DirBuilder::new();
         #[cfg(unix)]
@@ -199,7 +278,7 @@ impl Snapshot {
             .map_err(|_| ToolError::Operation)?;
         let dir = tmp.open_dir_nofollow(&name).map_err(|_| ToolError::Path)?;
         let snapshot = Self {
-            path: Path::new("/tmp").join(&name),
+            path: snapshot_root().join(&name),
             dir,
         };
         snapshot
@@ -210,77 +289,101 @@ impl Snapshot {
             .dir
             .open_dir_nofollow("workspace")
             .map_err(|_| ToolError::Path)?;
-        let mut entries = Vec::new();
-        let mut budget = ScanBudget::default();
-        if include_workspace {
-            for path in &config.workspace_paths {
-                if path == "." {
-                    collect_root(workspace, "", &mut entries, &mut budget)?;
-                } else {
-                    collect(workspace, path, &mut entries, &mut budget)?;
-                }
-            }
-        }
-        for entry in entries {
-            put_entry(&target, entry)?;
-        }
-        let mut runtime_bytes = 0usize;
-        for program in config
-            .commands
-            .iter()
-            .chain(config.mcp.iter().map(|server| &server.program))
-        {
-            let executable = read_regular(open_absolute(&program.executable)?, MAX_SNAPSHOT_BYTES)?;
-            if hex_digest(&executable) != program.sha256 {
-                return Err(ToolError::ChangedInput);
-            }
-            charge_runtime(&mut runtime_bytes, executable.len())?;
-            put(
-                &snapshot.dir,
-                &format!("programs/{}", program.name),
-                &executable,
-                true,
-            )?;
-            for input in &program.inputs {
-                let content = read_regular(open_absolute(&input.path)?, MAX_FILE_BYTES)?;
-                if hex_digest(&content) != input.sha256 {
-                    return Err(ToolError::ChangedInput);
-                }
-                charge_runtime(&mut runtime_bytes, content.len())?;
-                put(
-                    &snapshot.dir,
-                    &format!("inputs/{}/{}", program.name, input.destination),
-                    &content,
-                    false,
-                )?;
-            }
-        }
-        for skill in &config.skills {
-            let root = open_directory(Path::new(&skill.directory))?;
-            for (path, hash) in &skill.files {
-                let content = read_regular(open_file(&root, path)?, MAX_TOOL_RESULT_BYTES)?;
-                if hex_digest(&content) != *hash {
-                    return Err(ToolError::ChangedInput);
-                }
-                charge_runtime(&mut runtime_bytes, content.len())?;
-                put(
-                    &snapshot.dir,
-                    &format!("skills/{}/{path}", skill.name),
-                    &content,
-                    false,
-                )?;
-            }
-        }
+        snapshot_into(
+            workspace,
+            config,
+            include_workspace.then_some(&target),
+            &snapshot.dir,
+        )?;
         Ok(snapshot)
     }
 }
 
+pub(super) fn snapshot_into(
+    workspace: &Dir,
+    config: &Config,
+    project: Option<&Dir>,
+    resources: &Dir,
+) -> Result<(), ToolError> {
+    config.validate()?;
+    let mut entries = Vec::new();
+    let mut budget = ScanBudget::default();
+    if let Some(target) = project {
+        for path in &config.workspace_paths {
+            if path == "." {
+                collect_root(workspace, "", &mut entries, &mut budget)?;
+            } else {
+                collect(workspace, path, &mut entries, &mut budget)?;
+            }
+        }
+        for entry in entries {
+            put_entry(target, entry)?;
+        }
+    }
+    let mut runtime_bytes = 0usize;
+    for program in config
+        .commands
+        .iter()
+        .chain(config.mcp.iter().map(|server| &server.program))
+    {
+        let executable = read_regular(open_absolute(&program.executable)?, MAX_SNAPSHOT_BYTES)?;
+        if hex_digest(&executable) != program.sha256 {
+            return Err(ToolError::ChangedInput);
+        }
+        charge_runtime(&mut runtime_bytes, executable.len())?;
+        if !super::guard::native_system_program(&program.executable)? {
+            put(
+                resources,
+                &format!("programs/{}", program.name),
+                &executable,
+                true,
+            )?;
+        }
+        for input in &program.inputs {
+            let content = read_regular(open_absolute(&input.path)?, MAX_FILE_BYTES)?;
+            if hex_digest(&content) != input.sha256 {
+                return Err(ToolError::ChangedInput);
+            }
+            charge_runtime(&mut runtime_bytes, content.len())?;
+            put(
+                resources,
+                &format!("inputs/{}/{}", program.name, input.destination),
+                &content,
+                false,
+            )?;
+        }
+    }
+    for skill in &config.skills {
+        let root = open_directory(Path::new(&skill.directory))?;
+        for (path, hash) in &skill.files {
+            let content = read_regular(open_file(&root, path)?, MAX_TOOL_RESULT_BYTES)?;
+            if hex_digest(&content) != *hash {
+                return Err(ToolError::ChangedInput);
+            }
+            charge_runtime(&mut runtime_bytes, content.len())?;
+            put(
+                resources,
+                &format!("skills/{}/{path}", skill.name),
+                &content,
+                false,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
 impl Drop for Snapshot {
     fn drop(&mut self) {
-        if let (Ok(tmp), Some(name)) = (open_directory(Path::new("/tmp")), self.path.file_name()) {
+        if let (Ok(tmp), Some(name)) = (open_directory(snapshot_root()), self.path.file_name()) {
             let _ = tmp.remove_dir_all(name);
         }
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn snapshot_root() -> &'static Path {
+    Path::new("/tmp")
 }
 
 #[derive(Default)]
@@ -615,6 +718,7 @@ fn path_match(path: &str, query: &str) -> Option<u8> {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 pub(super) fn copy_seed() -> Result<(), ToolError> {
     let root = open_directory(Path::new("/seed/workspace"))?;
     let target = open_directory(Path::new("/workspace"))?;
@@ -635,8 +739,12 @@ pub(super) fn copy_seed() -> Result<(), ToolError> {
     Ok(())
 }
 
-pub(super) fn native(call: &ToolCall, config: &Config) -> Result<String, ToolError> {
-    let root = open_directory(Path::new("/workspace"))?;
+pub(super) fn native(
+    workspace: &Path,
+    call: &ToolCall,
+    config: &Config,
+) -> Result<String, ToolError> {
+    let root = open_directory(workspace)?;
     match call {
         ToolCall::Read {
             path,
@@ -658,7 +766,7 @@ pub(super) fn native(call: &ToolCall, config: &Config) -> Result<String, ToolErr
         ToolCall::List { path } | ToolCall::Search { path, .. } => {
             let path = if path == "." { "" } else { path.as_str() };
             if config.workspace_paths == ["."] && matches!(call, ToolCall::List { .. }) {
-                let rows = workspace_entries(Path::new("/workspace"), path, "")?;
+                let rows = workspace_entries(workspace, path, "")?;
                 return Ok(
                     json!({"entries":rows,"limit":64,"may_be_truncated":rows.len()>=64})
                         .to_string(),
@@ -818,32 +926,34 @@ fn replace(
                 .map_err(|_| ToolError::Operation)?;
         }
         verify()?;
-        #[cfg(target_os = "linux")]
-        if expected.is_none() {
-            rustix::fs::renameat_with(
-                &parent,
-                &temporary,
-                &parent,
-                &leaf,
-                rustix::fs::RenameFlags::NOREPLACE,
-            )
-            .map_err(|_| ToolError::Conflict)?;
-        } else {
-            parent
-                .rename(&temporary, &parent, &leaf)
-                .map_err(|_| ToolError::Operation)?;
-        }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            return Err(ToolError::ProtectionUnavailable);
+            if expected.is_none() {
+                rustix::fs::renameat_with(
+                    &parent,
+                    &temporary,
+                    &parent,
+                    &leaf,
+                    rustix::fs::RenameFlags::NOREPLACE,
+                )
+                .map_err(|_| ToolError::Conflict)?;
+            } else {
+                parent
+                    .rename(&temporary, &parent, &leaf)
+                    .map_err(|_| ToolError::Operation)?;
+            }
+            parent
+                .try_clone()
+                .map_err(|_| ToolError::Uncertain)?
+                .into_std_file()
+                .sync_all()
+                .map_err(|_| ToolError::Uncertain)?;
+            Ok(json!({"sha256":hex_digest(bytes),"bytes":bytes.len()}).to_string())
         }
-        parent
-            .try_clone()
-            .map_err(|_| ToolError::Uncertain)?
-            .into_std_file()
-            .sync_all()
-            .map_err(|_| ToolError::Uncertain)?;
-        Ok(json!({"sha256":hex_digest(bytes),"bytes":bytes.len()}).to_string())
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            Err(ToolError::ProtectionUnavailable)
+        }
     })();
     let _ = parent.remove_file(&temporary);
     result

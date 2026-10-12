@@ -46,12 +46,12 @@ fn prepare_test_file_account_at(account_root: &Path) -> Uuid {
         "schema": 1,
         "storage": "private_file",
         "account": {
-            "schema": 1,
+            "schema": 2,
             "id": account_id,
             "provider": "openai",
             "model": "gpt-5.4",
             "effort": null,
-            "api_key": "synthetic-existing-key"
+            "api_key": "synthetic-existing-key", "anthropic_workspace_id": null
         }
     });
     state
@@ -77,13 +77,23 @@ fn prepare_selected_chatgpt_account_at(account_root: &Path) -> Uuid {
             "client_id": "oaiapp_synthetic_saved",
             "subject": "synthetic-subject",
             "storage": "keyring",
-            "renewal_pending": false,
-            "token": null
-        }]
+            "renewal_pending": false, "signout_pending": false,
+            "disconnected": false, "plan_permission_missing": false, "token": null
+        }], "model_checks": []
     });
     state
         .replace_chatgpt_accounts_record(&serde_json::to_vec(&record).expect("account index"))
         .expect("test ChatGPT account index");
+    let registration = serde_json::json!({
+        "schema": 1,
+        "host_id": "123e4567-e89b-42d3-a456-426614174000",
+        "issued_client_id": null
+    });
+    state
+        .replace_chatgpt_registration_record(
+            &serde_json::to_vec(&registration).expect("registration"),
+        )
+        .expect("test ChatGPT registration");
     account_id
 }
 
@@ -91,14 +101,12 @@ fn wait_for(
     output: &mut impl Read,
     input: &mut impl Write,
     transcript: &mut Vec<u8>,
-    answered: &mut usize,
+    answered: &mut crate::session_picker::PtyResponses,
     needle: &[u8],
 ) {
-    let mut declined = false;
     let deadline = Instant::now() + Duration::from_secs(10);
     while !transcript.windows(needle.len()).any(|part| part == needle) {
         pump(output, input, transcript, answered);
-        super::process::decline_workspace_consent(input, transcript, &mut declined);
         assert!(
             Instant::now() < deadline,
             "setup PTY stage missing: {}",
@@ -112,18 +120,16 @@ fn wait_for_after(
     output: &mut impl Read,
     input: &mut impl Write,
     transcript: &mut Vec<u8>,
-    answered: &mut usize,
+    answered: &mut crate::session_picker::PtyResponses,
     start: usize,
     needle: &[u8],
 ) {
-    let mut declined = false;
     let deadline = Instant::now() + Duration::from_secs(10);
     while !transcript[start..]
         .windows(needle.len())
         .any(|part| part == needle)
     {
         pump(output, input, transcript, answered);
-        super::process::decline_workspace_consent(input, transcript, &mut declined);
         assert!(
             Instant::now() < deadline,
             "setup PTY stage missing: {}",
@@ -148,6 +154,8 @@ fn bare_start_reuses_private_file_account_without_setup_or_run() {
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
+        .env("HOME", temp.path().join("fixture-home"))
+        .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
         .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
         .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
         .env("DBUS_SESSION_BUS_ADDRESS", "unixexec:path=/usr/bin/false")
@@ -164,7 +172,7 @@ fn bare_start_reuses_private_file_account_without_setup_or_run() {
     let flags = fcntl_getfl(&output).expect("stdout flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
     let mut transcript = Vec::new();
-    let mut answered = 0;
+    let mut answered = crate::session_picker::PtyResponses::default();
     wait_for(
         &mut output,
         &mut input,
@@ -186,7 +194,10 @@ fn bare_start_reuses_private_file_account_without_setup_or_run() {
     pump(&mut output, &mut input, &mut transcript, &mut answered);
     assert!(result.status.success(), "saved-account startup failed");
     assert!(result.stderr.is_empty(), "script wrapper stderr");
-    assert_eq!(answered, 0, "screen-reader mode uses no cursor query");
+    assert_eq!(
+        answered.cursor_queries, 0,
+        "screen-reader mode uses no cursor query"
+    );
     let text = String::from_utf8(transcript).expect("screen-reader UTF-8");
     assert!(!text.contains("Choose access method"), "setup was reopened");
     assert!(
@@ -222,14 +233,14 @@ fn bare_start_reuses_private_file_account_without_setup_or_run() {
 #[cfg(debug_assertions)]
 #[test]
 fn bare_start_with_both_accounts_requires_an_explicit_billing_route() {
-    for (choice, corrupt_native, corrupt_chatgpt, provider, success) in [
+    for (choice, corrupt_native, corrupt_chatgpt, provider, opens_chat) in [
         (Some("API key"), false, true, Some("openai"), true),
         (Some("ChatGPT plan"), true, false, Some("chatgpt"), true),
-        (Some(""), true, true, None, true),
-        (Some("Cancel"), true, true, None, true),
-        (None, false, false, None, true),
-        (Some("API key"), true, false, None, false),
-        (Some("ChatGPT plan"), false, true, None, false),
+        (Some(""), true, true, None, false),
+        (Some("Cancel"), true, true, None, false),
+        (None, false, false, None, false),
+        (Some("API key"), true, false, None, true),
+        (Some("ChatGPT plan"), false, true, None, true),
     ] {
         let temp = tempfile::tempdir().expect("private test root");
         let workspace = temp.path().join("workspace");
@@ -263,6 +274,8 @@ fn bare_start_with_both_accounts_requires_an_explicit_billing_route() {
             .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
             .env("ARANY_TEST_STATE", &state)
             .env("ARANY_TEST_WORKSPACE", &workspace)
+            .env("HOME", temp.path().join("fixture-home"))
+            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
             .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
             .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
             .env(
@@ -282,7 +295,7 @@ fn bare_start_with_both_accounts_requires_an_explicit_billing_route() {
         let flags = fcntl_getfl(&output).expect("stdout flags");
         fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
         let mut transcript = Vec::new();
-        let mut answered = 0;
+        let mut answered = crate::session_picker::PtyResponses::default();
         wait_for(
             &mut output,
             &mut input,
@@ -322,7 +335,7 @@ fn bare_start_with_both_accounts_requires_an_explicit_billing_route() {
                     .write_all(name.as_bytes())
                     .expect("choose billing route");
                 input.write_all(b"\r").expect("submit billing route");
-                if provider.is_some() {
+                if opens_chat {
                     wait_for_after(
                         &mut output,
                         &mut input,
@@ -338,16 +351,21 @@ fn bare_start_with_both_accounts_requires_an_explicit_billing_route() {
         }
         let result = wait_product(child.take());
         pump(&mut output, &mut input, &mut transcript, &mut answered);
-        assert_eq!(
-            result.status.success(),
-            success,
-            "{choice:?}: {}",
-            result.status
-        );
+        assert!(result.status.success(), "{choice:?}: {}", result.status);
         assert!(result.stderr.is_empty(), "script wrapper stderr");
-        assert_eq!(answered, 0, "screen-reader mode queried the cursor");
+        assert_eq!(
+            answered.cursor_queries, 0,
+            "screen-reader mode queried the cursor"
+        );
         let text = String::from_utf8(transcript).expect("screen-reader UTF-8");
         assert!(text.contains("Both saved; choose billing route"));
+        // Invalid selected-route data reopens unconfigured chat for explicit recovery.
+        assert_eq!(
+            text.contains("Saved access could not be restored"),
+            opens_chat && provider.is_none(),
+            "{choice:?}: {text}"
+        );
+        assert!(!text.contains("use arany --setup"), "{choice:?}: {text}");
         assert!(!text.contains("synthetic-existing-key"));
         assert!(!text.contains("invalid unselected account JSON"));
         assert!(!text.contains("invalid unselected ChatGPT JSON"));
@@ -371,7 +389,7 @@ fn bare_start_with_both_accounts_requires_an_explicit_billing_route() {
                 .expect("unchanged ChatGPT record")
                 == chatgpt_before
         );
-        if provider.is_some() {
+        if opens_chat {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .expect("read-only runtime");
@@ -429,6 +447,9 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
                         "subject": "synthetic-other-subject",
                         "storage": "keyring",
                         "renewal_pending": false,
+                        "signout_pending": false,
+                        "disconnected": false,
+                        "plan_permission_missing": false,
                         "token": null
                     }));
             }
@@ -444,6 +465,8 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
             .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
             .env("ARANY_TEST_STATE", &state)
             .env("ARANY_TEST_WORKSPACE", &workspace)
+            .env("HOME", temp.path().join("fixture-home"))
+            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
             .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
             .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
             .env(
@@ -463,7 +486,7 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
         let flags = fcntl_getfl(&output).expect("stdout flags");
         fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
         let mut transcript = Vec::new();
-        let mut answered = 0;
+        let mut answered = crate::session_picker::PtyResponses::default();
         wait_for(
             &mut output,
             &mut input,
@@ -500,16 +523,33 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
                 b"type a choice name: Use saved or Reconnect or Connect new"
             },
         );
+        let chosen_at = transcript.len();
         input
             .write_all(format!("{choice}\r").as_bytes())
             .expect("choose selected account action");
+        // Failed setup returns to the unconfigured composer; empty Ctrl+D then exits.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !transcript[chosen_at..]
+            .split(|byte| *byte == b'\n')
+            .skip_while(|line| !line.starts_with(b"Notice: "))
+            .any(|line| line.starts_with(b"Input:"))
+        {
+            pump(&mut output, &mut input, &mut transcript, &mut answered);
+            assert!(
+                Instant::now() < deadline,
+                "failed setup notice missing: {}",
+                tail(&transcript)
+            );
+            thread::yield_now();
+        }
+        input.write_all(b"\x04").expect("exit unconfigured chat");
         let result = wait_product(child.take());
         pump(&mut output, &mut input, &mut transcript, &mut answered);
-        assert!(
-            !result.status.success(),
-            "missing synthetic token was usable"
+        assert!(result.status.success(), "unconfigured chat exit");
+        assert_eq!(
+            answered.cursor_queries, 0,
+            "linear setup queried the cursor"
         );
-        assert_eq!(answered, 0, "linear setup queried the cursor");
         let text = String::from_utf8(transcript).expect("screen-reader UTF-8");
         if choice == "Reconnect" {
             assert!(text.contains("Saved ChatGPT keyring is unavailable"));
@@ -532,7 +572,14 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
         assert!(!text.contains("new ChatGPT account was saved"));
         assert!(!text.contains("Waiting for ChatGPT"));
         assert!(!text.contains("Choose Accept to continue"));
-        assert!(!state.exists(), "failed reuse created Session State");
+        if let Ok(root) = StateRoot::open_existing(&state) {
+            let sessions = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("fixture runtime")
+                .block_on(arany::list_sessions(root, workspace.clone()))
+                .expect("Session list");
+            assert!(sessions.is_empty(), "failed reuse created a Session");
+        }
         assert!(!text.contains('\x1b'), "screen-reader output has escapes");
         let marker = |name: &str| {
             text.lines()
@@ -587,6 +634,9 @@ fn saved_chatgpt_picker_lists_account_ids_and_cancels_cleanly() {
             "subject": "synthetic-other-subject",
             "storage": "keyring",
             "renewal_pending": false,
+            "signout_pending": false,
+            "disconnected": false,
+            "plan_permission_missing": false,
             "token": null
         }));
     account_root
@@ -598,6 +648,8 @@ fn saved_chatgpt_picker_lists_account_ids_and_cancels_cleanly() {
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
+        .env("HOME", temp.path().join("fixture-home"))
+        .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
         .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
         .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
         .env(
@@ -617,7 +669,7 @@ fn saved_chatgpt_picker_lists_account_ids_and_cancels_cleanly() {
     let flags = fcntl_getfl(&output).expect("stdout flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
     let mut transcript = Vec::new();
-    let mut answered = 0;
+    let mut answered = crate::session_picker::PtyResponses::default();
     wait_for(
         &mut output,
         &mut input,
@@ -656,7 +708,10 @@ fn saved_chatgpt_picker_lists_account_ids_and_cancels_cleanly() {
     pump(&mut output, &mut input, &mut transcript, &mut answered);
     assert!(result.status.success(), "cancelled picker failed");
     assert!(result.stderr.is_empty(), "script wrapper stderr");
-    assert_eq!(answered, 0, "screen-reader picker queried cursor");
+    assert_eq!(
+        answered.cursor_queries, 0,
+        "screen-reader picker queried cursor"
+    );
     let text = String::from_utf8(transcript).expect("screen-reader UTF-8");
     assert!(text.contains(&format!("1* {}", &selected.simple().to_string()[24..])));
     assert!(text.contains(&format!("2  {}", &other.simple().to_string()[24..])));
@@ -686,6 +741,11 @@ fn bare_start_without_account_keeps_chat_input_and_offers_named_setup_choices() 
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let prompt_shell = "before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; if [ -n \"$ARANY_TEST_FORK\" ]; then set -- --fork \"$ARANY_TEST_FORK\"; else set --; fi; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" \"$@\" 'startup objective'; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
+    crate::isolation::remember_workspace_trust(
+        &temp.path().join("account-root"),
+        &workspace,
+        &workspace,
+    );
     for (name, fork) in [("new", String::new()), ("fork", Uuid::now_v7().to_string())] {
         let prompt_state = temp.path().join(format!("{name}-prompt-state"));
         let result = wait_product(
@@ -694,7 +754,9 @@ fn bare_start_without_account_keeps_chat_input_and_offers_named_setup_choices() 
                 .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
                 .env("ARANY_TEST_STATE", &prompt_state)
                 .env("ARANY_TEST_WORKSPACE", &workspace)
-                .env("ARANY_TEST_FORK", fork)
+                .env("ARANY_TEST_FORK", &fork)
+                .env("HOME", temp.path().join("fixture-home"))
+                .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
                 .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
                 .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
                 .env(
@@ -716,10 +778,15 @@ fn bare_start_without_account_keeps_chat_input_and_offers_named_setup_choices() 
         let text = std::str::from_utf8(&result.stdout).expect("startup-task UTF-8");
         let lines = text.lines().collect::<Vec<_>>();
         assert_eq!(lines.len(), 3, "{name}: unexpected startup output");
-        assert_eq!(
-            lines[1], "error: a prompt requires a selected Provider; run arany and use /setup",
-            "{name}: actionable admission error"
-        );
+        // A fork validates its source Session before admitting inherited selections.
+        let expected = if name == "fork" {
+            format!(
+                "error: conversation {fork} was not found in this State/Workspace; list conversations with arany --resume or /resume, or check --state-dir"
+            )
+        } else {
+            "error: a prompt requires a selected Provider; run arany and use /setup".to_owned()
+        };
+        assert_eq!(lines[1], expected, "{name}: actionable admission error");
         let before = lines[0]
             .strip_prefix("TTY_BEFORE:")
             .expect("before settings");
@@ -738,6 +805,8 @@ fn bare_start_without_account_keeps_chat_input_and_offers_named_setup_choices() 
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
+        .env("HOME", temp.path().join("fixture-home"))
+        .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
         .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
         .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
         .env(
@@ -757,7 +826,7 @@ fn bare_start_without_account_keeps_chat_input_and_offers_named_setup_choices() 
     let flags = fcntl_getfl(&output).expect("stdout flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
     let mut transcript = Vec::new();
-    let mut answered = 0;
+    let mut answered = crate::session_picker::PtyResponses::default();
     wait_for(
         &mut output,
         &mut input,
@@ -806,7 +875,10 @@ fn bare_start_without_account_keeps_chat_input_and_offers_named_setup_choices() 
     pump(&mut output, &mut input, &mut transcript, &mut answered);
     assert!(result.status.success(), "unconfigured chat failed");
     assert!(result.stderr.is_empty(), "script wrapper stderr");
-    assert_eq!(answered, 0, "screen-reader mode uses no cursor query");
+    assert_eq!(
+        answered.cursor_queries, 0,
+        "screen-reader mode uses no cursor query"
+    );
     let text = String::from_utf8(transcript).expect("screen-reader UTF-8");
     assert!(
         text.contains("visible draft"),
@@ -852,6 +924,8 @@ fn screen_reader_chatgpt_consent_defaults_to_back_before_browser_or_account_stat
             .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
             .env("ARANY_TEST_STATE", &state)
             .env("ARANY_TEST_WORKSPACE", &workspace)
+            .env("HOME", temp.path().join("fixture-home"))
+            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
             .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
             .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
             .env(
@@ -871,7 +945,7 @@ fn screen_reader_chatgpt_consent_defaults_to_back_before_browser_or_account_stat
         let flags = fcntl_getfl(&output).expect("stdout flags");
         fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
         let mut transcript = Vec::new();
-        let mut answered = 0;
+        let mut answered = crate::session_picker::PtyResponses::default();
         wait_for(
             &mut output,
             &mut input,
@@ -924,12 +998,20 @@ fn screen_reader_chatgpt_consent_defaults_to_back_before_browser_or_account_stat
         let result = wait_product(child.take());
         pump(&mut output, &mut input, &mut transcript, &mut answered);
         assert!(result.status.success(), "cancelled setup failed");
-        assert_eq!(answered, 0, "linear setup must not query the cursor");
-        assert!(!state.exists(), "cancelled setup created Session State");
-        assert!(
-            !account_root.exists(),
-            "pre-consent setup created account State"
+        assert_eq!(
+            answered.cursor_queries, 0,
+            "linear setup must not query the cursor"
         );
+        assert!(!state.exists(), "cancelled setup created Session State");
+        // The harness's Enter at folder consent is an explicit "read only" save, which creates the root.
+        if let Ok(root) = StateRoot::open_existing(&account_root) {
+            assert!(
+                root.read_saved_account_record().unwrap().is_none()
+                    && root.read_chatgpt_registration_record().unwrap().is_none()
+                    && root.read_chatgpt_accounts_record().unwrap().is_none(),
+                "pre-consent setup created account State"
+            );
+        }
         let text = String::from_utf8(transcript).expect("screen-reader UTF-8");
         assert!(text.contains("Password store unavailable. Unencrypted file"));
         assert_eq!(text.contains("remote output-token limit"), accept_file);
@@ -994,7 +1076,7 @@ fn release_setup_uses_private_passwd_home_without_test_override() {
     let flags = fcntl_getfl(&output).expect("stdout flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
     let mut transcript = Vec::new();
-    let mut answered = 0;
+    let mut answered = crate::session_picker::PtyResponses::default();
     wait_for(
         &mut output,
         &mut input,
@@ -1047,7 +1129,10 @@ fn release_setup_uses_private_passwd_home_without_test_override() {
     let result = wait_product(child.take());
     pump(&mut output, &mut input, &mut transcript, &mut answered);
     assert!(result.status.success(), "cancelled release setup failed");
-    assert_eq!(answered, 0, "screen-reader setup queried the cursor");
+    assert_eq!(
+        answered.cursor_queries, 0,
+        "screen-reader setup queried the cursor"
+    );
     assert!(
         !private_home.join("state").exists(),
         "created Session State"
@@ -1110,7 +1195,7 @@ fn release_bare_session(
     let flags = fcntl_getfl(&output).expect("stdout flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
     let mut transcript = Vec::new();
-    let mut answered = 0;
+    let mut answered = crate::session_picker::PtyResponses::default();
     wait_for(
         &mut output,
         &mut input,
@@ -1165,7 +1250,10 @@ fn release_bare_session(
     let result = wait_product(child.take());
     pump(&mut output, &mut input, &mut transcript, &mut answered);
     assert!(result.status.success(), "saved-account release exit");
-    assert_eq!(answered, 0, "screen-reader startup queried the cursor");
+    assert_eq!(
+        answered.cursor_queries, 0,
+        "screen-reader startup queried the cursor"
+    );
     let text = String::from_utf8(transcript).expect("screen-reader UTF-8");
     assert!(!text.contains("Choose access method"), "setup reopened");
     if access_choice.is_some() {
@@ -1393,10 +1481,10 @@ fn release_saved_account_is_private_across_os_users() {
         } else {
             "/arany --screen-reader --state-dir /other/state --workspace /other/workspace"
         };
-        let legacy_state = if expected_account.is_some() {
+        let fixture_state = if expected_account.is_some() {
             "/owner/spoofed-state"
         } else {
-            "/other/legacy-state"
+            "/other/fixture-state"
         };
         let mut command = Command::new("/usr/bin/script");
         command
@@ -1405,7 +1493,7 @@ fn release_saved_account_is_private_across_os_users() {
             .env("SHELL", "/usr/bin/sh")
             .env("TERM", "dumb")
             .env("HOME", "/owner")
-            .env("XDG_STATE_HOME", legacy_state)
+            .env("XDG_STATE_HOME", fixture_state)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -1415,7 +1503,7 @@ fn release_saved_account_is_private_across_os_users() {
         let flags = fcntl_getfl(&output).expect("stdout flags");
         fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
         let mut transcript = Vec::new();
-        let mut answered = 0;
+        let mut answered = crate::session_picker::PtyResponses::default();
         wait_for(
             &mut output,
             &mut input,
@@ -1427,7 +1515,10 @@ fn release_saved_account_is_private_across_os_users() {
         let result = wait_product(child.take());
         pump(&mut output, &mut input, &mut transcript, &mut answered);
         assert!(result.status.success(), "cross-user product exit");
-        assert_eq!(answered, 0, "screen-reader startup queried the cursor");
+        assert_eq!(
+            answered.cursor_queries, 0,
+            "screen-reader startup queried the cursor"
+        );
         assert!(
             !transcript
                 .windows(b"synthetic-existing-key".len())
@@ -1507,7 +1598,7 @@ fn release_saved_account_is_private_across_os_users() {
                 .take(2048)
                 .collect::<String>()
             );
-            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+            crate::process::assert_single_test_completed(&output.stdout, "second OS user");
         }
         return;
     }
@@ -1555,7 +1646,7 @@ fn release_saved_account_is_private_across_os_users() {
             "--symlink",
             "usr/lib",
             "/lib",
-            "--ro-bind",
+            "--ro-bind-try",
             "/lib64",
             "/lib64",
             "--ro-bind",
@@ -1599,7 +1690,7 @@ fn release_saved_account_is_private_across_os_users() {
         .take(4096)
         .collect::<String>()
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+    crate::process::assert_single_test_completed(&output.stdout, "saved account");
 }
 
 #[cfg(debug_assertions)]
@@ -1616,7 +1707,9 @@ fn narrow_no_color_chatgpt_warning_pages_before_acceptance_and_restores_terminal
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
+        .env("HOME", temp.path().join("fixture-home"))
+                .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
+                .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
         .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
         .env(
             "DBUS_SESSION_BUS_ADDRESS",
@@ -1641,7 +1734,7 @@ fn narrow_no_color_chatgpt_warning_pages_before_acceptance_and_restores_terminal
     let flags = fcntl_getfl(&output).expect("stdout flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
     let mut transcript = Vec::new();
-    let mut answered = 0;
+    let mut answered = crate::session_picker::PtyResponses::default();
     wait_for(
         &mut output,
         &mut input,
@@ -1674,7 +1767,7 @@ fn narrow_no_color_chatgpt_warning_pages_before_acceptance_and_restores_terminal
         &mut input,
         &mut transcript,
         &mut answered,
-        b"ChatGPT plan con",
+        "ChatGPT plan co\u{2026}".as_bytes(),
     );
     assert!(!state.exists(), "pre-consent flow created a Session");
     let next_page = transcript.len();
@@ -1746,6 +1839,8 @@ fn unconfigured_inline_composer_shows_draft_and_setup_selection_at_narrow_widths
             .env("ARANY_TEST_EXE", &executable)
             .env("ARANY_TEST_STATE", &state)
             .env("ARANY_TEST_WORKSPACE", &workspace)
+            .env("HOME", temp.path().join("fixture-home"))
+            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
             .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
             .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
             .env(
@@ -1765,13 +1860,21 @@ fn unconfigured_inline_composer_shows_draft_and_setup_selection_at_narrow_widths
         let flags = fcntl_getfl(&output).expect("stdout flags");
         fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
         let mut transcript = Vec::new();
-        let mut answered = 0;
+        let mut answered = crate::session_picker::PtyResponses::default();
         wait_for(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
             b"Ask Arany",
+        );
+        // Narrow frames can flush the setup hint after the composer border.
+        wait_for(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            b"/setup",
         );
         let text = String::from_utf8_lossy(&transcript);
         let shell_pid = text
@@ -1945,7 +2048,10 @@ fn unconfigured_inline_composer_shows_draft_and_setup_selection_at_narrow_widths
             result.status.success(),
             "inline setup journey failed at {columns}"
         );
-        assert_eq!(answered, 1, "inline cursor position query at {columns}");
+        assert_eq!(
+            answered.cursor_queries, 0,
+            "terminal ownership must not query cursor input at {columns}"
+        );
         let text = String::from_utf8(transcript).expect("PTY UTF-8");
         assert!(
             !text.contains("\x1b[?1049h"),
@@ -2012,6 +2118,11 @@ fn replaced_file_account_cannot_run_an_older_session() {
     let replacement = prepare_test_file_account(temp.path());
     assert_ne!(replacement, original_account);
 
+    crate::isolation::remember_workspace_trust(
+        &temp.path().join("account-root"),
+        &workspace,
+        std::path::Path::new("/data/workspace"),
+    );
     let shell = "/usr/bin/timeout -k 1s 5s /usr/bin/bwrap --unshare-user --unshare-net --unshare-pid --die-with-parent --tmpfs / --ro-bind /usr /usr --symlink usr/lib /lib --ro-bind /lib64 /lib64 --proc /proc --dev-bind /dev /dev --bind \"$ARANY_TEST_ROOT\" /data --ro-bind \"$ARANY_TEST_EXE\" /arany --clearenv --setenv HOME /data --setenv XDG_STATE_HOME /data/xdg-state --setenv ARANY_TEST_ACCOUNT_ROOT /data/account-root --setenv DBUS_SESSION_BUS_ADDRESS unixexec:path=/usr/bin/false --setenv TERM dumb --chdir /data/workspace -- /arany --screen-reader --state-dir /data/state --workspace /data/workspace --resume \"$ARANY_TEST_SESSION\" 'synthetic stale-account objective'";
     let mut command = Command::new("/usr/bin/script");
     command
@@ -2041,7 +2152,8 @@ fn replaced_file_account_cannot_run_an_older_session() {
         "screen-reader output has escapes"
     );
     assert!(
-        transcript == "error: invalid saved account\r\n",
+        transcript
+            == "error: invalid saved account; use arany --setup to choose or reset access\r\n",
         "stale account was not rejected exactly: {diagnostic}"
     );
 
@@ -2079,7 +2191,9 @@ fn narrow_no_color_setup_hides_key_and_restores_terminal_on_cancel() {
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
+        .env("HOME", temp.path().join("fixture-home"))
+                .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
+                .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
         .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
         .env(
             "DBUS_SESSION_BUS_ADDRESS",
@@ -2104,7 +2218,7 @@ fn narrow_no_color_setup_hides_key_and_restores_terminal_on_cancel() {
         let flags = fcntl_getfl(&output).expect("stdout flags");
         fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
         let mut transcript = Vec::new();
-        let mut answered = 0;
+        let mut answered = crate::session_picker::PtyResponses::default();
         wait_for(
             &mut output,
             &mut input,
@@ -2379,6 +2493,8 @@ fn cancelled_screen_reader_setup_hides_key_and_creates_no_session() {
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
+        .env("HOME", temp.path().join("fixture-home"))
+        .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
         .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
         .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
         .env("DBUS_SESSION_BUS_ADDRESS", "unixexec:path=/usr/bin/false")
@@ -2395,7 +2511,7 @@ fn cancelled_screen_reader_setup_hides_key_and_creates_no_session() {
     let flags = fcntl_getfl(&output).expect("stdout flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
     let mut transcript = Vec::new();
-    let mut answered = 0;
+    let mut answered = crate::session_picker::PtyResponses::default();
     wait_for(
         &mut output,
         &mut input,
@@ -2642,6 +2758,8 @@ fn setup_signals_after_hidden_key_segment_restore_echo_and_preserve_defaults() {
             .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
             .env("ARANY_TEST_STATE", &state)
             .env("ARANY_TEST_WORKSPACE", &workspace)
+            .env("HOME", temp.path().join("fixture-home"))
+            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
             .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
             .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
             .env("DBUS_SESSION_BUS_ADDRESS", "unixexec:path=/usr/bin/false")
@@ -2658,7 +2776,7 @@ fn setup_signals_after_hidden_key_segment_restore_echo_and_preserve_defaults() {
         let flags = fcntl_getfl(&output).expect("stdout flags");
         fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
         let mut transcript = Vec::new();
-        let mut answered = 0;
+        let mut answered = crate::session_picker::PtyResponses::default();
         wait_for(
             &mut output,
             &mut input,
@@ -2837,12 +2955,20 @@ fn unsafe_dbus_address_cannot_launch_a_credential_command() {
     let state = temp.path().join("state");
     let marker = temp.path().join("credential-command-marker");
     let address = format!("unixexec:path=/usr/bin/touch,argv1={}", marker.display());
+    crate::isolation::remember_workspace_trust(
+        &temp.path().join("account-root"),
+        &workspace,
+        &workspace,
+    );
+    prepare_selected_chatgpt_account(temp.path());
     let output = Command::new("/usr/bin/script")
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
+        .env("HOME", temp.path().join("fixture-home"))
+                .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
+                .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
         .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
         .env("DBUS_SESSION_BUS_ADDRESS", address)
         .env("SHELL", "/bin/sh")
@@ -2857,11 +2983,19 @@ fn unsafe_dbus_address_cannot_launch_a_credential_command() {
         ])
         .bounded_output()
         .expect("setup PTY process");
-    assert!(!output.status.success(), "unsafe transport rejected");
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.contains("unsafe or unsupported D-Bus session address"));
     assert!(!marker.exists(), "credential command was not executed");
-    assert!(!state.exists(), "unsafe transport created State");
+    // Rejected startup authorization keeps unconfigured chat; it saves no conversation.
+    assert!(text.contains("No conversation saved."));
+    if let Ok(root) = StateRoot::open_existing(&state) {
+        let sessions = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("fixture runtime")
+            .block_on(arany::list_sessions(root, workspace.clone()))
+            .expect("Session list");
+        assert!(sessions.is_empty(), "unsafe transport created a Session");
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -2956,6 +3090,8 @@ fn saved_account_fifo_is_rejected_without_blocking_or_keyring_access() {
             .arg(env!("CARGO_BIN_EXE_arany"))
             .args(["provider", "models", "openai", "--saved-account"])
             .env_clear()
+            .env("HOME", temp.path().join("fixture-home"))
+            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
             .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
             .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
             .env("DBUS_SESSION_BUS_ADDRESS", "unixexec:path=/usr/bin/false")
@@ -2978,7 +3114,7 @@ fn saved_account_fifo_is_rejected_without_blocking_or_keyring_access() {
                     "--symlink",
                     "usr/lib",
                     "/lib",
-                    "--ro-bind",
+                    "--ro-bind-try",
                     "/lib64",
                     "/lib64",
                     "--ro-bind",
@@ -3066,12 +3202,12 @@ fn native_credential_helper_round_trips_a_synthetic_isolated_slot() {
     let slot = format!("native-test-{}", Uuid::now_v7());
     let _cleanup = Cleanup(slot.clone());
     let account = serde_json::to_vec(&serde_json::json!({
-        "schema": 1,
+        "schema": 2,
         "id": Uuid::now_v7(),
         "provider": "openai",
         "model": "gpt-5.4",
         "effort": null,
-        "api_key": "synthetic-native-helper-key"
+        "api_key": "synthetic-native-helper-key", "anthropic_workspace_id": null
     }))
     .expect("synthetic account");
     let mut command = credential_helper_command("write", &slot, temp.path());
@@ -3137,19 +3273,26 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
     let temp = tempfile::tempdir().expect("private test root");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
+    crate::isolation::remember_workspace_trust(
+        &temp.path().join("account-home/.local/state/arany"),
+        &workspace,
+        &workspace,
+    );
     let state = temp.path().join("state");
     let socket = temp.path().join("bus");
     let listener = UnixListener::bind(&socket).expect("private synthetic D-Bus socket");
     listener
         .set_nonblocking(true)
         .expect("nonblocking synthetic bus");
-    let mut command = super::process::isolated_script(temp.path());
+    let mut command = super::isolation::isolated_script(temp.path());
     command
         .env_clear()
         .env("ARANY_TEST_EXE", "/arany")
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
+        .env("HOME", temp.path().join("fixture-home"))
+                .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
+                .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
         .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={}", socket.display()))
         .env("SHELL", "/bin/sh")
         .env("TERM", "dumb")
@@ -3162,24 +3305,18 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
             "/dev/null",
         ])
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null());
     let mut child = ChildGuard::new(command.spawn().expect("first-run setup PTY"));
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let mut connection = loop {
-        match listener.accept() {
-            Ok((connection, _)) => break connection,
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                assert!(
-                    Instant::now() < deadline,
-                    "setup never reached the OS store"
-                );
-                thread::yield_now();
-            }
-            Err(error) => panic!("synthetic bus accept failed: {error}"),
-        }
-    };
     let output = wait_product(child.take());
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+        "unconfigured startup must not probe the OS store"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("Input:"),
+        "unconfigured chat must open before EOF"
+    );
     assert_ne!(
         output.status.code(),
         Some(124),
@@ -3203,21 +3340,6 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
             "startup, local rejection and setup navigation save no empty conversation"
         );
     });
-    connection
-        .set_read_timeout(Some(Duration::from_secs(1)))
-        .expect("synthetic bus read deadline");
-    let mut observed = 0;
-    loop {
-        let mut bytes = [0; 1024];
-        let count = connection
-            .read(&mut bytes)
-            .expect("credential helper closed stalled connection");
-        if count == 0 {
-            break;
-        }
-        observed += count;
-        assert!(observed <= 4096, "bounded synthetic D-Bus handshake");
-    }
 
     let account_path = temp.path().join("account-home/.local/state/arany");
     let account_root = StateRoot::admit(&account_path).expect("isolated account marker");
@@ -3284,7 +3406,7 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
             events
         });
         let shell = "printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; stty cols 40 rows 12; if [ \"$ARANY_TEST_LINEAR\" = 1 ]; then set -- --screen-reader; else set -- --no-color; fi; \"$ARANY_TEST_EXE\" \"$@\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; stty \"$before\"; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
-        let mut command = super::process::isolated_script(temp.path());
+        let mut command = super::isolation::isolated_script(temp.path());
         command
             .env_clear()
             .env("ARANY_TEST_EXE", &executable)
@@ -3292,6 +3414,8 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
             .env("ARANY_TEST_WORKSPACE", &workspace)
             .env("ARANY_TEST_SESSION", session_id.to_string())
             .env("ARANY_TEST_LINEAR", if linear { "1" } else { "0" })
+            .env("HOME", temp.path().join("fixture-home"))
+            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
             .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
             .env(
                 "DBUS_SESSION_BUS_ADDRESS",
@@ -3310,35 +3434,13 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
         let flags = fcntl_getfl(&output).expect("stdout flags");
         fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
         let mut transcript = Vec::new();
-        let mut answered = 0;
-        if !linear {
-            wait_for(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                b"Do you trust this folder?",
-            );
-            let page_start = transcript.len();
-            input.write_all(b"\r").expect("review second consent page");
-            wait_for_after(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                page_start,
-                b"\x1b[?25l",
-            );
-            input
-                .write_all(b"\r")
-                .expect("explicit read-only fixture choice");
-        }
+        let mut answered = crate::session_picker::PtyResponses::default();
         wait_for(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
-            if linear { b"Input:\r\n" } else { b"\x1b[10;3H" },
+            b"Authorize saved access",
         );
         let text = String::from_utf8_lossy(&transcript);
         let shell_pid = text
@@ -3349,6 +3451,45 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
             .expect("shell PID number");
         let product_pid = product_child_of_executable(shell_pid, &executable);
         let _product = ProductGuard::for_executable(product_pid, state.clone(), executable.clone());
+        let startup_deadline = Instant::now() + Duration::from_secs(2);
+        let startup_connection = loop {
+            match listener.accept() {
+                Ok((connection, _)) => break connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    pump(&mut output, &mut input, &mut transcript, &mut answered);
+                    assert!(
+                        Instant::now() < startup_deadline,
+                        "startup authorization never reached the private bus"
+                    );
+                    thread::yield_now();
+                }
+                Err(error) => panic!("synthetic startup bus accept failed: {error}"),
+            }
+        };
+        let startup_end = transcript.len();
+        drop(startup_connection);
+        wait_for_after(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            startup_end,
+            if linear {
+                b"Input:\r\n"
+            } else {
+                b"Arany \xc2\xb7 error:"
+            },
+        );
+        if !linear {
+            wait_for_after(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                startup_end,
+                b"\x1b[10;3H",
+            );
+        }
         if replaced {
             let replacement = temp.path().join("replacement-arany");
             std::fs::write(&replacement, "#!/bin/sh\nexit 42\n").expect("replacement image");
@@ -3509,9 +3650,8 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
         );
         assert!(result.stderr.is_empty());
         assert_eq!(
-            answered == 0,
-            linear,
-            "only inline ownership queries the cursor"
+            answered.cursor_queries, 0,
+            "terminal ownership must not query cursor input"
         );
         let text = String::from_utf8(transcript).expect("screen-reader UTF-8");
         if linear {

@@ -1,47 +1,53 @@
 # Project skills
 
-Maintain Arany's own development skills here. `rust-clean-code` guides Rust engineering; `arany-terminal-design` guides terminal design and interaction; `clean-architecture-review` guides evidence-backed Robert C. Martin architecture reviews and bounded improvements. These files are the editable sources. `.agents/skills/` and agent-specific skill directories are generated, gitignored installations.
+Maintain Arany's development skill sources here: `rust-clean-code` for Rust, `arany-terminal-design` for terminal interaction, and `clean-architecture-review` for architecture reviews. Apply each only when its task fits. [Arany's implementation priorities](../../AGENTS.md#product-and-implementation-priorities) require Ponytail for every implementation and code review; the local skills complement it.
 
-The repository's single manifest is [`skills-lock.json`](../../skills-lock.json). Local entries use portable paths under `./agents/skills`; external entries retain their existing sources. Skills guide the development agent and do not register commands or tools in the Arany executable.
+`agents/skills/` contains editable, checked-in sources. `.agents/skills/` contains generated, gitignored installations discovered by Codex and other compatible agents; agent-specific directories can link to them. These are different directories, not alternative spellings. [`skills-lock.json`](../../skills-lock.json) is the single manifest, with portable local source paths. These skills guide development agents; they do not enable runtime Skills or Tool permissions in Arany.
 
 ## Install for a harness
 
-Run from the repository root. The following commands use the verified Skills CLI version and disable its telemetry:
+Run from the repository root with Node.js/npm available. Use the reviewed Skills CLI version below. Disable telemetry for the invoking shell:
 
-```bash
-DISABLE_TELEMETRY=1 npx --yes skills@1.7.0 add ./agents/skills --agent codex --yes
+```sh
+export DISABLE_TELEMETRY=1
 ```
 
-Select another supported harness with `--agent`, or provide multiple targets:
+In PowerShell, use `$env:DISABLE_TELEMETRY = "1"` instead. Then install the three local skills and pinned Ponytail:
 
-```bash
-DISABLE_TELEMETRY=1 npx --yes skills@1.7.0 add ./agents/skills --agent codex claude-code --yes
+```sh
+npx --yes skills@1.7.0 add ./agents/skills --agent codex claude-code --yes
+npx --yes skills@1.7.0 add https://github.com/DietrichGebert/ponytail/tree/e3ba2aa6f1e6f0bc4d69eb09c9f0d0a93af56156/skills/ponytail --skill ponytail --agent codex claude-code --yes
+npx --yes skills@1.7.0 list
 ```
 
-This installs the local skills and regenerates their content hashes in the existing lockfile. Codex uses `.agents/skills`; the second target receives links under its own skill directory. The source folders remain unchanged. Keep the Rust skill's license and attribution with its references. Use `--skill clean-architecture-review` to install only that skill without refreshing unrelated entries.
+This creates `.agents/skills/`, links the selected skills under `.claude/skills/`, and refreshes their lock entries without changing source files. Select only `codex` or another supported agent as needed; use `--copy` where symlinks are unavailable. Confirm that all four skills appear and `.agents/skills/ponytail/SKILL.md` can be opened. If a running agent does not discover them, start a fresh session; the explicit Ponytail path remains readable in the current session.
+
+On a fresh checkout, a lock entry does not mean its skill is installed. Restore a missing required skill before implementation; if installation is blocked, report the missing skill instead of claiming it was applied. Do not create a placeholder skill or silently fetch a different revision.
 
 ## Restore the lockfile
 
-```bash
-DISABLE_TELEMETRY=1 npx --yes skills@1.7.0 experimental_install
+The manifest includes the three local skills, pinned Ponytail, Matt Pocock's adopted development workflows and `find-skills`. The scoped setup above installs the four core skills only. To restore the complete project set, set the telemetry variable above and run:
+
+```sh
+npx --yes skills@1.7.0 experimental_install
 ```
 
-In this CLI version, `install` is an alias for `add` and requires a source; `experimental_install` restores the lockfile. Restoration installs into the shared `.agents/skills` directory; it does not select agent-specific destinations. Run the targeted local installation above when those links are needed. Restoration also fetches the external skills recorded in the lockfile: it is not an offline or immutable-revision guarantee for those existing entries.
+In this version, `install` aliases `add` and requires a source. `experimental_install` restores into shared `.agents/skills` without selecting agent-specific links. Use the scoped setup above when agent-specific links are needed. Existing Matt Pocock and `find-skills` entries retain their recorded sources and hashes but have no immutable `ref`; restoring them can resolve newer upstream content. Review and pin a revision when updating an external skill; a stored hash alone is not a revision pin.
+
+Matt Pocock's skills are part of the project's adopted workflow. Preserve adopted manifest entries during setup and cleanup: absence from a generated installation directory does not establish that a skill is unused.
 
 ## Update a local skill
 
-Edit its source under `agents/skills`, then rerun the targeted installation to refresh the installed copies and generated lock hashes. Review the source changes and corresponding lock entries together. Never treat edits to the ignored installed copies as durable repository changes.
+Edit its source under `agents/skills`, then reinstall only that skill, for example:
+
+```sh
+npx --yes skills@1.7.0 add ./agents/skills --skill rust-clean-code --agent codex claude-code --yes
+```
+
+Review source changes and generated lock entries together. Never maintain project changes only in ignored installed copies. Preserve the Rust skill's license and attribution. Keep descriptions specific to the task and load supporting references only when needed, following the [Agent Skills guidance](https://agentskills.io/skill-creation/best-practices).
 
 When checking a move or installation, validate skill frontmatter and relative references, compare source and installed files, and verify restoration from a relocated checkout using its local lock entries. Changes to these instructions do not require rebuilding the Rust executable.
 
 ## Ponytail
 
-[Ponytail](https://github.com/DietrichGebert/ponytail) is an external skill installed through Skills CLI. Its entry in `skills-lock.json` pins the reviewed commit, skill path, and content hash. The repository's [simplicity rule](../../AGENTS.md#global-rules) defines how to apply it without compromising the agreed objective; local Rust and terminal skills remain complementary.
-
-Lockfile restoration installs it into `.agents/skills/ponytail`. To install the reviewed version for both existing harness targets:
-
-```bash
-DISABLE_TELEMETRY=1 npx --yes skills@1.7.0 add https://github.com/DietrichGebert/ponytail/tree/e3ba2aa6f1e6f0bc4d69eb09c9f0d0a93af56156/skills/ponytail --skill ponytail --agent codex claude-code --yes
-```
-
-This installs only the skill, not the upstream plugin or lifecycle hooks. Review source changes before updating the pinned revision and this command. Keep edits to project-specific application rules here or in `AGENTS.md`, rather than modifying the ignored upstream installation.
+[Ponytail](https://github.com/DietrichGebert/ponytail) is an external skill pinned by commit, path and hash in `skills-lock.json`. The setup command installs only the skill, not its upstream plugin or lifecycle hooks. Review source changes before updating the pinned revision and command. Keep Arany-specific application rules in [AGENTS.md](../../AGENTS.md#product-and-implementation-priorities), rather than modifying the ignored upstream installation.

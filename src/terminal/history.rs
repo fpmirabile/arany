@@ -1187,7 +1187,7 @@ mod tests {
                     current_session_id,
                     Event::SessionStarted {
                         title: "Synthetic history".into(),
-                        workspace_identity: Some((1, 1)),
+                        workspace_identity: (1, 1),
                     },
                 )
                 .await

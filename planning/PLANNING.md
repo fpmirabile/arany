@@ -11,12 +11,15 @@ Rules for maintained execution plans. [README.md](./README.md) defines the folde
 - Split work by responsibility and risk, not arbitrary file groups.
 - Each branch or PR should be describable in one sentence and leave the repository coherent.
 - Change status to `In progress` when implementation starts.
-- For multi-PR plans, update the change log with shipped work before starting the next slice.
+- For multi-PR plans, update the current remaining work and next action before
+  starting the next slice; completed work stays in Git/PR/CI history.
 - Close completed implementation using the [planning lifecycle](./README.md#lifecycle), including local uncommitted work.
 - Cite adjacent rules and research instead of restating them.
 - For behavior work, link the owning spec or unmigrated contract and its existing evidence owner. Describe proposed changes with successful and meaningful rejection/failure/recovery scenarios before implementation. Review contract impact after each planning pass using [the spec workflow](../docs/specs/README.md), which owns acceptance, updates, extraction and evidence status.
 
 ## Harness-specific questions
+
+Apply the [product and implementation priorities](../AGENTS.md#product-and-implementation-priorities) to every implementation plan: identify the harness responsibility served, the simplest sufficient solution after Ponytail, and any OS impact. For platform work, name the common behavior, necessary native differences, unavailable capabilities and native verification; platform-independent changes need only that conclusion.
 
 Every architecture or module plan resolves:
 

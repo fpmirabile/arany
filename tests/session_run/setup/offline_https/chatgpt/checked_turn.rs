@@ -502,7 +502,7 @@ pub(super) fn accept_check_and_run(
     output: &mut impl Read,
     input: &mut impl Write,
     transcript: &mut Vec<u8>,
-    answered: &mut usize,
+    answered: &mut crate::session_picker::PtyResponses,
     signed: &str,
     refresh_ready: &mpsc::Sender<()>,
 ) {

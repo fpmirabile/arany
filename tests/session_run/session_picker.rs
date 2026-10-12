@@ -22,11 +22,90 @@ pub(super) fn tail(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// Replays cursor addressing, erasure and printable cells so differential frames read as displayed.
+pub(super) fn screen_rows(transcript: &[u8], columns: usize, rows: usize) -> Vec<String> {
+    let mut grid = vec![vec![' '; columns]; rows];
+    let (mut row, mut column) = (0, 0);
+    let text = String::from_utf8_lossy(transcript);
+    let mut chars = text.chars().peekable();
+    while let Some(character) = chars.next() {
+        match character {
+            '\x1b' if chars.peek() == Some(&'[') => {
+                chars.next();
+                let mut parameters = String::new();
+                let mut command = None;
+                for next in chars.by_ref() {
+                    if ('@'..='~').contains(&next) {
+                        command = Some(next);
+                        break;
+                    }
+                    parameters.push(next);
+                }
+                let mut values = parameters
+                    .trim_start_matches('?')
+                    .split(';')
+                    .map(|value| value.parse::<usize>().unwrap_or(0));
+                let first = values.next().unwrap_or(0);
+                match command {
+                    Some('H') => {
+                        row = first.max(1).min(rows) - 1;
+                        column = values.next().unwrap_or(1).max(1).min(columns) - 1;
+                    }
+                    Some('J') if first == 2 || first == 3 => {
+                        grid.iter_mut().for_each(|line| line.fill(' '));
+                    }
+                    Some('J') => {
+                        grid[row][column..].fill(' ');
+                        grid[row + 1..].iter_mut().for_each(|line| line.fill(' '));
+                    }
+                    Some('K') => grid[row][column..].fill(' '),
+                    _ => {}
+                }
+            }
+            '\r' => column = 0,
+            '\n' => row = (row + 1).min(rows - 1),
+            character if !character.is_control() && column < columns => {
+                grid[row][column] = character;
+                column += 1;
+            }
+            _ => {}
+        }
+    }
+    grid.into_iter()
+        .map(|line| line.into_iter().collect())
+        .collect()
+}
+
+pub(super) struct PtyResponses {
+    pub(super) cursor_queries: usize,
+    consent_from: usize,
+    auto_consent: bool,
+}
+
+impl Default for PtyResponses {
+    fn default() -> Self {
+        Self {
+            cursor_queries: 0,
+            consent_from: 0,
+            auto_consent: true,
+        }
+    }
+}
+
+impl PtyResponses {
+    pub(super) fn manual_consent() -> Self {
+        Self {
+            auto_consent: false,
+            ..Self::default()
+        }
+    }
+}
+
 pub(super) fn pump(
     output: &mut impl Read,
     input: &mut impl Write,
     transcript: &mut Vec<u8>,
-    answered: &mut usize,
+    answered: &mut PtyResponses,
 ) {
     loop {
         let mut chunk = [0; 4096];
@@ -49,9 +128,20 @@ pub(super) fn pump(
         .filter(|part| *part == b"\x1b[6n")
         .count();
     assert!(queries <= 32, "bounded cursor queries");
-    while *answered < queries {
+    while answered.cursor_queries < queries {
         input.write_all(b"\x1b[2;1R").expect("cursor response");
-        *answered += 1;
+        answered.cursor_queries += 1;
+    }
+    if answered.auto_consent {
+        let mut declined = false;
+        super::process::decline_workspace_consent(
+            input,
+            &transcript[answered.consent_from..],
+            &mut declined,
+        );
+        if declined {
+            answered.consent_from = transcript.len();
+        }
     }
 }
 
@@ -94,7 +184,7 @@ fn run_picker_case(
     let command = format!(
         "stty rows 24 cols {width}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" {no_color}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
-    let mut attached = crate::process::isolated_script(temp.path());
+    let mut attached = crate::isolation::isolated_script(temp.path());
     attached
         .env_clear()
         .env("ARANY_TEST_EXE", "/arany")
@@ -113,7 +203,7 @@ fn run_picker_case(
     let flags = fcntl_getfl(&output).expect("stdout pipe flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking stdout pipe");
     let mut transcript = Vec::new();
-    let mut answered = 0;
+    let mut answered = crate::session_picker::PtyResponses::default();
     let deadline = Instant::now() + Duration::from_secs(10);
     while !transcript
         .windows(b"\x1b[?1000h".len())
@@ -140,10 +230,11 @@ fn run_picker_case(
     if width < 20 {
         let cues: [&[u8]; 5] = [b"Up/Dn", b"Enter", b"Esc", b"Older", b"Newer"];
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !cues
-            .iter()
-            .all(|cue| transcript.windows(cue.len()).any(|part| part == *cue))
-        {
+        while !cues.iter().all(|cue| {
+            screen_rows(&transcript, width.into(), 24)
+                .iter()
+                .any(|line| line.contains(std::str::from_utf8(cue).unwrap()))
+        }) {
             pump(&mut output, &mut input, &mut transcript, &mut answered);
             assert!(
                 Instant::now() < deadline,
@@ -357,7 +448,7 @@ fn screen_reader_entry(
     let shell = format!(
         "before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" {entry}; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
-    let mut command = crate::process::isolated_script(state.parent().expect("fixture root"));
+    let mut command = crate::isolation::isolated_script(state.parent().expect("fixture root"));
     command
         .env_clear()
         .env("ARANY_TEST_EXE", "/arany")
@@ -376,12 +467,10 @@ fn screen_reader_entry(
     let flags = fcntl_getfl(&output).expect("stdout pipe flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking stdout pipe");
     let mut transcript = Vec::new();
-    let mut answered = 0;
-    let mut declined = false;
+    let mut answered = crate::session_picker::PtyResponses::default();
     let deadline = Instant::now() + Duration::from_secs(10);
     while !transcript.windows(8).any(|part| part == b"Input:\r\n") {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
-        super::process::decline_workspace_consent(&mut input, &transcript, &mut declined);
         assert!(
             Instant::now() < deadline,
             "screen-reader input not ready: {}",
@@ -424,7 +513,10 @@ fn screen_reader_entry(
         tail(&transcript)
     );
     assert_eq!(result.stderr, b"");
-    assert_eq!(answered, 0, "screen-reader mode uses no cursor query");
+    assert_eq!(
+        answered.cursor_queries, 0,
+        "screen-reader mode uses no cursor query"
+    );
     let text = String::from_utf8(transcript).expect("screen-reader UTF-8");
     let marker = |name: &str| {
         text.lines()

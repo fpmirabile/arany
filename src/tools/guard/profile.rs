@@ -50,7 +50,7 @@ fn compile(
     rules: BTreeMap<i64, Vec<SeccompRule>>,
     action: SeccompAction,
 ) -> Result<BpfProgram, ToolError> {
-    let mut program: BpfProgram = SeccompFilter::new(
+    let program: BpfProgram = SeccompFilter::new(
         rules,
         SeccompAction::Allow,
         action,
@@ -62,7 +62,7 @@ fn compile(
     .try_into()
     .map_err(|_| ToolError::ProtectionUnavailable)?;
     #[cfg(target_arch = "x86_64")]
-    {
+    let program = {
         use seccompiler::sock_filter;
         let mut prefix = vec![
             sock_filter {
@@ -84,9 +84,9 @@ fn compile(
                 k: libc::SECCOMP_RET_KILL_PROCESS,
             },
         ];
-        prefix.append(&mut program);
-        program = prefix;
-    }
+        prefix.extend(program);
+        prefix
+    };
     if program.is_empty() || program.len() > 1024 {
         return Err(ToolError::ProtectionUnavailable);
     }

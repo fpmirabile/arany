@@ -1,16 +1,15 @@
 use super::{AuthorizationAttempt, AuthorizationError, CodeExchange, account, valid_client_id};
-use arany::{StateRoot, StoreError};
+use arany::StateRoot;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use uuid::{Uuid, Variant, Version};
-
-const MIGRATED_REGISTRATION: &[u8] = b"{\"schema\":0,\"migrated\":\"os_user\"}";
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Record {
     schema: u8,
     host_id: Uuid,
+    #[serde(deserialize_with = "Option::deserialize")]
     issued_client_id: Option<String>,
 }
 
@@ -31,8 +30,10 @@ impl Record {
 
     fn decode(bytes: &[u8]) -> Result<Self, AuthorizationError> {
         let record: Self =
-            serde_json::from_slice(bytes).map_err(|_| AuthorizationError::InvalidIdentity)?;
-        record.validate()?;
+            serde_json::from_slice(bytes).map_err(|_| AuthorizationError::InvalidSavedState)?;
+        record
+            .validate()
+            .map_err(|_| AuthorizationError::InvalidSavedState)?;
         Ok(record)
     }
 
@@ -46,11 +47,39 @@ impl Record {
     }
 }
 
+pub(crate) fn validate_saved_setup(workspace: &Path) -> Result<(), AuthorizationError> {
+    let path = StateRoot::account_path().map_err(|_| AuthorizationError::Unavailable)?;
+    // Without State there is no saved host or registration to validate.
+    let Some(state) =
+        crate::cli::open_optional_state(&path).map_err(|_| AuthorizationError::Unavailable)?
+    else {
+        return Ok(());
+    };
+    state
+        .with_account_replacement_lock(workspace, || {
+            let host = account::saved_host_at(&state)?;
+            let bytes = state
+                .read_chatgpt_registration_record()
+                .map_err(|_| AuthorizationError::Unavailable)?;
+            match bytes {
+                Some(bytes) => {
+                    let record = Record::decode(&bytes)?;
+                    if host.is_some_and(|host| host != record.host_id) {
+                        return Err(AuthorizationError::InvalidSavedState);
+                    }
+                }
+                None if host.is_some() => return Err(AuthorizationError::InvalidSavedState),
+                None => {}
+            }
+            Ok(())
+        })
+        .map_err(|_| AuthorizationError::Unavailable)?
+}
+
 pub(crate) struct Registration(Record);
 
 impl Registration {
     pub(crate) fn open_or_create(workspace: &Path) -> Result<Self, AuthorizationError> {
-        migrate_legacy(workspace)?;
         let state = default_state()?;
         Self::at(&state, workspace)
     }
@@ -162,7 +191,6 @@ pub(super) fn retain_issued_client(
     workspace: &Path,
     exchange: &CodeExchange,
 ) -> Result<(), AuthorizationError> {
-    migrate_legacy(workspace)?;
     let state = default_state()?;
     retain_at(&state, workspace, exchange)
 }
@@ -200,65 +228,6 @@ fn retain_at(
 fn default_state() -> Result<StateRoot, AuthorizationError> {
     let path = StateRoot::account_path().map_err(|_| AuthorizationError::Unavailable)?;
     StateRoot::admit(&path).map_err(|_| AuthorizationError::Unavailable)
-}
-
-fn migrate_legacy(workspace: &Path) -> Result<(), AuthorizationError> {
-    let account_path = StateRoot::account_path().map_err(|_| AuthorizationError::Unavailable)?;
-    let old_path = StateRoot::default_path().map_err(|_| AuthorizationError::Unavailable)?;
-    migrate_legacy_at(&account_path, &old_path, workspace)
-}
-
-fn migrate_legacy_at(
-    account_path: &Path,
-    old_path: &Path,
-    workspace: &Path,
-) -> Result<(), AuthorizationError> {
-    if account_path == old_path {
-        return Ok(());
-    }
-    let old = match StateRoot::open_existing(old_path) {
-        Ok(state) => state,
-        Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            return match std::fs::symlink_metadata(old_path) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                _ => Err(AuthorizationError::Unavailable),
-            };
-        }
-        Err(_) => return Err(AuthorizationError::Unavailable),
-    };
-    old.with_account_replacement_lock(workspace, || {
-        let record = old
-            .read_chatgpt_registration_record()
-            .map_err(|_| AuthorizationError::Unavailable)?;
-        let Some(record) = record else {
-            return Ok(());
-        };
-        if record == MIGRATED_REGISTRATION {
-            return Ok(());
-        }
-        Record::decode(&record)?;
-        let current =
-            StateRoot::admit(account_path).map_err(|_| AuthorizationError::Unavailable)?;
-        current
-            .with_account_replacement_lock(workspace, || {
-                match current
-                    .read_chatgpt_registration_record()
-                    .map_err(|_| AuthorizationError::Unavailable)?
-                {
-                    Some(existing) if existing != record => {
-                        return Err(AuthorizationError::RegistrationConflict);
-                    }
-                    Some(_) => {}
-                    None => current
-                        .replace_chatgpt_registration_record(&record)
-                        .map_err(|_| AuthorizationError::Unavailable)?,
-                }
-                old.replace_chatgpt_registration_record(MIGRATED_REGISTRATION)
-                    .map_err(|_| AuthorizationError::Unavailable)
-            })
-            .map_err(|_| AuthorizationError::Unavailable)?
-    })
-    .map_err(|_| AuthorizationError::Unavailable)?
 }
 
 #[cfg(test)]
@@ -460,7 +429,7 @@ mod tests {
             .expect("synthetic malformed record");
         assert!(matches!(
             Registration::at(&state, &workspace),
-            Err(AuthorizationError::InvalidIdentity)
+            Err(AuthorizationError::InvalidSavedState)
         ));
 
         let record = Record {
@@ -468,6 +437,9 @@ mod tests {
             host_id: Uuid::parse_str("123e4567-e89b-42d3-a456-426614174000").unwrap(),
             issued_client_id: Some("oaiapp_pending".into()),
         };
+        let mut missing = serde_json::to_value(&record).unwrap();
+        missing.as_object_mut().unwrap().remove("issued_client_id");
+        assert!(Record::decode(&serde_json::to_vec(&missing).unwrap()).is_err());
         state
             .replace_chatgpt_registration_record(&record.encode().unwrap())
             .unwrap();
@@ -476,55 +448,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             Registration::at(&state, &workspace),
-            Err(AuthorizationError::InvalidIdentity)
+            Err(AuthorizationError::InvalidSavedState)
         ));
-    }
-
-    #[test]
-    fn legacy_registration_migration_preserves_identity_and_rejects_conflicts() {
-        let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir(&workspace).expect("workspace");
-        let old_path = temp.path().join("legacy");
-        let account_path = temp.path().join("user-account");
-        let old = StateRoot::admit(&old_path).expect("legacy root");
-        let registration = Registration::at(&old, &workspace).expect("legacy registration");
-        let source = old
-            .read_chatgpt_registration_record()
-            .expect("source record")
-            .expect("registration");
-        let current = StateRoot::admit(&account_path).expect("user account root");
-        current
-            .replace_chatgpt_registration_record(&source)
-            .expect("simulated interrupted copy");
-        migrate_legacy_at(&account_path, &old_path, &workspace).expect("finish migration");
-        assert_eq!(
-            Registration::at(&current, &workspace)
-                .expect("migrated registration")
-                .0
-                .host_id,
-            registration.0.host_id
-        );
-        assert_eq!(
-            old.read_chatgpt_registration_record().expect("old marker"),
-            Some(MIGRATED_REGISTRATION.to_vec())
-        );
-
-        let other_path = temp.path().join("conflicting-legacy");
-        let other = StateRoot::admit(&other_path).expect("second legacy root");
-        Registration::at(&other, &workspace).expect("different registration");
-        assert_eq!(
-            migrate_legacy_at(&account_path, &other_path, &workspace),
-            Err(AuthorizationError::RegistrationConflict)
-        );
-        assert!(
-            Record::decode(
-                &other
-                    .read_chatgpt_registration_record()
-                    .expect("other record")
-                    .expect("unmigrated record")
-            )
-            .is_ok()
-        );
     }
 }

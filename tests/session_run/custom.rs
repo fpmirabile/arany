@@ -104,7 +104,7 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
             "outcome_encoding": "json_schema",
             "privacy": "user_authorized",
             "max_output_tokens": 4096,
-            "capability_evidence_version": 1
+            "capability_evidence_version": 2, "efforts": []
         }]
     });
     let profile_path = state_path.join("provider-profiles.json");
@@ -129,6 +129,9 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
                     Err(error) => panic!("accept failed: {error}"),
                 }
             };
+            stream
+                .set_nonblocking(false)
+                .expect("blocking accepted stream");
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("request deadline");
@@ -523,7 +526,7 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
         provenance.endpoint,
         format!("http://127.0.0.1:{port}/v1/responses")
     );
-    assert_eq!(provenance.capability_evidence_version, 1);
+    assert_eq!(provenance.capability_evidence_version, 2);
     let team_events = runtime
         .block_on(store.load_session(team_session_id))
         .expect("team Events");

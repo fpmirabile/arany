@@ -2,6 +2,11 @@
 
 mod cli;
 
+#[cfg(all(test, unix))]
+#[allow(dead_code)]
+#[path = "../tests/common/process.rs"]
+mod test_process;
+
 use arany::{RunId, SessionId, SessionView, StateRoot, Store, Telemetry, render_session};
 use clap::{ColorChoice, Parser, Subcommand, error::ErrorKind};
 use cli::{
@@ -35,6 +40,12 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("--internal-native-tool-unit"))
+    {
+        return arany::tool_guard_unit_main();
+    }
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--internal-tool-guard"))
     {
         return arany::tool_guard_main();
@@ -62,14 +73,14 @@ fn main() -> ExitCode {
             };
         }
         Err(_) => {
-            eprintln!("error: invalid arguments; run arany --help");
+            report_error("invalid arguments; run arany --help");
             return ExitCode::FAILURE;
         }
     };
     let telemetry = match Telemetry::from_process(cli.otlp_endpoint.as_deref()) {
         Ok(telemetry) => telemetry,
         Err(error) => {
-            eprintln!("error: {error}");
+            report_error(error);
             return ExitCode::from(2);
         }
     };
@@ -82,7 +93,7 @@ fn run_cli(cli: Cli, telemetry: Telemetry) -> ExitCode {
     let runtime = match build_runtime() {
         Ok(runtime) => runtime,
         Err(_) => {
-            eprintln!("error: runtime initialization failed");
+            report_error("runtime initialization failed");
             return ExitCode::FAILURE;
         }
     };
@@ -91,13 +102,13 @@ fn run_cli(cli: Cli, telemetry: Telemetry) -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 arany::record_development_failure(arany::DevelopmentFailure::AttachedExit);
-                eprintln!("error: {error}");
+                report_error(error);
                 ExitCode::FAILURE
             }
         };
     }
     if !cli.attached.is_empty() {
-        eprintln!("error: attached options cannot be used with a subcommand");
+        report_error("attached options cannot be used with a subcommand");
         return ExitCode::FAILURE;
     }
     match runtime.block_on(run(cli.command.expect("checked subcommand"), telemetry)) {
@@ -110,7 +121,7 @@ fn run_cli(cli: Cli, telemetry: Telemetry) -> ExitCode {
                     .is_err()
             {
                 arany::record_development_failure(arany::DevelopmentFailure::Output);
-                eprintln!("error: output failed");
+                report_error("output failed");
                 ExitCode::FAILURE
             } else if output.success {
                 ExitCode::SUCCESS
@@ -120,10 +131,14 @@ fn run_cli(cli: Cli, telemetry: Telemetry) -> ExitCode {
         }
         Err(error) => {
             arany::record_development_failure(arany::DevelopmentFailure::ExecExit);
-            eprintln!("error: {error}");
+            report_error(error);
             ExitCode::FAILURE
         }
     }
+}
+
+fn report_error(message: impl std::fmt::Display) {
+    let _ = writeln!(std::io::stderr().lock(), "error: {message}");
 }
 
 fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {

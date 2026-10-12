@@ -2,58 +2,13 @@ use std::{
     io::{self, Read},
     os::fd::AsFd,
     process::{Child, Command, Output, Stdio},
+    sync::Mutex,
     time::{Duration, Instant},
 };
 
-#[cfg(target_os = "linux")]
-pub fn isolated_script(root: &std::path::Path) -> Command {
-    use std::os::unix::fs::PermissionsExt;
-    let home = root.join("account-home");
-    std::fs::create_dir_all(&home).expect("isolated account home");
-    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let user = nix::unistd::User::from_uid(nix::unistd::geteuid())
-        .unwrap()
-        .unwrap();
-    let mut command = Command::new("/usr/bin/bwrap");
-    command
-        .args([
-            "--unshare-user",
-            "--unshare-net",
-            "--die-with-parent",
-            "--tmpfs",
-            "/",
-            "--ro-bind",
-            "/usr",
-            "/usr",
-            "--symlink",
-            "usr/bin",
-            "/bin",
-            "--symlink",
-            "usr/lib",
-            "/lib",
-            "--ro-bind",
-            "/lib64",
-            "/lib64",
-        ])
-        .args(["--ro-bind", env!("CARGO_BIN_EXE_arany"), "/arany"])
-        .args(["--ro-bind", "/etc/passwd", "/etc/passwd"])
-        .arg("--bind")
-        .arg(root)
-        .arg(root)
-        .arg("--bind")
-        .arg(home)
-        .arg(user.dir)
-        .args([
-            "--proc",
-            "/proc",
-            "--dev-bind",
-            "/dev",
-            "/dev",
-            "--",
-            "/usr/bin/script",
-        ]);
-    command
-}
+/// Serializes heavy native gates that share one test binary.
+#[allow(dead_code)]
+pub static NATIVE_GATE: Mutex<()> = Mutex::new(());
 
 pub trait BoundedOutput {
     fn bounded_output(&mut self) -> io::Result<Output>;
@@ -94,9 +49,166 @@ impl Drop for OwnedChild {
 }
 
 pub fn capture(child: &mut Child, duration: Duration, cap: usize) -> Output {
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    capture_streams(
+        child,
+        stdout_pipe,
+        stderr_pipe,
+        duration,
+        cap,
+        "stderr",
+        |_| {},
+    )
+}
+
+/// Runs `command` with file-backed stdio, so descendants holding inherited handles cannot
+/// delay EOF; enforces a 10-second deadline and 64 KiB per stream.
+#[allow(dead_code)]
+pub fn file_output(command: &mut Command, input: Option<&[u8]>) -> Output {
+    use std::io::{Seek, SeekFrom, Write};
+
+    const STREAM_CAP: u64 = 64 * 1024;
+    let root = tempfile::tempdir().expect("private native observation");
+    let stdin = if let Some(input) = input {
+        assert!(input.len() <= 16 * 1024, "native input bound");
+        let mut file = tempfile::tempfile_in(root.path()).expect("private native input");
+        file.write_all(input).expect("synthetic native input");
+        file.rewind().expect("input rewind");
+        Stdio::from(file)
+    } else {
+        Stdio::null()
+    };
+    let mut stdout = tempfile::tempfile_in(root.path()).expect("private native stdout");
+    let mut stderr = tempfile::tempfile_in(root.path()).expect("private native stderr");
+    let mut child = OwnedChild(
+        command
+            .stdin(stdin)
+            .stdout(stdout.try_clone().expect("stdout handle"))
+            .stderr(stderr.try_clone().expect("stderr handle"))
+            .spawn()
+            .expect("native process"),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.0.try_wait().expect("native status") {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "native parent deadline");
+        assert!(
+            stdout.metadata().expect("stdout size").len() <= STREAM_CAP
+                && stderr.metadata().expect("stderr size").len() <= STREAM_CAP,
+            "native output bound"
+        );
+        std::thread::yield_now();
+    };
+    let mut output = Output {
+        status,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+    };
+    for (file, bytes) in [
+        (&mut stdout, &mut output.stdout),
+        (&mut stderr, &mut output.stderr),
+    ] {
+        file.seek(SeekFrom::Start(0)).expect("output rewind");
+        file.take(STREAM_CAP + 1)
+            .read_to_end(bytes)
+            .expect("bounded native output");
+        assert!(bytes.len() as u64 <= STREAM_CAP, "native observation bound");
+    }
+    output
+}
+
+/// Opens a PTY whose master and slave close on exec; returns `(master, slave)`.
+#[cfg(unix)]
+#[allow(dead_code)]
+pub fn cloexec_pty(geometry: Option<&nix::pty::Winsize>) -> (std::fs::File, std::fs::File) {
+    let pty = nix::pty::openpty(geometry, None).unwrap();
+    let pair = (
+        std::fs::File::from(pty.master),
+        std::fs::File::from(pty.slave),
+    );
+    for descriptor in [&pair.0, &pair.1] {
+        rustix::io::fcntl_setfd(descriptor, rustix::io::FdFlags::CLOEXEC).unwrap();
+    }
+    pair
+}
+
+/// Accepts one connection from a nonblocking `listener` before `timeout` elapses.
+#[allow(dead_code)]
+pub fn accept_with_deadline(
+    listener: &std::net::TcpListener,
+    timeout: Duration,
+    context: &str,
+) -> std::net::TcpStream {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => return stream,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                assert!(Instant::now() < deadline, "{context} missing");
+                std::thread::yield_now();
+            }
+            Err(error) => panic!("{context} accept failed: {error}"),
+        }
+    }
+}
+
+/// Asserts that a self-spawned `--exact` test child completed exactly one passing test.
+pub fn assert_single_test_completed(stdout: &[u8], context: &str) {
+    assert!(
+        String::from_utf8_lossy(stdout)
+            .lines()
+            .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;")),
+        "{context}: child did not complete exactly one test"
+    );
+}
+
+#[cfg(unix)]
+pub fn terminal_settings(terminal: impl AsFd) -> nix::sys::termios::Termios {
+    let settings = nix::sys::termios::tcgetattr(terminal).expect("native terminal settings");
+    #[cfg(target_os = "macos")]
+    {
+        let mut settings: nix::libc::termios = settings.into();
+        // Darwin sets this input-state bit when canonical input is restored.
+        settings.c_lflag &= !nix::sys::termios::LocalFlags::PENDIN.bits();
+        settings.into()
+    }
+    #[cfg(not(target_os = "macos"))]
+    settings
+}
+
+#[cfg(unix)]
+pub fn capture_terminal(
+    child: &mut Child,
+    terminal: std::fs::File,
+    duration: Duration,
+    cap: usize,
+    observe: impl FnMut(&[u8]),
+) -> Output {
+    let stdout_pipe = child.stdout.take();
+    capture_streams(
+        child,
+        stdout_pipe,
+        Some(terminal),
+        duration,
+        cap,
+        "terminal",
+        observe,
+    )
+}
+
+fn capture_streams(
+    child: &mut Child,
+    mut stdout_pipe: Option<impl Read + AsFd>,
+    mut stderr_pipe: Option<impl Read + AsFd>,
+    duration: Duration,
+    cap: usize,
+    stderr_channel: &'static str,
+    mut observe: impl FnMut(&[u8]),
+) -> Output {
     let deadline = Instant::now() + duration;
-    let mut stdout_pipe = child.stdout.take();
-    let mut stderr_pipe = child.stderr.take();
     for pipe in stdout_pipe
         .as_ref()
         .map(AsFd::as_fd)
@@ -115,7 +227,8 @@ pub fn capture(child: &mut Child, duration: Duration, cap: usize) -> Output {
             "subprocess exit/output EOF deadline exceeded"
         );
         drain(&mut stdout_pipe, &mut stdout, cap, "stdout");
-        drain(&mut stderr_pipe, &mut stderr, cap, "stderr");
+        drain(&mut stderr_pipe, &mut stderr, cap, stderr_channel);
+        observe(&stderr);
         if let Some(status) = child.try_wait().expect("subprocess status")
             && stdout_pipe.is_none()
             && stderr_pipe.is_none()
@@ -150,29 +263,70 @@ fn drain(pipe: &mut Option<impl Read>, bytes: &mut Vec<u8>, cap: usize, channel:
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => return,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            #[cfg(target_os = "linux")]
+            Err(error)
+                if error.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error())
+                    && channel == "terminal" =>
+            {
+                *pipe = None;
+                return;
+            }
             Err(error) => panic!("subprocess {channel} capture failed: {error}"),
         }
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub fn decline_workspace_consent(
     input: &mut impl std::io::Write,
     transcript: &[u8],
     declined: &mut bool,
 ) {
+    if *declined {
+        return;
+    }
     let prompt = b"Type trust or read only; empty Enter selects read only. Ctrl+C exits:";
-    if !*declined
-        && let Some(start) = transcript
-            .windows(prompt.len())
-            .rposition(|part| part == prompt)
-        && !transcript[start + prompt.len()..]
-            .windows(b"Input:".len())
-            .any(|part| part == b"Input:")
+    if let Some(start) = transcript
+        .windows(prompt.len())
+        .rposition(|part| part == prompt)
+    {
+        let after = &transcript[start + prompt.len()..];
+        if (after.starts_with(b"\r\n") || after.starts_with(b"\n"))
+            && !after.windows(b"Input:".len()).any(|part| part == b"Input:")
+        {
+            input
+                .write_all(b"read only\r")
+                .expect("explicit read-only fixture decision");
+            *declined = true;
+        }
+        return;
+    }
+    if !transcript.windows(2).any(|part| part == b"\x1b[") {
+        return;
+    }
+    let mut visible = Vec::new();
+    let mut bytes = transcript.iter().copied();
+    while let Some(byte) = bytes.next() {
+        if byte == 0x1b && bytes.next() == Some(b'[') {
+            for byte in bytes.by_ref() {
+                if (b'@'..=b'~').contains(&byte) {
+                    break;
+                }
+            }
+        } else if !byte.is_ascii_whitespace() {
+            visible.push(byte);
+        }
+    }
+    if visible
+        .windows(b"Doyoutrust".len())
+        .any(|part| part == b"Doyoutrust")
+        && [b"Ctrl+Cexit".as_slice(), b"^Cexit".as_slice()]
+            .iter()
+            .any(|needle| visible.windows(needle.len()).any(|part| part == *needle))
     {
         input
-            .write_all(b"read only\r")
-            .expect("explicit read-only fixture decision");
+            .write_all(b"\x1b")
+            .expect("dismiss initial inline consent without authority");
         *declined = true;
     }
 }

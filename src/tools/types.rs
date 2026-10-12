@@ -18,7 +18,7 @@ pub(crate) const MAX_SNAPSHOT_FILES: usize = 2048;
 pub(crate) const MAX_RUNTIME_BYTES: usize = 96 * 1024 * 1024;
 pub(crate) const SCRATCH_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const MEMORY_BYTES: u64 = 512 * 1024 * 1024;
-pub(crate) const MAX_PROCESSES: u32 = 64;
+pub(crate) const MAX_PROCESSES_OR_THREADS: u32 = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
@@ -87,6 +87,12 @@ pub(crate) fn parse_mcp_arguments(arguments: &str) -> Result<Value, super::ToolE
 }
 
 impl ToolCall {
+    pub(crate) fn is_process(&self) -> bool {
+        matches!(
+            self,
+            Self::Command { .. } | Self::McpList { .. } | Self::McpCall { .. }
+        )
+    }
     pub(crate) fn valid(&self) -> bool {
         if !serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_ARGUMENT_BYTES) {
             return false;
@@ -286,6 +292,14 @@ pub struct ToolLimits {
     pub max_processes: u32,
     pub scratch_bytes: u64,
     pub network: NetworkGrant,
+    pub resource_profile: ToolResourceProfile,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResourceProfile {
+    LinuxKernel,
+    MacosSupervised,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -300,9 +314,14 @@ impl Default for ToolLimits {
             result_bytes: MAX_TOOL_RESULT_BYTES as u32,
             runtime_ms: 60_000,
             memory_bytes: MEMORY_BYTES,
-            max_processes: MAX_PROCESSES,
+            max_processes: MAX_PROCESSES_OR_THREADS,
             scratch_bytes: SCRATCH_BYTES,
             network: NetworkGrant::None,
+            resource_profile: if cfg!(target_os = "macos") {
+                ToolResourceProfile::MacosSupervised
+            } else {
+                ToolResourceProfile::LinuxKernel
+            },
         }
     }
 }
@@ -312,7 +331,7 @@ impl ToolLimits {
         (128..=MAX_TOOL_RESULT_BYTES as u32).contains(&self.result_bytes)
             && (1_000..=60_000).contains(&self.runtime_ms)
             && self.memory_bytes == MEMORY_BYTES
-            && self.max_processes == MAX_PROCESSES
+            && self.max_processes == MAX_PROCESSES_OR_THREADS
             && self.scratch_bytes == SCRATCH_BYTES
             && self.network == NetworkGrant::None
     }
@@ -358,6 +377,9 @@ pub struct ToolObservation {
 }
 
 impl ToolObservation {
+    pub(crate) fn attested_for(&self, intent: &EffectIntent) -> bool {
+        self.intent == *intent && self.valid() && self.guard.is_some()
+    }
     pub(crate) fn stops_run(&self) -> bool {
         matches!(
             self.disposition,

@@ -1,14 +1,16 @@
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 #[path = "common/process.rs"]
 pub mod process;
 use process::BoundedOutput;
 
 use std::{
-    net::{SocketAddr, TcpListener, TcpStream},
+    io::{BufRead, BufReader},
+    net::SocketAddr,
     path::Path,
     process::{Child, Command, Output, Stdio},
-    time::{Duration, Instant},
+    sync::mpsc,
+    time::Duration,
 };
 
 struct Server(Child);
@@ -24,8 +26,28 @@ fn wait_bounded(mut child: Server) -> Output {
     process::capture(&mut child.0, Duration::from_secs(30), 64 * 1024)
 }
 
+fn openssl() -> std::path::PathBuf {
+    #[cfg(target_os = "linux")]
+    let path = Path::new("/usr/bin/openssl");
+    #[cfg(target_os = "macos")]
+    let path = [
+        "/opt/homebrew/opt/openssl@3/bin/openssl",
+        "/usr/local/opt/openssl@3/bin/openssl",
+    ]
+    .into_iter()
+    .map(Path::new)
+    .find(|path| path.is_file())
+    .expect(
+        "native TLS fixture requires installed OpenSSL 3 for an explicitly loopback-bound server",
+    );
+    std::fs::canonicalize(path).unwrap()
+}
+
 fn certificate(dir: &Path, name: &str) {
-    let root = Command::new("/usr/bin/openssl")
+    let configuration = dir.join(format!("{name}.cnf"));
+    std::fs::write(&configuration, "[req]\ndistinguished_name=dn\nx509_extensions=ca\nreq_extensions=leaf\nprompt=no\n[dn]\nCN=arany-test-root\n[ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n[leaf]\nsubjectAltName=DNS:localhost\nbasicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth\n").unwrap();
+    let root = Command::new(openssl())
+        .env_clear()
         .args([
             "req",
             "-x509",
@@ -36,12 +58,10 @@ fn certificate(dir: &Path, name: &str) {
             "1",
             "-subj",
             "/CN=arany-test-root",
-            "-addext",
-            "basicConstraints=critical,CA:TRUE",
-            "-addext",
-            "keyUsage=critical,keyCertSign,cRLSign",
-            "-keyout",
         ])
+        .arg("-config")
+        .arg(&configuration)
+        .arg("-keyout")
         .arg(dir.join(format!("{name}-ca.key")))
         .arg("-out")
         .arg(dir.join(format!("{name}-ca.pem")))
@@ -50,7 +70,8 @@ fn certificate(dir: &Path, name: &str) {
         .bounded_output()
         .expect("OpenSSL is required for the explicit TLS gate");
     assert!(root.status.success(), "generate test-owned root");
-    let request = Command::new("/usr/bin/openssl")
+    let request = Command::new(openssl())
+        .env_clear()
         .args([
             "req",
             "-new",
@@ -59,14 +80,10 @@ fn certificate(dir: &Path, name: &str) {
             "-nodes",
             "-subj",
             "/CN=localhost",
-            "-addext",
-            "subjectAltName=DNS:localhost",
-            "-addext",
-            "basicConstraints=critical,CA:FALSE",
-            "-addext",
-            "extendedKeyUsage=serverAuth",
-            "-keyout",
         ])
+        .arg("-config")
+        .arg(&configuration)
+        .arg("-keyout")
         .arg(dir.join(format!("{name}.key")))
         .arg("-out")
         .arg(dir.join(format!("{name}.csr")))
@@ -78,21 +95,18 @@ fn certificate(dir: &Path, name: &str) {
         request.status.success(),
         "generate test-owned certificate request"
     );
-    let signed = Command::new("/usr/bin/openssl")
+    let signed = Command::new(openssl())
+        .env_clear()
         .args(["x509", "-req", "-in"])
         .arg(dir.join(format!("{name}.csr")))
         .arg("-CA")
         .arg(dir.join(format!("{name}-ca.pem")))
         .arg("-CAkey")
         .arg(dir.join(format!("{name}-ca.key")))
-        .args([
-            "-CAcreateserial",
-            "-days",
-            "1",
-            "-copy_extensions",
-            "copy",
-            "-out",
-        ])
+        .args(["-CAcreateserial", "-days", "1"])
+        .arg("-extfile")
+        .arg(&configuration)
+        .args(["-extensions", "leaf", "-out"])
         .arg(dir.join(format!("{name}.pem")))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -102,31 +116,39 @@ fn certificate(dir: &Path, name: &str) {
 }
 
 fn server(dir: &Path, name: &str) -> (Server, u16) {
-    let reservation = TcpListener::bind(("127.0.0.1", 0)).expect("reserve local port");
-    let port = reservation.local_addr().expect("reserved address").port();
-    drop(reservation);
-    let child = Command::new("/usr/bin/openssl")
-        .args(["s_server", "-www", "-accept"])
-        .arg(format!("127.0.0.1:{port}"))
+    let mut child = Command::new(openssl())
+        .env_clear()
+        .args(["s_server", "-www", "-accept", "127.0.0.1:0"])
         .arg("-cert")
         .arg(dir.join(format!("{name}.pem")))
         .arg("-key")
         .arg(dir.join(format!("{name}.key")))
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .expect("start test-owned HTTPS peer");
+    let stdout = child.stdout.take().expect("HTTPS peer output");
     let child = Server(child);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while TcpStream::connect(("127.0.0.1", port)).is_err() {
-        assert!(Instant::now() < deadline, "HTTPS peer did not start");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    // The peer binds port 0 and reports it, so no other process can take a released port.
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+        let port = lines
+            .by_ref()
+            .take(8)
+            .find_map(|line| line.strip_prefix("ACCEPT 127.0.0.1:")?.parse::<u16>().ok());
+        let _ = sender.send(port);
+        lines.for_each(drop);
+    });
+    let port = receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("HTTPS peer did not start")
+        .expect("HTTPS peer reported no loopback port");
     (child, port)
 }
 
 #[test]
-#[ignore = "explicit Linux TLS gate; requires /usr/bin/openssl"]
+#[ignore = "explicit native TLS gate; macOS requires OpenSSL 3 and checks system-root rejection plus client-local chain/name trust"]
 fn platform_tls_chain_and_name() {
     let dir = tempfile::tempdir().expect("private TLS test files");
     certificate(dir.path(), "trusted");
@@ -134,37 +156,43 @@ fn platform_tls_chain_and_name() {
     let (_trusted_server, trusted_port) = server(dir.path(), "trusted");
     let (_wrong_name_server, wrong_name_port) = server(dir.path(), "trusted");
     let (_untrusted_server, untrusted_port) = server(dir.path(), "untrusted");
-    let child = Command::new(std::env::current_exe().expect("test executable"))
-        .args(["--exact", "platform_tls_child", "--ignored", "--nocapture"])
-        .env_clear()
-        .env("ARANY_TLS_TEST_CHILD", "1")
-        .env("ARANY_TLS_TRUSTED_PORT", trusted_port.to_string())
-        .env("ARANY_TLS_WRONG_NAME_PORT", wrong_name_port.to_string())
-        .env("ARANY_TLS_UNTRUSTED_PORT", untrusted_port.to_string())
-        .env("SSL_CERT_FILE", dir.path().join("trusted-ca.pem"))
-        .env_remove("SSL_CERT_DIR")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("isolated TLS client test");
-    let output = wait_bounded(Server(child));
-    assert!(
-        output.status.success(),
-        "TLS client gate failed: {} {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.lines().any(|line| line == "running 1 test"),
-        "TLS child did not run exactly one test"
-    );
-    assert!(
-        stdout
-            .lines()
-            .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;")),
-        "TLS child did not complete its assertions"
-    );
+    #[cfg(target_os = "linux")]
+    let modes = ["local"];
+    #[cfg(target_os = "macos")]
+    let modes = ["local", "system"];
+    for mode in modes {
+        let mut command = Command::new(std::env::current_exe().expect("test executable"));
+        command
+            .args(["--exact", "platform_tls_child", "--ignored", "--nocapture"])
+            .current_dir(dir.path())
+            .env_clear()
+            .env("ARANY_TLS_TEST_CHILD", "1")
+            .env("ARANY_TLS_ROOT_MODE", mode)
+            .env("ARANY_TLS_TRUSTED_PORT", trusted_port.to_string())
+            .env("ARANY_TLS_WRONG_NAME_PORT", wrong_name_port.to_string())
+            .env("ARANY_TLS_UNTRUSTED_PORT", untrusted_port.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if mode == "local" {
+            command
+                .env("SSL_CERT_FILE", dir.path().join("trusted-ca.pem"))
+                .env("ARANY_TLS_TEST_CA", dir.path().join("trusted-ca.pem"));
+        }
+        let child = command.spawn().expect("isolated TLS client test");
+        let output = wait_bounded(Server(child));
+        assert!(
+            output.status.success(),
+            "TLS {mode} client gate failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.lines().any(|line| line == "running 1 test"),
+            "TLS {mode} child did not run exactly one test"
+        );
+        process::assert_single_test_completed(&output.stdout, &format!("TLS {mode}"));
+    }
 }
 
 #[test]
@@ -192,13 +220,32 @@ fn platform_tls_child() {
         .build()
         .expect("TLS test runtime");
     runtime.block_on(async {
-        let trusted_client = client(trusted_port);
+        let mode = std::env::var("ARANY_TLS_ROOT_MODE").expect("parent-selected root mode");
+        #[cfg(target_os = "macos")]
+        if mode == "system" {
+            assert!(std::env::var_os("SSL_CERT_FILE").is_none());
+            assert!(std::env::var_os("SSL_CERT_DIR").is_none());
+            assert!(std::env::var_os("ARANY_TLS_TEST_CA").is_none());
+            let rejection = client(trusted_port, false)
+                .get(format!("https://localhost:{trusted_port}/"))
+                .send()
+                .await
+                .expect_err("default system trust must reject the generated private CA");
+            let rejection = format!("{rejection:?}");
+            assert!(
+                rejection.contains("InvalidCertificate") && rejection.contains("UnknownIssuer"),
+                "default system rejection must identify the untrusted issuer: {rejection}"
+            );
+            return;
+        }
+        assert_eq!(mode, "local");
+        let trusted_client = client(trusted_port, true);
         let valid = trusted_client
             .get(format!("https://localhost:{trusted_port}/"))
             .send()
             .await;
         assert!(valid.is_ok(), "trusted chain and name: {valid:?}");
-        let wrong_name = client(wrong_name_port)
+        let wrong_name = client(wrong_name_port, true)
             .get(format!("https://127.0.0.1:{wrong_name_port}/"))
             .send()
             .await;
@@ -210,7 +257,7 @@ fn platform_tls_child() {
             wrong_name.contains("InvalidCertificate") && wrong_name.contains("NotValidForName"),
             "wrong server name must fail certificate validation: {wrong_name}"
         );
-        let invalid_chain = client(untrusted_port)
+        let invalid_chain = client(untrusted_port, true)
             .get(format!("https://localhost:{untrusted_port}/"))
             .send()
             .await;
@@ -227,8 +274,25 @@ fn platform_tls_child() {
     });
 }
 
-fn client(port: u16) -> reqwest::Client {
-    reqwest::Client::builder()
+fn client(port: u16, local_anchor: bool) -> reqwest::Client {
+    let builder = reqwest::Client::builder();
+    #[cfg(target_os = "macos")]
+    let builder = if local_anchor {
+        builder.add_root_certificate(
+            reqwest::Certificate::from_pem(
+                &std::fs::read(
+                    std::env::var_os("ARANY_TLS_TEST_CA").expect("isolated native trust anchor"),
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        )
+    } else {
+        builder
+    };
+    #[cfg(target_os = "linux")]
+    let _ = local_anchor;
+    builder
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())

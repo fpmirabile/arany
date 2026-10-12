@@ -41,6 +41,12 @@ pub(crate) fn selected_account_id() -> Result<Uuid, AuthorizationError> {
     account::selected_id()
 }
 
+pub(crate) fn selected_keyring_slot(
+    expected_id: Uuid,
+) -> Result<Option<String>, AuthorizationError> {
+    account::selected_keyring_slot(expected_id)
+}
+
 pub(crate) fn selected_registration() -> Result<(Uuid, bool), AuthorizationError> {
     account::selected_registration()
 }
@@ -234,11 +240,15 @@ pub(crate) enum AuthorizationError {
     InvalidClient,
     #[error("invalid authorization identity")]
     InvalidIdentity,
+    #[error(
+        "saved ChatGPT setup is incompatible or damaged; use /setup or arany --setup to reset it and sign in again"
+    )]
+    InvalidSavedState,
     #[error("invalid authorization identity: {0}; sign-in was not saved; use /setup to retry")]
     IdentityRejected(identity::IdentityFailure),
     #[error("selected ChatGPT account changed; restart /setup")]
     SelectedAccountChanged,
-    #[error("ChatGPT registrations in different state roots conflict")]
+    #[error("ChatGPT account state in different roots conflicts")]
     RegistrationConflict,
     #[error(
         "ChatGPT plan permission was not granted; use /setup to enable the plan or explicitly choose an API account"

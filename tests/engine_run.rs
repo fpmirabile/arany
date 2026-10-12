@@ -701,7 +701,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         assert!(fourth.run.config.as_ref().unwrap().history_run_ids.is_empty());
         assert_eq!(fourth.run.config.as_ref().unwrap().excluded_history_runs, 3);
         let compacted = engine.compact_session(first.session_id, workspace.clone()).await.unwrap();
-        assert_eq!(compacted.compiler_version, 2);
+        assert_eq!(compacted.compiler_version, 3);
         for (id, objective) in [(first.session_id, maximal_objective.as_str()), (fork_id, "After fork")] {
             let mut next = request(&workspace, objective);
             next.session_id = Some(id);
@@ -776,6 +776,16 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         let events = store.load_session(first.session_id).await.unwrap();
         assert_eq!(events.len(), 41);
         let view = SessionView::replay(first.session_id, &events).unwrap().unwrap();
+        for (run_id, phase) in [
+            (first.run.id, AgentPhase::RootPlan),
+            (third.run.id, AgentPhase::RootPlan),
+            (third.run.id, AgentPhase::ChildWork),
+        ] {
+            let missing_call: Vec<_> = events.iter().filter(|envelope| {
+                !matches!(&envelope.event, Event::ProviderCallRecorded { run_id: id, record, .. } if *id == run_id && record.phase == phase)
+            }).cloned().collect();
+            assert!(SessionView::replay(first.session_id, &missing_call).is_err(), "missing observed call for {phase:?}");
+        }
         assert_eq!(view.runs.len(), 5);
         assert_eq!(view.runs[0].images, std::slice::from_ref(&first_image));
         assert_eq!(view.runs[3].images, [large_image]);
@@ -808,10 +818,10 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 assert!(accepted[3]["payload"]["text"].as_str() == Some(maximal_objective.as_str()));
                 let image_payload_bytes = accepted[3]["payload"].to_string().len();
                 assert!((300 * 1024..=320 * 1024).contains(&image_payload_bytes), "maximally escaped image input fits its Event");
-                assert_eq!(accepted[4]["event_version"], 1);
+                assert_eq!(accepted[4]["event_version"], 2);
                 assert!(accepted[4]["payload"]["text"].as_str() == Some(maximal_objective.as_str()));
-                assert_eq!(accepted[4]["payload"].to_string().len(), 6 * 8 * 1024 + 11, "maximally escaped text-only input fits its Event");
-                assert!(accepted[4]["payload"].get("images").is_none(), "text-only v1 changed encoding");
+                assert_eq!(accepted[4]["payload"].to_string().len(), 6 * 8 * 1024 + 23, "maximally escaped text-only input fits its Event");
+                assert_eq!(accepted[4]["payload"]["images"], serde_json::json!([]), "text-only input retains the current Message shape");
             }
         }
         let fork = store.load_view(fork_id).await.unwrap().unwrap();
@@ -827,15 +837,15 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             [first.session_id.to_string()], |row| Ok((row.get(0)?, row.get(1)?)),
         ).unwrap();
         let original: serde_json::Value = serde_json::from_str(&payload).unwrap();
-        for fault in ["legacy version", "unknown version", "missing images", "empty images", "five images", "aggregate bytes", "non-PNG", "corrupted image", "URL", "extra field", "text overflow", "payload overflow", "agent scope"] {
+        for fault in ["unsupported version", "unknown version", "missing images", "empty Message", "five images", "aggregate bytes", "non-PNG", "corrupted image", "URL", "extra field", "text overflow", "payload overflow", "agent scope"] {
             let mut invalid = original.clone();
             let mut version = 2;
             let mut agent_scope = None;
             match fault {
-                "legacy version" => version = 1,
+                "unsupported version" => version = 1,
                 "unknown version" => version = 3,
                 "missing images" => { invalid.as_object_mut().unwrap().remove("images"); }
-                "empty images" => invalid["images"] = serde_json::json!([]),
+                "empty Message" => { invalid["text"] = "".into(); invalid["images"] = serde_json::json!([]); },
                 "five images" => invalid["images"] = serde_json::to_value(vec![second_image.clone(); 5]).unwrap(),
                 "aggregate bytes" => invalid["images"] = serde_json::to_value(vec![view.runs[0].images[0].clone(); 4]).unwrap(),
                 "non-PNG" => invalid["images"][0]["media_type"] = "image/jpeg".into(),
@@ -873,90 +883,84 @@ fn subscription_account_and_local_bound_survive_run_and_compaction_replay() {
         .build()
         .expect("runtime");
     runtime.block_on(async {
-        for admission in [
-            ChatGptAdmission::Conformance,
-            ChatGptAdmission::AccountConsent,
-        ] {
-            let temp = tempfile::tempdir().expect("temporary root");
-            let workspace = temp.path().join("workspace");
-            std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-            std::fs::write(workspace.join("notes/facts.txt"), "Synthetic fact").expect("include");
-            let state_path = temp.path().join("state");
-            let account_id = Uuid::now_v7();
-            let fingerprint = [7; 32];
-            let mut provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-                summary: "Synthetic summary".into(),
-                result: "Synthetic answer".into(),
-            })])
-            .with_chatgpt_account(account_id, fingerprint)
-            .with_compactions(vec![Ok(CompactionResponse {
-                summary: "Compacted synthetic history".into(),
-                response_id: Some("resp_compact".into()),
-                input_tokens: Some(20),
-                output_tokens: Some(8),
-                wire_provenance: Some(
-                    arany::ProviderWireProvenance::ResponsesCompletedStoreFalseRequested,
-                ),
-            })]);
-            provider.chatgpt_provenance.as_mut().unwrap().admission = admission;
-            let mut engine = Engine::open(
-                StateRoot::admit(&state_path).expect("private state"),
-                provider,
-            )
-            .expect("engine");
-            let outcome = engine
-                .run(request(&workspace, "Synthetic objective"))
-                .await
-                .expect("committed Run");
-            assert_eq!(outcome.run.status, RunStatus::Finished);
-            let config = outcome.run.config.as_ref().expect("Run provenance");
-            assert_eq!(config.provider, "chatgpt");
-            assert_eq!(config.saved_api_account_id, None);
-            assert_eq!(
-                config.output_token_bound,
-                OutputTokenBound::LocalAcceptanceOnly
-            );
-            assert_eq!(
-                config.chatgpt_provenance,
-                Some(ChatGptProvenance {
-                    account_id,
-                    evidence_fingerprint: fingerprint,
-                    admission,
-                })
-            );
-            let compaction = engine
-                .compact_session(outcome.session_id, workspace)
-                .await
-                .expect("committed compaction");
-            assert!(matches!(
-                compaction.status,
-                CompactionStatus::Succeeded { .. }
-            ));
-            assert_eq!(compaction.chatgpt_provenance, config.chatgpt_provenance);
-            assert_eq!(
-                compaction.output_token_bound,
-                OutputTokenBound::LocalAcceptanceOnly
-            );
-            engine.close().await.expect("engine shutdown");
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
+        std::fs::write(workspace.join("notes/facts.txt"), "Synthetic fact").expect("include");
+        let state_path = temp.path().join("state");
+        let account_id = Uuid::now_v7();
+        let fingerprint = [7; 32];
+        let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
+            summary: "Synthetic summary".into(),
+            result: "Synthetic answer".into(),
+        })])
+        .with_chatgpt_account(account_id, fingerprint)
+        .with_compactions(vec![Ok(CompactionResponse {
+            summary: "Compacted synthetic history".into(),
+            response_id: Some("resp_compact".into()),
+            input_tokens: Some(20),
+            output_tokens: Some(8),
+            wire_provenance: Some(
+                arany::ProviderWireProvenance::ResponsesCompletedStoreFalseRequested,
+            ),
+        })]);
+        let mut engine = Engine::open(
+            StateRoot::admit(&state_path).expect("private state"),
+            provider,
+        )
+        .expect("engine");
+        let outcome = engine
+            .run(request(&workspace, "Synthetic objective"))
+            .await
+            .expect("committed Run");
+        assert_eq!(outcome.run.status, RunStatus::Finished);
+        let config = outcome.run.config.as_ref().expect("Run provenance");
+        assert_eq!(config.provider, "chatgpt");
+        assert_eq!(config.saved_api_account_id, None);
+        assert_eq!(
+            config.output_token_bound,
+            OutputTokenBound::LocalAcceptanceOnly
+        );
+        assert_eq!(
+            config.chatgpt_provenance,
+            Some(ChatGptProvenance {
+                account_id,
+                evidence_fingerprint: fingerprint,
+                admission: ChatGptAdmission::AccountConsent,
+            })
+        );
+        let compaction = engine
+            .compact_session(outcome.session_id, workspace)
+            .await
+            .expect("committed compaction");
+        assert!(matches!(
+            compaction.status,
+            CompactionStatus::Succeeded { .. }
+        ));
+        assert_eq!(compaction.chatgpt_provenance, config.chatgpt_provenance);
+        assert_eq!(
+            compaction.output_token_bound,
+            OutputTokenBound::LocalAcceptanceOnly
+        );
+        engine.close().await.expect("engine shutdown");
 
-            let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap())
-                .expect("read-only reopen");
-            let events = store
-                .load_session(outcome.session_id)
-                .await
-                .expect("canonical Events");
-            let view = SessionView::replay(outcome.session_id, &events)
-                .expect("strict replay")
-                .expect("Session");
-            assert_eq!(view.runs[0].config.as_ref(), Some(config));
-            assert!(events.iter().any(|event| matches!(
-                &event.event,
-                Event::ContextCompacted { record }
-                    if record.chatgpt_provenance == config.chatgpt_provenance
-                        && record.output_token_bound == OutputTokenBound::LocalAcceptanceOnly
-            )));
-            store.close().await.expect("store shutdown");
-        }
+        let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap())
+            .expect("read-only reopen");
+        let events = store
+            .load_session(outcome.session_id)
+            .await
+            .expect("canonical Events");
+        let view = SessionView::replay(outcome.session_id, &events)
+            .expect("strict replay")
+            .expect("Session");
+        assert_eq!(view.runs[0].config.as_ref(), Some(config));
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            Event::ContextCompacted { record }
+                if record.chatgpt_provenance == config.chatgpt_provenance
+                    && record.output_token_bound == OutputTokenBound::LocalAcceptanceOnly
+        )));
+        store.close().await.expect("store shutdown");
     });
 }
 
@@ -1245,7 +1249,7 @@ fn compaction_is_derived_durable_context_and_failure_keeps_the_prior_summary() {
             );
         }
         pressure.context_usage = None;
-        assert!(!pressure.auto_compaction_due(), "legacy footprint");
+        assert!(!pressure.auto_compaction_due(), "unknown footprint");
         for (tool_history, bytes, due) in
             [(1, 43_903, false), (1, 43_904, true), (0, 43_904, false)]
         {
@@ -2029,19 +2033,15 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
         std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
         let state_path = temp.path().join("state");
-        let session_id = SessionId::new();
+        let session_id = arany::create_session(
+            StateRoot::admit(&state_path).expect("private state"),
+            workspace.clone(),
+            Some("Interrupted Session".into()),
+        )
+        .await
+        .expect("pinned Session start");
         let store =
             Store::open(StateRoot::admit(&state_path).expect("private state")).expect("store");
-        store
-            .append(
-                session_id,
-                Event::SessionStarted {
-                    title: "Interrupted Session".into(),
-                    workspace_identity: None,
-                },
-            )
-            .await
-            .expect("Session start");
         store
             .append(
                 session_id,
@@ -2135,7 +2135,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             let mut connection = rusqlite::Connection::open(path.join("events.sqlite3")).unwrap();
             let transaction = connection.transaction().unwrap();
             for sequence in 9..=prefix {
-                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',1,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string()]).unwrap();
+                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',2,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string()]).unwrap();
             }
             transaction.commit().unwrap();
             drop(connection);
@@ -2186,7 +2186,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             let mut connection = rusqlite::Connection::open(path.join("events.sqlite3")).unwrap();
             let transaction = connection.transaction().unwrap();
             for sequence in 9..=prefix {
-                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',1,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, root.to_string()]).unwrap();
+                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',2,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, root.to_string()]).unwrap();
             }
             transaction.commit().unwrap();
             drop(connection);
@@ -2246,7 +2246,10 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
 
 #[test]
 #[cfg(unix)]
-#[ignore = "file-backed 256 MiB database-capacity admission and recovery"]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "file-backed 256 MiB database-capacity admission and recovery"
+)]
 fn database_capacity_is_admitted_before_provider_usage() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
@@ -2725,20 +2728,12 @@ fn one_child_team_finishes_only_after_child_result_is_committed() {
         duplicate_call[5].event = events[4].event.clone();
         duplicate_call[5].agent_run_id = events[4].agent_run_id;
         assert!(SessionView::replay(outcome.session_id, &duplicate_call).is_err());
-        let legacy_events = events
+        let missing_calls: Vec<_> = events
             .iter()
             .filter(|event| !matches!(event.event, Event::ProviderCallRecorded { .. }))
             .cloned()
-            .collect::<Vec<_>>();
-        let legacy = SessionView::replay(outcome.session_id, &legacy_events)
-            .expect("legacy journal without call records")
-            .expect("Session");
-        assert!(
-            legacy.runs[0]
-                .agents
-                .iter()
-                .all(|agent| agent.provider_calls.is_empty())
-        );
+            .collect();
+        assert!(SessionView::replay(outcome.session_id, &missing_calls).is_err());
         assert!(matches!(
             events[7].event,
             arany::Event::AgentFinished { .. }
@@ -2854,11 +2849,7 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
                 .any(|part| part == b"running 1 test\n")
         );
         assert_eq!(seeded.stderr, b"");
-        assert!(
-            seeded.stdout.windows(b"test result: ok. 1 passed; 0 failed; 0 ignored;".len())
-                .any(|part| part == b"test result: ok. 1 passed; 0 failed; 0 ignored;"),
-            "exactly one completed seed test"
-        );
+        process::assert_single_test_completed(&seeded.stdout, "seed");
         let selected = continue_session(
             StateRoot::open_existing(&state_path).expect("seed State"),
             workspace.clone(),
@@ -3794,14 +3785,7 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                         if let Event::ProviderCallRecorded { record, .. } = &envelope.event {
                             let document: serde_json::Value =
                                 serde_json::from_str(line).expect("canonical JSONL");
-                            assert_eq!(
-                                document["event_version"],
-                                if record.failure_reason.is_some() {
-                                    2
-                                } else {
-                                    1
-                                }
-                            );
+                            assert_eq!(document["event_version"], 2);
                             assert_eq!(document["payload"], serde_json::to_value(record).unwrap());
                         }
                     }

@@ -12,6 +12,8 @@ Write Rust that makes intent, ownership, and failure understandable. This is gui
 
 Read the relevant repository instructions and nearby code first. Use the declared edition, minimum supported Rust version (MSRV), dependencies, feature combinations, and verification commands. Project requirements take precedence over this skill's preferences.
 
+For Arany, follow the [product and implementation priorities](../../../AGENTS.md#product-and-implementation-priorities), including mandatory Ponytail and OS parity, before choosing the implementation.
+
 Separate three kinds of advice:
 
 - **Correctness requirements:** language safety obligations and actual product contracts. Explain the concrete failure and preserve these guarantees.

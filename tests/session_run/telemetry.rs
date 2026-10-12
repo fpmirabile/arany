@@ -14,20 +14,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn accept_with_deadline(listener: &TcpListener) -> std::net::TcpStream {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        match listener.accept() {
-            Ok((stream, _)) => return stream,
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                assert!(Instant::now() < deadline, "loopback request missing");
-                thread::yield_now();
-            }
-            Err(error) => panic!("loopback accept failed: {error}"),
-        }
-    }
-}
-
 fn trace_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -141,7 +127,11 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
     let (first_team_export, team_export_gate) = mpsc::channel();
     let provider = thread::spawn(move || {
         for index in 0..9 {
-            let mut stream = accept_with_deadline(&provider_listener);
+            let mut stream = crate::process::accept_with_deadline(
+                &provider_listener,
+                Duration::from_secs(10),
+                "loopback request",
+            );
             let body = read_request(&mut stream);
             assert!(
                 !body

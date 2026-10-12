@@ -9,8 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
-const CHECK_VERSION_V1: &str = "openai-responses-conformance-v7";
-const CHECK_VERSION_V2: &str = "openai-responses-conformance-effort-v7";
+const CHECK_VERSION: &str = "openai-responses-conformance-effort-v7";
 
 pub struct CustomProfileCheck {
     profile_name: String,
@@ -202,11 +201,7 @@ pub(super) fn fingerprint(profile: &CustomProfile) -> [u8; 32] {
     let mut digest = Sha256::new();
     for field in [
         env!("CARGO_PKG_VERSION"),
-        if profile.capability_evidence_version() == 1 {
-            CHECK_VERSION_V1
-        } else {
-            CHECK_VERSION_V2
-        },
+        CHECK_VERSION,
         profile.name(),
         profile.endpoint(),
         profile.model(),
@@ -219,13 +214,11 @@ pub(super) fn fingerprint(profile: &CustomProfile) -> [u8; 32] {
         digest.update((field.len() as u64).to_be_bytes());
         digest.update(field.as_bytes());
     }
-    if profile.capability_evidence_version() == 2 {
-        digest.update(2_u32.to_be_bytes());
-        for effort in profile.efforts() {
-            let value = effort.as_str();
-            digest.update((value.len() as u64).to_be_bytes());
-            digest.update(value.as_bytes());
-        }
+    digest.update(2_u32.to_be_bytes());
+    for effort in profile.efforts() {
+        let value = effort.as_str();
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
     }
     digest.finalize().into()
 }
@@ -453,11 +446,7 @@ mod tests {
             endpoint: format!("http://127.0.0.1:{port}/v1/responses"),
             model: "model-1".into(),
             credential_env: "ARANY_PROVIDER_LOCAL_KEY".into(),
-            capability_evidence_version: if matches!(reply, ProbeReply::ValidEfforts) {
-                2
-            } else {
-                1
-            },
+            capability_evidence_version: 2,
             efforts: if matches!(reply, ProbeReply::ValidEfforts) {
                 vec![crate::provider::Effort::Low, crate::provider::Effort::High]
             } else {
@@ -488,7 +477,7 @@ mod tests {
             endpoint: format!("http://127.0.0.1:{port}/v1/responses"),
             model: "model-1".into(),
             credential_env: "ARANY_PROVIDER_LOCAL_KEY".into(),
-            capability_evidence_version: 1,
+            capability_evidence_version: 2,
             efforts: Vec::new(),
         };
         let destination = profile

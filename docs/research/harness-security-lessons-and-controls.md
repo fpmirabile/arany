@@ -175,7 +175,7 @@ SQLite exposes `SQLITE_OPEN_NOFOLLOW` to prevent opening a database through a sy
 
 Cargo recommends committing `Cargo.lock` for applications to preserve resolved dependency versions. [Cargo lock-file guidance](https://doc.rust-lang.org/cargo/guide/cargo-toml-vs-cargo-lock.html) Cargo build scripts execute before compilation and can compile native code or perform arbitrary tasks. [Cargo build scripts](https://doc.rust-lang.org/cargo/reference/build-scripts.html) Registry checksums detect mismatched package contents but do not make a malicious package version safe. [Cargo source replacement](https://doc.rust-lang.org/cargo/reference/source-replacement.html) RustSec's advisory database and `cargo-audit` provide ecosystem vulnerability checks. [RustSec advisory database](https://github.com/rustsec/advisory-db), [`cargo-audit`](https://github.com/rustsec/rustsec/tree/main/cargo-audit)
 
-**Inference for this harness:** `rusqlite` with bundled SQLite intentionally adds C, FFI, and build-script code to the trusted computing base. Record that exception and test the compiled SQLite options/hardening at runtime. The application crate should use `#![forbid(unsafe_code)]`; any later unsafe or FFI addition needs an isolated safe interface, documented invariants, adversarial tests, and explicit review. Dependency review must include enabled features, build scripts, proc macros, native compilation, sources, licenses, advisories, and MSRV—not only crate names.
+**Inference for this harness:** `rusqlite` with bundled SQLite intentionally adds C, FFI, and build-script code to the trusted computing base. Record that exception and test the compiled SQLite options/hardening at runtime. The binary forbids application unsafe; the library denies it with scoped native Guard and private filesystem ACL exceptions behind safe interfaces, documented invariants, adversarial tests and explicit review. Dependency review must include enabled features, build scripts, proc macros, native compilation, sources, licenses, advisories, and MSRV—not only crate names.
 
 ### Memory and excessive agency
 
@@ -278,7 +278,7 @@ V1's effective set contains only provider invocation with fixed endpoint/model c
 
 ### P1 — Minimize the Rust and dependency trusted computing base
 
-- Put `#![forbid(unsafe_code)]` at the application crate root. Do not weaken it with a local `allow`; isolate a justified exception behind a separately reviewed crate/module boundary if one becomes necessary.
+- Forbid unsafe in the binary and deny it by default in the library. Scope justified native Guard and ACL exceptions to separately reviewed private modules behind safe interfaces; do not allow unsafe in ordinary application code.
 - Commit `Cargo.lock`. Pin the Rust toolchain and minimum supported version. Use minimal dependency features; do not enable Tokio `full` or unused protocol stacks.
 - Inventory direct and transitive build scripts, proc macros, FFI/native code, unsafe code, cryptography, parsers, and network clients. The bundled SQLite choice is an explicit native-code exception.
 - CI must run formatting, Clippy with warnings denied according to repository policy, tests, dependency license/source policy, duplicate/feature review, and RustSec audit. An unavailable advisory feed must produce a visible result rather than a false pass.

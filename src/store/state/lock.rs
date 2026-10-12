@@ -18,6 +18,8 @@ const LOCK_NAMESPACE_FILE: &str = "session-locks.guard";
 #[cfg(unix)]
 const ACCOUNT_LOCK_FILE: &str = "account-credentials.lock";
 #[cfg(unix)]
+const HISTORY_LOCK_FILE: &str = "history.lock";
+#[cfg(unix)]
 const MAX_SESSION_LOCK_FILES: usize = 65_536;
 #[cfg(unix)]
 const MAX_STATE_OVERHEAD_FILES: usize = 32;
@@ -34,6 +36,15 @@ impl Drop for NamespaceLock {
 
 #[cfg(unix)]
 struct AccountLock(File);
+
+pub(crate) struct HistoryLock(pub(super) File);
+
+impl Drop for HistoryLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        let _ = rustix::fs::flock(&self.0, rustix::fs::FlockOperation::Unlock);
+    }
+}
 
 #[cfg(unix)]
 impl Drop for AccountLock {
@@ -71,6 +82,41 @@ impl Drop for SessionRunLock {
 }
 
 impl StateRoot {
+    pub(crate) fn lock_history(&self, exclusive: bool) -> Result<HistoryLock, StoreError> {
+        #[cfg(unix)]
+        {
+            use cap_std::fs::MetadataExt;
+            use rustix::fs::{FlockOperation, flock};
+
+            let file = self
+                .open_private_record(HISTORY_LOCK_FILE, 0)?
+                .ok_or(StoreError::InvalidStateDirectory)?;
+            let operation = if exclusive {
+                FlockOperation::NonBlockingLockExclusive
+            } else {
+                FlockOperation::NonBlockingLockShared
+            };
+            match flock(&file, operation) {
+                Ok(()) => {}
+                Err(rustix::io::Errno::WOULDBLOCK) => return Err(StoreError::HistoryBusy),
+                Err(error) => return Err(io::Error::from(error).into()),
+            }
+            let guard = HistoryLock(file);
+            let current = self.dir.symlink_metadata(HISTORY_LOCK_FILE)?;
+            let held = guard.0.metadata()?;
+            if current.dev() != held.dev() || current.ino() != held.ino() {
+                return Err(StoreError::HistoryChanged);
+            }
+            self.history_records()?;
+            Ok(guard)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = exclusive;
+            Err(StoreError::InvalidStateDirectory)
+        }
+    }
+
     pub fn with_account_replacement_lock<T>(
         &self,
         workspace: &Path,
@@ -104,10 +150,15 @@ impl StateRoot {
 }
 
 #[cfg(unix)]
+pub(super) fn prepare_history_lock(dir: &Dir) -> Result<(), StoreError> {
+    open_private_lock_file(dir, HISTORY_LOCK_FILE, || Ok(())).map(|_| ())
+}
+
+#[cfg(unix)]
 fn lock_account(state: &StateRoot) -> Result<AccountLock, StoreError> {
     use rustix::fs::{FlockOperation, flock};
 
-    let (file, _) = open_private_lock_file(&state._dir, ACCOUNT_LOCK_FILE, || Ok(()))?;
+    let (file, _) = open_private_lock_file(&state.dir, ACCOUNT_LOCK_FILE, || Ok(()))?;
     match flock(&file, FlockOperation::NonBlockingLockExclusive) {
         Ok(()) => Ok(AccountLock(file)),
         Err(rustix::io::Errno::WOULDBLOCK) => Err(StoreError::AccountBusy),
@@ -131,7 +182,7 @@ fn lock_session_with_limit(
     use rustix::fs::{FlockOperation, flock};
 
     let name = format!("session-{session_id}.lock");
-    let dir = state._dir.try_clone()?;
+    let dir = state.dir.try_clone()?;
     let _namespace = lock_namespace(&dir)?;
     let (file, created) =
         open_private_lock_file(&dir, &name, || check_lock_file_quota(&dir, limit))?;
@@ -197,6 +248,7 @@ fn open_private_lock_file(
         Err(error) => return Err(StoreError::Io(error)),
     };
     let metadata = file.metadata()?;
+    crate::private_fs::check_acl(&file, true)?;
     if !metadata.is_file()
         || metadata.len() != 0
         || metadata.nlink() != 1

@@ -1,10 +1,11 @@
 use super::ToolError;
 use super::config::Config;
-use super::guard::{payload, read_capped, read_line_capped};
+use super::guard::{drain_stderr, payload, read_capped, read_line_capped, reap_owned_child};
 use super::skills::parse_json;
 use super::types::{MAX_TOOL_RESULT_BYTES, ToolCall, hex_digest, parse_mcp_arguments};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncWriteExt, BufReader};
@@ -145,7 +146,11 @@ impl Connection {
     }
 }
 
-pub(super) async fn execute(call: &ToolCall, config: &Config) -> Result<String, ToolError> {
+pub(super) async fn execute(
+    call: &ToolCall,
+    config: &Config,
+    root: &Path,
+) -> Result<String, ToolError> {
     let name = match call {
         ToolCall::McpList { server } | ToolCall::McpCall { server, .. } => server,
         _ => return Err(ToolError::Operation),
@@ -155,7 +160,7 @@ pub(super) async fn execute(call: &ToolCall, config: &Config) -> Result<String, 
         .iter()
         .find(|server| &server.name == name)
         .ok_or(ToolError::Configuration)?;
-    let mut command = payload(&server.program, &server.args, "")?;
+    let mut command = payload(&server.program, &server.args, "", root)?;
     command.stdin(Stdio::piped());
     let mut child = command.spawn().map_err(|_| ToolError::Operation)?;
     let writer = child.stdin.take().ok_or(ToolError::Operation)?;
@@ -208,13 +213,13 @@ pub(super) async fn execute(call: &ToolCall, config: &Config) -> Result<String, 
     }).await.unwrap_or(Err(ToolError::Limit));
     let _ = connection.writer.shutdown().await;
     let _ = connection.child.start_kill();
-    let reaped = tokio::time::timeout(Duration::from_secs(2), connection.child.wait()).await;
-    let drained = tokio::time::timeout(Duration::from_secs(2), &mut stderr_task).await;
-    if drained.is_err() {
-        stderr_task.abort();
-        let _ = stderr_task.await;
-    }
-    if !matches!(reaped, Ok(Ok(_))) || !matches!(drained, Ok(Ok(Ok(_)))) {
+    let reaped = tokio::time::timeout(
+        Duration::from_secs(2),
+        reap_owned_child(&mut connection.child),
+    )
+    .await;
+    let drained = drain_stderr(&mut stderr_task).await;
+    if !matches!(reaped, Ok(Ok(_))) || drained.is_none() {
         return Err(ToolError::Operation);
     }
     result

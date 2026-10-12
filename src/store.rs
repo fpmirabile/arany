@@ -13,6 +13,7 @@ mod replay;
 mod state;
 use journal::{HotSession, append, fork_session, open_connection};
 use replay::{latest_session_id, list_session_items, load_session, resolve_view, session_for_run};
+pub use state::HistoryReset;
 pub(crate) use state::SessionRunLock;
 pub use state::StateRoot;
 
@@ -56,6 +57,10 @@ pub enum StoreError {
     SessionBusy,
     #[error("account replacement is already active")]
     AccountBusy,
+    #[error("history is in use by another Arany process; close it and retry")]
+    HistoryBusy,
+    #[error("saved history changed during recovery; retry before resetting")]
+    HistoryChanged,
     #[error("Session history exceeds the replay limit")]
     ReplayLimit,
     #[error("too many Sessions for discovery; resume an exact ID")]
@@ -77,6 +82,16 @@ pub enum StoreError {
 impl From<io::Error> for StoreError {
     fn from(source: io::Error) -> Self {
         Self::Io(source)
+    }
+}
+
+impl From<crate::private_fs::Error> for StoreError {
+    fn from(error: crate::private_fs::Error) -> Self {
+        match error {
+            crate::private_fs::Error::InvalidPath => Self::InvalidStateDirectory,
+            crate::private_fs::Error::NotPrivate => Self::StateNotPrivate,
+            crate::private_fs::Error::Io(error) => Self::Io(error),
+        }
     }
 }
 
@@ -184,6 +199,13 @@ impl Store {
         let thread = std::thread::Builder::new()
             .name("arany-sqlite".into())
             .spawn(move || {
+                let _history = match root.lock_history(false) {
+                    Ok(lock) => lock,
+                    Err(error) => {
+                        let _ = ready_sender.send(Err(error));
+                        return;
+                    }
+                };
                 let connection = open_connection(&root, read_only);
                 let Ok(mut connection) = connection else {
                     let _ = ready_sender.send(connection.map(|_| ()));

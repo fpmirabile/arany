@@ -10,6 +10,8 @@
 
 Describe the observable outcome in one short paragraph.
 
+Name the harness responsibility this serves, or state that the change is development workflow only.
+
 ## Scope
 
 - In scope:
@@ -45,6 +47,8 @@ Describe invariants, dependency direction, and the information each module hides
 - Performance and resources:
 - Security and privacy:
 - Operational:
+
+For implementation work, apply [Arany's priorities](../AGENTS.md#product-and-implementation-priorities): record the simplest sufficient approach after Ponytail and the Linux/macOS/Windows impact, including necessary differences and native verification. State when there is no OS impact.
 
 ## Options considered
 
@@ -129,7 +133,3 @@ Use one ordered list for a cohesive PR. Split into tickets only when one PR woul
 - Security:
 - Documentation and auto-learning:
 - Closeout: update the owning spec, route evidence and pending checks to their existing owners, update inbound links and delete the completed plan:
-
-## Change log
-
-- `YYYY-MM-DD`: Created plan.

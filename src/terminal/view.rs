@@ -1,6 +1,6 @@
-use super::Composer;
 use super::commands::{Submission, help_entry, help_len, parse_submission};
 use super::history::{HistoryRow, MAX_ROW_CELLS, MessageKind};
+use super::{Composer, TerminalOutput};
 use crate::presentation::{
     AgentInspectorModel, DraftAction, PresentationModel, model_id_preview, safe_truncate,
 };
@@ -15,7 +15,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap},
 };
-use std::io::{self, Stderr};
+use std::io;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -248,14 +248,14 @@ fn accent_lead(line: String, palette: Palette) -> Line<'static> {
     }
 }
 
-pub(super) fn screen_terminal() -> io::Result<Terminal<CrosstermBackend<Stderr>>> {
+pub(super) fn screen_terminal() -> io::Result<Terminal<CrosstermBackend<TerminalOutput>>> {
     let mut terminal = Terminal::with_options(
-        CrosstermBackend::new(io::stderr()),
+        CrosstermBackend::new(TerminalOutput(Some(io::stderr()))),
         TerminalOptions {
             viewport: Viewport::Fullscreen,
         },
     )?;
-    terminal.clear()?;
+    ratatui::backend::Backend::clear(terminal.backend_mut())?;
     Ok(terminal)
 }
 
@@ -520,6 +520,7 @@ pub(super) fn draw_setup_choices_frame(
 
 pub(super) fn draw_setup_warning_frame(
     frame: &mut Frame,
+    title: &str,
     warning: &str,
     page: usize,
     accept_selected: bool,
@@ -544,7 +545,10 @@ pub(super) fn draw_setup_warning_frame(
     let page = page.min(pages - 1);
     let has_more = page + 1 < pages;
     frame.render_widget(
-        Paragraph::new(Line::styled("ChatGPT plan consent", palette.selection())),
+        Paragraph::new(Line::styled(
+            safe_truncate(title, usize::from(width)),
+            palette.selection(),
+        )),
         Rect::new(area.x, area.y, width, 1),
     );
     let start = page * usize::from(body_height);

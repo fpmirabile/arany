@@ -1,3 +1,4 @@
+#[cfg(target_os = "linux")]
 use super::process::BoundedOutput;
 use super::*;
 use std::os::unix::{
