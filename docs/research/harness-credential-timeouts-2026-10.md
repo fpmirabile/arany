@@ -65,7 +65,7 @@ The current owner has a different startup contract. Unconfigured startup asserts
 
 The [credential contract](../specs/credentials.md#selected-item-authorization) also distinguishes the supervised two-minute interactive authorization wait from five-second routine reads, writes and deletion. A startup authorization exceeding five seconds is not, by itself, a regression. The [supervisor corpus](../../src/cli/credentials/keyring_helper.rs) owns status-only authorization, cancellation/reaping, human latency and uncertain write-timeout behavior; the Linux product owner supplies separate PTY and replay evidence. Neither synthetic owner proves real native-service rollback or identifies the historical cause.
 
-The historical parent-deadline miss remains unresolved and is an unconfirmed observer incident, not a demonstrated credential-timeout regression. On recurrence, the existing owner needs bounded stage metadata distinguishing peer acceptance, helper start/reap, composer readiness, process exit and channel EOF, together with contemporaneous load metadata. Keep that verification follow-up in [NEXT_STEPS.md](../../NEXT_STEPS.md#beta-2-and-broader-release); do not increase deadlines or retry automatically. Passing current scenarios cannot establish why the older observer missed its deadline.
+The historical parent-deadline miss has no established cause and is not a demonstrated credential-timeout regression. It is not retained as an active follow-up. Passing current scenarios cannot establish why the older observer missed its deadline.
 
 ## Application to Arany
 
