@@ -578,6 +578,8 @@ impl RecoveryBudget {
             .min(Duration::from_millis(expiry.saturating_sub(now_ms)));
         let started = tokio::time::Instant::now();
         #[cfg(target_os = "macos")]
+        let capture = super::macos::fixture::Span::begin(super::macos::fixture::Stage::Recovery);
+        #[cfg(target_os = "macos")]
         let recovery = super::macos::recover_abandoned(root_parent, &mut self.attempts);
         #[cfg(target_os = "linux")]
         let recovery = recover_reservations(&directory.dir, &mut self.attempts);
@@ -589,6 +591,10 @@ impl RecoveryBudget {
             .await
             .map_err(|_| ToolError::ProtectionUnavailable)?;
         self.remaining = self.remaining.saturating_sub(started.elapsed());
+        #[cfg(target_os = "macos")]
+        if result.is_ok() {
+            capture.complete();
+        }
         result
     }
 }

@@ -9,13 +9,28 @@ history. Implementation status and verified support are separate claims.
 
 ## Open defects
 
+- **macOS guarded-chat admission deadline.**
+  `native_chat_preserves_turns_with_guarded_tools_and_rejects_invalid_admission`
+  can exceed its unchanged 30-second parent envelope in debug. This is a separate
+  owner from the stopped-command corpus. Capture its current admission and native
+  Tool stages, measuring cold catalogue admission separately from preparation,
+  before attributing the delay to rendering or relaxing the fixture deadline.
+
 - **Native Engine stopped-command timeout investigation.** The macOS corpus
-  timed out once at its unchanged 30-second case deadline; a diagnostic-enabled
-  repeat passed without raising it. The first failure lacked case/stage
-  evidence, so its cause is unestablished. On recurrence capture the reported
-  case, committed progress and queued hint together with native
-  preparation/recovery/cleanup stages before attributing the timeout to
-  admission, cancellation or host load.
+  has reached its unchanged 30-second case deadline in `receipt-loss` and
+  `mcp-version`. Captured stages place substantial time before Ready and show
+  cleanup at the observer boundary; queue recovery was not the dominant stage in
+  those observations. The original failure remains unattributed, and retaining
+  checked system-directory handles during worker revalidation has not established
+  a repair. The exact-literal catalogue union preserves native execution and
+  observed host/excluded-program read denials, but a passing corpus does not
+  establish the original cause. The existing native journey captures fixed
+  stages, monotonic
+  completed/interrupted durations, committed progress and queue state through
+  [private fixture snapshots](./agents/guard-fixture.md), including parent-observer
+  failure. Use that owner to distinguish native preparation, payload and cleanup
+  from host scheduling before changing budgets or claiming resolution. The
+  180-second parent envelope also remains a required gate.
 
 ## Next functional priority
 

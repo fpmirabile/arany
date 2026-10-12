@@ -28,6 +28,7 @@ use tokio::process::Command;
 
 #[allow(unsafe_code)]
 mod ffi;
+pub(crate) mod fixture;
 mod storage;
 mod unit;
 
@@ -192,10 +193,10 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
         return Err(ToolError::ProtectionUnavailable);
     }
-    let mut bytes = b"arany-macos-guard-v7:shared-fifo-capacity;durable-observed-attachment;boot-bound-locked-root-recovery;persisted-supervisor-before-task;image-inode-device-mount-ownership;no-buffered-go-before-ready;typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;metadata-only-directory-ancestors;workspace-call-write;guard-read-only;file-cpu-default-unblocked-immutable;supervised-resources;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;bounded-go-receipt".to_vec();
+    let mut bytes = b"arany-macos-guard-v9:shared-fifo-capacity;durable-observed-attachment;boot-bound-locked-root-recovery;persisted-supervisor-before-task;image-inode-device-mount-ownership;no-buffered-go-before-ready;typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;metadata-only-directory-ancestors;workspace-call-write;guard-read-only;file-cpu-default-unblocked-immutable;supervised-resources;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;bounded-go-receipt".to_vec();
     bytes.extend_from_slice(profile(PROFILE, FILE_DENIED_SYSCALLS).as_bytes());
     bytes.extend_from_slice(profile(COMMAND_PROFILE, COMMAND_DENIED_SYSCALLS).as_bytes());
-    bytes.extend_from_slice(b"native-commands-mcp:checked-private-cwd;fixed-capacity-nosuid-project-scratch;fresh-selected-snapshot;read-only-pinned-runtime;bounded-positive-root-owned-non-setid-unentitled-system-exec;admission-catalogue-bound-to-enforcement;per-worker-no-follow-metadata-revalidation;dynamic-coalition-persona-entitlement-fork-denial;null-bootstrap-registered-ports;child-only-signals;supervised-cpu");
+    bytes.extend_from_slice(b"native-commands-mcp:checked-private-cwd;fixed-capacity-nosuid-project-scratch;fresh-selected-snapshot;read-only-pinned-runtime;bounded-positive-root-owned-non-setid-unentitled-system-exec;admission-catalogue-bound-to-enforcement;per-worker-pinned-system-directories-no-follow-metadata-revalidation;exact-literal-union-profile;dynamic-coalition-persona-entitlement-fork-denial;null-bootstrap-registered-ports;child-only-signals;supervised-cpu");
     bytes.extend_from_slice(&CPU_LIMIT.as_nanos().to_le_bytes());
     bytes.extend_from_slice(&SUPERVISION_INTERVAL.as_nanos().to_le_bytes());
     bytes.extend_from_slice(&MEMORY_BYTES.to_le_bytes());
@@ -346,32 +347,49 @@ pub(super) fn system_program(path: &str) -> Result<bool, ToolError> {
 }
 
 fn system_program_metadata(path: &str) -> Result<Option<std::fs::Metadata>, ToolError> {
-    use std::os::unix::fs::MetadataExt;
-
+    if !crate::tools::config::valid_absolute(path) {
+        return Err(ToolError::Path);
+    }
     let path = Path::new(path);
     if !matches!(path.parent(), Some(parent) if [Path::new("/bin"), Path::new("/usr/bin")].contains(&parent))
     {
         return Ok(None);
     }
-    let parent = crate::tools::fs::open_directory(path.parent().ok_or(ToolError::Path)?)?;
-    let parent = parent
-        .into_std_file()
-        .metadata()
-        .map_err(|_| ToolError::Path)?;
-    let file = crate::tools::fs::open_absolute(path.to_str().ok_or(ToolError::Path)?)?;
-    let metadata = file.metadata().map_err(|_| ToolError::Path)?;
-    if !parent.is_dir()
-        || !system_directory(parent.uid(), parent.mode())
-        || !system_file(
-            metadata.is_file(),
-            metadata.uid(),
-            metadata.nlink(),
-            metadata.mode(),
-        )
-    {
+    let parent = system_program_directory(path.parent().ok_or(ToolError::Path)?)?;
+    Ok(Some(system_program_metadata_in(&parent, path)?))
+}
+
+fn system_program_directory(path: &Path) -> Result<cap_std::fs::Dir, ToolError> {
+    use cap_std::fs::MetadataExt;
+    let parent = crate::tools::fs::open_directory(path)?;
+    let metadata = parent.dir_metadata().map_err(|_| ToolError::Path)?;
+    if !metadata.is_dir() || !system_directory(metadata.uid(), metadata.mode()) {
         return Err(ToolError::ProtectionUnavailable);
     }
-    Ok(Some(metadata))
+    Ok(parent)
+}
+
+fn system_program_metadata_in(
+    parent: &cap_std::fs::Dir,
+    path: &Path,
+) -> Result<std::fs::Metadata, ToolError> {
+    use std::os::unix::fs::MetadataExt;
+    let file = crate::tools::fs::open_file(
+        parent,
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(ToolError::Path)?,
+    )?;
+    let metadata = file.metadata().map_err(|_| ToolError::Path)?;
+    if !system_file(
+        metadata.is_file(),
+        metadata.uid(),
+        metadata.nlink(),
+        metadata.mode(),
+    ) {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok(metadata)
 }
 
 fn system_directory(uid: u32, mode: u32) -> bool {
@@ -496,6 +514,7 @@ impl SystemPrograms {
     pub(crate) fn admit() -> Result<Self, ToolError> {
         use cap_std::fs::MetadataExt;
 
+        let capture = fixture::Span::begin(fixture::Stage::Catalogue);
         let mut count = 0;
         let mut programs = Vec::new();
         for directory in ["/bin", "/usr/bin"] {
@@ -551,6 +570,7 @@ impl SystemPrograms {
         programs.sort_unstable();
         let programs = Self { programs };
         macos_enforcement_digest(Some(&programs))?;
+        capture.complete();
         Ok(programs)
     }
 
@@ -558,21 +578,39 @@ impl SystemPrograms {
         if self.programs.is_empty() || self.programs.len() > SYSTEM_PROGRAMS_CAP {
             return Err(ToolError::ProtectionUnavailable);
         }
+        let directories = [
+            (
+                Path::new("/bin"),
+                system_program_directory(Path::new("/bin"))?,
+            ),
+            (
+                Path::new("/usr/bin"),
+                system_program_directory(Path::new("/usr/bin"))?,
+            ),
+        ];
+        profile.push_str("(allow file-read* file-map-executable process-exec (require-any\n");
         for (path, expected) in &self.programs {
-            let metadata =
-                system_program_metadata(path)?.ok_or(ToolError::ProtectionUnavailable)?;
+            if !crate::tools::config::valid_absolute(path) {
+                return Err(ToolError::Path);
+            }
+            let path = Path::new(path);
+            let directory = directories
+                .iter()
+                .find(|(directory, _)| Some(*directory) == path.parent())
+                .ok_or(ToolError::ProtectionUnavailable)?;
+            let metadata = system_program_metadata_in(&directory.1, path)?;
             if program_stamp(&metadata) != *expected {
                 return Err(ToolError::ChangedInput);
             }
-            let path = Path::new(path);
             required.retain(|required| required != path);
-            profile.push_str(&format!(
-                "(allow file-read* file-map-executable process-exec (literal {}))\n",
-                quoted(path)?
-            ));
+            profile.push_str(&format!("(literal {})\n", quoted(path)?));
             if profile.len() > PROFILE_BYTES_CAP {
                 return Err(ToolError::Limit);
             }
+        }
+        profile.push_str("))\n");
+        if profile.len() > PROFILE_BYTES_CAP {
+            return Err(ToolError::Limit);
         }
         Ok(())
     }
@@ -728,75 +766,86 @@ async fn execute_worker(
     let mut stdout = BufReader::new(child.stdout.take().ok_or(ToolError::Operation)?);
     let stderr = child.stderr.take().ok_or(ToolError::Operation)?;
     let mut stderr_task = tokio::spawn(read_capped(stderr, CAPTURE_BYTES));
-    let execution = async {
-        let ready = tokio::time::timeout(PREPARATION_DEADLINE, async {
-            stdin
-                .write_all(&task)
-                .await
-                .map_err(|_| ToolError::Operation)?;
-            parse_ready(&read_line_capped(&mut stdout, 2048).await?, intent)
-        })
-        .await
-        .map_err(|_| {
-            ToolError::GuardBootstrap(BootstrapFailure {
-                stage: BootstrapStage::Handshake,
+    let (result, status) = {
+        let execution = async {
+            let capture = fixture::Span::begin(fixture::Stage::WorkerReady);
+            let ready = tokio::time::timeout(PREPARATION_DEADLINE, async {
+                stdin
+                    .write_all(&task)
+                    .await
+                    .map_err(|_| ToolError::Operation)?;
+                parse_ready(&read_line_capped(&mut stdout, 2048).await?, intent)
             })
-        })??;
-        if ready.pid != pid {
-            return Err(ToolError::ProtectionUnavailable);
-        }
-        if !check_process_resources(pid)
-            .map_err(|_| ToolError::GuardRejected(GuardStage::ResourceAttestation))?
-        {
-            return Err(ToolError::GuardRejected(GuardStage::ResourceAttestation));
-        }
-        let ready = serde_json::to_vec(&ready).map_err(|_| ToolError::Operation)?;
-        control
-            .write_all(&ready)
             .await
-            .map_err(|_| ToolError::Operation)?;
-        control
-            .write_all(b"\n")
-            .await
-            .map_err(|_| ToolError::Operation)?;
-        receive_go.await.map_err(|_| ToolError::Operation)?;
-        let payload_deadline = tokio::time::Instant::now()
-            + Duration::from_millis(u64::from(intent.limits.runtime_ms));
-        tokio::time::timeout_at(payload_deadline, async {
-            stdin
-                .write_all(b"GO\n")
+            .map_err(|_| {
+                ToolError::GuardBootstrap(BootstrapFailure {
+                    stage: BootstrapStage::Handshake,
+                })
+            })??;
+            if ready.pid != pid {
+                return Err(ToolError::ProtectionUnavailable);
+            }
+            if !check_process_resources(pid)
+                .map_err(|_| ToolError::GuardRejected(GuardStage::ResourceAttestation))?
+            {
+                return Err(ToolError::GuardRejected(GuardStage::ResourceAttestation));
+            }
+            let ready = serde_json::to_vec(&ready).map_err(|_| ToolError::Operation)?;
+            control
+                .write_all(&ready)
                 .await
                 .map_err(|_| ToolError::Operation)?;
-            stdin.shutdown().await.map_err(|_| ToolError::Operation)?;
-            read_observation(&mut stdout, intent).await
-        })
-        .await
-        .map_err(|_| ToolError::Limit)?
-    };
-    let deadline = tokio::time::Instant::now()
-        + PREPARATION_DEADLINE
-        + Duration::from_millis(u64::from(intent.limits.runtime_ms))
-        + Duration::from_secs(5);
-    let execution = tokio::time::timeout_at(deadline, execution);
-    tokio::pin!(execution);
-    let mut samples = tokio::time::interval(SUPERVISION_INTERVAL);
-    let mut status = None;
-    let result = loop {
-        tokio::select! {
-            biased;
-            () = cancellation.cancelled() => break Err(ToolError::Operation),
-            result = &mut execution => break result.unwrap_or(Err(ToolError::Limit)),
-            exited = child.wait(), if status.is_none() => {
-                status = Some(exited.map_err(|_| ToolError::Operation));
+            control
+                .write_all(b"\n")
+                .await
+                .map_err(|_| ToolError::Operation)?;
+            capture.complete();
+            let capture = fixture::Span::begin(fixture::Stage::WorkerGo);
+            receive_go.await.map_err(|_| ToolError::Operation)?;
+            capture.complete();
+            let payload_deadline = tokio::time::Instant::now()
+                + Duration::from_millis(u64::from(intent.limits.runtime_ms));
+            tokio::time::timeout_at(payload_deadline, async {
+                let capture = fixture::Span::begin(fixture::Stage::WorkerReceipt);
+                stdin
+                    .write_all(b"GO\n")
+                    .await
+                    .map_err(|_| ToolError::Operation)?;
+                stdin.shutdown().await.map_err(|_| ToolError::Operation)?;
+                let observation = read_observation(&mut stdout, intent).await?;
+                capture.complete();
+                Ok(observation)
+            })
+            .await
+            .map_err(|_| ToolError::Limit)?
+        };
+        let deadline = tokio::time::Instant::now()
+            + PREPARATION_DEADLINE
+            + Duration::from_millis(u64::from(intent.limits.runtime_ms))
+            + Duration::from_secs(5);
+        let execution = tokio::time::timeout_at(deadline, execution);
+        tokio::pin!(execution);
+        let mut samples = tokio::time::interval(SUPERVISION_INTERVAL);
+        let mut status = None;
+        let result = loop {
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => break Err(ToolError::Operation),
+                result = &mut execution => break result.unwrap_or(Err(ToolError::Limit)),
+                exited = child.wait(), if status.is_none() => {
+                    status = Some(exited.map_err(|_| ToolError::Operation));
+                }
+                _ = samples.tick() => {
+                    if let Err(error) = scope.check_resources() { break Err(error); }
+                }
             }
-            _ = samples.tick() => {
-                if let Err(error) = scope.check_resources() { break Err(error); }
-            }
-        }
+        };
+        (result, status)
     };
     if result.is_err() {
         let _ = child.start_kill();
     }
+    let capture = fixture::Span::begin(fixture::Stage::WorkerReap);
     let reaped = match status {
         Some(status) => Ok(status),
         None => {
@@ -811,6 +860,11 @@ async fn execute_worker(
         let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
     }
     let drained = drain_stderr(&mut stderr_task).await;
+    if matches!(reaped, Ok(Ok(_))) && drained.is_some() {
+        capture.complete();
+    } else {
+        drop(capture);
+    }
     if result.is_err()
         && let Some(failure) = drained.as_deref().and_then(bootstrap_failure)
     {
@@ -859,11 +913,12 @@ mod tests {
             macos_enforcement_digest(Some(&programs)).unwrap()
         );
         assert_ne!(enforcement, enforcement_digest().unwrap());
-        for case in ["stale", "outside", "overflow"] {
+        for case in ["stale", "outside", "noncanonical", "overflow"] {
             admitted.programs = programs.programs.clone();
             match case {
                 "stale" => admitted.programs[0].1[1] ^= 1,
                 "outside" => admitted.programs[0].0 = "/etc/passwd".into(),
+                "noncanonical" => admitted.programs[0].0 = "/usr/bin/./true".into(),
                 "overflow" => admitted
                     .programs
                     .resize(SYSTEM_PROGRAMS_CAP + 1, programs.programs[0].clone()),
@@ -872,7 +927,9 @@ mod tests {
             assert!(
                 matches!(
                     admitted.allow(&mut String::new(), &mut Vec::new()),
-                    Err(ToolError::ChangedInput | ToolError::ProtectionUnavailable)
+                    Err(ToolError::ChangedInput
+                        | ToolError::ProtectionUnavailable
+                        | ToolError::Path)
                 ),
                 "{case}"
             );

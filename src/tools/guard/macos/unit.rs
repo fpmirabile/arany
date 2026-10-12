@@ -1,4 +1,5 @@
 use super::super::{BootstrapFailure, GuardStage, Task, read_line_capped};
+use super::fixture::{Span as FixtureSpan, Stage as FixtureStage};
 use super::storage::{
     cleanup_storage, prepare_command_storage, read_record, storage_mounted, write_record,
 };
@@ -507,8 +508,11 @@ impl Unit {
         expires_at_ms: u64,
         queued: impl Fn(bool),
     ) -> Result<Self, ToolError> {
+        let capture = FixtureSpan::begin(FixtureStage::Admission);
         let permit = super::super::admission::acquire(id, expires_at_ms, queued).await?;
-        Self::create(permit, Path::new(UNIT_ROOT_PARENT))
+        let unit = Self::create(permit, Path::new(UNIT_ROOT_PARENT))?;
+        capture.complete();
+        Ok(unit)
     }
 
     fn create(permit: super::super::admission::Permit, parent: &Path) -> Result<Self, ToolError> {
@@ -625,16 +629,26 @@ impl Unit {
         if !system_program("/usr/bin/env")? {
             return Err(ToolError::ProtectionUnavailable);
         }
-        let path = self.write_job(
-            &[
-                "/usr/bin/env",
-                "-i",
-                runtime.guard_executable.to_str().ok_or(ToolError::Path)?,
-                "--internal-native-tool-unit",
-                socket.to_str().ok_or(ToolError::Path)?,
-            ],
-            "/dev/null",
-        )?;
+        let mut arguments = vec!["/usr/bin/env", "-i"];
+        #[cfg(debug_assertions)]
+        let fixture_environment = super::fixture::directory().and_then(|directory| {
+            let path = directory.path.to_str()?;
+            let account = directory.path.parent()?.to_str()?;
+            Some([
+                format!("ARANY_TEST_ACCOUNT_ROOT={account}"),
+                format!("ARANY_TEST_GUARD_TRACE={path}"),
+            ])
+        });
+        #[cfg(debug_assertions)]
+        if let Some(environment) = &fixture_environment {
+            arguments.extend(environment.iter().map(String::as_str));
+        }
+        arguments.extend([
+            runtime.guard_executable.to_str().ok_or(ToolError::Path)?,
+            "--internal-native-tool-unit",
+            socket.to_str().ok_or(ToolError::Path)?,
+        ]);
+        let path = self.write_job(&arguments, "/dev/null")?;
         self.manager(ManagerAction::Bootstrap(&path)).await?;
         let launched = self.manager(ManagerAction::Kickstart).await?;
         let launched = std::str::from_utf8(&launched)
@@ -676,15 +690,29 @@ impl Unit {
         if self.stopped {
             return Ok(());
         }
+        let capture = FixtureSpan::begin(FixtureStage::ControllerCoalition);
         let cleanup = if let Some(scope) = &mut self.scope {
             scope.stop(None).await
         } else {
             Ok(())
         };
+        if cleanup.is_ok() {
+            capture.complete();
+        } else {
+            drop(capture);
+        }
+        let capture = FixtureSpan::begin(FixtureStage::ControllerBootout);
         let removal = self.manager(ManagerAction::Bootout).await;
+        if removal.is_ok() {
+            capture.complete();
+        } else {
+            drop(capture);
+        }
         cleanup?;
         removal?;
+        let capture = FixtureSpan::begin(FixtureStage::ControllerStorage);
         cleanup_storage(&self.root).await?;
+        capture.complete();
         self.stopped = true;
         Ok(())
     }
@@ -743,11 +771,14 @@ pub(super) async fn execute(
     };
     crate::tools::fs::reject_overlap(&unit.root, &runtime.workspace)?;
     let execution = async {
+        let capture = FixtureSpan::begin(FixtureStage::Connect);
         let mut stream = BufReader::new(
             tokio::time::timeout(CONNECT_DEADLINE, unit.connect(runtime))
                 .await
                 .map_err(|_| ToolError::Limit)??,
         );
+        capture.complete();
+        let capture = FixtureSpan::begin(FixtureStage::ControllerReady);
         let task = super::super::encode_task(&Task::new(runtime, intent))?;
         stream
             .get_mut()
@@ -773,13 +804,17 @@ pub(super) async fn execute(
             .ok_or(ToolError::ProtectionUnavailable)?
             .check_resources()
             .map_err(|_| ToolError::GuardRejected(GuardStage::ResourceAttestation))?;
+        capture.complete();
+        let capture = FixtureSpan::begin(FixtureStage::ControllerReceipt);
         dispatched.store(true, Ordering::Release);
         stream
             .get_mut()
             .write_all(b"GO\n")
             .await
             .map_err(|_| ToolError::Operation)?;
-        super::super::read_observation(&mut stream, intent).await
+        let observation = super::super::read_observation(&mut stream, intent).await?;
+        capture.complete();
+        Ok(observation)
     };
     let deadline = CONNECT_DEADLINE
         + PREPARATION_DEADLINE
@@ -885,6 +920,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             });
             let result = async {
                 stage = super::super::BootstrapStage::Workspace;
+                let capture = FixtureSpan::begin(FixtureStage::SupervisorStorage);
                 let _storage = if intent.call.is_process() {
                     Some(
                         prepare_command_storage(path.parent().ok_or(ToolError::Path)?, &runtime)
@@ -893,6 +929,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 } else {
                     None
                 };
+                capture.complete();
                 stage = super::super::BootstrapStage::Capabilities;
                 super::execute_worker(
                     &runtime,
@@ -906,9 +943,20 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 .await
             }
             .await;
+            let capture = FixtureSpan::begin(FixtureStage::SupervisorCoalition);
             let cleanup = scope.stop(Some(std::process::id())).await;
+            if cleanup.is_ok() {
+                capture.complete();
+            } else {
+                drop(capture);
+            }
             let storage_cleanup = if cleanup.is_ok() {
-                cleanup_storage(path.parent().ok_or(ToolError::Path)?).await
+                let capture = FixtureSpan::begin(FixtureStage::SupervisorDetach);
+                let result = cleanup_storage(path.parent().ok_or(ToolError::Path)?).await;
+                if result.is_ok() {
+                    capture.complete();
+                }
+                result
             } else {
                 Err(ToolError::ProtectionUnavailable)
             };

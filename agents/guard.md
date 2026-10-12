@@ -43,7 +43,12 @@ limits and compatibility.
   persist it as an authority cache. Workers revalidate every entry through
   no-follow handles: root ownership, non-writable non-set-ID permissions,
   device/inode, size and modification/change timestamps. Reject drift before
-  Ready; do not repeat the signature scan or refresh a stale catalogue within an
+  Ready. Pin the checked `/bin` and `/usr/bin` directory handles once per worker
+  revalidation and open each file relative to its matching handle; never replace
+  fresh file checks with cached metadata or reopen every ancestor for each entry.
+  Encode the catalogue as one allow rule with an explicit union of its exact
+  literal paths; retain all independent denies and the profile byte cap.
+  Do not repeat the signature scan or refresh a stale catalogue within an
   admitted Run. Keep the catalogue inside the existing Task byte/entry bounds;
   overflow rejects without dispatch. File/Skill intents retain the compiled
   digest and carry no catalogue. Configured pins and selected resources remain
