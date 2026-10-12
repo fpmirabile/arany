@@ -326,13 +326,11 @@ macOS units reserve at most 1 GiB of backing images in aggregate (two 64 MiB ima
 per unit); the configured ceiling is `units × 128 MiB`. Existing excess roots
 from a previous implementation are retained and prevent further admission.
 Linux's per-unit mount/cgroup limits remain unchanged; a slot is released only
-after positive native-unit termination. Linux's existing host seed snapshots have
-Drop-only cleanup; controller death can retain them without a cumulative disk
-bound. Their ownership/recovery gap is tracked in [Next steps](../../NEXT_STEPS.md).
+after positive native-unit termination. Host seed storage has no cumulative disk
+bound; [Next steps](../../NEXT_STEPS.md) owns its unresolved cleanup gap.
 A dead Linux reservation is recovered using its exact
 recorded unit, resetting a failed transient job before reclaiming capacity, or
-retired after its boot ends. A nil boot identity cannot establish that transition.
-Uncertain startup remains reserved.
+retired after its boot ends. Uncertain startup remains reserved.
 
 When capacity is occupied, the approved Tool remains pending in its current Run.
 Up to `queued` Tools register in one shared FIFO, ordered by registration under
@@ -340,8 +338,8 @@ the namespace lock. Newcomers cannot overtake registered waiters. Cancellation,
 original intent expiry and process death remove the participant's position.
 Overflow rejects before effects. Waiting never renews an intent, approval or Run
 budget and is not a durable task queue; restart never resumes old permissions.
-There is one pending Tool per Run. A temporary `queued` indication is display-only
-and absent from Events, replay and Provider context. Native recovery retains its
+There is one pending Tool per Run. The [terminal contract](./terminal.md#conversation-progress-and-history)
+owns the temporary queued indication. Native recovery retains its
 30-second deadline within the original intent lifetime; local filesystem bounds
 remain cooperative rather than hard-real-time guarantees.
 
@@ -358,7 +356,7 @@ Byte/entry bounds on synchronous local snapshot preparation do not guarantee a f
 | Scenario | Required observation | Existing owner |
 |---|---|---|
 | Shared native capacity, settings and FIFO | Simultaneous first creation succeeds; eight default units and 32 registered waiters remain bounded across processes; overflow rejects before launch; cancellation, expiry and dead heads advance FIFO without newcomer overtaking. Valid settings change admission and invalid ranges fail closed; a queued macOS head can recover capacity abandoned during its wait. | [Shared admission corpus](../../src/tools/guard/admission.rs) |
-| Retained Linux failed native unit | The exact failed transient job has no payload/cgroup; recovery resets its failure before reclaiming capacity. Unknown startup is retained. Native execution remains pending under [Next steps](../../NEXT_STEPS.md). | [Native retained-unit owner](../../src/tools/guard/linux.rs) |
+| Retained Linux failed native unit | The exact failed transient job has no payload/cgroup; recovery resets its failure before reclaiming capacity. Unknown startup is retained. | [Native retained-unit owner](../../src/tools/guard/linux.rs) |
 | Folder admission before account setup | Every attached entry resolves folder access first, including without an account and with explicit flags. Ctrl+C enters no account flow and creates no Session. Read-only/dismissal asks again next time; remembered trust skips the prompt only for the same directory identity. macOS retains ordinary chat after consent and admits granted Tools only after native protection attests. Explicit `--tools` discloses retained private-config authority at the choice. An initially unconfigured trusted conversation restores its displayed approval mode when a supported native Provider is selected. | [Startup consent journey](../../tests/session_run/startup_trust.rs), [native macOS attached composition](../../src/cli/attached/run.rs) |
 | Native macOS attached capability | Remembered trust offers file/Skill Tools, the pinned native shell and approval controls while ordinary/resumed greetings retain history without effect Events; stale executable pins reject before inference and preserve the committed prefix | [Native macOS attached composition](../../src/cli/attached/run.rs) |
 | Private grant and project discovery | Only selected roots and `.agents/skills` contribute pinned guidance; private names take precedence; unsafe paths and overflow reject | [Tool configuration and discovery corpus](../../src/tools/tests.rs), [native Skill journey](../../tests/session_run/tools.rs) |

@@ -58,7 +58,7 @@ Capture newly discovered invariants, recurring failure modes, ownership decision
 
 ## Module boundaries
 
-The beta is one Cargo package and one long-lived process, with bounded credential and Guard helpers for blocking work and privilege isolation. Provider is the only substitutable Engine behavior seam. Terminal/platform types stay outside the Engine; SQLite owns canonical history and telemetry is lossy output. Read the [system overview](./docs/architecture/system-overview.md#2-runtime-architecture) for current module ownership and data flow, and the relevant module rules before changing a boundary.
+Read the [system overview](./docs/architecture/system-overview.md#2-runtime-architecture) and relevant module rules before changing a boundary. The overview owns package/process shape, dependency direction and state ownership.
 
 Create a module only after its implementation gains depth; a crate needs measured dependency, release, privilege, ownership or compile pressure. Add a daemon only for a second Client or detached execution. Effectful Tools require deterministic Policy and the separate Guard.
 

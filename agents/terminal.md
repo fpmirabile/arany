@@ -11,9 +11,9 @@ For cross-boundary work, also load [CLI](./cli.md), [history](./history.md), [se
 - Attempt real backend cleanup and retain its errors, then detach its output before dropping Ratatui. Its destructor otherwise prints a failed cursor-restoration diagnostic to stderr, which can panic on a disconnected sink before raw-mode restoration.
 - Composer owns the sole bounded in-memory catalog, scoped to Provider/account. Seed after successful setup/default publication. The picker owns one cancellable refresh; inline replacement retains admissible staging, and linear numbers remain an immutable snapshot until close. Exact custom declarations retain local loading. Cached metadata and keystrokes grant no credential or Run authority.
 - Consume committed sequence and ordered agent facts for progress. Coalescing display snapshots never drops canonical Events. Assignment/wait/state/call/usage attribution must come from durable facts, not UI arrival order.
-  Shared Guard capacity waiting is a separate one-slot transient hint keyed to
-  the current committed pending intent. Check that match before display and
-  discard it when the Run ends; it has no history or authority meaning.
+  Validate transient Tool-capacity hints against the current committed pending
+  intent before drawing; the [terminal contract](../docs/specs/terminal.md#conversation-progress-and-history)
+  owns their lifecycle.
 - Display draft counts as graphemes while retaining byte-based admission and reader synchronization. Encoded image size cannot establish model token usage; follow the [terminal measurement contract](../docs/specs/terminal.md#acceptance-scenarios-and-evidence-owners).
 - Keep draft, palette, feedback, viewport and reading anchors presentation-local. [History rules](./history.md) own bounded notices and lazy indexing; no presentation state enters Events or Provider context.
 - Derive Provider failure guidance only from the last committed non-review call of a failed AgentRun, ahead of earlier recoverable Tool denials. Optional AI review is not a terminal failure cause after human fallback. Attested filesystem denials cannot supply an approval-expiry cause. Cancelled siblings, successful calls and absent records cannot supply a Provider cause. Never render chain-of-thought, raw prompts, token streams, reasoning items, Tool payloads or upstream error bodies in ordinary conversation. Explicit effect approval may show the complete bounded sanitized immutable action solely for the decision.

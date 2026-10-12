@@ -49,33 +49,21 @@ resource semantics and unavailable-capability rejection.
   requires positive ownership and device/mount evidence before deletion.
 - The controller holds the root lock through deletion. Persist the opened root's
   identity and boot UUID before bootstrap, and publish the supervisor's identity
-  atomically with file/directory sync before reading a task. Recovery holds an
-  exclusive no-follow lock and validates owner, mode, ACL, link count, record
-  bounds/version and directory identity. Missing or unsupported records remain
-  untouched; there are no legacy readers. Record writes use exclusive temporary
-  files so an incomplete publication cannot authorize dispatch.
+  atomically with file/directory sync before reading a task. Recovery owns an
+  exclusive checked root lock; incomplete publication cannot authorize dispatch.
 - Bind persisted coalitions to `kern.bootsessionuuid`: XNU allocates monotonically
   increasing IDs [within a boot](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/coalition.c),
   not across boots. Same-boot recovery requires exact-target bootout and positive
   coalition emptiness; later-boot recovery must not signal or bootout stale identities.
-- Pin backing image inodes before attachment. Detachment cross-checks bounded
-  `hdiutil info -plist` output with the kernel mount table, rejects foreign/nested
-  mount targets and verifies device absence before clearing an attach marker.
-  Record the interrupted image/boot and persist its observed phase before
-  detachment. Empty inventory cannot settle an unobserved same-boot attachment;
-  cancellation after observed detachment must remain recoverable.
-  Root removal checks the admitted directory identity and every descendant mount.
-  Keep the eight-attempt, 4096-entry and 30-second recovery bounds off the terminal
-  reactor, and retain records on cancellation or incomplete observation.
-- The activated native unit owner exercises escaped-descendant cleanup,
-  stale-token refusal and actual aggregate memory/task and ignored-signal CPU
-  termination, fixed-capacity exhaustion, supervisor termination and storage
-  cleanup during unwind and abrupt controller-death recovery with escaped
-  descendants. Its private command phase exercises the checked
-  snapshot, compiled native code and real MCP, with denied host/network/signal
-  and coalition/persona operations. Its signed-actor phase proves dynamic
-  entitlement denial after a successful unsandboxed baseline while ordinary
-  launch remains available; it does not confer an Apple private entitlement.
+- Pin backing image inodes before attachment. Follow the [native recovery contract](../docs/specs/tools.md#macos-enforcement-and-compatibility)
+  for inventory/mount ownership and deletion evidence. Persist the interrupted
+  image/boot and its observed phase before detachment so cancellation remains
+  recoverable; empty inventory cannot settle an unobserved same-boot attachment.
+- The [acceptance map](../docs/specs/tools.md#acceptance-scenarios-and-evidence-owners)
+  owns native cleanup, resources, storage, recovery and privilege refusal.
+  Follow [testing rules](./testing.md) for activation and evidence requirements.
+  Signed-actor refusal requires a successful unsandboxed baseline; ad-hoc signing
+  does not confer Apple private entitlements.
 - Emit bounded fixed-stage failures while the owned control writer is live.
   Dropping Tokio's owned Unix write half shuts down the shared socket; a cloned
   descriptor cannot publish a failure afterward. Retire the bootstrap diagnostic
