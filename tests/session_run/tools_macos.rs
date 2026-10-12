@@ -1,4 +1,5 @@
 use crate::process::BoundedOutput;
+use crate::{hash, private_file};
 use arany::{
     CollaborationPolicy, CompactionRequest, CompactionResponse, Engine, Finish, Provider,
     ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse, RunRequest, RunStatus,
@@ -22,18 +23,6 @@ while IFS= read -r request; do
     esac
 done
 "#;
-
-fn hash(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn private_file(path: &Path, bytes: &[u8]) {
-    std::fs::write(path, bytes).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
-}
 
 struct Journey {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
@@ -94,7 +83,14 @@ impl Provider for Journey {
 }
 
 #[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native launchd/Seatbelt Tool journey; about 35 seconds"
+)]
 fn guarded_native_files_and_skills_survive_closed_replay() {
+    let _gate = crate::process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().unwrap();
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args([

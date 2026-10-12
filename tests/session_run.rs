@@ -19,8 +19,25 @@ mod isolation;
 mod tools;
 
 #[cfg(all(target_os = "macos", debug_assertions))]
-#[path = "session_run/tools/macos.rs"]
+#[path = "session_run/tools_macos.rs"]
 mod tools;
+
+/// Hex SHA-256, as Tool configuration pins resources.
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+fn hash(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+fn private_file(path: &std::path::Path, bytes: &[u8]) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, bytes).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
 
 #[cfg(unix)]
 #[path = "session_run/custom.rs"]
@@ -62,7 +79,7 @@ mod startup_trust;
 mod active_terminal;
 
 #[cfg(all(target_os = "macos", debug_assertions))]
-#[path = "session_run/active_terminal/macos.rs"]
+#[path = "session_run/active_terminal_macos.rs"]
 mod active_terminal;
 
 #[cfg(target_os = "linux")]
@@ -173,18 +190,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
-        let pty = nix::pty::openpty(Some(&geometry), None).unwrap();
-        let slave = std::fs::File::from(pty.slave);
-        let master = std::fs::File::from(pty.master);
-        for descriptor in [&slave, &master] {
-            rustix::io::fcntl_setfd(descriptor, rustix::io::FdFlags::CLOEXEC).unwrap();
-            assert!(
-                rustix::io::fcntl_getfd(descriptor)
-                    .unwrap()
-                    .contains(rustix::io::FdFlags::CLOEXEC),
-                "fixture PTY must not survive an unrelated test process exec"
-            );
-        }
+        let (master, slave) = process::cloexec_pty(Some(&geometry));
         let before = process::terminal_settings(&master);
         let probe = master.try_clone().unwrap();
         let input = master.try_clone().unwrap();

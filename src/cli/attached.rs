@@ -7,6 +7,7 @@ use arany::{
     resume_session, set_session_defaults,
 };
 use clap::Args;
+use std::ops::ControlFlow;
 use std::{
     io::Write,
     path::{Path, PathBuf},
@@ -247,45 +248,16 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
     }
     let mut composer = Composer::default();
     let mut setup_notice = None;
-    match permissions::admit(
+    if admit_startup(
         &mut terminal,
-        &admission.workspace,
+        &mut admission,
         &mut composer,
-        admission.tools,
+        &mut setup_notice,
     )
-    .await
+    .await?
+    .is_break()
     {
-        Ok(
-            permissions::PermissionChoice::Selected(access)
-            | permissions::PermissionChoice::Closed(access),
-        ) => {
-            admission.workspace_permissions = Some(access);
-        }
-        Ok(permissions::PermissionChoice::Exit) => return Ok(()),
-        Err(setup::SetupError::Recoverable(error)) => {
-            return Err(format!(
-                "{error}; restore private folder trust state and retry"
-            ));
-        }
-        Err(error) => return Err(error.into()),
-    }
-    match setup::admit_history(&mut terminal, &admission.state_dir, &admission.workspace).await {
-        Ok(Some(false)) => {}
-        Ok(Some(true)) => {
-            admission.entry = EntryMode::New;
-            if admission.prompt.take().is_some() {
-                append_notice(
-                    &mut setup_notice,
-                    "Initial task was not submitted; enter it again.",
-                );
-            }
-            append_notice(
-                &mut setup_notice,
-                "Starting a new conversation; saved accounts and folder trust kept.",
-            );
-        }
-        Ok(None) => return Ok(()),
-        Err(error) => return Err(error.into()),
+        return Ok(());
     }
     if !native_protection_supported() {
         append_notice(&mut setup_notice, permissions::UNAVAILABLE_NOTICE);
@@ -352,8 +324,8 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
     let mut access_authorized = true;
     if matches!(admission.entry, EntryMode::New) && !admission.setup_requested && !access_checked {
         match authorize_or_notice(&mut terminal, &admission.defaults, &mut setup_notice).await? {
-            Some(authorized) => access_authorized = authorized,
-            None => return Ok(()),
+            ControlFlow::Continue(authorized) => access_authorized = authorized,
+            ControlFlow::Break(()) => return Ok(()),
         }
     }
     if reuse_saved_selection && access_authorized {
@@ -423,8 +395,8 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
     let (mut session_id, mut view) = start_session(&admission).await?;
     if !matches!(admission.entry, EntryMode::New) {
         match authorize_or_notice(&mut terminal, &view.defaults, &mut setup_notice).await? {
-            Some(authorized) => access_authorized = authorized,
-            None => return Ok(()),
+            ControlFlow::Continue(authorized) => access_authorized = authorized,
+            ControlFlow::Break(()) => return Ok(()),
         }
         if admission.prompt.is_some() {
             require_access(access_authorized, setup_notice.as_ref())?;
@@ -1422,21 +1394,65 @@ fn refresh_runtime_skills<N: From<String> + std::fmt::Display>(
     }
 }
 
-/// Runs saved-access authorization; `None` means the user cancelled, `Some(false)` a recoverable failure.
+/// Runs folder consent, then history recovery, before any account or Provider step.
+async fn admit_startup(
+    terminal: &mut AttachedTerminal,
+    admission: &mut Admission,
+    composer: &mut Composer,
+    setup_notice: &mut Option<String>,
+) -> Result<ControlFlow<()>, String> {
+    match permissions::admit(terminal, &admission.workspace, composer, admission.tools).await {
+        Ok(
+            permissions::PermissionChoice::Selected(access)
+            | permissions::PermissionChoice::Closed(access),
+        ) => {
+            admission.workspace_permissions = Some(access);
+        }
+        Ok(permissions::PermissionChoice::Exit) => return Ok(ControlFlow::Break(())),
+        Err(setup::SetupError::Recoverable(error)) => {
+            return Err(format!(
+                "{error}; restore private folder trust state and retry"
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    }
+    match setup::admit_history(terminal, &admission.state_dir, &admission.workspace).await {
+        Ok(setup::HistoryAdmission::Ready) => {}
+        Ok(setup::HistoryAdmission::Reset) => {
+            admission.entry = EntryMode::New;
+            if admission.prompt.take().is_some() {
+                append_notice(
+                    setup_notice,
+                    "Initial task was not submitted; enter it again.",
+                );
+            }
+            append_notice(
+                setup_notice,
+                "Starting a new conversation; saved accounts and folder trust kept.",
+            );
+        }
+        Ok(setup::HistoryAdmission::Exit) => return Ok(ControlFlow::Break(())),
+        Err(error) => return Err(error.into()),
+    }
+    Ok(ControlFlow::Continue(()))
+}
+
+/// Runs saved-access authorization; `Break` means the user cancelled, `Continue(false)` a
+/// recoverable failure.
 async fn authorize_or_notice<N: From<String> + std::fmt::Display>(
     terminal: &mut AttachedTerminal,
     defaults: &SessionDefaults,
     notice: &mut Option<N>,
-) -> Result<Option<bool>, String> {
+) -> Result<ControlFlow<(), bool>, String> {
     match setup::authorize_saved_access(terminal, defaults).await {
-        Ok(true) => Ok(Some(true)),
-        Ok(false) => Ok(None),
+        Ok(true) => Ok(ControlFlow::Continue(true)),
+        Ok(false) => Ok(ControlFlow::Break(())),
         Err(setup::SetupError::Recoverable(error)) => {
             append_notice(
                 notice,
                 &format!("Error: {error}; use /setup to review saved access"),
             );
-            Ok(Some(false))
+            Ok(ControlFlow::Continue(false))
         }
         Err(error) => Err(error.into()),
     }

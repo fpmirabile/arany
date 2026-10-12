@@ -226,7 +226,7 @@ pub(super) fn unentitled_code(path: &Path) -> Result<bool, ToolError> {
 
 pub(super) fn task_info(pid: u32) -> Result<libc::proc_taskinfo, ToolError> {
     let mut info = MaybeUninit::<libc::proc_taskinfo>::uninit();
-    // Callers establish process ownership; a full kernel write initializes the SDK layout.
+    // The live local buffer is writable for exactly the size passed; the kernel writes at most that.
     let count = unsafe {
         libc::proc_pidinfo(
             pid as i32,
@@ -246,7 +246,7 @@ pub(super) fn task_info(pid: u32) -> Result<libc::proc_taskinfo, ToolError> {
 /// Returns true only when BSD metadata, including zombies, positively shows `pid` exiting.
 pub(super) fn exited(pid: u32) -> bool {
     let mut info = MaybeUninit::<libc::proc_bsdinfo>::uninit();
-    // Callers bind the process identity; exact BSD output establishes kernel exit.
+    // The live local buffer is writable for exactly the size passed; the kernel writes at most that.
     let count = unsafe {
         libc::proc_pidinfo(
             pid as i32,
@@ -267,7 +267,7 @@ pub(super) fn exited(pid: u32) -> bool {
 
 pub(super) fn process_info(pid: u32) -> Result<ProcessInfo, ToolError> {
     let mut process = MaybeUninit::<ProcessInfo>::uninit();
-    // Reviewed Darwin POD layouts are read only after exact-size kernel writes.
+    // The live local buffer is writable for exactly the size passed; the kernel writes at most that.
     let bytes = unsafe {
         libc::proc_pidinfo(
             pid as i32,
@@ -286,7 +286,7 @@ pub(super) fn process_info(pid: u32) -> Result<ProcessInfo, ToolError> {
 
 pub(super) fn coalition(pid: u32) -> Result<u64, ToolError> {
     let mut coalition = MaybeUninit::<CoalitionInfo>::uninit();
-    // A short positive kernel write cannot initialize the complete coalition layout.
+    // The live local buffer is writable for exactly the size passed; the kernel writes at most that.
     let bytes = unsafe {
         libc::proc_pidinfo(
             pid as i32,
@@ -337,7 +337,7 @@ pub(super) fn max_processes() -> Result<i32, ToolError> {
     let mut maximum = 0_i32;
     let mut length = size_of::<i32>();
     let mut query = [libc::CTL_KERN, libc::KERN_MAXPROC];
-    // This reads one bounded kernel capacity, never process arguments or environments.
+    // `query` and the i32 output are live for the call and `length` states the output size.
     if unsafe {
         libc::sysctl(
             query.as_mut_ptr(),
@@ -357,7 +357,7 @@ pub(super) fn max_processes() -> Result<i32, ToolError> {
 
 /// Fills `pids` with every current process ID and returns the written prefix.
 pub(super) fn list_pids(pids: &mut [i32]) -> Result<&[i32], ToolError> {
-    // The caller's buffer exceeds the admitted kernel-wide process ceiling.
+    // `pids` is a live, writable, i32-aligned buffer and its exact byte length is passed.
     let bytes = unsafe {
         libc::proc_listpids(
             ALL_PROCESSES,

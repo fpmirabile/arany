@@ -33,6 +33,13 @@ Tools owns one private model-input projection shared by the native adapters. It 
 
 There is one Rust package, one long-lived process, and one substitutable Engine behavior seam. Short-lived same-binary children isolate blocking OS-credential calls and effectful Tool execution at separate privilege boundaries; neither is a second Client or daemon.
 
+Each OS keeps its Guard launch behind one adapter. Linux starts a transient
+systemd unit that runs Bubblewrap, then the Guard helper. macOS bootstraps a
+temporary launchd job that owns a distinct kernel coalition; its unit supervisor
+attaches two fixed-size disk images for command Workspace and scratch storage,
+then launches a separate Seatbelt worker for the payload. Both send the same
+Task, Ready, GO and observation protocol.
+
 The macOS Tool controller runs its bounded unit lifecycle on an awaited blocking
 owner with a private reactor. Native teardown, including synchronous unwind,
 does not occupy the terminal reactor. Abandoning that await cancels the owner;
@@ -64,6 +71,8 @@ flowchart LR
     Provider --> Custom[Exact verified custom profile]
     Engine --> Workspace[Pinned Workspace input]
     Tools --> Guard[Bounded same-binary native Guard]
+    Guard -. Linux .-> Systemd[systemd unit + Bubblewrap]
+    Guard -. macOS .-> Launchd[launchd coalition unit + Seatbelt worker]
     Guard --> Files[Typed preconditioned file operations]
     Guard --> Snapshot[Offline command / Skill / MCP resources]
     OTLP -. opt-in .-> Collector[Loopback Collector]
@@ -118,7 +127,10 @@ src/
 │   │   └── registration.rs stable host and issued-client registration
 │   ├── credentials.rs protected default native API account access
 │   ├── credentials/
-│   │   └── keyring_helper.rs supervised bounded OS-store process
+│   │   ├── keyring_helper.rs supervised bounded OS-store process
+│   │   ├── keyring_helper/
+│   │   │   └── macos.rs  Keychain item access for the helper
+│   │   └── macos_tests.rs isolated test-keychain helper gates
 │   ├── exec.rs      one-Run command composition and durable receipt
 │   └── provider.rs  model catalog and data-free custom profile check commands
 ├── lib.rs           small public interface for the deep Engine
@@ -174,10 +186,13 @@ src/
 │   ├── config.rs    private closed configuration and resource pins
 │   ├── types.rs     semantic calls, immutable intents and receipts
 │   ├── fs.rs        no-follow snapshots and atomic native mutations
-│   ├── guard.rs     native process ownership and helper lifecycle
+│   ├── guard.rs     shared Task/Ready/GO protocol, helper entry and payload dispatch
 │   ├── guard/
+│   │   ├── linux.rs systemd unit, Bubblewrap launch and capability hardening
 │   │   ├── macos.rs trusted native worker and Seatbelt enforcement
 │   │   ├── macos/
+│   │   │   ├── ffi.rs  isolated unsafe Darwin, Seatbelt and Security bindings
+│   │   │   ├── storage.rs fixed-size private disk images for command units
 │   │   │   └── unit.rs one-use native coalition ownership and supervision
 │   │   └── profile.rs Linux namespace facts and compiled seccomp profile
 │   ├── mcp.rs       bounded legacy stdio tools protocol and schema checks
@@ -202,6 +217,7 @@ src/
 │   ├── agents.rs    agent inspector navigation and state
 │   ├── commands.rs  closed trusted slash registry and parser
 │   ├── clipboard.rs explicit bounded local OS-client lifecycle
+│   ├── clipboard.js macOS pasteboard reader run by the system osascript
 │   ├── composer.rs  bounded grapheme-safe draft editing
 │   ├── input.rs     bounded reader ownership and semantic input mapping
 │   ├── input/
@@ -474,7 +490,7 @@ The release boundary includes:
 - inert terminal output, no alternate screen, transient picker-only mouse, and one RAII terminal owner that restores every enabled mode on every exit path; and
 - pinned/reviewed dependencies, lockfile, build/proc-macro/native inventory, binary-forbidden and library-denied `unsafe` with scoped native Guard/ACL exceptions.
 
-The first local effectful base implements immutable typed effects, deterministic restrict-only Policy and a separately enforcing Guard. Private reviewed configuration or explicit user folder trust supplies upfront grants. Attached Request approvals, Auto edits and AI-reviewed Auto approval narrow dispatch through a bounded one-shot control channel; AI reviews use the existing Provider seam and canonical phase/usage, never a new authority. The terminal owns vertical choices and mode keys. Replay retains review/effect facts without renewing permission. Universal host/same-UID protection is not claimed. Native macOS, remote MCP/network disclosure and larger runtimes require separate admission/evidence.
+The first local effectful base implements immutable typed effects, deterministic restrict-only Policy and a separately enforcing Guard. Private reviewed configuration or explicit user folder trust supplies upfront grants. Attached Request approvals, Auto edits and AI-reviewed Auto approval narrow dispatch through a bounded one-shot control channel; AI reviews use the existing Provider seam and canonical phase/usage, never a new authority. The terminal owns vertical choices and mode keys. Replay retains review/effect facts without renewing permission. Universal host/same-UID protection is not claimed. Native macOS Guard, Keychain, private-filesystem ACL and clipboard adapters are implemented and exercised by CI on hosted macOS; optimized account isolation, human Keychain/pasteboard checks and crash recovery of retained Guard roots remain open in [NEXT_STEPS](../../NEXT_STEPS.md). Remote MCP/network disclosure and larger runtimes require separate admission/evidence.
 
 ## 12. Evidence-dense proof
 

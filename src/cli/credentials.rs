@@ -11,93 +11,7 @@ use uuid::{Uuid, Version};
 mod keyring_helper;
 
 #[cfg(all(test, target_os = "macos", debug_assertions))]
-#[path = "credentials/macos_tests.rs"]
 mod macos_tests;
-
-#[cfg(all(
-    test,
-    any(target_os = "linux", all(target_os = "macos", debug_assertions))
-))]
-pub(crate) fn native_test_output(
-    command: &mut std::process::Command,
-    input: Option<&[u8]>,
-) -> std::process::Output {
-    use std::io::{Read, Seek, SeekFrom, Write};
-    use std::process::{Child, Output, Stdio};
-    use std::time::{Duration, Instant};
-
-    struct OwnedChild(Option<Child>);
-    impl Drop for OwnedChild {
-        fn drop(&mut self) {
-            if let Some(mut child) = self.0.take() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-        }
-    }
-
-    let root = tempfile::tempdir().expect("private native observation");
-    let stdin = if let Some(input) = input {
-        assert!(input.len() <= 16 * 1024, "native input bound");
-        let mut file = tempfile::tempfile_in(root.path()).expect("private native input");
-        file.write_all(input).expect("synthetic native input");
-        file.rewind().expect("input rewind");
-        Stdio::from(file)
-    } else {
-        Stdio::null()
-    };
-    let mut stdout = tempfile::tempfile_in(root.path()).expect("private native stdout");
-    let mut stderr = tempfile::tempfile_in(root.path()).expect("private native stderr");
-    let mut child = OwnedChild(Some(
-        command
-            .stdin(stdin)
-            .stdout(stdout.try_clone().expect("stdout handle"))
-            .stderr(stderr.try_clone().expect("stderr handle"))
-            .spawn()
-            .expect("native process"),
-    ));
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let status = loop {
-        if let Some(status) = child
-            .0
-            .as_mut()
-            .expect("native child")
-            .try_wait()
-            .expect("native status")
-        {
-            break status;
-        }
-        assert!(Instant::now() < deadline, "native parent deadline");
-        assert!(
-            stdout.metadata().expect("stdout size").len() <= 64 * 1024
-                && stderr.metadata().expect("stderr size").len() <= 64 * 1024,
-            "native output bound"
-        );
-        std::thread::yield_now();
-    };
-    child
-        .0
-        .take()
-        .expect("native child")
-        .wait()
-        .expect("native child reaped");
-    let mut output = Output {
-        status,
-        stdout: Vec::new(),
-        stderr: Vec::new(),
-    };
-    for (file, bytes) in [
-        (&mut stdout, &mut output.stdout),
-        (&mut stderr, &mut output.stderr),
-    ] {
-        file.seek(SeekFrom::Start(0)).expect("output rewind");
-        file.take(64 * 1024 + 1)
-            .read_to_end(bytes)
-            .expect("bounded native output");
-        assert!(bytes.len() <= 64 * 1024, "native observation bound");
-    }
-    output
-}
 
 pub(crate) async fn probe_keyring() -> Result<(), CredentialError> {
     tokio::task::spawn_blocking(keyring_helper::probe_backend)
@@ -803,7 +717,7 @@ mod tests {
                         command.env(name, value);
                     }
                 }
-                let output = native_test_output(&mut command, None);
+                let output = crate::test_process::file_output(&mut command, None);
                 assert!(
                     output.status.success(),
                     "native account child {stage} failed"
@@ -924,7 +838,7 @@ mod tests {
                 client.env(name, value);
             }
         }
-        let output = native_test_output(&mut client, None);
+        let output = crate::test_process::file_output(&mut client, None);
         let retrieved = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
         let exposed = output.status.success() && retrieved == expected;
 

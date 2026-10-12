@@ -1,6 +1,6 @@
 use super::ToolError;
 use super::config::Config;
-use super::guard::{payload, read_capped, read_line_capped, reap_owned_child};
+use super::guard::{drain_stderr, payload, read_capped, read_line_capped, reap_owned_child};
 use super::skills::parse_json;
 use super::types::{MAX_TOOL_RESULT_BYTES, ToolCall, hex_digest, parse_mcp_arguments};
 use serde_json::{Value, json};
@@ -218,12 +218,8 @@ pub(super) async fn execute(
         reap_owned_child(&mut connection.child),
     )
     .await;
-    let drained = tokio::time::timeout(Duration::from_secs(2), &mut stderr_task).await;
-    if drained.is_err() {
-        stderr_task.abort();
-        let _ = stderr_task.await;
-    }
-    if !matches!(reaped, Ok(Ok(_))) || !matches!(drained, Ok(Ok(Ok(_)))) {
+    let drained = drain_stderr(&mut stderr_task).await;
+    if !matches!(reaped, Ok(Ok(_))) || drained.is_none() {
         return Err(ToolError::Operation);
     }
     result

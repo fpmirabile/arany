@@ -3,6 +3,8 @@ name: CI
 on:
   pull_request:
     branches: [main]
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -81,5 +83,6 @@ jobs:
           key: ${{ matrix.profile }}
       - run: cargo fetch --locked
       - name: Clippy on macOS
-        run: cargo clippy --workspace --all-targets --locked --offline ${{ matrix.profile == 'release' && '--release' || '' }} -- -D warnings
+        if: matrix.profile == 'debug'
+        run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
       - run: cargo test --workspace --locked --offline ${{ matrix.profile == 'release' && '--release' || '' }}

@@ -463,7 +463,7 @@ fn native_keyring_round_trips_and_replaces_a_synthetic_chatgpt_account() {
                 command.env(name, value);
             }
         }
-        let output = crate::cli::credentials::native_test_output(&mut command, input);
+        let output = crate::test_process::file_output(&mut command, input);
         assert!(output.stdout.len() <= MAX_TOKEN_RECORD_BYTES);
         assert!(output.stderr.is_empty(), "product helper emitted stderr");
         output

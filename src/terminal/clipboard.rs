@@ -56,15 +56,13 @@ fn read(_cancelled: &AtomicBool) -> Result<ClipboardContent, &'static str> {
     Err("explicit clipboard access is unavailable on this platform")
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn read(cancelled: &AtomicBool) -> Result<ClipboardContent, &'static str> {
     use super::composer::MAX_DRAFT_BYTES;
-    #[cfg(target_os = "linux")]
     use std::process::Command;
     use std::time::{Duration, Instant};
 
     let deadline = Instant::now() + Duration::from_secs(2);
-    #[cfg(target_os = "linux")]
     let (mut command, image) = {
         use std::os::unix::fs::{FileTypeExt, MetadataExt};
         use std::path::Path;
@@ -171,33 +169,33 @@ fn read(cancelled: &AtomicBool) -> Result<ClipboardContent, &'static str> {
             (payload, kind == "image/png")
         }
     };
-    #[cfg(target_os = "macos")]
-    {
-        let mut command = native_command(None)?;
-        let bytes = run_process(
-            &mut command,
-            cancelled,
-            deadline,
-            MAX_DRAFT_BYTES.max(crate::provider::MAX_IMAGE_BYTES) + 2,
-        )?;
-        native_content(&bytes)
+    let limit = if image {
+        crate::provider::MAX_IMAGE_BYTES
+    } else {
+        MAX_DRAFT_BYTES
+    };
+    let bytes = run_process(&mut command, cancelled, deadline, limit)?;
+    if image {
+        ImageAttachment::from_png(&bytes).map(ClipboardContent::Image)
+    } else {
+        String::from_utf8(bytes)
+            .map(ClipboardContent::Text)
+            .map_err(|_| "clipboard text is not valid UTF-8")
     }
-    #[cfg(target_os = "linux")]
-    {
-        let limit = if image {
-            crate::provider::MAX_IMAGE_BYTES
-        } else {
-            MAX_DRAFT_BYTES
-        };
-        let bytes = run_process(&mut command, cancelled, deadline, limit)?;
-        if image {
-            ImageAttachment::from_png(&bytes).map(ClipboardContent::Image)
-        } else {
-            String::from_utf8(bytes)
-                .map(ClipboardContent::Text)
-                .map_err(|_| "clipboard text is not valid UTF-8")
-        }
-    }
+}
+
+#[cfg(target_os = "macos")]
+fn read(cancelled: &AtomicBool) -> Result<ClipboardContent, &'static str> {
+    use std::time::{Duration, Instant};
+
+    let mut command = native_command(None)?;
+    let bytes = run_process(
+        &mut command,
+        cancelled,
+        Instant::now() + Duration::from_secs(2),
+        super::composer::MAX_DRAFT_BYTES.max(crate::provider::MAX_IMAGE_BYTES) + 2,
+    )?;
+    native_content(&bytes)
 }
 
 #[cfg(target_os = "macos")]
@@ -259,7 +257,11 @@ fn local_x11_display(display: &str) -> bool {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn installed(name: &str) -> Result<std::path::PathBuf, &'static str> {
     use std::os::unix::fs::MetadataExt;
-    for root in ["/usr/bin", "/usr/local/bin", "/run/current-system/sw/bin"] {
+    #[cfg(target_os = "linux")]
+    const ROOTS: &[&str] = &["/usr/bin", "/usr/local/bin", "/run/current-system/sw/bin"];
+    #[cfg(target_os = "macos")]
+    const ROOTS: &[&str] = &["/usr/bin"];
+    for root in ROOTS {
         let candidate = std::path::Path::new(root).join(name);
         let Ok(path) = std::fs::canonicalize(&candidate) else {
             continue;

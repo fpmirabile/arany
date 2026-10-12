@@ -1,11 +1,10 @@
 use super::{
-    BootstrapFailure, CAPTURE_BYTES, GuardStage, TASK_BYTES_CAP, Task, bootstrap_failure,
-    drain_stderr, parse_ready, read_capped, read_line_capped, read_observation,
+    BootstrapFailure, BootstrapStage, CAPTURE_BYTES, GuardStage, TASK_BYTES_CAP, Task,
+    bootstrap_failure, drain_stderr, parse_ready, read_capped, read_line_capped, read_observation,
 };
 use crate::engine::RunCancellation;
 use crate::tools::types::{MAX_PROCESSES_OR_THREADS, MEMORY_BYTES, digest};
 use crate::tools::{EffectIntent, ToolCall, ToolError, ToolObservation, ToolRuntime};
-use nix::libc;
 use std::ffi::{CStr, CString};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -17,6 +16,7 @@ use tokio::process::Command;
 
 #[allow(unsafe_code)]
 mod ffi;
+mod storage;
 mod unit;
 
 pub(super) fn unit_main() -> std::process::ExitCode {
@@ -26,7 +26,10 @@ pub(super) fn unit_main() -> std::process::ExitCode {
 const CPU_LIMIT: Duration = Duration::from_secs(15);
 const SYSTEM_PROGRAMS_CAP: usize = 2048;
 const PROFILE_BYTES_CAP: usize = 96 * 1024;
-const SUPERVISION_INTERVAL: Duration = Duration::from_millis(10);
+pub(super) const SUPERVISION_INTERVAL: Duration = Duration::from_millis(10);
+// Command/MCP workers check every system program's signature before Ready: about 1.5-6 s on
+// an idle host and over 20 s with all cores saturated.
+pub(super) const PREPARATION_DEADLINE: Duration = Duration::from_secs(30);
 const PROCESS_LIMITS: &[(rustix::process::Resource, u64)] = &[
     (rustix::process::Resource::Nofile, 64),
     (rustix::process::Resource::Core, 0),
@@ -187,7 +190,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     bytes.extend_from_slice(&SUPERVISION_INTERVAL.as_nanos().to_le_bytes());
     bytes.extend_from_slice(&MEMORY_BYTES.to_le_bytes());
     bytes.extend_from_slice(&MAX_PROCESSES_OR_THREADS.to_le_bytes());
-    bytes.extend_from_slice(&unit::STORAGE_BYTES_CAP.to_le_bytes());
+    bytes.extend_from_slice(&storage::STORAGE_BYTES_CAP.to_le_bytes());
     bytes.extend_from_slice(&(SYSTEM_PROGRAMS_CAP as u64).to_le_bytes());
     bytes.extend_from_slice(&(PROFILE_BYTES_CAP as u64).to_le_bytes());
     bytes.extend_from_slice(&(TASK_BYTES_CAP as u64).to_le_bytes());
@@ -324,7 +327,7 @@ fn command_root(task: &Task) -> Result<PathBuf, ToolError> {
     {
         return Err(ToolError::ChangedInput);
     }
-    unit::verify_storage(&root)?;
+    storage::verify_storage(&root)?;
     Ok(root)
 }
 
@@ -409,10 +412,42 @@ fn install_command(task: &Task) -> Result<PathBuf, ToolError> {
         quoted(&resources)?,
         quoted(&resources.join("programs"))?
     ));
+    allow_system_programs(&mut profile, &mut required_system_programs)?;
+    if !required_system_programs.is_empty() {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    profile.push_str(&format!(
+        "(deny file-write* (literal {}))\n",
+        quoted(&task.guard_executable)?
+    ));
+    if !ffi::detach_bootstrap_ports() {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    install_profile(profile)?;
+    attest_policy(
+        &[
+            (c"process-fork", 0),
+            (c"network-outbound", 1),
+            (c"mach-lookup", 1),
+            (c"iokit-open-user-client", 1),
+            (c"process-exec-update-label", 1),
+        ],
+        COMMAND_DENIED_SYSCALLS,
+    )?;
+    Ok(root)
+}
+
+/// Grants each unentitled system program in `/bin` and `/usr/bin` that passes ownership
+/// checks, removing it from `required`.
+fn allow_system_programs(
+    profile: &mut String,
+    required: &mut Vec<PathBuf>,
+) -> Result<(), ToolError> {
+    use cap_std::fs::MetadataExt;
+
     let mut count = 0;
     for directory in ["/bin", "/usr/bin"] {
         let dir = crate::tools::fs::open_directory(Path::new(directory))?;
-        use cap_std::fs::MetadataExt;
         let metadata = dir
             .dir_metadata()
             .map_err(|_| ToolError::ProtectionUnavailable)?;
@@ -450,7 +485,7 @@ fn install_command(task: &Task) -> Result<PathBuf, ToolError> {
             if !ffi::unentitled_code(&path)? {
                 continue;
             }
-            required_system_programs.retain(|required| required != &path);
+            required.retain(|required| required != &path);
             profile.push_str(&format!(
                 "(allow file-read* file-map-executable process-exec (literal {}))\n",
                 quoted(&path)?
@@ -460,28 +495,7 @@ fn install_command(task: &Task) -> Result<PathBuf, ToolError> {
             }
         }
     }
-    if !required_system_programs.is_empty() {
-        return Err(ToolError::ProtectionUnavailable);
-    }
-    profile.push_str(&format!(
-        "(deny file-write* (literal {}))\n",
-        quoted(&task.guard_executable)?
-    ));
-    if !ffi::detach_bootstrap_ports() {
-        return Err(ToolError::ProtectionUnavailable);
-    }
-    install_profile(profile)?;
-    attest_policy(
-        &[
-            (c"process-fork", 0),
-            (c"network-outbound", 1),
-            (c"mach-lookup", 1),
-            (c"iokit-open-user-client", 1),
-            (c"process-exec-update-label", 1),
-        ],
-        COMMAND_DENIED_SYSCALLS,
-    )?;
-    Ok(root)
+    Ok(())
 }
 
 fn attest_policy(operations: &[(&CStr, i32)], denied_syscalls: &[i32]) -> Result<(), ToolError> {
@@ -574,6 +588,28 @@ pub(super) async fn execute_inner(
     result
 }
 
+impl Task {
+    fn new(runtime: &ToolRuntime, intent: &EffectIntent) -> Self {
+        Self {
+            config: runtime.config.clone(),
+            intent: intent.clone(),
+            workspace: runtime.workspace.clone(),
+            guard_executable: runtime.guard_executable.clone(),
+        }
+    }
+
+    fn into_runtime(self) -> (ToolRuntime, EffectIntent) {
+        let runtime = ToolRuntime {
+            config: self.config,
+            workspace: self.workspace,
+            workspace_identity: (self.intent.workspace_device, self.intent.workspace_inode),
+            guard_executable: self.guard_executable,
+            enforcement_digest: self.intent.enforcement_digest,
+        };
+        (runtime, self.intent)
+    }
+}
+
 async fn execute_worker(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
@@ -584,12 +620,7 @@ async fn execute_worker(
     root: &Path,
 ) -> Result<ToolObservation, ToolError> {
     crate::tools::fs::validate_workspace(runtime)?;
-    let task = super::encode_task(&Task {
-        config: runtime.config.clone(),
-        intent: intent.clone(),
-        workspace: runtime.workspace.clone(),
-        guard_executable: runtime.guard_executable.clone(),
-    })?;
+    let task = super::encode_task(&Task::new(runtime, intent))?;
     let mut child = Command::new(&runtime.guard_executable)
         .arg("--internal-tool-guard")
         .env_clear()
@@ -610,7 +641,7 @@ async fn execute_worker(
     let stderr = child.stderr.take().ok_or(ToolError::Operation)?;
     let mut stderr_task = tokio::spawn(read_capped(stderr, CAPTURE_BYTES));
     let execution = async {
-        let ready = tokio::time::timeout(Duration::from_secs(5), async {
+        let ready = tokio::time::timeout(PREPARATION_DEADLINE, async {
             stdin
                 .write_all(&task)
                 .await
@@ -618,7 +649,11 @@ async fn execute_worker(
             parse_ready(&read_line_capped(&mut stdout, 2048).await?, intent)
         })
         .await
-        .map_err(|_| ToolError::Limit)??;
+        .map_err(|_| {
+            ToolError::GuardBootstrap(BootstrapFailure {
+                stage: BootstrapStage::Handshake,
+            })
+        })??;
         if ready.pid != pid {
             return Err(ToolError::ProtectionUnavailable);
         }
@@ -651,6 +686,7 @@ async fn execute_worker(
         .map_err(|_| ToolError::Limit)?
     };
     let deadline = tokio::time::Instant::now()
+        + PREPARATION_DEADLINE
         + Duration::from_millis(u64::from(intent.limits.runtime_ms))
         + Duration::from_secs(5);
     let execution = tokio::time::timeout_at(deadline, execution);
@@ -710,6 +746,7 @@ mod tests {
     use crate::test_process::BoundedOutput;
     use crate::tools::config::Config;
     use crate::tools::types::ToolLimits;
+    use nix::libc;
     use std::io::Write;
     use std::os::unix::process::ExitStatusExt;
 
@@ -806,6 +843,7 @@ mod tests {
             workspace,
             guard_executable: std::env::current_exe().unwrap(),
         };
+        assert!(Path::new("/usr/bin/true").is_file());
         configure_resources().unwrap();
         install(&task).unwrap();
         assert_eq!(
@@ -847,7 +885,7 @@ mod tests {
                 .kind(),
             std::io::ErrorKind::PermissionDenied
         );
-        // macOS 15 reports the denied bind as ENOENT; later releases report EPERM.
+        // macOS 15 reports denied binds and execs as ENOENT; later releases report EPERM.
         assert!(matches!(
             std::os::unix::net::UnixListener::bind(root.join("workspace/socket"))
                 .unwrap_err()
@@ -860,13 +898,13 @@ mod tests {
                 .kind(),
             std::io::ErrorKind::NotFound
         );
-        assert_eq!(
+        assert!(matches!(
             std::process::Command::new("/usr/bin/true")
                 .status()
                 .unwrap_err()
                 .kind(),
-            std::io::ErrorKind::PermissionDenied
-        );
+            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
+        ));
         if cpu {
             std::io::stdout().write_all(b"CPU readiness\n").unwrap();
             std::io::stdout().flush().unwrap();

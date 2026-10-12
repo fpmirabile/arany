@@ -1,6 +1,7 @@
 # Native macOS process unit
 
-Load when changing `src/tools/guard/macos/unit.rs`. [Guard](./guard.md) owns the
+Load when changing `src/tools/guard/macos/unit.rs` or its private disk-image storage in
+`storage.rs`. [Guard](./guard.md) owns the
 native worker and FFI constraints; [Tools](../docs/specs/tools.md) owns effects,
 resource semantics and unavailable-capability rejection.
 

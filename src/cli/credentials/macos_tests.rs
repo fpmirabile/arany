@@ -90,7 +90,7 @@ pub(super) async fn roundtrip() {
             Err(CredentialError::InvalidAccount)
         ));
 
-        let output = native_test_output(
+        let output = crate::test_process::file_output(
             Command::new("/usr/bin/security")
                 .arg("lock-keychain")
                 .arg(root.path().join(keyring_helper::macos::TEST_KEYCHAIN))
@@ -200,7 +200,7 @@ pub(super) async fn roundtrip() {
         .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
         .env("TMPDIR", "/private/tmp")
         .current_dir(temp.path());
-    let output = native_test_output(&mut command, None);
+    let output = crate::test_process::file_output(&mut command, None);
     for secret in [
         b"synthetic-native-key".as_slice(),
         b"synthetic-replacement-key".as_slice(),

@@ -98,12 +98,7 @@ fn native_resume_picker_restores_mouse_and_terminal_without_changing_history() {
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
-        let pty = nix::pty::openpty(Some(&geometry), None).unwrap();
-        let slave = std::fs::File::from(pty.slave);
-        let master = std::fs::File::from(pty.master);
-        for descriptor in [&slave, &master] {
-            rustix::io::fcntl_setfd(descriptor, rustix::io::FdFlags::CLOEXEC).unwrap();
-        }
+        let (master, slave) = crate::process::cloexec_pty(Some(&geometry));
         let before = crate::process::terminal_settings(&master);
         let probe = master.try_clone().unwrap();
         let input = master.try_clone().unwrap();
@@ -261,15 +256,8 @@ fn native_resume_picker_renderer_failure_restores_surviving_terminal() {
                 ws_xpixel: 0,
                 ws_ypixel: 0,
             };
-            let input_pty = nix::pty::openpty(Some(&geometry), None).unwrap();
-            let output_pty = nix::pty::openpty(Some(&geometry), None).unwrap();
-            let slave = std::fs::File::from(input_pty.slave);
-            let input = std::fs::File::from(input_pty.master);
-            let stderr = std::fs::File::from(output_pty.slave);
-            let master = std::fs::File::from(output_pty.master);
-            for descriptor in [&slave, &input, &stderr, &master] {
-                rustix::io::fcntl_setfd(descriptor, rustix::io::FdFlags::CLOEXEC).unwrap();
-            }
+            let (input, slave) = crate::process::cloexec_pty(Some(&geometry));
+            let (master, stderr) = crate::process::cloexec_pty(Some(&geometry));
             let before = crate::process::terminal_settings(&input);
             let probe = stderr.try_clone().unwrap();
             let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
@@ -415,15 +403,8 @@ fn native_partial_acquisition_restores_raw_mode_when_initial_output_disconnects(
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
-    let input_pty = nix::pty::openpty(Some(&geometry), None).unwrap();
-    let output_pty = nix::pty::openpty(Some(&geometry), None).unwrap();
-    let slave = std::fs::File::from(input_pty.slave);
-    let input = std::fs::File::from(input_pty.master);
-    let stderr = std::fs::File::from(output_pty.slave);
-    let master = std::fs::File::from(output_pty.master);
-    for descriptor in [&slave, &input, &stderr, &master] {
-        rustix::io::fcntl_setfd(descriptor, rustix::io::FdFlags::CLOEXEC).unwrap();
-    }
+    let (input, slave) = crate::process::cloexec_pty(Some(&geometry));
+    let (master, stderr) = crate::process::cloexec_pty(Some(&geometry));
     let before = crate::process::terminal_settings(&input);
     let probe = stderr.try_clone().unwrap();
     let name = rustix::termios::ttyname(&stderr, Vec::new()).unwrap();
@@ -536,26 +517,17 @@ fn native_folder_consent_restores_before_account_setup_or_session_work() {
                 ws_xpixel: 0,
                 ws_ypixel: 0,
             };
-            let pty = nix::pty::openpty(Some(&geometry), None).unwrap();
-            let slave = std::fs::File::from(pty.slave);
-            let mut input = std::fs::File::from(pty.master);
+            let (mut input, slave) = crate::process::cloexec_pty(Some(&geometry));
             let before = crate::process::terminal_settings(&input);
             let broken = case.starts_with("stderr-");
             let mut fault_probe = None;
             let (master, stderr) = if broken {
-                let output = nix::pty::openpty(Some(&geometry), None).unwrap();
-                let stderr = std::fs::File::from(output.slave);
+                let (master, stderr) = crate::process::cloexec_pty(Some(&geometry));
                 fault_probe = Some(stderr.try_clone().unwrap());
-                (std::fs::File::from(output.master), stderr)
+                (master, stderr)
             } else {
                 (input.try_clone().unwrap(), slave.try_clone().unwrap())
             };
-            for descriptor in [&slave, &input, &master, &stderr] {
-                rustix::io::fcntl_setfd(descriptor, rustix::io::FdFlags::CLOEXEC).unwrap();
-            }
-            if let Some(probe) = &fault_probe {
-                rustix::io::fcntl_setfd(probe, rustix::io::FdFlags::CLOEXEC).unwrap();
-            }
             let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
             command
                 .env_clear()
@@ -708,20 +680,11 @@ fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
             let peer = thread::spawn(move || {
                 listener.set_nonblocking(true).unwrap();
                 for index in 0..4 {
-                    let deadline = Instant::now() + Duration::from_secs(15);
-                    let mut stream = loop {
-                        match listener.accept() {
-                            Ok((stream, _)) => break stream,
-                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                                assert!(
-                                    Instant::now() < deadline,
-                                    "native request {index} missing"
-                                );
-                                thread::yield_now();
-                            }
-                            Err(error) => panic!("native peer accept: {error}"),
-                        }
-                    };
+                    let mut stream = crate::process::accept_with_deadline(
+                        &listener,
+                        Duration::from_secs(15),
+                        &format!("native request {index}"),
+                    );
                     stream.set_nonblocking(false).unwrap();
                     let body = read_request(&mut stream);
                     let wire: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -772,12 +735,7 @@ fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
                 ws_xpixel: 0,
                 ws_ypixel: 0,
             };
-            let pty = nix::pty::openpty(Some(&geometry), None).unwrap();
-            let slave = std::fs::File::from(pty.slave);
-            let master = std::fs::File::from(pty.master);
-            for descriptor in [&slave, &master] {
-                rustix::io::fcntl_setfd(descriptor, rustix::io::FdFlags::CLOEXEC).unwrap();
-            }
+            let (master, slave) = crate::process::cloexec_pty(Some(&geometry));
             let before = crate::process::terminal_settings(&slave);
             let terminal_probe = matches!(exit, Exit::PtyLoss).then(|| slave.try_clone().unwrap());
             let mut input = Some(master.try_clone().unwrap());
@@ -786,14 +744,7 @@ fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
                 if matches!(exit, Exit::PtyLoss) {
                     input_master = Some(master);
                 }
-                let output = nix::pty::openpty(Some(&geometry), None).unwrap();
-                for descriptor in [&output.master, &output.slave] {
-                    rustix::io::fcntl_setfd(descriptor, rustix::io::FdFlags::CLOEXEC).unwrap();
-                }
-                (
-                    std::fs::File::from(output.master),
-                    std::fs::File::from(output.slave),
-                )
+                crate::process::cloexec_pty(Some(&geometry))
             } else {
                 (master, slave.try_clone().unwrap())
             };

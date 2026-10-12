@@ -5,10 +5,12 @@ pub mod process;
 use process::BoundedOutput;
 
 use std::{
-    net::{SocketAddr, TcpListener, TcpStream},
+    io::{BufRead, BufReader},
+    net::SocketAddr,
     path::Path,
     process::{Child, Command, Output, Stdio},
-    time::{Duration, Instant},
+    sync::mpsc,
+    time::Duration,
 };
 
 struct Server(Child);
@@ -114,27 +116,34 @@ fn certificate(dir: &Path, name: &str) {
 }
 
 fn server(dir: &Path, name: &str) -> (Server, u16) {
-    let reservation = TcpListener::bind(("127.0.0.1", 0)).expect("reserve local port");
-    let port = reservation.local_addr().expect("reserved address").port();
-    drop(reservation);
-    let child = Command::new(openssl())
+    let mut child = Command::new(openssl())
         .env_clear()
-        .args(["s_server", "-www", "-accept"])
-        .arg(format!("127.0.0.1:{port}"))
+        .args(["s_server", "-www", "-accept", "127.0.0.1:0"])
         .arg("-cert")
         .arg(dir.join(format!("{name}.pem")))
         .arg("-key")
         .arg(dir.join(format!("{name}.key")))
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .expect("start test-owned HTTPS peer");
+    let stdout = child.stdout.take().expect("HTTPS peer output");
     let child = Server(child);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while TcpStream::connect(("127.0.0.1", port)).is_err() {
-        assert!(Instant::now() < deadline, "HTTPS peer did not start");
-        std::thread::yield_now();
-    }
+    // The peer binds port 0 and reports it, so no other process can take a released port.
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+        let port = lines
+            .by_ref()
+            .take(8)
+            .find_map(|line| line.strip_prefix("ACCEPT 127.0.0.1:")?.parse::<u16>().ok());
+        let _ = sender.send(port);
+        lines.for_each(drop);
+    });
+    let port = receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("HTTPS peer did not start")
+        .expect("HTTPS peer reported no loopback port");
     (child, port)
 }
 

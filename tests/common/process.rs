@@ -62,6 +62,99 @@ pub fn capture(child: &mut Child, duration: Duration, cap: usize) -> Output {
     )
 }
 
+/// Runs `command` with file-backed stdio, so descendants holding inherited handles cannot
+/// delay EOF; enforces a 10-second deadline and 64 KiB per stream.
+#[allow(dead_code)]
+pub fn file_output(command: &mut Command, input: Option<&[u8]>) -> Output {
+    use std::io::{Seek, SeekFrom, Write};
+
+    const STREAM_CAP: u64 = 64 * 1024;
+    let root = tempfile::tempdir().expect("private native observation");
+    let stdin = if let Some(input) = input {
+        assert!(input.len() <= 16 * 1024, "native input bound");
+        let mut file = tempfile::tempfile_in(root.path()).expect("private native input");
+        file.write_all(input).expect("synthetic native input");
+        file.rewind().expect("input rewind");
+        Stdio::from(file)
+    } else {
+        Stdio::null()
+    };
+    let mut stdout = tempfile::tempfile_in(root.path()).expect("private native stdout");
+    let mut stderr = tempfile::tempfile_in(root.path()).expect("private native stderr");
+    let mut child = OwnedChild(
+        command
+            .stdin(stdin)
+            .stdout(stdout.try_clone().expect("stdout handle"))
+            .stderr(stderr.try_clone().expect("stderr handle"))
+            .spawn()
+            .expect("native process"),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.0.try_wait().expect("native status") {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "native parent deadline");
+        assert!(
+            stdout.metadata().expect("stdout size").len() <= STREAM_CAP
+                && stderr.metadata().expect("stderr size").len() <= STREAM_CAP,
+            "native output bound"
+        );
+        std::thread::yield_now();
+    };
+    let mut output = Output {
+        status,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+    };
+    for (file, bytes) in [
+        (&mut stdout, &mut output.stdout),
+        (&mut stderr, &mut output.stderr),
+    ] {
+        file.seek(SeekFrom::Start(0)).expect("output rewind");
+        file.take(STREAM_CAP + 1)
+            .read_to_end(bytes)
+            .expect("bounded native output");
+        assert!(bytes.len() as u64 <= STREAM_CAP, "native observation bound");
+    }
+    output
+}
+
+/// Opens a PTY whose master and slave close on exec; returns `(master, slave)`.
+#[cfg(unix)]
+#[allow(dead_code)]
+pub fn cloexec_pty(geometry: Option<&nix::pty::Winsize>) -> (std::fs::File, std::fs::File) {
+    let pty = nix::pty::openpty(geometry, None).unwrap();
+    let pair = (
+        std::fs::File::from(pty.master),
+        std::fs::File::from(pty.slave),
+    );
+    for descriptor in [&pair.0, &pair.1] {
+        rustix::io::fcntl_setfd(descriptor, rustix::io::FdFlags::CLOEXEC).unwrap();
+    }
+    pair
+}
+
+/// Accepts one connection from a nonblocking `listener` before `timeout` elapses.
+#[allow(dead_code)]
+pub fn accept_with_deadline(
+    listener: &std::net::TcpListener,
+    timeout: Duration,
+    context: &str,
+) -> std::net::TcpStream {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => return stream,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                assert!(Instant::now() < deadline, "{context} missing");
+                std::thread::yield_now();
+            }
+            Err(error) => panic!("{context} accept failed: {error}"),
+        }
+    }
+}
+
 /// Asserts that a self-spawned `--exact` test child completed exactly one passing test.
 pub fn assert_single_test_completed(stdout: &[u8], context: &str) {
     assert!(

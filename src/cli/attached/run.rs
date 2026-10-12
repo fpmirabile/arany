@@ -401,94 +401,167 @@ mod tests {
             Interrupt,
         }
         use StartupInput::{Interrupt, Reply};
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Case {
+            ChatGpt,
+            Locked,
+            Missing,
+            Secret,
+            Native,
+            NativeCached,
+            Replaced,
+            PrivateFile,
+            Unconfigured,
+            InvalidChatgpt,
+            InvalidChatgptReset,
+            InvalidNative,
+            InvalidNativeReset,
+            InvalidPreferences,
+            InvalidPreferencesReset,
+            InvalidRegistration,
+            InitialSetupFailure,
+            InvalidHistory,
+            InvalidHistorySameRoot,
+            InvalidHistoryCancel,
+            CorruptHistory,
+            UnsafeHistory,
+            ResumeLocked,
+            ContinueMissing,
+            Cancel,
+        }
+        impl Case {
+            const ALL: [Self; 25] = [
+                Self::ChatGpt,
+                Self::Locked,
+                Self::Missing,
+                Self::Secret,
+                Self::Native,
+                Self::NativeCached,
+                Self::Replaced,
+                Self::PrivateFile,
+                Self::Unconfigured,
+                Self::InvalidChatgpt,
+                Self::InvalidChatgptReset,
+                Self::InvalidNative,
+                Self::InvalidNativeReset,
+                Self::InvalidPreferences,
+                Self::InvalidPreferencesReset,
+                Self::InvalidRegistration,
+                Self::InitialSetupFailure,
+                Self::InvalidHistory,
+                Self::InvalidHistorySameRoot,
+                Self::InvalidHistoryCancel,
+                Self::CorruptHistory,
+                Self::UnsafeHistory,
+                Self::ResumeLocked,
+                Self::ContinueMissing,
+                Self::Cancel,
+            ];
+
+            fn name(self) -> &'static str {
+                match self {
+                    Self::ChatGpt => "chatgpt",
+                    Self::Locked => "locked",
+                    Self::Missing => "missing",
+                    Self::Secret => "secret",
+                    Self::Native => "native",
+                    Self::NativeCached => "native_cached",
+                    Self::Replaced => "replaced",
+                    Self::PrivateFile => "private_file",
+                    Self::Unconfigured => "unconfigured",
+                    Self::InvalidChatgpt => "invalid_chatgpt",
+                    Self::InvalidChatgptReset => "invalid_chatgpt_reset",
+                    Self::InvalidNative => "invalid_native",
+                    Self::InvalidNativeReset => "invalid_native_reset",
+                    Self::InvalidPreferences => "invalid_preferences",
+                    Self::InvalidPreferencesReset => "invalid_preferences_reset",
+                    Self::InvalidRegistration => "invalid_registration",
+                    Self::InitialSetupFailure => "initial_setup_failure",
+                    Self::InvalidHistory => "invalid_history",
+                    Self::InvalidHistorySameRoot => "invalid_history_same_root",
+                    Self::InvalidHistoryCancel => "invalid_history_cancel",
+                    Self::CorruptHistory => "corrupt_history",
+                    Self::UnsafeHistory => "unsafe_history",
+                    Self::ResumeLocked => "resume_locked",
+                    Self::ContinueMissing => "continue_missing",
+                    Self::Cancel => "cancel",
+                }
+            }
+
+            fn parse(name: &str) -> Self {
+                Self::ALL
+                    .into_iter()
+                    .find(|case| case.name() == name)
+                    .expect("synthetic startup case")
+            }
+        }
+        impl std::fmt::Display for Case {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.name())
+            }
+        }
 
         const ROOT: &str = "ARANY_TEST_SAVED_ACCESS_ROOT";
         const CASE: &str = "ARANY_TEST_SAVED_ACCESS_CASE";
         const TEST: &str = "cli::attached::run::tests::saved_access_is_authorized_before_chat_without_exposing_secrets";
         let Some(root) = std::env::var_os(ROOT) else {
-            for case in [
-                "chatgpt",
-                "locked",
-                "missing",
-                "secret",
-                "native",
-                "native_cached",
-                "replaced",
-                "private_file",
-                "unconfigured",
-                "invalid_chatgpt",
-                "invalid_chatgpt_reset",
-                "invalid_native",
-                "invalid_native_reset",
-                "invalid_preferences",
-                "invalid_preferences_reset",
-                "invalid_registration",
-                "initial_setup_failure",
-                "invalid_history",
-                "invalid_history_same_root",
-                "invalid_history_cancel",
-                "corrupt_history",
-                "unsafe_history",
-                "resume_locked",
-                "continue_missing",
-                "cancel",
-            ] {
+            for case in Case::ALL {
                 let dialogue: &[StartupInput] = match case {
-                    "invalid_chatgpt" | "invalid_registration" => &[
+                    Case::InvalidChatgpt | Case::InvalidRegistration => &[
                         Reply("/setup\n"),
                         Reply("ChatGPT plan\n"),
                         Reply("\n"),
                         Reply("/quit\n"),
                     ],
-                    "invalid_chatgpt_reset" => &[
+                    Case::InvalidChatgptReset => &[
                         Reply("/setup\n"),
                         Reply("ChatGPT plan\n"),
                         Reply("Reset local setup\n"),
                         Reply("\n"),
                         Reply("/quit\n"),
                     ],
-                    "invalid_native" => &[
+                    Case::InvalidNative => &[
                         Reply("/setup\n"),
                         Reply("API key\n"),
                         Reply("\n"),
                         Reply("/quit\n"),
                     ],
-                    "invalid_native_reset" => &[
+                    Case::InvalidNativeReset => &[
                         Reply("/setup\n"),
                         Reply("API key\n"),
                         Reply("Reset local setup\n"),
                         Reply("\n"),
                         Reply("/quit\n"),
                     ],
-                    "invalid_preferences" => &[Reply("/setup\n"), Reply("\n"), Reply("/quit\n")],
-                    "invalid_preferences_reset" => &[
+                    Case::InvalidPreferences => &[Reply("/setup\n"), Reply("\n"), Reply("/quit\n")],
+                    Case::InvalidPreferencesReset => &[
                         Reply("/setup\n"),
                         Reply("Reset local setup\n"),
                         Interrupt,
                         Reply("/quit\n"),
                     ],
-                    "initial_setup_failure" => &[Reply("ChatGPT plan\n"), Reply("/quit\n")],
-                    "invalid_history" | "invalid_history_same_root" | "corrupt_history" => &[
-                        Reply("Reset history\n"),
-                        Reply("Accept\n"),
-                        Reply("/quit\n"),
-                    ],
-                    "invalid_history_cancel" => {
+                    Case::InitialSetupFailure => &[Reply("ChatGPT plan\n"), Reply("/quit\n")],
+                    Case::InvalidHistory | Case::InvalidHistorySameRoot | Case::CorruptHistory => {
+                        &[
+                            Reply("Reset history\n"),
+                            Reply("Accept\n"),
+                            Reply("/quit\n"),
+                        ]
+                    }
+                    Case::InvalidHistoryCancel => {
                         &[Reply("Reset history\n"), Reply("\n"), Reply("Exit\n")]
                     }
-                    "unsafe_history" => &[Reply("Exit\n")],
-                    "resume_locked" | "continue_missing" | "cancel" => &[],
+                    Case::UnsafeHistory => &[Reply("Exit\n")],
+                    Case::ResumeLocked | Case::ContinueMissing | Case::Cancel => &[],
                     _ => &[Reply("/quit\n")],
                 };
                 let mut inputs = dialogue.iter();
                 let temp = tempfile::tempdir().unwrap();
-                let pty = nix::pty::openpty(None, None).unwrap();
-                let slave = std::fs::File::from(pty.slave);
-                let master = std::fs::File::from(pty.master);
+                let (master, slave) = crate::test_process::cloexec_pty(None);
                 let settings = nix::sys::termios::tcgetattr(&master).unwrap();
                 let mut input = master.try_clone().unwrap();
                 let mut answered_bytes = 0;
-                let listener = if case == "cancel" {
+                let listener = if case == Case::Cancel {
                     let listener =
                         std::os::unix::net::UnixListener::bind(temp.path().join("authorization"))
                             .unwrap();
@@ -504,7 +577,7 @@ mod tests {
                 command
                     .env_clear()
                     .env(ROOT, temp.path())
-                    .env(CASE, case)
+                    .env(CASE, case.name())
                     .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account"))
                     .env("ARANY_TEST_EXE", temp.path().join("credential-helper"))
                     .env("HOME", temp.path().join("fixture-home"))
@@ -584,8 +657,10 @@ mod tests {
                     &output.stdout,
                     &format!("saved access case {case}"),
                 );
-                let expects_prompt =
-                    !matches!(case, "resume_locked" | "continue_missing" | "cancel");
+                let expects_prompt = !matches!(
+                    case,
+                    Case::ResumeLocked | Case::ContinueMissing | Case::Cancel
+                );
                 assert_eq!(
                     transcript.contains("Input:\n"),
                     expects_prompt,
@@ -600,7 +675,7 @@ mod tests {
                     settings,
                     "startup must restore exact terminal settings"
                 );
-                if case == "cancel" {
+                if case == Case::Cancel {
                     use std::io::Read;
                     assert!(interrupted);
                     let mut byte = [0];
@@ -620,14 +695,14 @@ mod tests {
                     "credential escaped to presentation"
                 );
                 let marker = temp.path().join("helper-access");
-                if case.contains("history") {
+                if case.name().contains("history") {
                     assert!(
                         transcript.contains("Setup: History recovery"),
                         "history case {case}: {}",
                         arany::escape_terminal(&transcript)
                     );
                     assert!(transcript.contains("empty Enter selects Retry"));
-                    if case == "unsafe_history" {
+                    if case == Case::UnsafeHistory {
                         assert!(!transcript.contains("Reset history"));
                         assert!(transcript.contains("unsafe or inaccessible"));
                     } else {
@@ -639,14 +714,16 @@ mod tests {
                     let calls = std::fs::read_to_string(marker).unwrap_or_default();
                     assert_eq!(
                         calls.lines().count(),
-                        usize::from(!case.ends_with("_cancel") && case != "unsafe_history")
+                        usize::from(
+                            !case.name().ends_with("_cancel") && case != Case::UnsafeHistory
+                        )
                     );
-                } else if case.starts_with("invalid_") || case == "initial_setup_failure" {
+                } else if case.name().starts_with("invalid_") || case == Case::InitialSetupFailure {
                     assert!(transcript.contains("Setup: "));
-                    if !matches!(case, "invalid_registration" | "initial_setup_failure") {
+                    if !matches!(case, Case::InvalidRegistration | Case::InitialSetupFailure) {
                         assert!(transcript.contains("Saved access could not be restored"));
                     }
-                    if case == "initial_setup_failure" {
+                    if case == Case::InitialSetupFailure {
                         assert!(transcript.contains("Setup could not be completed"));
                     } else {
                         assert!(
@@ -657,13 +734,15 @@ mod tests {
                             transcript.contains("Reset local setup"),
                             "reset choice must not be clipped"
                         );
-                        if !case.starts_with("invalid_preferences") {
+                        if !case.name().starts_with("invalid_preferences") {
                             assert!(transcript.contains("no remote sign-out"));
                         }
                     }
                     let expected = usize::from(matches!(
                         case,
-                        "invalid_registration" | "invalid_chatgpt_reset" | "invalid_native_reset"
+                        Case::InvalidRegistration
+                            | Case::InvalidChatgptReset
+                            | Case::InvalidNativeReset
                     ));
                     let calls = std::fs::read_to_string(marker).unwrap_or_default();
                     assert_eq!(
@@ -671,7 +750,7 @@ mod tests {
                         expected,
                         "only explicit setup probes or valid startup authorization may use the helper"
                     );
-                } else if matches!(case, "private_file" | "unconfigured") {
+                } else if matches!(case, Case::PrivateFile | Case::Unconfigured) {
                     assert!(
                         !marker.exists(),
                         "unconfigured/private file must not access the OS store"
@@ -689,16 +768,20 @@ mod tests {
                         "startup must not retry or inspect another item"
                     );
                     match case {
-                        "locked" | "resume_locked" => {
+                        Case::Locked | Case::ResumeLocked => {
                             assert!(transcript.contains("OS credential store is locked"))
                         }
-                        "missing" | "continue_missing" => assert!(
+                        Case::Missing | Case::ContinueMissing => assert!(
                             transcript
                                 .contains("Saved sign-in is missing from the OS password store")
                         ),
-                        "secret" => assert!(transcript.contains("OS credential store unavailable")),
-                        "replaced" => assert!(transcript.contains("invalid saved account")),
-                        "cancel" => assert!(transcript.contains("Startup authorization cancelled")),
+                        Case::Secret => {
+                            assert!(transcript.contains("OS credential store unavailable"))
+                        }
+                        Case::Replaced => assert!(transcript.contains("invalid saved account")),
+                        Case::Cancel => {
+                            assert!(transcript.contains("Startup authorization cancelled"))
+                        }
                         _ => assert!(
                             !transcript.contains("Error:"),
                             "authorization failed in {case}"
@@ -709,10 +792,10 @@ mod tests {
             return;
         };
         let root = std::path::PathBuf::from(root);
-        let case = std::env::var(CASE).unwrap();
+        let case = Case::parse(&std::env::var(CASE).unwrap());
         let workspace = root.join("workspace");
         std::fs::create_dir(&workspace).unwrap();
-        let session_path = root.join(if case == "invalid_history_same_root" {
+        let session_path = root.join(if case == Case::InvalidHistorySameRoot {
             "account"
         } else {
             "session"
@@ -728,13 +811,13 @@ mod tests {
         std::fs::write(&trust_path, trust).unwrap();
         std::fs::set_permissions(&trust_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let native = matches!(
-            case.as_str(),
-            "native"
-                | "native_cached"
-                | "replaced"
-                | "private_file"
-                | "invalid_native"
-                | "invalid_native_reset"
+            case,
+            Case::Native
+                | Case::NativeCached
+                | Case::Replaced
+                | Case::PrivateFile
+                | Case::InvalidNative
+                | Case::InvalidNativeReset
         );
         let account = crate::cli::credentials::SavedAccount::new(
             "openai".into(),
@@ -745,10 +828,10 @@ mod tests {
         .unwrap();
         let id = if native { account.id } else { Uuid::now_v7() };
         let profile = if native { "openai" } else { "chatgpt" };
-        let (operation, slot, response) = if case == "unconfigured" {
+        let (operation, slot, response) = if case == Case::Unconfigured {
             ("forbidden", "forbidden".into(), "exit 1".into())
         } else if native {
-            if case == "private_file" {
+            if case == Case::PrivateFile {
                 crate::cli::credentials::save(
                     &workspace,
                     account,
@@ -766,7 +849,7 @@ mod tests {
                 let record = serde_json::to_string(&account)
                     .unwrap()
                     .replace('\'', "'\\''");
-                if case == "native" {
+                if case == Case::Native {
                     (
                         "read",
                         "default-native-api-account".into(),
@@ -776,7 +859,7 @@ mod tests {
                     (
                         "authorize",
                         "default-native-api-account".into(),
-                        if case == "replaced" {
+                        if case == Case::Replaced {
                             "exit 4"
                         } else {
                             "exit 0"
@@ -802,31 +885,31 @@ mod tests {
             let slot = crate::cli::chatgpt::selected_keyring_slot(id)
                 .unwrap()
                 .unwrap();
-            let response = match case.as_str() {
-                "chatgpt" => "exit 0",
-                "locked" | "resume_locked" => "exit 3",
-                "missing" | "continue_missing" => "exit 2",
-                "secret" => "printf synthetic-startup-secret",
-                "cancel" => "held-helper",
-                "invalid_registration"
-                | "invalid_history_same_root"
-                | "invalid_history"
-                | "invalid_history_cancel"
-                | "corrupt_history"
-                | "unsafe_history" => "exit 0",
-                "initial_setup_failure"
-                | "invalid_chatgpt"
-                | "invalid_chatgpt_reset"
-                | "invalid_preferences"
-                | "invalid_preferences_reset" => "exit 1",
+            let response = match case {
+                Case::ChatGpt => "exit 0",
+                Case::Locked | Case::ResumeLocked => "exit 3",
+                Case::Missing | Case::ContinueMissing => "exit 2",
+                Case::Secret => "printf synthetic-startup-secret",
+                Case::Cancel => "held-helper",
+                Case::InvalidRegistration
+                | Case::InvalidHistorySameRoot
+                | Case::InvalidHistory
+                | Case::InvalidHistoryCancel
+                | Case::CorruptHistory
+                | Case::UnsafeHistory => "exit 0",
+                Case::InitialSetupFailure
+                | Case::InvalidChatgpt
+                | Case::InvalidChatgptReset
+                | Case::InvalidPreferences
+                | Case::InvalidPreferencesReset => "exit 1",
                 _ => panic!("invalid synthetic startup case"),
             }
             .into();
             ("authorize", slot, response)
         };
         if !matches!(
-            case.as_str(),
-            "native" | "unconfigured" | "invalid_native" | "invalid_native_reset"
+            case,
+            Case::Native | Case::Unconfigured | Case::InvalidNative | Case::InvalidNativeReset
         ) {
             state
                 .replace_model_preferences_record(
@@ -839,7 +922,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        if case.starts_with("invalid_chatgpt") {
+        if case.name().starts_with("invalid_chatgpt") {
             let mut record: serde_json::Value =
                 serde_json::from_slice(&state.read_chatgpt_accounts_record().unwrap().unwrap())
                     .unwrap();
@@ -851,31 +934,31 @@ mod tests {
                 .replace_chatgpt_accounts_record(&serde_json::to_vec(&record).unwrap())
                 .unwrap();
         }
-        if case.starts_with("invalid_native") {
+        if case.name().starts_with("invalid_native") {
             state
                 .replace_saved_account_record(b"unsupported-api-setup")
                 .unwrap();
         }
-        if case.starts_with("invalid_preferences") {
+        if case.name().starts_with("invalid_preferences") {
             state
                 .replace_model_preferences_record(b"unsupported-model-preferences")
                 .unwrap();
         }
-        if case == "invalid_registration" {
+        if case == Case::InvalidRegistration {
             state
                 .replace_chatgpt_registration_record(b"unsupported-registration")
                 .unwrap();
         }
-        if case == "initial_setup_failure" {
+        if case == Case::InitialSetupFailure {
             nix::unistd::mkfifo(
                 &state.path().join("chatgpt-registration.json"),
                 nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
             )
             .unwrap();
         }
-        let recovery = case.starts_with("invalid_")
-            || case.ends_with("_history")
-            || case == "initial_setup_failure";
+        let recovery = case.name().starts_with("invalid_")
+            || case.name().ends_with("_history")
+            || case == Case::InitialSetupFailure;
         let before_accounts = if recovery {
             Some((
                 state.read_saved_account_record().unwrap(),
@@ -895,7 +978,7 @@ mod tests {
         } else {
             "[ \"$#\" -eq 3 ] || exit 1".into()
         };
-        let response = if case == "cancel" {
+        let response = if case == Case::Cancel {
             let socket = root
                 .join("authorization")
                 .to_str()
@@ -924,8 +1007,8 @@ mod tests {
             screen_reader: true,
             ..Default::default()
         };
-        args.setup = case == "initial_setup_failure";
-        if case == "invalid_history_same_root" {
+        args.setup = case == Case::InitialSetupFailure;
+        if case == Case::InvalidHistorySameRoot {
             args.prompt = Some("synthetic task must remain unsubmitted".into());
             args.continue_session = true;
         }
@@ -945,12 +1028,12 @@ mod tests {
         } else {
             None
         };
-        if case.starts_with("invalid_history") {
+        if case.name().starts_with("invalid_history") {
             let connection =
                 rusqlite::Connection::open(session_path.join("events.sqlite3")).unwrap();
             connection.execute_batch("PRAGMA user_version=3").unwrap();
         }
-        if case == "corrupt_history" {
+        if case == Case::CorruptHistory {
             std::fs::write(
                 session_path.join("events.sqlite3"),
                 b"synthetic-broken-history",
@@ -958,17 +1041,17 @@ mod tests {
             .unwrap();
         }
         let outside = root.join("outside-history");
-        if case == "unsafe_history" {
+        if case == Case::UnsafeHistory {
             std::fs::write(&outside, b"outside-stays").unwrap();
             std::os::unix::fs::symlink(&outside, session_path.join("events.sqlite3-journal"))
                 .unwrap();
         }
-        let before_database = if case.contains("history") {
+        let before_database = if case.name().contains("history") {
             Some(std::fs::read(session_path.join("events.sqlite3")).unwrap())
         } else {
             None
         };
-        if matches!(case.as_str(), "resume_locked" | "continue_missing") {
+        if matches!(case, Case::ResumeLocked | Case::ContinueMissing) {
             let session = arany::create_session(
                 StateRoot::admit(&session_path).unwrap(),
                 workspace.clone(),
@@ -995,7 +1078,7 @@ mod tests {
             let before = store.load_session(session).await.unwrap();
             store.close().await.unwrap();
             args.prompt = Some("synthetic task must not be submitted".into());
-            if case == "resume_locked" {
+            if case == Case::ResumeLocked {
                 args.resume = Some(Some(session.to_string()));
             } else {
                 args.continue_session = true;
@@ -1003,7 +1086,7 @@ mod tests {
             let error = super::super::run(args, Telemetry::disabled())
                 .await
                 .unwrap_err();
-            assert!(error.contains(if case == "resume_locked" {
+            assert!(error.contains(if case == Case::ResumeLocked {
                 "OS credential store is locked"
             } else {
                 "Saved sign-in is missing"
@@ -1022,7 +1105,7 @@ mod tests {
         super::super::run(args, Telemetry::disabled())
             .await
             .unwrap();
-        if case == "cancel" {
+        if case == Case::Cancel {
             assert!(
                 !session_path.exists(),
                 "cancelled startup must not create Session state"
@@ -1032,11 +1115,11 @@ mod tests {
         }
         if let Some((session, events)) = before_history {
             if let Some(database) = before_database {
-                if case.ends_with("_cancel") || case == "unsafe_history" {
+                if case.name().ends_with("_cancel") || case == Case::UnsafeHistory {
                     assert!(
                         std::fs::read(session_path.join("events.sqlite3")).unwrap() == database
                     );
-                    if case == "unsafe_history" {
+                    if case == Case::UnsafeHistory {
                         assert_eq!(std::fs::read(outside).unwrap(), b"outside-stays");
                     }
                 } else {
@@ -1074,20 +1157,20 @@ mod tests {
             );
             store.close().await.unwrap();
             let (native_before, chatgpt_before, models_before) = before_accounts.unwrap();
-            let reset = case.ends_with("_reset");
+            let reset = case.name().ends_with("_reset");
             assert!(
                 state.read_saved_account_record().unwrap()
                     == if reset && native { None } else { native_before }
             );
             assert!(
                 state.read_chatgpt_accounts_record().unwrap()
-                    == if reset && case.starts_with("invalid_chatgpt") {
+                    == if reset && case.name().starts_with("invalid_chatgpt") {
                         None
                     } else {
                         chatgpt_before
                     }
             );
-            if case == "invalid_registration" {
+            if case == Case::InvalidRegistration {
                 assert!(
                     state.read_chatgpt_registration_record().unwrap()
                         == Some(b"unsupported-registration".to_vec())
@@ -1169,9 +1252,7 @@ mod tests {
         const TEST: &str = "cli::attached::run::tests::native_chat_preserves_turns_with_guarded_tools_and_rejects_invalid_admission";
         let Some(root) = std::env::var_os(FIXTURE) else {
             let temp = tempfile::tempdir().unwrap();
-            let pty = nix::pty::openpty(None, None).unwrap();
-            let slave = std::fs::File::from(pty.slave);
-            let master = std::fs::File::from(pty.master);
+            let (master, slave) = crate::test_process::cloexec_pty(None);
             let mut input = master.try_clone().unwrap();
             let mut cancelled = false;
             let mut command = Command::new(std::env::current_exe().unwrap());

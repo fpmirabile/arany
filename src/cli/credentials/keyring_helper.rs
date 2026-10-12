@@ -138,13 +138,17 @@ fn helper_command(operation: &str, slot: &str) -> Result<(Command, usize), Crede
         .env_clear();
     #[cfg(unix)]
     command.current_dir("/");
-    for name in [
+    #[cfg(target_os = "linux")]
+    let forwarded = [
         "DBUS_SESSION_BUS_ADDRESS",
         "XDG_RUNTIME_DIR",
         "HOME",
         "USER",
         "LOGNAME",
-    ] {
+    ];
+    #[cfg(not(target_os = "linux"))]
+    let forwarded = ["HOME", "USER", "LOGNAME"];
+    for name in forwarded {
         if let Some(value) = std::env::var_os(name) {
             command.env(name, value);
         }

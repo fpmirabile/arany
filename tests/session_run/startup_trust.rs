@@ -505,9 +505,7 @@ fn folder_consent_precedes_setup_and_remembers_only_the_exact_trusted_directory(
     let state = temp.path().join("state");
     std::fs::create_dir(&workspace).unwrap();
     let probe = |args: &[&str], expect_prompt: bool, choice: Option<&[u8]>| {
-        let pty = nix::pty::openpty(None, None).unwrap();
-        let slave = std::fs::File::from(pty.slave);
-        let master = std::fs::File::from(pty.master);
+        let (master, slave) = crate::process::cloexec_pty(None);
         let mut input = master.try_clone().unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
         command

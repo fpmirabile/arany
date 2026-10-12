@@ -1,5 +1,12 @@
-use super::*;
+use super::super::{BootstrapFailure, GuardStage, Task, read_line_capped};
+use super::storage::{cleanup_storage, prepare_command_storage, storage_mounted};
+use super::{
+    CPU_LIMIT, PREPARATION_DEADLINE, SUPERVISION_INTERVAL, bootstrap, ffi, system_program,
+};
+use crate::engine::RunCancellation;
 use crate::private_fs::{PrivateDirectory, open_directory};
+use crate::tools::types::{MAX_PROCESSES_OR_THREADS, MEMORY_BYTES};
+use crate::tools::{EffectIntent, ToolError, ToolObservation, ToolRuntime};
 use core_foundation::array::CFArray;
 use core_foundation::base::TCFType;
 use core_foundation::boolean::CFBoolean;
@@ -7,21 +14,24 @@ use core_foundation::dictionary::CFDictionary;
 use core_foundation::number::CFNumber;
 use core_foundation::propertylist::{create_data, kCFPropertyListBinaryFormat_v1_0};
 use core_foundation::string::CFString;
+use nix::libc;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::Path;
 use std::path::PathBuf;
+use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncWriteExt, BufReader};
+use tokio::process::Command;
 
 const HOST_PROCESS_CAP: usize = 65_536;
 const JOB_BYTES_CAP: usize = 128 * 1024;
-pub(super) const STORAGE_BYTES_CAP: u64 = crate::tools::types::SCRATCH_BYTES;
-const BYTES_PER_MEBIBYTE: u64 = 1024 * 1024;
-const _: () = assert!(STORAGE_BYTES_CAP.is_multiple_of(BYTES_PER_MEBIBYTE));
-const STORAGE_NAMES: [&str; 2] = ["workspace", "scratch"];
-const STORAGE_PENDING: &str = "storage.pending";
 const AVAILABILITY_DEADLINE: Duration = Duration::from_secs(3);
+const CONNECT_DEADLINE: Duration = Duration::from_secs(5);
 const UNIT_ROOT_PARENT: &str = "/private/tmp";
 const UNIT_ROOT_PREFIX: &str = "arany-u-";
 // A live unit holds an exclusive lock here; the kernel releases it when the owner exits.
@@ -242,271 +252,12 @@ fn peer(stream: &UnixStream) -> Result<u32, ToolError> {
     Ok(pid as u32)
 }
 
-async fn disk_command(root: &Path, arguments: &[&str]) -> Result<(), ToolError> {
-    if !system_program("/usr/bin/hdiutil")? {
-        return Err(ToolError::ProtectionUnavailable);
-    }
-    let mut command = Command::new("/usr/bin/hdiutil");
-    command
-        .args(arguments)
-        .env_clear()
-        .env("HOME", root)
-        .env("TMPDIR", root)
-        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-        .current_dir(root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let (status, _, _) = super::super::capture(
-        command
-            .spawn()
-            .map_err(|_| ToolError::ProtectionUnavailable)?,
-        CAPTURE_BYTES,
-        Duration::from_secs(20),
-    )
-    .await?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(ToolError::ProtectionUnavailable)
-    }
-}
-
-async fn prepare_storage(root: &Path) -> Result<[cap_std::fs::Dir; 2], ToolError> {
-    use cap_fs_ext::{DirExt, OpenOptionsFollowExt};
-    use cap_std::fs::{OpenOptionsExt, PermissionsExt};
-
-    open_directory(root, false).map_err(|_| ToolError::Path)?;
-    let directory = crate::tools::fs::open_directory(root)?;
-    let parent = crate::tools::fs::identity(&directory)?;
-    let mut volumes = Vec::with_capacity(2);
-    for name in STORAGE_NAMES {
-        let image_name = format!("{name}.dmg");
-        for entry in [name, image_name.as_str()] {
-            match directory.symlink_metadata(entry) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                _ => return Err(ToolError::ChangedInput),
-            }
-        }
-        let mut builder = cap_std::fs::DirBuilder::new();
-        cap_std::fs::DirBuilderExt::mode(&mut builder, 0o700);
-        directory
-            .create_dir_with(name, &builder)
-            .map_err(|_| ToolError::Operation)?;
-        let image = root.join(&image_name);
-        let mount = root.join(name);
-        let image_path = image.to_str().ok_or(ToolError::Path)?;
-        let mount_path = mount.to_str().ok_or(ToolError::Path)?;
-        let size = format!("{}m", STORAGE_BYTES_CAP / BYTES_PER_MEBIBYTE);
-        disk_command(
-            root,
-            &[
-                "create",
-                "-quiet",
-                "-size",
-                &size,
-                "-layout",
-                "NONE",
-                "-type",
-                "UDIF",
-                "-fs",
-                "Case-sensitive HFS+",
-                "-nospotlight",
-                "-volname",
-                name,
-                image_path,
-            ],
-        )
-        .await?;
-        let image = directory
-            .open_with(
-                &image_name,
-                cap_std::fs::OpenOptions::new()
-                    .read(true)
-                    .custom_flags(libc::O_NONBLOCK)
-                    .follow(cap_fs_ext::FollowSymlinks::No),
-            )
-            .map_err(|_| ToolError::Path)?;
-        use cap_std::fs::MetadataExt;
-        let metadata = image.metadata().map_err(|_| ToolError::Path)?;
-        if !metadata.is_file()
-            || metadata.uid() != rustix::process::geteuid().as_raw()
-            || metadata.nlink() != 1
-            || metadata.len() != STORAGE_BYTES_CAP
-        {
-            return Err(ToolError::ProtectionUnavailable);
-        }
-        image
-            .set_permissions(cap_std::fs::Permissions::from_mode(0o600))
-            .map_err(|_| ToolError::Path)?;
-        directory
-            .open_with(
-                STORAGE_PENDING,
-                cap_std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .follow(cap_fs_ext::FollowSymlinks::No),
-            )
-            .map_err(|_| ToolError::Operation)?;
-        disk_command(
-            root,
-            &[
-                "attach",
-                "-quiet",
-                "-kernel",
-                image_path,
-                "-mountpoint",
-                mount_path,
-                "-mount",
-                "required",
-                "-owners",
-                "on",
-                "-nobrowse",
-                "-noautoopen",
-                "-noautofsck",
-                "-verify",
-            ],
-        )
-        .await?;
-        directory
-            .remove_file(STORAGE_PENDING)
-            .map_err(|_| ToolError::Operation)?;
-        let volume = directory
-            .open_dir_nofollow(name)
-            .map_err(|_| ToolError::Path)?;
-        verify_volume(&volume, parent.0)?;
-        volume
-            .set_permissions(".", cap_std::fs::Permissions::from_mode(0o700))
-            .map_err(|_| ToolError::Path)?;
-        volumes.push(volume);
-    }
-    volumes
-        .try_into()
-        .map_err(|_| ToolError::ProtectionUnavailable)
-}
-
-fn verify_volume(volume: &cap_std::fs::Dir, parent_device: u64) -> Result<(), ToolError> {
-    use cap_std::fs::MetadataExt;
-
-    let metadata = volume.dir_metadata().map_err(|_| ToolError::Path)?;
-    let capacity = rustix::fs::fstatvfs(volume).map_err(|_| ToolError::ProtectionUnavailable)?;
-    if metadata.uid() != rustix::process::geteuid().as_raw()
-        || metadata.dev() == parent_device
-        || capacity.f_blocks.checked_mul(capacity.f_frsize) != Some(STORAGE_BYTES_CAP)
-        || !capacity
-            .f_flag
-            .contains(rustix::fs::StatVfsMountFlags::NOSUID)
-        || capacity
-            .f_flag
-            .contains(rustix::fs::StatVfsMountFlags::RDONLY)
-    {
-        return Err(ToolError::ProtectionUnavailable);
-    }
-    Ok(())
-}
-
-pub(super) fn verify_storage(root: &Path) -> Result<(), ToolError> {
-    use cap_fs_ext::DirExt;
-    use cap_std::fs::MetadataExt;
-
-    let directory = crate::tools::fs::open_directory(root)?;
-    let parent = crate::tools::fs::identity(&directory)?;
-    for name in STORAGE_NAMES {
-        let volume = directory
-            .open_dir_nofollow(name)
-            .map_err(|_| ToolError::Path)?;
-        verify_volume(&volume, parent.0)?;
-        if volume.dir_metadata().map_err(|_| ToolError::Path)?.mode() & 0o7777 != 0o700 {
-            return Err(ToolError::ProtectionUnavailable);
-        }
-    }
-    Ok(())
-}
-
-async fn prepare_command_storage(
-    root: &Path,
-    runtime: &ToolRuntime,
-) -> Result<[cap_std::fs::Dir; 2], ToolError> {
-    use cap_fs_ext::DirExt;
-
-    runtime.config.validate()?;
-    let workspace = crate::tools::fs::open_directory(&runtime.workspace)?;
-    if crate::tools::fs::identity(&workspace)? != runtime.workspace_identity {
-        return Err(ToolError::ChangedInput);
-    }
-    crate::tools::fs::reject_overlap(root, &runtime.workspace)?;
-    let volumes = prepare_storage(root).await?;
-    let directory = crate::tools::fs::open_directory(root)?;
-    let mut builder = cap_std::fs::DirBuilder::new();
-    cap_std::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    directory
-        .create_dir_with("runtime", &builder)
-        .map_err(|_| ToolError::Operation)?;
-    let resources = directory
-        .open_dir_nofollow("runtime")
-        .map_err(|_| ToolError::Path)?;
-    crate::tools::fs::snapshot_into(&workspace, &runtime.config, Some(&volumes[0]), &resources)?;
-    Ok(volumes)
-}
-
-fn storage_mounted(root: &Path) -> Result<bool, ToolError> {
-    let directory = crate::tools::fs::open_directory(root)?;
-    let parent = crate::tools::fs::identity(&directory)?;
-    for name in STORAGE_NAMES.into_iter().chain([STORAGE_PENDING]) {
-        let metadata = match directory.symlink_metadata(name) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return Err(ToolError::Path),
-        };
-        use cap_std::fs::MetadataExt;
-        if name == STORAGE_PENDING || !metadata.is_dir() || metadata.dev() != parent.0 {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-async fn cleanup_storage(root: &Path) -> Result<(), ToolError> {
-    let directory = crate::tools::fs::open_directory(root)?;
-    let parent = crate::tools::fs::identity(&directory)?;
-    for name in STORAGE_NAMES {
-        let metadata = match directory.symlink_metadata(name) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return Err(ToolError::Path),
-        };
-        use cap_std::fs::MetadataExt;
-        if !metadata.is_dir() || metadata.uid() != rustix::process::geteuid().as_raw() {
-            return Err(ToolError::Path);
-        }
-        if metadata.dev() != parent.0 {
-            let mount = root.join(name);
-            disk_command(
-                root,
-                &[
-                    "detach",
-                    "-force",
-                    "-quiet",
-                    mount.to_str().ok_or(ToolError::Path)?,
-                ],
-            )
-            .await?;
-        }
-    }
-    if storage_mounted(root)? {
-        Err(ToolError::ProtectionUnavailable)
-    } else {
-        Ok(())
-    }
-}
-
 struct Unit {
     root: PathBuf,
     _directory: PrivateDirectory,
     _liveness: cap_std::fs::File,
-    target: String,
+    domain: String,
+    label: String,
     scope: Option<Scope>,
     stopped: bool,
 }
@@ -537,7 +288,7 @@ fn check_retained_roots(parent: &Path, owner: u32) -> Result<(), ToolError> {
             continue;
         }
         match std::fs::symlink_metadata(entry.path()) {
-            Ok(metadata) if metadata.uid() == owner && !unit_is_live(&entry.path())? => {
+            Ok(metadata) if metadata.uid() == owner && is_retained(&entry.path())? => {
                 retained += 1;
             }
             Ok(_) => {}
@@ -551,8 +302,9 @@ fn check_retained_roots(parent: &Path, owner: u32) -> Result<(), ToolError> {
     Ok(())
 }
 
-// A root without a held liveness lock was left by a finished or crashed owner.
-fn unit_is_live(root: &Path) -> Result<bool, ToolError> {
+// An unlocked liveness lock was left by a finished or crashed owner. A root without the
+// lock is still being created or was abandoned before it could hold storage.
+fn is_retained(root: &Path) -> Result<bool, ToolError> {
     use std::os::unix::fs::OpenOptionsExt;
     let lock = match std::fs::OpenOptions::new()
         .read(true)
@@ -571,8 +323,8 @@ fn unit_is_live(root: &Path) -> Result<bool, ToolError> {
         Err(_) => return Err(ToolError::ProtectionUnavailable),
     };
     match rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockShared) {
-        Ok(()) => Ok(false),
-        Err(rustix::io::Errno::WOULDBLOCK) => Ok(true),
+        Ok(()) => Ok(true),
+        Err(rustix::io::Errno::WOULDBLOCK) => Ok(false),
         Err(_) => Err(ToolError::ProtectionUnavailable),
     }
 }
@@ -585,14 +337,13 @@ fn hold_liveness_lock(directory: &PrivateDirectory) -> Result<cap_std::fs::File,
         .write(true)
         .create_new(true)
         .follow(FollowSymlinks::No)
+        // Creating and locking atomically keeps admission from seeing an unlocked live root.
+        .custom_flags(libc::O_EXLOCK | libc::O_NONBLOCK)
         .mode(0o600);
-    let lock = directory
+    directory
         .dir
         .open_with(UNIT_LIVENESS_LOCK, &options)
-        .map_err(|_| ToolError::Operation)?;
-    rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive)
-        .map_err(|_| ToolError::Operation)?;
-    Ok(lock)
+        .map_err(|_| ToolError::Operation)
 }
 
 impl Unit {
@@ -625,13 +376,15 @@ impl Unit {
             root,
             _directory: directory,
             _liveness: liveness,
-            target: format!(
-                "user/{}/dev.arany.tool.{name}",
-                rustix::process::geteuid().as_raw()
-            ),
+            domain: format!("user/{}", rustix::process::geteuid().as_raw()),
+            label: format!("dev.arany.tool.{name}"),
             scope: None,
             stopped: false,
         })
+    }
+
+    fn target(&self) -> String {
+        format!("{}/{}", self.domain, self.label)
     }
 
     fn write_job(&self, arguments: &[&str], stderr: &str) -> Result<PathBuf, ToolError> {
@@ -644,14 +397,9 @@ impl Unit {
         {
             return Err(ToolError::Limit);
         }
-        let label = self
-            .target
-            .rsplit_once('/')
-            .ok_or(ToolError::Configuration)?
-            .1;
         let arguments: Vec<_> = arguments.iter().map(|value| CFString::new(value)).collect();
         let entries = [
-            ("Label", CFString::new(label).as_CFType()),
+            ("Label", CFString::new(&self.label).as_CFType()),
             (
                 "ProgramArguments",
                 CFArray::from_CFTypes(&arguments).as_CFType(),
@@ -698,21 +446,13 @@ impl Unit {
         command.env_clear().current_dir("/");
         match action {
             ManagerAction::Bootstrap(path) => {
-                command
-                    .arg("bootstrap")
-                    .arg(
-                        self.target
-                            .rsplit_once('/')
-                            .ok_or(ToolError::Configuration)?
-                            .0,
-                    )
-                    .arg(path);
+                command.arg("bootstrap").arg(&self.domain).arg(path);
             }
             ManagerAction::Kickstart => {
-                command.args(["kickstart", "-p", &self.target]);
+                command.args(["kickstart", "-p", &self.target()]);
             }
             ManagerAction::Bootout => {
-                command.args(["bootout", &self.target]);
+                command.args(["bootout", &self.target()]);
             }
         }
         command
@@ -850,16 +590,11 @@ pub(super) async fn execute(
     crate::tools::fs::reject_overlap(&unit.root, &runtime.workspace)?;
     let execution = async {
         let mut stream = BufReader::new(
-            tokio::time::timeout(Duration::from_secs(5), unit.connect(runtime))
+            tokio::time::timeout(CONNECT_DEADLINE, unit.connect(runtime))
                 .await
                 .map_err(|_| ToolError::Limit)??,
         );
-        let task = super::super::encode_task(&Task {
-            config: runtime.config.clone(),
-            intent: intent.clone(),
-            workspace: runtime.workspace.clone(),
-            guard_executable: runtime.guard_executable.clone(),
-        })?;
+        let task = super::super::encode_task(&Task::new(runtime, intent))?;
         stream
             .get_mut()
             .write_all(&task)
@@ -892,8 +627,10 @@ pub(super) async fn execute(
             .map_err(|_| ToolError::Operation)?;
         super::super::read_observation(&mut stream, intent).await
     };
-    let deadline =
-        Duration::from_millis(u64::from(intent.limits.runtime_ms)) + Duration::from_secs(5);
+    let deadline = CONNECT_DEADLINE
+        + PREPARATION_DEADLINE
+        + Duration::from_millis(u64::from(intent.limits.runtime_ms))
+        + Duration::from_secs(5);
     let result = tokio::select! {
         biased;
         () = cancellation.cancelled() => Err(ToolError::Operation),
@@ -905,6 +642,22 @@ pub(super) async fn execute(
     result
 }
 
+fn connect_control(path: &Path) -> Result<(PrivateDirectory, UnixStream), ToolError> {
+    use std::os::unix::fs::FileTypeExt;
+    let root = open_directory(path.parent().ok_or(ToolError::Path)?, false)
+        .map_err(|_| ToolError::Path)?;
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| ToolError::Path)?;
+    if !metadata.file_type().is_socket()
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.nlink() != 1
+    {
+        return Err(ToolError::Path);
+    }
+    let stream = UnixStream::connect(path).map_err(|_| ToolError::Operation)?;
+    Ok((root, stream))
+}
+
 pub(super) fn helper_main() -> std::process::ExitCode {
     let mut diagnostic = None;
     let mut stage = super::super::BootstrapStage::Admission;
@@ -912,18 +665,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
         bootstrap()?;
         let path = std::env::args_os().nth(2).ok_or(ToolError::Configuration)?;
         let path = Path::new(&path);
-        let _root = open_directory(path.parent().ok_or(ToolError::Path)?, false)
-            .map_err(|_| ToolError::Path)?;
-        let metadata = std::fs::symlink_metadata(path).map_err(|_| ToolError::Path)?;
-        use std::os::unix::fs::FileTypeExt;
-        if !metadata.file_type().is_socket()
-            || metadata.uid() != rustix::process::geteuid().as_raw()
-            || metadata.mode() & 0o777 != 0o600
-            || metadata.nlink() != 1
-        {
-            return Err(ToolError::Path);
-        }
-        let mut stream = UnixStream::connect(path).map_err(|_| ToolError::Operation)?;
+        let (_root, mut stream) = connect_control(path)?;
         diagnostic = Some(stream.try_clone().map_err(|_| ToolError::Operation)?);
         stage = super::super::BootstrapStage::Capabilities;
         let parent = peer(&stream)?;
@@ -951,13 +693,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
         {
             return Err(ToolError::ProtectionUnavailable);
         }
-        let runtime = ToolRuntime {
-            config: task.config,
-            workspace: task.workspace,
-            workspace_identity: (task.intent.workspace_device, task.intent.workspace_inode),
-            guard_executable: task.guard_executable,
-            enforcement_digest: task.intent.enforcement_digest,
-        };
+        let (runtime, intent) = task.into_runtime();
         stream
             .set_read_timeout(None)
             .map_err(|_| ToolError::Operation)?;
@@ -989,7 +725,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             });
             let result = async {
                 stage = super::super::BootstrapStage::Workspace;
-                let _storage = if task.intent.call.is_process() {
+                let _storage = if intent.call.is_process() {
                     Some(
                         prepare_command_storage(path.parent().ok_or(ToolError::Path)?, &runtime)
                             .await?,
@@ -1000,7 +736,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 stage = super::super::BootstrapStage::Capabilities;
                 super::execute_worker(
                     &runtime,
-                    &task.intent,
+                    &intent,
                     cancellation,
                     &mut scope,
                     &mut output,
@@ -1060,19 +796,30 @@ pub(super) fn helper_main() -> std::process::ExitCode {
 
 #[cfg(test)]
 mod tests {
+    use super::super::storage::{STORAGE_BYTES_CAP, STORAGE_PENDING, prepare_storage};
+    use super::super::{COMMAND_DENIED_SYSCALLS, COMMAND_PROFILE, SYS_COALITION_INFO, SYS_PERSONA};
     use super::*;
+    use crate::tools::ToolCall;
+    use crate::tools::guard::read_capped;
     use std::io::Read;
 
     #[test]
     fn retained_root_bound_counts_only_this_users_unit_roots() {
         let parent = tempfile::tempdir().unwrap();
         let owner = rustix::process::geteuid().as_raw();
+        let abandoned = |name: &str| {
+            let root = parent.path().join(format!("{UNIT_ROOT_PREFIX}{name}"));
+            std::fs::create_dir(&root).unwrap();
+            std::fs::File::create(root.join(UNIT_LIVENESS_LOCK)).unwrap();
+        };
         std::fs::create_dir(parent.path().join("unrelated")).unwrap();
         for index in 0..RETAINED_ROOT_LIMIT - 1 {
-            std::fs::create_dir(parent.path().join(format!("{UNIT_ROOT_PREFIX}{index}"))).unwrap();
+            abandoned(&index.to_string());
         }
-        check_retained_roots(parent.path(), owner).expect("below the retained-root cap");
-        std::fs::create_dir(parent.path().join(format!("{UNIT_ROOT_PREFIX}last"))).unwrap();
+        std::fs::create_dir(parent.path().join(format!("{UNIT_ROOT_PREFIX}creating"))).unwrap();
+        check_retained_roots(parent.path(), owner)
+            .expect("a root without its liveness lock holds no storage");
+        abandoned("last");
         assert!(matches!(
             check_retained_roots(parent.path(), owner),
             Err(ToolError::RetainedRoots)
@@ -1083,6 +830,7 @@ mod tests {
         );
         let live = parent.path().join(format!("{UNIT_ROOT_PREFIX}last"));
         std::fs::set_permissions(&live, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::remove_file(live.join(UNIT_LIVENESS_LOCK)).unwrap();
         let held = hold_liveness_lock(&open_directory(&live, false).unwrap()).unwrap();
         check_retained_roots(parent.path(), owner).expect("a live unit root is not retained");
         drop(held);
@@ -1835,6 +1583,7 @@ done
                 let (mut wake_sender, mut wake_receiver) = UnixStream::pair().unwrap();
                 wake_sender.write_all(&[1]).unwrap();
                 wake_receiver.read_exact(&mut [0]).unwrap();
+                assert!(Path::new("/bin/launchctl").is_file());
                 super::super::configure_resources().unwrap();
                 super::super::install(&task).unwrap();
                 let cpu = rustix::process::getrlimit(rustix::process::Resource::Cpu);
@@ -1844,14 +1593,15 @@ done
                     wake_sender.write(&[1]).unwrap_err().kind(),
                     std::io::ErrorKind::PermissionDenied
                 );
-                assert_eq!(
+                // macOS 15 reports the denied exec as ENOENT; later releases report EPERM.
+                assert!(matches!(
                     std::process::Command::new("/bin/launchctl")
                         .arg("help")
                         .status()
                         .unwrap_err()
                         .kind(),
-                    std::io::ErrorKind::PermissionDenied
-                );
+                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
+                ));
                 // Signal 0 observes permission without risking a signal to the fixture's outside owner.
                 assert_eq!(
                     rustix::process::test_kill_process(

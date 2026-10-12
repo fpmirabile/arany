@@ -120,16 +120,29 @@ impl ChatGptSetupAccount {
     }
 }
 
+pub(super) enum HistoryAdmission {
+    Ready,
+    Reset,
+    Exit,
+}
+
 pub(super) async fn admit_history(
     terminal: &mut AttachedTerminal,
     state_dir: &Path,
     workspace: &Path,
-) -> Result<Option<bool>, SetupError> {
+) -> Result<HistoryAdmission, SetupError> {
+    let ready = |reset_attempted| {
+        if reset_attempted {
+            HistoryAdmission::Reset
+        } else {
+            HistoryAdmission::Ready
+        }
+    };
     let mut reset_attempted = false;
     let mut uncertain = false;
     loop {
         let root = match crate::cli::open_optional_state(state_dir) {
-            Ok(None) => return Ok(Some(reset_attempted)),
+            Ok(None) => return Ok(ready(reset_attempted)),
             Ok(Some(_)) => StateRoot::admit(state_dir),
             Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 StateRoot::admit(state_dir)
@@ -139,7 +152,7 @@ pub(super) async fn admit_history(
         let error = match root.and_then(Store::open) {
             Ok(store) => {
                 store.close().await.map_err(|_| "store shutdown failed")?;
-                return Ok(Some(reset_attempted));
+                return Ok(ready(reset_attempted));
             }
             Err(error) => error,
         };
@@ -208,7 +221,7 @@ pub(super) async fn admit_history(
                     uncertain = reset.ok_or("history reset unavailable")?.apply().is_err();
                 }
             }
-            _ => return Ok(None),
+            _ => return Ok(HistoryAdmission::Exit),
         }
     }
 }
