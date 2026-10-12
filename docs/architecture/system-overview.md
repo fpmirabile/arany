@@ -108,8 +108,6 @@ separate bounded metadata commits preparation, root identity and native lifecycl
 The Linux adapter supplies termination evidence, while admission owns storage
 retirement and the capacity charge. Shared snapshot copying has no independent
 temporary-root lifecycle. No recovery state enters Engine or canonical Events.
-The [ownership rationale](../research/linux-host-seed-ownership.md) compares
-manager-owned directories and descriptor-based alternatives.
 
 ## 3. Physical beta shape
 
