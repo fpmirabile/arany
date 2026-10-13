@@ -23,7 +23,7 @@ Check existing issues and pull requests for related work. The
    [product spec](./docs/specs/README.md) and inspect nearby code and tests.
 
 Keep repository content in English. Prefer a small, complete change that reuses
-existing code. Consider Linux, macOS and Windows when platform behavior is
+existing code. Consider Linux and macOS when platform behavior is
 involved, and preserve security, accessibility and resource limits. Update the
 owning contract when intentionally changing observable behavior.
 
