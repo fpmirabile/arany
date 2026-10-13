@@ -612,7 +612,7 @@ impl SystemPrograms {
     }
 }
 
-// Signature evaluation dominates per-Run admission; a verdict is reused only for an identical stamp.
+// Signature evaluation dominates admission; reuse only determined verdicts for an identical stamp.
 fn unentitled_program(path: &str, stamp: [u64; 7]) -> Result<bool, ToolError> {
     use std::collections::HashMap;
     use std::sync::{LazyLock, Mutex};
@@ -632,6 +632,9 @@ fn unentitled_program(path: &str, stamp: [u64; 7]) -> Result<bool, ToolError> {
     if program_stamp(&after) != stamp {
         return Err(ToolError::ChangedInput);
     }
+    let Some(verdict) = verdict else {
+        return Ok(false);
+    };
     let mut verdicts = VERDICTS
         .lock()
         .map_err(|_| ToolError::ProtectionUnavailable)?;
@@ -887,11 +890,7 @@ async fn execute_worker(
         let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
     }
     let drained = drain_stderr(&mut stderr_task).await;
-    if matches!(reaped, Ok(Ok(_))) && drained.is_some() {
-        capture.complete();
-    } else {
-        drop(capture);
-    }
+    capture.finish(matches!(reaped, Ok(Ok(_))) && drained.is_some());
     if result.is_err()
         && let Some(failure) = drained.as_deref().and_then(bootstrap_failure)
     {

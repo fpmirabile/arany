@@ -79,6 +79,12 @@ impl Span {
         Self { capture }
     }
 
+    pub(crate) fn finish(self, completed: bool) {
+        if completed {
+            self.complete();
+        }
+    }
+
     pub(crate) fn complete(mut self) {
         #[cfg(debug_assertions)]
         if let Some(capture) = self.capture.take() {

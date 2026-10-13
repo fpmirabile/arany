@@ -53,9 +53,10 @@ limits and compatibility.
   Encode the catalogue as one allow rule with an explicit union of its exact
   literal paths; retain all independent denies and the profile byte cap.
   Do not repeat the signature scan or refresh a stale catalogue within an
-  admitted Run. Across Runs, a process may reuse an in-memory signature verdict
-  only for the same path and an identical fresh metadata stamp; any drift
-  reinspects the code. Never persist verdicts. Keep the catalogue inside the existing Task byte/entry bounds;
+  admitted Run. Across Runs, a process may reuse a determined in-memory
+  signature verdict only for the same path and an identical fresh metadata
+  stamp; any drift reinspects the code. An undetermined Security result excludes
+  the program for that admission only and is never reused. Never persist verdicts. Keep the catalogue inside the existing Task byte/entry bounds;
   overflow rejects without dispatch. File/Skill intents retain the compiled
   digest and carry no catalogue. Configured pins and selected resources remain
   bound by the normalized intent and configuration.

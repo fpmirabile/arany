@@ -696,18 +696,10 @@ impl Unit {
         } else {
             Ok(())
         };
-        if cleanup.is_ok() {
-            capture.complete();
-        } else {
-            drop(capture);
-        }
+        capture.finish(cleanup.is_ok());
         let capture = FixtureSpan::begin(FixtureStage::ControllerBootout);
         let removal = self.manager(ManagerAction::Bootout).await;
-        if removal.is_ok() {
-            capture.complete();
-        } else {
-            drop(capture);
-        }
+        capture.finish(removal.is_ok());
         cleanup?;
         removal?;
         let capture = FixtureSpan::begin(FixtureStage::ControllerStorage);
@@ -945,17 +937,11 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             .await;
             let capture = FixtureSpan::begin(FixtureStage::SupervisorCoalition);
             let cleanup = scope.stop(Some(std::process::id())).await;
-            if cleanup.is_ok() {
-                capture.complete();
-            } else {
-                drop(capture);
-            }
+            capture.finish(cleanup.is_ok());
             let storage_cleanup = if cleanup.is_ok() {
                 let capture = FixtureSpan::begin(FixtureStage::SupervisorDetach);
                 let result = cleanup_storage(path.parent().ok_or(ToolError::Path)?).await;
-                if result.is_ok() {
-                    capture.complete();
-                }
+                capture.finish(result.is_ok());
                 result
             } else {
                 Err(ToolError::ProtectionUnavailable)
