@@ -36,7 +36,7 @@ pub(super) fn check_available() -> Result<(), ToolError> {
 }
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
-    let mut bytes = b"arany-guard-v7:shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account".to_vec();
+    let mut bytes = b"arany-guard-v8:shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts".to_vec();
     bytes.extend_from_slice(&profile::profile_digest()?);
     bytes.extend_from_slice(&(MAX_CHANGESET_FILES as u64).to_le_bytes());
     bytes.extend_from_slice(&(MAX_CHANGESET_BYTES as u64).to_le_bytes());
@@ -536,6 +536,12 @@ pub(super) async fn execute_inner(
     let workspace = crate::tools::fs::open_directory(&runtime.workspace)?;
     let (seed_path, seed_dir) =
         permit.prepare_seed(&workspace, &runtime.config, intent.call.is_process())?;
+    let runtime_grants = if intent.call.is_process() {
+        runtime.config.runtime_grants.as_slice()
+    } else {
+        &[]
+    };
+    let runtime_path = runtime_path(runtime_grants)?;
     let mut unit = Unit {
         name: format!("arany-tool-{}.service", permit.id),
         invocation: None,
@@ -590,7 +596,7 @@ pub(super) async fn execute_inner(
             "--clearenv",
             "--setenv",
             "PATH",
-            "/usr/bin:/bin",
+            &runtime_path,
             "--setenv",
             "HOME",
             "/scratch",
@@ -620,6 +626,29 @@ pub(super) async fn execute_inner(
             "--ro-bind",
         ]);
     command.arg(&seed_path).arg("/seed");
+    let mut runtime_directories = std::collections::BTreeSet::new();
+    let mut mounts = Vec::new();
+    for grant in runtime_grants {
+        grant.verify_host()?;
+        let target = grant.mounted_path()?;
+        let root = if grant.kind.is_toolchain() {
+            Path::new("/runtime")
+        } else {
+            Path::new("/scratch")
+        };
+        for parent in target.ancestors().take_while(|path| *path != root) {
+            runtime_directories.insert(parent.to_owned());
+        }
+        mounts.push((grant.path.clone(), target));
+    }
+    let mut runtime_directories = runtime_directories.into_iter().collect::<Vec<_>>();
+    runtime_directories.sort_by_key(|path| (path.components().count(), path.clone()));
+    for directory in runtime_directories {
+        command.args(["--dir"]).arg(directory);
+    }
+    for (source, target) in mounts {
+        command.args(["--ro-bind"]).arg(source).arg(target);
+    }
     for folder in ["programs", "inputs", "skills"] {
         if seed_dir.symlink_metadata(folder).is_ok() {
             command
@@ -756,9 +785,65 @@ pub(super) async fn execute_inner(
     result
 }
 
+fn runtime_path(grants: &[super::super::toolchains::RuntimeGrant]) -> Result<String, ToolError> {
+    let mut paths = grants
+        .iter()
+        .filter(|grant| grant.kind.is_toolchain())
+        .map(|grant| {
+            Ok(grant
+                .mounted_path()?
+                .join("bin")
+                .to_str()
+                .ok_or(ToolError::Path)?
+                .to_owned())
+        })
+        .collect::<Result<Vec<_>, ToolError>>()?;
+    paths.extend(["/usr/bin".into(), "/bin".into()]);
+    Ok(paths.join(":"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_runtime_path_and_cache_mounts_are_exact() {
+        use crate::tools::toolchains::RuntimeKind;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let node = home.join(".nvm/versions/node/v22.3.0");
+        std::fs::create_dir_all(node.join("bin")).unwrap();
+        let executable = node.join("bin/node");
+        std::fs::write(&executable, b"synthetic executable").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let cargo_cache = home.join(".cargo/registry/cache");
+        std::fs::create_dir_all(&cargo_cache).unwrap();
+
+        let candidates = crate::tools::toolchains::discover(&home).unwrap();
+        let node = candidates
+            .iter()
+            .find(|candidate| candidate.grant.kind == RuntimeKind::Node)
+            .unwrap();
+        let cache = candidates
+            .iter()
+            .find(|candidate| candidate.grant.kind == RuntimeKind::CargoCache)
+            .unwrap();
+        let command_path = runtime_path(std::slice::from_ref(&node.grant)).unwrap();
+        assert_eq!(
+            command_path,
+            format!(
+                "{}:/usr/bin:/bin",
+                node.grant.mounted_path().unwrap().join("bin").display()
+            )
+        );
+        assert_eq!(
+            cache.grant.mounted_path().unwrap(),
+            Path::new("/scratch/cargo/registry/cache")
+        );
+        assert!(node.grant.verify_host().is_ok() && cache.grant.verify_host().is_ok());
+    }
 
     #[tokio::test]
     #[ignore = "native Linux retained failed-unit recovery; requires systemd user manager and delegated cgroup v2"]

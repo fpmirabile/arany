@@ -33,6 +33,7 @@ Arany is a Rust-first, CLI-only agent harness. The product and executable are na
 | Product behavior, fixes, acceptance scenarios, documentation ownership | [Spec workflow](./docs/specs/README.md) and the owning contract |
 | Run coordination, budgets, Provider outcomes | [Engine](./agents/engine.md) |
 | Model-driven Tools, commands, runtime Skills, MCP, Guard | [Tools](./agents/tools.md) |
+| Runtime profile discovery, exact identities and folder-trust selection | [Toolchains](./agents/toolchains.md) |
 | Native Guard launch, sandbox profiles, resources, FFI and process ownership | [Guard](./agents/guard.md) |
 | Shared Guard capacity, FIFO waiting and user settings | [Guard admission](./agents/guard-admission.md) |
 | Native macOS coalition ownership, control transport and resource supervision | [Guard unit](./agents/guard-unit.md) |

@@ -4,6 +4,7 @@ mod fs;
 mod guard;
 mod mcp;
 mod skills;
+pub(crate) mod toolchains;
 pub(crate) mod types;
 mod workspace;
 
@@ -105,11 +106,10 @@ pub(crate) struct ToolRuntime {
     workspace_identity: (u64, u64),
     guard_executable: PathBuf,
     enforcement_digest: [u8; 32],
+    process_enforcement_digest: [u8; 32],
     queue_progress: Option<tokio::sync::watch::Sender<Option<uuid::Uuid>>>,
     #[cfg(target_os = "macos")]
     system_programs: Option<std::sync::Arc<guard::SystemPrograms>>,
-    #[cfg(target_os = "macos")]
-    process_enforcement_digest: [u8; 32],
 }
 
 impl ToolRuntime {
@@ -142,7 +142,7 @@ impl ToolRuntime {
         #[cfg(target_os = "macos")]
         let capture = guard::FixtureSpan::begin(guard::FixtureStage::ToolAdmission);
         guard::check_available()?;
-        let enforcement_digest = guard::enforcement_digest()?;
+        let enforcement_digest = guard::enforcement_digest(&[])?;
         let root = fs::open_directory(workspace)?;
         state
             .ensure_outside_workspace(&root)
@@ -153,6 +153,15 @@ impl ToolRuntime {
         for protected in [workspace, state.path(), account.as_path()] {
             for runtime in guard::runtime_roots() {
                 fs::reject_overlap(Path::new(runtime), protected)?;
+            }
+        }
+        for grant in &config.runtime_grants {
+            grant.verify_host()?;
+            for protected in [workspace, state.path(), account.as_path()] {
+                fs::reject_overlap(&grant.path, protected)?;
+            }
+            for runtime in guard::runtime_roots() {
+                fs::reject_overlap(&grant.path, Path::new(runtime))?;
             }
         }
         let workspace_identity = fs::identity(&root)?;
@@ -178,8 +187,12 @@ impl ToolRuntime {
             Some(std::sync::Arc::new(guard::SystemPrograms::admit()?))
         };
         #[cfg(target_os = "macos")]
-        let process_enforcement_digest =
-            guard::macos_enforcement_digest(system_programs.as_deref())?;
+        let process_enforcement_digest = guard::macos_runtime_enforcement_digest(
+            system_programs.as_deref(),
+            &config.runtime_grants,
+        )?;
+        #[cfg(not(target_os = "macos"))]
+        let process_enforcement_digest = guard::enforcement_digest(&config.runtime_grants)?;
         #[cfg(target_os = "macos")]
         capture.complete();
         Ok(Self {
@@ -189,10 +202,9 @@ impl ToolRuntime {
             workspace_identity,
             guard_executable,
             enforcement_digest,
+            process_enforcement_digest,
             #[cfg(target_os = "macos")]
             system_programs,
-            #[cfg(target_os = "macos")]
-            process_enforcement_digest,
         })
     }
 
@@ -231,12 +243,10 @@ impl ToolRuntime {
         agent_run_id: AgentRunId,
         call: ToolCall,
     ) -> EffectIntent {
-        let enforcement_digest = self.enforcement_digest;
-        #[cfg(target_os = "macos")]
         let enforcement_digest = if call.is_process() {
             self.process_enforcement_digest
         } else {
-            enforcement_digest
+            self.enforcement_digest
         };
         EffectIntent {
             id: uuid::Uuid::now_v7(),

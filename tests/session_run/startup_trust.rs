@@ -213,6 +213,17 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
             let temp = tempfile::tempdir().unwrap();
             let workspace = temp.path().join("project");
             std::fs::create_dir(&workspace).unwrap();
+            let runtime_home = temp.path().join("account-home");
+            let runtime_path = runtime_home.join(".nvm/versions/node/v22.3.0");
+            std::fs::create_dir_all(runtime_path.join("bin")).unwrap();
+            let runtime_binary = runtime_path.join("bin/node");
+            std::fs::write(&runtime_binary, b"#!/bin/sh\nprintf profile-selected\n").unwrap();
+            std::fs::set_permissions(&runtime_binary, std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            let runtime_token = format!(
+                "node-{}",
+                &hash(runtime_path.to_str().unwrap().as_bytes())[..12]
+            );
             let skill = workspace.join(".agents/skills/review");
             std::fs::create_dir_all(&skill).unwrap();
             std::fs::write(skill.join("SKILL.md"), b"---\nname: review\ndescription: Synthetic review\n---\nReview the current task.\n").unwrap();
@@ -377,9 +388,15 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
             );
             if trust {
                 let from = transcript.len();
-                input
-                    .write_all(if linear { b"trust\r" } else { b"\x1b[B\r" })
-                    .unwrap();
+                if linear {
+                    input
+                        .write_all(format!("trust {runtime_token}\r").as_bytes())
+                        .unwrap();
+                } else {
+                    input
+                        .write_all(format!("{runtime_token}\x1b[B\r").as_bytes())
+                        .unwrap();
+                }
                 wait(
                     &mut output,
                     &mut input,
@@ -465,9 +482,21 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
             if trust {
                 let value: serde_json::Value =
                     serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
-                assert_eq!(value["version"], 1);
+                assert_eq!(value["version"], 2);
                 assert_eq!(value["workspaces"].as_array().unwrap().len(), 1);
                 assert_eq!(value["workspaces"][0]["path"], workspace.to_str().unwrap());
+                assert_eq!(
+                    value["workspaces"][0]["runtime_grants"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    1
+                );
+                assert_eq!(value["workspaces"][0]["runtime_grants"][0]["kind"], "node");
+                assert_eq!(
+                    value["workspaces"][0]["runtime_grants"][0]["version"],
+                    "v22.3.0"
+                );
                 assert_eq!(
                     std::fs::metadata(record).unwrap().permissions().mode() & 0o777,
                     0o600

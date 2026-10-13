@@ -160,7 +160,13 @@ pub(super) async fn execute(
         .iter()
         .find(|server| &server.name == name)
         .ok_or(ToolError::Configuration)?;
-    let mut command = payload(&server.program, &server.args, "", root)?;
+    let mut command = payload(
+        &server.program,
+        &server.args,
+        "",
+        root,
+        &config.runtime_grants,
+    )?;
     command.stdin(Stdio::piped());
     let mut child = command.spawn().map_err(|_| ToolError::Operation)?;
     let writer = child.stdin.take().ok_or(ToolError::Operation)?;

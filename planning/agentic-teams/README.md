@@ -125,8 +125,8 @@ unsupported enforcement fails closed. Child authority remains
      Finish, bounded by context compaction, the Goal budget and
      cancellation. Tool observations use the model's admitted context with
      compaction instead of a fixed 64 KiB.
-   - Commands default to a 2-minute timeout and may request up to a
-     user-configurable maximum (default 10 minutes).
+   - Commands default to 120 seconds and may request up to the approved
+     user-configurable maximum of 600 seconds.
    - The plan contract may request a larger resource profile or timeout;
      Plan-gate approval grants it. In Accept edits and Auto, requests within
      the settings maxima are granted without a prompt; beyond them always
@@ -134,8 +134,11 @@ unsupported enforcement fails closed. Child authority remains
    - Runs remain the durable recovery unit, closed at milestone or wave
      boundaries, never because an arbitrary cap was hit.
    - Named, closed resource profiles (current `default` plus a larger
-     `build`) remain bound into intents and receipts, and Guard resource
-     ceilings (CPU, memory, storage, processes) stay finite.
+     `build`) remain bound into intents and receipts. The `build` profile uses
+     a Linux CPU quota of 100% of one core; macOS retains per-process CPU
+     supervision with its threshold derived from the admitted command timeout,
+     up to 600 seconds, and makes no aggregate CPU-rate claim. Memory,
+     storage, task and wall-time ceilings stay finite.
 5. **Typed Git reads.** Read-only `status`, `diff` and `log` operations
    implemented in-process over the repository, without executing Git hooks,
    filters or configuration from the project. Commits stay with the user.
@@ -490,25 +493,42 @@ Each slice that crosses one of these boundaries runs the
 Each item is one PR with its own contract update, security pass where
 triggered and evidence under [testing rules](../../agents/testing.md).
 
-2. A2–A4 Toolchain profiles, build cache and flexible limits.
-3. **Dogfooding milestone: Arany develops Arany.** Use Arany for this
+2. **A2 Toolchain profiles.** Explicitly select exact, read-only Rust, Node
+   and Python runtime roots, with optional precisely scoped host registry-cache
+   roots, through folder trust. Native Linux mounts and macOS Seatbelt grants
+   must bind and revalidate the selected identities.
+3. **A3 Persistent build cache.** Add the private per-Workspace writable cache
+   under StateRoot, with complete bounded streaming, isolation, quota and an
+   explicit clear operation. Its initial default quota is 64 MiB and its
+   approved configurable maximum is 8 GiB; A4 binds the selected quota to the
+   native build profile. A4's approved maxima are 4 GiB memory, 1 GiB writable
+   project storage and 256 tasks. These ceilings are policy choices, not
+   measured support claims.
+4. **Goal core and budgets.** E11 every task is a Goal, B1 plan contract,
+   E1–E4 steering, context, Workspace lock and checkpoints, E8 compaction,
+   E10 `exec` integration and bounded Goal budgets. Creates the
+   `docs/specs/goals.md` domain spec. This provides the actual cancellation,
+   context and budget owner required by A4.
+5. **A4 Flexible limits.** Replace the Run's fixed tool/model/context ceilings
+   with Finish, compaction, cancellation and Goal-budget bounds; add the
+   agreed command timeout and finite build resource profile settings. Guard
+   resource ceilings remain finite. This slice depends on Goal core and must
+   not make the current fixed Run loop unlimited by itself.
+6. **Dogfooding milestone: Arany develops Arany.** Use Arany for this
    repository's own work from here on. Requires Beta 1 check 7 (live
    validation of the chosen model's strict Tool encoding) in
    [next steps](../../NEXT_STEPS.md#beta-1-final-user-owned-checks). Every
    later slice is exercised through real use, which supplies the shadow-mode
    calibration data B2 needs.
-4. Goal core: E11 every task is a Goal, B1 plan contract, E1–E4 steering,
-   context, Workspace lock and checkpoints, E8 compaction and E10 `exec`
-   integration. Creates the `docs/specs/goals.md` domain spec.
-5. B6 modes including RPI and grilling, E7 Goal view and E12 settings.
-6. B2, B3, B5 and E5 Supervisor signals, escalation, Finish gate and override.
-7. A5 Typed Git reads and E6 Git writes.
-8. A6 Registry fetch.
-9. D1–D5 Provider roster and per-agent routing.
-10. Configurable judges over the roster (agent-capable judges first, then a
+7. B6 modes including RPI and grilling, E7 Goal view and E12 settings.
+8. B2, B3, B5 and E5 Supervisor signals, escalation, Finish gate and override.
+9. A5 Typed Git reads and E6 Git writes.
+10. A6 Registry fetch.
+11. D1–D5 Provider roster and per-agent routing.
+12. Configurable judges over the roster (agent-capable judges first, then a
    typed-judge adapter after its API research note).
-11. C1–C3 Writable workers, leases and integrator.
-12. B4 and C4 Review-point review and reviewer role.
+13. C1–C3 Writable workers, leases and integrator.
+14. B4 and C4 Review-point review and reviewer role.
 
 Observe during dogfooding, without changing the plan unless evidence demands
 it: whether RPI's Plan gate adds friction to small tasks, and whether the
@@ -516,9 +536,11 @@ per-slice specification and evidence cost slows delivery.
 
 E13 telemetry spans land with the slice that introduces each span's subject.
 
-Next action: specify A2–A4 toolchain profiles, build cache and flexible limits
-in the [Tools contract](../../docs/specs/tools.md), including native admission,
-credential exclusion, cache quotas and larger offline build scenarios.
+Next action: implement A2's explicit toolchain profiles and precise optional
+host-cache grants under the [Tools contract](../../docs/specs/tools.md). A3's
+configurable default and maximum values are agreed; native build verification
+and named-host measurements remain required before support claims. Goal core
+and budgets precede A4, which precedes the dogfooding milestone.
 
 ## Open questions
 
@@ -527,12 +549,13 @@ data-dependent questions remain:
 
 - Default thresholds for loop, probing and disproportion signals. Decided from
   shadow-mode corpus and real Runs before those signals enforce.
-- `build` resource profile values per OS and default settings maxima. Decided
-  from measured builds on named hosts after A2–A4.
+- Native build-resource enforcement and measured builds on named hosts. The
+  approved finite ceilings do not prove a build works or establish support on
+  a named host.
 
 ## Contract owners
 
-- `docs/specs/goals.md` (created in execution step 4): Goal lifecycle, RPI, steering, checkpoints and Goal view facts.
+- `docs/specs/goals.md` (created in execution step 4): Goal lifecycle, RPI, steering, checkpoints, budgets and Goal view facts.
 - [Execution](../../docs/specs/execution.md): Run admission, coordination, teams and recovery.
 - [Tools](../../docs/specs/tools.md): grants, effects, changesets, Guard and native differences.
 - [Terminal](../../docs/specs/terminal.md): interaction, Supervisor prompts and accessibility.

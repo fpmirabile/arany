@@ -10,6 +10,13 @@ limits and compatibility.
   adapter admits typed files and pinned Skill data through a non-spawning
   profile. Commands/MCP use the private snapshot and ordinary-launch profile;
   keep those authorities distinct and reject unavailable enforcement.
+- Revalidate selected runtime path/version/directory identities before Ready
+  and GO for process intents. File/Skill intents carry no runtime grants in
+  their enforcement fingerprint or native profile and skip runtime rechecks.
+  Linux mounts exact runtime and cache roots read-only; macOS grants exact
+  toolchain read/execute scopes and read-only cache scopes. Do not grant parent
+  cache/configuration paths. Candidate identity and consent rules live in
+  [runtime profile rules](./toolchains.md).
 - Capture command changesets only after positive payload-descendant absence.
   Linux retains its attested private PID namespace init/helper while stopping
   and killing every other namespace process; final owned-cgroup cleanup still

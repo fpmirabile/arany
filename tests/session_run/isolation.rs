@@ -103,8 +103,9 @@ pub fn remember_workspace_trust(
     let identity = std::fs::metadata(workspace).expect("fixture directory identity");
     let root = arany::StateRoot::admit(account).expect("private fixture account root");
     let bytes = serde_json::to_vec(&serde_json::json!({
-        "version": 1, "workspaces": [{ "path": admitted_path,
-            "device": identity.dev(), "inode": identity.ino(), "mode": "auto_edits" }]
+        "version": 2, "workspaces": [{ "path": admitted_path,
+            "device": identity.dev(), "inode": identity.ino(), "mode": "auto_edits",
+            "runtime_grants": [] }]
     }))
     .unwrap();
     let mut file = std::fs::OpenOptions::new()

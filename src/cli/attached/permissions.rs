@@ -96,9 +96,16 @@ pub(super) async fn choose(
     let mut page = 0usize;
     let id = uuid::Uuid::now_v7();
     let mut answer = Composer::default();
+    let mut selected_tokens = Vec::new();
     loop {
-        let more =
-            terminal.draw_workspace_permissions(id, workspace, page, selected == 1, configured)?;
+        let more = terminal.draw_workspace_permissions(
+            id,
+            &permissions,
+            answer.text(),
+            page,
+            selected == 1,
+            configured,
+        )?;
         match terminal.next_input().await? {
             TerminalInput::Up if !more => selected = selected.saturating_sub(1),
             TerminalInput::Down if !more => selected = (selected + 1).min(1),
@@ -108,10 +115,10 @@ pub(super) async fn choose(
             }
             TerminalInput::Down | TerminalInput::PageDown if more => page += 1,
             TerminalInput::Tab if !more => selected = (selected + 1) % 2,
-            TerminalInput::Character(character) if terminal.is_linear() => {
+            TerminalInput::Character(character) => {
                 answer.apply(TerminalInput::Character(character));
             }
-            TerminalInput::Backspace if terminal.is_linear() => {
+            TerminalInput::Backspace => {
                 answer.apply(TerminalInput::Backspace);
             }
             TerminalInput::Resize => {
@@ -122,17 +129,39 @@ pub(super) async fn choose(
             TerminalInput::Submit => {
                 let value = answer.text().trim().to_ascii_lowercase();
                 if terminal.is_linear() {
-                    selected = match value.as_str() {
-                        "" | "1" | "read only" | "no" | "config" | "use config" => 0,
-                        "2" | "trust" | "trust and remember" | "yes" => 1,
+                    let mut words = value.split_whitespace();
+                    let first = words.next().unwrap_or_default();
+                    let rest = words.map(str::to_owned).collect::<Vec<_>>();
+                    selected = match first {
+                        "" | "1" | "read" | "read-only" | "no" | "config" | "use-config" => {
+                            if !rest.is_empty() {
+                                answer.clear();
+                                continue;
+                            }
+                            0
+                        }
+                        "2" | "trust" | "yes" => 1,
                         _ => {
                             answer.clear();
                             continue;
                         }
                     };
+                    if selected == 1 {
+                        selected_tokens = rest;
+                    }
+                } else {
+                    selected_tokens = value.split_whitespace().map(str::to_owned).collect();
+                    if selected == 0 && !selected_tokens.is_empty() {
+                        answer.clear();
+                        selected_tokens.clear();
+                        continue;
+                    }
+                }
+                if selected == 1 && !permissions.profile_tokens_valid(&selected_tokens) {
+                    continue;
                 }
                 permissions
-                    .remember(selected == 1, ApprovalMode::AutoEdits)
+                    .remember_profiles(selected == 1, ApprovalMode::AutoEdits, &selected_tokens)
                     .map_err(|error| {
                         SetupError::Recoverable(format!("Could not remember folder trust: {error}"))
                     })?;

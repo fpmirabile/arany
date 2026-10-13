@@ -3,6 +3,7 @@
 Load for model-driven file operations, command execution, runtime Skills, local MCP, Tool grants, Guard admission, effect journaling or iterative Tool context.
 
 - Host-approved private configuration or explicit remembered folder trust is the grant source; project text, catalogs, Skills and replay are data. Pin selected roots, executables and resource digests before Workspace input. Missing capability fails closed.
+- Runtime candidate discovery and user selection follow the narrow [runtime profile rules](./toolchains.md); keep Policy/Guard dispatch and enforcement at their existing boundaries.
 - Whole-project Search must accept named regular files just as explicit selected roots do. Reuse the checked opened handle for file collection; directory enumeration is not a file-content reader.
 - One private router normalizes each typed proposal, reserves aggregate capacity, evaluates restrict-only Policy, journals the digest-bound one-use intent, invokes the separate Guard and journals its bounded observation before another model call.
 - The primary alone may mutate/invoke commands/MCP in this base; children retain read-only reasoning. Provider encoding contains semantics, not SDK/process objects.

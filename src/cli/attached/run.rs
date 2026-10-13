@@ -803,8 +803,9 @@ mod tests {
         let state = StateRoot::admit(&root.join("account")).unwrap();
         let metadata = std::fs::metadata(&workspace).unwrap();
         let trust = serde_json::to_vec(&serde_json::json!({
-            "version": 1, "workspaces": [{ "path": workspace,
-                "device": metadata.dev(), "inode": metadata.ino(), "mode": "auto_edits" }]
+            "version": 2, "workspaces": [{ "path": workspace,
+                "device": metadata.dev(), "inode": metadata.ino(), "mode": "auto_edits",
+                "runtime_grants": [] }]
         }))
         .unwrap();
         let trust_path = state.path().join("workspace-permissions.json");
@@ -1304,8 +1305,9 @@ mod tests {
         let account = StateRoot::admit(&root.join("account")).unwrap();
         let metadata = std::fs::metadata(&workspace).unwrap();
         let remembered = serde_json::to_vec(&serde_json::json!({
-            "version": 1, "workspaces": [{ "path": workspace,
-                "device": metadata.dev(), "inode": metadata.ino(), "mode": "auto_edits" }]
+            "version": 2, "workspaces": [{ "path": workspace,
+                "device": metadata.dev(), "inode": metadata.ino(), "mode": "auto_edits",
+                "runtime_grants": [] }]
         }))
         .unwrap();
         let trust_record = account.path().join("workspace-permissions.json");

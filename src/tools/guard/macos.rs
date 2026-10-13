@@ -193,7 +193,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
         return Err(ToolError::ProtectionUnavailable);
     }
-    let mut bytes = b"arany-macos-guard-v10:shared-fifo-capacity;durable-observed-attachment;boot-bound-locked-root-recovery;persisted-supervisor-before-task;image-inode-device-mount-ownership;no-buffered-go-before-ready;typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;metadata-only-directory-ancestors;workspace-call-write;guard-read-only;file-cpu-default-unblocked-immutable;supervised-resources;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;strict-bounded-no-follow-command-changeset-after-coalition-emptiness-before-detach;bounded-go-receipt".to_vec();
+    let mut bytes = b"arany-macos-guard-v11:shared-fifo-capacity;durable-observed-attachment;boot-bound-locked-root-recovery;persisted-supervisor-before-task;image-inode-device-mount-ownership;no-buffered-go-before-ready;typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;metadata-only-directory-ancestors;workspace-call-write;guard-read-only;file-cpu-default-unblocked-immutable;supervised-resources;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;strict-bounded-no-follow-command-changeset-after-coalition-emptiness-before-detach;bounded-go-receipt;versioned-exact-ro-runtime-and-cache-grants".to_vec();
     bytes.extend_from_slice(profile(PROFILE, FILE_DENIED_SYSCALLS).as_bytes());
     bytes.extend_from_slice(profile(COMMAND_PROFILE, COMMAND_DENIED_SYSCALLS).as_bytes());
     bytes.extend_from_slice(b"native-commands-mcp:checked-private-cwd;fixed-capacity-nosuid-project-scratch;fresh-selected-snapshot;read-only-pinned-runtime;bounded-positive-root-owned-non-setid-unentitled-system-exec;stamp-bound-process-signature-verdicts;admission-catalogue-bound-to-enforcement;per-worker-pinned-system-directories-no-follow-metadata-revalidation;exact-literal-union-profile;dynamic-coalition-persona-entitlement-fork-denial;null-bootstrap-registered-ports;child-only-signals;supervised-cpu;physical-footprint-memory");
@@ -432,6 +432,22 @@ fn install_command(task: &Task) -> Result<PathBuf, ToolError> {
             "(allow file-read* file-write* file-map-executable process-exec (subpath {}))\n",
             quoted(&path)?
         ));
+    }
+    for grant in &task.config.runtime_grants {
+        grant.verify_host()?;
+        ancestors(&mut profile, &grant.path)?;
+        if grant.kind.is_toolchain() {
+            profile.push_str(&format!(
+                "(allow file-read* file-map-executable (subpath {}))\n(allow process-exec (subpath {}))\n",
+                quoted(&grant.path)?,
+                quoted(&grant.path.join("bin"))?
+            ));
+        } else {
+            profile.push_str(&format!(
+                "(allow file-read* (subpath {}))\n",
+                quoted(&grant.path)?
+            ));
+        }
     }
     let resources = root.join("runtime");
     let metadata = std::fs::symlink_metadata(&resources).map_err(|_| ToolError::Path)?;
@@ -761,8 +777,8 @@ impl Task {
             workspace_identity: (self.intent.workspace_device, self.intent.workspace_inode),
             guard_executable: self.guard_executable,
             enforcement_digest: self.intent.enforcement_digest,
-            system_programs: self.system_programs.map(Arc::new),
             process_enforcement_digest: self.intent.enforcement_digest,
+            system_programs: self.system_programs.map(Arc::new),
         };
         (runtime, self.intent)
     }

@@ -1,5 +1,6 @@
 use super::ToolError;
 use super::fs::{open_absolute, read_regular};
+use super::toolchains::{RuntimeGrant, validate_selection};
 use super::types::*;
 use crate::store::StateRoot;
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,8 @@ pub(crate) struct Config {
     pub commands: Vec<Program>,
     pub skills: Vec<Skill>,
     pub mcp: Vec<Server>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_grants: Vec<RuntimeGrant>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -62,6 +65,9 @@ impl Config {
             super::skills::parse_json(&bytes, 64 * 1024).map_err(|_| ToolError::Configuration)?;
         let config: Self = serde_json::from_value(value).map_err(|_| ToolError::Configuration)?;
         config.validate()?;
+        if !config.runtime_grants.is_empty() {
+            return Err(ToolError::Configuration);
+        }
         Ok(config)
     }
 
@@ -78,6 +84,7 @@ impl Config {
         {
             return Err(ToolError::Configuration);
         }
+        validate_selection(&self.runtime_grants)?;
         let roots: BTreeSet<_> = self.workspace_paths.iter().collect();
         if roots.len() != self.workspace_paths.len()
             || roots.iter().any(|left| {

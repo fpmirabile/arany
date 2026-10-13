@@ -387,27 +387,46 @@ impl AttachedTerminal {
     pub fn draw_workspace_permissions(
         &mut self,
         id: uuid::Uuid,
-        workspace: &std::path::Path,
+        permissions: &crate::tools::WorkspacePermissions,
+        selection: &str,
         page: usize,
         trust: bool,
         configured: bool,
     ) -> Result<bool, TerminalError> {
         self.cancel_clipboard_paste();
-        let mut lines = crate::presentation::workspace_permission_lines(workspace);
+        let mut lines = crate::presentation::workspace_permission_lines(permissions.path());
         if configured {
             lines.push(
                 "--tools is selected. Continue with its private configuration or remember folder trust; the explicit configuration keeps precedence.".into(),
             );
         }
+        let candidates = permissions.runtime_profile_options();
+        if candidates.is_empty() {
+            lines.push("No supported runtime profiles were detected.".into());
+        } else {
+            lines.push("Detected profiles are opt-in; focus Trust and type exact tokens separated by spaces:".into());
+            lines.push("Host caches may contain private package names, source and registry-response metadata; configs and credentials are excluded.".into());
+            lines.extend(candidates.iter().map(|(token, label)| {
+                format!("{token} · {}", crate::presentation::escape_terminal(label))
+            }));
+        }
+        lines.push(format!(
+            "Selected profile tokens: {}",
+            if selection.is_empty() {
+                "none"
+            } else {
+                selection
+            }
+        ));
         if let Some(linear) = &mut self.linear {
             linear
                 .draw_permission_prompt(
                     id,
                     &lines,
                     if configured {
-                        "1. Use explicit Tool config\n2. Trust this folder\nType trust or config; empty Enter uses explicit config. Ctrl+C exits:"
+                        "1. Use explicit Tool config\n2. Trust this folder\nType trust [profile tokens] or config; empty Enter uses explicit config. Ctrl+C exits:"
                     } else {
-                        "1. Continue read only\n2. Trust this folder\nType trust or read only; empty Enter selects read only. Ctrl+C exits:"
+                        "1. Continue read only\n2. Trust this folder\nType trust [profile tokens] or read only; empty Enter selects read only. Ctrl+C exits:"
                     },
                 )
                 .map_err(TerminalError::Io)?;
