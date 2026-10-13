@@ -1123,10 +1123,10 @@ mod tests {
         ignore = "native private mount propagation fixture; requires unprivileged user namespaces"
     )]
     async fn native_runtime_mount_attestation() {
+        use crate::tools::toolchains::RuntimeGrant;
+
         const MODE: &str = "ARANY_TEST_RUNTIME_MOUNT_MODE";
         if let Some(mode) = std::env::var_os(MODE) {
-            use crate::tools::toolchains::RuntimeGrant;
-
             let mode = mode.to_string_lossy();
             if let Some(mode) = mode.strip_prefix("launch-") {
                 let uid_mapping =

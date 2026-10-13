@@ -140,7 +140,11 @@ async fn selected_cache_canary_helper() {
         .expect("metadata-only Cargo cache candidate");
     assert!(!cache.selected);
     permissions
-        .remember_profiles(true, arany::ApprovalMode::AutoEdits, &[cache.token.clone()])
+        .remember_profiles(
+            true,
+            arany::ApprovalMode::AutoEdits,
+            std::slice::from_ref(&cache.token),
+        )
         .unwrap();
     let permissions = arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
     assert!(
