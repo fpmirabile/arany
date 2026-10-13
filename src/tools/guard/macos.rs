@@ -196,7 +196,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     let mut bytes = b"arany-macos-guard-v9:shared-fifo-capacity;durable-observed-attachment;boot-bound-locked-root-recovery;persisted-supervisor-before-task;image-inode-device-mount-ownership;no-buffered-go-before-ready;typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;metadata-only-directory-ancestors;workspace-call-write;guard-read-only;file-cpu-default-unblocked-immutable;supervised-resources;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;bounded-go-receipt".to_vec();
     bytes.extend_from_slice(profile(PROFILE, FILE_DENIED_SYSCALLS).as_bytes());
     bytes.extend_from_slice(profile(COMMAND_PROFILE, COMMAND_DENIED_SYSCALLS).as_bytes());
-    bytes.extend_from_slice(b"native-commands-mcp:checked-private-cwd;fixed-capacity-nosuid-project-scratch;fresh-selected-snapshot;read-only-pinned-runtime;bounded-positive-root-owned-non-setid-unentitled-system-exec;admission-catalogue-bound-to-enforcement;per-worker-pinned-system-directories-no-follow-metadata-revalidation;exact-literal-union-profile;dynamic-coalition-persona-entitlement-fork-denial;null-bootstrap-registered-ports;child-only-signals;supervised-cpu");
+    bytes.extend_from_slice(b"native-commands-mcp:checked-private-cwd;fixed-capacity-nosuid-project-scratch;fresh-selected-snapshot;read-only-pinned-runtime;bounded-positive-root-owned-non-setid-unentitled-system-exec;stamp-bound-process-signature-verdicts;admission-catalogue-bound-to-enforcement;per-worker-pinned-system-directories-no-follow-metadata-revalidation;exact-literal-union-profile;dynamic-coalition-persona-entitlement-fork-denial;null-bootstrap-registered-ports;child-only-signals;supervised-cpu;physical-footprint-memory");
     bytes.extend_from_slice(&CPU_LIMIT.as_nanos().to_le_bytes());
     bytes.extend_from_slice(&SUPERVISION_INTERVAL.as_nanos().to_le_bytes());
     bytes.extend_from_slice(&MEMORY_BYTES.to_le_bytes());
@@ -554,17 +554,13 @@ impl SystemPrograms {
                 }
                 let path = Path::new(directory).join(entry.file_name());
                 let path = path.to_str().ok_or(ToolError::Path)?;
-                let before =
-                    system_program_metadata(path)?.ok_or(ToolError::ProtectionUnavailable)?;
-                if !ffi::unentitled_code(Path::new(path))? {
+                let stamp = program_stamp(
+                    &system_program_metadata(path)?.ok_or(ToolError::ProtectionUnavailable)?,
+                );
+                if !unentitled_program(path, stamp)? {
                     continue;
                 }
-                let metadata =
-                    system_program_metadata(path)?.ok_or(ToolError::ProtectionUnavailable)?;
-                if program_stamp(&metadata) != program_stamp(&before) {
-                    return Err(ToolError::ChangedInput);
-                }
-                programs.push((path.to_owned(), program_stamp(&metadata)));
+                programs.push((path.to_owned(), stamp));
             }
         }
         programs.sort_unstable();
@@ -616,6 +612,36 @@ impl SystemPrograms {
     }
 }
 
+// Signature evaluation dominates per-Run admission; a verdict is reused only for an identical stamp.
+fn unentitled_program(path: &str, stamp: [u64; 7]) -> Result<bool, ToolError> {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+
+    type Verdicts = HashMap<String, ([u64; 7], bool)>;
+    static VERDICTS: LazyLock<Mutex<Verdicts>> = LazyLock::new(Mutex::default);
+    let cached = VERDICTS
+        .lock()
+        .map_err(|_| ToolError::ProtectionUnavailable)?
+        .get(path)
+        .and_then(|&(cached, verdict)| (cached == stamp).then_some(verdict));
+    if let Some(verdict) = cached {
+        return Ok(verdict);
+    }
+    let verdict = ffi::unentitled_code(Path::new(path))?;
+    let after = system_program_metadata(path)?.ok_or(ToolError::ProtectionUnavailable)?;
+    if program_stamp(&after) != stamp {
+        return Err(ToolError::ChangedInput);
+    }
+    let mut verdicts = VERDICTS
+        .lock()
+        .map_err(|_| ToolError::ProtectionUnavailable)?;
+    if verdicts.len() >= SYSTEM_PROGRAMS_CAP && !verdicts.contains_key(path) {
+        verdicts.clear();
+    }
+    verdicts.insert(path.to_owned(), (stamp, verdict));
+    Ok(verdict)
+}
+
 fn attest_policy(operations: &[(&CStr, i32)], denied_syscalls: &[i32]) -> Result<(), ToolError> {
     if operations
         .iter()
@@ -648,13 +674,14 @@ fn verify_cpu_controls() -> Result<(), ToolError> {
 }
 
 fn check_process_resources(pid: u32) -> Result<bool, ToolError> {
-    let info = match ffi::task_info(pid) {
-        Ok(info) => info,
+    let (info, usage) = match ffi::task_info(pid).and_then(|info| Ok((info, ffi::rusage(pid)?))) {
+        Ok(sample) => sample,
         Err(_) if ffi::exited(pid) => return Ok(false),
         Err(_) => return Err(ToolError::ProtectionUnavailable),
     };
+    // Resident size omits compressed and swapped pages; the footprint does not.
     if info.pti_threadnum < 1
-        || info.pti_resident_size > MEMORY_BYTES
+        || usage.ri_phys_footprint > MEMORY_BYTES
         || info.pti_threadnum as u32 > MAX_PROCESSES_OR_THREADS
     {
         return Err(ToolError::Limit);

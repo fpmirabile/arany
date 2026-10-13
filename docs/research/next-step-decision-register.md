@@ -152,7 +152,17 @@ build 25G83), and the
 compose literal filters with `require-any`. The WebKit link tracks mutable
 `main`. These examples support union composition, not a stable public DSL,
 compiler performance or the timeout's cause. Native fixtures own enforcement
-evidence; [Next steps](../../NEXT_STEPS.md) owns unresolved attribution.
+evidence.
+
+Fixture capture on 2026-10-13 attributed the stopped-command timeout: under
+host memory pressure the over-limit `receipt-loss` payload stayed below the
+512 MiB resident-size threshold, so supervision never stopped it and the case
+reached its 30-second deadline in `controller_receipt`. Supervision now bounds
+`ri_phys_footprint`, which includes compressed and swapped pages. The same
+capture showed the Security signature scan costing about 1.3 seconds of every
+command-capable Run, and up to 5 seconds under parallel load; stamp-bound
+in-process verdict reuse removes the repeated scan without caching authority
+across processes.
 
 ### D-16 — Evidence-dense testing
 

@@ -228,7 +228,7 @@ impl Scope {
                 return Err(ToolError::ProtectionUnavailable);
             }
             memory = memory
-                .checked_add(task.pti_resident_size)
+                .checked_add(usage.ri_phys_footprint)
                 .ok_or(ToolError::Limit)?;
             threads = threads
                 .checked_add(task.pti_threadnum as u64)
