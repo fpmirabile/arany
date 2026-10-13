@@ -94,9 +94,12 @@ pub(super) async fn choose(
     composer: &mut Composer,
     configured: bool,
 ) -> Result<PermissionChoice, SetupError> {
-    let mut permissions = WorkspacePermissions::open(workspace).map_err(|error| {
-        SetupError::Recoverable(format!("Could not load folder trust: {error}"))
-    })?;
+    let mut permissions =
+        WorkspacePermissions::open_for_profile_selection(workspace).map_err(|error| {
+            SetupError::Recoverable(format!(
+                "Could not prepare folder permission choices: {error}"
+            ))
+        })?;
     let mut selected = 0usize;
     let mut page = 0usize;
     let id = uuid::Uuid::now_v7();
@@ -107,23 +110,26 @@ pub(super) async fn choose(
         .map(|option| option.selected)
         .collect::<Vec<_>>();
     let mut focused_profile = None;
+    let mut explanation_pages_seen = false;
     loop {
-        let more = terminal.draw_workspace_permissions(
+        let (more, visible_page) = terminal.draw_workspace_permissions(
             id,
             &permissions,
-            (&selected_profiles, focused_profile),
+            (&selected_profiles, focused_profile, explanation_pages_seen),
             page,
             selected == 1,
             configured,
         )?;
+        page = visible_page;
+        if focused_profile.is_none() && !more {
+            explanation_pages_seen = true;
+        }
         match terminal.next_input().await? {
-            TerminalInput::Up if focused_profile.is_some() => {
+            TerminalInput::Up if explanation_pages_seen && focused_profile.is_some() => {
                 focused_profile = focused_profile.and_then(|index| index.checked_sub(1));
-                if focused_profile.is_none() {
-                    page = usize::MAX;
-                }
             }
-            TerminalInput::Down if let Some(index) = focused_profile => {
+            TerminalInput::Down if explanation_pages_seen && focused_profile.is_some() => {
+                let index = focused_profile.expect("matched selected profile");
                 focused_profile = Some((index + 1).min(options.len().saturating_sub(1)));
             }
             TerminalInput::Up if !more => selected = selected.saturating_sub(1),
@@ -134,12 +140,14 @@ pub(super) async fn choose(
                 focused_profile = None;
             }
             TerminalInput::Down | TerminalInput::PageDown if more => page += 1,
-            TerminalInput::Tab if focused_profile.is_some() => {
+            TerminalInput::Tab if !explanation_pages_seen => {}
+            TerminalInput::Tab if explanation_pages_seen && focused_profile.is_some() => {
                 focused_profile = None;
-                page = usize::MAX;
             }
-            TerminalInput::Tab if !options.is_empty() => focused_profile = Some(0),
-            TerminalInput::Tab if !more => selected = (selected + 1) % 2,
+            TerminalInput::Tab if explanation_pages_seen && !options.is_empty() => {
+                focused_profile = Some(0)
+            }
+            TerminalInput::Tab if explanation_pages_seen && !more => selected = (selected + 1) % 2,
             TerminalInput::Character(' ') if !terminal.is_linear() => {
                 if let Some(index) = focused_profile {
                     selected_profiles[index] = !selected_profiles[index];
@@ -156,8 +164,9 @@ pub(super) async fn choose(
                 page = 0;
                 selected = 0;
                 focused_profile = None;
+                explanation_pages_seen = false;
             }
-            TerminalInput::Submit if focused_profile.is_some() => {
+            TerminalInput::Submit if explanation_pages_seen && focused_profile.is_some() => {
                 let index = focused_profile.expect("matched selected profile");
                 selected_profiles[index] = !selected_profiles[index];
                 selected = 1;
@@ -207,6 +216,7 @@ pub(super) async fn choose(
                 page = 0;
                 selected = 0;
                 focused_profile = None;
+                explanation_pages_seen = false;
             }
             TerminalInput::Shutdown(signal) => {
                 return Err(SetupError::Shutdown(signal));

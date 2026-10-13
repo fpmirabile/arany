@@ -19,6 +19,19 @@ const MANAGER_DEADLINE: Duration = Duration::from_secs(4);
 const MOUNTINFO_BYTES_CAP: usize = 1024 * 1024;
 const MOUNTINFO_ENTRIES_CAP: usize = 4096;
 const MOUNTINFO_LINE_CAP: usize = 16 * 1024;
+const BWRAP_BOOTSTRAP: &[&str] = &[
+    "/usr/bin/env",
+    "-i",
+    "PATH=/usr/bin:/bin",
+    "/usr/bin/unshare",
+    "--user",
+    "--map-current-user",
+    "--mount",
+    "--propagation",
+    "private",
+    "--",
+    "/usr/bin/bwrap",
+];
 
 pub(super) fn check_available() -> Result<(), ToolError> {
     profile::programs()?;
@@ -40,7 +53,7 @@ pub(super) fn check_available() -> Result<(), ToolError> {
 }
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
-    let mut bytes = b"arany-guard-v10:shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;fixed-root-owned-unshare-bootstrap-user-map-current-recursive-private;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;bounded-namespace-mountinfo-private-root-and-unique-exact-private-aliases-no-descendants-before-ready-and-after-go".to_vec();
+    let mut bytes = b"arany-guard-v11:shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;fixed-root-owned-unshare-bootstrap-user-map-current-recursive-private-no-retained-caps;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;bounded-namespace-mountinfo-private-root-and-unique-exact-private-aliases-no-descendants-before-ready-and-after-go".to_vec();
     bytes.extend_from_slice(&profile::profile_digest()?);
     bytes.extend_from_slice(&(MAX_CHANGESET_FILES as u64).to_le_bytes());
     bytes.extend_from_slice(&(MAX_CHANGESET_BYTES as u64).to_le_bytes());
@@ -484,15 +497,9 @@ pub(super) async fn hold_seed_unit(permit: &super::admission::Permit, seed: &Pat
             "--property=KillMode=control-group",
             "--property=TimeoutStopSec=2s",
             "--property=RuntimeMaxSec=60s",
-            "/usr/bin/unshare",
-            "--user",
-            "--map-current-user",
-            "--mount",
-            "--propagation",
-            "private",
-            "--keep-caps",
-            "--",
-            "/usr/bin/bwrap",
+        ])
+        .args(BWRAP_BOOTSTRAP)
+        .args([
             "--unshare-all",
             "--unshare-user",
             "--die-with-parent",
@@ -592,19 +599,8 @@ pub(super) async fn execute_inner(
             "--property=RuntimeMaxSec={}ms",
             intent.limits.runtime_ms
         ))
+        .args(BWRAP_BOOTSTRAP)
         .args([
-            "/usr/bin/env",
-            "-i",
-            "PATH=/usr/bin:/bin",
-            "/usr/bin/unshare",
-            "--user",
-            "--map-current-user",
-            "--mount",
-            "--propagation",
-            "private",
-            "--keep-caps",
-            "--",
-            "/usr/bin/bwrap",
             "--unshare-all",
             "--unshare-user",
             "--disable-userns",
@@ -1131,6 +1127,129 @@ mod tests {
         if let Some(mode) = std::env::var_os(MODE) {
             use crate::tools::toolchains::RuntimeGrant;
 
+            let mode = mode.to_string_lossy();
+            if let Some(mode) = mode.strip_prefix("launch-") {
+                let uid_mapping =
+                    std::fs::read_to_string("/proc/self/uid_map").expect("fixture UID mapping");
+                let initial_uid = uid_mapping
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .expect("fixture mapped initial UID");
+                assert_ne!(initial_uid, 0, "fixture must launch from a non-root UID");
+                assert_ne!(
+                    nix::unistd::getuid().as_raw(),
+                    0,
+                    "production-prefix fixture UID must remain non-root"
+                );
+                let grant_path = Path::new(
+                    &std::env::var_os("ARANY_TEST_RUNTIME_MOUNT_GRANT")
+                        .expect("fixture grant path"),
+                );
+                assert!(grant_path.is_file(), "fixture grant exists");
+                let fixture =
+                    std::env::var_os("ARANY_TEST_RUNTIME_MOUNT_FIXTURE").expect("fixture root");
+                let alias =
+                    std::env::var_os("ARANY_TEST_RUNTIME_MOUNT_ALIAS").expect("runtime alias");
+                let target =
+                    std::env::var_os("ARANY_TEST_RUNTIME_MOUNT_TARGET").expect("runtime target");
+                let binary = std::env::var_os("ARANY_TEST_RUNTIME_MOUNT_BINARY")
+                    .expect("fixture test binary");
+                let binary_metadata = std::fs::metadata(&binary).expect("test binary metadata");
+                assert!(binary_metadata.is_file());
+                let mut command = Command::new(BWRAP_BOOTSTRAP[0]);
+                command
+                    .args(&BWRAP_BOOTSTRAP[1..])
+                    .args([
+                        "--unshare-all",
+                        "--unshare-user",
+                        "--disable-userns",
+                        "--assert-userns-disabled",
+                        "--new-session",
+                        "--die-with-parent",
+                        "--cap-drop",
+                        "ALL",
+                        "--clearenv",
+                        "--setenv",
+                        "PATH",
+                    ])
+                    .arg(format!(
+                        "{}/bin:/usr/bin:/bin",
+                        Path::new(&target).display()
+                    ))
+                    .args([
+                        "--setenv",
+                        "HOME",
+                        "/scratch",
+                        "--setenv",
+                        "TMPDIR",
+                        "/scratch",
+                        "--setenv",
+                        "CARGO_TARGET_DIR",
+                        "/scratch/target",
+                        "--ro-bind",
+                        "/usr",
+                        "/usr",
+                        "--symlink",
+                        "usr/lib",
+                        "/lib",
+                        "--symlink",
+                        "usr/lib64",
+                        "/lib64",
+                        "--proc",
+                        "/proc",
+                        "--dev",
+                        "/dev",
+                        "--tmpfs",
+                        "/scratch",
+                        "--dir",
+                        "/runtime",
+                        "--dir",
+                        "/runtime/toolchains",
+                        "--dir",
+                    ])
+                    .arg(&target)
+                    .arg("--ro-bind")
+                    .arg(alias)
+                    .arg(&target)
+                    .args(["--dir", "/fixture", "--bind"])
+                    .arg(&fixture)
+                    .args(["/fixture", "--ro-bind"])
+                    .arg(binary)
+                    .args([
+                        "/fixture/arany-test-bin",
+                        "--setenv",
+                        "ARANY_TEST_RUNTIME_MOUNT_MODE",
+                        mode,
+                        "--setenv",
+                        "ARANY_TEST_RUNTIME_MOUNT_GRANT",
+                        "/fixture/grant.json",
+                        "--setenv",
+                        "ARANY_TEST_RUNTIME_MOUNT_RESULT",
+                        "/fixture/result",
+                        "--setenv",
+                        "ARANY_TEST_RUNTIME_MOUNT_READY",
+                        "/fixture/ready",
+                        "--setenv",
+                        "ARANY_TEST_RUNTIME_MOUNT_GO",
+                        "/fixture/go",
+                        "--",
+                        "/fixture/arany-test-bin",
+                        "native_runtime_mount_attestation",
+                        "--nocapture",
+                    ]);
+                let child = command.spawn().expect("production Bwrap prefix launch");
+                let (status, _, stderr) = capture(child, 64 * 1024, Duration::from_secs(30))
+                    .await
+                    .expect("bounded production-prefix fixture");
+                assert!(
+                    status.success(),
+                    "production unshare/Bubblewrap prefix: {}",
+                    String::from_utf8_lossy(&stderr)
+                );
+                return;
+            }
+
             let grant_path = std::env::var_os("ARANY_TEST_RUNTIME_MOUNT_GRANT").unwrap();
             let result_path = std::env::var_os("ARANY_TEST_RUNTIME_MOUNT_RESULT").unwrap();
             let ready_path = std::env::var_os("ARANY_TEST_RUNTIME_MOUNT_READY").unwrap();
@@ -1205,6 +1324,7 @@ mod tests {
         std::fs::write(&grant_path, serde_json::to_vec(&grant).unwrap()).unwrap();
         let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/runtime-mounts.sh");
         let mut command = Command::new("/usr/bin/unshare");
+        // The outer namespace owns fixture mount setup; the BWRAP_BOOTSTRAP worker drops these caps.
         command
             .args([
                 "--user",

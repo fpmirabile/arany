@@ -792,7 +792,7 @@ async fn native_runtime_mount_journey_helper() {
     assert!(attached.status.success(), "hdiutil attach: {attached:?}");
     let mounted = MountedRuntimeImage(mountpoint.clone());
 
-    let permissions = arany::WorkspacePermissions::open(&workspace).unwrap();
+    let permissions = arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
     let options = permissions.runtime_profile_choices();
     let node = options
         .iter()
@@ -803,7 +803,7 @@ async fn native_runtime_mount_journey_helper() {
     permissions
         .remember_profiles(true, arany::ApprovalMode::AutoEdits, &[token])
         .unwrap();
-    let permissions = arany::WorkspacePermissions::open(&workspace).unwrap();
+    let permissions = arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
 
     let mut engine = Engine::open(
         StateRoot::admit(&root.join("state-mounted")).unwrap(),

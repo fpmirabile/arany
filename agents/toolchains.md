@@ -8,6 +8,11 @@ and enforcement.
 - Discover only the known per-manager directories with bounded enumeration
   and file metadata. Never execute a candidate or read package-manager
   configuration, project instructions or credential files during discovery.
+  Run discovery only for initial consent or when `/permissions` opens the
+  selector. Remembered trusted startup validates saved grant pins without
+  enumerating optional home-managed directories, so an unrelated candidate
+  overflow cannot block chat; the explicit selector reports its own bounded
+  discovery failure.
 - Admit only numeric `major.minor.patch` directory labels. Bind the exact
   manager label, absolute selected path and directory device/inode. The label
   identifies the selected directory; it does not prove the binary's version.

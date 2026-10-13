@@ -20,7 +20,11 @@ limits and compatibility.
 - Linux `ro-bind` imports source submounts recursively. Start the unchanged
   Bubblewrap profile through the fixed, root-owned `/usr/bin/unshare` user and
   mount namespace bootstrap with recursive-private propagation, cleared
-  environment and fixed arguments. Do not add capabilities to payloads. Before
+  environment and fixed arguments. Do not use `--keep-caps`: util-linux makes
+  propagation private before exec, and retained capabilities make Bubblewrap
+  reject a non-root real UID ([unshare](https://github.com/util-linux/util-linux/blob/v2.39.3/sys-utils/unshare.c),
+  [Bubblewrap](https://github.com/containers/bubblewrap/blob/main/bubblewrap.c)).
+  Do not add capabilities to payloads. Before
   Ready and again after GO, parse bounded `/proc/self/mountinfo` and require a
   private root and one exact private entry per selected alias, with no optional
   propagation fields, stacked entries or descendant mounts; malformed or

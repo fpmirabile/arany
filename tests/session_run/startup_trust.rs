@@ -571,6 +571,239 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
     }
 }
 
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native Linux PTY trusted startup with bounded runtime candidate overflow"
+)]
+fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
+    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+    use std::{io::Write, os::unix::fs::PermissionsExt};
+
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("project");
+    std::fs::create_dir(&workspace).unwrap();
+    let account_home = temp.path().join("account-home");
+    std::fs::create_dir(&account_home).unwrap();
+    std::fs::set_permissions(&account_home, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let versions = account_home.join(".pyenv/versions");
+    std::fs::create_dir_all(&versions).unwrap();
+    for index in 0..129 {
+        std::fs::create_dir(versions.join(format!("unrelated-{index:03}"))).unwrap();
+    }
+    let account = account_home.join(".local/state/arany");
+    super::isolation::remember_workspace_trust(&account, &workspace, &workspace);
+
+    let state = temp.path().join("state");
+    let shell = "before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; stty rows 24 cols 80; /arany --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4; code=$?; after=$(stty -g); printf '\\nTTY_AFTER:%s\\n' \"$after\"; exit \"$code\"";
+    let mut command = super::isolation::isolated_script(temp.path());
+    command
+        .env_clear()
+        .env("ARANY_TEST_ACCOUNT_ROOT", &account)
+        .env("ARANY_TEST_STATE", &state)
+        .env("ARANY_TEST_WORKSPACE", &workspace)
+        .env("OPENAI_API_KEY", "synthetic-never-sent-key")
+        .env("SHELL", "/bin/sh")
+        .env("TERM", "xterm-256color")
+        .current_dir(&workspace)
+        .args(["-q", "-e", "-c", shell, "/dev/null"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = super::loopback::ChildGuard::new(command.spawn().unwrap());
+    let mut input = child.child().stdin.take().unwrap();
+    let mut output = child.child().stdout.take().unwrap();
+    let flags = fcntl_getfl(&output).unwrap();
+    fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
+    let mut transcript = Vec::new();
+    let mut answered = crate::session_picker::PtyResponses::manual_consent();
+    let wait = |output: &mut std::process::ChildStdout,
+                input: &mut std::process::ChildStdin,
+                transcript: &mut Vec<u8>,
+                answered: &mut crate::session_picker::PtyResponses,
+                from: usize,
+                needle: &[u8]| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !transcript[from..]
+            .windows(needle.len())
+            .any(|part| part == needle)
+        {
+            super::session_picker::pump(output, input, transcript, answered);
+            assert!(
+                Instant::now() < deadline,
+                "trusted startup stage missing: {}",
+                super::session_picker::tail(transcript)
+            );
+            thread::yield_now();
+        }
+    };
+    wait(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        0,
+        b"Ask Arany",
+    );
+    assert!(
+        !transcript
+            .windows(b"Do you trust this folder?".len())
+            .any(|part| part == b"Do you trust this folder?"),
+        "remembered trust must skip optional candidate discovery"
+    );
+    let from = transcript.len();
+    input.write_all(b"/permissions\r").unwrap();
+    wait(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        from,
+        b"Could not prepare folder permission choices",
+    );
+    let from = transcript.len();
+    input.write_all(b"/status\r").unwrap();
+    wait(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        from,
+        b"New conversation",
+    );
+    input.write_all(b"\x03").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        super::session_picker::pump(&mut output, &mut input, &mut transcript, &mut answered);
+        if let Some(status) = child.child().try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "trusted chat did not exit: {}",
+            super::session_picker::tail(&transcript)
+        );
+        thread::yield_now();
+    };
+    super::session_picker::pump(&mut output, &mut input, &mut transcript, &mut answered);
+    assert!(status.success());
+    let text = String::from_utf8_lossy(&transcript);
+    assert_eq!(
+        super::active_terminal::transcript_field(&text, "TTY_BEFORE:"),
+        super::active_terminal::transcript_field(&text, "TTY_AFTER:")
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native Linux narrow PTY consent paging regression"
+)]
+fn tab_cannot_skip_narrow_folder_consent_pages() {
+    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+    use std::io::Write;
+
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("project");
+    std::fs::create_dir(&workspace).unwrap();
+    let runtime_home = temp.path().join("account-home");
+    let runtime_path = runtime_home.join(".nvm/versions/node/v22.3.0");
+    std::fs::create_dir_all(runtime_path.join("bin")).unwrap();
+    let runtime_binary = runtime_path.join("bin/node");
+    std::fs::write(&runtime_binary, b"synthetic runtime marker").unwrap();
+    std::fs::set_permissions(&runtime_binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let account = temp.path().join("account-home/.local/state/arany");
+    let state = temp.path().join("state");
+    let shell = "before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; stty rows 8 cols 16; /arany --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4; code=$?; after=$(stty -g); printf '\\nTTY_AFTER:%s\\n' \"$after\"; exit \"$code\"";
+    let mut command = super::isolation::isolated_script(temp.path());
+    command
+        .env_clear()
+        .env("ARANY_TEST_ACCOUNT_ROOT", &account)
+        .env("ARANY_TEST_STATE", &state)
+        .env("ARANY_TEST_WORKSPACE", &workspace)
+        .env("OPENAI_API_KEY", "synthetic-never-sent-key")
+        .env("SHELL", "/bin/sh")
+        .env("TERM", "xterm-256color")
+        .current_dir(&workspace)
+        .args(["-q", "-e", "-c", shell, "/dev/null"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = super::loopback::ChildGuard::new(command.spawn().unwrap());
+    let mut input = child.child().stdin.take().unwrap();
+    let mut output = child.child().stdout.take().unwrap();
+    let flags = fcntl_getfl(&output).unwrap();
+    fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
+    let mut transcript = Vec::new();
+    let mut answered = crate::session_picker::PtyResponses::manual_consent();
+    let wait = |output: &mut std::process::ChildStdout,
+                input: &mut std::process::ChildStdin,
+                transcript: &mut Vec<u8>,
+                answered: &mut crate::session_picker::PtyResponses,
+                from: usize,
+                needle: &[u8]| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !transcript[from..]
+            .windows(needle.len())
+            .any(|part| part == needle)
+        {
+            super::session_picker::pump(output, input, transcript, answered);
+            assert!(
+                Instant::now() < deadline,
+                "narrow consent stage missing: {}",
+                super::session_picker::tail(transcript)
+            );
+            thread::yield_now();
+        }
+    };
+    wait(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        0,
+        b"Page 1/",
+    );
+    input.write_all(b"\t\t\r").unwrap();
+    let from = transcript.len();
+    wait(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        from,
+        b"Page 2/",
+    );
+    assert!(
+        !account.join("workspace-permissions.json").exists(),
+        "Tab/Tab/Enter on the first narrow consent page must not save trust"
+    );
+    input.write_all(b"\x03").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        super::session_picker::pump(&mut output, &mut input, &mut transcript, &mut answered);
+        if let Some(status) = child.child().try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "consent interruption did not exit: {}",
+            super::session_picker::tail(&transcript)
+        );
+        thread::yield_now();
+    };
+    super::session_picker::pump(&mut output, &mut input, &mut transcript, &mut answered);
+    assert!(status.success());
+    let text = String::from_utf8_lossy(&transcript);
+    assert_eq!(
+        super::active_terminal::transcript_field(&text, "TTY_BEFORE:"),
+        super::active_terminal::transcript_field(&text, "TTY_AFTER:")
+    );
+}
+
 #[cfg(all(target_os = "macos", debug_assertions))]
 #[test]
 fn folder_consent_precedes_setup_and_remembers_only_the_exact_trusted_directory() {

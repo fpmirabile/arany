@@ -5,15 +5,13 @@ setup_alias() {
   /usr/bin/mount --make-shared "$alias"
 }
 run_worker() {
-  /usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/unshare --user --map-current-user --mount --propagation private --keep-caps -- /usr/bin/bwrap \
-    --unshare-all --unshare-user --disable-userns --assert-userns-disabled --new-session --die-with-parent --cap-drop ALL --clearenv \
-    --setenv PATH "$target/bin:/usr/bin:/bin" --setenv HOME /scratch --setenv TMPDIR /scratch --setenv CARGO_TARGET_DIR /scratch/target \
-    --ro-bind /usr /usr --symlink usr/lib /lib --symlink usr/lib64 /lib64 --proc /proc --dev /dev --tmpfs /scratch \
-    --dir /runtime --dir /runtime/toolchains --dir "$target" --ro-bind "$alias" "$target" \
-    --dir /fixture --bind "$fixture" /fixture --ro-bind "$binary" /fixture/arany-test-bin \
-    --setenv ARANY_TEST_RUNTIME_MOUNT_MODE "$1" --setenv ARANY_TEST_RUNTIME_MOUNT_GRANT /fixture/grant.json \
-    --setenv ARANY_TEST_RUNTIME_MOUNT_RESULT /fixture/result --setenv ARANY_TEST_RUNTIME_MOUNT_READY /fixture/ready \
-    --setenv ARANY_TEST_RUNTIME_MOUNT_GO /fixture/go -- /fixture/arany-test-bin native_runtime_mount_attestation --nocapture
+  ARANY_TEST_RUNTIME_MOUNT_MODE="launch-$1" \
+  ARANY_TEST_RUNTIME_MOUNT_GRANT="$fixture/grant.json" \
+  ARANY_TEST_RUNTIME_MOUNT_FIXTURE="$fixture" \
+  ARANY_TEST_RUNTIME_MOUNT_ALIAS="$alias" \
+  ARANY_TEST_RUNTIME_MOUNT_TARGET="$target" \
+  ARANY_TEST_RUNTIME_MOUNT_BINARY="$binary" \
+    "$binary" native_runtime_mount_attestation --nocapture
 }
 cleanup() { /usr/bin/umount --recursive "$alias" >/dev/null 2>&1 || true; }
 trap cleanup EXIT

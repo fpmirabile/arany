@@ -131,7 +131,8 @@ async fn selected_cache_canary_helper() {
     let workspace = root.join("workspace");
     let account = root.join("account");
     assert_eq!(StateRoot::account_path().unwrap(), account);
-    let mut permissions = arany::WorkspacePermissions::open(&workspace).unwrap();
+    let mut permissions =
+        arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
     let options = permissions.runtime_profile_choices();
     let cache = options
         .iter()
@@ -141,7 +142,7 @@ async fn selected_cache_canary_helper() {
     permissions
         .remember_profiles(true, arany::ApprovalMode::AutoEdits, &[cache.token.clone()])
         .unwrap();
-    let permissions = arany::WorkspacePermissions::open(&workspace).unwrap();
+    let permissions = arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
     assert!(
         permissions
             .runtime_profile_choices()

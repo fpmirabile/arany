@@ -875,14 +875,28 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 .await?,
                             ));
                         } else if command == InteractiveCommand::Permissions {
-                            let access = permissions::choose(
+                            let choice = permissions::choose(
                                 &mut terminal,
                                 &admission.workspace,
                                 &mut composer,
                                 false,
                             )
-                            .await?;
-                            let access = match access {
+                            .await;
+                            let choice = match choice {
+                                Ok(choice) => choice,
+                                Err(setup::SetupError::Recoverable(message))
+                                    if message.starts_with(
+                                        "Could not prepare folder permission choices:",
+                                    ) =>
+                                {
+                                    notice = Some(Feedback::History(format!(
+                                        "Error: {message}; existing permissions unchanged"
+                                    )));
+                                    continue;
+                                }
+                                Err(error) => return Err(error.into()),
+                            };
+                            let access = match choice {
                                 permissions::PermissionChoice::Selected(access) => access,
                                 permissions::PermissionChoice::Closed(_) => {
                                     notice =

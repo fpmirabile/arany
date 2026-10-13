@@ -388,12 +388,12 @@ impl AttachedTerminal {
         &mut self,
         id: uuid::Uuid,
         permissions: &crate::tools::WorkspacePermissions,
-        profile_selection: (&[bool], Option<usize>),
+        profile_selection: (&[bool], Option<usize>, bool),
         page: usize,
         trust: bool,
         configured: bool,
-    ) -> Result<bool, TerminalError> {
-        let (selected_profiles, focused_profile) = profile_selection;
+    ) -> Result<(bool, usize), TerminalError> {
+        let (selected_profiles, focused_profile, profile_selection_enabled) = profile_selection;
         self.cancel_clipboard_paste();
         let mut lines = crate::presentation::workspace_permission_lines(permissions.path());
         if configured {
@@ -442,16 +442,16 @@ impl AttachedTerminal {
                     },
                 )
                 .map_err(TerminalError::Io)?;
-            return Ok(false);
+            return Ok((false, page));
         }
         let palette = self.palette();
-        let mut more = true;
+        let mut progress = view::PermissionFrameProgress { more: true, page };
         self.terminal
             .as_mut()
             .expect("inline terminal")
             .draw(|frame| {
                 if frame.area().width >= 16 && frame.area().height >= 8 {
-                    more = view::draw_permission_frame(
+                    progress = view::draw_permission_frame(
                         frame,
                         &lines,
                         view::PermissionFrameState {
@@ -469,13 +469,8 @@ impl AttachedTerminal {
                             profile_start,
                             profile_count: candidates.len(),
                             focused_profile,
-                            footer: if frame.area().width < 24 {
-                                "↑↓ · Tab profiles · Space toggle · Enter · ^C"
-                            } else if frame.area().width < 50 {
-                                "↑↓ choose · Tab profiles · Space toggle · Enter"
-                            } else {
-                                "↑↓ choose · Tab profiles · Space toggle · Enter confirm · Ctrl+C exit"
-                            },
+                            profile_selection_enabled: Some(profile_selection_enabled),
+                            footer: None,
                             palette,
                         },
                     );
@@ -486,7 +481,7 @@ impl AttachedTerminal {
                     );
                 }
             })?;
-        Ok(more)
+        Ok((progress.more, progress.page))
     }
     pub fn draw_tool_approval(
         &mut self,
@@ -518,16 +513,18 @@ impl AttachedTerminal {
                             profile_start: None,
                             profile_count: 0,
                             focused_profile: None,
-                            footer: if frame.area().width < 24 {
+                            profile_selection_enabled: None,
+                            footer: Some(if frame.area().width < 24 {
                                 "↑↓ Enter Esc"
                             } else if frame.area().width < 50 {
                                 "↑↓ Enter · Esc denies"
                             } else {
                                 "↑↓ choose · Enter confirm · Esc denies"
-                            },
+                            }),
                             palette,
                         },
-                    );
+                    )
+                    .more;
                 } else {
                     frame.render_widget(
                         ratatui::widgets::Paragraph::new("Resize to review; Esc denies"),

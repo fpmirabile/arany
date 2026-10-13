@@ -214,11 +214,17 @@ impl WorkspacePermissions {
                     trusted: false,
                     mode: ApprovalMode::AutoEdits,
                     runtime_grants: Vec::new(),
-                    candidates: discover_home_candidates()?,
+                    candidates: Vec::new(),
                 })
             }
             Err(_) => Err(ToolError::Configuration),
         }
+    }
+
+    pub fn open_for_profile_selection(path: &Path) -> Result<Self, ToolError> {
+        let mut permissions = Self::open(path)?;
+        permissions.candidates = discover_home_candidates()?;
+        Ok(permissions)
     }
 
     fn load(path: &Path, root: &StateRoot) -> Result<Self, ToolError> {
@@ -239,7 +245,7 @@ impl WorkspacePermissions {
             trusted,
             mode: entry.map_or(ApprovalMode::AutoEdits, |entry| entry.mode),
             runtime_grants,
-            candidates: discover_home_candidates()?,
+            candidates: Vec::new(),
         })
     }
 
