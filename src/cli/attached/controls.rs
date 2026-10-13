@@ -23,12 +23,14 @@ pub(super) struct Preferences {
 }
 
 fn apply_setting(preferences: &mut Preferences, value: &str) -> bool {
-    if let Some(completion) = [CompletionLayout::Tabs, CompletionLayout::Combined]
+    let completion = preferences.completion;
+    let view = preferences.view;
+    if let Some(completion) = [completion, completion.toggled()]
         .into_iter()
         .find(|completion| completion.label() == value)
     {
         preferences.completion = completion;
-    } else if let Some(view) = [TerminalMode::Fullscreen, TerminalMode::Classic]
+    } else if let Some(view) = [view, view.toggled()]
         .into_iter()
         .find(|view| view.label() == value)
     {
@@ -95,14 +97,15 @@ async fn save_settings(admission: &Admission, preferences: Preferences) -> Resul
 }
 
 fn settings_rows(preferences: Preferences, linear: bool) -> [String; 2] {
-    let completion = match preferences.completion {
-        CompletionLayout::Tabs => "Tabs",
-        CompletionLayout::Combined => "Combined",
+    let title = |label: &str| {
+        let mut characters = label.chars();
+        characters
+            .next()
+            .map(|first| first.to_ascii_uppercase().to_string() + characters.as_str())
+            .unwrap_or_default()
     };
-    let view = match preferences.view {
-        TerminalMode::Fullscreen => "Fullscreen",
-        TerminalMode::Classic => "Classic",
-    };
+    let completion = title(preferences.completion.label());
+    let view = title(preferences.view.label());
     if linear {
         [
             format!("Slash menu: {completion}"),
@@ -116,12 +119,15 @@ fn settings_rows(preferences: Preferences, linear: bool) -> [String; 2] {
     }
 }
 
+/// Linear empty Enter saves the shown values rather than selecting a choice.
+const NO_DEFAULT_CHOICE: usize = usize::MAX;
+
 async fn choose_settings(
     terminal: &mut AttachedTerminal,
     mut chosen: Preferences,
 ) -> Result<Option<Preferences>, String> {
     let linear = terminal.is_linear();
-    let mut row = 0;
+    let mut view_row = false;
     let mut answer = Composer::default();
     let mut invalid = false;
     loop {
@@ -137,7 +143,7 @@ async fn choose_settings(
                     (3, "fullscreen"),
                     (4, "classic"),
                 ],
-                usize::MAX,
+                NO_DEFAULT_CHOICE,
                 invalid.then_some("Type tabs, combined, fullscreen or classic; q closes"),
             )
         } else {
@@ -146,7 +152,7 @@ async fn choose_settings(
                 "Settings",
                 "←→ changes the value; Enter saves both",
                 &[(1, rows[0].as_str()), (2, rows[1].as_str())],
-                row,
+                usize::from(view_row),
                 None,
             )
         }
@@ -156,12 +162,12 @@ async fn choose_settings(
             .await
             .map_err(|error| error.to_string())?
         {
-            TerminalInput::Up | TerminalInput::Down if !linear => row = 1 - row,
+            TerminalInput::Up | TerminalInput::Down if !linear => view_row = !view_row,
             TerminalInput::Left | TerminalInput::Right if !linear => {
-                if row == 0 {
-                    chosen.completion = chosen.completion.toggled();
-                } else {
+                if view_row {
                     chosen.view = chosen.view.toggled();
+                } else {
+                    chosen.completion = chosen.completion.toggled();
                 }
             }
             TerminalInput::Character(character) if linear => {
@@ -215,8 +221,7 @@ pub(super) async fn settings(
                 let view_changed = chosen.view != *saved_view;
                 *saved_view = chosen.view;
                 composer.set_completion_layout(chosen.completion);
-                let pinned = terminal.classic_pinned() && chosen.view != terminal.mode();
-                if !linear && !pinned && view_changed && chosen.view != terminal.mode() {
+                if !linear && view_changed {
                     terminal
                         .set_mode(chosen.view, composer.text().len())
                         .map_err(|error| error.to_string())?;
@@ -227,7 +232,7 @@ pub(super) async fn settings(
                     chosen.view.label(),
                     if linear {
                         " (visual sessions)"
-                    } else if pinned {
+                    } else if chosen.view != terminal.mode() {
                         " (sessions without --classic)"
                     } else {
                         ""
@@ -1237,6 +1242,10 @@ mod tests {
         }
         save_settings(&admission, combined_classic).await.unwrap();
         let original = root.read_ui_preferences_record().unwrap().unwrap();
+        assert_eq!(
+            original,
+            br#"{"version":2,"preferences":{"completion":"combined","view":"classic"}}"#
+        );
         assert!(
             root.replace_ui_preferences_record(&vec![b'x'; 1025])
                 .is_err()

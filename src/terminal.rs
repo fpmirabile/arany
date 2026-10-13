@@ -676,7 +676,7 @@ impl AttachedTerminal {
         self.mode
     }
 
-    /// Keeps Classic for this process; saved chat-view changes apply to later sessions.
+    /// Keeps Classic for this process; later `set_mode` calls leave the presentation unchanged.
     pub fn pin_classic(&mut self) {
         self.classic_pinned = true;
     }
@@ -889,6 +889,9 @@ impl AttachedTerminal {
                 io::ErrorKind::Unsupported,
                 "visual modes are unavailable in linear presentation",
             )));
+        }
+        if self.classic_pinned || mode == self.mode {
+            return Ok(());
         }
         self.release()?;
         self.mode = mode;
