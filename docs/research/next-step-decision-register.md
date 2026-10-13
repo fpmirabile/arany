@@ -158,11 +158,16 @@ Fixture capture on 2026-10-13 attributed the stopped-command timeout: under
 host memory pressure the over-limit `receipt-loss` payload stayed below the
 512 MiB resident-size threshold, so supervision never stopped it and the case
 reached its 30-second deadline in `controller_receipt`. Supervision now bounds
-`ri_phys_footprint`, which includes compressed and swapped pages. The same
+`ri_phys_footprint`, which counts compressed memory whether held in RAM or
+swapped out. The same
 capture showed the Security signature scan costing about 1.3 seconds of every
 command-capable Run, and up to 5 seconds under parallel load; stamp-bound
 in-process verdict reuse removes the repeated scan without caching authority
-across processes.
+across processes. Earlier `mcp-version` timeouts were captured with most time
+before Ready, where that scan ran; after both changes the case completed in
+about 4 seconds across three `arany_ci` suites and twelve journeys run four at a
+time. A recurrence is a new defect; capture its stages through the
+[fixture](../../agents/guard-fixture.md) before changing budgets.
 
 ### D-16 — Evidence-dense testing
 
