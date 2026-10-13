@@ -632,7 +632,21 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             .load_session(first.session_id)
             .await
             .expect("durable journal");
-        assert_eq!(events.len(), 15);
+        assert_eq!(events.len(), 27);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalStarted { .. }))
+                .count(),
+            2
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalFinished { .. }))
+                .count(),
+            2
+        );
         assert_eq!(
             events
                 .iter()
@@ -1715,7 +1729,14 @@ fn compaction_input_limit_rejects_before_provider_egress() {
             .load_session(session_id)
             .await
             .expect("durable Events");
-        assert_eq!(events.len(), 50);
+        assert_eq!(events.len(), 92);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalStarted { .. }))
+                .count(),
+            7
+        );
         assert_eq!(
             events
                 .iter()
@@ -2045,13 +2066,41 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
         )
         .await
         .expect("pinned Session start");
+        use std::os::unix::fs::MetadataExt;
+        let workspace_metadata = std::fs::metadata(&workspace).expect("Workspace metadata");
+        let workspace_identity = (workspace_metadata.dev(), workspace_metadata.ino());
+        let goal_id = arany::GoalId::new();
+        let interrupted_run_id = arany::RunId::new();
         let store =
             Store::open(StateRoot::admit(&state_path).expect("private state")).expect("store");
         store
             .append(
                 session_id,
+                Event::GoalStarted {
+                    goal_id,
+                    objective: "Unfinished question".into(),
+                    workspace_identity,
+                    budget: arany::GoalBudget::default(),
+                },
+            )
+            .await
+            .expect("Goal start");
+        store
+            .append(
+                session_id,
+                Event::GoalRunLinked {
+                    goal_id,
+                    run_id: interrupted_run_id,
+                    phase: arany::GoalPhase::Implementation,
+                },
+            )
+            .await
+            .expect("interrupted Run link");
+        store
+            .append(
+                session_id,
                 Event::MessageAccepted {
-                    run_id: arany::RunId::new(),
+                    run_id: interrupted_run_id,
                     text: "Unfinished question".into(),
                     images: Vec::new(),
                 },
@@ -2080,6 +2129,7 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
         let mut resumed = request(&workspace, "Finished question");
         resumed.session_id = Some(session_id);
         resumed.title = None;
+        resumed.goal = arany::GoalRequest::resume(goal_id, arany::GoalPhase::Implementation, true);
         engine.run(resumed).await.expect("completed later Run");
         engine
             .compact_session(session_id, workspace.clone())
@@ -2141,7 +2191,12 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             engine.close().await.unwrap();
             let mut connection = rusqlite::Connection::open(path.join("events.sqlite3")).unwrap();
             let transaction = connection.transaction().unwrap();
-            for sequence in 9..=prefix {
+            let first_padding_sequence: i64 = transaction
+                .query_row("SELECT COALESCE(MAX(sequence), 0) + 1 FROM events", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            for sequence in first_padding_sequence..=i64::from(prefix) {
                 transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',2,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string()]).unwrap();
             }
             transaction.commit().unwrap();
@@ -2338,7 +2393,22 @@ fn database_capacity_is_admitted_before_provider_usage() {
         assert!(compactions.lock().unwrap().is_empty());
         engine.close().await.unwrap();
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
-        assert_eq!(store.load_session(id).await.unwrap().len(), 8);
+        let events = store.load_session(id).await.unwrap();
+        assert_eq!(events.len(), 14);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalStarted { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalFinished { .. }))
+                .count(),
+            1
+        );
         let view = store.load_view(id).await.unwrap().unwrap();
         assert_eq!(view.runs.len(), 1);
         assert_eq!(view.runs[0].status, RunStatus::Finished);
@@ -2701,8 +2771,26 @@ fn one_child_team_finishes_only_after_child_result_is_committed() {
             .load_session(outcome.session_id)
             .await
             .expect("durable Events");
-        assert_eq!(events.len(), 12);
-        let interrupted = SessionView::replay(outcome.session_id, &events[..5])
+        assert_eq!(events.len(), 20);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalProviderCallReserved { .. }))
+                .count(),
+            3
+        );
+        let delegated_call = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    &event.event,
+                    Event::ProviderCallRecorded { record, .. }
+                        if record.phase == AgentPhase::RootPlan
+                            && record.disposition == ProviderCallDisposition::Delegated
+                )
+            })
+            .expect("committed delegation");
+        let interrupted = SessionView::replay(outcome.session_id, &events[..=delegated_call])
             .expect("valid post-call prefix")
             .expect("Session");
         assert_eq!(interrupted.runs[0].status, RunStatus::Interrupted);
@@ -3784,8 +3872,22 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                         .expect("Session");
                     assert_eq!(
                         terminal.sequence,
-                        events.last().expect("terminal Event").sequence
+                        outcome
+                            .run
+                            .finished_sequence
+                            .expect("Run terminal sequence")
                     );
+                    assert!(events.last().is_some_and(|event| {
+                        event.sequence > terminal.sequence
+                            && matches!(
+                                event.event,
+                                Event::GoalFinished {
+                                    goal_id,
+                                    status: arany::GoalStatus::Cancelled,
+                                    ..
+                                } if goal_id == outcome.goal_id
+                            )
+                    }));
                     assert_eq!(replay.runs.len(), 1);
                     assert_eq!(replay.runs[0], outcome.run);
                     let jsonl = arany::render_session(&replay, &events, arany::Output::Jsonl);
@@ -5086,6 +5188,7 @@ fn preview_checkpoint_survives_abrupt_process_death() {
         assert_eq!(run.display.len(), 1);
         assert_eq!(run.display[0].text.len(), 2048);
         assert!(run.display[0].text.starts_with("DURABLE_CRASH_CANARY:"));
+        let goal_id = view.goals[0].id;
         store.close().await.unwrap();
         let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
             summary: "done".into(),
@@ -5101,6 +5204,7 @@ fn preview_checkpoint_survives_abrupt_process_death() {
         next.include_paths.clear();
         next.session_id = Some(id);
         next.title = None;
+        next.goal = arany::GoalRequest::resume(goal_id, arany::GoalPhase::Implementation, true);
         assert_eq!(
             engine.run(next).await.unwrap().run.status,
             RunStatus::Finished

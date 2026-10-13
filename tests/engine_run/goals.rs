@@ -7,7 +7,7 @@ async fn goal_lifecycle_bounds_report_and_requires_goal_replay_linkage() {
     std::fs::create_dir(&workspace).expect("workspace");
     let state_path = temp.path().join("state");
     let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-        summary: "ࠀ".repeat(2500),
+        summary: "ࠀ".repeat(620),
         result: "accepted result".into(),
     })]);
     let mut engine =
@@ -158,13 +158,19 @@ async fn goal_call_budget_blocks_a_later_run_before_provider_dispatch() {
 
     let mut second = request(&workspace, "Try to use another Provider call");
     second.session_id = Some(initial.session_id);
+    second.title = None;
     second.include_paths.clear();
     second.goal =
         arany::GoalRequest::resume(initial.goal_id, arany::GoalPhase::Implementation, true);
-    assert!(matches!(
-        engine.run(second).await,
-        Err(EngineError::GoalBudgetExhausted)
-    ));
+    let result = engine.run(second).await;
+    assert!(
+        matches!(&result, Err(EngineError::GoalBudgetExhausted)),
+        "unexpected second-Run result: {}",
+        result
+            .as_ref()
+            .err()
+            .map_or_else(|| "Run succeeded".into(), |error| format!("{error:?}"))
+    );
     assert_eq!(requests.lock().expect("Provider requests").len(), 1);
     engine.close().await.expect("engine shutdown");
 }
@@ -326,13 +332,19 @@ async fn interrupted_goal_resumes_only_by_exact_id_without_replaying_the_old_cal
     .expect("second engine");
     let mut mismatched = request(&workspace, "Must not select a different Goal");
     mismatched.session_id = Some(initial.session_id);
+    mismatched.title = None;
     mismatched.include_paths.clear();
     mismatched.goal =
         arany::GoalRequest::resume(arany::GoalId::new(), arany::GoalPhase::Implementation, true);
-    assert!(matches!(
-        second_engine.run(mismatched).await,
-        Err(EngineError::GoalUnavailable)
-    ));
+    let result = second_engine.run(mismatched).await;
+    assert!(
+        matches!(&result, Err(EngineError::GoalUnavailable)),
+        "unexpected mismatched-resume result: {}",
+        result
+            .as_ref()
+            .err()
+            .map_or_else(|| "Run succeeded".into(), |error| format!("{error:?}"))
+    );
     assert!(
         second_requests
             .lock()
@@ -342,6 +354,7 @@ async fn interrupted_goal_resumes_only_by_exact_id_without_replaying_the_old_cal
 
     let mut resumed = request(&workspace, "Complete the reviewed Goal");
     resumed.session_id = Some(initial.session_id);
+    resumed.title = None;
     resumed.include_paths.clear();
     resumed.goal =
         arany::GoalRequest::resume(initial.goal_id, arany::GoalPhase::Implementation, true);
