@@ -102,6 +102,12 @@ directory handles and native ACL validation. This module knows neither history
 nor Tool policy. Store creates its database, records and leases after admission;
 Guard admits its private capacity/settings directory and temporary control roots,
 retaining their checked handles independently of history.
+On Linux, the same Guard reservation owns host seed storage through checked
+deletion. Its stable lease excludes live controllers and competing recovery;
+separate bounded metadata commits preparation, root identity and native lifecycle.
+The Linux adapter supplies termination evidence, while admission owns storage
+retirement and the capacity charge. Shared snapshot copying has no independent
+temporary-root lifecycle. No recovery state enters Engine or canonical Events.
 
 ## 3. Physical beta shape
 

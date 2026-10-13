@@ -322,7 +322,11 @@ fn broken_stderr_during_folder_consent_restores_raw_mode_without_session() {
             &stderr_bytes,
             &mut consent,
         );
-        if consent {
+        if consent
+            && stdout_bytes
+                .split_inclusive(|byte| *byte == b'\n')
+                .any(|line| line.starts_with(b"TTY_BEFORE:") && line.ends_with(b"\n"))
+        {
             break;
         }
         assert!(

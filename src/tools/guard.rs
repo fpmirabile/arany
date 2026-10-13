@@ -140,6 +140,7 @@ impl BootstrapFailure {
 pub enum GuardStage {
     ResourceAttestation,
     ProcessCleanup,
+    StorageCleanup,
     LauncherReap,
     OutputEof,
     NamespaceBootstrap,
@@ -152,6 +153,7 @@ impl GuardStage {
         match self {
             Self::ResourceAttestation => "resource attestation",
             Self::ProcessCleanup => "process cleanup",
+            Self::StorageCleanup => "storage cleanup",
             Self::LauncherReap => "launcher reap",
             Self::OutputEof => "output EOF",
             Self::NamespaceBootstrap => "namespace bootstrap",

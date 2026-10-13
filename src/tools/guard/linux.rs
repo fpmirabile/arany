@@ -35,7 +35,7 @@ pub(super) fn check_available() -> Result<(), ToolError> {
 }
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
-    let mut bytes = b"arany-guard-v4:shared-fifo-capacity;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account".to_vec();
+    let mut bytes = b"arany-guard-v6:shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account".to_vec();
     bytes.extend_from_slice(&profile::profile_digest()?);
     Ok(digest(&bytes))
 }
@@ -342,13 +342,133 @@ pub(super) async fn recover_reservation(id: uuid::Uuid) -> Result<bool, ToolErro
     unit.empty()
 }
 
+#[cfg(test)]
+pub(super) fn stop_seed_fixture(id: uuid::Uuid) {
+    use crate::test_process::BoundedOutput;
+    let checked = std::panic::catch_unwind(|| {
+        let name = format!("arany-tool-{id}.service");
+        let mut stop = manager_command("/usr/bin/systemctl");
+        stop.args(["--user", "--no-ask-password", "stop", &name]);
+        let _ = stop
+            .into_std()
+            .bounded_output_for(MANAGER_DEADLINE, 4096)
+            .unwrap();
+        let mut show = manager_command("/usr/bin/systemctl");
+        show.args([
+            "--user",
+            "show",
+            &name,
+            "--property=ActiveState,MainPID,ControlGroup",
+        ]);
+        let output = show
+            .into_std()
+            .bounded_output_for(MANAGER_DEADLINE, 4096)
+            .unwrap();
+        let text = std::str::from_utf8(&output.stdout).unwrap();
+        assert!(
+            text.lines()
+                .any(|line| line == "ActiveState=inactive" || line == "ActiveState=failed")
+        );
+        assert!(text.lines().any(|line| line == "MainPID=0"));
+        assert!(text.lines().any(|line| line == "ControlGroup="));
+    });
+    if let Err(error) = checked {
+        if std::thread::panicking() {
+            eprintln!("native seed fixture cleanup could not be verified: {id}");
+        } else {
+            std::panic::resume_unwind(error);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(super) async fn seed_unit_group(id: uuid::Uuid) -> cap_std::fs::Dir {
+    let unit = Unit {
+        name: format!("arany-tool-{id}.service"),
+        invocation: None,
+        group: None,
+        kill: None,
+    };
+    let values = unit.properties().await.unwrap();
+    assert_eq!(values["ActiveState"], "active");
+    let group = values["ControlGroup"].as_str().unwrap();
+    assert!(group.starts_with("/user.slice/") && group.ends_with(&unit.name));
+    let dir = crate::tools::fs::open_directory(
+        &Path::new("/sys/fs/cgroup").join(group.trim_start_matches('/')),
+    )
+    .unwrap();
+    assert!(
+        dir.read_to_string("cgroup.events")
+            .unwrap()
+            .lines()
+            .any(|line| line == "populated 1")
+    );
+    dir
+}
+
+#[cfg(test)]
+pub(super) async fn hold_seed_unit(permit: &super::admission::Permit, seed: &Path) {
+    let name = format!("arany-tool-{}.service", permit.id);
+    let mut command = manager_command("/usr/bin/systemd-run");
+    command
+        .args([
+            "--user",
+            "--no-ask-password",
+            "--quiet",
+            "--wait",
+            "--pipe",
+            "--service-type=exec",
+            "--unit",
+            &name,
+            "--property=Restart=no",
+            "--property=KillMode=control-group",
+            "--property=TimeoutStopSec=2s",
+            "--property=RuntimeMaxSec=60s",
+            "/usr/bin/bwrap",
+            "--unshare-all",
+            "--unshare-user",
+            "--die-with-parent",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--symlink",
+            "usr/lib",
+            "/lib",
+            "--symlink",
+            "usr/lib64",
+            "/lib64",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--ro-bind",
+        ])
+        .arg(seed)
+        .args([
+            "/seed",
+            "/usr/bin/sh",
+            "-c",
+            "test -r /seed/workspace/sample && printf 'READY\\n' && exec /usr/bin/sleep 600",
+        ]);
+    permit.launching().unwrap();
+    let mut child = command.spawn().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let ready = tokio::time::timeout(Duration::from_secs(10), read_line_capped(&mut stdout, 64))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ready, b"READY\n");
+    permit.seed_checkpoint("native");
+    panic!("native seed controller must be killed by its parent");
+}
+
 pub(super) async fn execute_inner(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
     mut cancellation: RunCancellation,
     dispatched: &mut bool,
 ) -> Result<ToolObservation, ToolError> {
-    let mut permit = tokio::select! {
+    let permit = tokio::select! {
         biased;
         () = cancellation.cancelled() => return Err(ToolError::Operation),
         permit = super::admission::acquire(intent.id, intent.expires_at_ms, |queued| runtime.queue_changed(intent.id, queued)) => permit?,
@@ -358,8 +478,8 @@ pub(super) async fn execute_inner(
         + Duration::from_secs(5);
     crate::tools::fs::validate_workspace(runtime)?;
     let workspace = crate::tools::fs::open_directory(&runtime.workspace)?;
-    let snapshot =
-        crate::tools::fs::Snapshot::create(&workspace, &runtime.config, intent.call.is_process())?;
+    let (seed_path, seed_dir) =
+        permit.prepare_seed(&workspace, &runtime.config, intent.call.is_process())?;
     let mut unit = Unit {
         name: format!("arany-tool-{}.service", permit.id),
         invocation: None,
@@ -431,7 +551,7 @@ pub(super) async fn execute_inner(
             "usr/lib",
             "/lib",
             "--symlink",
-            "usr/lib",
+            "usr/lib64",
             "/lib64",
             "--proc",
             "/proc",
@@ -443,12 +563,12 @@ pub(super) async fn execute_inner(
             "/scratch",
             "--ro-bind",
         ]);
-    command.arg(&snapshot.path).arg("/seed");
+    command.arg(&seed_path).arg("/seed");
     for folder in ["programs", "inputs", "skills"] {
-        if snapshot.dir.symlink_metadata(folder).is_ok() {
+        if seed_dir.symlink_metadata(folder).is_ok() {
             command
                 .args(["--ro-bind"])
-                .arg(snapshot.path.join(folder))
+                .arg(seed_path.join(folder))
                 .arg(format!("/{folder}"));
         }
     }
@@ -480,10 +600,15 @@ pub(super) async fn execute_inner(
         .args(["--chdir", "/", "/arany", "--internal-tool-guard"]);
     command.stdin(Stdio::piped());
     let parent_namespaces = profile::Namespaces::read()?;
-    let mut child = command
-        .spawn()
-        .map_err(|_| ToolError::ProtectionUnavailable)?;
-    permit.launched();
+    permit.launching()?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(_) => {
+            permit.terminated()?;
+            permit.cleanup().await?;
+            return Err(ToolError::ProtectionUnavailable);
+        }
+    };
     let mut stdin = child.stdin.take().ok_or(ToolError::Operation)?;
     let mut stdout = BufReader::new(child.stdout.take().ok_or(ToolError::Operation)?);
     let stderr = child.stderr.take().ok_or(ToolError::Operation)?;
@@ -534,12 +659,18 @@ pub(super) async fn execute_inner(
     if !matches!(cleanup, Ok(Ok(()))) {
         unit.kill_group();
     }
-    if matches!(cleanup, Ok(Ok(()))) {
-        permit.release();
-    }
     let _ = child.start_kill();
     let reaped = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
     let drained = drain_stderr(&mut stderr_task).await;
+    if matches!(cleanup, Ok(Ok(()))) {
+        permit
+            .terminated()
+            .map_err(|_| ToolError::GuardRejected(GuardStage::StorageCleanup))?;
+        permit
+            .cleanup()
+            .await
+            .map_err(|_| ToolError::GuardRejected(GuardStage::StorageCleanup))?;
+    }
     if result.is_err()
         && let Some(failure) = drained.as_deref().and_then(bootstrap_failure)
     {

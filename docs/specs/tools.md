@@ -331,12 +331,12 @@ launch. Live, recovering and retained units count. At defaults, newly admitted
 macOS units reserve at most 1 GiB of backing images in aggregate (two 64 MiB images
 per unit); the configured ceiling is `units × 128 MiB`. Existing excess roots
 from a previous implementation are retained and prevent further admission.
-Linux's per-unit mount/cgroup limits remain unchanged; a slot is released only
-after positive native-unit termination. Host seed storage has no cumulative disk
-bound; [Next steps](../../NEXT_STEPS.md) owns its unresolved cleanup gap.
-A dead Linux reservation is recovered using its exact
-recorded unit, resetting a failed transient job before reclaiming capacity, or
-retired after its boot ends. Uncertain startup remains reserved.
+Linux's per-unit mount/cgroup limits remain unchanged. Its slot also owns the
+host seed until checked deletion. Each seed contains at most 32 MiB of selected
+Workspace data and 96 MiB of runtime data, bounding newly admitted retained
+payload at `units × 128 MiB` (1 GiB by default). This is a logical payload bound,
+not a physical filesystem quota; directory, file-count and record bounds apply
+separately. Historical unrecorded seeds require the maintenance procedure below.
 
 When capacity is occupied, the approved Tool remains pending in its current Run.
 Up to `queued` Tools register in one shared FIFO, ordered by registration under
@@ -348,6 +348,37 @@ There is one pending Tool per Run. The [terminal contract](./terminal.md#convers
 owns the temporary queued indication. Native recovery retains its
 30-second deadline within the original intent lifetime; local filesystem bounds
 remain cooperative rather than hard-real-time guarantees.
+
+### Linux host seed ownership
+
+Every new host seed must retain its reservation from creation until checked
+deletion. Normal completion leaves no seed or stale reservation. Following
+controller death, subsequent Tool admission recovers the owned storage before
+releasing capacity, without replaying its effect. Failed deletion, identity
+uncertainty and ambiguous native launch retain the charge. A new boot settles
+old processes but does not establish file deletion. Recovery resets a positively
+identified failed native unit before retirement. A missing or not-loaded unit
+cannot settle an interrupted launch request; such a reservation can exhaust
+capacity until positive native evidence or a later boot permits recovery.
+
+Linux reservations use version 2; macOS reservations remain version 1. An
+immutable locked reservation owns one bounded version-1 seed record and at most
+one publication temporary. The planned location is committed before exclusive
+creation, and the checked directory identity before copying payload. A dead
+preparation without a committed directory identity permits only empty-directory
+removal. The launch-requested phase precedes launcher invocation; positive native
+termination precedes recursive deletion. Record updates never replace the locked
+lease inode. Metadata retires only after synchronized seed absence. Deletion
+rejects links, mounts, foreign ownership, unsafe permissions and replacements;
+incomplete cleanup retains its slot and prevents successful completion.
+
+Historical unrecorded roots require an explicit maintenance procedure with
+Arany stopped, positive native inactivity and authorization of exact inventoried
+objects. Reboot before restarting Arany is the fallback for uncertain inactivity.
+Deletion revalidates object identity; a name prefix never authorizes removal.
+Normal admission neither migrates nor automatically deletes unsupported records.
+Historical cleanup completion applies to the selected host/account inventory;
+follow the [one-time maintenance procedure](../tools.md#historical-linux-seed-maintenance).
 
 ## Linux enforcement and compatibility
 
@@ -363,6 +394,8 @@ Byte/entry bounds on synchronous local snapshot preparation do not guarantee a f
 |---|---|---|
 | Shared native capacity, settings and FIFO | Simultaneous first creation succeeds; eight default units and 32 registered waiters remain bounded across processes; overflow rejects before launch; cancellation, expiry and dead heads advance FIFO without newcomer overtaking. Valid settings change admission and invalid ranges fail closed; a queued macOS head can recover capacity abandoned during its wait. | [Shared admission corpus](../../src/tools/guard/admission.rs) |
 | Retained Linux failed native unit | The exact failed transient job has no payload/cgroup; recovery resets its failure before reclaiming capacity. Unknown startup is retained. | [Native retained-unit owner](../../src/tools/guard/linux.rs) |
+| Linux host seed lifecycle | Normal cleanup and safe next-admission recovery remove the seed before capacity release. Real controller SIGKILL, preparation/cleanup interruption, previous-boot files and competing recovery retain exclusive ownership; unsafe deletion and uncertain launch keep capacity charged without Tool replay. | [Admission corpus](../../src/tools/guard/admission.rs), [native Linux recovery owner](../../src/tools/guard/linux.rs), [Tool journeys](../../tests/session_run/tools.rs) |
+| Historical Linux seed cleanup | Under the maintenance procedure, exact approved inactive roots and obsolete reservations are removed; replacements, live leases, foreign roots, settings and unrelated data remain untouched. Partial cleanup is reported; final inventory proves the selected objects absent. | [Admission maintenance corpus](../../src/tools/guard/admission.rs), [Tool guide procedure](../tools.md#historical-linux-seed-maintenance) |
 | Folder admission before account setup | Every attached entry resolves folder access first, including without an account and with explicit flags. Ctrl+C enters no account flow and creates no Session. Read-only/dismissal asks again next time; remembered trust skips the prompt only for the same directory identity. macOS retains ordinary chat after consent and admits granted Tools only after native protection attests. Explicit `--tools` discloses retained private-config authority at the choice. An initially unconfigured trusted conversation restores its displayed approval mode when a supported native Provider is selected. | [Startup consent journey](../../tests/session_run/startup_trust.rs), [native macOS attached composition](../../src/cli/attached/run.rs) |
 | Native macOS attached capability | Remembered trust offers file/Skill Tools, the pinned native shell and approval controls while ordinary/resumed greetings retain history without effect Events; stale executable pins reject before inference and preserve the committed prefix | [Native macOS attached composition](../../src/cli/attached/run.rs) |
 | Private grant and project discovery | Only selected roots and `.agents/skills` contribute pinned guidance; private names take precedence; unsafe paths and overflow reject | [Tool configuration and discovery corpus](../../src/tools/tests.rs), [native Skill journey](../../tests/session_run/tools.rs) |

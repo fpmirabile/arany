@@ -19,15 +19,6 @@ history. Implementation status and verified support are separate claims.
 
 ## Next functional priority
 
-- **Linux host seed ownership after controller death.** Existing
-  `/tmp/arany-tools-*` snapshots contain selected Workspace/runtime data and use
-  Drop-only removal. `SIGKILL` can retain those private files indefinitely after
-  the systemd/cgroup unit ends; the shared unit quota does not bound cumulative
-  host seed storage. Bind new snapshots' checked path/device/inode to their
-  reservation before copying, retain capacity until validated deletion, and
-  prove recovery after actual native termination. Existing unrecorded roots
-  must remain untouched; a filename-prefix sweep cannot authorize deletion.
-
 - **Deferred Anthropic consumer subscriptions.** Native Claude-plan access is
   missing and user-deferred behind the [route/authorization gate](./docs/research/subscription-provider-routes-2026-10.md#decision-boundary-for-beta-1).
   Continue unaffected implementation. API-key billing is a separate route;
