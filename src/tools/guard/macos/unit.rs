@@ -2742,7 +2742,7 @@ test "$npm_config_cache" = "$TMPDIR/.npm"
 test -r "$npm_config_cache/_cacache/index.marker"
 test "$PIP_CACHE_DIR" = "$TMPDIR/.cache/pip"
 test -r "$PIP_CACHE_DIR/http-v2/index.marker"
-if printf changed > "$CARGO_HOME/registry/cache/write-marker" 2>/dev/null; then exit 97; fi
+if printf changed 2>/dev/null > "$CARGO_HOME/registry/cache/write-marker"; then exit 97; fi
 test ! -e "$CARGO_HOME/registry/cache/write-marker"
 test ! -e "$CARGO_HOME/credentials.toml"
 printf 'command change' > "$1"

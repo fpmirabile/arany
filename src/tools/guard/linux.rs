@@ -1143,8 +1143,7 @@ mod tests {
                     "production-prefix fixture UID must remain non-root"
                 );
                 let grant_path = std::path::PathBuf::from(
-                    std::env::var_os("ARANY_TEST_RUNTIME_MOUNT_GRANT")
-                        .expect("fixture grant path"),
+                    std::env::var_os("ARANY_TEST_RUNTIME_MOUNT_GRANT").expect("fixture grant path"),
                 );
                 assert!(grant_path.is_file(), "fixture grant exists");
                 let fixture =
@@ -1238,7 +1237,13 @@ mod tests {
                         "native_runtime_mount_attestation",
                         "--nocapture",
                     ]);
-                let child = command.spawn().expect("production Bwrap prefix launch");
+                let child = command
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .kill_on_drop(true)
+                    .spawn()
+                    .expect("production Bwrap prefix launch");
                 let (status, _, stderr) = capture(child, 64 * 1024, Duration::from_secs(30))
                     .await
                     .expect("bounded production-prefix fixture");
@@ -1347,7 +1352,11 @@ mod tests {
                 target.as_os_str(),
             ])
             .env_clear()
-            .env("PATH", "/usr/bin:/bin");
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
         let (status, stdout, stderr) = capture(
             command.spawn().map_err(|_| ToolError::Operation).unwrap(),
             64 * 1024,
