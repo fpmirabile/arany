@@ -33,6 +33,10 @@ limits and compatibility.
   retain C string lifetimes through each call and free native error allocations
   once. Never parse or print arbitrary native diagnostics. The syscall-number
   filter and explicit Darwin syscall numbers support only reviewed 64-bit ABIs.
+- Keep Linux runtime aliases distinct: `/lib` targets `/usr/lib`, while `/lib64`
+  targets `/usr/lib64`. Mapping both to `/usr/lib` hides the x86-64 ELF loader
+  even when the ARM64 native gates pass. Native fixtures must preserve the same
+  loader layout as the production mount profile.
 - Grant ancestor metadata only, without directory-data access; unrelated host
   metadata and control-root listings must remain denied. The compiled policy
   fingerprint covers profile rules, admission algorithms and enforced constants.
