@@ -1,16 +1,16 @@
 # Arany
 
-A Rust-first, CLI-only agent harness for durable conversations and controlled coding work.
+A Rust-first, CLI-only agent harness specialized in multi-task agentic teams, with durable conversations and controlled coding work.
 
 Arany provides the runtime around a language model: it manages context, coordinates agent work, controls access to tools, and saves what happened. You work in a terminal, choose your Provider and model, and return to the same conversation across process restarts.
 
 ## Goal and principles
 
-The goal is a dependable harness that can grow without replacing its Engine or tying your workflow to one Provider or operating system.
+The goal is a dependable harness where teams of agents carry out coding work end to end while Arany detects and restrains misbehavior, without replacing its Engine or tying your workflow to one Provider or operating system. Writable teams and the Supervisor are planned, not current features; see the [beta plan](./planning/agentic-teams/README.md).
 
 - **Durable work.** Keep conversations and execution history locally, with explicit resume, fork and recovery.
 - **User control.** Make model selection, permissions and execution limits explicit. Tools operate within granted capabilities.
-- **OS parity.** Aim for equivalent behavior on Linux, macOS and Windows, with narrow native integrations where necessary.
+- **OS parity.** Equivalent behavior on Linux and macOS, with narrow native integrations where necessary. On Windows, use the Linux build under WSL2.
 - **A useful terminal.** Support interactive conversations, accessible plain output and commands that compose with scripts.
 - **Simple engineering.** Build in Rust, reuse existing capabilities and apply Ponytail to every implementation. Add abstractions when a real requirement earns them.
 
@@ -20,7 +20,7 @@ A conversation is a **Session**. Each submitted task starts a bounded **Run**, l
 
 The current implementation includes OpenAI and Anthropic API-key routes, consented ChatGPT-plan access, and verified custom read-only profiles. Optional coding tools provide guarded file edits, offline commands, runtime Skills and local MCP integrations.
 
-**Status:** development beta. Linux and macOS have native Tool enforcement; platform verification and release checks remain incomplete. Windows parity is a design goal, not a current support claim. See [next steps](./NEXT_STEPS.md) for remaining work.
+**Status:** development beta. Linux and macOS have native Tool enforcement; platform verification and release checks remain incomplete. Native Windows is not supported; WSL2 support still needs its own verification. See [next steps](./NEXT_STEPS.md) for remaining work.
 
 ## Install from source
 

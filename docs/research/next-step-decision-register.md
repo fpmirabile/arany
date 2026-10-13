@@ -188,8 +188,11 @@ owns the trade-offs.
 
 ### D-17 — Product identity, platforms, and license
 
-The product and executable are Arany and `arany`. Linux-first delivery does not
-change the OS parity goal; native evidence determines support claims. Apache-2.0
+The product and executable are Arany and `arany`. Arany targets Linux and
+macOS; native Windows is out of scope and Windows users run the Linux build
+under WSL2 (decided 2026-10-13: one Unix enforcement family keeps the Guard
+and its evidence tractable). Native evidence determines support claims,
+including for WSL2. Apache-2.0
 plus NOTICE supplies standard attribution and patent terms without a custom
 license. It does not require private users or hosted services to display credit.
 [LICENSE](../../LICENSE), [NOTICE](../../NOTICE) and [project priorities](../../AGENTS.md)

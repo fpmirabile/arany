@@ -9,22 +9,27 @@ history. Implementation status and verified support are separate claims.
 
 ## Next functional priority
 
+- **Agentic coding teams (Beta 1 scope, current implementation priority).**
+  RPI Goals, command changesets, toolchain/cache and flexible limits, registry
+  fetch, Git, a
+  narrowing-only Supervisor, per-agent Provider routing and writable team
+  workers. The [initiative plan](./planning/agentic-teams/README.md) is
+  self-contained and orders the slices; start at its next action (execution
+  step 1, command changesets). Remote
+  MCP/OAuth, interactive/background jobs and other network grants need their
+  own Policy/Guard/protocol evidence; retain the existing
+  [Tool scope](./docs/specs/tools.md) until each slice lands.
 - **Deferred Anthropic consumer subscriptions.** Native Claude-plan access is
   missing and user-deferred behind the [route/authorization gate](./docs/research/subscription-provider-routes-2026-10.md#decision-boundary-for-beta-1).
   Continue unaffected implementation. API-key billing is a separate route;
   another harness's implementation or credentials do not authorize Arany access.
-- **Larger coding workloads.** Add reviewed runtime/cache mounts, bounded build
-  profiles and explicit artifact integration when actual workloads need them.
-  Remote MCP/OAuth, network/disclosure grants, interactive/background jobs,
-  package installation and child effects need their own Policy/Guard/protocol
-  evidence; retain the existing [Tool scope](./docs/specs/tools.md).
 - **Long-lived history.** Evaluate incremental replay/indexing and a bounded
   archival/new-Session policy before histories reach existing admission quotas.
   Preserve canonical Events, fork lineage and append acknowledgement semantics.
 
 ## Terminal continuity evidence
 
-- Exercise classic scrollback, narrow resize/reflow, temporary details, idle `/settings` chat-view transitions and a 200-line streamed response in a real macOS emulator and native Linux/Windows terminals. Synthetic macOS PTYs prove controlled cursor ownership, transcript insertion and restoration; they do not emulate scrollback or prove other OS support.
+- Exercise classic scrollback, narrow resize/reflow, temporary details, idle `/settings` chat-view transitions and a 200-line streamed response in a real macOS emulator and native Linux terminals, including under WSL2. Synthetic macOS PTYs prove controlled cursor ownership, transcript insertion and restoration; they do not emulate scrollback or prove other OS support.
 - With explicit usage consent, repeat OpenAI, Anthropic, ChatGPT and exact-custom streaming conformance against actual selected accounts/endpoints. Offline fixtures prove protocol/lifecycle behavior, not live compatibility. Keep incomplete answers outside future context and confirm recovery after cancellation/crash.
 - Check `--screen-reader`, `/transcript`, monochrome labels and managed following with real assistive technology. These usability claims remain unverified.
 
@@ -96,7 +101,7 @@ to the user's credential store or clipboard.
 | Readiness, load and observer faults | Measure cancellation/cleanup and resource enforcement under declared load. [Guard unit rules](./agents/guard-unit.md) |
 | Performance | Measure history/input latency, RSS and telemetry on named hosts. Measure the bounded macOS host-PID scan at its nominal supervision interval before choosing another membership primitive or interval. [Native measurement rules](./agents/references/testing-details.md#native-and-live-evidence) |
 | Distribution and dependency policy | Verify fresh advisories, license/source bundles, exact source/binary pairing, compiler/native provenance and MSRV. Resolve changed notice exceptions and the unreached standard-library gate without weakening pins. [Release review](./docs/security/beta-license-release-review.md#current-result), [dependency inventory](./docs/security/beta-dependency-inventory.md) |
-| Other platforms and enforcers | Verify native Linux ARM64, implement Windows and alternative Linux-native enforcement, and require actual platform behavior evidence before support claims. Windows CI remains deferred. [OS-parity priority](./AGENTS.md#product-and-implementation-priorities) |
+| Other platforms and enforcers | Verify native Linux ARM64, alternative Linux-native enforcement and the Linux build under WSL2 (user namespaces, cgroup v2 and Guard enforcement), and require actual platform behavior evidence before support claims. Native Windows is out of scope. [OS-parity priority](./AGENTS.md#product-and-implementation-priorities) |
 
 These gates remain unverified until their named procedure completes. Specs and
 existing tests describe what must hold; neither implemented code nor an old

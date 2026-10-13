@@ -35,7 +35,7 @@ For work with no observable behavior impact, replace this section with that conc
 ## Chosen direction
 
 - Simplest sufficient solution after Ponytail and why it fits:
-- Linux/macOS/Windows impact and native evidence, or no OS impact:
+- Linux/macOS impact and native evidence, or no OS impact:
 - Ownership or interface changes, if any:
 - Alternatives for hard-to-reverse decisions and meaningful trade-offs:
 

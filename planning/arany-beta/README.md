@@ -3,8 +3,8 @@
 ## Metadata
 
 - Status: `In progress`
-- Owner: Codex
-- Last updated: 2026-10-12
+- Owner: Fernando Mirabile
+- Last updated: 2026-10-13
 
 ## Goal
 
@@ -12,6 +12,11 @@ Deliver the personal Linux beta with durable Sessions/Runs, bounded collaboratio
 strict replay, accessible terminal interaction, selected Provider/account access,
 opt-in telemetry and guarded files, commands, Skills and local MCP. Broader
 platform/release support requires its own native evidence.
+
+Beta 1 also includes multi-task agentic coding teams. That implementation work
+has its own self-contained [initiative plan](../agentic-teams/README.md); start
+there for any implementation slice. The remaining Beta 1 work outside it is the
+user-owned checks and evidence in [next steps](../../NEXT_STEPS.md).
 
 ## Remaining execution
 
@@ -37,7 +42,8 @@ remain in force; no live call or user credential/clipboard access is implied.
 
 ## Exit criteria
 
-Resolve agreed implementation defects and required verification through their
+Complete the [agentic coding teams plan](../agentic-teams/README.md) and
+resolve agreed implementation defects and required verification through their
 owners. Report unperformed checks without claiming support; a user-deferred
 integration is not completed functionality. Promote accepted behavior and
 invariants to specs/module rules and remove completed execution work. Git/CI
