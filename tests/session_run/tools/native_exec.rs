@@ -1,5 +1,6 @@
 use super::*;
 use crate::{loopback::ChildGuard, process::BoundedOutput};
+use sha2::{Digest, Sha256};
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
@@ -138,7 +139,8 @@ async fn selected_cache_canary_helper() {
             .any(|option| option.selected && option.label.starts_with("Cargo archive cache"))
     );
 
-    let state = StateRoot::admit(&root.join("state")).unwrap();
+    let state_path = root.join("state");
+    let state = StateRoot::admit(&state_path).unwrap();
     let call = ToolCall::Command {
         program: "sh".into(),
         args: vec![
@@ -197,23 +199,73 @@ async fn selected_cache_canary_helper() {
     );
     assert_eq!(outcome.run.tools.len(), 1);
     let observation = outcome.run.tools[0].observation.as_ref().unwrap();
-    assert!(observation.output.contains(CACHE_CANARY));
-    let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
-    let initial_tools = requests[0]
-        .tools
+    assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+    assert_eq!(observation.intent, outcome.run.tools[0].intent);
+    assert_eq!(observation.intent.call, call);
+    let receipt = observation
+        .guard
         .as_ref()
-        .expect("first cache canary request includes Tool context");
-    let initial = serde_json::to_vec(initial_tools).unwrap();
-    assert!(
-        !initial
-            .windows(CACHE_CANARY.len())
-            .any(|part| part == CACHE_CANARY.as_bytes())
+        .expect("successful cache command has a Guard receipt");
+    let expected_digest: [u8; 32] =
+        Sha256::digest(serde_json::to_vec(&observation.intent).unwrap()).into();
+    assert_eq!(receipt.contract_version, 1);
+    assert_eq!(receipt.intent_digest, expected_digest);
+    assert_eq!(
+        receipt.enforcement_digest,
+        observation.intent.enforcement_digest
     );
+    assert_eq!(receipt.limits, observation.intent.limits);
+    let command: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
+    assert_eq!(command["exit_code"], 0);
+    assert_eq!(command["stderr"], "");
     assert!(
-        requests[1].tools.as_ref().unwrap().observations[0]
-            .output
-            .contains(CACHE_CANARY)
+        command["stdout"]
+            .as_str()
+            .is_some_and(|stdout| stdout == CACHE_CANARY),
+        "explicit cache command stdout mismatch"
+    );
+    {
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let initial_tools = requests[0]
+            .tools
+            .as_ref()
+            .expect("first cache canary request includes Tool context");
+        let initial = serde_json::to_vec(initial_tools).unwrap();
+        assert!(
+            !initial
+                .windows(CACHE_CANARY.len())
+                .any(|part| part == CACHE_CANARY.as_bytes())
+        );
+        assert!(
+            requests[1].tools.as_ref().unwrap().observations[0]
+                .output
+                .contains(CACHE_CANARY),
+            "explicit cache output missing from the later Provider request"
+        );
+    }
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+    let events = store.load_session(outcome.session_id).await.unwrap();
+    store.close().await.unwrap();
+    let replay = SessionView::replay(outcome.session_id, &events)
+        .unwrap()
+        .unwrap();
+    assert_eq!(replay.runs.len(), 1);
+    assert!(
+        replay.runs[0] == outcome.run,
+        "closed cache canary replay differs"
+    );
+    let finished = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            arany::Event::ToolFinished { observation, .. } => Some(observation),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(finished.len(), 1);
+    assert!(
+        finished[0] == observation,
+        "ToolFinished cache observation differs"
     );
 }
 
