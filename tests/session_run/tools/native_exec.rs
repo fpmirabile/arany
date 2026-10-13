@@ -186,7 +186,11 @@ async fn selected_cache_canary_helper() {
     assert!(observation.output.contains(CACHE_CANARY));
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
-    let initial = serde_json::to_vec(&requests[0].tools).unwrap();
+    let initial_tools = requests[0]
+        .tools
+        .as_ref()
+        .expect("first cache canary request includes Tool context");
+    let initial = serde_json::to_vec(initial_tools).unwrap();
     assert!(
         !initial
             .windows(CACHE_CANARY.len())

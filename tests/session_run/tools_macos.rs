@@ -836,16 +836,19 @@ async fn native_runtime_mount_journey_helper() {
         let requests = refused_requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
         assert!(requests[0].tools.as_ref().unwrap().observations.is_empty());
-        assert_eq!(
-            requests[1]
-                .tools
-                .as_ref()
-                .unwrap()
-                .observations
-                .last()
-                .unwrap()
-                .disposition,
-            ToolDisposition::Failed
+        let provider_observation = requests[1]
+            .tools
+            .as_ref()
+            .unwrap()
+            .observations
+            .last()
+            .unwrap();
+        assert_eq!(provider_observation.disposition, ToolDisposition::Failed);
+        assert!(provider_observation.guard.is_none());
+        assert!(
+            provider_observation
+                .output
+                .contains("runtime mount topology")
         );
     }
     let detached = std::process::Command::new("/usr/bin/hdiutil")
@@ -910,17 +913,17 @@ async fn native_runtime_mount_journey_helper() {
             .observations
             .is_empty()
     );
-    assert_eq!(
-        accepted_requests[1]
-            .tools
-            .as_ref()
-            .unwrap()
-            .observations
-            .last()
-            .unwrap()
-            .disposition,
-        ToolDisposition::Succeeded
-    );
+    let provider_observation = accepted_requests[1]
+        .tools
+        .as_ref()
+        .unwrap()
+        .observations
+        .last()
+        .unwrap();
+    assert_eq!(provider_observation.disposition, ToolDisposition::Succeeded);
+    let provider_output: serde_json::Value =
+        serde_json::from_str(&provider_observation.output).unwrap();
+    assert_eq!(provider_output["stdout"], "selected-runtime-command");
 }
 
 async fn stopped_effects_survive_closed_replay(
