@@ -597,7 +597,7 @@ fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
 
     let state = temp.path().join("state");
     let shell = "before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; stty rows 24 cols 80; /arany --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4; code=$?; after=$(stty -g); printf '\\nTTY_AFTER:%s\\n' \"$after\"; exit \"$code\"";
-    let mut command = super::isolation::account_isolated_script(temp.path());
+    let mut command = super::isolation::isolated_script(temp.path());
     command
         .env_clear()
         .env("ARANY_TEST_STATE", &state)
@@ -730,7 +730,7 @@ fn tab_cannot_skip_narrow_folder_consent_pages() {
     let account = temp.path().join("account-home/.local/state/arany");
     let state = temp.path().join("state");
     let shell = "before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; stty rows 8 cols 16; /arany --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4; code=$?; after=$(stty -g); printf '\\nTTY_AFTER:%s\\n' \"$after\"; exit \"$code\"";
-    let mut command = super::isolation::account_isolated_script(temp.path());
+    let mut command = super::isolation::isolated_script(temp.path());
     command
         .env_clear()
         .env("ARANY_TEST_STATE", &state)
