@@ -2510,7 +2510,50 @@ fn database_capacity_is_admitted_before_provider_usage() {
             assert_eq!(requests[0].max_output_tokens, 1024);
         }
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
-        assert_eq!(store.load_session(id).await.unwrap().len(), 16);
+        let events = store.load_session(id).await.unwrap();
+        let goal_event_counts = [
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalStarted { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalRunLinked { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalActiveTimeReserved { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalProviderCallReserved { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalActiveTimeSettled { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalFinished { .. }))
+                .count(),
+        ];
+        assert_eq!(goal_event_counts, [2; 6]);
+        let non_goal_events = events
+            .iter()
+            .filter(|event| {
+                !matches!(
+                    event.event,
+                    Event::GoalStarted { .. }
+                        | Event::GoalRunLinked { .. }
+                        | Event::GoalActiveTimeReserved { .. }
+                        | Event::GoalProviderCallReserved { .. }
+                        | Event::GoalActiveTimeSettled { .. }
+                        | Event::GoalFinished { .. }
+                )
+            })
+            .count();
+        assert_eq!(non_goal_events, 16);
+        assert_eq!(events.len(), 28);
         let view = store.load_view(id).await.unwrap().unwrap();
         assert_eq!(view.runs.len(), 2);
         assert!(view.runs.iter().all(|run| run.status == RunStatus::Finished));
@@ -2842,6 +2885,58 @@ fn one_child_team_finishes_only_after_child_result_is_committed() {
             interrupted.runs[0].agents[0].provider_calls[0].disposition,
             ProviderCallDisposition::Delegated
         );
+        let child_id = outcome.run.agents[1].id;
+        let primary_id = outcome.run.agents[0].id;
+        let child_call = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    &event.event,
+                    Event::ProviderCallRecorded { agent_run_id, record, .. }
+                        if *agent_run_id == child_id && record.phase == AgentPhase::ChildWork
+                )
+            })
+            .expect("committed child call");
+        let synthesis_call = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    &event.event,
+                    Event::ProviderCallRecorded { agent_run_id, record, .. }
+                        if *agent_run_id == primary_id && record.phase == AgentPhase::RootSynthesis
+                )
+            })
+            .expect("committed primary synthesis call");
+        let child_finished = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    &event.event,
+                    Event::AgentFinished {
+                        agent_run_id,
+                        disposition: arany::AgentDisposition::Finished,
+                        ..
+                    } if *agent_run_id == child_id
+                )
+            })
+            .expect("committed child result");
+        let primary_finished = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    &event.event,
+                    Event::AgentFinished {
+                        agent_run_id,
+                        disposition: arany::AgentDisposition::Finished,
+                        ..
+                    } if *agent_run_id == primary_id
+                )
+            })
+            .expect("committed primary result");
+        assert!(delegated_call < child_call);
+        assert!(child_call < child_finished);
+        assert!(child_finished < synthesis_call);
+        assert!(synthesis_call < primary_finished);
         let calls = events
             .iter()
             .filter_map(|event| match &event.event {
@@ -2858,15 +2953,17 @@ fn one_child_team_finishes_only_after_child_result_is_committed() {
             ]
         );
         let mut invalid_phase = events.clone();
-        if let Event::ProviderCallRecorded { record, .. } = &mut invalid_phase[4].event {
+        if let Event::ProviderCallRecorded { record, .. } = &mut invalid_phase[delegated_call].event
+        {
             record.phase = AgentPhase::RootSynthesis;
         } else {
-            panic!("expected primary planning call");
+            panic!("expected committed primary delegation");
         }
         assert!(SessionView::replay(outcome.session_id, &invalid_phase).is_err());
         let mut duplicate_call = events.clone();
-        duplicate_call[5].event = events[4].event.clone();
-        duplicate_call[5].agent_run_id = events[4].agent_run_id;
+        duplicate_call[child_call].event = events[delegated_call].event.clone();
+        duplicate_call[child_call].run_id = events[delegated_call].run_id;
+        duplicate_call[child_call].agent_run_id = events[delegated_call].agent_run_id;
         assert!(SessionView::replay(outcome.session_id, &duplicate_call).is_err());
         let missing_calls: Vec<_> = events
             .iter()
@@ -2874,14 +2971,6 @@ fn one_child_team_finishes_only_after_child_result_is_committed() {
             .cloned()
             .collect();
         assert!(SessionView::replay(outcome.session_id, &missing_calls).is_err());
-        assert!(matches!(
-            events[7].event,
-            arany::Event::AgentFinished { .. }
-        ));
-        assert!(matches!(
-            events[9].event,
-            arany::Event::AgentFinished { .. }
-        ));
         store.close().await.expect("store shutdown");
     });
 }
@@ -3920,15 +4009,21 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                             .finished_sequence
                             .expect("Run terminal sequence")
                     );
+                    let expected_goal_status = match outcome.run.status {
+                        RunStatus::Finished => arany::GoalStatus::Completed,
+                        RunStatus::Failed => arany::GoalStatus::Failed,
+                        RunStatus::Cancelled => arany::GoalStatus::Cancelled,
+                        status => panic!("expected a terminal Run, got {status:?}"),
+                    };
                     assert!(events.last().is_some_and(|event| {
                         event.sequence > terminal.sequence
                             && matches!(
                                 event.event,
                                 Event::GoalFinished {
                                     goal_id,
-                                    status: arany::GoalStatus::Cancelled,
+                                    status,
                                     ..
-                                } if goal_id == outcome.goal_id
+                                } if goal_id == outcome.goal_id && status == expected_goal_status
                             )
                     }));
                     assert_eq!(replay.runs.len(), 1);
