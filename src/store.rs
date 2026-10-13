@@ -123,6 +123,13 @@ enum Request {
         event: Box<Event>,
         reply: oneshot::Sender<Result<EventEnvelope, StoreError>>,
     },
+    #[cfg(test)]
+    GateGoalAppendAcknowledgment {
+        session_id: SessionId,
+        entered: oneshot::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
     Load {
         session_id: SessionId,
         reply: oneshot::Sender<Result<Vec<EventEnvelope>, StoreError>>,
@@ -217,6 +224,12 @@ impl Store {
                     return;
                 }
                 let mut hot_session = None::<HotSession>;
+                #[cfg(test)]
+                let mut goal_append_ack_gate = None::<(
+                    SessionId,
+                    oneshot::Sender<()>,
+                    std::sync::mpsc::Receiver<()>,
+                )>;
                 while let Some(request) = receiver.blocking_recv() {
                     match request {
                         Request::AdmitOperation {
@@ -236,6 +249,11 @@ impl Store {
                             event,
                             reply,
                         } => {
+                            #[cfg(test)]
+                            let is_goal_lifecycle = matches!(
+                                event.as_ref(),
+                                Event::GoalStarted { .. } | Event::GoalResumed { .. }
+                            );
                             let result = if read_only {
                                 Err(StoreError::ReadOnly)
                             } else if matches!(event.as_ref(), Event::SessionForked { .. }) {
@@ -243,7 +261,29 @@ impl Store {
                             } else {
                                 append(&mut connection, &mut hot_session, session_id, *event)
                             };
+                            #[cfg(test)]
+                            if result.is_ok()
+                                && is_goal_lifecycle
+                                && goal_append_ack_gate.as_ref().is_some_and(
+                                    |(gated_session, _, _)| *gated_session == session_id,
+                                )
+                            {
+                                let (_, entered, release) =
+                                    goal_append_ack_gate.take().expect("matching append gate");
+                                let _ = entered.send(());
+                                let _ = release.recv();
+                            }
                             let _ = reply.send(result);
+                        }
+                        #[cfg(test)]
+                        Request::GateGoalAppendAcknowledgment {
+                            session_id,
+                            entered,
+                            release,
+                            reply,
+                        } => {
+                            goal_append_ack_gate = Some((session_id, entered, release));
+                            let _ = reply.send(Ok(()));
                         }
                         Request::Load { session_id, reply } => {
                             let _ = reply.send(load_session(&connection, session_id));
@@ -357,6 +397,23 @@ impl Store {
             reply,
         })
         .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn gate_goal_append_acknowledgment(
+        &self,
+        session_id: SessionId,
+    ) -> Result<(oneshot::Receiver<()>, std::sync::mpsc::Sender<()>), StoreError> {
+        let (entered, wait_entered) = oneshot::channel();
+        let (release, wait_release) = std::sync::mpsc::channel();
+        self.call(|reply| Request::GateGoalAppendAcknowledgment {
+            session_id,
+            entered,
+            release: wait_release,
+            reply,
+        })
+        .await?;
+        Ok((wait_entered, release))
     }
 
     pub(crate) async fn clear_provider_evidence(&self, name: String) -> Result<(), StoreError> {

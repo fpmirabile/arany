@@ -319,6 +319,7 @@ pub(crate) fn engine_failure(error: &crate::engine::EngineError) {
         EngineError::SessionBusy => "SessionBusy",
         EngineError::WorkspaceBusy => "WorkspaceBusy",
         EngineError::GoalUnavailable => "GoalUnavailable",
+        EngineError::GoalAdmissionUncertain => "GoalAdmissionUncertain",
         EngineError::GoalBudgetExhausted => "GoalBudgetExhausted",
         EngineError::SessionNotIdle => "SessionNotIdle",
         EngineError::ForkNotAtRunBoundary => "ForkNotAtRunBoundary",

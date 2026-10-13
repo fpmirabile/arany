@@ -56,6 +56,10 @@ pub enum EngineError {
     WorkspaceBusy,
     #[error("Goal is not available for explicit resume")]
     GoalUnavailable,
+    #[error(
+        "Goal admission was not acknowledged; inspect Session history before retrying or explicitly resuming"
+    )]
+    GoalAdmissionUncertain,
     #[error("Goal budget is exhausted")]
     GoalBudgetExhausted,
     #[error("Session is not idle")]
@@ -541,6 +545,112 @@ mod goal_report_tests {
     }
 }
 
+#[cfg(all(test, unix))]
+mod goal_workspace_lease_tests {
+    use super::*;
+    use crate::provider::{ProviderError, ProviderResponse};
+    use std::time::Duration;
+
+    struct NeverProvider;
+
+    impl Provider for NeverProvider {
+        fn profile_name(&self) -> &str {
+            "scripted"
+        }
+
+        fn model_name(&self) -> &str {
+            "lease-test"
+        }
+
+        fn max_concurrent_calls(&self) -> u8 {
+            1
+        }
+
+        async fn invoke(&self, _: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+            panic!("a dropped Goal admission must not call the Provider")
+        }
+    }
+
+    #[tokio::test]
+    async fn goal_workspace_lease_survives_dropped_start_acknowledgment() {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let state_path = temp.path().join("state-a");
+        let second_state_path = temp.path().join("state-b");
+        let account_root = temp.path().join("account");
+        let state = StateRoot::admit(&state_path).expect("private State root");
+        let second_state = StateRoot::admit(&second_state_path).expect("second private State root");
+        let mut engine = Engine::open(state, NeverProvider).expect("Engine");
+        let session_id = SessionId::new();
+        let goal_id = GoalId::new();
+        let workspace_identity = (7, 11);
+        engine
+            .store
+            .append(
+                session_id,
+                Event::SessionStarted {
+                    title: "Goal lease acknowledgment".into(),
+                    workspace_identity,
+                },
+            )
+            .await
+            .expect("Session start");
+
+        let workspace_lock = engine
+            .state
+            .lock_workspace_in(&account_root, workspace_identity)
+            .expect("provisional Workspace lock");
+        let (acknowledgment_entered, release_acknowledgment) = engine
+            .store
+            .gate_goal_append_acknowledgment(session_id)
+            .await
+            .expect("install acknowledgment gate");
+        let mut admission = Box::pin(engine.append_goal_lifecycle(
+            goal_id,
+            workspace_identity,
+            Some(workspace_lock),
+            session_id,
+            None,
+            Event::GoalStarted {
+                goal_id,
+                objective: "Keep the Workspace lease through Store acknowledgment".into(),
+                workspace_identity,
+                budget: GoalBudget::default(),
+            },
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                result = &mut admission => panic!("append returned before its controlled acknowledgment: {result:?}"),
+                result = acknowledgment_entered => result.expect("committed append reached acknowledgment gate"),
+            }
+        })
+        .await
+        .expect("Goal append acknowledgment gate");
+        drop(admission);
+        release_acknowledgment
+            .send(())
+            .expect("release Store acknowledgment");
+
+        let view = engine
+            .store
+            .load_view(session_id)
+            .await
+            .expect("canonical Session view")
+            .expect("Session exists");
+        assert!(view.active_goal().is_some_and(|goal| goal.id == goal_id));
+        assert!(matches!(
+            second_state.lock_workspace_in(&account_root, workspace_identity),
+            Err(StoreError::WorkspaceBusy)
+        ));
+        let events = engine
+            .store
+            .load_session(session_id)
+            .await
+            .expect("canonical Events");
+        assert_eq!(events.len(), 2, "no Run or effect was admitted");
+        engine.close().await.expect("close Engine");
+    }
+}
+
 #[derive(Clone, Copy)]
 enum GoalReportSection {
     Changes,
@@ -839,6 +949,31 @@ impl<P: Provider + 'static> Engine<P> {
             .is_some_and(|held| held.goal_id == goal_id)
         {
             self.workspace_locks.remove(&identity);
+        }
+    }
+
+    async fn append_goal_lifecycle(
+        &mut self,
+        goal_id: GoalId,
+        workspace_identity: (u64, u64),
+        workspace_lock: Option<WorkspaceRunLock>,
+        session_id: SessionId,
+        progress: Option<&ProgressPublisher>,
+        event: Event,
+    ) -> Result<(), EngineError> {
+        self.retain_goal_workspace(goal_id, workspace_identity, workspace_lock);
+        match append_observed(&self.store, progress, None, session_id, event).await {
+            Ok(_) => Ok(()),
+            Err(error) => match self.store.load_view(session_id).await {
+                Ok(Some(view)) if view.active_goal().is_some() => {
+                    Err(EngineError::GoalAdmissionUncertain)
+                }
+                Ok(_) => {
+                    self.release_goal_workspace(goal_id, workspace_identity);
+                    Err(error)
+                }
+                Err(_) => Err(EngineError::GoalAdmissionUncertain),
+            },
         }
     }
 
@@ -1167,11 +1302,12 @@ impl<P: Provider + 'static> Engine<P> {
             return Err(EngineError::CancelledBeforeStart);
         }
         if goal.is_new {
-            append_observed(
-                &self.store,
-                publisher.as_ref(),
-                None,
+            self.append_goal_lifecycle(
+                goal.id,
+                workspace_identity,
+                provisional_workspace_lock,
                 session_id,
+                publisher.as_ref(),
                 Event::GoalStarted {
                     goal_id: goal.id,
                     objective: request.objective.clone(),
@@ -1181,16 +1317,18 @@ impl<P: Provider + 'static> Engine<P> {
             )
             .await?;
         } else if goal.resume {
-            append_observed(
-                &self.store,
-                publisher.as_ref(),
-                None,
+            self.append_goal_lifecycle(
+                goal.id,
+                workspace_identity,
+                provisional_workspace_lock,
                 session_id,
+                publisher.as_ref(),
                 Event::GoalResumed { goal_id: goal.id },
             )
             .await?;
+        } else {
+            self.retain_goal_workspace(goal.id, workspace_identity, provisional_workspace_lock);
         }
-        self.retain_goal_workspace(goal.id, workspace_identity, provisional_workspace_lock);
         if cancellation.is_cancelled() {
             return Err(EngineError::CancelledBeforeStart);
         }

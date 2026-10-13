@@ -177,7 +177,7 @@ impl StateRoot {
     }
 
     #[cfg(unix)]
-    fn lock_workspace_in(
+    pub(crate) fn lock_workspace_in(
         &self,
         account_root: &Path,
         identity: (u64, u64),
