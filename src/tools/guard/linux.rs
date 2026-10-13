@@ -1209,10 +1209,11 @@ mod tests {
         pidfd: &tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>,
         deadline: tokio::time::Instant,
     ) -> Result<(), String> {
-        tokio::time::timeout_at(deadline, pidfd.readable())
+        let readiness = tokio::time::timeout_at(deadline, pidfd.readable())
             .await
             .map_err(|_| "fixture process did not exit before cleanup deadline".to_string())?
             .map_err(|error| error.to_string())?;
+        drop(readiness);
         Ok(())
     }
 
@@ -1423,15 +1424,15 @@ mod tests {
         } else {
             None
         };
-        if let Some((_, namespace_pid)) = init_identity {
-            if namespace_pid != 1 {
-                errors.push("reported namespace init did not have PID 1".into());
-            }
+        if let Some((_, namespace_pid)) = init_identity
+            && namespace_pid != 1
+        {
+            errors.push("reported namespace init did not have PID 1".into());
         }
-        if let Some((_, namespace_pid)) = held_identity {
-            if namespace_pid <= 1 {
-                errors.push("reported held descendant was not below namespace init".into());
-            }
+        if let Some((_, namespace_pid)) = held_identity
+            && namespace_pid <= 1
+        {
+            errors.push("reported held descendant was not below namespace init".into());
         }
         let init_pidfd = init_identity.and_then(|identity| match bind_fixture_pidfd(identity) {
             Ok(pidfd) => Some(pidfd),
@@ -1482,13 +1483,21 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[test]
     #[cfg_attr(
         not(arany_ci),
         ignore = "native private mount propagation fixture; requires unprivileged user namespaces"
     )]
-    async fn native_runtime_mount_attestation() {
+    fn native_runtime_mount_attestation() {
         let _native_gate = crate::test_process::NATIVE_GATE.lock().unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(native_runtime_mount_attestation_inner());
+    }
+
+    async fn native_runtime_mount_attestation_inner() {
         use crate::tools::toolchains::RuntimeGrant;
 
         const MODE: &str = "ARANY_TEST_RUNTIME_MOUNT_MODE";

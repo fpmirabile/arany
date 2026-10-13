@@ -234,6 +234,7 @@ fn parse_linear_selection(
     let choice = words.next().unwrap_or_default().to_ascii_lowercase();
     let rest = words.collect::<Vec<_>>();
     match choice.as_str() {
+        "read" if rest == ["only"] => Some((0, vec![false; options.len()])),
         "" | "1" | "read" | "read-only" | "no" | "config" | "use-config" => {
             rest.is_empty().then(|| (0, vec![false; options.len()]))
         }
@@ -273,5 +274,32 @@ pub(super) fn cycle(composer: &mut Composer) -> String {
         "Auto approval · the selected AI reviews actions; additional model usage may apply; uncertain actions ask you".into()
     } else {
         format!("{} · Shift+Tab changes mode", mode.label())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_linear_selection;
+
+    #[test]
+    fn linear_permission_read_only_phrase_is_exact_and_clears_profiles() {
+        let options = [arany::RuntimeProfileOption {
+            token: "rust-example".into(),
+            label: "Rust example".into(),
+            selected: false,
+        }];
+        let selected = [true];
+
+        assert_eq!(
+            parse_linear_selection("read only", &options, &selected),
+            Some((0, vec![false]))
+        );
+        for input in ["read only 3", "read only trust", "read only none"] {
+            assert_eq!(parse_linear_selection(input, &options, &selected), None);
+        }
+        assert_eq!(
+            parse_linear_selection("trust 3", &options, &selected),
+            Some((1, vec![true]))
+        );
     }
 }

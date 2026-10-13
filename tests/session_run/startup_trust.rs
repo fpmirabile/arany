@@ -853,11 +853,8 @@ fn folder_consent_precedes_setup_and_remembers_only_the_exact_trusted_directory(
             |bytes| {
                 let text = String::from_utf8_lossy(bytes).replace("\r\n", "\n");
                 if !consent_seen
-                    && (text.contains(
-                        "Type trust or read only; empty Enter selects read only. Ctrl+C exits:\n",
-                    ) || text.contains(
-                        "Type trust or config; empty Enter uses explicit config. Ctrl+C exits:\n",
-                    ))
+                    && (text.contains(crate::process::READ_ONLY_CONSENT_PROMPT)
+                        || text.contains(crate::process::CONFIG_CONSENT_PROMPT))
                 {
                     assert!(expect_prompt, "remembered trust must skip consent");
                     assert!(
