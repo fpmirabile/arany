@@ -70,8 +70,11 @@ impl Provider for CacheCanary {
 fn selected_cache_is_disclosed_only_after_explicit_command_output() {
     use std::os::unix::fs::DirBuilderExt;
 
+    let _gate = crate::process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().unwrap();
-    for name in ["account", "home", "state"] {
+    for name in ["account-home", "home", "state"] {
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(temp.path().join(name))
@@ -83,7 +86,14 @@ fn selected_cache_is_disclosed_only_after_explicit_command_output() {
     let cache = home.join(".cargo/registry/cache");
     std::fs::create_dir_all(&cache).unwrap();
     private_file(&cache.join("canary.crate"), CACHE_CANARY.as_bytes());
-    let output = Command::new(std::env::current_exe().unwrap())
+    let test_executable = std::env::current_exe().unwrap();
+    let guard_executable = Path::new(env!("CARGO_BIN_EXE_arany"));
+    let mut helper = crate::isolation::native_account_isolated_test_command(
+        temp.path(),
+        &test_executable,
+        guard_executable,
+    );
+    helper
         .args([
             "--exact",
             "tools::native_exec::selected_cache_canary_helper",
@@ -91,21 +101,24 @@ fn selected_cache_is_disclosed_only_after_explicit_command_output() {
             "--nocapture",
         ])
         .env_clear()
-        .env("ARANY_TEST_CACHE_CANARY_ROOT", temp.path())
-        .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account"))
-        .env("HOME", &home)
-        .env("PATH", "/usr/bin:/bin")
-        .current_dir(temp.path())
-        .bounded_output_for(Duration::from_secs(90), 32 * 1024)
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "selected-cache canary: stdout={:?}; stderr={:?}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    crate::process::assert_single_test_completed(&output.stdout, "selected-cache canary");
-    assert!(output.stderr.is_empty());
+        .current_dir(temp.path());
+    let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let output = helper
+            .bounded_output_for(Duration::from_secs(90), 32 * 1024)
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "selected-cache canary: stdout={:?}; stderr={:?}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        crate::process::assert_single_test_completed(&output.stdout, "selected-cache canary");
+        assert!(output.stderr.is_empty());
+    }));
+    if let Err(error) = checked {
+        let _ = temp.keep();
+        std::panic::resume_unwind(error);
+    }
 }
 
 #[tokio::test]
@@ -114,7 +127,11 @@ async fn selected_cache_canary_helper() {
     let root = std::env::var_os("ARANY_TEST_CACHE_CANARY_ROOT").expect("private fixture root");
     let root = Path::new(&root);
     let workspace = root.join("workspace");
-    let account = root.join("account");
+    let user = nix::unistd::User::from_uid(nix::unistd::geteuid())
+        .unwrap()
+        .unwrap();
+    assert_eq!(user.dir, root.join("account-home"), "private passwd home");
+    let account = user.dir.join(".local/state/arany");
     assert_eq!(StateRoot::account_path().unwrap(), account);
     let mut permissions =
         arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
@@ -145,7 +162,7 @@ async fn selected_cache_canary_helper() {
         program: "sh".into(),
         args: vec![
             "-c".into(),
-            "/bin/cat \"$CARGO_HOME/registry/cache/canary.crate\"".into(),
+            "/usr/bin/cat \"$CARGO_HOME/registry/cache/canary.crate\"".into(),
         ],
         cwd: ".".into(),
     };
@@ -234,7 +251,7 @@ async fn selected_cache_canary_helper() {
             .tools
             .as_ref()
             .expect("first cache canary request includes Tool context");
-        let initial = format!("{:?}", &requests[0]);
+        let initial = format!("{:?}", requests[0]);
         assert!(
             !initial.contains(CACHE_CANARY),
             "cache canary was present in the initial Provider request"

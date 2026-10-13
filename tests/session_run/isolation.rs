@@ -30,6 +30,60 @@ pub fn account_isolated_command(
 }
 
 #[cfg(target_os = "linux")]
+pub fn native_account_isolated_test_command(
+    root: &std::path::Path,
+    test_executable: &std::path::Path,
+    guard_executable: &std::path::Path,
+) -> Command {
+    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+    assert!(
+        test_executable.is_absolute() && test_executable.is_file(),
+        "isolated test executable must be an absolute file"
+    );
+    assert!(
+        guard_executable.is_absolute() && guard_executable.is_file(),
+        "isolated Guard executable must be an absolute file"
+    );
+    let user = nix::unistd::User::from_uid(nix::unistd::geteuid())
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        user.uid.as_raw(),
+        0,
+        "native fixture requires an ordinary user"
+    );
+    assert!(root.is_absolute() && root.join("account-home").is_dir());
+    let mut passwd = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(root.join("passwd"))
+        .expect("exclusive native fixture passwd file");
+    writeln!(
+        passwd,
+        "arany-fixture:x:{}:{}:Arany native fixture:{}:/usr/bin/sh",
+        user.uid.as_raw(),
+        user.gid.as_raw(),
+        root.join("account-home").display()
+    )
+    .expect("private native fixture passwd entry");
+    passwd.sync_all().expect("native fixture passwd sync");
+    let mut command = Command::new("/usr/bin/sudo");
+    command
+        .args([
+            "--non-interactive", "--", "/usr/bin/unshare", "--mount", "--net",
+            "--propagation", "private", "--", "/usr/bin/sh", "-eu", "-c",
+            "root=$1; uid=$2; gid=$3; shift 3; /usr/bin/mount --bind \"$root/passwd\" /etc/passwd; /usr/bin/mount --options remount,bind,ro /etc/passwd; exec /usr/bin/timeout --kill-after=2s 80s /usr/bin/setpriv --reuid \"$uid\" --regid \"$gid\" --clear-groups --no-new-privs /usr/bin/env -i HOME=\"$root/home\" XDG_STATE_HOME=\"$root/environment-state\" XDG_DATA_HOME=\"$root/environment-data\" PATH=/usr/bin:/bin ARANY_TEST_CACHE_CANARY_ROOT=\"$root\" \"$@\"",
+            "arany-native-account-fixture",
+        ])
+        .arg(root)
+        .arg(user.uid.as_raw().to_string())
+        .arg(user.gid.as_raw().to_string())
+        .arg(test_executable);
+    command
+}
+
+#[cfg(target_os = "linux")]
 fn account_command(
     root: &std::path::Path,
     isolate_network: bool,

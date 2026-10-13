@@ -728,7 +728,7 @@ async fn native_runtime_mount_journey_helper() {
     let runtime = root.join("home/.nvm/versions/node/v22.3.0");
     std::fs::create_dir_all(runtime.join("bin")).unwrap();
     let node = runtime.join("bin/node");
-    private_file(&node, b"#!/bin/sh\nprintf runtime-profile-selected\\n\n");
+    private_file(&node, b"#!/bin/sh\nprintf 'runtime-profile-selected\\n'\n");
     std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mountpoint = runtime.join("mounted-image");
     std::fs::create_dir(&mountpoint).unwrap();
