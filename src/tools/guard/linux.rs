@@ -35,7 +35,7 @@ pub(super) fn check_available() -> Result<(), ToolError> {
 }
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
-    let mut bytes = b"arany-guard-v5:shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account".to_vec();
+    let mut bytes = b"arany-guard-v6:shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account".to_vec();
     bytes.extend_from_slice(&profile::profile_digest()?);
     Ok(digest(&bytes))
 }
@@ -435,7 +435,7 @@ pub(super) async fn hold_seed_unit(permit: &super::admission::Permit, seed: &Pat
             "usr/lib",
             "/lib",
             "--symlink",
-            "usr/lib",
+            "usr/lib64",
             "/lib64",
             "--proc",
             "/proc",
@@ -551,7 +551,7 @@ pub(super) async fn execute_inner(
             "usr/lib",
             "/lib",
             "--symlink",
-            "usr/lib",
+            "usr/lib64",
             "/lib64",
             "--proc",
             "/proc",
