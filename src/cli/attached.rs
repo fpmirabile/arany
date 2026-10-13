@@ -876,17 +876,17 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                             ));
                         } else if command == InteractiveCommand::Permissions {
                             let permissions =
-                                match arany::WorkspacePermissions::open_for_profile_selection(
-                                    &admission.workspace,
-                                ) {
-                                    Ok(permissions) => permissions,
-                                    Err(error) => {
-                                        notice = Some(Feedback::History(format!(
-                                            "Error: Could not prepare folder permission choices: {error}; existing permissions unchanged"
-                                        )));
-                                        continue;
-                                    }
-                                };
+                                arany::WorkspacePermissions::open(&admission.workspace)
+                                    .map_err(|error| error.to_string())?;
+                            let permissions = match permissions.prepare_profile_selection() {
+                                Ok(permissions) => permissions,
+                                Err(error) => {
+                                    notice = Some(Feedback::History(format!(
+                                        "Error: Could not prepare folder permission choices: {error}; existing permissions unchanged"
+                                    )));
+                                    continue;
+                                }
+                            };
                             let choice = permissions::choose(
                                 &mut terminal,
                                 permissions,
