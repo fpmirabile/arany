@@ -1216,6 +1216,18 @@ mod tests {
         Ok(())
     }
 
+    fn publish_fixture_gate(fixture: &Path, name: &str) -> std::io::Result<()> {
+        use std::io::Write;
+
+        let temporary = fixture.join(format!("{name}.next"));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(b"continue")?;
+        std::fs::rename(temporary, fixture.join(name))
+    }
+
     async fn capture_runtime_mount_topology(
         mut command: Command,
         fixture: &Path,
@@ -1258,7 +1270,7 @@ mod tests {
             setup_error.get_or_insert_with(|| "topology owner pidfd could not be bound".into());
         }
         if setup_error.is_none()
-            && let Err(error) = std::fs::write(fixture.join("init-go"), b"continue")
+            && let Err(error) = publish_fixture_gate(fixture, "init-go")
         {
             setup_error = Some(format!("release topology init gate: {error}"));
         }
@@ -1318,9 +1330,7 @@ mod tests {
                 coordination_error = Some(format!("invalid {phase} worker identity"));
                 break;
             }
-            if let Err(error) =
-                std::fs::write(fixture.join(format!("worker-{phase}-go")), b"continue")
-            {
+            if let Err(error) = publish_fixture_gate(fixture, &format!("worker-{phase}-go")) {
                 coordination_error = Some(format!("release {phase} worker gate: {error}"));
                 break;
             }

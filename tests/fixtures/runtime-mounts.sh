@@ -6,8 +6,9 @@ setup_alias() {
   /usr/bin/mount --make-shared "$alias"
 }
 report_identity() {
-  local line host_pid namespace_pid
+  local line host_pid namespace_pid temporary
   local -a ids
+  temporary="$1.tmp.$BASHPID"
   while IFS= read -r line; do
     case "$line" in
       NSpid:*)
@@ -16,7 +17,8 @@ report_identity() {
         [ "${#ids[@]}" -ge 2 ]
         host_pid=${ids[0]}
         namespace_pid=${ids[${#ids[@]}-1]}
-        printf '%s %s\n' "$host_pid" "$namespace_pid" > "$1"
+        printf '%s %s\n' "$host_pid" "$namespace_pid" > "$temporary"
+        /usr/bin/mv -f -- "$temporary" "$1"
         return
         ;;
     esac
