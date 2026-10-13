@@ -1142,7 +1142,7 @@ mod tests {
                     0,
                     "production-prefix fixture UID must remain non-root"
                 );
-                let grant_path = PathBuf::from(
+                let grant_path = std::path::PathBuf::from(
                     std::env::var_os("ARANY_TEST_RUNTIME_MOUNT_GRANT")
                         .expect("fixture grant path"),
                 );
