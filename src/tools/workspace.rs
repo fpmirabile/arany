@@ -222,9 +222,12 @@ impl WorkspacePermissions {
     }
 
     pub fn open_for_profile_selection(path: &Path) -> Result<Self, ToolError> {
-        let mut permissions = Self::open(path)?;
-        permissions.candidates = discover_home_candidates()?;
-        Ok(permissions)
+        Self::open(path)?.prepare_profile_selection()
+    }
+
+    pub fn prepare_profile_selection(mut self) -> Result<Self, ToolError> {
+        self.candidates = discover_home_candidates()?;
+        Ok(self)
     }
 
     fn load(path: &Path, root: &StateRoot) -> Result<Self, ToolError> {

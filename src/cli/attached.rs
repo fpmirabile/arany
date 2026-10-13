@@ -875,27 +875,25 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 .await?,
                             ));
                         } else if command == InteractiveCommand::Permissions {
+                            let permissions =
+                                match arany::WorkspacePermissions::open_for_profile_selection(
+                                    &admission.workspace,
+                                ) {
+                                    Ok(permissions) => permissions,
+                                    Err(error) => {
+                                        notice = Some(Feedback::History(format!(
+                                            "Error: Could not prepare folder permission choices: {error}; existing permissions unchanged"
+                                        )));
+                                        continue;
+                                    }
+                                };
                             let choice = permissions::choose(
                                 &mut terminal,
-                                &admission.workspace,
+                                permissions,
                                 &mut composer,
                                 false,
                             )
-                            .await;
-                            let choice = match choice {
-                                Ok(choice) => choice,
-                                Err(setup::SetupError::Recoverable(message))
-                                    if message.starts_with(
-                                        "Could not prepare folder permission choices:",
-                                    ) =>
-                                {
-                                    notice = Some(Feedback::History(format!(
-                                        "Error: {message}; existing permissions unchanged"
-                                    )));
-                                    continue;
-                                }
-                                Err(error) => return Err(error.into()),
-                            };
+                            .await?;
                             let access = match choice {
                                 permissions::PermissionChoice::Selected(access) => access,
                                 permissions::PermissionChoice::Closed(_) => {

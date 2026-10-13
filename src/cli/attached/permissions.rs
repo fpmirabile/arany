@@ -84,22 +84,21 @@ pub(super) async fn admit(
         composer.set_approval_mode(native_protection_supported().then_some(access.mode()));
         Ok(PermissionChoice::Selected(access))
     } else {
-        choose(terminal, workspace, composer, configured).await
+        let access = access.prepare_profile_selection().map_err(|error| {
+            SetupError::Recoverable(format!(
+                "Could not prepare folder permission choices: {error}"
+            ))
+        })?;
+        choose(terminal, access, composer, configured).await
     }
 }
 
 pub(super) async fn choose(
     terminal: &mut AttachedTerminal,
-    workspace: &Path,
+    mut permissions: WorkspacePermissions,
     composer: &mut Composer,
     configured: bool,
 ) -> Result<PermissionChoice, SetupError> {
-    let mut permissions =
-        WorkspacePermissions::open_for_profile_selection(workspace).map_err(|error| {
-            SetupError::Recoverable(format!(
-                "Could not prepare folder permission choices: {error}"
-            ))
-        })?;
     let mut selected = 0usize;
     let mut page = 0usize;
     let id = uuid::Uuid::now_v7();
