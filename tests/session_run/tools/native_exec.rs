@@ -248,7 +248,7 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                     let command = observations[0]["output"].clone();
                     assert_eq!(
                         command,
-                        json!({"exit_code":0,"stdout":"native command passed","stderr":"","workspace_changes":"discarded"})
+                        json!({"exit_code":0,"stdout":"native command passed","stderr":"","changeset":{"files":[]}})
                     );
                 }
                 assert_eq!(context["tools"]["catalog"]["write"], true);

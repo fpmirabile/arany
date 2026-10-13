@@ -60,6 +60,11 @@ Repeat with `--release` for the optimized profile. To run one ignored gate, use 
 - Account tests using `ARANY_TEST_ACCOUNT_ROOT` are debug-only: optimized Arany intentionally rejects that override. Isolate environment-selected Session/preference state too with explicit absolute synthetic `HOME`, `XDG_STATE_HOME` and `XDG_DATA_HOME` beneath the fixture account root's parent; [Store admission](../store.md) rejects an ambient default root when that override is set. Clearing those variables can otherwise fall back to the real passwd home for Session/preference state. Verify both roots stay fixture-owned before state access. Test optimized account behavior with a private passwd home and no-network mount namespace, and first prove the no-leaf control reaches the intended boundary; otherwise an early account-root rejection can make a failure test pass without exercising its fixture.
 - To prove the no-account composer without a live keyring lookup, use a private default user StateRoot and an admitted test-owned unavailable local credential-bus address. This can prove local rejection and setup cancellation, not saved-account write/reuse or native keyring behavior.
 - Every attached PTY now reaches OS-user folder trust before account/Session work, including with explicit Provider/`--tools` flags. Isolate the account and environment-selected state roots and explicitly answer or dismiss the initial consent; a private Session directory and Provider flag do not isolate trust metadata. Linux fixtures use the private passwd-home command owner, retaining host loopback only for synthetic peers. Tests outside the consent owner use its bounded response pump; the consent owner keeps manual input. Continue selecting an explicit Provider/model with a synthetic cleared-environment credential when setup is not under test, since bare account selection can reach the fixed OS credential slot.
+- Command snapshot-refusal fixtures must use admitted executable identities and
+  assert the actual capture disposition. A denied system executable or missing
+  interpreter runtime proves no snapshot rejection. macOS OS hard links can
+  exclude ordinary utilities from the single-link catalogue; use a pinned
+  synthetic actor when the boundary needs guaranteed payload execution.
 
 ## Terminal process fixtures
 

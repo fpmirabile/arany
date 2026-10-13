@@ -1,4 +1,5 @@
 use crate::session::{AgentRunId, RunId};
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -19,6 +20,102 @@ pub(crate) const MAX_RUNTIME_BYTES: usize = 96 * 1024 * 1024;
 pub(crate) const SCRATCH_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const MEMORY_BYTES: u64 = 512 * 1024 * 1024;
 pub(crate) const MAX_PROCESSES_OR_THREADS: u32 = 64;
+pub(crate) const MAX_CHANGESET_FILES: usize = 64;
+pub(crate) const MAX_CHANGESET_BYTES: usize = 8 * 1024;
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileVersion {
+    pub sha256: String,
+    pub content: String,
+    pub executable: bool,
+}
+
+impl FileVersion {
+    pub(crate) fn from_bytes(bytes: &[u8], executable: bool) -> Self {
+        Self {
+            sha256: hex_digest(bytes),
+            content: base64::engine::general_purpose::STANDARD.encode(bytes),
+            executable,
+        }
+    }
+
+    pub(crate) fn bytes(&self) -> Option<Vec<u8>> {
+        if !valid_digest(&self.sha256) || self.content.len() > MAX_CHANGESET_BYTES.div_ceil(3) * 4 {
+            return None;
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&self.content)
+            .ok()?;
+        (bytes.len() <= MAX_CHANGESET_BYTES
+            && hex_digest(&bytes) == self.sha256
+            && base64::engine::general_purpose::STANDARD.encode(&bytes) == self.content)
+            .then_some(bytes)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileChange {
+    pub path: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub before: Option<FileVersion>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub after: Option<FileVersion>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandChangeset {
+    pub files: Vec<FileChange>,
+}
+
+impl CommandChangeset {
+    pub(crate) fn valid(&self) -> bool {
+        if self.files.len() > MAX_CHANGESET_FILES {
+            return false;
+        }
+        let mut bytes = 0usize;
+        for (index, change) in self.files.iter().enumerate() {
+            if !valid_relative(&change.path, false)
+                || change.path.split('/').count() > 16
+                || change.before == change.after
+                || self.files[..index].iter().any(|other| {
+                    other.path >= change.path || Path::new(&change.path).starts_with(&other.path)
+                })
+            {
+                return false;
+            }
+            for version in change.before.iter().chain(change.after.iter()) {
+                let Some(content) = version.bytes() else {
+                    return false;
+                };
+                bytes = bytes.saturating_add(content.len());
+                if bytes > MAX_CHANGESET_BYTES {
+                    return false;
+                }
+            }
+        }
+        serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_ARGUMENT_BYTES - 256)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandResult {
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub changeset: CommandChangeset,
+}
+
+impl CommandResult {
+    pub(crate) fn valid(&self) -> bool {
+        self.changeset.valid()
+            && serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_RESULT_BYTES)
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
@@ -54,6 +151,10 @@ pub enum ToolCall {
         program: String,
         args: Vec<String>,
         cwd: String,
+    },
+    ApplyChangeset {
+        source_intent_digest: [u8; 32],
+        changeset: CommandChangeset,
     },
     Skill {
         name: String,
@@ -136,6 +237,12 @@ impl ToolCall {
                         .iter()
                         .all(|arg| arg.len() <= 4096 && !arg.contains('\0'))
             }
+            Self::ApplyChangeset {
+                source_intent_digest,
+                changeset,
+            } => {
+                *source_intent_digest != [0; 32] && !changeset.files.is_empty() && changeset.valid()
+            }
             Self::Skill { name, resource } => {
                 valid_name(name)
                     && resource
@@ -162,7 +269,10 @@ impl ToolCall {
     pub(crate) fn mutates(&self) -> bool {
         matches!(
             self,
-            Self::Write { .. } | Self::Edit { .. } | Self::Mkdir { .. }
+            Self::Write { .. }
+                | Self::Edit { .. }
+                | Self::Mkdir { .. }
+                | Self::ApplyChangeset { .. }
         )
     }
 
@@ -175,6 +285,7 @@ impl ToolCall {
             Self::Write { .. } => "write",
             Self::Edit { .. } => "edit",
             Self::Command { .. } => "command",
+            Self::ApplyChangeset { .. } => "apply_changeset",
             Self::Skill { .. } => "skill",
             Self::McpList { .. } => "mcp_list",
             Self::McpCall { .. } => "mcp_call",
@@ -428,7 +539,11 @@ impl ToolContext {
                         _ => "not_confirmed",
                     }
                 };
-                json!({"call":observation.intent.call,"disposition":observation.disposition,"output":output,"workspace_effect":effect})
+                let mut call = json!(observation.intent.call);
+                if let ToolCall::ApplyChangeset { .. } = observation.intent.call {
+                    call.as_object_mut().expect("typed call").remove("source_intent_digest");
+                }
+                json!({"call":call,"disposition":observation.disposition,"output":output,"workspace_effect":effect})
             })
             .collect();
         json!({"catalog":catalog,"observations":observations})

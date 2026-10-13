@@ -64,6 +64,7 @@ pub struct RunView {
 pub struct ToolView {
     pub intent: crate::tools::EffectIntent,
     pub observation: Option<crate::tools::ToolObservation>,
+    pub review_call_index: Option<u8>,
 }
 
 fn all_children_finished(run: &RunView) -> bool {
@@ -75,18 +76,91 @@ fn all_children_finished(run: &RunView) -> bool {
             .all(|child| child.status == AgentStatus::Finished)
 }
 
+fn model_tool_count(run: &RunView) -> usize {
+    run.tools
+        .iter()
+        .filter(|tool| {
+            !matches!(
+                tool.intent.call,
+                crate::tools::ToolCall::ApplyChangeset { .. }
+            )
+        })
+        .count()
+}
+
+fn observed_command_changeset(
+    observation: &crate::tools::ToolObservation,
+) -> Option<crate::tools::CommandChangeset> {
+    if !matches!(
+        observation.intent.call,
+        crate::tools::ToolCall::Command { .. }
+    ) || !observation.attested_for(&observation.intent)
+        || !matches!(
+            observation.disposition,
+            crate::tools::ToolDisposition::Succeeded | crate::tools::ToolDisposition::Failed
+        )
+    {
+        return None;
+    }
+    serde_json::from_str::<crate::tools::types::CommandResult>(&observation.output)
+        .ok()
+        .filter(|result| result.valid())
+        .map(|result| result.changeset)
+}
+
+fn valid_integration_source(run: &RunView, intent: &crate::tools::EffectIntent) -> bool {
+    let crate::tools::ToolCall::ApplyChangeset {
+        source_intent_digest,
+        changeset,
+    } = &intent.call
+    else {
+        return false;
+    };
+    let Some(primary) = run.primary() else {
+        return false;
+    };
+    if primary.provider_calls.last().is_none_or(|call| {
+        call.disposition != ProviderCallDisposition::ToolRequested
+            && call.phase != AgentPhase::ToolReview
+    }) || model_tool_count(run)
+        != primary
+            .provider_calls
+            .iter()
+            .filter(|call| call.disposition == ProviderCallDisposition::ToolRequested)
+            .count()
+    {
+        return false;
+    }
+    run.tools
+        .last()
+        .and_then(|tool| tool.observation.as_ref())
+        .is_some_and(|observation| {
+            observation.intent.digest() == *source_intent_digest
+                && observed_command_changeset(observation)
+                    .is_some_and(|source| source == *changeset)
+        })
+}
+
 fn is_tool_continuation(run: &RunView, agent: &AgentView, record: &ProviderCallRecord) -> bool {
     agent.role == AgentRole::Primary
         && agent.provider_calls.last().is_some_and(|call| {
             call.disposition == ProviderCallDisposition::ToolRequested && call.phase == record.phase
-                || call.phase == AgentPhase::ToolReview && record.phase == AgentPhase::RootPlan
+                || call.phase == AgentPhase::ToolReview
+                    && agent
+                        .provider_calls
+                        .iter()
+                        .rev()
+                        .find(|call| call.disposition == ProviderCallDisposition::ToolRequested)
+                        .is_some_and(|call| call.phase == record.phase)
         })
         && run.tools.last().is_some_and(|tool| {
-            tool.observation
-                .as_ref()
-                .is_some_and(|observation| !observation.stops_run())
+            tool.observation.as_ref().is_some_and(|observation| {
+                !observation.stops_run()
+                    && observed_command_changeset(observation)
+                        .is_none_or(|changeset| changeset.files.is_empty())
+            })
         })
-        && run.tools.len()
+        && model_tool_count(run)
             == agent
                 .provider_calls
                 .iter()
@@ -107,14 +181,20 @@ fn is_delegated_synthesis(run: &RunView, agent: &AgentView, record: &ProviderCal
 fn is_tool_review(run: &RunView, agent: &AgentView, record: &ProviderCallRecord) -> bool {
     agent.role == AgentRole::Primary
         && record.phase == AgentPhase::ToolReview
-        && agent
-            .provider_calls
-            .last()
-            .is_some_and(|call| call.disposition == ProviderCallDisposition::ToolRequested)
+        && agent.provider_calls.last().is_some_and(|call| {
+            call.disposition == ProviderCallDisposition::ToolRequested
+                || call.phase == AgentPhase::ToolReview
+                    && run.tools.last().is_some_and(|tool| {
+                        matches!(
+                            tool.intent.call,
+                            crate::tools::ToolCall::ApplyChangeset { .. }
+                        )
+                    })
+        })
         && run
             .tools
             .last()
-            .is_some_and(|tool| tool.observation.is_none())
+            .is_some_and(|tool| tool.observation.is_none() && tool.review_call_index.is_none())
 }
 
 impl RunView {
@@ -489,6 +569,12 @@ impl SessionView {
                 {
                     return Err(ReplayError::InvalidTransition);
                 }
+                if record.phase == AgentPhase::ToolReview {
+                    run.tools
+                        .last_mut()
+                        .ok_or(ReplayError::InvalidTransition)?
+                        .review_call_index = Some(run.agents[index].provider_calls.len() as u8);
+                }
                 run.agents[index].provider_calls.push(record.clone());
             }
             Event::AssistantDisplayRecorded {
@@ -569,22 +655,28 @@ impl SessionView {
                 let run = active_run(current, *run_id)?;
                 let config = run.config.as_ref().ok_or(ReplayError::InvalidTransition)?;
                 let primary = run.primary().ok_or(ReplayError::InvalidTransition)?;
+                let integration =
+                    matches!(intent.call, crate::tools::ToolCall::ApplyChangeset { .. });
+                let valid_origin = if integration {
+                    valid_integration_source(run, intent)
+                } else {
+                    primary.provider_calls.last().is_some_and(|call| {
+                        call.disposition == ProviderCallDisposition::ToolRequested
+                    }) && primary
+                        .provider_calls
+                        .iter()
+                        .filter(|call| call.disposition == ProviderCallDisposition::ToolRequested)
+                        .count()
+                        == model_tool_count(run) + 1
+                };
                 if config
                     .tool_policy
                     .as_ref()
                     .is_none_or(|policy| policy.config_digest != intent.policy_digest)
                     || primary.id != *agent_run_id
                     || primary.status != AgentStatus::Active
-                    || primary.provider_calls.last().is_none_or(|call| {
-                        call.disposition != ProviderCallDisposition::ToolRequested
-                    })
+                    || !valid_origin
                     || run.tools.len() >= crate::tools::MAX_TOOL_CALLS
-                    || primary
-                        .provider_calls
-                        .iter()
-                        .filter(|call| call.disposition == ProviderCallDisposition::ToolRequested)
-                        .count()
-                        != run.tools.len() + 1
                     || run
                         .tools
                         .iter()
@@ -597,6 +689,7 @@ impl SessionView {
                 run.tools.push(ToolView {
                     intent: intent.clone(),
                     observation: None,
+                    review_call_index: None,
                 });
             }
             Event::ToolFinished {

@@ -443,6 +443,7 @@ pub(super) fn helper_main() -> ExitCode {
                 | ToolCall::Write { .. }
                 | ToolCall::Edit { .. }
                 | ToolCall::Mkdir { .. }
+                | ToolCall::ApplyChangeset { .. }
         ) || cfg!(target_os = "macos") && matches!(task.intent.call, ToolCall::Skill { .. }))
             && super::fs::identity(&super::fs::open_directory(workspace)?)?
                 != (task.intent.workspace_device, task.intent.workspace_inode)
@@ -500,13 +501,47 @@ pub(super) fn helper_main() -> ExitCode {
         let result = runtime.block_on(async {
             match &task.intent.call {
                 ToolCall::Command { program, args, cwd } => {
-                    let definition = task.config.commands.iter().find(|value| &value.name == program).ok_or(ToolError::Configuration)?;
+                    let definition = task
+                        .config
+                        .commands
+                        .iter()
+                        .find(|value| &value.name == program)
+                        .ok_or(ToolError::Configuration)?;
+                    #[cfg(target_os = "linux")]
+                    let before = super::fs::command_snapshot(workspace)?;
                     let mut command = payload(definition, args, cwd, &root)?;
-                    let (status, out, err) = capture(command.spawn().map_err(|_| ToolError::Operation)?, (task.intent.limits.result_bytes as usize / 2).saturating_sub(128), PAYLOAD_DEADLINE).await?;
-                    Ok(serde_json::json!({"exit_code":status.code(),"stdout":String::from_utf8(out).map_err(|_| ToolError::Operation)?,"stderr":String::from_utf8(err).map_err(|_| ToolError::Operation)?,"workspace_changes":"discarded"}).to_string())
+                    let (status, out, err) = capture(
+                        command.spawn().map_err(|_| ToolError::Operation)?,
+                        (task.intent.limits.result_bytes as usize / 2).saturating_sub(128),
+                        PAYLOAD_DEADLINE,
+                    )
+                    .await?;
+                    #[cfg(target_os = "linux")]
+                    let changeset = {
+                        linux::stop_command_descendants(&task.parent_namespaces).await?;
+                        super::fs::command_changeset(workspace, &before)?
+                    };
+                    #[cfg(not(target_os = "linux"))]
+                    let changeset = CommandChangeset::default();
+                    let output = CommandResult {
+                        exit_code: status.code(),
+                        stdout: String::from_utf8(out).map_err(|_| ToolError::Operation)?,
+                        stderr: String::from_utf8(err).map_err(|_| ToolError::Operation)?,
+                        changeset,
+                    };
+                    if !output.valid() {
+                        return Err(ToolError::Limit);
+                    }
+                    serde_json::to_string(&output).map_err(|_| ToolError::Operation)
                 }
-                ToolCall::Skill { name, resource } => skill_text(name, resource.as_deref(), skill.ok_or(ToolError::Configuration)?),
-                ToolCall::McpList { .. } | ToolCall::McpCall { .. } => super::mcp::execute(&task.intent.call, &task.config, &root).await,
+                ToolCall::Skill { name, resource } => skill_text(
+                    name,
+                    resource.as_deref(),
+                    skill.ok_or(ToolError::Configuration)?,
+                ),
+                ToolCall::McpList { .. } | ToolCall::McpCall { .. } => {
+                    super::mcp::execute(&task.intent.call, &task.config, &root).await
+                }
                 call => super::fs::native(workspace, call, &task.config),
             }
         });

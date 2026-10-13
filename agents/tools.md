@@ -7,6 +7,11 @@ Load for model-driven file operations, command execution, runtime Skills, local 
 - One private router normalizes each typed proposal, reserves aggregate capacity, evaluates restrict-only Policy, journals the digest-bound one-use intent, invokes the separate Guard and journals its bounded observation before another model call.
 - The primary alone may mutate/invoke commands/MCP in this base; children retain read-only reasoning. Provider encoding contains semantics, not SDK/process objects.
 - Mutation requires no-follow pinned handles and an expected digest/create precondition. Publish a fresh regular inode atomically; do not truncate an admitted existing file or integrate unvalidated subprocess-created paths.
+- Command output and publication are separate facts. Only Engine generates
+  internal changeset intents from the immediately preceding attested command
+  receipt; model proposals reject even if structurally valid. Reserve command
+  and integration capacity before dispatch. Validate every batch precondition
+  before publishing, and retain Uncertain after any partial publication.
 - Successful mutation receipts must fit the minimum admitted result budget; bind the resource through the intent rather than repeating an arbitrarily long path after applying the effect. A lost/oversized receipt must not turn an applied change into an ordinary retryable failure.
 - Guard failure receipts must also fit the minimum result budget and contain only compiled stage labels. Preserve post-dispatch uncertainty without turning a predictable diagnostic overflow into an unpersistable result.
 - Commands/MCP use an isolated selected-file snapshot, no network or host credentials/state, declared scratch/capture/time/memory/task guarantees and an attested native enforcer. The [Tool spec](../docs/specs/tools.md#limits-and-failure-behavior) distinguishes Linux kernel quotas from accepted macOS supervised thresholds. Bind explicit, mandatory resource semantics in normalized intents and receipts; missing profile fields reject. A launcher PID/process group is not complete descendant containment. Unsupported native capability rejects; no unsandboxed retry.

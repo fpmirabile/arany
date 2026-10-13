@@ -4,7 +4,8 @@ use super::{
 };
 use crate::engine::RunCancellation;
 use crate::tools::types::{
-    EffectIntent, MAX_PROCESSES_OR_THREADS, MEMORY_BYTES, ToolCall, ToolObservation, digest,
+    EffectIntent, MAX_CHANGESET_BYTES, MAX_CHANGESET_FILES, MAX_PROCESSES_OR_THREADS, MEMORY_BYTES,
+    ToolCall, ToolObservation, digest,
 };
 use crate::tools::{ToolError, ToolRuntime};
 use std::io::{Read, Write};
@@ -35,9 +36,64 @@ pub(super) fn check_available() -> Result<(), ToolError> {
 }
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
-    let mut bytes = b"arany-guard-v6:shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account".to_vec();
+    let mut bytes = b"arany-guard-v7:shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account".to_vec();
     bytes.extend_from_slice(&profile::profile_digest()?);
+    bytes.extend_from_slice(&(MAX_CHANGESET_FILES as u64).to_le_bytes());
+    bytes.extend_from_slice(&(MAX_CHANGESET_BYTES as u64).to_le_bytes());
     Ok(digest(&bytes))
+}
+
+pub(super) async fn stop_command_descendants(
+    parent: &profile::Namespaces,
+) -> Result<(), ToolError> {
+    use rustix::io::Errno;
+    use rustix::process::{Pid, Signal, kill_process_group};
+
+    let own = std::process::id();
+    if !matches!(own, 1 | 2) || !profile::Namespaces::read()?.isolated_from(parent) {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        // Pid::INIT selects kill(-1), excluding this helper and the trusted namespace init.
+        for signal in [Signal::STOP, Signal::KILL] {
+            match kill_process_group(Pid::INIT, signal) {
+                Ok(()) | Err(Errno::SRCH) => {}
+                Err(_) => return Err(ToolError::ProtectionUnavailable),
+            }
+        }
+        let mut count = 0usize;
+        let mut live = false;
+        for (index, entry) in std::fs::read_dir("/proc")
+            .map_err(|_| ToolError::ProtectionUnavailable)?
+            .enumerate()
+        {
+            if index >= 512 {
+                return Err(ToolError::Limit);
+            }
+            let entry = entry.map_err(|_| ToolError::ProtectionUnavailable)?;
+            let name = entry.file_name();
+            let name = name.to_str().ok_or(ToolError::ProtectionUnavailable)?;
+            if !name.bytes().all(|byte| byte.is_ascii_digit()) {
+                continue;
+            }
+            let pid = name
+                .parse::<u32>()
+                .map_err(|_| ToolError::ProtectionUnavailable)?;
+            count += 1;
+            if count > MAX_PROCESSES_OR_THREADS as usize + 2 {
+                return Err(ToolError::Limit);
+            }
+            live |= pid != 1 && pid != own;
+        }
+        if !live {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 /// Drops capabilities, installs the syscall profile and verifies the result before Ready.
@@ -580,6 +636,7 @@ pub(super) async fn execute_inner(
             | ToolCall::Write { .. }
             | ToolCall::Edit { .. }
             | ToolCall::Mkdir { .. }
+            | ToolCall::ApplyChangeset { .. }
     );
     if native {
         command

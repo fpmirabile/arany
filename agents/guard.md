@@ -10,6 +10,15 @@ limits and compatibility.
   adapter admits typed files and pinned Skill data through a non-spawning
   profile. Commands/MCP use the private snapshot and ordinary-launch profile;
   keep those authorities distinct and reject unavailable enforcement.
+- Capture command changesets only after positive payload-descendant absence.
+  Linux retains its attested private PID namespace init/helper while stopping
+  and killing every other namespace process; final owned-cgroup cleanup still
+  gates completion. macOS retains the admitted snapshot baseline and checked
+  storage handles through coalition cleanup, scans before detaching images,
+  and never accepts a worker-local scan while descendants can still write.
+  Both scans reject whole hostile/over-limit snapshots without reading excluded
+  content. Engine owns command-receipt linkage; Guard independently validates
+  the integration's whole batch and file preconditions.
 - Close inherited descriptors at the single-threaded worker entry before Rust
   opens persistent handles. Install shared descriptor/core limits at bootstrap;
   only the non-spawning file/Skill worker resets and unblocks SIGXCPU and installs

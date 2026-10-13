@@ -22,8 +22,12 @@ mod tools;
 #[path = "session_run/tools_macos.rs"]
 mod tools;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "session_run/tools/replay.rs"]
+mod tool_replay;
+
 /// Hex SHA-256, as Tool configuration pins resources.
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn hash(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes)
