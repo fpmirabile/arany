@@ -12,6 +12,7 @@ const CACHE_CANARY: &str = "EXPLICIT_CACHE_OUTPUT_CANARY";
 
 struct CacheCanary {
     requests: std::sync::Arc<std::sync::Mutex<Vec<ProviderRequest>>>,
+    call: ToolCall,
 }
 
 impl Provider for CacheCanary {
@@ -38,14 +39,7 @@ impl Provider for CacheCanary {
             return Err(ProviderError::InvalidOutcome);
         }
         let outcome = if step == 0 {
-            ProviderOutcome::Tool(ToolCall::Command {
-                program: "sh".into(),
-                args: vec![
-                    "-c".into(),
-                    "/bin/cat \"$CARGO_HOME/registry/cache/canary.crate\"".into(),
-                ],
-                cwd: ".".into(),
-            })
+            ProviderOutcome::Tool(self.call.clone())
         } else {
             ProviderOutcome::Finish(Finish {
                 summary: "Selected cache output was explicit".into(),
@@ -145,15 +139,24 @@ async fn selected_cache_canary_helper() {
     );
 
     let state = StateRoot::admit(&root.join("state")).unwrap();
+    let call = ToolCall::Command {
+        program: "sh".into(),
+        args: vec![
+            "-c".into(),
+            "/bin/cat \"$CARGO_HOME/registry/cache/canary.crate\"".into(),
+        ],
+        cwd: ".".into(),
+    };
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut engine = Engine::open(
         state,
         CacheCanary {
             requests: requests.clone(),
+            call: call.clone(),
         },
     )
     .unwrap();
-    let (approvals, _) = arany::ToolApprovals::new(arany::ApprovalMode::AutoEdits);
+    let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
     engine
         .enable_trusted_workspace(
             permissions,
@@ -162,18 +165,29 @@ async fn selected_cache_canary_helper() {
             approvals,
         )
         .unwrap();
-    let outcome = engine
-        .run(RunRequest {
-            session_id: None,
-            title: Some("Selected cache canary".into()),
-            objective: "Read the selected cache canary with the shell Tool".into(),
-            images: Vec::new(),
-            workspace: workspace.clone(),
-            include_paths: Vec::new(),
-            policy: CollaborationPolicy::Single,
-        })
-        .await
-        .unwrap();
+    let run = engine.run(RunRequest {
+        session_id: None,
+        title: Some("Selected cache canary".into()),
+        objective: "Read the selected cache canary with the shell Tool".into(),
+        images: Vec::new(),
+        workspace: workspace.clone(),
+        include_paths: Vec::new(),
+        policy: CollaborationPolicy::Single,
+    });
+    let approve = async {
+        let approval = inbox
+            .next()
+            .await
+            .expect("one approval for the selected-cache command");
+        assert_eq!(approval.intent.call, call);
+        approval.decide(true);
+    };
+    let (outcome, ()) = tokio::time::timeout(Duration::from_secs(90), async {
+        tokio::join!(run, approve)
+    })
+    .await
+    .expect("bounded selected-cache approval journey");
+    let outcome = outcome.unwrap();
     engine.close().await.unwrap();
     assert_eq!(
         outcome.run.status,
