@@ -220,10 +220,7 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
             std::fs::write(&runtime_binary, b"#!/bin/sh\nprintf profile-selected\n").unwrap();
             std::fs::set_permissions(&runtime_binary, std::fs::Permissions::from_mode(0o700))
                 .unwrap();
-            let runtime_token = format!(
-                "node-{}",
-                &hash(runtime_path.to_str().unwrap().as_bytes())[..12]
-            );
+            let runtime_number = "3";
             let skill = workspace.join(".agents/skills/review");
             std::fs::create_dir_all(&skill).unwrap();
             std::fs::write(skill.join("SKILL.md"), b"---\nname: review\ndescription: Synthetic review\n---\nReview the current task.\n").unwrap();
@@ -390,12 +387,10 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                 let from = transcript.len();
                 if linear {
                     input
-                        .write_all(format!("trust {runtime_token}\r").as_bytes())
+                        .write_all(format!("trust {runtime_number}\r").as_bytes())
                         .unwrap();
                 } else {
-                    input
-                        .write_all(format!("{runtime_token}\x1b[B\r").as_bytes())
-                        .unwrap();
+                    input.write_all(b"\t\r\t\r").unwrap();
                 }
                 wait(
                     &mut output,
@@ -436,6 +431,70 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                     &mut answered,
                     from,
                     b"Do you trust this folder?",
+                );
+                let record = temp
+                    .path()
+                    .join("account-home/.local/state/arany/workspace-permissions.json");
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+                assert_eq!(
+                    value["workspaces"][0]["runtime_grants"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    1
+                );
+                let from = transcript.len();
+                if linear {
+                    input.write_all(b"trust\r").unwrap();
+                } else {
+                    input.write_all(b"\t\t\x1b[B\r").unwrap();
+                }
+                wait(
+                    &mut output,
+                    &mut input,
+                    &mut transcript,
+                    &mut answered,
+                    from,
+                    if linear { b"Input:" } else { b"Ask Arany" },
+                );
+                let saved = std::fs::read(&record).unwrap();
+                value = serde_json::from_slice(&saved).unwrap();
+                assert_eq!(
+                    value["workspaces"][0]["runtime_grants"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    1
+                );
+                assert_eq!(value["workspaces"][0]["runtime_grants"][0]["kind"], "node");
+                assert_eq!(
+                    value["workspaces"][0]["runtime_grants"][0]["version"],
+                    "v22.3.0"
+                );
+                let from = transcript.len();
+                input.write_all(b"/permissions\r").unwrap();
+                wait(
+                    &mut output,
+                    &mut input,
+                    &mut transcript,
+                    &mut answered,
+                    from,
+                    b"Do you trust this folder?",
+                );
+                let from = transcript.len();
+                if linear {
+                    input.write_all(b"trust none\r").unwrap();
+                } else {
+                    input.write_all(b"\t\r\t\r").unwrap();
+                }
+                wait(
+                    &mut output,
+                    &mut input,
+                    &mut transcript,
+                    &mut answered,
+                    from,
+                    if linear { b"Input:" } else { b"Ask Arany" },
                 );
             }
             let record = temp
@@ -490,12 +549,7 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                         .as_array()
                         .unwrap()
                         .len(),
-                    1
-                );
-                assert_eq!(value["workspaces"][0]["runtime_grants"][0]["kind"], "node");
-                assert_eq!(
-                    value["workspaces"][0]["runtime_grants"][0]["version"],
-                    "v22.3.0"
+                    0
                 );
                 assert_eq!(
                     std::fs::metadata(record).unwrap().permissions().mode() & 0o777,

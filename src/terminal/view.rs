@@ -20,15 +20,32 @@ use unicode_width::UnicodeWidthStr;
 
 const MAX_VISIBLE_DRAFT_ROWS: usize = 4;
 
+pub(super) struct PermissionFrameState<'a> {
+    pub choices: (&'a str, &'a str),
+    pub page: usize,
+    pub allow: bool,
+    pub profile_start: Option<usize>,
+    pub profile_count: usize,
+    pub focused_profile: Option<usize>,
+    pub footer: &'a str,
+    pub palette: Palette,
+}
+
 pub(super) fn draw_permission_frame(
     frame: &mut Frame,
     lines: &[String],
-    choices: (&str, &str),
-    page: usize,
-    allow: bool,
-    footer: &str,
-    palette: Palette,
+    state: PermissionFrameState<'_>,
 ) -> bool {
+    let PermissionFrameState {
+        choices,
+        page,
+        allow,
+        profile_start,
+        profile_count,
+        focused_profile,
+        footer,
+        palette,
+    } = state;
     let full = frame.area();
     let width = full
         .width
@@ -38,7 +55,12 @@ pub(super) fn draw_permission_frame(
         return true;
     }
     let mut rows = Vec::new();
+    let mut profile_rows = Vec::new();
     for (index, line) in lines.iter().enumerate() {
+        let row_start = rows.len();
+        let focused = profile_start
+            .zip(focused_profile)
+            .is_some_and(|(start, selected)| index == start + selected);
         let mut current = String::new();
         let mut cells = 0;
         for grapheme in line.graphemes(true) {
@@ -46,7 +68,7 @@ pub(super) fn draw_permission_frame(
             if cells + count > usize::from(width) && !current.is_empty() {
                 rows.push(Line::styled(
                     std::mem::take(&mut current),
-                    if index == 0 {
+                    if index == 0 || focused {
                         palette.selection()
                     } else {
                         Style::default()
@@ -59,12 +81,17 @@ pub(super) fn draw_permission_frame(
         }
         rows.push(Line::styled(
             current,
-            if index == 0 {
+            if index == 0 || focused {
                 palette.selection()
             } else {
                 Style::default()
             },
         ));
+        if let Some(start) = profile_start
+            && (start..start + profile_count).contains(&index)
+        {
+            profile_rows.push((index - start, row_start));
+        }
     }
     let height = full
         .height
@@ -78,7 +105,10 @@ pub(super) fn draw_permission_frame(
     );
     let body_height = usize::from(height - 5);
     let pages = rows.len().div_ceil(body_height).max(1);
-    let page = page.min(pages - 1);
+    let page = profile_rows
+        .iter()
+        .find(|(profile, _)| Some(*profile) == focused_profile)
+        .map_or(page.min(pages - 1), |(_, row)| row / body_height);
     let more = page + 1 < pages;
     let start = page * body_height;
     frame.render_widget(

@@ -1413,6 +1413,111 @@ done
         }
     }
 
+    #[test]
+    #[cfg_attr(
+        not(arany_ci),
+        ignore = "native macOS mounted-image runtime topology check; requires hdiutil"
+    )]
+    fn runtime_mount_attestation_rejects_nested_mounted_image() {
+        use crate::test_process::BoundedOutput;
+        use crate::tools::toolchains::{RuntimeGrant, RuntimeKind, RuntimeManager};
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        struct MountedImage(std::path::PathBuf);
+
+        impl Drop for MountedImage {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("/usr/bin/hdiutil")
+                    .args(["detach", "-force", "-quiet"])
+                    .arg(&self.0)
+                    .env_clear()
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .bounded_output_for(Duration::from_secs(20), 4096);
+            }
+        }
+
+        let fixture = tempfile::tempdir().unwrap();
+        let runtime = fixture.path().join("home/.nvm/versions/node/v22.3.0");
+        let mountpoint = runtime.join("mounted-image");
+        std::fs::create_dir_all(runtime.join("bin")).unwrap();
+        std::fs::create_dir(&mountpoint).unwrap();
+        let node = runtime.join("bin/node");
+        std::fs::write(&node, b"synthetic node executable").unwrap();
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let image = fixture.path().join("runtime.sparseimage");
+        let created = std::process::Command::new("/usr/bin/hdiutil")
+            .args([
+                "create",
+                "-quiet",
+                "-size",
+                "8m",
+                "-fs",
+                "HFS+",
+                "-volname",
+                "AranyRuntimeFixture",
+                "-type",
+                "SPARSE",
+                "-ov",
+            ])
+            .arg(&image)
+            .env_clear()
+            .env("HOME", fixture.path())
+            .env("TMPDIR", fixture.path())
+            .current_dir(fixture.path())
+            .bounded_output_for(Duration::from_secs(30), 4096)
+            .unwrap();
+        assert!(created.status.success(), "hdiutil create: {created:?}");
+        let attached = std::process::Command::new("/usr/bin/hdiutil")
+            .args(["attach", "-quiet", "-nobrowse", "-mountpoint"])
+            .arg(&mountpoint)
+            .arg(&image)
+            .env_clear()
+            .env("HOME", fixture.path())
+            .env("TMPDIR", fixture.path())
+            .current_dir(fixture.path())
+            .bounded_output_for(Duration::from_secs(30), 4096)
+            .unwrap();
+        assert!(attached.status.success(), "hdiutil attach: {attached:?}");
+        let _mounted = MountedImage(mountpoint.clone());
+
+        let metadata = std::fs::metadata(&runtime).unwrap();
+        let grant = RuntimeGrant {
+            kind: RuntimeKind::Node,
+            manager: RuntimeManager::Nvm,
+            version: Some("v22.3.0".into()),
+            path: runtime,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        };
+        let target = std::fs::canonicalize(&mountpoint).unwrap();
+        assert!(
+            ffi::mounts()
+                .unwrap()
+                .iter()
+                .any(|(_, path)| path == &target)
+        );
+        let call = ToolCall::Command {
+            program: "node".into(),
+            args: Vec::new(),
+            cwd: String::new(),
+        };
+        let mut stage = super::super::super::BootstrapStage::Workspace;
+        assert!(matches!(
+            super::super::super::attest_runtime_mounts(
+                &call,
+                std::slice::from_ref(&grant),
+                &mut stage,
+            ),
+            Err(ToolError::ProtectionUnavailable)
+        ));
+        assert!(matches!(
+            stage,
+            super::super::super::BootstrapStage::RuntimeMounts
+        ));
+    }
+
     /// Compiles the native actor and returns its entitlement-signed and plain copies.
     fn native_actors(directory: &Path) -> (PathBuf, PathBuf) {
         use crate::test_process::BoundedOutput;
@@ -2504,7 +2609,8 @@ done
                 wake_receiver.read_exact(&mut [0]).unwrap();
                 assert!(Path::new("/bin/launchctl").is_file());
                 super::super::configure_resources().unwrap();
-                super::super::install(&task).unwrap();
+                let mut stage = super::super::super::BootstrapStage::Workspace;
+                super::super::install(&task, &mut stage).unwrap();
                 let cpu = rustix::process::getrlimit(rustix::process::Resource::Cpu);
                 assert_eq!(cpu.current, None);
                 assert_eq!(cpu.maximum, None);

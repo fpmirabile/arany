@@ -71,6 +71,13 @@ pub struct WorkspacePermissions {
     candidates: Vec<Candidate>,
 }
 
+#[derive(Clone, Debug)]
+pub struct RuntimeProfileOption {
+    pub token: String,
+    pub label: String,
+    pub selected: bool,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Permissions {
@@ -133,10 +140,48 @@ impl WorkspacePermissions {
     }
 
     pub fn runtime_profile_options(&self) -> Vec<(String, String)> {
-        self.runtime_candidates()
-            .iter()
-            .map(|candidate| (candidate.token.clone(), candidate.label.clone()))
+        self.runtime_profile_choices()
+            .into_iter()
+            .map(|option| (option.token, option.label))
             .collect()
+    }
+
+    pub fn runtime_profile_choices(&self) -> Vec<RuntimeProfileOption> {
+        let selected = self
+            .runtime_grants
+            .iter()
+            .filter_map(|grant| grant.token().ok())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut options = self
+            .runtime_candidates()
+            .iter()
+            .map(|candidate| RuntimeProfileOption {
+                token: candidate.token.clone(),
+                label: candidate.label.clone(),
+                selected: selected.contains(&candidate.token),
+            })
+            .collect::<Vec<_>>();
+        for grant in &self.runtime_grants {
+            let Ok(token) = grant.token() else {
+                continue;
+            };
+            if options.iter().any(|option| option.token == token) {
+                continue;
+            }
+            let version = grant.version.as_deref().unwrap_or("selected cache");
+            options.push(RuntimeProfileOption {
+                token,
+                label: format!(
+                    "{} · {} · {} (no longer detected)",
+                    grant.kind.label(),
+                    version,
+                    grant.path.display()
+                ),
+                selected: true,
+            });
+        }
+        options.sort_by(|left, right| left.token.cmp(&right.token));
+        options
     }
 
     pub fn profile_tokens_valid(&self, tokens: &[String]) -> bool {
@@ -146,6 +191,14 @@ impl WorkspacePermissions {
     pub(crate) fn matches_identity(&self, identity: (u64, u64)) -> bool {
         self.identity == identity
     }
+
+    pub fn verify_runtime_grants(&self) -> Result<(), ToolError> {
+        for grant in &self.runtime_grants {
+            grant.verify_host()?;
+        }
+        Ok(())
+    }
+
     pub fn open(path: &Path) -> Result<Self, ToolError> {
         let account = StateRoot::account_path().map_err(|_| ToolError::Configuration)?;
         match StateRoot::open_existing(&account) {
@@ -179,9 +232,6 @@ impl WorkspacePermissions {
             .iter()
             .find(|entry| entry.path == path && (entry.device, entry.inode) == identity);
         let runtime_grants = entry.map_or_else(Vec::new, |entry| entry.runtime_grants.clone());
-        for grant in &runtime_grants {
-            grant.verify_host()?;
-        }
         let trusted = entry.is_some();
         Ok(Self {
             path: path.to_owned(),
@@ -189,11 +239,7 @@ impl WorkspacePermissions {
             trusted,
             mode: entry.map_or(ApprovalMode::AutoEdits, |entry| entry.mode),
             runtime_grants,
-            candidates: if trusted {
-                Vec::new()
-            } else {
-                discover_home_candidates()?
-            },
+            candidates: discover_home_candidates()?,
         })
     }
 
@@ -226,12 +272,19 @@ impl WorkspacePermissions {
         }
         let mut runtime_grants = Vec::new();
         for token in tokens {
-            let candidate = self
+            let grant = self
                 .candidates
                 .iter()
                 .find(|candidate| &candidate.token == token)
+                .map(|candidate| candidate.grant.clone())
+                .or_else(|| {
+                    self.runtime_grants
+                        .iter()
+                        .find(|grant| grant.token().ok().as_deref() == Some(token.as_str()))
+                        .cloned()
+                })
                 .ok_or(ToolError::Configuration)?;
-            runtime_grants.push(candidate.grant.clone());
+            runtime_grants.push(grant);
         }
         validate_selection(&runtime_grants)?;
         Ok(runtime_grants)
@@ -272,7 +325,6 @@ impl WorkspacePermissions {
         self.trusted = trusted;
         self.mode = mode;
         self.runtime_grants = if trusted { runtime_grants } else { Vec::new() };
-        self.candidates.clear();
         Ok(())
     }
 
@@ -359,6 +411,14 @@ mod tests {
         executable(&channel_alias.join("bin/rustc"));
         let node = home.join(".nvm/versions/node/v22.3.0");
         executable(&node.join("bin/node"));
+        let python_alias = home.join(".pyenv/versions/3.13.0");
+        executable(&python_alias.join("bin/python3.13"));
+        std::os::unix::fs::symlink("python3.13", python_alias.join("bin/python3")).unwrap();
+        let python_regular = home.join(".pyenv/versions/3.13.1");
+        executable(&python_regular.join("bin/python3.13"));
+        let python_escape = home.join(".pyenv/versions/3.13.2");
+        std::fs::create_dir_all(python_escape.join("bin")).unwrap();
+        std::os::unix::fs::symlink("/usr/bin/python3", python_escape.join("bin/python3")).unwrap();
         let cache = home.join(".cargo/registry/cache");
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::create_dir_all(home.join(".cargo")).unwrap();
@@ -388,6 +448,26 @@ mod tests {
             .find(|candidate| candidate.grant.kind == RuntimeKind::Node)
             .unwrap();
         assert_eq!(node.grant.version.as_deref(), Some("v22.3.0"));
+        let python = candidates
+            .iter()
+            .filter(|candidate| candidate.grant.kind == RuntimeKind::Python)
+            .collect::<Vec<_>>();
+        assert_eq!(python.len(), 2);
+        assert!(
+            python
+                .iter()
+                .any(|candidate| candidate.grant.path == python_alias)
+        );
+        assert!(
+            python
+                .iter()
+                .any(|candidate| candidate.grant.path == python_regular)
+        );
+        assert!(
+            python
+                .iter()
+                .all(|candidate| candidate.grant.path != python_escape)
+        );
         assert!(candidates.iter().all(|candidate| {
             !candidate.label.contains("synthetic credential canary")
                 && candidate.grant.path != home.join(".cargo")

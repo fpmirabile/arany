@@ -16,6 +16,9 @@ use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 const MANAGER_DEADLINE: Duration = Duration::from_secs(4);
+const MOUNTINFO_BYTES_CAP: usize = 1024 * 1024;
+const MOUNTINFO_ENTRIES_CAP: usize = 4096;
+const MOUNTINFO_LINE_CAP: usize = 16 * 1024;
 
 pub(super) fn check_available() -> Result<(), ToolError> {
     profile::programs()?;
@@ -25,6 +28,7 @@ pub(super) fn check_available() -> Result<(), ToolError> {
         "/usr/bin/systemd-run",
         "/usr/bin/systemctl",
         "/usr/bin/env",
+        "/usr/bin/unshare",
     ] {
         let metadata =
             std::fs::symlink_metadata(path).map_err(|_| ToolError::ProtectionUnavailable)?;
@@ -36,7 +40,7 @@ pub(super) fn check_available() -> Result<(), ToolError> {
 }
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
-    let mut bytes = b"arany-guard-v8:shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts".to_vec();
+    let mut bytes = b"arany-guard-v10:shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;fixed-root-owned-unshare-bootstrap-user-map-current-recursive-private;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;bounded-namespace-mountinfo-private-root-and-unique-exact-private-aliases-no-descendants-before-ready-and-after-go".to_vec();
     bytes.extend_from_slice(&profile::profile_digest()?);
     bytes.extend_from_slice(&(MAX_CHANGESET_FILES as u64).to_le_bytes());
     bytes.extend_from_slice(&(MAX_CHANGESET_BYTES as u64).to_le_bytes());
@@ -480,6 +484,14 @@ pub(super) async fn hold_seed_unit(permit: &super::admission::Permit, seed: &Pat
             "--property=KillMode=control-group",
             "--property=TimeoutStopSec=2s",
             "--property=RuntimeMaxSec=60s",
+            "/usr/bin/unshare",
+            "--user",
+            "--map-current-user",
+            "--mount",
+            "--propagation",
+            "private",
+            "--keep-caps",
+            "--",
             "/usr/bin/bwrap",
             "--unshare-all",
             "--unshare-user",
@@ -584,6 +596,14 @@ pub(super) async fn execute_inner(
             "/usr/bin/env",
             "-i",
             "PATH=/usr/bin:/bin",
+            "/usr/bin/unshare",
+            "--user",
+            "--map-current-user",
+            "--mount",
+            "--propagation",
+            "private",
+            "--keep-caps",
+            "--",
             "/usr/bin/bwrap",
             "--unshare-all",
             "--unshare-user",
@@ -773,7 +793,7 @@ pub(super) async fn execute_inner(
     };
     if result.is_err() {
         let diagnostic = std::str::from_utf8(&stderr).unwrap_or_default();
-        let stage = if diagnostic.contains("bwrap:") {
+        let stage = if diagnostic.contains("bwrap:") || diagnostic.contains("unshare:") {
             GuardStage::NamespaceBootstrap
         } else if diagnostic.contains("Failed to") {
             GuardStage::NativeManager
@@ -802,9 +822,265 @@ fn runtime_path(grants: &[super::super::toolchains::RuntimeGrant]) -> Result<Str
     Ok(paths.join(":"))
 }
 
+pub(super) fn verify_runtime_mounts(
+    grants: &[super::super::toolchains::RuntimeGrant],
+) -> Result<(), ToolError> {
+    use std::io::Read;
+
+    let mut bytes = Vec::new();
+    std::fs::File::open("/proc/self/mountinfo")
+        .map_err(|_| ToolError::ProtectionUnavailable)?
+        .take((MOUNTINFO_BYTES_CAP + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ToolError::ProtectionUnavailable)?;
+    if bytes.len() > MOUNTINFO_BYTES_CAP {
+        return Err(ToolError::Limit);
+    }
+    let mounts = parse_mountinfo(&bytes)?;
+    let targets = grants
+        .iter()
+        .map(super::super::toolchains::RuntimeGrant::mounted_path)
+        .collect::<Result<Vec<_>, _>>()?;
+    verify_mount_entries(&mounts, &targets)
+}
+
+fn verify_mount_entries(
+    mounts: &[MountInfoEntry],
+    targets: &[std::path::PathBuf],
+) -> Result<(), ToolError> {
+    let root = Path::new("/");
+    if mounts
+        .iter()
+        .filter(|mount| mount.path.as_path() == root)
+        .count()
+        != 1
+        || mounts
+            .iter()
+            .find(|mount| mount.path.as_path() == root)
+            .is_none_or(|mount| mount.optional_fields != 0)
+    {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    let mut unique_targets = std::collections::BTreeSet::new();
+    for target in targets {
+        if !unique_targets.insert(target) {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        if mounts
+            .iter()
+            .filter(|mount| mount.path.as_path() == target.as_path())
+            .count()
+            != 1
+        {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        let selected = mounts
+            .iter()
+            .find(|mount| mount.path.as_path() == target.as_path())
+            .ok_or(ToolError::ProtectionUnavailable)?;
+        if selected.optional_fields != 0
+            || mounts.iter().any(|mount| {
+                mount.path.as_path() != target.as_path() && mount.path.starts_with(target.as_path())
+            })
+        {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+    }
+    Ok(())
+}
+
+struct MountInfoEntry {
+    path: std::path::PathBuf,
+    optional_fields: usize,
+}
+
+fn parse_mountinfo(bytes: &[u8]) -> Result<Vec<MountInfoEntry>, ToolError> {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+    if bytes.is_empty() || bytes.len() > MOUNTINFO_BYTES_CAP || bytes.last() != Some(&b'\n') {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    let mut entries = Vec::new();
+    for line in bytes[..bytes.len() - 1].split(|byte| *byte == b'\n') {
+        if line.is_empty()
+            || line.len() > MOUNTINFO_LINE_CAP
+            || entries.len() >= MOUNTINFO_ENTRIES_CAP
+        {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        let fields = line.split(|byte| *byte == b' ').collect::<Vec<_>>();
+        if fields.iter().any(|field| field.is_empty()) {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        let separator = fields
+            .iter()
+            .position(|field| *field == b"-")
+            .ok_or(ToolError::ProtectionUnavailable)?;
+        if separator < 6 || fields.len() != separator + 4 {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        parse_decimal(fields[0])?;
+        parse_decimal(fields[1])?;
+        let device_separator = fields[2]
+            .iter()
+            .position(|byte| *byte == b':')
+            .ok_or(ToolError::ProtectionUnavailable)?;
+        let (major, minor) = fields[2].split_at(device_separator);
+        let minor = &minor[1..];
+        parse_decimal(major)?;
+        parse_decimal(minor)?;
+        if !visible_ascii(fields[5])
+            || !fields[6..separator]
+                .iter()
+                .all(|field| visible_ascii(field))
+            || !visible_ascii(fields[separator + 1])
+            || !visible_ascii(fields[separator + 3])
+        {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        let _mount_source = decode_mount_field(fields[separator + 2])?;
+        let _mount_root = decode_mount_path(fields[3])?;
+        let path = decode_mount_path(fields[4])?;
+        entries.push(MountInfoEntry {
+            path: std::path::PathBuf::from(OsString::from_vec(path)),
+            optional_fields: separator - 6,
+        });
+    }
+    if entries.is_empty() {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok(entries)
+}
+
+fn parse_decimal(bytes: &[u8]) -> Result<u64, ToolError> {
+    if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_digit) {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    std::str::from_utf8(bytes)
+        .map_err(|_| ToolError::ProtectionUnavailable)?
+        .parse()
+        .map_err(|_| ToolError::ProtectionUnavailable)
+}
+
+fn visible_ascii(bytes: &[u8]) -> bool {
+    !bytes.is_empty() && bytes.iter().all(|byte| (0x21..=0x7e).contains(byte))
+}
+
+fn decode_mount_field(bytes: &[u8]) -> Result<Vec<u8>, ToolError> {
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'\\' {
+            decoded.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        let escape = bytes
+            .get(index + 1..index + 4)
+            .ok_or(ToolError::ProtectionUnavailable)?;
+        if !escape.iter().all(|byte| (b'0'..=b'7').contains(byte)) {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        let value = (escape[0] - b'0') * 64 + (escape[1] - b'0') * 8 + escape[2] - b'0';
+        if !matches!(value, b' ' | b'\t' | b'\n' | b'\\') {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        decoded.push(value);
+        index += 4;
+    }
+    Ok(decoded)
+}
+
+fn decode_mount_path(bytes: &[u8]) -> Result<Vec<u8>, ToolError> {
+    let path = decode_mount_field(bytes)?;
+    if path.contains(&0)
+        || !path.starts_with(b"/")
+        || path.len() > 4096
+        || path.len() > 1 && path.last() == Some(&b'/')
+        || path != b"/"
+            && path[1..]
+                .split(|byte| *byte == b'/')
+                .any(|component| component.is_empty() || component == b"." || component == b"..")
+    {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mountinfo_with_runtime(optional: &str, descendants: &[&str]) -> Vec<u8> {
+        let mut bytes = format!(
+            "1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:1 /cache /runtime/toolchains/rust ro{optional} - ext4 /dev/root ro\n"
+        )
+        .into_bytes();
+        for (index, path) in descendants.iter().enumerate() {
+            bytes.extend_from_slice(
+                format!(
+                    "{} 2 8:1 /cache/{index} {path} ro - ext4 /dev/root ro\n",
+                    index + 3
+                )
+                .as_bytes(),
+            );
+        }
+        bytes
+    }
+
+    #[test]
+    fn runtime_mount_attestation_requires_private_root_and_exact_leaf_mounts() {
+        let target = Path::new("/runtime/toolchains/rust").to_owned();
+        let valid = parse_mountinfo(&mountinfo_with_runtime("", &[])).unwrap();
+        assert!(verify_mount_entries(&valid, std::slice::from_ref(&target)).is_ok());
+
+        let shared = mountinfo_with_runtime(" shared:2", &[]);
+        assert!(
+            verify_mount_entries(
+                &parse_mountinfo(&shared).unwrap(),
+                std::slice::from_ref(&target)
+            )
+            .is_err()
+        );
+
+        let nested = mountinfo_with_runtime("", &["/runtime/toolchains/rust/nested"]);
+        assert!(
+            verify_mount_entries(
+                &parse_mountinfo(&nested).unwrap(),
+                std::slice::from_ref(&target)
+            )
+            .is_err()
+        );
+
+        let shared_root = b"1 0 8:1 / / rw shared:1 - ext4 /dev/root rw\n2 1 8:1 /cache /runtime/toolchains/rust ro - ext4 /dev/root ro\n";
+        assert!(
+            verify_mount_entries(
+                &parse_mountinfo(shared_root).unwrap(),
+                std::slice::from_ref(&target)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn mountinfo_decodes_only_kernel_path_escapes_and_rejects_ambiguous_records() {
+        let target = Path::new("/runtime/toolchains/a b").to_owned();
+        let escaped = b"1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:1 /cache/a\\040b /runtime/toolchains/a\\040b ro - ext4 /dev/root ro\n";
+        let entries = parse_mountinfo(escaped).unwrap();
+        assert!(verify_mount_entries(&entries, std::slice::from_ref(&target)).is_ok());
+
+        let invalid_escape = b"1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:1 /cache/a\\141b /runtime/toolchains/a\\141b ro - ext4 /dev/root ro\n";
+        assert!(parse_mountinfo(invalid_escape).is_err());
+
+        let stacked = b"1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:1 /cache /runtime/toolchains/rust ro - ext4 /dev/root ro\n3 1 8:1 /other /runtime/toolchains/rust ro - ext4 /dev/root ro\n";
+        assert!(
+            verify_mount_entries(
+                &parse_mountinfo(stacked).unwrap(),
+                &[Path::new("/runtime/toolchains/rust").to_owned()]
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn selected_runtime_path_and_cache_mounts_are_exact() {
@@ -843,6 +1119,135 @@ mod tests {
             Path::new("/scratch/cargo/registry/cache")
         );
         assert!(node.grant.verify_host().is_ok() && cache.grant.verify_host().is_ok());
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        not(arany_ci),
+        ignore = "native private mount propagation fixture; requires unprivileged user namespaces"
+    )]
+    async fn native_runtime_mount_attestation() {
+        const MODE: &str = "ARANY_TEST_RUNTIME_MOUNT_MODE";
+        if let Some(mode) = std::env::var_os(MODE) {
+            use crate::tools::toolchains::RuntimeGrant;
+
+            let grant_path = std::env::var_os("ARANY_TEST_RUNTIME_MOUNT_GRANT").unwrap();
+            let result_path = std::env::var_os("ARANY_TEST_RUNTIME_MOUNT_RESULT").unwrap();
+            let ready_path = std::env::var_os("ARANY_TEST_RUNTIME_MOUNT_READY").unwrap();
+            let go_path = std::env::var_os("ARANY_TEST_RUNTIME_MOUNT_GO").unwrap();
+            let grant: RuntimeGrant =
+                serde_json::from_slice(&std::fs::read(grant_path).expect("fixture grant"))
+                    .expect("fixture grant schema");
+            let target = grant.mounted_path().unwrap();
+            grant.verify_at(&target).expect("runtime alias identity");
+            let call = ToolCall::Command {
+                program: "node".into(),
+                args: Vec::new(),
+                cwd: String::new(),
+            };
+            let grants = std::slice::from_ref(&grant);
+            let mut stage = super::super::BootstrapStage::Workspace;
+            if super::super::attest_runtime_mounts(&call, grants, &mut stage).is_err() {
+                let failure = super::super::BootstrapFailure { stage };
+                std::fs::write(
+                    result_path,
+                    serde_json::to_vec(&failure).expect("bounded stage encoding"),
+                )
+                .expect("fixture failure result");
+                return;
+            }
+            if mode == "exercise" {
+                std::fs::write(ready_path, b"ready").expect("fixture Ready marker");
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while !Path::new(&go_path).exists() {
+                    assert!(std::time::Instant::now() < deadline, "fixture GO deadline");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                super::super::attest_runtime_mounts(&call, grants, &mut stage)
+                    .expect("late shared-source mount must not propagate");
+            }
+            std::fs::write(result_path, b"PASS").expect("fixture success result");
+            return;
+        }
+
+        use crate::tools::toolchains::{RuntimeKind, RuntimeManager};
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let fixture = tempfile::tempdir().unwrap();
+        let source = fixture.path().join("home/.nvm/versions/node/v22.3.0");
+        std::fs::create_dir_all(source.join("bin")).unwrap();
+        std::fs::create_dir_all(source.join("late")).unwrap();
+        std::fs::create_dir_all(source.join("nested")).unwrap();
+        let node = source.join("bin/node");
+        std::fs::write(&node, b"fixture runtime executable").unwrap();
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let alias = fixture.path().join("runtime-alias");
+        std::fs::create_dir(&alias).unwrap();
+        let late_source = fixture.path().join("late-source");
+        let nested_source = fixture.path().join("nested-source");
+        std::fs::create_dir(&late_source).unwrap();
+        std::fs::create_dir(&nested_source).unwrap();
+        let metadata = std::fs::metadata(&source).unwrap();
+        let grant = RuntimeGrant {
+            kind: RuntimeKind::Node,
+            manager: RuntimeManager::Nvm,
+            version: Some("v22.3.0".into()),
+            path: source.clone(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        };
+        grant.validate_shape().unwrap();
+        let grant_path = fixture.path().join("grant.json");
+        let target = grant.mounted_path().unwrap();
+        let result_path = fixture.path().join("result");
+        let test_binary = std::env::current_exe().unwrap();
+        std::fs::write(fixture.path().join("arany-test-bin"), b"placeholder").unwrap();
+        std::fs::write(&grant_path, serde_json::to_vec(&grant).unwrap()).unwrap();
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/runtime-mounts.sh");
+        let mut command = Command::new("/usr/bin/unshare");
+        command
+            .args([
+                "--user",
+                "--map-current-user",
+                "--mount",
+                "--propagation",
+                "shared",
+                "--keep-caps",
+                "--",
+                "/usr/bin/bash",
+            ])
+            .arg(script)
+            .args([
+                source.as_os_str(),
+                alias.as_os_str(),
+                late_source.as_os_str(),
+                nested_source.as_os_str(),
+                fixture.path().as_os_str(),
+                test_binary.as_os_str(),
+                target.as_os_str(),
+            ])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin");
+        let (status, stdout, stderr) = capture(
+            command.spawn().map_err(|_| ToolError::Operation).unwrap(),
+            64 * 1024,
+            Duration::from_secs(40),
+        )
+        .await
+        .unwrap();
+        assert!(
+            status.success(),
+            "native mount attestation fixture: {}",
+            String::from_utf8_lossy(&stderr)
+        );
+        assert_eq!(
+            stdout,
+            b"private-source-ok\nlate-mount-isolated\nnested-mount-rejected-at-runtime-stage\n"
+        );
+        assert_eq!(
+            std::fs::read(result_path).unwrap(),
+            b"{\"stage\":\"runtime_mounts\"}"
+        );
     }
 
     #[tokio::test]

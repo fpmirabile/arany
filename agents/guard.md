@@ -17,6 +17,20 @@ limits and compatibility.
   toolchain read/execute scopes and read-only cache scopes. Do not grant parent
   cache/configuration paths. Candidate identity and consent rules live in
   [runtime profile rules](./toolchains.md).
+- Linux `ro-bind` imports source submounts recursively. Start the unchanged
+  Bubblewrap profile through the fixed, root-owned `/usr/bin/unshare` user and
+  mount namespace bootstrap with recursive-private propagation, cleared
+  environment and fixed arguments. Do not add capabilities to payloads. Before
+  Ready and again after GO, parse bounded `/proc/self/mountinfo` and require a
+  private root and one exact private entry per selected alias, with no optional
+  propagation fields, stacked entries or descendant mounts; malformed or
+  oversized data fails closed. The actual production fixture covers a shared
+  source, a pre-existing nested mount refusal at the topology stage and a late
+  host mount that does not appear in the isolated alias. It is separate from
+  the systemd-owned full Guard journey. On macOS, canonicalize selected roots
+  and reject strict descendant targets in the native `getfsstat` mount table
+  before Seatbelt and before Ready/GO; this is a point-in-time check, not a
+  lifetime mount-isolation guarantee.
 - Capture command changesets only after positive payload-descendant absence.
   Linux retains its attested private PID namespace init/helper while stopping
   and killing every other namespace process; final owned-cgroup cleanup still

@@ -67,15 +67,18 @@ impl RuntimeKind {
         }
     }
 
-    fn toolchain_token(self, path: &Path) -> Result<String, ToolError> {
+    fn toolchain_token(self, grant: &RuntimeGrant) -> Result<String, ToolError> {
         let prefix = match self {
             Self::Rust => "rust",
             Self::Node => "node",
             Self::Python => "python",
             _ => return Err(ToolError::Configuration),
         };
-        let path = path.to_str().ok_or(ToolError::Path)?;
-        let hash = super::types::hex_digest(path.as_bytes());
+        let path = grant.path.to_str().ok_or(ToolError::Path)?;
+        let mut identity = path.as_bytes().to_vec();
+        identity.extend_from_slice(&grant.device.to_le_bytes());
+        identity.extend_from_slice(&grant.inode.to_le_bytes());
+        let hash = super::types::hex_digest(&identity);
         Ok(format!("{prefix}-{}", &hash[..12]))
     }
 }
@@ -108,7 +111,7 @@ impl RuntimeGrant {
         self.kind
             .cache_token()
             .map(str::to_owned)
-            .map_or_else(|| self.kind.toolchain_token(&self.path), Ok)
+            .map_or_else(|| self.kind.toolchain_token(self), Ok)
     }
 
     pub(crate) fn validate_shape(&self) -> Result<(), ToolError> {
@@ -152,9 +155,7 @@ impl RuntimeGrant {
                     }
                 }
                 RuntimeKind::Python => {
-                    if !executable(&path.join("bin/python3"))
-                        && !executable(&path.join("bin/python"))
-                    {
+                    if !has_python_executable(path) {
                         return Err(ToolError::ChangedInput);
                     }
                 }
@@ -364,9 +365,7 @@ fn has_toolchain(path: &Path, kind: RuntimeKind) -> bool {
             executable(&path.join("bin/cargo")) && executable(&path.join("bin/rustc"))
         }
         RuntimeKind::Node => executable(&path.join("bin/node")),
-        RuntimeKind::Python => {
-            executable(&path.join("bin/python3")) || executable(&path.join("bin/python"))
-        }
+        RuntimeKind::Python => has_python_executable(path),
         _ => false,
     }
 }
@@ -378,6 +377,10 @@ fn executable(path: &Path) -> bool {
     let Ok(file) = fs::open_absolute(path) else {
         return false;
     };
+    executable_file(&file)
+}
+
+fn executable_file(file: &std::fs::File) -> bool {
     let Ok(metadata) = file.metadata() else {
         return false;
     };
@@ -393,6 +396,60 @@ fn executable(path: &Path) -> bool {
     {
         false
     }
+}
+
+fn has_python_executable(root: &Path) -> bool {
+    let Ok(bin) = fs::open_directory(&root.join("bin")) else {
+        return false;
+    };
+    for alias in ["python3", "python"] {
+        if let Ok(target) = bin.read_link(alias) {
+            let mut components = target.components();
+            if let Some(std::path::Component::Normal(name)) = components.next()
+                && components.next().is_none()
+                && let Some(name) = name.to_str()
+                && versioned_python_name(name)
+                && let Ok(file) = fs::open_file(&bin, name)
+                && executable_file(&file)
+            {
+                return true;
+            }
+        }
+    }
+    let Ok(entries) = bin.entries() else {
+        return false;
+    };
+    for (index, entry) in entries.enumerate() {
+        if index >= MAX_DIRECTORY_ENTRIES {
+            return false;
+        }
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if versioned_python_name(&name)
+            && let Ok(file) = fs::open_file(&bin, &name)
+            && executable_file(&file)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn versioned_python_name(name: &str) -> bool {
+    let Some(version) = name.strip_prefix("python") else {
+        return false;
+    };
+    let Some((major, minor)) = version.split_once('.') else {
+        return false;
+    };
+    !major.is_empty()
+        && !minor.is_empty()
+        && major.bytes().all(|byte| byte.is_ascii_digit())
+        && minor.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn admit_directory(

@@ -111,6 +111,7 @@ struct Ready {
 enum BootstrapStage {
     Admission,
     Workspace,
+    RuntimeMounts,
     Capabilities,
     Handshake,
     Payload,
@@ -122,6 +123,7 @@ impl BootstrapStage {
         match self {
             Self::Admission => "admission",
             Self::Workspace => "Workspace identity",
+            Self::RuntimeMounts => "runtime mount topology",
             Self::Capabilities => "kernel capability",
             Self::Handshake => "handshake",
             Self::Payload => "payload",
@@ -147,6 +149,7 @@ impl BootstrapFailure {
         match self.stage {
             BootstrapStage::Admission => "admission",
             BootstrapStage::Workspace => "pinned input",
+            BootstrapStage::RuntimeMounts => "runtime mount topology",
             BootstrapStage::Capabilities => "native protection",
             BootstrapStage::Handshake => "handshake",
             BootstrapStage::Payload => "execution",
@@ -235,7 +238,7 @@ fn bind_runtime_grants(
     if runtime_grants.is_empty() {
         return Ok(profile);
     }
-    let mut bytes = b"arany-runtime-profile-v1:metadata-detected;exact-versioned-roots;no-parent-cache-config-or-credentials".to_vec();
+    let mut bytes = b"arany-runtime-profile-v2:metadata-detected;exact-versioned-roots;explicit-read-only-cache-grants;bounded-output-may-disclose;no-automatic-cache-load;no-parent-cache-config-or-credentials".to_vec();
     bytes.extend_from_slice(&profile);
     bytes.extend_from_slice(
         &serde_json::to_vec(runtime_grants).map_err(|_| ToolError::Configuration)?,
@@ -261,6 +264,24 @@ fn verify_intent_runtime_grants(intent: &EffectIntent, config: &Config) -> Resul
     } else {
         Ok(())
     }
+}
+
+fn attest_runtime_mounts(
+    call: &ToolCall,
+    grants: &[RuntimeGrant],
+    stage: &mut BootstrapStage,
+) -> Result<(), ToolError> {
+    if !call.is_process() {
+        return Ok(());
+    }
+    *stage = BootstrapStage::RuntimeMounts;
+    #[cfg(target_os = "linux")]
+    linux::verify_runtime_mounts(grants)?;
+    #[cfg(target_os = "macos")]
+    macos::verify_runtime_mounts(grants)?;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    return Err(ToolError::ProtectionUnavailable);
+    Ok(())
 }
 
 pub(super) async fn execute(
@@ -457,7 +478,7 @@ fn bootstrap_locations(
     stage: &mut BootstrapStage,
 ) -> Result<(std::path::PathBuf, std::path::PathBuf), ToolError> {
     *stage = BootstrapStage::Capabilities;
-    let root = macos::install(task)?;
+    let root = macos::install(task, stage)?;
     let workspace = if task.intent.call.is_process() {
         root.join("workspace")
     } else {
@@ -496,6 +517,7 @@ pub(super) fn helper_main() -> ExitCode {
             return Err(ToolError::Configuration);
         }
         let (root, workspace) = bootstrap_locations(&task, &mut stage)?;
+        attest_runtime_mounts(&task.intent.call, &task.config.runtime_grants, &mut stage)?;
         let workspace = workspace.as_path();
         stage = BootstrapStage::Workspace;
         if (matches!(
@@ -520,6 +542,7 @@ pub(super) fn helper_main() -> ExitCode {
         };
         #[cfg(target_os = "linux")]
         {
+            attest_runtime_mounts(&task.intent.call, &task.config.runtime_grants, &mut stage)?;
             stage = BootstrapStage::Capabilities;
             linux::harden()?;
         }
@@ -552,6 +575,8 @@ pub(super) fn helper_main() -> ExitCode {
             return Err(ToolError::Configuration);
         }
         verify_intent_runtime_grants(&task.intent, &task.config)?;
+        attest_runtime_mounts(&task.intent.call, &task.config.runtime_grants, &mut stage)?;
+        stage = BootstrapStage::Handshake;
         drop(stdin);
         stage = BootstrapStage::Payload;
         #[cfg(not(target_os = "macos"))]
@@ -887,6 +912,15 @@ mod tests {
             mcp: Vec::new(),
             runtime_grants,
         }
+    }
+
+    #[test]
+    fn runtime_mount_rejection_reports_its_own_bootstrap_stage() {
+        let failure = BootstrapFailure {
+            stage: BootstrapStage::RuntimeMounts,
+        };
+        assert_eq!(failure.failure_stage(), "runtime mount topology");
+        assert_eq!(failure.to_string(), "runtime mount topology");
     }
 
     #[test]

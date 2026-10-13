@@ -2285,11 +2285,16 @@ fn permission_choices_are_vertical_and_complete_before_selection() {
                     more = draw_permission_frame(
                         frame,
                         &lines,
-                        ("Read only", "Trust folder"),
-                        page,
-                        false,
-                        "↑↓ Enter ^C exit",
-                        Palette { color: false },
+                        PermissionFrameState {
+                            choices: ("Read only", "Trust folder"),
+                            page,
+                            allow: false,
+                            profile_start: None,
+                            profile_count: 0,
+                            focused_profile: None,
+                            footer: "↑↓ Enter ^C exit",
+                            palette: Palette { color: false },
+                        },
                     );
                 })
                 .unwrap();

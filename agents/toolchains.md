@@ -13,11 +13,20 @@ and enforcement.
   identifies the selected directory; it does not prove the binary's version.
   Revalidate identity without following links; unsupported or changed roots
   fail closed.
+- Python discovery accepts a version-specific regular executable or an
+  in-root `python`/`python3` symlink whose single relative target is a
+  version-specific regular executable in the same `bin` directory. Never
+  follow an arbitrary alias or symlink chain.
 - Host caches require a distinct explicit choice for each known cache root.
-  Select only the exact cache subtree, read-only. Never traverse to a parent
-  cache/configuration directory or load credentials. Cache data may reveal
-  private package names, source or registry-response metadata, and never enters
-  Provider context or supplies authority.
+  Select only the exact cache subtree, read-only; never traverse to a parent
+  cache/configuration directory. Separate configuration and credential files
+  are excluded, but selected cache data may contain private package names,
+  source, registry-response metadata or embedded credential URLs. Consent warns
+  that a command or local MCP Tool can emit selected data through bounded
+  output; that output is journaled and may enter a later Provider request.
+  Contents are not loaded automatically and supply no authority.
 - Keep candidate discovery metadata-only and bounded. Keep platform mounts,
   Seatbelt rules, process authority and native attestation in Guard; both
-  Linux and macOS must reject stale identities before dispatch.
+  Linux and macOS must reject stale identities before dispatch. Linux runtime
+  aliases require a private-propagation bootstrap and a bounded mount-table
+  attestation before Ready and GO; see [Guard rules](./guard.md).
