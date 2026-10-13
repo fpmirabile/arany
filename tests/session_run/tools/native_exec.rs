@@ -234,11 +234,9 @@ async fn selected_cache_canary_helper() {
             .tools
             .as_ref()
             .expect("first cache canary request includes Tool context");
-        let initial = serde_json::to_vec(&requests[0]).unwrap();
+        let initial = format!("{:?}", &requests[0]);
         assert!(
-            !initial
-                .windows(CACHE_CANARY.len())
-                .any(|part| part == CACHE_CANARY.as_bytes()),
+            !initial.contains(CACHE_CANARY),
             "cache canary was present in the initial Provider request"
         );
         assert!(
