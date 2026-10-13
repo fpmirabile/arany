@@ -227,20 +227,7 @@ fn synthetic_server(
             }
             _ => serde_json::json!({"summary":"derived summary"}),
         };
-        let response = serde_json::json!({
-            "id": format!("resp_{}", index + 1),
-            "status": "completed",
-            "model": "model-1",
-            "output": [{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":text.to_string()}]}],
-            "usage": {"input_tokens":20,"output_tokens":10}
-        })
-        .to_string();
-        write!(
-            stream,
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
-            response.len()
-        )
-        .expect("synthetic response");
+        super::loopback::send_response(&mut stream, index, text);
     }
 }
 
@@ -600,7 +587,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
         std::fs::set_permissions(&profile_path, std::fs::Permissions::from_mode(0o600))
             .expect("restore private fixture profile");
     }
-    input.write_all(b"/quit\n").expect("exit command");
+    input.write_all(b"/exit\n").expect("exit command");
     drop(input);
     let result = wait_product(attached.take());
     let output = reader.join().expect("PTY output reader");

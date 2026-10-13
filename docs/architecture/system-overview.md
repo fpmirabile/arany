@@ -1,10 +1,17 @@
 # Arany beta architecture
 
-**Status:** canonical first implementation  
-**Date:** 2026-10-06
+**Status:** maintained architecture; implementation and verification gaps remain in next steps
+
 **Design rule:** build a familiar durable harness, then deepen it without replacing its Engine
 
 This document owns physical architecture, data model and responsibility boundaries. [Product specs](../specs/README.md) own migrated observable contracts; other domains retain their existing module contracts. [The documentation map](../README.md) locates those owners, and [next steps](../../NEXT_STEPS.md) owns current defects and verification debt. Research and the [decision register](../research/next-step-decision-register.md) retain source evidence and rationale. Anything absent here is not an empty module waiting to be scaffolded.
+
+Read the section for the affected boundary:
+[runtime ownership](#2-runtime-architecture), [module entry points](#3-physical-beta-shape),
+[Session lifecycle](#5-session-run-and-collaboration-lifecycle),
+[context and effects](#6-context-and-compaction), [persistence](#7-canonical-persistence),
+[presentation](#8-terminal-presentation), [Providers](#9-provider-profiles-and-custom-endpoints),
+[telemetry](#10-otlp-ships-last-in-beta), or [security](#11-security-boundary).
 
 ## 1. What the beta must prove
 
@@ -15,8 +22,8 @@ The full product contract is successful when it proves all of these together:
 1. a Session survives process exit, explicit resume, multiple Runs, provider changes between Runs, compaction, and deterministic replay;
 2. `single`, `auto`, and `team` policies all use the primary coordination loop and a generic ordered child collection rather than a fixed two-worker shape;
 3. the primary cannot finish team work before every required child has a persisted terminal disposition;
-4. the default terminal keeps a navigable committed transcript in the primary screen, conditional agent activity above a bottom composer, a slash menu below input when open, and a compact status row;
-5. keyboard access is complete, while mouse reporting exists only transiently inside an open picker or detail panel;
+4. the default fullscreen terminal keeps a navigable committed transcript on the alternate screen (Classic inserts it into native scrollback), conditional agent activity above a bottom composer, a slash menu below input when open, and a compact status row;
+5. keyboard access is complete, while mouse reporting exists only in fullscreen or transiently inside an open picker or detail panel;
 6. native OpenAI and Anthropic plus every admitted exact custom endpoint/model profile satisfy the same semantic Provider contract;
 7. exact Workspace-root `AGENTS.md` loads first, with exact `CLAUDE.md` as absence-only fallback;
 8. `exec` and `show` expose the same committed facts without terminal initialization; and
@@ -111,185 +118,23 @@ temporary-root lifecycle. No recovery state enters Engine or canonical Events.
 
 ## 3. Physical beta shape
 
-```text
-Cargo.toml
-src/
-├── main.rs          CLI grammar, mode selection, exit mapping
-├── cli.rs           shared CLI output and state-path selection
-├── cli/
-│   ├── attached.rs  attached Session lifecycle and composer loop
-│   ├── attached/
-│   │   ├── active.rs    active Run and compaction terminal handling
-│   │   ├── agents.rs    agent inspector command handling
-│   │   ├── controls.rs  trusted local command handlers
-│   │   ├── picker.rs    private Session picker input and selection
-│   │   ├── models.rs    bounded attached model catalog browsing
-│   │   ├── run.rs       selected native Provider Run composition
-│   │   └── setup.rs     attached account selection
-│   ├── chatgpt.rs  consented OAuth account access and selected catalog
-│   ├── chatgpt/
-│   │   ├── account.rs  bounded protected subscription account records
-│   │   ├── account/
-│   │   │   └── tests.rs synthetic renewal and storage cases
-│   │   ├── callback.rs bounded one-result loopback HTTP callback
-│   │   ├── catalog.rs  bounded account-scoped subscription model listing
-│   │   ├── consent.rs  versioned account-bound warning acceptance
-│   │   ├── exchange.rs bounded token/JWKS redemption
-│   │   ├── exchange/
-│   │   │   ├── revoke.rs private discovered-endpoint token revocation
-│   │   │   └── tests.rs synthetic issuer and signed-identity corpus
-│   │   ├── identity.rs strict signed ID-token admission
-│   │   └── registration.rs stable host and issued-client registration
-│   ├── credentials.rs protected default native API account access
-│   ├── credentials/
-│   │   ├── keyring_helper.rs supervised bounded OS-store process
-│   │   ├── keyring_helper/
-│   │   │   └── macos.rs  Keychain item access for the helper
-│   │   └── macos_tests.rs isolated test-keychain helper gates
-│   ├── exec.rs      one-Run command composition and durable receipt
-│   └── provider.rs  model catalog and data-free custom profile check commands
-├── lib.rs           small public interface for the deep Engine
-├── private_fs.rs    shared no-follow private-directory admission
-├── private_fs/
-│   └── acl.rs       native macOS descriptor-based ACL checks
-├── diagnostics.rs   closed local debug failure stages and bounded stack frames
-├── engine.rs        Run admission, budgets, Provider outcomes
-├── engine/
-│   ├── compaction.rs private manual and duplicate-safe automatic compaction
-│   ├── lifecycle.rs private Session create/resume/fork/default operations
-│   ├── progress.rs  committed bounded Run observation
-│   ├── run_loop.rs  private Run orchestration and terminal transitions
-│   └── run_loop/
-│       └── children.rs private bounded child scheduling and synthesis
-├── session.rs       Session module interface
-├── session/
-│   ├── events.rs    typed canonical facts and scope validation
-│   ├── reducer.rs   strict Session/Run/AgentRun replay
-│   ├── input.rs     pinned no-follow Workspace snapshots
-│   ├── input/
-│   │   └── race_tests.rs ignored Linux component-replacement gate
-│   ├── context.rs   deterministic bounded history selection
-│   ├── lineage.rs   canonical Event-prefix digest for fork replay
-│   └── compaction.rs bounded summary input and snapshot validation
-├── provider.rs      Provider semantic contract and adapter selection
-├── provider/
-│   ├── custom.rs     private exact custom-profile admission
-│   ├── custom/
-│   │   ├── adapter.rs      verified semantic custom Provider
-│   │   ├── destination.rs  bounded resolution and pinned HTTP destination
-│   │   ├── check.rs        synthetic conformance and evidence orchestration
-│   │   └── transport.rs    shared bounded custom wire and egress
-│   ├── anthropic.rs  native Messages key and bounded HTTP behavior
-│   ├── anthropic/
-│   │   ├── wire.rs  strict Messages documents and decoding
-│   │   └── wire/
-│   │       └── tests.rs  offline wire corpus
-│   ├── effort.rs     reviewed native model-specific effort admission
-│   ├── image.rs      bounded immutable PNG values and semantic origin
-│   ├── catalog.rs    bounded account-scoped native model discovery
-│   ├── native_check.rs  exact-key synthetic conformance and evidence admission
-│   ├── openai.rs     native Responses key and bounded HTTP behavior
-│   └── openai/
-│       ├── subscription.rs bounded ChatGPT-plan Provider and synthetic probe
-│       ├── subscription/
-│       │   └── tests.rs synthetic stream and local-limit corpus
-│       ├── wire.rs  strict Responses documents and decoding
-│       └── wire/
-│           └── tests.rs  offline wire corpus
-├── tools.rs         private grant admission and concrete effect router
-├── tools/
-│   ├── config.rs    private closed configuration and resource pins
-│   ├── types.rs     semantic calls, immutable intents and receipts
-│   ├── fs.rs        no-follow snapshots and atomic native mutations
-│   ├── guard.rs     shared Task/Ready/GO protocol, helper entry and payload dispatch
-│   ├── guard/
-│   │   ├── linux.rs systemd unit, Bubblewrap launch and capability hardening
-│   │   ├── macos.rs trusted native worker and Seatbelt enforcement
-│   │   ├── macos/
-│   │   │   ├── ffi.rs  isolated unsafe Darwin, Seatbelt and Security bindings
-│   │   │   ├── storage.rs fixed-size private disk images for command units
-│   │   │   └── unit.rs one-use native coalition ownership and supervision
-│   │   └── profile.rs Linux namespace facts and compiled seccomp profile
-│   ├── mcp.rs       bounded legacy stdio tools protocol and schema checks
-│   ├── skills.rs    bounded portable metadata, inside the Guard only
-│   └── tests.rs     deterministic grant/schema/receipt corpus
-├── store.rs         private SQLite owner and Store interface
-├── store/
-│   ├── evidence.rs  bounded expiring custom and native Provider evidence
-│   ├── journal.rs   SQLite setup, append, fork writes
-│   ├── journal/
-│   │   └── crash_tests.rs ignored Linux append transaction-death gate
-│   ├── replay.rs    bounded strict Event loading and lineage resolution
-│   ├── state.rs     private State records and checked history reset
-│   └── state/
-│       └── lock.rs  per-Session and account-replacement locks, private file checks
-├── presentation.rs  pure linear projections and sanitization
-├── presentation/
-│   ├── agents.rs    bounded semantic agent inspection
-│   └── model.rs     bounded semantic status and activity rows
-├── terminal.rs      attached terminal ownership and lifecycle
-├── terminal/
-│   ├── agents.rs    agent inspector navigation and state
-│   ├── commands.rs  closed trusted slash registry and parser
-│   ├── clipboard.rs explicit bounded local OS-client lifecycle
-│   ├── clipboard.js macOS pasteboard reader run by the system osascript
-│   ├── composer.rs  bounded grapheme-safe draft editing
-│   ├── input.rs     bounded reader ownership and semantic input mapping
-│   ├── input/
-│   │   └── raw.rs   bounded Unix keys, pointer events and paste framing
-│   ├── linear.rs    labeled append-only terminal output
-│   ├── view.rs      inline Ratatui frame drawing
-│   └── view/
-│       └── tests.rs  inline frame and picker TestBackend cases
-├── telemetry.rs     private opt-in OTLP trace lifecycle and SDK owner
-└── telemetry/
-    ├── config.rs    numeric-loopback endpoint admission
-    ├── tests.rs     topology, privacy, and transport fixtures
-    └── tests/
-        └── performance.rs ignored Linux release queue-saturation measurement
-tests/
-├── session_run.rs   journal, replay, and process-level output
-├── session_run/
-│   ├── active_terminal.rs Linux signals, cancellation, suspend, and restoration PTYs
-│   ├── active_terminal/
-│   │   ├── acquisition.rs  Linux partial-acquisition restoration PTY
-│   │   ├── broken_stderr.rs Linux active-renderer fault PTY
-│   │   ├── panic.rs Linux terminal-owner panic-unwind PTY
-│   │   └── output_window.rs Linux signal during restored-output PTY
-│   ├── agent_inspector.rs Linux active/idle inspector PTYs
-│   ├── auto_compaction.rs Linux attached threshold and compaction process journey
-│   ├── custom.rs    exact custom-profile process journey in the same test target
-│   ├── disk_fault.rs Linux Store file-growth recovery release gate
-│   ├── disk_fault/
-│   │   ├── enospc.rs ignored Linux private-tmpfs ENOSPC recovery gate
-│   │   ├── enospc/
-│   │   │   └── product.rs ignored shipped-exec private-tmpfs ENOSPC gate
-│   │   └── product.rs ignored Linux shipped-exec failure-channel gate
-│   ├── live.rs      ignored paid native direct/team conformance journeys
-│   ├── loopback.rs  shared bounded local Provider process fixture
-│   ├── performance.rs ignored Linux release replay and team process measurements
-│   ├── performance/
-│   │   ├── memory.rs  ignored Linux two-file and capped-response RSS measurement
-│   │   └── startup.rs ignored two-file startup upper-bound measurement
-│   ├── session_picker.rs Linux transient mouse-capture picker PTY
-│   ├── session_picker/
-│   │   └── termination.rs Linux picker signal and suspend restoration PTY
-│   ├── slash_completion.rs Linux Tab, ghost placeholder, and restoration PTY
-│   ├── setup.rs    Linux hidden-key cancellation and terminal restoration PTY
-│   ├── startup_trust.rs Linux adversarial repository-startup process gate
-│   ├── tools.rs     native effect journey, hostile peers, quotas and replay
-│   ├── tools/
-│   │   └── native_exec.rs shipped native-adapter command continuation over local TLS
-│   └── telemetry.rs product-process trace and canonical replay journey
-├── common/
-│   └── process.rs   bounded concurrent product-output capture including exit/EOF
-├── engine_run.rs   scripted Provider and Workspace input journey
-└── engine_run/
-    ├── performance.rs ignored release two-child core Run measurement
-    ├── workspace_security.rs explicit include admission corpus
-    └── performance/
-        └── cancellation.rs ignored release team cancellation measurement
-```
+The package's main boundaries are listed below. Follow source modules for their
+current private file layout; this document does not mirror the repository tree.
+
+| Responsibility | Entry point | Editing rules |
+|---|---|---|
+| CLI grammar and composition | [main](../../src/main.rs), [CLI](../../src/cli.rs) | [CLI](../../agents/cli.md) |
+| Run and Session orchestration | [Engine](../../src/engine.rs) | [Engine](../../agents/engine.md) |
+| Events, replay and context | [Session](../../src/session.rs) | [Session](../../agents/session.md) |
+| Semantic inference and wire adapters | [Provider](../../src/provider.rs) | [Provider](../../agents/provider.md) |
+| Saved API and subscription accounts | [Credentials](../../src/cli/credentials.rs), [ChatGPT](../../src/cli/chatgpt.rs) | [Credentials](../../agents/credentials.md), [ChatGPT](../../agents/chatgpt.md) |
+| Tool admission, Policy and dispatch | [Tools](../../src/tools.rs) | [Tools](../../agents/tools.md) |
+| Separate native effect enforcement | [Guard](../../src/tools/guard.rs) | [Guard](../../agents/guard.md) |
+| Canonical SQLite and private records | [Store](../../src/store.rs) | [Store](../../agents/store.md) |
+| Shared no-follow and ACL admission | [Private filesystem](../../src/private_fs.rs) | [Private filesystem](../../agents/private-fs.md) |
+| Semantic presentation and terminal ownership | [Presentation](../../src/presentation.rs), [terminal](../../src/terminal.rs) | [Terminal](../../agents/terminal.md) |
+| Lossy export and private failure inspection | [Telemetry](../../src/telemetry.rs), [diagnostics](../../src/diagnostics.rs) | [Telemetry](../../agents/telemetry.md), [diagnostics](../../agents/diagnostics.md) |
+| Product acceptance and Engine evidence | [Session journey](../../tests/session_run.rs), [Engine corpus](../../tests/engine_run.rs) | [Testing](../../agents/testing.md) |
 
 This remains one package and one long-lived process. OS credentials use a supervised same-binary helper; explicitly requested clipboard access uses a bounded trusted OS-client child under terminal ownership. Neither becomes an agent Tool. The private `tools` implementation is one concrete router with deterministic Policy and a native Guard privilege seam, not a generic execution framework or fakeable second Engine behavior seam. The `session/` files remain one deep module, and ChatGPT's stream remains private OpenAI implementation. `engine.rs` holds orchestration behind `Engine::run`, keeping `lib.rs` readable. Add a crate only after measured release, privilege, ownership, dependency or compile pressure.
 
@@ -425,9 +270,9 @@ History indexes row counts/source anchors over the already loaded Session view w
 
 The private attached model owner persists token-free `model-preferences.json` under the checked OS-user account root, using the existing account replacement lock and atomic file transport. It holds at most eight exact Provider/account UUID sources, their selected model/effort and up to 4,096 catalog IDs each, bounded to 1 MiB with oldest-source eviction. Current native metadata reconstructs labels; the file contains no compatibility evidence, grant or credential. New bare Sessions reuse matching preferences and seed the Composer cache; explicit flags and resumed defaults win. A first upgrade may copy only a matching tuple from the latest admitted-Workspace Session without inheriting its history. Selection and successful catalog writes remain separate from current account/consent and actual-response admission.
 
-The attached command owner persists token-free `ui-preferences.json` at the selected admitted state root through the existing private replacement lock and atomic file transport. Its closed versioned 1 KiB record selects slash completion tabs or a combined list; defaults and malformed-record recovery use tabs. The Composer owns tab/focus state and the frame places the bounded list below input, sharing history-capacity geometry with the lifecycle owner. Preferences never enter canonical Events, account authority, Tool grants or Provider context.
+The attached command owner persists token-free `ui-preferences.json` at the selected admitted state root through the existing private replacement lock and atomic file transport. Its closed versioned 1 KiB record selects slash completion tabs or a combined list and the fullscreen or Classic chat view; defaults and malformed-record recovery use tabs and fullscreen. Attached startup reads it read-only before terminal acquisition without creating State; `--classic` pins Classic for that process without changing the record. The Composer owns tab/focus state and the frame places the bounded list below input, sharing history-capacity geometry with the lifecycle owner. Preferences never enter canonical Events, account authority, Tool grants or Provider context.
 
-The Engine publishes the latest acknowledged RunView and committed sequence through a one-slot coalescing progress handle. Skipped display intermediates never skip canonical Events. Before Engine admission, preparing feedback remains presentation-local; afterward activity derives solely from committed current-Run facts. Closed replay, terminal restoration and typed CLI classification precede receipt/answer output.
+The Engine publishes the latest acknowledged RunView and committed sequence through a one-slot coalescing progress handle. Skipped display intermediates never skip canonical Events. Before Engine admission, preparing feedback remains presentation-local; afterward activity derives solely from committed current-Run facts. Closed replay and typed CLI classification precede receipt/answer output. Linear output restores ownership first; visual modes retain their owned viewport while inserting classic transcript or emitting redirected confirmed stdout.
 
 Guard's shared capacity wait is a separate one-slot intent-ID hint, validated
 against the committed pending Tool before display. It cannot enter history or
@@ -440,6 +285,10 @@ owns defaults, configuration, resource bounds and interruption semantics.
 A terminal-owned clipboard worker has bounded trusted OS-client ownership distinct from the reader and Engine. Immutable image values cross semantic Provider/Session boundaries; human drawing receives metadata. Canonical image bytes, multimodal context and compaction remain under the image/Session/Store owners.
 
 The released terminal owner retains signal listeners through committed output and transfers them to reacquisition. Raw/canonical input is stopped and joined before modes/flags are restored; suspension retains the pinned Run future and bounded draft. Lifecycle failures cannot manufacture a committed outcome. Detailed fault ownership remains in [terminal rules](../../agents/terminal.md); [next steps](../../NEXT_STEPS.md) owns unverified claims.
+
+### Display observations and terminal continuity
+
+Provider adapters may publish a bounded typed preview to attached primary execution. The Engine coalesces transient observations, checkpoints safe text through canonical Events and validates the complete outcome before accepting an answer. Display-only checkpoints never enter future Provider context or compaction. Terminal owns provisional labels, sanitized Tool details, reading anchors and classic/fullscreen mode changes. Classic uses Ratatui Inline and native insertion while fullscreen owns an alternate screen; a narrow backend routes cursor observation through the sole input reader and scopes primary-screen clearing. This adds no process, terminal engine or second canonical history store.
 
 ## 9. Provider profiles and custom endpoints
 
@@ -506,11 +355,11 @@ On Unix, the Workspace input loader rejects an opened instruction or explicit-in
 
 The release boundary includes:
 
-- untrusted/headless read-only Runs; folder-trusted or explicitly configured model-driven files/commands/Skills/local MCP only through the typed private grant/Guard path; no arbitrary fetch, runtime plugin, self-update or unsandboxed fallback; account setup owns its compiled browser/callback route, and only the credential helper accesses the OS store;
+- Runs without an admitted Tool grant remain read-only; folder-trusted or explicitly configured model-driven files/commands/Skills/local MCP use only the typed private grant/Guard path, including explicit headless `--tools`; no arbitrary fetch, runtime plugin, self-update or unsandboxed fallback; account setup owns its compiled browser/callback route, and only the credential helper accesses the OS store;
 - private no-follow SQLite state outside the Workspace, strict data-only replay, aggregate growth admission, and no encryption-at-rest claim;
 - one immutable aggregate Run budget for calls, output tokens, bytes, time, memory, disk, `N`, and concurrency;
 - only admitted fixed native or exact verified custom Provider requests, with phase-minimal content and origin-bound credentials; standard OS TLS validation may make auxiliary certificate-related connections, never an Arany payload destination;
-- inert terminal output, no alternate screen, transient picker-only mouse, and one RAII terminal owner that restores every enabled mode on every exit path; and
+- inert terminal output, classic primary-screen and explicit alternate-screen fullscreen/detail ownership, scoped mouse, and one RAII terminal owner that restores every enabled mode on every exit path; and
 - pinned/reviewed dependencies, lockfile, build/proc-macro/native inventory, binary-forbidden and library-denied `unsafe` with scoped native Guard/ACL exceptions.
 
 The first local effectful base implements immutable typed effects, deterministic restrict-only Policy and a separately enforcing Guard. Private reviewed configuration or explicit user folder trust supplies upfront grants. Attached Request approvals, Auto edits and AI-reviewed Auto approval narrow dispatch through a bounded one-shot control channel; AI reviews use the existing Provider seam and canonical phase/usage, never a new authority. The terminal owns vertical choices and mode keys. Replay retains review/effect facts without renewing permission. Universal host/same-UID protection is not claimed. Native macOS Guard, Keychain, private-filesystem ACL and clipboard adapters are implemented and exercised by CI on hosted macOS; optimized account isolation and human Keychain/pasteboard checks remain open in [NEXT_STEPS](../../NEXT_STEPS.md). Remote MCP/network disclosure and larger runtimes require separate admission/evidence.
@@ -556,17 +405,9 @@ It does not force private users or hosted services to show a public “Powered b
 
 ## 15. Implementation order
 
-1. Write the implementation plan with this Session/team contract, security claims/non-claims, and evidence owners.
-2. Keep the package's binary-forbidden and library-denied `unsafe` policy, scoped reviewed native Guard/ACL exceptions, pinned toolchain/lockfile, minimal features, and reviewed supply chain.
-3. Implement trusted startup, private state admission, Workspace snapshots, Session identity, Event schema, reducers, deterministic output, and hostile-content handling.
-4. Make create/exit/resume/multi-Run/fork and deterministic context compilation pass with the scripted Provider.
-5. Implement ordered bounded `0..N` children and prove `single`, `auto`, `team`, aggregate budgets, join, and cancellation.
-6. Add a primary-screen committed transcript, fixed-bottom composer/status, conditional activity shelf, keyboard-complete Session/agent pickers, and native history/restoration PTY proof; add transient picker mouse only after restoration gates pass.
-7. Add native OpenAI and Anthropic API-key adapters and their offline/live conformance.
-8. Add trusted custom `openai-responses` profiles plus data-free `provider check`; do not admit unverified endpoints.
-9. Add slash-command Tab completion and persistent argument previews without changing the trusted command boundary.
-10. Complete the official ChatGPT-plan account, consent, model/effort admission, and synthetic Engine turns on a locally built Linux executable; preserve independent API-key routes and hand real sign-in, plan-consuming checks, and turns to the user.
-11. Pursue Anthropic subscription only after provider authorization or a published supported route. Then run the broader Linux/macOS security, PTY/accessibility, fault, distribution, license, and performance gates, with native macOS on a macOS machine after this goal.
-12. Verify the existing opt-in OTLP trace export still meets topology, privacy, bounds, failure-isolation, and shutdown gates after the new routes.
-
-The beta 1 implementation handoff follows step 10's security/offline checks and local executable build. Actual account compatibility and usability remain unverified until the user's final checks; implementation completion does not waive those checks or turn synthetic evidence into live support. Later steps complete the broader product contract without being misreported as beta 1 evidence.
+The [active beta plan](../../planning/arany-beta/README.md) routes remaining
+execution through [next steps](../../NEXT_STEPS.md). This architecture does not
+retain a second task sequence for already implemented foundations. Accepted
+contracts stay with their mapped owners; completed work and checks stay in the
+handoff and Git/PR/CI history. Missing live, native or accessibility evidence
+remains an explicit gap rather than an inferred support claim.

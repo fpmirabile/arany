@@ -86,7 +86,7 @@ fn screen_reader_agent_inspector_opens_and_closes_without_provider_access() {
     stage(1);
     input.write_all(b"q\n").expect("close inspector");
     stage(2);
-    input.write_all(b"/quit\n").expect("exit attached mode");
+    input.write_all(b"/exit\n").expect("exit attached mode");
     drop(input);
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -308,7 +308,7 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
     stage(5);
     release_run.send(()).expect("release active response");
     stage(6);
-    input.write_all(b"/quit\n").expect("exit attached mode");
+    input.write_all(b"/exit\n").expect("exit attached mode");
     drop(input);
     let result = wait_product(attached.take());
     let output = reader.join().expect("PTY output reader");
@@ -386,7 +386,7 @@ fn inline_inspector(
 ) {
     let no_color = if width < 20 { "--no-color " } else { "" };
     let command = format!(
-        "stty rows 24 cols {width}; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" {no_color}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
+        "stty rows 24 cols {width}; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic {no_color}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
     let mut command_line =
         crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
@@ -418,7 +418,6 @@ fn inline_inspector(
         0,
         b"Ask Arany",
     );
-    let picker_start = transcript.len();
     input.write_all(b"/agents\r").expect("open inspector");
     wait_for_pty(
         &mut output,
@@ -429,22 +428,18 @@ fn inline_inspector(
         b"\x1b[?1000h",
     );
     let checkpoint = if width < 20 {
-        wait_for_pty(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            picker_start,
-            b"Esc Up/Dn P",
-        );
-        for cue in [b"Esc".as_slice(), b"Up/Dn"] {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !crate::session_picker::screen_rows(&transcript, width.into(), 24)
+            .iter()
+            .any(|line| line.starts_with("Esc Up/Dn P"))
+        {
+            pump(&mut output, &mut input, &mut transcript, &mut answered);
             assert!(
-                transcript[picker_start..]
-                    .windows(cue.len())
-                    .any(|part| part == cue),
-                "narrow inspector cue missing: {}",
+                Instant::now() < deadline,
+                "narrow inspector cues missing: {}",
                 tail(&transcript)
             );
+            thread::yield_now();
         }
         let checkpoint = transcript.len();
         input.write_all(b"\x1b[B").expect("select prior AgentRun");
@@ -460,9 +455,10 @@ fn inline_inspector(
         input.write_all(b"\x1b").expect("close inspector");
         checkpoint
     } else {
+        // The bottom Classic viewport lists Run 2 on row 14 and Run 1 on row 15.
         let checkpoint = transcript.len();
         input
-            .write_all(b"\x1b[<35;1;13M")
+            .write_all(b"\x1b[<35;1;15M")
             .expect("hover older AgentRun");
         wait_for_pty(
             &mut output,
@@ -474,7 +470,7 @@ fn inline_inspector(
         );
         let checkpoint = transcript.len();
         input
-            .write_all(b"\x1b[<64;1;13M")
+            .write_all(b"\x1b[<64;1;15M")
             .expect("wheel to newest AgentRun");
         wait_for_pty(
             &mut output,
@@ -486,7 +482,7 @@ fn inline_inspector(
         );
         let checkpoint = transcript.len();
         input
-            .write_all(b"\x1b[<0;1;13M")
+            .write_all(b"\x1b[<0;1;15M")
             .expect("click older AgentRun");
         wait_for_pty(
             &mut output,
@@ -498,7 +494,7 @@ fn inline_inspector(
         );
         let checkpoint = transcript.len();
         input
-            .write_all(b"\x1b[<65;1;2M\x1b[<35;1;12M")
+            .write_all(b"\x1b[<65;1;2M\x1b[<35;1;14M")
             .expect("off-list wheel then hover newest AgentRun");
         wait_for_pty(
             &mut output,
@@ -510,7 +506,7 @@ fn inline_inspector(
         );
         let checkpoint = transcript.len();
         input
-            .write_all(b"\x1b[<35;1;13M")
+            .write_all(b"\x1b[<35;1;15M")
             .expect("hover older AgentRun again");
         wait_for_pty(
             &mut output,
@@ -531,7 +527,7 @@ fn inline_inspector(
         checkpoint,
         b"\x1b[?1000l",
     );
-    input.write_all(b"/quit\r").expect("exit attached mode");
+    input.write_all(b"/exit\r").expect("exit attached mode");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         pump(&mut output, &mut input, &mut transcript, &mut answered);

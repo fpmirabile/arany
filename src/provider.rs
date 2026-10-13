@@ -14,6 +14,7 @@ pub(crate) use image::test_image;
 pub(crate) use image::{MAX_IMAGE_METADATA_BYTES, deserialize_images, valid_image_collection};
 mod native_check;
 mod openai;
+mod streaming;
 pub use anthropic::AnthropicProvider;
 pub use catalog::{
     ModelEntry, list_native_models, list_native_models_with_api_key,
@@ -29,6 +30,7 @@ pub use native_check::{
     check_native_model_with_credentials,
 };
 pub use openai::{ChatGptProvider, OpenAiProvider, probe_chatgpt_model};
+pub use streaming::{PreviewText, ResponsePreview};
 
 fn http_client(timeout: std::time::Duration) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
@@ -687,6 +689,14 @@ pub trait Provider: Send + Sync {
         &self,
         request: ProviderRequest,
     ) -> impl Future<Output = Result<ProviderResponse, ProviderError>> + Send;
+
+    fn invoke_with_preview(
+        &self,
+        request: ProviderRequest,
+        _preview: ResponsePreview,
+    ) -> impl Future<Output = Result<ProviderResponse, ProviderError>> + Send {
+        self.invoke(request)
+    }
 
     /// Summarizes accepted conversation data without Workspace guidance or effects.
     /// Unsupported compaction returns `Unavailable`. Adapters enforce the declared

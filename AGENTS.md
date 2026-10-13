@@ -15,16 +15,19 @@ Arany is a Rust-first, CLI-only agent harness. The product and executable are na
 | Git operations, including planned steps | [Git](./agents/git.md) |
 | Auth, secrets, I/O, APIs, Tools, processes, MCP, memory, transports, untrusted rendering | [Security](./agents/security.md) |
 | Providers, models, capabilities, credentials, routing, conformance | [Provider](./agents/provider.md) |
+| SSE framing, provisional answer extraction and credential-safe streaming | [Provider streaming](./agents/provider-streaming.md) |
 | Saved accounts, keyrings, credential transport | [Credential spec](./docs/specs/credentials.md), [credential rules](./agents/credentials.md) |
 | ChatGPT-plan OAuth, consent, tokens, weaker output bounds | [ChatGPT](./agents/chatgpt.md) |
 | Sessions, resume/fork/compaction, collaboration, topology, context | [Session](./agents/session.md) |
 | SQLite admission, Events, replay | [Store](./agents/store.md) |
 | Shared private-directory admission and native ACL checks | [Private filesystem](./agents/private-fs.md) |
 | Terminal behavior, output, accessibility, restoration, presentation | [Terminal](./agents/terminal.md) |
+| Ratatui backend, Inline cursor responses and scoped clearing | [Terminal backend](./agents/terminal-backend.md) |
 | Clipboard transport, clients, workers, results | [Clipboard](./agents/clipboard.md) |
 | Image admission, multimodal context, replay | [Image](./agents/image.md) |
 | History indexing, navigation, find, anchors | [History](./agents/history.md) |
 | Behavior, fixes, tests, output, correctness/release claims, beta continuation, verification handoff | [Testing](./agents/testing.md) |
+| Documentation and agent-instruction routing | [Documentation checks](./agents/testing.md#documentation-and-instruction-changes) |
 | Architecture, codebase shape, data model, new seams | [System overview](./docs/architecture/system-overview.md) |
 | Creating or changing implementation plans | [Planning](./planning/PLANNING.md) |
 | Product behavior, fixes, acceptance scenarios, documentation ownership | [Spec workflow](./docs/specs/README.md) and the owning contract |
@@ -39,7 +42,7 @@ Arany is a Rust-first, CLI-only agent harness. The product and executable are na
 | OTLP endpoints, privacy, bounds, shutdown | [Telemetry](./agents/telemetry.md) |
 | Development logs, failure stages, stack traces | [Diagnostics](./agents/diagnostics.md) |
 
-Open the linked files whose triggers apply, including `agents/<module>.md` for the module being edited. These are ordinary documents, not automatically loaded nested instructions. Follow affected boundaries without loading unrelated rules. Root rules still apply; [CONTRIBUTING.md](./CONTRIBUTING.md) owns setup and check commands.
+Open the linked files whose triggers apply, including `agents/<module>.md` for the module being edited. These are ordinary documents, not automatically loaded nested instructions. Start with the task's contract and rules, then follow affected boundaries; do not preload every linked document, research report or Skill. Use the [documentation map](./docs/README.md#find-the-owner-for-a-task) when ownership is unclear. Root rules still apply; [development setup and checks](./docs/development.md) owns shared commands. Agent workflow starts here; CONTRIBUTING.md is the human contribution guide and is not a required instruction dependency.
 
 When a new module is introduced, add `agents/<module>.md` and link it here. Create the file only when the module has a real boundary, invariant, or workflow to document; avoid empty templates.
 
@@ -55,7 +58,7 @@ When a new module is introduced, add `agents/<module>.md` and link it here. Crea
 
 ## Auto-learning
 
-Capture newly discovered invariants, recurring failure modes, ownership decisions and workflow constraints in the same change. Use the narrowest authoritative home in the [documentation map](./docs/README.md#where-each-fact-belongs); behavior changes follow the [spec workflow](./docs/specs/README.md), including unmigrated domains. Record the context, decision, reason, trade-offs, scope and status. Update misleading guidance instead of adding duplicates; do not cache discoverable commands or configuration in prose. Mention intentional documentation changes in the handoff, commit or PR.
+Capture newly discovered invariants, recurring failure modes, ownership decisions and workflow constraints in the same change. Use the narrowest authoritative home in the [documentation map](./docs/README.md#where-each-fact-belongs); behavior changes follow the [spec workflow](./docs/specs/README.md), including unmigrated domains. Keep a rule actionable and put decision context, reasons and trade-offs in its existing decision owner. Update misleading guidance instead of adding duplicates, task transcripts or facts readily found in code. Mention intentional documentation changes in the handoff, commit or PR.
 
 ## Module boundaries
 
@@ -68,7 +71,7 @@ Create a module only after its implementation gains depth; a crate needs measure
 1. Read the triggered rules and affected flow. For behavior work, identify the owning contract and acceptance scenarios before implementation.
 2. Propose a concrete plan for multi-module or public-interface changes. Include the harness responsibility, Ponytail choice, OS impact, documentation changes, triggered security pass and verification map under [testing rules](./agents/testing.md). Cover successful and meaningful failure paths through existing evidence owners. State when there is no OS impact.
 3. Ask before deleting files, renaming public APIs, restructuring modules or changing CI/shared infrastructure unless the current request already authorizes it. Preserve existing user work under [Git rules](./agents/git.md).
-4. Before closing, review the final diff with Ponytail, run applicable [repository checks](./CONTRIBUTING.md#verification), and capture durable learnings. Documentation-only work needs document/link review, not a Rust rebuild. Keep local visual artifacts in gitignored `.lavish/`.
+4. Before closing, review the final diff with Ponytail, run applicable [repository checks](./docs/development.md#verification), and capture durable learnings. Documentation-only work needs document/link review, not a Rust rebuild. Keep local visual artifacts in gitignored `.lavish/`.
 5. After planning and before closing any implementation, review contract impact under the [spec workflow](./docs/specs/README.md). Update missing or changed requirements and scenarios; an adequate unchanged contract needs no edit. Report the changes, checks actually run, limitations and relevant platform evidence.
 
 ## Maintaining these instructions

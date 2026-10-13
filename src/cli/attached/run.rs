@@ -511,41 +511,41 @@ mod tests {
                         Reply("/setup\n"),
                         Reply("ChatGPT plan\n"),
                         Reply("\n"),
-                        Reply("/quit\n"),
+                        Reply("/exit\n"),
                     ],
                     Case::InvalidChatgptReset => &[
                         Reply("/setup\n"),
                         Reply("ChatGPT plan\n"),
                         Reply("Reset local setup\n"),
                         Reply("\n"),
-                        Reply("/quit\n"),
+                        Reply("/exit\n"),
                     ],
                     Case::InvalidNative => &[
                         Reply("/setup\n"),
                         Reply("API key\n"),
                         Reply("\n"),
-                        Reply("/quit\n"),
+                        Reply("/exit\n"),
                     ],
                     Case::InvalidNativeReset => &[
                         Reply("/setup\n"),
                         Reply("API key\n"),
                         Reply("Reset local setup\n"),
                         Reply("\n"),
-                        Reply("/quit\n"),
+                        Reply("/exit\n"),
                     ],
-                    Case::InvalidPreferences => &[Reply("/setup\n"), Reply("\n"), Reply("/quit\n")],
+                    Case::InvalidPreferences => &[Reply("/setup\n"), Reply("\n"), Reply("/exit\n")],
                     Case::InvalidPreferencesReset => &[
                         Reply("/setup\n"),
                         Reply("Reset local setup\n"),
                         Interrupt,
-                        Reply("/quit\n"),
+                        Reply("/exit\n"),
                     ],
-                    Case::InitialSetupFailure => &[Reply("ChatGPT plan\n"), Reply("/quit\n")],
+                    Case::InitialSetupFailure => &[Reply("ChatGPT plan\n"), Reply("/exit\n")],
                     Case::InvalidHistory | Case::InvalidHistorySameRoot | Case::CorruptHistory => {
                         &[
                             Reply("Reset history\n"),
                             Reply("Accept\n"),
-                            Reply("/quit\n"),
+                            Reply("/exit\n"),
                         ]
                     }
                     Case::InvalidHistoryCancel => {
@@ -553,7 +553,7 @@ mod tests {
                     }
                     Case::UnsafeHistory => &[Reply("Exit\n")],
                     Case::ResumeLocked | Case::ContinueMissing | Case::Cancel => &[],
-                    _ => &[Reply("/quit\n")],
+                    _ => &[Reply("/exit\n")],
                 };
                 let mut inputs = dialogue.iter();
                 let temp = tempfile::tempdir().unwrap();
@@ -1311,7 +1311,8 @@ mod tests {
         let trust_record = account.path().join("workspace-permissions.json");
         std::fs::write(&trust_record, &remembered).unwrap();
         std::fs::set_permissions(&trust_record, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let mut terminal = AttachedTerminal::acquire_with_preference(true).unwrap();
+        let mut terminal =
+            AttachedTerminal::acquire_with_mode(true, arany::TerminalMode::default()).unwrap();
         let mut composer = Composer::default();
         composer.apply(arany::TerminalInput::Character('x'));
         composer.set_approval_mode(Some(ApprovalMode::AutoEdits));

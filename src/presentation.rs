@@ -46,6 +46,108 @@ pub enum Output {
     Jsonl,
 }
 
+pub(crate) fn tool_summary(tool: &crate::session::ToolView) -> String {
+    use crate::tools::{ToolCall, ToolDisposition};
+    let operation = match &tool.intent.call {
+        ToolCall::List { path } => format!("List {path}"),
+        ToolCall::Read { path, .. } => format!("Read {path}"),
+        ToolCall::Search { path, .. } => format!("Search {path}"),
+        ToolCall::Mkdir { path } => format!("Create folder {path}"),
+        ToolCall::Write { path, .. } => format!("Write {path}"),
+        ToolCall::Edit { path, .. } => format!("Edit {path}"),
+        ToolCall::Command { program, .. } => format!("Command {program}"),
+        ToolCall::Skill { name, .. } => format!("Skill {name}"),
+        ToolCall::McpList { server } => format!("MCP list {server}"),
+        ToolCall::McpCall { server, tool, .. } => format!("MCP {server} / {tool}"),
+    };
+    let state = match tool
+        .observation
+        .as_ref()
+        .map(|observation| observation.disposition)
+    {
+        None => "pending",
+        Some(ToolDisposition::Succeeded) => "succeeded",
+        Some(ToolDisposition::Denied) => "denied",
+        Some(ToolDisposition::Failed) => "failed",
+        Some(ToolDisposition::Conflict) => "conflict",
+        Some(ToolDisposition::Limit) => "limit",
+        Some(ToolDisposition::Cancelled) => "cancelled",
+        Some(ToolDisposition::Uncertain) => "uncertain",
+    };
+    format!("Tool · {} · {state}", safe_truncate(&operation, 160))
+}
+
+pub(crate) fn tool_detail_text(tool: &crate::session::ToolView) -> String {
+    let arguments = serde_json::to_string(&tool.intent.call).expect("typed Tool call");
+    format!(
+        "{}\nArguments: {arguments}\nResult:\n{}",
+        tool_summary(tool),
+        tool.observation
+            .as_ref()
+            .map_or("Awaiting result", |observation| observation.output.as_str())
+    )
+}
+
+pub(crate) fn display_answer(run: &RunView) -> Option<String> {
+    let call = run
+        .display
+        .iter()
+        .filter(|chunk| chunk.category == crate::session::DisplayCategory::Answer)
+        .map(|chunk| chunk.call_index)
+        .max()?;
+    if !display_call_visible(run, call) {
+        return None;
+    }
+    Some(
+        run.display
+            .iter()
+            .filter(|chunk| {
+                chunk.call_index == call
+                    && chunk.category == crate::session::DisplayCategory::Answer
+            })
+            .map(|chunk| chunk.text.as_str())
+            .collect(),
+    )
+}
+
+pub(crate) fn display_call_visible(run: &RunView, call: u8) -> bool {
+    run.agents
+        .first()
+        .and_then(|agent| agent.provider_calls.get(usize::from(call)))
+        .is_none_or(|record| {
+            matches!(
+                record.disposition,
+                ProviderCallDisposition::Finished
+                    | ProviderCallDisposition::Delegated
+                    | ProviderCallDisposition::ToolRequested
+                    | ProviderCallDisposition::Unavailable
+                    | ProviderCallDisposition::TimedOut
+                    | ProviderCallDisposition::Cancelled
+                    | ProviderCallDisposition::TaskPanic
+            )
+        })
+}
+
+pub(crate) fn display_commentary(run: &RunView) -> Vec<(u8, u8, String)> {
+    let mut items: Vec<(u8, u8, String)> = Vec::new();
+    for chunk in &run.display {
+        if chunk.category != crate::session::DisplayCategory::Commentary
+            || !display_call_visible(run, chunk.call_index)
+        {
+            continue;
+        }
+        if let Some((_, _, text)) = items
+            .iter_mut()
+            .find(|(call, item, _)| *call == chunk.call_index && *item == chunk.item)
+        {
+            text.push_str(&chunk.text);
+        } else {
+            items.push((chunk.call_index, chunk.item, chunk.text.clone()));
+        }
+    }
+    items
+}
+
 pub(crate) fn tool_approval_lines(intent: &crate::tools::EffectIntent) -> Vec<String> {
     use crate::tools::ToolCall;
     let mut lines = vec!["Approve this action?".to_owned()];

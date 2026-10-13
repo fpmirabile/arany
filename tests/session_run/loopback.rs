@@ -81,20 +81,55 @@ pub(super) fn read_request(stream: &mut TcpStream) -> Vec<u8> {
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(super) fn send_response(stream: &mut TcpStream, index: usize, text: serde_json::Value) {
+    send_response_for(stream, index, text, index < 2);
+}
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+pub(super) fn send_response_for(
+    stream: &mut TcpStream,
+    index: usize,
+    text: serde_json::Value,
+    streaming: bool,
+) {
     let response = serde_json::json!({
         "id": format!("resp_{}", index + 1),
         "status": "completed",
         "model": "model-1",
         "output": [{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":text.to_string()}]}],
         "usage": {"input_tokens":20,"output_tokens":10}
-    })
-    .to_string();
+    });
+    let (content_type, response) = if streaming {
+        ("text/event-stream", responses_stream(response))
+    } else {
+        ("application/json", response.to_string())
+    };
     write!(
         stream,
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
         response.len()
     )
     .expect("synthetic response");
+}
+
+pub(super) fn responses_stream(mut response: serde_json::Value) -> String {
+    let id = "msg_stream";
+    response["output"][0]["id"] = serde_json::json!(id);
+    let events = [
+        serde_json::json!({"type":"response.created","response":{"id":response["id"],"model":response["model"]}}),
+        serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"id":id,"type":"message","role":"assistant","status":"in_progress","content":[]}}),
+        serde_json::json!({"type":"response.output_text.delta","item_id":id,"output_index":0,"content_index":0,"delta":response["output"][0]["content"][0]["text"]}),
+        serde_json::json!({"type":"response.output_item.done","output_index":0,"item":response["output"][0]}),
+        serde_json::json!({"type":"response.completed","response":response}),
+    ];
+    events
+        .iter()
+        .map(|event| {
+            format!(
+                "event: {}\ndata: {event}\n\n",
+                event["type"].as_str().unwrap()
+            )
+        })
+        .collect()
 }
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]

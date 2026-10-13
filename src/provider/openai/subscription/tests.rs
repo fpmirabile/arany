@@ -1098,3 +1098,50 @@ async fn model_probe_requires_distinct_direct_delegate_and_compaction_outcomes()
         ));
     }
 }
+
+#[test]
+fn attached_stream_preview_is_in_place_and_never_exposes_wire_arguments() {
+    let outcome =
+        r#"{"outcome":{"result":"hello\n\uD83D\uDE80","type":"finish","summary":"done"}}"#;
+    let final_item = json!({"id":"msg_final","type":"message","role":"assistant","status":"completed","phase":"final_answer","content":[{"type":"output_text","text":outcome}]});
+    let commentary = json!({"id":"msg_comment","type":"message","role":"assistant","status":"completed","phase":"commentary","content":[{"type":"output_text","text":"Public progress"}]});
+    let mut events = vec![
+        json!({"type":"response.created","response":{"id":"resp_preview","model":"model-a"}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":{"id":"msg_comment","type":"message","role":"assistant","phase":"commentary","status":"in_progress","content":[]}}),
+        json!({"type":"response.output_item.done","output_index":0,"item":commentary}),
+        json!({"type":"response.output_item.added","output_index":1,"item":{"id":"msg_final","type":"message","role":"assistant","phase":"final_answer","status":"in_progress","content":[]}}),
+    ];
+    for character in outcome.chars() {
+        events.push(json!({"type":"response.output_text.delta","output_index":1,"content_index":0,"item_id":"msg_final","delta":character.to_string()}));
+    }
+    events.push(json!({"type":"response.output_item.done","output_index":1,"item":final_item}));
+    events.push(json!({"type":"response.completed","response":{"id":"resp_preview","model":"model-a","status":"completed","output":[commentary, final_item],"usage":{"input_tokens":8,"output_tokens":12}}}));
+    let (publisher, observed) = ResponsePreview::new();
+    let mut decoder = StreamDecoder::with_preview(TOKEN, "model-a", Some(publisher));
+    let mut last = String::new();
+    let mut accepted = None;
+    for event in &events {
+        let bytes = format!("data: {event}\n\n");
+        accepted = decoder.feed(bytes.as_bytes()).unwrap().or(accepted);
+        let current = observed.borrow().answer.clone();
+        assert!(current.starts_with(&last));
+        assert!(!current.contains("outcome"));
+        last = current;
+    }
+    assert_eq!(last, "hello\n🚀");
+    assert_eq!(observed.borrow().commentary, vec!["Public progress"]);
+    assert!(wire::decode_streamed_run(&accepted.unwrap(), "model-a").is_ok());
+    for event in [
+        json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"unknown","delta":"unsafe"}),
+        json!({"type":"response.output_item.added","output_index":0,"item":{"id":"msg","type":"message","role":"assistant","phase":"reasoning","content":[]}}),
+    ] {
+        let (publisher, observed) = ResponsePreview::new();
+        let mut decoder = StreamDecoder::with_preview(TOKEN, "model-a", Some(publisher));
+        assert!(
+            decoder
+                .feed(format!("data: {event}\n\n").as_bytes())
+                .is_err()
+        );
+        assert!(observed.borrow().answer.is_empty());
+    }
+}

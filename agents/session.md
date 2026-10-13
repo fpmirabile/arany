@@ -2,7 +2,7 @@
 
 Load when changing Session lifecycle, resume/fork/rename, compaction, context reconstruction, collaboration policy, agent topology, queued input, or per-Run budgets.
 
-The evidence and rationale live in `docs/research/beta-sessions-teams-terminal-providers-and-license.md` and `docs/research/context-memory-and-compaction.md`. This file retains the unmigrated Session lifecycle/context contract and editing constraints; the [execution spec](../docs/specs/execution.md) owns bounded Run coordination and delegation.
+The [decision register](../docs/research/next-step-decision-register.md) and [context research](../docs/research/context-memory-and-compaction.md) retain reasons and alternatives. This file retains the unmigrated Session lifecycle/context contract and editing constraints; the [execution spec](../docs/specs/execution.md) owns bounded Run coordination and delegation.
 
 ## Domain boundaries
 
@@ -23,8 +23,8 @@ The evidence and rationale live in `docs/research/beta-sessions-teams-terminal-p
 
 - Pin exactly one `single`, `auto(max_active_children = N)`, or `team(max_active_children = N)` policy before each Run. `SessionDefaultChanged` records a complete validated next-Run selection only while idle; every Run still re-admits its selected Provider before Workspace input.
 - The primary AgentRun owns the final answer and an ordered `0..N` collection of direct read-only children. Children cannot spawn nested teams in beta.
-- `N` is generic but never unbounded. Child admission is the minimum of the Session policy, process safety ceiling, remaining call/token/byte/time budgets, and Provider concurrency limit.
-- Default `auto` to at most three active children. `single` admits none. `team` requests team-oriented decomposition but still cannot exceed effective capacity.
+- `N` bounds total direct children, despite the field name `max_active_children`. Admission respects Session policy, process safety and remaining call/token/byte/time budgets. The separately pinned Provider concurrency ceiling limits simultaneous calls; admitted children may wait in the ordered queue.
+- Default `auto` to at most three total direct children. `single` admits none. `team` requests team-oriented decomposition but still cannot exceed effective capacity. The [execution spec](../docs/specs/execution.md#collaboration) owns this distinction.
 - Every child has a causal assignment, stable identity, isolated context, and persisted terminal disposition. Cancellation reaches every admitted child.
 
 ## Session commands
@@ -57,3 +57,5 @@ The evidence and rationale live in `docs/research/beta-sessions-teams-terminal-p
 - `ProviderCallRecorded` is an AgentRun fact: primary planning precedes children, child work is one call per admitted child, and primary synthesis follows finished children. A child spawn requires an observed Delegated call, and successful Agent completion requires an observed Finished call. It stores bounded observed outcome, response ID, provider-reported token usage, optional accepted wire provenance and optional closed failure reason. A reason must match a rejected or unavailable call; it is not upstream text or current account authority. Absent usage is unknown, not zero. A nullable wire provenance is explicit; omitted fields reject. The closed provenance value reports a local request control and accepted wire completion, never a Provider privacy guarantee.
 - Persist Session creation/default/rename/fork/compaction facts plus existing Run and AgentRun lifecycle facts. Do not persist terminal focus, panel state, hover, picker selection, or native scroll position.
 - One evidence-dense scenario must prove multiple Runs, process exit, resume, provider change between Runs, bounded `N`, fork prefix identity, compaction failure safety, and deterministic replay. Boundary tables own `single`, `auto`, capacity, cancellation, and invalid snapshot cases.
+
+- `AssistantDisplayRecorded` is a display-only primary/call-scoped Event. Replay enforces sequential byte offsets, legal active call phases and the terminal contract's per-Run bytes/items/chunk bounds, including at most one compiled detail-limit cue. It never supplies `MessageCommitted`, Agent results, Provider context or compaction items. An accepted primary result must match every checkpoint of its final call; delegation/Tool calls cannot accept answer checkpoints. Cancelled/interrupted replay can expose these facts as incomplete; failed validation hides its candidate while explicit journal export retains the qualified facts.

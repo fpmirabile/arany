@@ -3,8 +3,8 @@ use crate::cli::{chatgpt, exec::ProviderArg};
 use arany::{
     AttachedTerminal, CollaborationPolicy, CommandAvailability, CommandParseError,
     CompletionLayout, Composer, CustomProfile, Effort, InteractiveCommand, SessionId, SessionView,
-    StateRoot, Submission, TerminalInput, fork_session, rename_session, resume_session,
-    validate_native_model_id,
+    StateRoot, Submission, TerminalInput, TerminalMode, fork_session, rename_session,
+    resume_session, validate_native_model_id,
 };
 use std::str::FromStr;
 
@@ -12,25 +12,43 @@ use std::str::FromStr;
 #[serde(deny_unknown_fields)]
 struct UiPreferences {
     version: u8,
-    completion: CompletionLayout,
+    preferences: Preferences,
 }
 
-fn settings_argument(argument: &str) -> Result<CompletionLayout, &'static str> {
-    match argument {
-        "tabs" => Ok(CompletionLayout::Tabs),
-        "combined" => Ok(CompletionLayout::Combined),
-        _ => Err("Usage: /settings [tabs|combined]"),
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Preferences {
+    pub completion: CompletionLayout,
+    pub view: TerminalMode,
+}
+
+fn apply_setting(preferences: &mut Preferences, value: &str) -> bool {
+    let completion = preferences.completion;
+    let view = preferences.view;
+    if let Some(completion) = [completion, completion.toggled()]
+        .into_iter()
+        .find(|completion| completion.label() == value)
+    {
+        preferences.completion = completion;
+    } else if let Some(view) = [view, view.toggled()]
+        .into_iter()
+        .find(|view| view.label() == value)
+    {
+        preferences.view = view;
+    } else {
+        return false;
     }
+    true
 }
 
-pub(super) async fn restore_settings(admission: &Admission) -> Result<CompletionLayout, String> {
+pub(super) async fn restore_settings(admission: &Admission) -> Result<Preferences, String> {
     let path = admission.state_dir.clone();
     tokio::task::spawn_blocking(move || {
         let root = match StateRoot::open_existing(&path) {
             Ok(root) => root,
             Err(arany::StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 if matches!(std::fs::symlink_metadata(&path), Err(error) if error.kind() == std::io::ErrorKind::NotFound) {
-                    return Ok(CompletionLayout::default());
+                    return Ok(Preferences::default());
                 }
                 return Err("display settings unavailable or unsafe".into());
             }
@@ -42,29 +60,29 @@ pub(super) async fn restore_settings(admission: &Admission) -> Result<Completion
     .map_err(|_| "display settings unavailable".to_owned())?
 }
 
-fn read_settings(root: &StateRoot) -> Result<CompletionLayout, String> {
+fn read_settings(root: &StateRoot) -> Result<Preferences, String> {
     let Some(record) = root
         .read_ui_preferences_record()
         .map_err(|_| "display settings unavailable or unsafe")?
     else {
-        return Ok(CompletionLayout::default());
+        return Ok(Preferences::default());
     };
-    let preferences: UiPreferences = serde_json::from_slice(&record)
+    let record: UiPreferences = serde_json::from_slice(&record)
         .map_err(|_| "invalid display settings; use /settings to replace them")?;
-    if preferences.version != 1 {
+    if record.version != 2 {
         return Err("unsupported display settings; use /settings to replace them".into());
     }
-    Ok(preferences.completion)
+    Ok(record.preferences)
 }
 
-async fn save_settings(admission: &Admission, layout: CompletionLayout) -> Result<(), String> {
+async fn save_settings(admission: &Admission, preferences: Preferences) -> Result<(), String> {
     let path = admission.state_dir.clone();
     let workspace = admission.workspace.clone();
     tokio::task::spawn_blocking(move || {
         let root = StateRoot::admit(&path).map_err(|_| "display settings unavailable or unsafe")?;
         let record = serde_json::to_vec(&UiPreferences {
-            version: 1,
-            completion: layout,
+            version: 2,
+            preferences,
         })
         .map_err(|_| "display settings unavailable")?;
         root.with_account_replacement_lock(&workspace, || {
@@ -78,103 +96,151 @@ async fn save_settings(admission: &Admission, layout: CompletionLayout) -> Resul
     .map_err(str::to_owned)
 }
 
+fn settings_rows(preferences: Preferences, linear: bool) -> [String; 2] {
+    let title = |label: &str| {
+        let mut characters = label.chars();
+        characters
+            .next()
+            .map(|first| first.to_ascii_uppercase().to_string() + characters.as_str())
+            .unwrap_or_default()
+    };
+    let completion = title(preferences.completion.label());
+    let view = title(preferences.view.label());
+    if linear {
+        [
+            format!("Slash menu: {completion}"),
+            format!("Chat view: {view}"),
+        ]
+    } else {
+        [
+            format!("Slash menu   < {completion} >"),
+            format!("Chat view    < {view} >"),
+        ]
+    }
+}
+
+/// Linear empty Enter saves the shown values rather than selecting a choice.
+const NO_DEFAULT_CHOICE: usize = usize::MAX;
+
+async fn choose_settings(
+    terminal: &mut AttachedTerminal,
+    mut chosen: Preferences,
+) -> Result<Option<Preferences>, String> {
+    let linear = terminal.is_linear();
+    let mut view_row = false;
+    let mut answer = Composer::default();
+    let mut invalid = false;
+    loop {
+        let rows = settings_rows(chosen, linear);
+        if linear {
+            terminal.draw_setup_choices(
+                0,
+                "Settings",
+                &format!("{}; {}; empty Enter saves, q closes", rows[0], rows[1]),
+                &[
+                    (1, "tabs"),
+                    (2, "combined"),
+                    (3, "fullscreen"),
+                    (4, "classic"),
+                ],
+                NO_DEFAULT_CHOICE,
+                invalid.then_some("Type tabs, combined, fullscreen or classic; q closes"),
+            )
+        } else {
+            terminal.draw_setup_choices(
+                0,
+                "Settings",
+                "←→ changes the value; Enter saves both",
+                &[(1, rows[0].as_str()), (2, rows[1].as_str())],
+                usize::from(view_row),
+                None,
+            )
+        }
+        .map_err(|error| error.to_string())?;
+        match terminal
+            .next_input()
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            TerminalInput::Up | TerminalInput::Down if !linear => view_row = !view_row,
+            TerminalInput::Left | TerminalInput::Right if !linear => {
+                if view_row {
+                    chosen.view = chosen.view.toggled();
+                } else {
+                    chosen.completion = chosen.completion.toggled();
+                }
+            }
+            TerminalInput::Character(character) if linear => {
+                answer.apply(TerminalInput::Character(character));
+            }
+            TerminalInput::Backspace if linear => {
+                answer.apply(TerminalInput::Backspace);
+            }
+            TerminalInput::Submit if linear => {
+                let value = answer.take().trim().to_ascii_lowercase();
+                match value.as_str() {
+                    "" => return Ok(Some(chosen)),
+                    "q" => return Ok(None),
+                    value => invalid = !apply_setting(&mut chosen, value),
+                }
+            }
+            TerminalInput::Submit => return Ok(Some(chosen)),
+            TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
+                return Ok(None);
+            }
+            TerminalInput::Suspend => terminal
+                .suspend_and_resume(answer.text().len())
+                .map_err(|error| error.to_string())?,
+            TerminalInput::Shutdown(signal) => {
+                return Err(format!("terminated by {}", signal.name()));
+            }
+            TerminalInput::LineRejected => {
+                answer.clear();
+                invalid = true;
+            }
+            _ => {}
+        }
+    }
+}
+
 pub(super) async fn settings(
     terminal: &mut AttachedTerminal,
     admission: &Admission,
     composer: &mut Composer,
-    argument: Option<&str>,
+    saved_view: &mut TerminalMode,
 ) -> Result<String, String> {
-    let layout = if let Some(argument) = argument {
-        settings_argument(argument).map_err(str::to_owned)?
-    } else {
-        let mut selected = usize::from(composer.completion_layout() == CompletionLayout::Combined);
-        let mut answer = Composer::default();
-        let mut invalid = false;
-        loop {
-            terminal
-                .draw_setup_choices(
-                    0,
-                    "Slash menu display",
-                    "Tabs: Commands / Skills; Combined: one list",
-                    &[(1, "Tabs"), (2, "Combined")],
-                    selected,
-                    invalid.then_some("Type tabs or combined; q closes"),
-                )
-                .map_err(|error| error.to_string())?;
-            match terminal
-                .next_input()
-                .await
-                .map_err(|error| error.to_string())?
-            {
-                TerminalInput::Up | TerminalInput::Down | TerminalInput::Tab
-                    if !terminal.is_linear() =>
-                {
-                    selected = 1 - selected
-                }
-                TerminalInput::Character(character) if terminal.is_linear() => {
-                    answer.apply(TerminalInput::Character(character));
-                }
-                TerminalInput::Backspace if terminal.is_linear() => {
-                    answer.apply(TerminalInput::Backspace);
-                }
-                TerminalInput::Submit => {
-                    if terminal.is_linear() {
-                        let value = answer.take().trim().to_ascii_lowercase();
-                        match value.as_str() {
-                            "" => {}
-                            "tabs" | "1" => selected = 0,
-                            "combined" | "2" => selected = 1,
-                            "q" => {
-                                terminal
-                                    .restore_draft_input(composer.text().len())
-                                    .map_err(|error| error.to_string())?;
-                                return Ok("Display settings unchanged".into());
-                            }
-                            _ => {
-                                invalid = true;
-                                continue;
-                            }
-                        }
-                    }
-                    break if selected == 0 {
-                        CompletionLayout::Tabs
-                    } else {
-                        CompletionLayout::Combined
-                    };
-                }
-                TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
-                    terminal
-                        .restore_draft_input(composer.text().len())
-                        .map_err(|error| error.to_string())?;
-                    return Ok("Display settings unchanged".into());
-                }
-                TerminalInput::Suspend => terminal
-                    .suspend_and_resume(answer.text().len())
-                    .map_err(|error| error.to_string())?,
-                TerminalInput::Shutdown(signal) => {
-                    return Err(format!("terminated by {}", signal.name()));
-                }
-                TerminalInput::LineRejected => {
-                    answer.clear();
-                    invalid = true;
-                }
-                _ => {}
-            }
-        }
+    let linear = terminal.is_linear();
+    let current = Preferences {
+        completion: composer.completion_layout(),
+        view: *saved_view,
     };
-    let notice = match save_settings(admission, layout).await {
-        Ok(()) => {
-            composer.set_completion_layout(layout);
-            format!(
-                "Slash menu: {} · saved",
-                if layout == CompletionLayout::Tabs {
-                    "tabs"
-                } else {
-                    "combined"
+    let notice = match choose_settings(terminal, current).await? {
+        None => "Settings unchanged".to_owned(),
+        Some(chosen) => match save_settings(admission, chosen).await {
+            Ok(()) => {
+                let view_changed = chosen.view != *saved_view;
+                *saved_view = chosen.view;
+                composer.set_completion_layout(chosen.completion);
+                if !linear && view_changed {
+                    terminal
+                        .set_mode(chosen.view, composer.text().len())
+                        .map_err(|error| error.to_string())?;
                 }
-            )
-        }
-        Err(error) => format!("Error: {error}; current display kept"),
+                format!(
+                    "Settings: slash menu {} · chat view {}{} · saved",
+                    chosen.completion.label(),
+                    chosen.view.label(),
+                    if linear {
+                        " (visual sessions)"
+                    } else if chosen.view != terminal.mode() {
+                        " (sessions without --classic)"
+                    } else {
+                        ""
+                    },
+                )
+            }
+            Err(error) => format!("Error: {error}; current settings kept"),
+        },
     };
     terminal
         .restore_draft_input(composer.text().len())
@@ -294,6 +360,7 @@ pub(super) enum ActiveSubmission {
     Notice(String),
     OpenAgents,
     OpenHelp,
+    OpenTranscript,
     ReadClipboard,
 }
 
@@ -303,6 +370,13 @@ pub(super) fn handle_active_submission(
     starting_sequence: u64,
 ) -> ActiveSubmission {
     let notice = match composer.submission() {
+        Ok(Submission::Command {
+            command: InteractiveCommand::Transcript,
+            argument: None,
+        }) => {
+            composer.take();
+            return ActiveSubmission::OpenTranscript;
+        }
         Ok(Submission::Objective(_)) => return ActiveSubmission::RetainedDraft,
         Ok(Submission::Command {
             command: InteractiveCommand::Paste,
@@ -347,9 +421,6 @@ pub(super) fn validate_idle_command(
     argument: Option<&str>,
 ) -> Result<(), &'static str> {
     match command {
-        InteractiveCommand::Settings if argument.is_some() => {
-            settings_argument(argument.expect("settings argument")).map(|_| ())
-        }
         InteractiveCommand::Resume
             if argument.is_some_and(|id| SessionId::from_str(id).is_err()) =>
         {
@@ -654,8 +725,8 @@ pub(super) fn active_command_notice(
                 "Read-only Workspace; Arany requests: selected Provider; OS TLS checks may connect separately; no Tools or sandbox".into()
             }
         }
-        InteractiveCommand::Quit => {
-            "Ctrl+C cancels the active Run; /quit exits after it ends".into()
+        InteractiveCommand::Exit => {
+            "Ctrl+C cancels the active Run; /exit exits after it ends".into()
         }
         _ => "Command locked for this run".into(),
     }
@@ -822,7 +893,7 @@ mod tests {
         assert!(composer.is_empty());
         assert_eq!(view.defaults, SessionDefaults::default());
 
-        for command in ["/new", "/compact", "/settings", "/settings combined"] {
+        for command in ["/new", "/compact", "/settings"] {
             for character in command.chars() {
                 composer.apply(TerminalInput::Character(character));
             }
@@ -856,6 +927,7 @@ mod tests {
             accepted_sequence: 2,
             finished_sequence: None,
             tools: Vec::new(),
+            display: Vec::new(),
         });
         assert_eq!(
             active_command_notice(&view, InteractiveCommand::Status, starting_sequence),
@@ -1023,16 +1095,6 @@ mod tests {
         let oversized_unicode_title = "é".repeat(65);
         for (command, argument, expected) in [
             (
-                InteractiveCommand::Settings,
-                "other",
-                "Usage: /settings [tabs|combined]",
-            ),
-            (
-                InteractiveCommand::Settings,
-                "tabs extra",
-                "Usage: /settings [tabs|combined]",
-            ),
-            (
                 InteractiveCommand::Provider,
                 "other",
                 "Provider must be openai, anthropic, chatgpt, or custom:NAME",
@@ -1105,7 +1167,7 @@ mod tests {
             Err("Effort unavailable for the selected Provider/model")
         );
         assert!(validate_idle_command(&view, InteractiveCommand::Agents, Some("team 2")).is_ok());
-        assert!(validate_idle_command(&view, InteractiveCommand::Quit, None).is_ok());
+        assert!(validate_idle_command(&view, InteractiveCommand::Exit, None).is_ok());
         for title in ["x".repeat(128), "é".repeat(64)] {
             assert!(validate_idle_command(&view, InteractiveCommand::Rename, Some(&title)).is_ok());
         }
@@ -1125,22 +1187,30 @@ mod tests {
             workspace_permissions: None,
             defaults: SessionDefaults::default(),
             screen_reader: false,
+            classic: false,
             no_color: false,
             setup_requested: false,
             entry: EntryMode::New,
             prompt: None,
         };
+        let combined_classic = Preferences {
+            completion: CompletionLayout::Combined,
+            view: TerminalMode::Classic,
+        };
         assert_eq!(
             restore_settings(&admission).await.unwrap(),
-            CompletionLayout::Tabs
+            Preferences {
+                completion: CompletionLayout::Tabs,
+                view: TerminalMode::Fullscreen,
+            }
         );
         assert!(
             !admission.state_dir.exists(),
             "reading defaults creates no State"
         );
-        for layout in [CompletionLayout::Combined, CompletionLayout::Tabs] {
-            save_settings(&admission, layout).await.unwrap();
-            assert_eq!(restore_settings(&admission).await.unwrap(), layout);
+        for preferences in [combined_classic, Preferences::default()] {
+            save_settings(&admission, preferences).await.unwrap();
+            assert_eq!(restore_settings(&admission).await.unwrap(), preferences);
             assert_eq!(
                 std::fs::metadata(admission.state_dir.join("events.sqlite3"))
                     .unwrap()
@@ -1150,10 +1220,17 @@ mod tests {
         }
         let root = StateRoot::open_existing(&admission.state_dir).unwrap();
         for document in [
-            br#"{"version":2,"completion":"tabs"}"#.as_slice(),
-            br#"{"version":1,"completion":"unknown"}"#.as_slice(),
-            br#"{"version":1,"completion":"tabs","tools":true}"#.as_slice(),
-            br#"{"version":1}"#.as_slice(),
+            br#"{"version":1,"completion":"tabs"}"#.as_slice(),
+            br#"{"version":2,"completion":"tabs","view":"classic"}"#.as_slice(),
+            br#"{"version":3,"preferences":{"completion":"tabs","view":"classic"}}"#.as_slice(),
+            br#"{"version":2,"preferences":{"completion":"tabs"}}"#.as_slice(),
+            br#"{"version":2,"preferences":{"completion":"unknown","view":"classic"}}"#.as_slice(),
+            br#"{"version":2,"preferences":{"completion":"tabs","view":"unknown"}}"#.as_slice(),
+            br#"{"version":2,"preferences":{"completion":"tabs","view":"classic","tools":true}}"#
+                .as_slice(),
+            br#"{"version":2,"preferences":{"completion":"tabs","view":"classic"},"tools":true}"#
+                .as_slice(),
+            br#"{"version":2}"#.as_slice(),
             b"malformed",
         ] {
             root.replace_ui_preferences_record(document).unwrap();
@@ -1163,10 +1240,12 @@ mod tests {
                 document
             );
         }
-        save_settings(&admission, CompletionLayout::Combined)
-            .await
-            .unwrap();
+        save_settings(&admission, combined_classic).await.unwrap();
         let original = root.read_ui_preferences_record().unwrap().unwrap();
+        assert_eq!(
+            original,
+            br#"{"version":2,"preferences":{"completion":"combined","view":"classic"}}"#
+        );
         assert!(
             root.replace_ui_preferences_record(&vec![b'x'; 1025])
                 .is_err()
@@ -1183,13 +1262,13 @@ mod tests {
             std::fs::write(&outside, b"unchanged").unwrap();
             symlink(&outside, &pending).unwrap();
             assert!(
-                save_settings(&admission, CompletionLayout::Tabs)
+                save_settings(&admission, Preferences::default())
                     .await
                     .is_err()
             );
             assert_eq!(
                 restore_settings(&admission).await.unwrap(),
-                CompletionLayout::Combined
+                combined_classic
             );
             assert_eq!(std::fs::read(&outside).unwrap(), b"unchanged");
             std::fs::remove_file(pending).unwrap();
@@ -1197,7 +1276,7 @@ mod tests {
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
             assert!(restore_settings(&admission).await.is_err());
             assert!(
-                save_settings(&admission, CompletionLayout::Tabs)
+                save_settings(&admission, Preferences::default())
                     .await
                     .is_err()
             );
@@ -1218,6 +1297,7 @@ mod tests {
             workspace_permissions: None,
             defaults: SessionDefaults::default(),
             screen_reader: false,
+            classic: false,
             no_color: false,
             setup_requested: false,
             entry: EntryMode::New,

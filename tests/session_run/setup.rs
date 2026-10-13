@@ -189,7 +189,7 @@ fn bare_start_reuses_private_file_account_without_setup_or_run() {
         .expect("shell PID number");
     let product_pid = product_child_of(shell_pid);
     let _product = ProductGuard::new(product_pid, state.clone());
-    input.write_all(b"/quit\r").expect("quit Session");
+    input.write_all(b"/exit\r").expect("exit Session");
     let result = wait_product(child.take());
     pump(&mut output, &mut input, &mut transcript, &mut answered);
     assert!(result.status.success(), "saved-account startup failed");
@@ -344,7 +344,7 @@ fn bare_start_with_both_accounts_requires_an_explicit_billing_route() {
                         choice_at,
                         b"Input:\r\n",
                     );
-                    input.write_all(b"/quit\r").expect("quit Session");
+                    input.write_all(b"/exit\r").expect("exit Session");
                 }
             }
             None => input.write_all(b"\x03").expect("cancel billing choice"),
@@ -870,7 +870,7 @@ fn bare_start_without_account_keeps_chat_input_and_offers_named_setup_choices() 
         &mut answered,
         b"Notice: Setup closed\r\nInput:\r\n",
     );
-    input.write_all(b"/quit\r").expect("quit Session");
+    input.write_all(b"/exit\r").expect("exit Session");
     let result = wait_product(child.take());
     pump(&mut output, &mut input, &mut transcript, &mut answered);
     assert!(result.status.success(), "unconfigured chat failed");
@@ -1237,7 +1237,7 @@ fn release_bare_session(
         );
     }
     if !cancelled {
-        input.write_all(b"/quit\r").expect("quit Session");
+        input.write_all(b"/exit\r").expect("exit Session");
     }
     wait_for_after(
         &mut output,
@@ -1511,7 +1511,7 @@ fn release_saved_account_is_private_across_os_users() {
             &mut answered,
             b"Input:\r\n",
         );
-        input.write_all(b"/quit\r").expect("quit Session");
+        input.write_all(b"/exit\r").expect("exit Session");
         let result = wait_product(child.take());
         pump(&mut output, &mut input, &mut transcript, &mut answered);
         assert!(result.status.success(), "cross-user product exit");
@@ -1831,7 +1831,7 @@ fn unconfigured_inline_composer_shows_draft_and_setup_selection_at_narrow_widths
         std::fs::create_dir(&workspace).expect("Workspace");
         let state = temp.path().join("state");
         let shell = format!(
-            "stty rows 8 cols {columns}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
+            "stty rows 8 cols {columns}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
         );
         let mut command = Command::new("/usr/bin/script");
         command
@@ -2039,7 +2039,7 @@ fn unconfigured_inline_composer_shows_draft_and_setup_selection_at_narrow_widths
             closed_at,
             b"\x1b[?25h",
         );
-        input.write_all(b"/quit\r").expect("quit Session");
+        input.write_all(b"/exit\r").expect("exit Session");
         let result = wait_product(child.take());
         output
             .read_to_end(&mut transcript)
@@ -2049,8 +2049,8 @@ fn unconfigured_inline_composer_shows_draft_and_setup_selection_at_narrow_widths
             "inline setup journey failed at {columns}"
         );
         assert_eq!(
-            answered.cursor_queries, 0,
-            "terminal ownership must not query cursor input at {columns}"
+            answered.cursor_queries, 1,
+            "Classic observes the cursor only at acquisition at {columns}"
         );
         let text = String::from_utf8(transcript).expect("PTY UTF-8");
         assert!(
@@ -2206,7 +2206,7 @@ fn narrow_no_color_setup_hides_key_and_restores_terminal_on_cancel() {
             "-q",
             "-e",
             "-c",
-            "stty rows 8 cols 16; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --no-color --setup --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"",
+            "stty rows 8 cols 16; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic --no-color --setup --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"",
             "/dev/null",
         ])
         .stdin(Stdio::piped())
@@ -3405,7 +3405,7 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
             store.close().await.expect("close prefix");
             events
         });
-        let shell = "printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; stty cols 40 rows 12; if [ \"$ARANY_TEST_LINEAR\" = 1 ]; then set -- --screen-reader; else set -- --no-color; fi; \"$ARANY_TEST_EXE\" \"$@\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; stty \"$before\"; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
+        let shell = "printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; stty cols 40 rows 12; if [ \"$ARANY_TEST_LINEAR\" = 1 ]; then set -- --screen-reader; else set -- --no-color; fi; \"$ARANY_TEST_EXE\" --classic \"$@\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; stty \"$before\"; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
         let mut command = super::isolation::isolated_script(temp.path());
         command
             .env_clear()
@@ -3632,7 +3632,7 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
             if linear { b"Input:\r\n" } else { b"\x1b[10;3H" },
         );
         input
-            .write_all(b"/quit\r")
+            .write_all(b"/exit\r")
             .expect("explicit quit after cancellation");
         wait_for_after(
             &mut output,
@@ -3650,8 +3650,9 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
         );
         assert!(result.stderr.is_empty());
         assert_eq!(
-            answered.cursor_queries, 0,
-            "terminal ownership must not query cursor input"
+            answered.cursor_queries,
+            usize::from(!linear),
+            "only Classic observes the cursor, once at acquisition"
         );
         let text = String::from_utf8(transcript).expect("screen-reader UTF-8");
         if linear {

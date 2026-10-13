@@ -26,6 +26,22 @@ pub enum CompletionLayout {
     Combined,
 }
 
+impl CompletionLayout {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Tabs => "tabs",
+            Self::Combined => "combined",
+        }
+    }
+
+    pub const fn toggled(self) -> Self {
+        match self {
+            Self::Tabs => Self::Combined,
+            Self::Combined => Self::Tabs,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Composer {
     text: String,
@@ -1113,13 +1129,7 @@ mod tests {
                 assert_eq!(composer.text(), prefix);
                 assert_eq!(composer.cursor_byte_offset(), cursor);
                 assert_eq!(composer.apply(accept), ComposerEdit::Changed);
-                assert_eq!(
-                    composer.text(),
-                    format!(
-                        "/{expected}{}",
-                        if expected == "settings" { " " } else { "" }
-                    )
-                );
+                assert_eq!(composer.text(), format!("/{expected}"));
                 assert!(composer.completion_menu().is_none());
                 assert_eq!(
                     composer.apply(TerminalInput::Submit),

@@ -6,7 +6,7 @@
 
 ## Review method
 
-Three reviewers followed actual success, failure and cancellation paths with complementary ownership: dependency direction; responsibility/cohesion; and behavioral substitution/interface contracts. Root reconciled their evidence before assigning disjoint fixes. The [development skill](../../agents/skills/clean-architecture-review/SKILL.md) records the repeatable procedure; [primary-source research](../research/clean-architecture-principles-2026-10.md) separates Martin's principles from project judgments. The [verification record](#verification) below retains scoped evidence; current behavior lives in the [terminal](../specs/terminal.md) and [execution](../specs/execution.md) contracts.
+Three reviewers followed actual success, failure and cancellation paths with complementary ownership: dependency direction; responsibility/cohesion; and behavioral substitution/interface contracts. Root reconciled their evidence before assigning disjoint fixes. The [development skill](../../agents/skills/clean-architecture-review/SKILL.md) records the repeatable procedure and [Martin's primary sources](../../agents/skills/clean-architecture-review/SKILL.md#attribution); the findings below are project judgments. The [verification record](#verification) retains scoped evidence; current behavior lives in the [terminal](../specs/terminal.md) and [execution](../specs/execution.md) contracts.
 
 ## Confirmed strengths
 

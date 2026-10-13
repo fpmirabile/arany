@@ -119,7 +119,7 @@ output goldens when an intentional contract change alters bytes. Incidental
 UUIDs, timestamps and temporary paths may be canonicalized; user-controlled
 content, ordering and identity relationships may not.
 
-Use [the contribution guide](../../CONTRIBUTING.md#verification) for current check
+Use [the shared development guide](../development.md#verification) for current check
 commands and the workflow for CI configuration. Do not cache their commands,
 job names, test totals or historical native runs in this strategy.
 

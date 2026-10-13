@@ -330,7 +330,7 @@ fn resident_memory_two_includes_on_named_host() {
         Path::new(env!("CARGO_BIN_EXE_arany"))
     );
     let after_rss_kib = rss_kib(pid);
-    input.write_all(b"/quit\n").expect("exit attached mode");
+    input.write_all(b"/exit\n").expect("exit attached mode");
     drop(input);
     let result = wait_product(child.take());
     product.0 = None;

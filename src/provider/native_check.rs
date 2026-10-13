@@ -10,7 +10,7 @@ use aws_lc_rs::hmac;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const CHECK_VERSION: &str = "native-strict-outcome-conformance-v8";
+const CHECK_VERSION: &str = "native-strict-outcome-conformance-v9";
 const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 const PROBE_OUTPUT_CAP: u32 = 1024;
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
@@ -205,11 +205,12 @@ async fn probe<P: Provider>(provider: &P) -> Result<(), NativeCheckError> {
         max_output_tokens: PROBE_OUTPUT_CAP,
         tools: None,
     };
+    let (preview, observed) = super::ResponsePreview::new();
     let response = provider
-        .invoke(direct.clone())
+        .invoke_with_preview(direct.clone(), preview)
         .await
         .map_err(|_| NativeCheckError::ConformanceFailed)?;
-    if !matches!(&response.outcome, ProviderOutcome::Finish(value) if !value.summary.trim().is_empty() && !value.result.trim().is_empty() && value.summary.len() <= 8 * 1024 && value.result.len() <= 8 * 1024)
+    if !matches!(&response.outcome, ProviderOutcome::Finish(value) if !observed.borrow().answer.is_empty() && value.result.starts_with(&observed.borrow().answer) && !value.summary.trim().is_empty() && !value.result.trim().is_empty() && value.summary.len() <= 8 * 1024 && value.result.len() <= 8 * 1024)
         || !valid_usage(response.input_tokens, response.output_tokens)
     {
         return Err(NativeCheckError::ConformanceFailed);
@@ -587,6 +588,21 @@ mod tests {
                 output_tokens: Some(8),
                 wire_provenance: None,
             })
+        }
+
+        async fn invoke_with_preview(
+            &self,
+            request: ProviderRequest,
+            preview: super::super::ResponsePreview,
+        ) -> Result<ProviderResponse, ProviderError> {
+            let response = self.invoke(request).await?;
+            if let ProviderOutcome::Finish(finish) = &response.outcome {
+                preview.publish(super::super::PreviewText {
+                    answer: finish.result.clone(),
+                    ..Default::default()
+                })?;
+            }
+            Ok(response)
         }
 
         async fn compact(

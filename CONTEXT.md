@@ -17,7 +17,7 @@ The policy-owning module that advances a Run and owns its lifecycle invariants.
 _Avoid_: Core, backend, server
 
 **Workspace**:
-The authorized read-only project scope available to a Run.
+The project scope pinned to a Session and revalidated for each Run. Reading its content and changing its files require their respective admitted authority; folder identity alone grants neither.
 _Avoid_: Repository, working directory, project root
 
 **Run**:

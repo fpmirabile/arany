@@ -1,6 +1,6 @@
 # Testing
 
-Load when continuing beta 1, adding or changing behavior, fixing a defect, editing tests or fixtures, changing user-visible output, or making a correctness, security, durability, provider, performance, or platform-support claim. The [testing strategy](../docs/research/testing-strategy-for-rust-cli-harness.md) explains the design rationale; keep this file as the concise working contract.
+Load when continuing beta 1, adding or changing behavior, fixing a defect, editing tests or fixtures, changing user-visible output, or making a correctness, security, durability, provider, performance, or platform-support claim. For documentation-only work, use [documentation and instruction checks](#documentation-and-instruction-changes). The [testing strategy](../docs/research/testing-strategy-for-rust-cli-harness.md) explains the design rationale; keep this file as the concise working contract.
 
 ## Load for the affected task
 
@@ -10,6 +10,16 @@ Load when continuing beta 1, adding or changing behavior, fixing a defect, editi
 - Process, account, OS-service or private-state fixtures; local Unix test commands → [host and account isolation](./references/testing-details.md#host-and-account-isolation).
 - PTY input, signals, restoration, terminal faults or tmux → [terminal process fixtures](./references/testing-details.md#terminal-process-fixtures).
 - Storage/Workspace faults, response RSS or paused deadlines → [storage, Workspace and resource faults](./references/testing-details.md#storage-workspace-and-resource-faults).
+
+## Documentation and instruction changes
+
+Use the [shared documentation checks](../docs/development.md#verification).
+When changing instruction routing, follow representative tasks from `AGENTS.md`
+to their contract, editing rules and evidence owner: terminal output, Provider
+decoding and Session persistence. Check affected inbound links after moving or
+renaming a heading. Keep commands at their existing owner and distinguish
+requirements from past verification. These checks establish documentation
+consistency, not measured agent quality or runtime/platform support.
 
 ## Evidence budget
 
@@ -47,7 +57,7 @@ Load when continuing beta 1, adding or changing behavior, fixing a defect, editi
 ## Evidence lanes
 
 - Default `cargo test` is offline, deterministic, isolated, retry-free, free of wall sleeps and hardware-sensitive timing assertions, and quiet on success.
-- Heavy native gates use `cfg_attr(not(arany_ci), ignore)`, so CI's `--cfg arany_ci` runs them in the ordinary test step while local runs stay ignored until requested. Gates in one test binary hold `crate::test_process::NATIVE_GATE`; a locally ignored gate is not evidence. Standard check commands live in [CONTRIBUTING](../CONTRIBUTING.md#verification); CI reproduction lives in [testing details](./references/testing-details.md#local-verification-and-ci).
+- Heavy native gates use `cfg_attr(not(arany_ci), ignore)`, so CI's `--cfg arany_ci` runs them in the ordinary test step while local runs stay ignored until requested. Gates in one test binary hold `crate::test_process::NATIVE_GATE`; a locally ignored gate is not evidence. Standard check commands live in the [development guide](../docs/development.md#verification); CI reproduction lives in [testing details](./references/testing-details.md#local-verification-and-ci).
 - Keep beta integration scenarios in one `tests/session_run.rs` target. Focused owning-module tests use compact transition, boundary, hostile-input, or parser tables only where the central journey cannot prove the claim.
 - Use pure presentation tables and Ratatui `TestBackend` for Session/composer/status/activity-shelf frames, including single/team/overflow states. Use native Linux/macOS PTY process tests for terminal acquisition/restoration, Session and agent pickers, transient mouse reporting, signals, resize, suspend/resume, cancellation, fallback, tmux, and broken stderr. Do not duplicate Engine scenarios per width or key.
 - Exact linear accessibility fixtures prove the absence of CSI/OSC and carriage-return rewriting; manual VoiceOver and Orca checks are release evidence, not silent CI skips.

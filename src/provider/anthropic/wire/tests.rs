@@ -533,3 +533,58 @@ fn inbound_messages_require_one_complete_structured_answer() {
     );
     assert!(encode_request(&json!({"oversize": "x".repeat(MAX_REQUEST_BYTES)})).is_err());
 }
+
+#[test]
+fn streamed_messages_require_closed_blocks_and_exclude_thinking_from_preview() {
+    use crate::provider::{PreviewText, ResponsePreview};
+    let outcome = serde_json::json!({"outcome":{"type":"finish","summary":"done","result":"line one\nline two 🚀"}}).to_string();
+    let events = vec![
+        serde_json::json!({"type":"message_start","message":{"id":"msg_stream","type":"message","role":"assistant","model":"model-1","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":12,"output_tokens":0}}}),
+        serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}),
+        serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"INTERNAL_CANARY"}}),
+        serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"signature"}}),
+        serde_json::json!({"type":"content_block_stop","index":0}),
+        serde_json::json!({"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}),
+        serde_json::json!({"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":outcome}}),
+        serde_json::json!({"type":"content_block_stop","index":1}),
+        serde_json::json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":8}}),
+        serde_json::json!({"type":"message_stop"}),
+    ];
+    let wire = events
+        .iter()
+        .map(|event| {
+            format!(
+                "event: {}\ndata: {event}\n\n",
+                event["type"].as_str().unwrap()
+            )
+        })
+        .collect::<String>();
+    let (publisher, observed) = ResponsePreview::new();
+    let mut decoder = MessageStream::new("synthetic-key", "model-1", publisher);
+    let mut completed = None;
+    for byte in wire.bytes() {
+        if let Some(response) = decoder.feed(&[byte]).unwrap() {
+            completed = Some(response);
+        }
+    }
+    assert_eq!(
+        **observed.borrow(),
+        PreviewText {
+            answer: "line one\nline two 🚀".into(),
+            ..Default::default()
+        }
+    );
+    let accepted = decode_run(&completed.unwrap(), "model-1", 32).unwrap();
+    assert!(
+        matches!(accepted.outcome, ProviderOutcome::Finish(Finish { result, .. }) if result == "line one\nline two 🚀")
+    );
+    for invalid in [
+        serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"unsafe"}}),
+        serde_json::json!({"type":"message_stop"}),
+    ] {
+        let (publisher, _) = ResponsePreview::new();
+        let mut decoder = MessageStream::new("key", "model-1", publisher);
+        let wire = format!("data: {invalid}\n\n");
+        assert!(decoder.feed(wire.as_bytes()).is_err());
+    }
+}

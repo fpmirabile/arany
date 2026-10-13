@@ -751,7 +751,7 @@ fn isolated_stage(checked_turn: bool) {
             }
         }
         let quit_at = transcript.len();
-        input.write_all(b"/quit\r").expect("quit ChatGPT Session");
+        input.write_all(b"/exit\r").expect("exit ChatGPT Session");
         wait_for_stage(
             &mut output,
             &mut input,

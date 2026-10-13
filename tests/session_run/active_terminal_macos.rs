@@ -496,6 +496,106 @@ fn native_partial_acquisition_restores_raw_mode_when_initial_output_disconnects(
     );
 }
 
+fn read_until_consent(
+    reader: &mut std::fs::File,
+    transcript: &mut Vec<u8>,
+    child: &mut ChildGuard,
+    context: &str,
+) {
+    let flags = rustix::fs::fcntl_getfl(&*reader).unwrap();
+    rustix::fs::fcntl_setfl(&*reader, flags | rustix::fs::OFlags::NONBLOCK).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut consent = false;
+    let mut suggested_input = Vec::new();
+    while !consent {
+        let mut bytes = [0; 4096];
+        match reader.read(&mut bytes) {
+            Ok(0) => panic!("native consent closed before admission: {context}"),
+            Ok(count) => {
+                assert!(transcript.len() + count <= 64 * 1024);
+                transcript.extend_from_slice(&bytes[..count]);
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) => {}
+            Err(error) => panic!("native consent read: {error}"),
+        }
+        crate::process::decline_workspace_consent(&mut suggested_input, transcript, &mut consent);
+        assert!(
+            Instant::now() < deadline,
+            "native consent missing: {context}"
+        );
+        assert!(child.child().try_wait().unwrap().is_none());
+        thread::yield_now();
+    }
+}
+
+#[test]
+fn native_saved_classic_chat_view_selects_the_primary_screen() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("project");
+    let state = temp.path().join("state");
+    std::fs::create_dir(&workspace).unwrap();
+    StateRoot::admit(&state)
+        .unwrap()
+        .replace_ui_preferences_record(
+            br#"{"version":2,"preferences":{"completion":"tabs","view":"classic"}}"#,
+        )
+        .unwrap();
+    let geometry = nix::pty::Winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let (input, slave) = crate::process::cloexec_pty(Some(&geometry));
+    let before = crate::process::terminal_settings(&input);
+    let master = input.try_clone().unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
+    command
+        .env_clear()
+        .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account"))
+        .env("HOME", temp.path().join("fixture-home"))
+        .env("XDG_STATE_HOME", temp.path().join("fixture-state"))
+        .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
+        .env("TERM", "xterm")
+        .current_dir(&workspace)
+        .args(["--no-color", "--state-dir"])
+        .arg(&state)
+        .arg("--workspace")
+        .arg(&workspace)
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(slave));
+    own_terminal(&mut command);
+    // Close fixture PTYs before reaping a child on unwind.
+    let (mut child, mut input, mut master) =
+        (ChildGuard::new(command.spawn().unwrap()), input, master);
+    drop(command);
+    let mut transcript = Vec::new();
+    read_until_consent(&mut master, &mut transcript, &mut child, "saved classic");
+    assert!(
+        transcript.windows(4).any(|part| part == b"\x1b[6n"),
+        "saved classic observes the inline cursor"
+    );
+    assert!(
+        !transcript.windows(8).any(|part| part == b"\x1b[?1049h"),
+        "saved classic stays on the primary screen"
+    );
+    input.write_all(&[3]).unwrap();
+    let output = crate::process::capture_terminal(
+        child.child(),
+        master,
+        Duration::from_secs(10),
+        64 * 1024,
+        |_| {},
+    );
+    assert_eq!(output.status.code(), Some(0));
+    restored(&input, &before);
+}
+
 #[test]
 fn native_folder_consent_restores_before_account_setup_or_session_work() {
     for linear in [true, false] {
@@ -517,7 +617,7 @@ fn native_folder_consent_restores_before_account_setup_or_session_work() {
                 ws_xpixel: 0,
                 ws_ypixel: 0,
             };
-            let (mut input, slave) = crate::process::cloexec_pty(Some(&geometry));
+            let (input, slave) = crate::process::cloexec_pty(Some(&geometry));
             let before = crate::process::terminal_settings(&input);
             let broken = case.starts_with("stderr-");
             let mut fault_probe = None;
@@ -552,44 +652,24 @@ fn native_folder_consent_restores_before_account_setup_or_session_work() {
             if case == "stderr-before" {
                 drop(master.take());
             }
-            let mut child = ChildGuard::new(command.spawn().unwrap());
+            // Close fixture PTYs before reaping a child on unwind.
+            let (mut child, mut input, mut master) =
+                (ChildGuard::new(command.spawn().unwrap()), input, master);
             drop(command);
             let pid = Pid::from_raw(child.child().id().try_into().unwrap()).unwrap();
             let mut transcript = Vec::new();
             if case != "stderr-before" {
-                let reader = master.as_mut().unwrap();
-                let flags = rustix::fs::fcntl_getfl(&*reader).unwrap();
-                rustix::fs::fcntl_setfl(&*reader, flags | rustix::fs::OFlags::NONBLOCK).unwrap();
-                let deadline = Instant::now() + Duration::from_secs(10);
-                let mut consent = false;
-                let mut suggested_input = Vec::new();
-                while !consent {
-                    let mut bytes = [0; 4096];
-                    match reader.read(&mut bytes) {
-                        Ok(0) => panic!("native consent closed before admission: {linear} {case}"),
-                        Ok(count) => {
-                            assert!(transcript.len() + count <= 64 * 1024);
-                            transcript.extend_from_slice(&bytes[..count]);
-                        }
-                        Err(error)
-                            if matches!(
-                                error.kind(),
-                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                            ) => {}
-                        Err(error) => panic!("native consent read: {error}"),
-                    }
-                    crate::process::decline_workspace_consent(
-                        &mut suggested_input,
-                        &transcript,
-                        &mut consent,
-                    );
-                    assert!(
-                        Instant::now() < deadline,
-                        "native consent missing: {linear} {case}"
-                    );
-                    assert!(child.child().try_wait().unwrap().is_none());
-                    thread::yield_now();
-                }
+                read_until_consent(
+                    master.as_mut().unwrap(),
+                    &mut transcript,
+                    &mut child,
+                    &format!("{linear} {case}"),
+                );
+                assert_eq!(
+                    transcript.windows(8).any(|part| part == b"\x1b[?1049h"),
+                    !linear,
+                    "default chat view is fullscreen: {linear} {case}"
+                );
                 let active = crate::process::terminal_settings(&input);
                 assert_eq!(
                     active == before,
@@ -887,10 +967,11 @@ fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
                             release_tx.send(()).unwrap();
                             suspended = true;
                         }
-                        let expected = if matches!(exit, Exit::Failure) {
-                            b"Status: failed".as_slice()
-                        } else {
-                            b"Status: cancelled".as_slice()
+                        let expected = match (linear, matches!(exit, Exit::Failure)) {
+                            (true, true) => b"Status: failed".as_slice(),
+                            (true, false) => b"Status: cancelled".as_slice(),
+                            (false, true) => b"failed.".as_slice(),
+                            (false, false) => b"cancelled.".as_slice(),
                         };
                         if released
                             && !exited

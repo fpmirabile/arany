@@ -1446,7 +1446,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
                         assert!(
                             labels
                                 .iter()
-                                .any(|row| row.contains("Choose slash menu display"))
+                                .any(|row| row.contains("Slash menu and chat view"))
                         );
                     }
                     if !color {

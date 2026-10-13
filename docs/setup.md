@@ -1,158 +1,225 @@
 # Arany account setup
 
-[The saved-credential contract](./specs/credentials.md) owns account scope, protected storage, startup authorization and recovery; this guide explains the user flow.
+This guide explains account setup and everyday recovery. The [credential
+contract](./specs/credentials.md) owns account scope and storage; the [terminal
+contract](./specs/terminal.md) owns interaction. [Provider rules](../agents/provider.md)
+and [ChatGPT rules](../agents/chatgpt.md) retain route and OAuth admission.
 
-On every supported OS, attached startup asks whether you trust the opened folder before account setup or selection, unless that exact directory already has remembered trust. This also applies with explicit Provider flags, `--tools`, resume and fork. Read only or Escape leaves trust unremembered; the next start asks again. With `--tools`, the first choice says Use explicit Tool config and retains that private configuration without remembering folder trust. Ctrl+C exits before account access. Unsafe trust metadata stops startup for recovery.
+## Start an attached conversation
 
-Before chat input, Arany checks OS-store authorization for the selected saved account. The OS may request permission for that Arany item; Arany does not enumerate passwords, unlock the whole store or change access permissions. The authorization phase allows up to two minutes for the OS dialog, and Escape or Ctrl+C exits with terminal restoration and helper cleanup. Missing, denied, invalid or changed access starts no task, sign-in or automatic retry. Environment/custom, unconfigured and private-file selections request no OS credential access. On macOS, [Allow Once applies to one retrieval; Always Allow permits later retrievals of that item](https://support.apple.com/en-ae/guide/keychain-access/kyca1243/mac). Arany preserves the user's OS choice, so a later access can ask again.
+1. Run `arany` in the project directory. Review the folder-trust choice before
+   account access. Read only or Escape leaves trust unremembered; Ctrl+C exits.
+   [Local Tools](./tools.md) explains what trusting a folder enables.
+2. Arany reuses your last explicit saved account/model selection. Without a
+   remembered selection, coexistence of API and ChatGPT accounts requires an
+   explicit billing-route choice; Cancel starts focused. Unavailable access
+   never falls back to another account or billing route.
+3. For a selected keyring account, the OS may request access to that Arany item
+   before chat opens. Arany does not enumerate passwords or unlock the whole
+   store. Escape or Ctrl+C cancels startup. On macOS, Allow Once can prompt again
+   at later access; the OS owns that choice.
+4. If no account is configured, chat still opens. Use `/setup`, or Ctrl+K → Setup,
+   to connect one. `arany --setup` opens the wizard at startup. API-key entry hides
+   the key; non-secret fields remain visible.
+5. Setup reads the selected account's model catalog and chooses a low-effort
+   default without inference. Use `/model` to change model and reasoning, then
+   submit a task. Submission can consume API or plan usage; catalog visibility
+   alone does not prove model compatibility.
 
-On macOS, folder trust enables guarded file Tools, runtime Skills and a pinned native shell. Explicit private configuration can add reviewed commands and local MCP. These use native isolation and the accepted supervised resource profile; unavailable protection rejects without affecting ordinary chat. [Tool compatibility](./specs/tools.md#macos-enforcement-and-compatibility) owns these guarantees and limits.
+A positional task such as `arany "Your task"` requires a Provider/model selection
+at startup. If it is missing, configure access in chat first. A fork starts with
+unselected defaults; resume retains its saved selection and still revalidates
+access. A replaced or disconnected account requires explicit recovery.
 
-If ChatGPT reports an inaccessible desktop password store, unlock that store and retry. `/setup` → ChatGPT plan → Reconnect keeps the saved account's pinned store. If it stays unavailable, Connect new offers Cancel or Use private file; Cancel starts focused. The private file stores sign-in credentials without encryption and requires its full risk warning before browser authorization. A missing saved sign-in instead directs to Reconnect. Arany does not change storage, sign in or retry an objective automatically. A present Linux Secret Service alone does not prove its collection or selected item is usable.
+## Select a model and keep your draft
 
-Model Tab completion includes every admitted ID from setup or the last explicitly opened model catalog, including availability-only rows whose compatibility is unknown. Changing Provider or saved-account identity clears the cache, including saved/environment-backed transitions; same-account model changes keep it. `/model` opens an already cached native/ChatGPT list immediately and shows `refreshing` while updating that same account asynchronously. Arrows, reasoning choices, Enter and cancellation remain available. A failed refresh keeps the older list with a textual error; retry `/model` or review the account with `/setup`. Inline updates preserve filter, focused model identity and tentative effort when that row remains. Screen-reader mode keeps the open choice numbers unchanged and uses the refreshed list on reopening. Saved-account catalog IDs and the last acknowledged model/effort survive restarts in a bounded private, token-free preference file keyed by Provider and account UUID. Restoring that tuple and its cached rows makes no credential or network request; selected OS-store authorization is a separate startup phase; explicit flags and resumed Session defaults win. On the first upgrade, an absent preference can copy only the matching account/model/effort from the latest Session in this Workspace; it opens a new conversation rather than resuming history. A source with no cached rows still needs its first bounded catalog read. Environment-backed and exact custom choices retain their own selection paths, and lists are never hardcoded by subscription tier. A remembering error leaves the committed Session selection usable and warns that later starts may need /model again. Exact custom profiles retain local declaration loading. The second `/model MODEL EFFORT` hints follow reviewed native metadata; ChatGPT/unreviewed models show explicit levels and `<effort>`, not provider default. Selection remains staging, never credential or compatibility authority.
+`/model` opens the model and reasoning picker. Up/Down selects a row, Left/Right
+changes its reasoning, typing filters IDs, Enter saves both and Escape cancels.
+Screen-reader mode uses numbered pages and `NUMBER [EFFORT|default]`. Literal
+selection is available as `/model MODEL [EFFORT|default]`; use an ID visible to
+your account. Unknown native and ChatGPT models offer explicit effort levels
+rather than provider default.
 
-While a model catalog loads, typing retains a task draft rather than submitting it. Linear/screen-reader mode keeps ordinary terminal echo without a notice for every character; Ctrl+D after text announces the retained character count once, not an invalid-line error. Ctrl+C cancels loading and returns to the same draft. A loading failure instead returns a labeled catalog error with its safe diagnostic and review/retry guidance, leaving Session defaults and any retained task draft unchanged. It does not retry automatically or start a Run. Clear or submit the draft explicitly after returning to chat; neither failure nor cancellation promises rollback of an already-started account refresh.
+Cached lists can open while refreshing. A failed refresh preserves the older
+list and shows an error; retry `/model` or review `/setup`. Selecting a model
+starts no inference or compatibility check. During a Run, model inspection
+shows the pinned selection without changing it.
 
-Inline conversation uses `› You:` and a left rail for your messages, and `● Arany:` for replies. Message spacing separates turns, while the terminal keeps its own background. These role markers remain readable without color; screen-reader mode uses plain labeled messages.
+The composer retains text and caret across selectors, resize and background
+catalog work. Enter during a Run or compaction retains the draft without
+queueing another task. Ctrl+C cancels active work. Once idle, review the retained
+draft and press Enter explicitly. Errors do not automatically retry a task or
+restore an already consumed submission.
 
-The chat input stays above the bottom status row. Long text wraps visually into up to four visible rows without adding newlines to your message. When some rows are hidden, the heading shows the visible visual-row range, or the caret row and total at narrow widths. `Ctrl+O` or Shift+Enter inserts an explicit newline when your terminal sends Shift+Enter distinctly; use Ctrl+O if it sends ordinary Enter for both. Left/Right edit across wrapped rows, while Up/Down move between explicit lines unless command choices are open. Ctrl+Left/Right move between whitespace-delimited words; Ctrl+W deletes backward to the previous word start. Punctuation stays part of a word, including paths and model IDs; spaces and explicit newlines separate them. Backspace and Delete keep whole visible Unicode characters intact; if deleting a separator joins an accent or emoji, the caret moves past the joined character. Enter submits when idle and retains your task draft during a Run or context maintenance, except for completion in the open slash-name menu. The lower rule names that action and shows newline shortcuts where space permits, including without color. Closing a selector or resizing keeps the same editable text and caret.
+Use Ctrl+O for a newline, `/paste` for an explicit clipboard read and `/help` for
+available commands. The draft is limited to 8 KiB of UTF-8; invalid or oversized
+insertions reject without submitting a truncated task. Clipboard PNGs are
+limited to four images totaling 192 KiB. Original images remain in private
+history and JSONL exports; human history shows metadata. See [paste and
+attachments](./specs/terminal.md#paste-and-attachments) for transport, privacy and
+model limitations.
 
-While idle, Ctrl+C clears a nonempty draft. With an empty draft it first shows a chat notice about Ctrl+Shift+C copying; another Ctrl+C within two seconds exits. Copying belongs to your terminal emulator, and Arany does not read your clipboard for this notice. During a Run, Ctrl+C still requests cancellation rather than clearing your draft or treating the interrupt as a copy.
+Fullscreen, the default chat view, provides managed history with a visible
+composer. Classic inserts confirmed turns into native scrollback; choose it with
+`--classic` for one process or save it as the chat view in `/settings`. Ctrl+T
+or `/transcript` shows Tool details and public commentary. Visual streaming is
+provisional: interrupted saved prefixes remain incomplete and
+outside later model context. `--screen-reader` uses linear confirmed output.
+[Terminal continuity](./specs/terminal.md#terminal-continuity-and-provisional-text)
+owns these distinctions and recovery limits.
 
-Use `/new` or `/clear` while idle to start an empty conversation with your current Provider, account, model, effort and collaboration settings. This does not restore startup settings, erase older Sessions, inherit their title/messages, sign in, or run a compatibility check. An unconfigured or account-only selection stays that way. The next task still needs current account and model/effort admission; retaining a selection is not renewed authorization.
+## Connect or recover a ChatGPT account
 
-After resuming interrupted work, you can change the idle conversation's title or next-Run selection without retrying its objective. Those changes retain the previous Run as interrupted, including any already recorded usage or answer; they do not continue it under its old Run ID. A new objective creates a new Run.
+Choose ChatGPT plan in `/setup`. For a saved account:
 
-If another Arany process holds an operation on your Session, changing its Provider, model, effort or collaboration settings reports an error in chat without saving that choice. You can select again after the operation ends; Arany does not retry automatically. A catalog read may already have completed, and this rejection does not undo it. Startup, account setup and storage/Workspace failures keep their separate error handling.
+| Choice | Effect |
+|---|---|
+| Use saved | Reuses a connected account without browser sign-in; multiple accounts open a picker |
+| Reconnect | Reauthorizes the selected identity and retains its storage backend |
+| Connect new | Starts a separate account connection |
+| Enable plan | Appears for a verified identity whose plan permissions are disabled |
 
-Draft and hidden API-key feedback use characters. A combined emoji or accented character counts once in a draft; accepted spaces and newlines count too. The hidden key accepts at most 512 printable ASCII characters. Active `context N% local` reports the recorded local context budget, including images; it is not the model's token-window percentage. `/agents` shows the last call's provider-reported input/output tokens, with missing counts marked unknown. Human image sizes use rounded KB.
+Before browser sign-in, review the full warning and explicitly select Accept.
+Back starts focused. Local response/time limits do not guarantee a remote
+generation or plan-usage cap. Storage has its own warning: an unlocked Linux
+Secret Service item may be accessible to another same-user app; the private-file
+backend stores credentials without encryption. Resize or resume restarts review.
 
-The draft limit is 8 KiB of UTF-8 text, not 8,192 characters. An insertion that would exceed it produces an error and leaves your existing inline text and caret unchanged. Linear/screen-reader mode rejects an invalid or oversized physical segment without adding any of it to the previously accepted logical draft; the next valid segment can still continue that draft. These errors remain textual during a Run, compaction or catalog loading, while valid continuation remains an ordinary character-count notice. Neither rejection submits truncated text or retries a task.
+Reconnect requires the same signed account identity. A browser success page is
+not proof of completed sign-in: Arany must still validate the issuer, signature,
+audience, nonce and time claims. Follow the safe error category; do not bypass
+validation or paste tokens, callback URLs or raw token responses into a report.
+If a prior new sign-in left a registration, Resume sign-in reuses it with a fresh
+authorization attempt; Back preserves it without connecting an account.
 
-In Unix inline chat, terminal-delivered bracketed text paste inserts one editable block without sending it. A terminal's Ctrl+Shift+V normally supplies that paste without an Arany clipboard read. Multiline text stays in the draft, CR/CRLF becomes LF, and tabs remain literal with a four-space display. The whole paste must fit the eight-KiB draft limit and contain no other control characters; rejection leaves text and caret unchanged. Enter is still required to submit later. Paste works while a Run, compaction or catalog is loading; an open selector ignores it. API-key and workspace fields validate their own bounds without auto-confirming.
+Cancelling before account publication preserves the existing selection. After a
+new connection, switch or reconnect has saved the account, cancelling or failing
+catalog loading can leave it selected without model/effort defaults. Use `/model`
+to finish selection. Cancellation does not roll back a saved account or a token
+refresh already started.
 
-Ctrl+V, a decoded Ctrl+Shift+V, or `/paste` explicitly requests local clipboard access for the chat draft. Linux uses an installed `wl-paste` for Wayland or `xclip` for a local X11 display, without requiring GNOME or KDE. macOS uses a bounded native AppKit worker. An unavailable client/transport shows an error without changing the draft; normal terminal text paste still works. The read is asynchronous and bounded; Enter during it retains the draft. Idle Ctrl+C cancels that read without clearing the draft, while active Ctrl+C still cancels the Run. Modal entry, terminal release and suspend discard outstanding reads. `/paste` also works with canonical/screen-reader input and prints a complete labeled `Draft (not sent)` preview; a later Enter remains necessary. Canonical input still does not claim safe unframed emulator multiline paste. The isolated named-pasteboard test (an ignored manual gate in `src/terminal/clipboard.rs`, not run in CI) exercises macOS transport; general-pasteboard UX remains a user check.
+If plan permission is disabled, `/setup` → Enable plan explicitly requests it for
+the same registration and identity. No catalog, check or Run can use the disabled
+account. Arany never switches to API billing automatically. Anthropic consumer
+subscriptions remain unsupported; Anthropic API keys use separate billing.
 
-Linux and macOS image clipboard access admit PNG only, at most four images totaling 192 KiB per draft. Arany checks container structure, CRC, dimensions and pixel count without local raster decoding; a model may still reject the image or lack vision support. An unsupported advertised image format is not pasted as a filename or text fallback. The composer shows an image count without replacing your text/caret; text plus images, or images alone, submit only with Enter. Ctrl+C on an idle nonempty draft clears both. Local controls and pickers preserve attachments; submit or clear them before changing Sessions. Native Responses, ChatGPT-plan Responses and Messages send inline image bytes under existing request bounds; exact custom profiles remain text-only. Original images are stored in private Session history and inherited by forks, not encrypted at rest. Context selects whole historical turns within count/byte limits. Compaction retains only text, assistant interpretations and image metadata/digests in its lossy summary input; original bytes remain canonical but covered pixels are not restored into later summarized requests. Human history and `show` display metadata, while explicit `show --output jsonl` exports the original bytes. General-pasteboard UX and real model vision remain final user checks.
-
-Type `/` or a partial command such as `/s` to see matching commands above the input. Up/Down highlights a row; Tab or Enter fills its name without executing it, and a later Enter submits through the normal command checks. The footer names both completion keys, including at 16 columns without color. Escape closes the rows without changing your draft or caret; further editing reopens matching choices. Exact command names and arguments retain their usual completion: `/provider ` keeps `<provider>` visible until typing starts, and `/provider o` completes to `openai` with Tab. These previews never request credentials, load a catalog or call a Provider. Screen-reader mode keeps literal canonical input rather than this inline menu.
-
-An older or account-only Session can still lack a model or required effort. Submitting then reports the local selection error before reading credentials or starting a Run, keeping your inline task and caret. Use `Ctrl+K` → Models to choose both without losing the draft; native and ChatGPT selection requires no synthetic check. Screen-reader mode starts a fresh physical input line after rejection. This local recovery does not automatically restore or retry a submission after a later credential, State or Provider failure.
-
-Submitting immediately shows `preparing` and a compact `Preparing request` row above the input while Arany admits the request and selected credentials. You can keep editing a new draft without losing that state; it does not mean inference has started. Current committed Run facts replace it with working status and agent activity; an active agent without a Tool or accepted work summary says `Waiting for response; Ctrl+C cancels` instead of repeating your objective as progress. Screen-reader mode keeps labeled preparation/Run facts without per-character feedback. Subscription answers appear only after a complete valid response; Arany shows no private reasoning, partial answer or raw Provider stream. Development builds capture safe failure details in the [local diagnostic log](./development-diagnostics.md).
-
-While a submitted chat objective awaits selected Provider credentials, Ctrl+C stops that wait and returns to the same Session. It retains the new draft typed during the wait; it neither restores nor retries the original objective. The interruption notice means that submission did not reach Engine Run admission, not that delegated account renewal rolled back. A Run already admitted follows normal durable cancellation instead. Startup and pre-Session prompt validation keep their separate bounded waits.
-
-Unknown or locally invalid slash commands appear as errors, with a textual heading even without color. Inline syntax or argument rejection keeps the command and caret for correction; screen-reader mode labels the error and starts a fresh line. Extra text on a no-argument command, such as `/status extra` or `/help extra`, is rejected in idle chat and during a Run; the usage error names the command or alias you entered. Trailing whitespace is allowed. A parser-rejected command during a Run cannot steer it, while valid read-only inspection and locked controls remain ordinary notices. Suggestions refer only to Arany's compiled commands, and no rejected command becomes Provider input or a Session Event.
-
-Errors returned by `/resume`, `/fork`, `/rename` or model selection are labeled too. Failed resume/fork operations do not replace your current Session view. `/provider chatgpt` also keeps chat open when the selected account is absent or invalid, preserving the current Provider, model and effort; use `/setup` for explicit account connection or recovery. It does not open sign-in, retry or switch billing automatically. Custom model/effort selection keeps chat open when its profile is missing, invalid or unsafe, its model differs, or a typed level is not declared; rejection changes no defaults. This applies to `/model MODEL EFFORT` and the model picker. A declared custom choice remains staging: a Run still requires current exact profile conformance. Choosing a model does not load an account token or renew consent; the actual Run revalidates both before Workspace input. Operation results after State/profile access do not restore or repeat a consumed command. If a State write has an uncertain outcome, inspect saved Session history before retrying; the error label does not promise rollback.
-
-Use `/resume` to choose a conversation by title. The focused row shows its creation and last saved activity in UTC, its model and API/subscription route. The first successfully completed AI summary supplies a default title without another call; before that, the first task is the preview, or `Empty conversation` for a draft. `/rename TITLE` keeps your chosen title. Opening a conversation alone does not change its activity timestamp. `/sessions` is retired.
-
-Accounts and credentials are shared across your OS user's conversations. Each conversation keeps its own next-turn model, effort and access route. Resume preserves those choices; missing selection recovers the latest Run's pinned tuple or inherits the current/user default and saves it before switching. You need no repeated `/setup` when a usable default exists. A replaced or disconnected pinned account still requires explicit recovery; it cannot silently switch accounts or API/subscription billing. Bare startup remembers the last explicit saved-account choice even when both access routes are saved; catalog refresh does not change that choice.
-
-If `/resume` cannot load its list, it reports a safe error in chat and keeps the current Session. An empty list remains ordinary guidance. Neither outcome selects another Session or starts a Run. A terminal drawing, input or cleanup failure instead exits through terminal restoration; it is not a recoverable list notice. Before entering a Session, bare `arany --resume` still exits unsuccessfully when its list is empty or unavailable.
-
-In the inline chat, press `Ctrl+K` and choose Setup to configure an account while keeping your draft. When no Provider is selected, Setup is already focused. `/setup` opens the same wizard. A task rejected before account or model selection remains editable; errors and important notices appear in the chat, while closing a selector returns to the same text and caret. This local feedback is not saved in Session Events or sent to a Provider. The [next steps](../NEXT_STEPS.md) checklist separates final manual/live beta 1 checks from beta 2 and broader release work.
-
-Use `/model` or Ctrl+K → Models to select model and reasoning together. The bounded inline list overlays the lower chat, not a separate screen: Up/Down focuses a model; Left/Right changes the focused row's reasoning; Enter saves both atomically; Escape or Ctrl+C keeps the previous selection and exact draft/caret/reading position. Type to filter IDs locally, or use Backspace to edit the filter. Each row retains its tentative reasoning while focus changes. The composer remains visible; at very small heights its multiline preview is temporarily clipped without changing any text. Below 16 columns or eight rows, resize or close the selector before choosing. Screen-reader mode uses numbered pages and accepts `NUMBER [EFFORT|default]`; number alone uses the displayed level. Reviewed native models offer known levels plus provider default; unknown native and ChatGPT models offer explicit levels; custom profiles offer only declared levels plus default. No selection starts inference or a cost check. `/effort` is no longer a command. During a Run model inspection reports the pinned tuple without changing it. `/model` is the sole model command; `/models` is retired.
-
-After a failed or cancelled Run is confirmed from saved Events, chat explains that no answer was committed. Chat and `/agents` distinguish unavailable/rejected requests, incompatible responses, output limits, timeout and internal failure. Recognized typed errors additionally distinguish account/usage/service problems, incomplete or malformed streams, response/model/usage contract mismatch, invalid structured outcomes and local token-cap rejection. Only these closed reasons survive replay, never raw upstream bodies or tokens; old generic failures remain generic. They identify neither an exact upstream HTTP error, quota, retry time nor billing diagnosis. Cancellation before primary terminal commitment wins even after a reply/error; an already-started terminal commitment remains final. Previously observed calls and known usage remain saved, so cancellation does not prove remote work or billing stopped. Your draft/caret remain editable. There is no automatic retry, relaxed outcome validation or billing fallback. Screen-reader output uses the same append-only guidance; compaction keeps its separate failure categories.
-
-`/compact` requests a separate context-summary call while idle. A committed failed summary or an admission/operation failure gets safe error feedback without changing an already completed Run; a successful summary reports its known usage without exposing its text. Ctrl+C reports interruption and asks you to check saved history, not rollback or stopped remote billing. Terminal drawing/input/restoration failure instead exits. Automatic maintenance warns after the confirmed Run receipt and retains that Run's Provider, model, effort and account source even if another process changes future defaults; current selected-account/credential and custom-destination admission still apply.
-
-Automatic maintenance considers both context pressure and the smaller summary-input limit, reserving room for the latest answer before the source becomes too large. This preserves usability for continuously maintained successful conversations without deleting Messages or increasing limits. A long unmaintained or failure-heavy prefix can still exceed the source bound; Arany rejects it before a summary call rather than truncating accepted history. `exec` does not start automatic maintenance.
-
-While manual or automatic compaction is in flight, keep typing, editing or reading older history. Enter keeps the same draft, including slash text: it does not run a command or queue a task. Ctrl+K remains unavailable; Ctrl+C interrupts maintenance without clearing your draft. Resize and suspend/resume preserve text and caret, and history find remains visible. Linear/screen-reader mode keeps ordinary echo, announces continued character counts and retention, and adds no input prompt during the call. After success, failure or interruption, review or edit the retained text and press Enter explicitly when ready; idle Ctrl+C clears it. Drafts never become summary input or saved Events without submission.
-
-Use `arany show --output text SESSION_ID` to inspect a Session's saved Events, or replace the ID with a receipt's `RUN_ID` to inspect only that Run. `--output jsonl` exports the same selected facts as one JSON object per line. Run inspection validates the complete parent history first, also works for failed or interrupted work, and neither starts a Provider call nor changes saved State. A missing or ambiguous ID fails without output.
-
-Use `/rename TITLE` while idle to name the current Session. Titles allow 1 to 128 UTF-8 bytes, not 128 characters. An oversized inline title produces a local error and keeps the command and caret so you can shorten it and press Enter again; nothing is renamed until the valid operation commits. Screen-reader mode rejects that physical line and accepts a fresh command instead. Renaming never starts a Provider call, and State or Workspace errors after local validation are not automatically retried.
-
-On Linux, Arany uses the cross-desktop Secret Service interface, not the GNOME desktop. Any compatible implementation may provide the credential store; for a new unpinned account, an unavailable store leads to a separately confirmed private-file choice. Native API and new ChatGPT file choices start on Cancel, so empty Enter declines. To accept the plaintext fallback, navigate to `Use private file` before Enter, or type that visible name in linear/screen-reader mode. ChatGPT still requires its complete risk warning and a Back/Accept choice afterward, initially focused on Back; reconnect retains the already pinned backend.
-
-Keyring calls run in a short-lived same-binary helper with bounded private pipes. Arany terminates and reaps it after five seconds if the OS store does not respond. A timeout during a write does not prove the store rejected the request; the keyring backend remains pinned and Arany reports an uncertain failure rather than claiming rollback.
-
-Run `arany` in a terminal to open a new attached Session. If both an API account and a ChatGPT account are saved, Arany asks which billing route to use on every new start before loading either credential. Cancel is initially focused, so empty Enter exits without creating a Session or loading either account payload; choose `API key` or `ChatGPT plan` explicitly. An unavailable chosen account never falls back to the other route. With only one saved access method, Arany uses it. When neither exists, it still opens the normal chat input and immediately shows `/setup` guidance; submitting a task shows `Use /setup to choose an account` and starts no Run. Type `/setup` to choose an access method inside that Session. Native API-key setup includes Provider, hidden key and optional explicit Anthropic API workspace, then selects a low-effort model from its catalog without inference or further questions; ChatGPT setup selects or connects an account, reads its visible catalog and returns to chat with low effort. It prefers the cost-sensitive `gpt-5.6-luna` when visible, otherwise the first visible model with an unknown-prices notice; it starts no synthetic inference and asks no further model/effort/cost questions. Use `arany --setup` to open the same wizard before creating a new Session. Escape or Ctrl+C before saving an account closes `/setup` without changing Session defaults and cancels `--setup` without creating a Session. After a ChatGPT account is saved, cancelling catalog loading keeps that account selected but leaves model and effort unset. Inline choices use Up/Down or Tab and Enter, while linear/screen-reader choices accept their visible names and announce `empty Enter selects` followed by the focused choice. Submitting an empty line takes that named choice, including the current effort when reopening its picker and Back at account risk consent. Only the API-key field hides typed input.
-
-A positional task such as `arany "Your task"` requires a selected Provider and model at startup. Without a configured selection, Arany exits with local setup guidance before creating a Session. Open `arany`, choose `/setup`, model and effort, then submit your task in chat. A fork starts with unselected defaults rather than inheriting the source's billing route; starting it with a positional task requires explicit Provider/model flags. Resume and continue retain their saved-default behavior.
-
-Recoverable account or Provider errors during `/setup` return to chat without committing new Session defaults; a retained inline draft remains available. An empty API-account catalog reports `selected account has no visible models; use /setup to retry`; it saves no candidate key and leaves Session defaults unchanged. Escape or Ctrl+C closes the current setup flow. SIGTERM, SIGHUP, or a terminal ownership failure instead exits through terminal restoration rather than becoming a chat notice. Closing or failing after an account save, refresh, or evidence publication has started does not promise to roll that operation back; the account-only and uncertain-storage behavior below still applies.
-
-If a connected ChatGPT account is already selected, choosing `ChatGPT plan` in `/setup` or `--setup` offers `Use saved`, `Reconnect`, and `Connect new`. `Use saved` skips browser login; when several accounts are saved, it shows their short IDs with `*` marking the current one. Choosing another validates its consented credential and changes the selected OS-user account before loading its model catalog. Cancelling that account picker changes nothing; cancelling catalog loading leaves a switched account selected with model and effort unset; successful catalog loading selects its low-effort default without inference. `Reconnect` signs in again to the currently selected account, useful after expired consent, an unusable refresh token, or uncertain credential storage. It repeats the warning and explicit Back/Accept consent, then opens the official browser account selector without placing an old token in its URL; choose the same account. A different signed identity is rejected, and the original account UUID, storage backend, and selected client must still match when the new token is saved. `Connect new` starts a separate sign-in. Cancelling or failing catalog loading when reusing the current account leaves existing Session defaults unchanged; cancelling after a newly connected or reconnected account keeps that account selected without a model/effort tuple. A malformed saved account index fails closed instead of being treated as a missing account.
-
-Run `arany provider logout chatgpt` to disconnect the selected OS-user ChatGPT account. Arany blocks new account use before attempting refresh-token revocation, then removes its local token and model checks while retaining its registration for `Reconnect`. A successful remote revocation is reported only when confirmed; otherwise the command exits with a warning to disconnect the app in ChatGPT Settings. If the OS credential store cannot confirm deletion, Arany keeps the account blocked and warns that a token may remain there. Logout does not erase filesystem backups or cancel a Provider request already in flight. After logout, bare `arany` opens an unconfigured Session when no other access method is available; `/setup` offers `Reconnect` or `Connect new`, plus another saved account when one is connected. The command neither reads an API key nor switches billing routes.
-
-Verified ChatGPT sign-in and permission to use the plan are separate. If the signed identity is valid but the token response omits required plan permissions, setup saves only its registration/identity metadata and reports that plan usage is disabled. It stores no new token, clears prior model checks and any private-file token, and blocks the account before supervised cleanup of a previous keyring token; an uncertain deletion is reported without enabling use. Model and effort remain unset, and no catalog, model check or Run starts. Submitting chat points back to `/setup` for permission recovery, not model selection. `/setup` offers `Enable plan` for that selected registration, reusing its client, host, signed subject and storage backend with ordinary OAuth `prompt=consent`. Routine reconnect does not force consent. You may instead explicitly choose another account or API billing; Arany never makes that billing choice automatically. A rejected identity is not saved as a disabled account. This follows the [official recovery contract](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery#chatgpt-plan-use-isnt-enabled); it does not diagnose the previously reported live identity rejection.
-
-If a refresh response identifies an unusable refresh token, Arany disconnects that account and removes its local token and model checks; use `/setup` or `arany --setup` to reconnect. A temporary network or server failure instead preserves the saved credential for a later retry. If keyring deletion cannot be confirmed, account use stays blocked and Arany tells you to retry `arany provider logout chatgpt` after checking the OS credential store. Neither file replacement nor keyring deletion guarantees secure erasure of backups.
-
-The API key is entered with terminal echo disabled. Arany prefers the operating system's credential store: Keychain Services on macOS or Secret Service on Linux. If no keyring backend is pinned and that store is unavailable, setup asks you to accept a private-file fallback before you enter the key. The file is plaintext under a user-owned `0700` State directory with a `0600` account file; these permissions restrict ordinary other-user access but do not encrypt the key or protect it from another process using your OS account, an administrator, or a device backup. If the keyring is locked or already pinned for the saved account, Arany reports an error instead of silently switching to the file. A file-backed account remains on that backend even if the keyring later becomes available; migration is not automatic. Arany does not write the key to its SQLite Session history, shell arguments, process environment, or telemetry. On Linux, only a single local Unix D-Bus session address is accepted for keyring access; executable and remote transports are rejected. Separate Session history is not encrypted, and a Linux Secret Service backend may allow another same-user client to read an unlocked item. The [Linux client-isolation finding](./security/findings/linux-secret-service-client-isolation.md) remains open.
-
-On Linux and macOS, account replacement holds a private, empty lock under the effective OS user's passwd home, independent of Session `--state-dir`, `HOME`, and XDG variables. Linux uses `.local/state/arany`; macOS uses `Library/Application Support/dev.Arany.arany`. The account root contains a current backend marker without a key for keyring-backed accounts, or the bounded private record for a file-backed account. Account readers use only this root. Unsupported records remain unchanged and cannot authorize access. Attached Arany still opens and offers explicit local recovery in setup; confirmed reset removes only checked records for the selected route and saved model choices, preserving conversations, folder trust and other-route accounts. It neither revokes remote access nor removes old password-store entries. Another Arany process using the root reports a busy error instead of writing concurrently. The lock contains no key or token; a failed or interrupted keyring write can have an uncertain outcome and does not imply rollback. Isolated native Keychain lifecycle checks use the production supervisor; full keyring-backed product setup and cross-user proof remain pending. [The credential contract](./specs/credentials.md#storage-replacement-and-recovery) owns record admission and recovery.
-
-Native API setup reads the selected account's complete bounded model catalog and automatically saves low effort before returning to chat. For OpenAI it prefers visible `gpt-5.6-luna`, a [cost-sensitive model with low effort](https://developers.openai.com/api/docs/models/gpt-5.6-luna). For Anthropic it prefers `claude-sonnet-5-5`, then `claude-sonnet-5`, the economical reviewed low-effort-capable family; the cheaper Haiku 4.5 [does not support effort](https://platform.claude.com/docs/en/models/overview), so Arany does not select it automatically with an invalid low-effort request. Otherwise it uses the first visible row and discloses that catalog prices are unknown. This is not a promise of a globally cheapest or live-compatible model. No model/effort/cost questionnaire or synthetic inference runs during setup. Empty catalog, failure or pre-save cancellation saves no candidate account and changes no defaults.
-
-`/model MODEL [EFFORT|default]` also accepts a bounded literal ID. Changing a native or ChatGPT model without naming its effort chooses low; naming the same model retains its current effort. A changed custom model starts with provider default and must match its exact profile. Unsupported reviewed combinations reject locally; unknown native choices require explicit effort but no conformance record. Model selection is not credential authority: current account identity, consent, credential source and API workspace remain checked before Workspace input, with strict actual request/outcome validation and no retry or fallback. Active inspection reports only the admitted tuple and current committed Run facts, never a previous Run's context. Replacing a saved account prevents an older Session from silently using its new key.
-
-For headless `exec` with native API-key Providers, custom profiles, or attached native use with explicit Provider flags, set the selected credential in its named environment variable (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`) and pass a Provider and model. For example:
-
-```sh
-arany exec --provider openai --model gpt-5.4 --output text "Your task"
-```
-
-For an Anthropic personal/service-account API key that is not limited to one API workspace, set Arany's `ANTHROPIC_WORKSPACE_ID` to the explicitly chosen Console workspace ID alongside `ANTHROPIC_API_KEY`. The [authentication guide](https://platform.claude.com/docs/en/manage-claude/authentication#select-a-workspace) requires that scope on every request; a key already scoped to one workspace may omit it. Arany accepts a `wrkspc_` prefix with a nonempty ASCII-alphanumeric suffix and at most 128 characters. An explicitly empty, malformed or oversized value is rejected rather than treated as absent. Catalog pages, synthetic checks, direct/team calls and compaction use the same selection; Arany does not discover or infer a workspace or call the Admin API. This is API billing, not a Claude subscription.
-
-For a saved Anthropic API account, `/setup` asks for `Key scoped to workspace` or `Choose API workspace` after the hidden key. The latter opens a visible ID field with ordinary editing and a `wrkspc_...` hint; the hint is not entered text. Enter validates locally before catalog access; inline errors retain the ID for correction, while linear mode starts a fresh line. Escape or Ctrl+C before save preserves the previous account and Session defaults. No environment variable supplies this saved selection.
-
-Key-only saved accounts retain schema 1 with no workspace; explicit scoped accounts use schema 2 so older Arany versions reject them rather than silently lose the scope. Both storage backends retain their existing protections and 1-KiB record bound. Saved catalogs, checks, Runs and compaction load the complete selected credential. Existing key-only accounts and `--saved-account` never inherit `ANTHROPIC_WORKSPACE_ID`. The current native checker contract binds API workspace scope and the shared response decoder: earlier-contract diagnostic records cannot satisfy the optional checked library constructors, and a diagnostic for one workspace cannot satisfy another. Ordinary native Runs require no check. Reviewed native models retain their ordinary admission. No live unscoped-key compatibility result is claimed.
-
-`exec` never prompts or reads the saved default native API account. Explicit `--provider chatgpt` instead reads only the selected, consented OS-user ChatGPT account; it never falls back to `OPENAI_API_KEY`. `arany provider models openai` uses the explicit environment key; add `--saved-account` to list the current saved API account instead. `/model` inside a Session uses that Session's pinned account when present. After consenting to and connecting a ChatGPT account, run `arany provider models chatgpt` to list every model visible to the selected OS-user account. It may refresh a near-expiry token; it does not read `OPENAI_API_KEY` or any Workspace content. Its display names are escaped for terminal safety. Availability is not compatibility; a Run validates current account consent and strict actual outcomes without requiring a check.
-
-To check one ChatGPT model and effort, first review its name in that catalog, then run:
+To disconnect the selected ChatGPT account:
 
 ```sh
-arany provider check chatgpt MODEL --effort high --accept-cost
+arany provider logout chatgpt
 ```
 
-This uses only the selected ChatGPT account, makes up to three synthetic, plan-consuming inference calls, and sends no Workspace content. Each call accepts at most 1,024 reported output tokens locally, under a 180-second aggregate probe deadline; OpenAI does not accept a remote output-token cap on this route, so actual generation or plan usage is not bounded by that local number. A failed or cancelled check cannot guarantee no usage already occurred. Successful exact account/model/effort diagnostics last at most 24 hours. They are optional for Run admission: a ChatGPT Run instead revalidates the selected account and its current storage-bound consent before Workspace input, with no hidden catalog or synthetic call. There is no API-key fallback, `--state-dir`, or `--saved-account` for ChatGPT checks; no paid check has been run during development.
+Logout blocks account use, attempts remote revocation and removes the local
+token while retaining registration for Reconnect. Follow any warning about
+unconfirmed revocation or token deletion. It does not erase backups or cancel
+requests already in flight. [ChatGPT rules](../agents/chatgpt.md) own the precise
+renewal, permission and logout behavior.
 
-For a headless Run, select an account-visible model and effort explicitly; no preliminary check is required:
+## Storage and recovery
+
+Accounts belong to the effective OS user across Sessions. `--state-dir` changes
+Session/Tool configuration storage, not saved-account scope. Linux uses Secret
+Service; macOS uses Keychain Services. A locked or pinned keyring failure never
+silently changes to a private file. For a new unpinned account, an unavailable
+store can offer Use private file with explicit plaintext consent; Cancel starts
+focused. Reconnect retains its pinned backend.
+
+Private permissions do not encrypt files or exclude another same-user or
+privileged process. Session history is also unencrypted. OS-store authorization
+has a bounded interactive wait; routine store operations have shorter deadlines.
+An uncertain write or deletion is not a confirmed rollback. Unlock the selected
+store and retry deliberately, or follow the explicit new-account storage choice.
+
+Malformed or unsupported saved account data keeps access unconfigured and
+provides `/setup` recovery. A confirmed local reset removes only the disclosed,
+checked records for the selected route and saved model choices. It preserves
+conversations, folder trust and other-route accounts, but does not revoke remote
+access or remove old password-store entries. Back cancels; cancelling subsequent
+setup cannot restore records already reset.
+
+History recovery is separate. Unsupported or damaged history offers Retry,
+Reset history and Exit. Reset requires explicit warning confirmation and discards
+conversations and derived Provider evidence in that StateRoot, preserving
+accounts, model choices and folder trust. Unsafe files or active/concurrent use
+refuse reset. No reset migrates unsupported records or automatically resubmits an
+objective. See [credential recovery](./specs/credentials.md#storage-replacement-and-recovery)
+and [history recovery](./specs/terminal.md#setup-and-account-choices).
+
+## Headless API-key use
+
+Provide the selected key through `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`, without
+putting it in command arguments. Native `exec` does not prompt or implicitly read
+the saved default API account. List models, then replace `MODEL_ID` with a chosen
+ID and select supported effort:
 
 ```sh
-arany exec --provider chatgpt --model MODEL --effort high "Your task"
+arany provider models openai
+arany exec --provider openai --model MODEL_ID --effort low "Your task"
 ```
 
-ChatGPT requests negotiate SSE and always validate the body as bounded typed events, even when the response media label is absent or misleading. Only a complete `response.completed` with the expected model, strict requested outcome and valid usage within the local cap can succeed. Complete indexed item events can supply empty terminal output after matching response identity; populated output must agree, and deltas cannot supply an answer. A media label never enables non-streamed JSON/HTML fallback or partial-output acceptance; TLS, destination, credential and request limits remain unchanged.
+For a saved native catalog, use `arany provider models openai --saved-account`.
+Inside chat, `/model` uses the Session's pinned account. Account replacement can
+make an older Session's saved identity unavailable; it never silently substitutes
+the new credential.
 
-After successful ChatGPT setup, its visible model and low effort are selected for the attached Session. If you cancelled catalog loading after account save, use `/model` to select both, or type `/model MODEL low`, without synthetic inference. The explicit check command remains an optional, plan-consuming diagnostic, not Run authorization. ChatGPT setup reads only the catalog after account save and returns to ordinary chat without this diagnostic. Escape after the account has been saved preserves account-only defaults if catalog loading was cancelled. Opening a Session with the selected ChatGPT account reads its local account ID but does not refresh a token or contact the keyring; listing models, checking compatibility, and starting a Run still require a valid consent-matched token. Attached paths reject a changed selected account before loading or renewing its token, and check publication revalidates the identity. ChatGPT Run and compaction receipts identify the plan route and warn that output is capped only on local acceptance. The account UUID, opaque admission fingerprint and `account_consent` category are recorded for replay. Neither tokens nor the consent text enter Session history. A real account login, paid check, and live Run remain unverified.
+An Anthropic API key not limited to one Console workspace needs an explicit
+`ANTHROPIC_WORKSPACE_ID` alongside the environment key. A workspace-scoped key
+may omit it. Saved-account setup instead asks Key scoped to workspace or Choose
+API workspace; saved selections never inherit ambient workspace variables.
+[Provider account rules](../agents/references/provider-details.md#native-models-and-accounts)
+own workspace validation and admission.
 
-With the explicitly accepted private-file ChatGPT fallback, the bounded account index may contain several accounts' tokens in one plaintext file. Opening that index parses the whole protected record inside Arany, even though only the selected account may be used for a catalog, check, or Run. The index and registration use only the current OS-user root and current formats. Invalid selected-route data keeps chat and setup available for explicit recovery without reading another route's credential. The mixed-access startup choice checks current record presence and avoids reading the separate API-key record when ChatGPT is chosen, or the ChatGPT index when API is chosen; it does not isolate private-file tokens within the chosen index from Arany's own process memory.
+## Headless ChatGPT use and optional diagnostics
 
-An unknown native model can run with explicit effort without a preliminary check. To perform an optional, potentially billable diagnostic first, use the selected environment key:
+After consenting to and connecting the intended account, list its models and
+select one explicitly:
 
 ```sh
-arany provider check openai MODEL --effort high --accept-cost
-arany exec --provider openai --model MODEL --effort high "Your task"
+arany provider models chatgpt
+arany exec --provider chatgpt --model MODEL_ID --effort high "Your task"
 ```
 
-The optional native check confirms selected-account catalog visibility and makes at most three synthetic inference calls with a total remote output cap of 3,072 tokens plus bounded input, under one 180-second deadline. It sends no Workspace content or automatic retry. Its 24-hour diagnostic evidence binds Provider, API workspace, model, effort, exact key and credential source/account UUID; a failed check clears its prior exact record. Ordinary product Runs require no diagnostic record, successful probe or expiry renewal. The opt-in checked library constructors still require exact-source evidence. Compatibility and paid live support remain unverified until deliberately tested.
+These commands use only the selected consented OS-user ChatGPT account; they
+never fall back to `OPENAI_API_KEY`. A catalog read may refresh a near-expiry
+token. A Run revalidates account identity and consent before Workspace input.
 
-For an optional saved-account diagnostic, use `arany provider check openai MODEL --effort high --saved-account --accept-cost`. Its evidence is distinct from an environment-key diagnostic even if key bytes match. Attached Runs independently validate the Session-pinned account UUID and selected credential/scope before Workspace input, not that diagnostic. No paid native check has run here.
-
-The selected saved API account's UUID is recorded with each Run and can be inspected in JSONL history; the API key is never recorded there. Replacing the saved account leaves older Sessions unable to use their previous account selection.
-
-If a previous new-account ChatGPT sign-in issued a client registration but did not finish, setup offers `Resume sign-in?` after storage/risk consent and before opening the browser. `Back` is initially selected; empty Enter cancels. Choose `Resume` to reuse that registration and stable host with a fresh authorization attempt. Cancelling keeps the registration for later and does not delete saved accounts or revoke remote permissions. Pre-Session `--setup` cancellation creates no Session; in-chat `/setup` keeps existing defaults. Reconnecting a saved account uses its own verified registration and does not take over an unrelated unfinished sign-in.
-
-For a new or reconnected ChatGPT account, setup signs in through the official browser OAuth flow. Before opening a loopback listener or browser, Arany shows the complete warning that local time/read limits cannot guarantee a remote output-token or plan-usage cap. It also warns about the selected storage backend: an unlocked Linux Secret Service item may be readable by another app running as your OS user, while a private fallback file is not encrypted. Read every page, then select `Accept` with Tab or arrows and press Enter; `Back` is initially selected and empty Enter cancels. Linear/screen-reader mode announces the full warning, then accepts the visible choice name `Accept` or `Back`. Resizing or resuming the inline terminal restarts review and resets focus; fewer than 16 columns or eight rows stops sign-in rather than hiding consent. The warning receipt is now version 4; older receipts require `/setup` → ChatGPT plan → `Reconnect` with fresh consent, retaining the pinned account backend. Arany prefers the OS keyring for a new account and offers the file only after an explicit choice when that backend is unavailable; reconnect keeps the saved backend and never silently migrates it. A locked keyring must be unlocked rather than silently treated as absent. A verified account is saved in the OS-user account root, separately from API-key accounts and SQLite Sessions. Setup then reads only the account catalog and selects the visible cost-sensitive `gpt-5.6-luna`, otherwise the first visible row, with low effort. When prices are unknown, its notice says so instead of claiming a globally cheapest model. It returns to chat without inference or model/effort/cost questions. Cancelling or failing catalog discovery after a new, switched, or reconnected account leaves it selected without a model/effort tuple and reports recovery guidance on failure. A failed reuse of the current account instead leaves existing Session defaults unchanged. Reusing an account does not reauthorize a broken login; use `Reconnect` for reauthorization. No route falls back to API-key billing. A ChatGPT inference request rejected with HTTP 4xx reports a rejected Provider call; HTTP 5xx reports unavailable. Arany does not display the upstream error body or retry automatically. A live login, complete keyring lifecycle, paid subscription conformance, and a real Run remain unverified. Anthropic consumer subscriptions are not supported.
-
-If the browser reports authorization received but Arany rejects the authorization identity, the callback is not proof of completed sign-in. Arany still verifies the issuer's signature, issued-client audience, nonce, time claims and selected-account identity before saving credentials. The issued-client audience can be a string or equivalent one-element string array; additional audiences are rejected, and a present authorized party (`azp`) must equal that client. The earlier string-only parser's singleton rejection was reproduced and corrected with a signed synthetic identity, not diagnosed from a user token. The error includes a fixed failure category and retry guidance, never token or claim values. A time-claim rejection suggests checking the system clock; other categories must be investigated without bypassing validation. The user-reported live identity rejection remains undiagnosed: public-key compatibility and synthetic success do not prove its cause or resolution. Never paste tokens, callback URLs or raw token responses into a report.
-
-When you are ready to run the separate live ChatGPT beta gate on Linux, first connect an account with `cargo run --release -- --setup`. Setup performs no inference; its separately consented account authorization still applies. Inspect visible models with `cargo run --release -- provider models chatgpt`, then replace `MODEL_FROM_CATALOG` and `EFFORT` below with the exact model and reasoning effort you want to test:
+Compatibility checks are optional for ordinary native/ChatGPT Runs and can
+consume usage. Only after choosing the account/model and accepting that cost:
 
 ```sh
-ARANY_LIVE_CONFORMANCE=1 ARANY_LIVE_CHATGPT=1 ARANY_LIVE_CHATGPT_MODEL=MODEL_FROM_CATALOG ARANY_LIVE_CHATGPT_EFFORT=EFFORT cargo test --release --offline --locked --test session_run live::chatgpt_plan_direct_turn_replays_exact_events -- --ignored --exact
+arany provider check chatgpt MODEL_ID --effort high --accept-cost
+arany provider check openai MODEL_ID --effort high --accept-cost
 ```
 
-This explicit gate uses the selected OS-user ChatGPT account, makes one synthetic compatibility check of up to three calls and one direct Engine Run, and strictly replays its temporary Session. It can refresh the saved token and consume plan usage; the local read/time limits do not cap remote generation or usage under the [current ChatGPT-plan preview rules](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations). It does not read an API key or require a token in the command. Do not run it until you accept that usage and have selected the intended account; it has not been run against a real account here.
+The native command uses the environment key; `--saved-account` explicitly selects
+the saved native account instead. ChatGPT always uses its selected consented
+account. Each check makes at most three synthetic calls and sends no Workspace
+content. ChatGPT's output cap is local acceptance only; failure or cancellation
+does not prove remote usage stopped. Checks do not authorize fallback, retries or
+broader disclosure. Exact custom profiles have their own mandatory conformance
+admission under [Provider rules](../agents/provider.md).
+
+## Resume and inspect results
+
+Use `/resume` to choose a saved conversation, `/rename TITLE` to name it, and
+`/new` or `/clear` to begin an empty one with the current selection. Older
+conversations remain saved. `/compact` requests a separate context-summary call;
+it can consume usage and does not delete canonical history. Failed or cancelled
+maintenance preserves the prior accepted summary.
+
+```sh
+arany show --output text SESSION_ID
+arany show --output jsonl RUN_ID
+```
+
+Replace the placeholders with saved IDs. Inspection does not invoke a Provider
+or change history; JSONL can contain original image bytes and private task data.
+After uncertainty, inspect saved facts and actual files before an intentional
+retry. Development builds expose bounded safe failure categories in the
+[local diagnostic log](./development-diagnostics.md).
+
+[Next steps](../NEXT_STEPS.md) owns pending native, live and accessibility checks.
+Developers running an explicitly authorized live gate should follow the
+[native/live evidence procedure](../agents/references/testing-details.md#native-and-live-evidence)
+and its test owner. This guide does not establish support for an untested model,
+account, OS or credential backend.

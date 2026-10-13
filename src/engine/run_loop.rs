@@ -1,13 +1,14 @@
 use super::progress::{ProgressPublisher, append_observed};
 use super::{EngineError, RunCancellation};
 use crate::provider::{
-    AgentPhase, Finish, MAX_REPORTED_INPUT_TOKENS, Provider, ProviderFailureClass,
-    ProviderFailureReason, ProviderOutcome, ProviderRequest, ProviderResponse,
+    AgentPhase, Finish, MAX_REPORTED_INPUT_TOKENS, PreviewText, Provider, ProviderFailureClass,
+    ProviderFailureReason, ProviderOutcome, ProviderRequest, ProviderResponse, ResponsePreview,
 };
 use crate::session::{
-    AgentDisposition, AgentRunId, CollaborationPolicy, Event,
-    MAX_ASSISTANT_MESSAGE_BYTES as MAX_PRIMARY_RESULT_BYTES, ProviderCallDisposition,
-    ProviderCallRecord, RunDisposition, RunId, SessionId,
+    AgentDisposition, AgentRunId, CollaborationPolicy, DisplayCategory, DisplayChunk, Event,
+    MAX_ASSISTANT_MESSAGE_BYTES as MAX_PRIMARY_RESULT_BYTES, MAX_DISPLAY_CHUNK_BYTES,
+    MAX_DISPLAY_CHUNKS, MAX_DISPLAY_COMMENTARY_ITEMS, MAX_DISPLAY_TEXT_BYTES,
+    ProviderCallDisposition, ProviderCallRecord, RunDisposition, RunId, SessionId,
 };
 use crate::store::Store;
 use crate::telemetry::{AgentTrace, ProviderTraceOutcome, RunTrace, TraceFailure, TraceOutcome};
@@ -34,6 +35,41 @@ enum CallFailure {
     InvalidResponse(Option<ProviderFailureReason>),
     OutputLimit,
     TaskPanic,
+}
+
+struct DisplayCheckpoint {
+    call_index: u8,
+    phase: AgentPhase,
+    chunks: usize,
+    answer_offset: usize,
+    commentary_offsets: Vec<usize>,
+    remaining_commentary_bytes: usize,
+    remaining_commentary_items: usize,
+    limited: bool,
+    limit_recorded: bool,
+}
+
+impl DisplayCheckpoint {
+    fn filter(&self, text: &PreviewText) -> PreviewText {
+        let mut remaining = self.remaining_commentary_bytes;
+        let mut commentary = Vec::new();
+        let mut limited =
+            text.commentary_limited || text.commentary.len() > self.remaining_commentary_items;
+        for item in text.commentary.iter().take(self.remaining_commentary_items) {
+            let mut end = item.len().min(remaining);
+            while !item.is_char_boundary(end) {
+                end -= 1;
+            }
+            limited |= end < item.len();
+            commentary.push(item[..end].to_owned());
+            remaining -= end;
+        }
+        PreviewText {
+            answer: text.answer.clone(),
+            commentary,
+            commentary_limited: limited,
+        }
+    }
 }
 
 pub(super) struct RunLoop<'a, P: Provider> {
@@ -104,13 +140,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             let first_trace = (step == 0).then(|| primary.begin_first_provider());
             let next_trace = (step != 0)
                 .then(|| primary.begin_provider(AgentPhase::RootPlan, &root_request.model));
-            let first = invoke_bounded(
-                self.provider.as_ref(),
-                root_request.clone(),
-                deadline,
-                self.controls.cancellation.clone(),
-            )
-            .await;
+            let first = self.invoke_primary(root_request.clone(), deadline).await?;
             let (input_tokens, output_tokens) = call_trace_usage(&first);
             let valid_response = match &first {
                 CallResult::Response(ProviderResponse {
@@ -194,6 +224,164 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             }
         }
         self.fail_primary(primary).await
+    }
+
+    async fn invoke_primary(
+        &self,
+        request: ProviderRequest,
+        deadline: Instant,
+    ) -> Result<CallResult, EngineError> {
+        let context = self
+            .progress
+            .map(|progress| progress.preview_context(self.primary_id))
+            .transpose()?
+            .flatten();
+        let Some(context) = context else {
+            return Ok(invoke_bounded(
+                self.provider.as_ref(),
+                request,
+                deadline,
+                self.controls.cancellation.clone(),
+            )
+            .await);
+        };
+        let call_index = context.call_index;
+        let (preview, mut receiver) = ResponsePreview::new();
+        let mut checkpoint = DisplayCheckpoint {
+            call_index,
+            phase: request.phase,
+            chunks: context.chunks,
+            answer_offset: 0,
+            commentary_offsets: vec![0; MAX_DISPLAY_COMMENTARY_ITEMS],
+            remaining_commentary_bytes: MAX_DISPLAY_TEXT_BYTES - context.commentary_bytes,
+            remaining_commentary_items: MAX_DISPLAY_COMMENTARY_ITEMS - context.commentary_items,
+            limited: false,
+            limit_recorded: context.limit_recorded,
+        };
+        let future = invoke_bounded_with_preview(
+            self.provider.as_ref(),
+            request,
+            deadline,
+            self.controls.cancellation.clone(),
+            Some(preview),
+        );
+        tokio::pin!(future);
+        let mut observing = true;
+        let result = loop {
+            tokio::select! {
+                result = &mut future => break result,
+                changed = receiver.changed(), if observing => {
+                    if changed.is_err() { observing = false; continue; }
+                    let text = checkpoint.filter(&receiver.borrow_and_update());
+                    self.checkpoint(&text, &mut checkpoint, false).await?;
+                    self.progress.expect("preview owner").publish_preview(self.primary_id, call_index, Some(Arc::new(text)));
+                }
+            }
+        };
+        let text = checkpoint.filter(&receiver.borrow());
+        let result = match result {
+            CallResult::Response(response)
+                if !text.answer.is_empty()
+                    && !matches!(&response.outcome,
+                ProviderOutcome::Finish(finish) if finish.result.starts_with(&text.answer)) =>
+            {
+                CallResult::Failed(CallFailure::InvalidResponse(Some(
+                    ProviderFailureReason::ResponseContract,
+                )))
+            }
+            result => result,
+        };
+        if !matches!(
+            result,
+            CallResult::Failed(
+                CallFailure::InvalidResponse(_)
+                    | CallFailure::Rejected(_)
+                    | CallFailure::OutputLimit
+            )
+        ) {
+            self.checkpoint(&text, &mut checkpoint, true).await?;
+        }
+        self.progress
+            .expect("preview owner")
+            .publish_preview(self.primary_id, call_index, None);
+        Ok(result)
+    }
+
+    async fn checkpoint(
+        &self,
+        text: &PreviewText,
+        state: &mut DisplayCheckpoint,
+        tail: bool,
+    ) -> Result<(), EngineError> {
+        state.limited |= text.commentary_limited;
+        for (category, item, body) in
+            std::iter::once((DisplayCategory::Answer, 0, text.answer.as_str())).chain(
+                text.commentary
+                    .iter()
+                    .enumerate()
+                    .map(|(index, text)| (DisplayCategory::Commentary, index, text.as_str())),
+            )
+        {
+            let answer_reserve = MAX_DISPLAY_TEXT_BYTES
+                .saturating_sub(state.answer_offset)
+                .div_ceil(MAX_DISPLAY_CHUNK_BYTES - 3);
+            let offset = if category == DisplayCategory::Answer {
+                &mut state.answer_offset
+            } else {
+                &mut state.commentary_offsets[item]
+            };
+            while body.len().saturating_sub(*offset) >= MAX_DISPLAY_CHUNK_BYTES
+                || (tail || category == DisplayCategory::Commentary) && *offset < body.len()
+            {
+                if category == DisplayCategory::Commentary
+                    && state.chunks
+                        >= MAX_DISPLAY_CHUNKS - answer_reserve - usize::from(!state.limit_recorded)
+                {
+                    state.limited = true;
+                    break;
+                }
+                if state.chunks == MAX_DISPLAY_CHUNKS {
+                    return Err(EngineError::CoordinatorFailed);
+                }
+                let mut end = body.len().min(*offset + MAX_DISPLAY_CHUNK_BYTES);
+                while !body.is_char_boundary(end) {
+                    end -= 1;
+                }
+                self.append(Event::AssistantDisplayRecorded {
+                    run_id: self.run_id,
+                    agent_run_id: self.primary_id,
+                    chunk: DisplayChunk {
+                        call_index: state.call_index,
+                        phase: state.phase,
+                        category,
+                        item: item as u8,
+                        offset: *offset as u32,
+                        text: body[*offset..end].to_owned(),
+                    },
+                })
+                .await?;
+                *offset = end;
+                state.chunks += 1;
+            }
+        }
+        if state.limited && !state.limit_recorded {
+            self.append(Event::AssistantDisplayRecorded {
+                run_id: self.run_id,
+                agent_run_id: self.primary_id,
+                chunk: DisplayChunk {
+                    call_index: state.call_index,
+                    phase: state.phase,
+                    category: DisplayCategory::Limit,
+                    item: 0,
+                    offset: 0,
+                    text: crate::session::DISPLAY_LIMIT_TEXT.to_owned(),
+                },
+            })
+            .await?;
+            state.chunks += 1;
+            state.limit_recorded = true;
+        }
+        Ok(())
     }
 
     fn valid_tool(&self, request: &ProviderRequest, call: &crate::tools::ToolCall) -> bool {
@@ -431,7 +619,17 @@ async fn invoke_bounded<P: Provider>(
     provider: &P,
     request: ProviderRequest,
     run_deadline: Instant,
+    cancellation: RunCancellation,
+) -> CallResult {
+    invoke_bounded_with_preview(provider, request, run_deadline, cancellation, None).await
+}
+
+async fn invoke_bounded_with_preview<P: Provider>(
+    provider: &P,
+    request: ProviderRequest,
+    run_deadline: Instant,
     mut cancellation: RunCancellation,
+    preview: Option<ResponsePreview>,
 ) -> CallResult {
     if cancellation.is_cancelled() {
         return CallResult::Cancelled;
@@ -442,10 +640,16 @@ async fn invoke_bounded<P: Provider>(
     }
     let timeout = CALL_DEADLINE.min(remaining);
     let output_cap = request.max_output_tokens;
+    let invocation = async {
+        match preview {
+            Some(preview) => provider.invoke_with_preview(request, preview).await,
+            None => provider.invoke(request).await,
+        }
+    };
     tokio::select! {
         biased;
         () = cancellation.cancelled() => CallResult::Cancelled,
-        result = tokio::time::timeout(timeout, provider.invoke(request)) => match result {
+        result = tokio::time::timeout(timeout, invocation) => match result {
             Ok(Ok(response)) if response.input_tokens.is_some_and(|count| count > MAX_REPORTED_INPUT_TOKENS) => {
                 CallResult::Failed(CallFailure::InvalidResponse(None))
             }

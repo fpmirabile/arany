@@ -1,17 +1,45 @@
 use super::EngineError;
-use crate::session::{Event, EventEnvelope, RunId, RunView, SessionId, SessionView};
+use crate::provider::PreviewText;
+use crate::session::{AgentRunId, Event, EventEnvelope, RunId, RunView, SessionId, SessionView};
 use crate::store::Store;
 use crate::telemetry::{RunTrace, TraceEventKind};
+use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::watch;
 
-/// Committed Run snapshots and separate temporary Tool capacity hints.
+/// Committed Run snapshots and separate temporary display and Tool capacity hints.
 #[derive(Clone)]
 pub struct RunProgress {
     sender: watch::Sender<Option<RunUpdate>>,
     receiver: watch::Receiver<Option<RunUpdate>>,
     waiting_sender: watch::Sender<Option<uuid::Uuid>>,
     waiting_receiver: watch::Receiver<Option<uuid::Uuid>>,
+    preview_sender: watch::Sender<Option<DisplayUpdate>>,
+    preview_receiver: watch::Receiver<Option<DisplayUpdate>>,
+    previews_enabled: bool,
+}
+
+#[derive(Clone)]
+pub struct DisplayUpdate {
+    pub run_id: RunId,
+    pub agent_run_id: AgentRunId,
+    pub call_index: u8,
+    pub text: Arc<PreviewText>,
+}
+
+pub struct RunPreview {
+    receiver: watch::Receiver<Option<DisplayUpdate>>,
+    _sender: watch::Sender<Option<DisplayUpdate>>,
+}
+
+impl RunPreview {
+    pub async fn changed(&mut self) -> Option<DisplayUpdate> {
+        self.receiver
+            .changed()
+            .await
+            .expect("preview owner retains sender");
+        self.receiver.borrow_and_update().clone()
+    }
 }
 
 /// An acknowledged Event sequence and the Run state reduced through it.
@@ -26,12 +54,34 @@ impl RunProgress {
     pub fn new() -> Self {
         let (sender, receiver) = watch::channel(None);
         let (waiting_sender, waiting_receiver) = watch::channel(None);
+        let (preview_sender, preview_receiver) = watch::channel(None);
         Self {
             sender,
             receiver,
             waiting_sender,
             waiting_receiver,
+            preview_sender,
+            preview_receiver,
+            previews_enabled: false,
         }
+    }
+
+    pub fn with_previews() -> Self {
+        Self {
+            previews_enabled: true,
+            ..Self::new()
+        }
+    }
+
+    pub fn previews(&self) -> RunPreview {
+        RunPreview {
+            receiver: self.preview_receiver.clone(),
+            _sender: self.preview_sender.clone(),
+        }
+    }
+
+    pub(super) fn previews_enabled(&self) -> bool {
+        self.previews_enabled
     }
 
     /// Latest temporary capacity wait, keyed to a committed pending Tool; never replayed.
@@ -67,6 +117,14 @@ impl Default for RunProgress {
     }
 }
 
+pub(super) struct PreviewContext {
+    pub(super) call_index: u8,
+    pub(super) chunks: usize,
+    pub(super) commentary_bytes: usize,
+    pub(super) commentary_items: usize,
+    pub(super) limit_recorded: bool,
+}
+
 pub(super) struct ProgressPublisher {
     view: Mutex<SessionView>,
     progress: RunProgress,
@@ -76,6 +134,66 @@ pub(super) struct ProgressPublisher {
 impl ProgressPublisher {
     pub(super) fn tool_queue(&self) -> watch::Sender<Option<uuid::Uuid>> {
         self.progress.waiting_sender.clone()
+    }
+
+    pub(super) fn preview_context(
+        &self,
+        primary: AgentRunId,
+    ) -> Result<Option<PreviewContext>, EngineError> {
+        if !self.progress.previews_enabled {
+            return Ok(None);
+        }
+        let view = self
+            .view
+            .lock()
+            .map_err(|_| EngineError::CoordinatorFailed)?;
+        let run = view
+            .runs
+            .last()
+            .filter(|run| run.id == self.run_id)
+            .ok_or(EngineError::CoordinatorFailed)?;
+        let agent = run
+            .agents
+            .first()
+            .filter(|agent| agent.id == primary)
+            .ok_or(EngineError::CoordinatorFailed)?;
+        let mut items = std::collections::HashSet::new();
+        let commentary_bytes = run
+            .display
+            .iter()
+            .filter(|chunk| chunk.category == crate::session::DisplayCategory::Commentary)
+            .map(|chunk| {
+                items.insert((chunk.call_index, chunk.item));
+                chunk.text.len()
+            })
+            .sum();
+        Ok(Some(PreviewContext {
+            call_index: u8::try_from(agent.provider_calls.len())
+                .map_err(|_| EngineError::CoordinatorFailed)?,
+            chunks: run.display.len(),
+            commentary_bytes,
+            commentary_items: items.len(),
+            limit_recorded: run
+                .display
+                .iter()
+                .any(|chunk| chunk.category == crate::session::DisplayCategory::Limit),
+        }))
+    }
+
+    pub(super) fn publish_preview(
+        &self,
+        agent_run_id: AgentRunId,
+        call_index: u8,
+        text: Option<Arc<PreviewText>>,
+    ) {
+        self.progress
+            .preview_sender
+            .send_replace(text.map(|text| DisplayUpdate {
+                run_id: self.run_id,
+                agent_run_id,
+                call_index,
+                text,
+            }));
     }
     pub(super) fn new(view: SessionView, progress: RunProgress, run_id: RunId) -> Self {
         Self {
@@ -117,20 +235,21 @@ pub(super) async fn append_observed(
     event: Event,
 ) -> Result<u64, EngineError> {
     let kind = match &event {
-        Event::MessageAccepted { .. } => TraceEventKind::MessageAccepted,
-        Event::RunStarted { .. } => TraceEventKind::RunStarted,
-        Event::AgentSpawned { .. } => TraceEventKind::AgentSpawned,
-        Event::ProviderCallRecorded { .. } => TraceEventKind::ProviderCallRecorded,
-        Event::ToolStarted { .. } => TraceEventKind::ToolStarted,
-        Event::ToolFinished { .. } => TraceEventKind::ToolFinished,
-        Event::AgentFinished { .. } => TraceEventKind::AgentFinished,
-        Event::MessageCommitted { .. } => TraceEventKind::MessageCommitted,
-        Event::RunFinished { .. } => TraceEventKind::RunFinished,
+        Event::AssistantDisplayRecorded { .. } => None,
+        Event::MessageAccepted { .. } => Some(TraceEventKind::MessageAccepted),
+        Event::RunStarted { .. } => Some(TraceEventKind::RunStarted),
+        Event::AgentSpawned { .. } => Some(TraceEventKind::AgentSpawned),
+        Event::ProviderCallRecorded { .. } => Some(TraceEventKind::ProviderCallRecorded),
+        Event::ToolStarted { .. } => Some(TraceEventKind::ToolStarted),
+        Event::ToolFinished { .. } => Some(TraceEventKind::ToolFinished),
+        Event::AgentFinished { .. } => Some(TraceEventKind::AgentFinished),
+        Event::MessageCommitted { .. } => Some(TraceEventKind::MessageCommitted),
+        Event::RunFinished { .. } => Some(TraceEventKind::RunFinished),
         _ => return Err(EngineError::CoordinatorFailed),
     };
     let committed = store.append(session_id, event).await?;
     crate::diagnostics::event_failure(&committed.event);
-    if let Some(trace) = trace {
+    if let (Some(trace), Some(kind)) = (trace, kind) {
         trace.event_committed(committed.sequence, kind);
     }
     if let Some(progress) = progress {

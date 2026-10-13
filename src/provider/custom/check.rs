@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
-const CHECK_VERSION: &str = "openai-responses-conformance-effort-v7";
+const CHECK_VERSION: &str = "openai-responses-conformance-effort-stream-v8";
 
 pub struct CustomProfileCheck {
     profile_name: String,
@@ -90,11 +90,13 @@ async fn probe(
         max_output_tokens: profile.max_output_tokens(),
         tools: None,
     };
+    let (preview, observed) = crate::provider::ResponsePreview::new();
     let direct_response = transport
-        .run(&direct, None)
+        .run_streamed(&direct, None, Some(preview))
         .await
         .map_err(|_| CustomProfileError::ConformanceFailed)?;
-    if !matches!(direct_response.outcome, ProviderOutcome::Finish(_)) {
+    if !matches!(&direct_response.outcome, ProviderOutcome::Finish(value) if !observed.borrow().answer.is_empty() && value.result.starts_with(&observed.borrow().answer))
+    {
         return Err(CustomProfileError::ConformanceFailed);
     }
     let direct_id = direct_response
@@ -117,11 +119,12 @@ async fn probe(
         max_output_tokens: 128,
         tools: None,
     };
+    let (preview, observed) = crate::provider::ResponsePreview::new();
     let delegate_response = transport
-        .run(&delegate, None)
+        .run_streamed(&delegate, None, Some(preview))
         .await
         .map_err(|_| CustomProfileError::ConformanceFailed)?;
-    if !matches!(&delegate_response.outcome, ProviderOutcome::Delegate(value) if value.children.len() == 1 && !value.children[0].trim().is_empty())
+    if !matches!(&delegate_response.outcome, ProviderOutcome::Delegate(value) if value.children.len() == 1 && !value.children[0].trim().is_empty() && observed.borrow().answer.is_empty())
     {
         return Err(CustomProfileError::ConformanceFailed);
     }
@@ -163,11 +166,13 @@ async fn probe(
         selected.run_id = RunId::new();
         selected.agent_run_id = AgentRunId::new();
         selected.max_output_tokens = 128;
+        let (preview, observed) = crate::provider::ResponsePreview::new();
         let response = transport
-            .run(&selected, Some(*effort))
+            .run_streamed(&selected, Some(*effort), Some(preview))
             .await
             .map_err(|_| CustomProfileError::ConformanceFailed)?;
-        if !matches!(response.outcome, ProviderOutcome::Finish(_)) {
+        if !matches!(&response.outcome, ProviderOutcome::Finish(value) if !observed.borrow().answer.is_empty() && value.result.starts_with(&observed.borrow().answer))
+        {
             return Err(CustomProfileError::ConformanceFailed);
         }
         let id = response
@@ -297,6 +302,7 @@ mod tests {
             let body: serde_json::Value =
                 serde_json::from_slice(&request[header_end..header_end + body_len])
                     .expect("JSON request");
+            let streaming = body["stream"] == true;
             let compaction = body["text"]["format"]["name"] == "arany_compaction";
             assert_eq!(body["model"], "model-1");
             assert_eq!(body["store"], false);
@@ -361,6 +367,12 @@ mod tests {
                         0 if matches!(reply, ProbeReply::EscapedCredential) => {
                             json!({"outcome":{"type":"finish","summary":"ok","result":"test-key"}})
                         }
+                        1 if streaming => {
+                            json!({"outcome":{"type":"delegate","children":["one read-only question"]}})
+                        }
+                        _ if streaming && index != 0 => {
+                            json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}})
+                        }
                         0 | 3 | 4 => {
                             json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}})
                         }
@@ -419,6 +431,29 @@ mod tests {
                     .write_all(response.as_bytes())
                     .await
                     .expect("chunked response");
+                continue;
+            }
+            if streaming && !response_body.is_empty() {
+                let mut response: serde_json::Value = serde_json::from_str(&response_body).unwrap();
+                response["output"][0]["id"] = json!("msg_stream");
+                let text = response["output"][0]["content"][0]["text"].clone();
+                let events = [
+                    json!({"type":"response.created","response":{"id":response["id"],"model":"model-1"}}),
+                    json!({"type":"response.output_item.added","output_index":0,"item":{"id":"msg_stream","type":"message","role":"assistant","status":"in_progress","content":[]}}),
+                    json!({"type":"response.output_text.delta","item_id":"msg_stream","output_index":0,"content_index":0,"delta":text}),
+                    json!({"type":"response.output_item.done","output_index":0,"item":response["output"][0]}),
+                    json!({"type":"response.completed","response":response}),
+                ];
+                let body = events
+                    .iter()
+                    .map(|event| {
+                        format!(
+                            "event: {}\ndata: {event}\n\n",
+                            event["type"].as_str().unwrap()
+                        )
+                    })
+                    .collect::<String>();
+                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
                 continue;
             }
             let declared_len = if matches!(reply, ProbeReply::Oversize) {

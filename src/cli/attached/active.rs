@@ -64,7 +64,12 @@ pub(super) async fn submit_objective(
         .ok_or("select /model before submitting")?;
     let starting_sequence = view.last_sequence;
     let cancellation = RunCancellation::new();
-    let mut progress = RunProgress::new();
+    let mut progress = if terminal.is_linear() {
+        RunProgress::new()
+    } else {
+        RunProgress::with_previews()
+    };
+    let mut previews = progress.previews();
     let mut waiting_progress = progress.clone();
     let (approvals, mut inbox) =
         arany::ToolApprovals::new(composer.approval_mode().unwrap_or_default());
@@ -122,6 +127,7 @@ pub(super) async fn submit_objective(
             }
             result = &mut future => {
                 terminal.set_waiting_tool(None);
+                terminal.set_preview(None);
                 composer.set_file_candidates(None, Vec::new());
                 if terminal.close_agents_at_run_end().is_err() {
                     return Ok(RunSubmission::Shutdown(
@@ -139,6 +145,12 @@ pub(super) async fn submit_objective(
                     Err(run::RunAttemptError::Failed(error)) => Err(error),
                 };
             },
+            preview = previews.changed() => {
+                terminal.set_preview(preview);
+                if draw_active_snapshot(terminal, view, composer, user_recorded, cancelling, None).is_err() {
+                    break "terminal rendering failed".to_owned();
+                }
+            }
             update = progress.changed() => {
                 if update.sequence <= view.last_sequence {
                     continue;
@@ -240,6 +252,16 @@ pub(super) async fn submit_objective(
                     && terminal.close_agents().is_err()
                 {
                     break "terminal input cleanup failed".to_owned();
+                }
+                match terminal.handle_transcript_input(input, view) {
+                    Ok(true) => {
+                        if draw_active_snapshot(terminal, view, composer, user_recorded, cancelling, None).is_err() {
+                            break "terminal rendering failed".to_owned();
+                        }
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(_) => break "terminal rendering failed".to_owned(),
                 }
                 if terminal.handle_history_input(input, view) {
                     if draw_active_snapshot(terminal, view, composer, user_recorded, cancelling, None).is_err() {
@@ -345,6 +367,14 @@ pub(super) async fn submit_objective(
                                 }
                                 None
                             }
+                            ActiveSubmission::OpenTranscript => {
+                                if terminal.toggle_transcript(view).is_err()
+                                    || draw_active_snapshot(terminal, view, composer, user_recorded, cancelling, None).is_err()
+                                {
+                                    break "terminal rendering failed".to_owned();
+                                }
+                                None
+                            }
                         }
                     }
                     TerminalInput::Interrupt => {
@@ -388,6 +418,14 @@ pub(super) async fn submit_objective(
     };
     cancellation.cancel();
     let linear = terminal.is_linear();
+    let mode = (!linear).then_some(terminal.mode());
+    let preview_printed = if linear {
+        user_recorded
+    } else {
+        view.runs
+            .last()
+            .is_some_and(|run| terminal.user_run_recorded(run.id))
+    };
     let restored = terminal.restore();
     let mut reason = shutdown_reason;
     match tokio::time::timeout(SHUTDOWN_GRACE, future.as_mut()).await {
@@ -395,8 +433,9 @@ pub(super) async fn submit_objective(
             if emit_outcome(
                 &admission.state_dir,
                 &outcome,
-                user_recorded && linear,
+                preview_printed,
                 !linear,
+                mode,
             )
             .await
             .is_err()

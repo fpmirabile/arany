@@ -223,7 +223,7 @@ async fn active_keyboard_stays_visible_with_near_cap_history() {
     let wrapper = temp.path().join("tmux-pane.sh");
     std::fs::write(
         &wrapper,
-        "#!/bin/sh\nbefore=$(stty -g)\n\"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider custom:local --model model-1 --no-color\nresult=$?\nafter=$(stty -g)\nprintf '%s\\n%s\\n%s\\n' \"$result\" \"$before\" \"$after\" > \"$ARANY_TEST_EXIT\"\nexit \"$result\"\n",
+        "#!/bin/sh\nbefore=$(stty -g)\n\"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider custom:local --model model-1 --no-color\nresult=$?\nafter=$(stty -g)\nprintf '%s\\n%s\\n%s\\n' \"$result\" \"$before\" \"$after\" > \"$ARANY_TEST_EXIT\"\nexit \"$result\"\n",
     )
     .expect("tmux pane wrapper");
     std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))
@@ -454,7 +454,7 @@ async fn active_keyboard_stays_visible_with_near_cap_history() {
     );
     assert!(
         server
-            .run(&["send-keys", "-t", "arany-test:0.0", "/quit", "Enter"])
+            .run(&["send-keys", "-t", "arany-test:0.0", "/exit", "Enter"])
             .status
             .success()
     );

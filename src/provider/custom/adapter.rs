@@ -104,6 +104,25 @@ impl Provider for CustomProvider {
             .map_err(transport_error)
     }
 
+    async fn invoke_with_preview(
+        &self,
+        request: ProviderRequest,
+        preview: crate::provider::ResponsePreview,
+    ) -> Result<ProviderResponse, ProviderError> {
+        request.validate_scope()?;
+        if request.tools.is_some()
+            || !request.images.is_empty()
+            || request.model != self.model
+            || !(1..=4096).contains(&request.max_output_tokens)
+        {
+            return Err(ProviderError::Rejected);
+        }
+        self.transport
+            .run_streamed(&request, self.effort, Some(preview))
+            .await
+            .map_err(transport_error)
+    }
+
     async fn compact(
         &self,
         request: CompactionRequest,

@@ -182,7 +182,7 @@ fn run_picker_case(
         ""
     };
     let command = format!(
-        "stty rows 24 cols {width}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" {no_color}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
+        "stty rows 24 cols {width}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic {no_color}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
     let mut attached = crate::isolation::isolated_script(temp.path());
     attached
@@ -353,7 +353,7 @@ fn run_picker_case(
         );
     }
     input
-        .write_all(b"/rename Mouse\r/quit\r")
+        .write_all(b"/rename Mouse\r/exit\r")
         .expect("rename selected Session and exit");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -422,15 +422,16 @@ fn run_picker_case(
 
 #[test]
 fn session_picker_selects_visible_rows_and_restores_capture() {
+    // The Classic viewport starts at the answered cursor row 2: Newer is row 3, Older row 4.
     run_picker_case(
         "hover and stale activation",
         80,
-        b"\x1b[<35;1;15M\r",
+        b"\x1b[<35;1;4M\r",
         true,
         true,
     );
-    run_picker_case("wheel", 80, b"\x1b[<65;1;14M\r", true, false);
-    run_picker_case("click", 80, b"\x1b[<0;1;15M", true, false);
+    run_picker_case("wheel", 80, b"\x1b[<65;1;3M\r", true, false);
+    run_picker_case("click", 80, b"\x1b[<0;1;4M", true, false);
     run_picker_case("off-surface wheel", 80, b"\x1b[<65;1;1M\r", false, false);
     run_picker_case("16-column keyboard", 16, b"\x1b[B\r", true, false);
 }
@@ -504,7 +505,7 @@ fn screen_reader_entry(
         }
         std::fs::set_permissions(state, original_mode).expect("restore fixture State mode");
     }
-    input.write_all(b"/quit\r").expect("quit Session");
+    input.write_all(b"/exit\r").expect("exit Session");
     let result = wait_product(child.take());
     pump(&mut output, &mut input, &mut transcript, &mut answered);
     assert!(

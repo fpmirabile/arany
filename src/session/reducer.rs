@@ -57,6 +57,7 @@ pub struct RunView {
     pub accepted_sequence: u64,
     pub finished_sequence: Option<u64>,
     pub tools: Vec<ToolView>,
+    pub display: Vec<super::events::DisplayChunk>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -373,6 +374,7 @@ impl SessionView {
                     accepted_sequence: prior,
                     finished_sequence: None,
                     tools: Vec::new(),
+                    display: Vec::new(),
                 });
             }
             Event::RunStarted { run_id, config } => {
@@ -474,7 +476,90 @@ impl SessionView {
                 {
                     return Err(ReplayError::InvalidTransition);
                 }
+                if run.agents[index].role == AgentRole::Primary
+                    && matches!(
+                        record.disposition,
+                        ProviderCallDisposition::Delegated | ProviderCallDisposition::ToolRequested
+                    )
+                    && run.display.iter().any(|chunk| {
+                        chunk.category == super::events::DisplayCategory::Answer
+                            && usize::from(chunk.call_index)
+                                == run.agents[index].provider_calls.len()
+                    })
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
                 run.agents[index].provider_calls.push(record.clone());
+            }
+            Event::AssistantDisplayRecorded {
+                run_id,
+                agent_run_id,
+                chunk,
+            } => {
+                use super::events::{
+                    DisplayCategory, MAX_DISPLAY_CHUNKS, MAX_DISPLAY_COMMENTARY_ITEMS,
+                    MAX_DISPLAY_TEXT_BYTES,
+                };
+                let run = active_run(current, *run_id)?;
+                let primary = run.primary().ok_or(ReplayError::InvalidTransition)?;
+                let candidate = ProviderCallRecord {
+                    phase: chunk.phase,
+                    disposition: ProviderCallDisposition::Finished,
+                    response_id: None,
+                    input_tokens: None,
+                    output_tokens: None,
+                    wire_provenance: None,
+                    failure_reason: None,
+                };
+                let valid_phase = primary.provider_calls.is_empty()
+                    && chunk.phase == AgentPhase::RootPlan
+                    || is_delegated_synthesis(run, primary, &candidate)
+                    || is_tool_continuation(run, primary, &candidate);
+                if primary.id != *agent_run_id
+                    || primary.status != AgentStatus::Active
+                    || chunk.call_index as usize != primary.provider_calls.len()
+                    || !valid_phase
+                    || run.display.len() >= MAX_DISPLAY_CHUNKS
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
+                let offset: usize = run
+                    .display
+                    .iter()
+                    .filter(|prior| {
+                        prior.call_index == chunk.call_index
+                            && prior.category == chunk.category
+                            && prior.item == chunk.item
+                    })
+                    .map(|prior| prior.text.len())
+                    .sum();
+                let total: usize = run
+                    .display
+                    .iter()
+                    .filter(|prior| prior.category == chunk.category)
+                    .map(|prior| prior.text.len())
+                    .sum();
+                let mut items = std::collections::HashSet::new();
+                for prior in &run.display {
+                    if prior.category == DisplayCategory::Commentary {
+                        items.insert((prior.call_index, prior.item));
+                    }
+                }
+                if chunk.category == DisplayCategory::Commentary {
+                    items.insert((chunk.call_index, chunk.item));
+                }
+                if chunk.category == DisplayCategory::Limit
+                    && run
+                        .display
+                        .iter()
+                        .any(|prior| prior.category == DisplayCategory::Limit)
+                    || chunk.offset as usize != offset
+                    || total + chunk.text.len() > MAX_DISPLAY_TEXT_BYTES
+                    || items.len() > MAX_DISPLAY_COMMENTARY_ITEMS
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
+                run.display.push(chunk.clone());
             }
             Event::ToolStarted {
                 run_id,
@@ -590,6 +675,22 @@ impl SessionView {
                     })
                 {
                     return Err(ReplayError::InvalidTransition);
+                }
+                if *disposition == AgentDisposition::Finished
+                    && run.agents[index].role == AgentRole::Primary
+                {
+                    let call = run.agents[index].provider_calls.len().saturating_sub(1);
+                    for chunk in run.display.iter().filter(|chunk| {
+                        chunk.category == super::events::DisplayCategory::Answer
+                            && usize::from(chunk.call_index) == call
+                    }) {
+                        let start = chunk.offset as usize;
+                        if result.as_ref().is_none_or(|text| {
+                            text.get(start..start + chunk.text.len()) != Some(chunk.text.as_str())
+                        }) {
+                            return Err(ReplayError::InvalidTransition);
+                        }
+                    }
                 }
                 let agent = &mut run.agents[index];
                 agent.status = match disposition {
