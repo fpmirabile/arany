@@ -579,10 +579,7 @@ fn command_status(spec: &CommandSpec, choices: &CommandChoices) -> String {
 }
 
 fn suggest(name: &str) -> Option<&'static str> {
-    if name.is_empty()
-        || name.len() > MAX_COMMAND_NAME_BYTES
-        || !name.bytes().all(|byte| byte.is_ascii_lowercase())
-    {
+    if name.is_empty() || !valid_command_prefix(name) {
         return None;
     }
     COMMANDS
@@ -709,6 +706,12 @@ mod tests {
             parse_submission("/models"),
             Err(CommandParseError::Unknown {
                 suggestion: Some("model"),
+            })
+        );
+        assert_eq!(
+            parse_submission("/resume-goa"),
+            Err(CommandParseError::Unknown {
+                suggestion: Some("resume-goal"),
             })
         );
         assert!(command_completions("/sessions").is_empty());
