@@ -138,6 +138,22 @@ provide containment. [Security rules](../../agents/security.md) and
 [the Tool contract](../specs/tools.md) own current requirements. Incident evidence
 remains in [security research](./harness-security-lessons-and-controls.md).
 
+The macOS executable catalogue uses one union of exact literal paths to avoid
+repeating the same operation rule for each admitted program. This keeps the
+intended allow set narrow; directory-wide grants would broaden it. Fresh file
+revalidation and independent denies remain governed by
+[Guard rules](../../agents/guard.md).
+
+Source syntax reviewed on 2026-10-12: Apple's shipped
+`/System/Library/Sandbox/Profiles/application.sb` and
+`com.apple.storereceiptinstaller.sb` in the same directory (macOS 26.6.2,
+build 25G83), and the
+[WebKit WebProcess profile](https://raw.githubusercontent.com/WebKit/WebKit/main/Source/WebKit/WebProcess/com.apple.WebProcess.sb.in)
+compose literal filters with `require-any`. The WebKit link tracks mutable
+`main`. These examples support union composition, not a stable public DSL,
+compiler performance or the timeout's cause. Native fixtures own enforcement
+evidence; [Next steps](../../NEXT_STEPS.md) owns unresolved attribution.
+
 ### D-16 — Evidence-dense testing
 
 Exercise real Engine, filesystem and SQLite behavior with only Provider scripted.
