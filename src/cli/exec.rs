@@ -493,19 +493,43 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).expect("JSONL Event"))
             .collect();
-        assert_eq!(lines.len(), 12);
-        assert_eq!(lines[0]["kind"], "GoalRunLinked");
-        assert_eq!(lines[1]["kind"], "MessageAccepted");
-        assert_eq!(lines[1]["payload"]["text"], "@literal follow-up");
-        assert_eq!(lines[5]["kind"], "GoalProviderCallReserved");
-        assert_eq!(lines[6]["kind"], "ProviderCallRecorded");
-        assert_eq!(lines[6]["payload"]["phase"], "root_plan");
-        assert_eq!(lines[6]["payload"]["disposition"], "finished");
-        assert_eq!(lines[6]["payload"]["response_id"], "resp_test");
-        assert_eq!(lines[6]["payload"]["input_tokens"], 20);
-        assert_eq!(lines[6]["payload"]["output_tokens"], 10);
-        assert_eq!(lines[9]["kind"], "RunFinished");
-        assert_eq!(lines[11]["kind"], "GoalFinished");
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| line["kind"].as_str().expect("Event kind"))
+                .collect::<Vec<_>>(),
+            vec![
+                "GoalStarted",
+                "GoalRunLinked",
+                "MessageAccepted",
+                "RunStarted",
+                "GoalActiveTimeReserved",
+                "AgentSpawned",
+                "GoalProviderCallReserved",
+                "ProviderCallRecorded",
+                "AgentFinished",
+                "MessageCommitted",
+                "RunFinished",
+                "GoalActiveTimeSettled",
+                "GoalFinished",
+            ]
+        );
+        assert_eq!(lines[2]["payload"]["text"], "@literal follow-up");
+        assert_eq!(lines[7]["payload"]["phase"], "root_plan");
+        assert_eq!(lines[7]["payload"]["disposition"], "finished");
+        assert_eq!(lines[7]["payload"]["response_id"], "resp_test");
+        assert_eq!(lines[7]["payload"]["input_tokens"], 20);
+        assert_eq!(lines[7]["payload"]["output_tokens"], 10);
+        assert_eq!(lines[10]["kind"], "RunFinished");
+        assert_eq!(lines[12]["kind"], "GoalFinished");
+        assert_eq!(
+            lines[0]["payload"]["goal_id"],
+            lines[1]["payload"]["goal_id"]
+        );
+        assert_eq!(
+            lines[12]["payload"]["goal_id"],
+            lines[1]["payload"]["goal_id"]
+        );
         assert!(
             lines
                 .iter()
@@ -514,8 +538,11 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .all(|line| line["run_id"] == lines[0]["run_id"])
+                .filter(|line| !line["run_id"].is_null())
+                .all(|line| line["run_id"] == lines[1]["run_id"])
         );
+        assert!(lines[0]["run_id"].is_null());
+        assert!(lines[12]["run_id"].is_null());
         assert!(!second_report.stdout.contains("first summary"));
 
         let store = Store::open_read_only(StateRoot::open_existing(&state_dir).expect("state"))
@@ -528,18 +555,16 @@ mod tests {
             .expect("Session exists");
         assert_eq!(view.runs.len(), 2);
         assert_eq!(view.runs[0], first_view.runs[0]);
-        assert_eq!(
-            lines.len(),
-            events
-                .iter()
-                .filter(|event| event.run_id == Some(view.runs[1].id))
-                .count()
-        );
-        for (line, event) in lines.iter().zip(
-            events
-                .iter()
-                .filter(|event| event.run_id == Some(view.runs[1].id)),
-        ) {
+        let run_lines: Vec<_> = lines
+            .iter()
+            .filter(|line| !line["run_id"].is_null())
+            .collect();
+        let run_events: Vec<_> = events
+            .iter()
+            .filter(|event| event.run_id == Some(view.runs[1].id))
+            .collect();
+        assert_eq!(run_lines.len(), run_events.len());
+        for (line, event) in run_lines.into_iter().zip(run_events) {
             assert_eq!(line["sequence"], event.sequence);
             assert_eq!(line["created_at_ms"], event.created_at_ms);
             assert_eq!(line["event_version"], 2);
@@ -569,6 +594,19 @@ mod tests {
             failed_lines
                 .iter()
                 .any(|line| line["kind"] == "RunFinished")
+        );
+        assert_eq!(failed_lines[0]["kind"], "GoalStarted");
+        assert_eq!(failed_lines.last().unwrap()["kind"], "GoalFinished");
+        assert_eq!(failed_lines.last().unwrap()["payload"]["status"], "failed");
+        assert_eq!(
+            failed_lines[0]["payload"]["goal_id"],
+            failed_lines.last().unwrap()["payload"]["goal_id"]
+        );
+        assert!(
+            failed_lines
+                .iter()
+                .filter(|line| !line["run_id"].is_null())
+                .all(|line| line["run_id"] == failed_lines[1]["run_id"])
         );
         assert!(
             !failed_lines
@@ -626,13 +664,41 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).expect("new JSONL Event"))
             .collect();
-        assert_eq!(new_lines.len(), 13);
+        assert_eq!(new_lines.len(), 14);
         assert_eq!(new_lines[0]["kind"], "SessionStarted");
-        assert_eq!(new_lines[1]["kind"], "GoalRunLinked");
-        assert_eq!(new_lines[2]["kind"], "MessageAccepted");
-        assert_eq!(new_lines[2]["payload"]["text"], "//literal new");
-        assert_eq!(new_lines[10]["kind"], "RunFinished");
-        assert_eq!(new_lines[12]["kind"], "GoalFinished");
+        assert_eq!(
+            new_lines
+                .iter()
+                .map(|line| line["kind"].as_str().expect("Event kind"))
+                .collect::<Vec<_>>(),
+            vec![
+                "SessionStarted",
+                "GoalStarted",
+                "GoalRunLinked",
+                "MessageAccepted",
+                "RunStarted",
+                "GoalActiveTimeReserved",
+                "AgentSpawned",
+                "GoalProviderCallReserved",
+                "ProviderCallRecorded",
+                "AgentFinished",
+                "MessageCommitted",
+                "RunFinished",
+                "GoalActiveTimeSettled",
+                "GoalFinished",
+            ]
+        );
+        assert_eq!(new_lines[3]["payload"]["text"], "//literal new");
+        assert_eq!(new_lines[11]["kind"], "RunFinished");
+        assert_eq!(new_lines[13]["kind"], "GoalFinished");
+        assert_eq!(
+            new_lines[1]["payload"]["goal_id"],
+            new_lines[2]["payload"]["goal_id"]
+        );
+        assert_eq!(
+            new_lines[13]["payload"]["goal_id"],
+            new_lines[2]["payload"]["goal_id"]
+        );
 
         let calls = observed.lock().expect("observations");
         assert_eq!(calls.len(), 3);

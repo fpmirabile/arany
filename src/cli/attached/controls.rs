@@ -1596,11 +1596,37 @@ mod tests {
 
         let store = Store::open(StateRoot::open_existing(&admission.state_dir).expect("State"))
             .expect("interrupted source Store");
+        let goal_id = arany::GoalId::new();
+        let run_id = RunId::new();
+        let workspace_identity = view.workspace_identity.expect("Session Workspace identity");
+        store
+            .append(
+                original_id,
+                arany::Event::GoalStarted {
+                    goal_id,
+                    objective: "Prior accepted objective".into(),
+                    workspace_identity,
+                    budget: arany::GoalBudget::default(),
+                },
+            )
+            .await
+            .expect("start interrupted source Goal");
+        store
+            .append(
+                original_id,
+                arany::Event::GoalRunLinked {
+                    goal_id,
+                    run_id,
+                    phase: arany::GoalPhase::Implementation,
+                },
+            )
+            .await
+            .expect("link interrupted source Run");
         store
             .append(
                 original_id,
                 arany::Event::MessageAccepted {
-                    run_id: RunId::new(),
+                    run_id,
                     text: "Prior accepted objective".into(),
                     images: Vec::new(),
                 },
