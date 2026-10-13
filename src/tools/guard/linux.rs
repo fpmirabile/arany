@@ -1142,8 +1142,8 @@ mod tests {
                     0,
                     "production-prefix fixture UID must remain non-root"
                 );
-                let grant_path = Path::new(
-                    &std::env::var_os("ARANY_TEST_RUNTIME_MOUNT_GRANT")
+                let grant_path = PathBuf::from(
+                    std::env::var_os("ARANY_TEST_RUNTIME_MOUNT_GRANT")
                         .expect("fixture grant path"),
                 );
                 assert!(grant_path.is_file(), "fixture grant exists");
