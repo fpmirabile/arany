@@ -5,7 +5,6 @@ use arany::{
     RunRequest, RunStatus, SessionView, StateRoot, Store, ToolCall, ToolDisposition,
 };
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
