@@ -14,8 +14,8 @@ mod state;
 use journal::{HotSession, append, fork_session, open_connection};
 use replay::{latest_session_id, list_session_items, load_session, resolve_view, session_for_run};
 pub use state::HistoryReset;
-pub(crate) use state::SessionRunLock;
 pub use state::StateRoot;
+pub(crate) use state::{SessionRunLock, WorkspaceRunLock};
 
 const DATABASE_FILE: &str = "events.sqlite3";
 pub(crate) const MAX_EVENT_BYTES: usize = 64 * 1024;

@@ -5,8 +5,9 @@ use crate::session::{
     GoalPlanContract, GoalReport, GoalStatus, MAX_USER_MESSAGE_BYTES as MAX_OBJECTIVE_BYTES,
     RunConfig, RunId, RunView, SessionId,
 };
-use crate::store::{SessionRunLock, StateRoot, Store, StoreError};
+use crate::store::{SessionRunLock, StateRoot, Store, StoreError, WorkspaceRunLock};
 use crate::telemetry::{Telemetry, TraceOutcome};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -654,6 +655,14 @@ fn resolve_goal_admission(
             .and_then(|view| view.goals.last())
             .filter(|goal| goal.id == id)
             .ok_or(EngineError::GoalUnavailable)?;
+        if !goal
+            .run_ids
+            .iter()
+            .any(|run_id| history.is_some_and(|view| view.runs.iter().any(|run| run.id == *run_id)))
+            && goal.objective != request.objective
+        {
+            return Err(EngineError::GoalUnavailable);
+        }
         if goal.status == GoalStatus::Interrupted
             && history.is_none_or(|view| !goal.can_resume(view))
             || goal.active_run.is_some()
@@ -675,6 +684,11 @@ fn resolve_goal_admission(
                 0
             })
             .ok_or(EngineError::GoalBudgetExhausted)?;
+        let linked_run_is_unaccepted = history.is_some_and(|view| {
+            goal.run_ids
+                .last()
+                .is_some_and(|run_id| !view.runs.iter().any(|run| run.id == *run_id))
+        });
         Ok(GoalAdmission {
             id,
             budget: goal.budget.clone(),
@@ -700,7 +714,12 @@ fn resolve_goal_admission(
                     .is_some()
                     && !goal.unobserved_provider_calls.is_empty(),
             active_ms,
-            runs_used: u8::try_from(goal.run_ids.len()).unwrap_or(u8::MAX),
+            runs_used: u8::try_from(
+                goal.run_ids
+                    .len()
+                    .saturating_sub(usize::from(linked_run_is_unaccepted)),
+            )
+            .unwrap_or(u8::MAX),
         })
     } else {
         if history
@@ -738,6 +757,12 @@ pub struct Engine<P: Provider> {
     tools: Option<(crate::tools::config::Config, PathBuf)>,
     workspace_permissions: Option<crate::tools::WorkspacePermissions>,
     tool_approvals: Option<crate::tools::ToolApprovals>,
+    workspace_locks: HashMap<(u64, u64), GoalWorkspaceLock>,
+}
+
+struct GoalWorkspaceLock {
+    goal_id: GoalId,
+    _lock: WorkspaceRunLock,
 }
 
 impl<P: Provider + 'static> Engine<P> {
@@ -768,6 +793,55 @@ impl<P: Provider + 'static> Engine<P> {
         lock_session(&self.state, session_id)
     }
 
+    fn acquire_goal_workspace(
+        &mut self,
+        goal_id: GoalId,
+        identity: (u64, u64),
+    ) -> Result<Option<WorkspaceRunLock>, EngineError> {
+        if let Some(held) = self.workspace_locks.get(&identity) {
+            return if held.goal_id == goal_id {
+                Ok(None)
+            } else {
+                Err(EngineError::WorkspaceBusy)
+            };
+        }
+        let lock = self.state.lock_workspace(identity).map_err(|error| {
+            if matches!(error, StoreError::WorkspaceBusy) {
+                EngineError::WorkspaceBusy
+            } else {
+                EngineError::Store(error)
+            }
+        })?;
+        Ok(Some(lock))
+    }
+
+    fn retain_goal_workspace(
+        &mut self,
+        goal_id: GoalId,
+        identity: (u64, u64),
+        lock: Option<WorkspaceRunLock>,
+    ) {
+        if let Some(lock) = lock {
+            self.workspace_locks.insert(
+                identity,
+                GoalWorkspaceLock {
+                    goal_id,
+                    _lock: lock,
+                },
+            );
+        }
+    }
+
+    fn release_goal_workspace(&mut self, goal_id: GoalId, identity: (u64, u64)) {
+        if self
+            .workspace_locks
+            .get(&identity)
+            .is_some_and(|held| held.goal_id == goal_id)
+        {
+            self.workspace_locks.remove(&identity);
+        }
+    }
+
     pub fn open(state: StateRoot, provider: P) -> Result<Self, EngineError> {
         Self::open_with_telemetry(state, provider, Telemetry::disabled())
     }
@@ -786,6 +860,7 @@ impl<P: Provider + 'static> Engine<P> {
             tools: None,
             workspace_permissions: None,
             tool_approvals: None,
+            workspace_locks: HashMap::new(),
         })
     }
 
@@ -948,20 +1023,11 @@ impl<P: Provider + 'static> Engine<P> {
                 event_slots + usize::from(request.session_id.is_none()),
             )
             .await?;
-        let _workspace_lock = if request.goal.phase == crate::session::GoalPhase::Implementation
+        let provisional_workspace_lock = if request.goal.phase
+            == crate::session::GoalPhase::Implementation
             && self.tools.as_ref().is_some_and(|(config, _)| config.write)
         {
-            Some(
-                self.state
-                    .lock_workspace(workspace_identity)
-                    .map_err(|error| {
-                        if matches!(error, StoreError::WorkspaceBusy) {
-                            EngineError::WorkspaceBusy
-                        } else {
-                            EngineError::Store(error)
-                        }
-                    })?,
-            )
+            self.acquire_goal_workspace(goal.id, workspace_identity)?
         } else {
             None
         };
@@ -1124,6 +1190,10 @@ impl<P: Provider + 'static> Engine<P> {
             )
             .await?;
         }
+        self.retain_goal_workspace(goal.id, workspace_identity, provisional_workspace_lock);
+        if cancellation.is_cancelled() {
+            return Err(EngineError::CancelledBeforeStart);
+        }
         append_observed(
             &self.store,
             publisher.as_ref(),
@@ -1136,6 +1206,9 @@ impl<P: Provider + 'static> Engine<P> {
             },
         )
         .await?;
+        if cancellation.is_cancelled() {
+            return Err(EngineError::CancelledBeforeStart);
+        }
         let accepted_sequence = append_observed(
             &self.store,
             publisher.as_ref(),
@@ -1306,6 +1379,7 @@ impl<P: Provider + 'static> Engine<P> {
                     },
                 )
                 .await?;
+                self.release_goal_workspace(goal.id, workspace_identity);
             }
             crate::session::RunStatus::Failed | crate::session::RunStatus::Cancelled => {
                 let status = if run.status == crate::session::RunStatus::Failed {
@@ -1327,6 +1401,7 @@ impl<P: Provider + 'static> Engine<P> {
                     },
                 )
                 .await?;
+                self.release_goal_workspace(goal.id, workspace_identity);
             }
             _ => {}
         }

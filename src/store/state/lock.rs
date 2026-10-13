@@ -167,13 +167,22 @@ impl StateRoot {
     ) -> Result<WorkspaceRunLock, StoreError> {
         #[cfg(unix)]
         {
-            lock_workspace(identity)
+            self.lock_workspace_in(&StateRoot::account_path()?, identity)
         }
         #[cfg(not(unix))]
         {
             let _ = identity;
             Err(StoreError::InvalidStateDirectory)
         }
+    }
+
+    #[cfg(unix)]
+    fn lock_workspace_in(
+        &self,
+        account_root: &Path,
+        identity: (u64, u64),
+    ) -> Result<WorkspaceRunLock, StoreError> {
+        lock_workspace(account_root, identity)
     }
 }
 
@@ -236,13 +245,16 @@ fn lock_session_with_limit(
 }
 
 #[cfg(unix)]
-fn lock_workspace(identity: (u64, u64)) -> Result<WorkspaceRunLock, StoreError> {
+fn lock_workspace(
+    account_root: &Path,
+    identity: (u64, u64),
+) -> Result<WorkspaceRunLock, StoreError> {
     use rustix::fs::{FlockOperation, flock};
 
     if identity.1 == 0 {
         return Err(StoreError::InvalidStateDirectory);
     }
-    let path = StateRoot::account_path()?.join("guard/workspace-locks");
+    let path = account_root.join("guard/workspace-locks");
     let private = crate::private_fs::open_directory(&path, true)
         .map_err(|_| StoreError::InvalidStateDirectory)?;
     let dir = private.dir;
@@ -402,17 +414,25 @@ mod tests {
         let temp = tempfile::tempdir().expect("temporary root");
         let first = StateRoot::admit(&temp.path().join("state-a")).expect("first StateRoot");
         let second = StateRoot::admit(&temp.path().join("state-b")).expect("second StateRoot");
+        let account_root = temp.path().join("account");
         let identity = (7, 11);
 
-        let writer = first.lock_workspace(identity).expect("first writer");
+        let writer = first
+            .lock_workspace_in(&account_root, identity)
+            .expect("first writer");
         assert!(matches!(
-            second.lock_workspace(identity),
+            second.lock_workspace_in(&account_root, identity),
             Err(StoreError::WorkspaceBusy)
         ));
         drop(writer);
         second
-            .lock_workspace(identity)
+            .lock_workspace_in(&account_root, identity)
             .expect("writer after release");
+        assert!(
+            account_root
+                .join("guard/workspace-locks/workspace-7-11.lock")
+                .is_file()
+        );
     }
 
     #[test]

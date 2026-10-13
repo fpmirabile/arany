@@ -50,6 +50,11 @@ Repeat with `--release` for the optimized profile. To run one ignored gate, use 
   closes it, so parent descriptor drop alone is not immediate unlock evidence.
   Keep the original lock/release assertions and a bounded, exactly-one-test
   helper receipt; serializing or retrying the whole suite does not fix ownership.
+- Linux tests that directly enable write-capable Engine Tools and exercise the
+  account-wide Workspace lock must run through the existing private passwd-home
+  account fixture. `StateRoot::account_path` uses the effective UID's passwd
+  entry; a temporary Session root or `HOME` override alone still targets the
+  host account root.
 - Native macOS Keychain evidence uses the debug-only fixed-file fixture and a privately named synthetic Keychain, with unchanged default/search-list observations. Apple's [Keychain storage owner](https://github.com/apple-oss-distributions/Security/blob/main/OSX/libsecurity_keychain/lib/StorageManager.cpp) adds only login/System Keychains automatically; the fixture must never use those names or change search lists. Optimized fixture rejection is separate evidence, not an optimized Keychain lifecycle claim.
 - Reset an accepted test socket to blocking mode before timeout-bounded reads when its listener uses nonblocking accept. macOS preserves the listener's nonblocking mode on accepted streams, unlike Linux.
 - Keep a fixture's initial socket peer alive until the helper acknowledges its next stage. Darwin rejects `SO_RCVTIMEO` with `EINVAL` on a disconnected Unix socket; closing immediately after sending GO can race the helper's timeout setup. A next-stage connection can supply that acknowledgement without sleeps or retries.

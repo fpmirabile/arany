@@ -30,6 +30,41 @@ pub fn account_isolated_command(
 }
 
 #[cfg(target_os = "linux")]
+pub fn enter_account_isolated_test() -> bool {
+    const CHILD: &str = "ARANY_ACCOUNT_ISOLATED_TEST";
+
+    if std::env::var_os(CHILD).is_some() {
+        return true;
+    }
+    use crate::process::BoundedOutput;
+    let test = std::thread::current()
+        .name()
+        .expect("named test thread")
+        .to_owned();
+    let executable = std::env::current_exe().expect("test executable");
+    let temp = tempfile::tempdir().expect("isolated account test root");
+    let temp_files = temp.path().join("tmp");
+    std::fs::create_dir(&temp_files).expect("isolated test temporary directory");
+    let mut command = account_isolated_command(temp.path(), "/arany", &executable);
+    command
+        .env_clear()
+        .env(CHILD, "1")
+        .env("TMPDIR", temp_files)
+        .args(["--exact", &test, "--include-ignored", "--nocapture"]);
+    let output = command
+        .bounded_output_for(std::time::Duration::from_secs(600), 32 * 1024 * 1024)
+        .expect("isolated test process");
+    assert!(
+        output.status.success(),
+        "isolated test failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    crate::process::assert_single_test_completed(&output.stdout, &test);
+    false
+}
+
+#[cfg(target_os = "linux")]
 fn account_command(
     root: &std::path::Path,
     isolate_network: bool,

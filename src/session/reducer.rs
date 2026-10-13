@@ -71,7 +71,16 @@ impl GoalView {
         if self.active_run.is_some() {
             return false;
         }
-        self.run_ids.iter().all(|run_id| {
+        let completed_run_ids = if self
+            .run_ids
+            .last()
+            .is_some_and(|run_id| !view.runs.iter().any(|run| run.id == *run_id))
+        {
+            &self.run_ids[..self.run_ids.len().saturating_sub(1)]
+        } else {
+            &self.run_ids
+        };
+        completed_run_ids.iter().all(|run_id| {
             view.runs
                 .iter()
                 .find(|run| run.id == *run_id)
@@ -680,17 +689,43 @@ impl SessionView {
                 goal.run_ids.push(*run_id);
             }
             Event::GoalResumed { goal_id } => {
+                let active_run = current
+                    .goals
+                    .last()
+                    .filter(|goal| goal.id == *goal_id && goal.status == GoalStatus::Running)
+                    .and_then(|goal| goal.active_run);
+                if let Some(run_id) = active_run
+                    && let Some(run) = current.runs.last_mut().filter(|run| run.id == run_id)
+                {
+                    run.interrupt();
+                }
+                if let Some(goal) = current
+                    .goals
+                    .last_mut()
+                    .filter(|goal| goal.id == *goal_id && goal.status == GoalStatus::Running)
+                {
+                    goal.status = GoalStatus::Interrupted;
+                    goal.active_run = None;
+                }
                 let recoverable = current
                     .goals
                     .last()
                     .filter(|goal| goal.id == *goal_id)
                     .is_some_and(|goal| goal.can_resume(current));
+                let has_unaccepted_run = current.goals.last().is_some_and(|goal| {
+                    goal.run_ids
+                        .last()
+                        .is_some_and(|run_id| !current.runs.iter().any(|run| run.id == *run_id))
+                });
                 let goal = current_goal_mut(current, *goal_id)?;
                 if goal.status != GoalStatus::Interrupted
                     || goal.active_run.is_some()
                     || !recoverable
                 {
                     return Err(ReplayError::InvalidTransition);
+                }
+                if has_unaccepted_run {
+                    goal.run_ids.pop();
                 }
                 if goal.status == GoalStatus::Interrupted {
                     let reservation = match (goal.reserved_active_run, goal.reserved_active_ms) {

@@ -217,6 +217,9 @@ impl Provider for Journey {
 #[tokio::test]
 #[ignore = "native Linux namespace/cgroup Tool conformance; offline and synthetic"]
 async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
+    if !super::isolation::enter_account_isolated_test() {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src")).unwrap();
@@ -542,6 +545,253 @@ fn proposal_request(workspace: &Path) -> RunRequest {
     }
 }
 
+struct ExactTokenTool {
+    requests: Arc<Mutex<Vec<ProviderRequest>>>,
+}
+
+impl arany::Provider for ExactTokenTool {
+    fn profile_name(&self) -> &str {
+        "scripted"
+    }
+
+    fn model_name(&self) -> &str {
+        "goal-budget-model"
+    }
+
+    fn max_concurrent_calls(&self) -> u8 {
+        1
+    }
+
+    async fn invoke(
+        &self,
+        request: ProviderRequest,
+    ) -> Result<arany::ProviderResponse, arany::ProviderError> {
+        self.requests.lock().unwrap().push(request);
+        Ok(arany::ProviderResponse {
+            outcome: ProviderOutcome::Tool {
+                call: ToolCall::Edit {
+                    path: "src/current.txt".into(),
+                    expected_digest: hash(b"current"),
+                    old: "current".into(),
+                    new: "after".into(),
+                },
+                plan_contract: Some(Box::new(arany::GoalPlanContract {
+                    mission: "Change the exact selected file".into(),
+                    paths: vec!["src".into()],
+                    commands: Vec::new(),
+                    skills: Vec::new(),
+                    mcp_tools: Vec::new(),
+                    success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
+                        path: "src/current.txt".into(),
+                        content: "after".into(),
+                    },
+                    budget: arany::GoalBudget {
+                        max_tokens: Some(8),
+                        ..arany::GoalBudget::default()
+                    },
+                })),
+            },
+            response_id: None,
+            input_tokens: Some(0),
+            output_tokens: Some(8),
+            wire_provenance: None,
+        })
+    }
+
+    async fn compact(
+        &self,
+        _: CompactionRequest,
+    ) -> Result<CompactionResponse, arany::ProviderError> {
+        Err(arany::ProviderError::InvalidOutcome)
+    }
+}
+
+#[tokio::test]
+async fn exact_goal_token_cap_fails_before_a_tool_request_is_journaled() {
+    if !super::isolation::enter_account_isolated_test() {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    private_file(&workspace.join("src/current.txt"), b"current");
+    let state_path = temp.path().join("state");
+    let state = StateRoot::admit(&state_path).unwrap();
+    basic_config(&state_path);
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = Engine::open(
+        state,
+        ExactTokenTool {
+            requests: Arc::clone(&requests),
+        },
+    )
+    .unwrap();
+    engine
+        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
+        .unwrap();
+    let mut request = proposal_request(&workspace);
+    request.goal = arany::GoalRequest::new(
+        arany::GoalBudget {
+            max_tokens: Some(8),
+            ..arany::GoalBudget::default()
+        },
+        arany::GoalPhase::Implementation,
+    );
+    let outcome = engine.run(request).await.unwrap();
+    engine.close().await.unwrap();
+
+    assert_eq!(outcome.run.status, RunStatus::Failed);
+    assert!(outcome.run.tools.is_empty());
+    assert_eq!(
+        std::fs::read(workspace.join("src/current.txt")).unwrap(),
+        b"current"
+    );
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    drop(requests);
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+    let events = store.load_session(outcome.session_id).await.unwrap();
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        arany::Event::ProviderCallRecorded { record, .. }
+            if record.disposition == arany::ProviderCallDisposition::InvalidResponse
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(&event.event, arany::Event::ToolStarted { .. }))
+    );
+    store.close().await.unwrap();
+}
+
+struct GoalWorkspaceLease {
+    requests: Arc<Mutex<Vec<ProviderRequest>>>,
+}
+
+impl Provider for GoalWorkspaceLease {
+    fn profile_name(&self) -> &str {
+        "scripted"
+    }
+
+    fn model_name(&self) -> &str {
+        "goal-lease-model"
+    }
+
+    fn max_concurrent_calls(&self) -> u8 {
+        1
+    }
+
+    async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        self.requests.lock().unwrap().push(request);
+        Ok(ProviderResponse {
+            outcome: ProviderOutcome::Finish(Finish {
+                summary: "The selected task is complete".into(),
+                result: "No Workspace mutation was needed".into(),
+            }),
+            response_id: None,
+            input_tokens: Some(1),
+            output_tokens: Some(1),
+            wire_provenance: None,
+        })
+    }
+
+    async fn compact(&self, _: CompactionRequest) -> Result<CompactionResponse, ProviderError> {
+        Err(ProviderError::InvalidOutcome)
+    }
+}
+
+#[tokio::test]
+async fn unfinished_implementation_goal_holds_workspace_lease_across_runs() {
+    if !super::isolation::enter_account_isolated_test() {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    let first_state_path = temp.path().join("first-state");
+    let second_state_path = temp.path().join("second-state");
+    for state_path in [&first_state_path, &second_state_path] {
+        let state = StateRoot::admit(state_path).unwrap();
+        drop(state);
+        basic_config(state_path);
+    }
+
+    let first_requests = Arc::new(Mutex::new(Vec::new()));
+    let mut first_engine = Engine::open(
+        StateRoot::open_existing(&first_state_path).unwrap(),
+        GoalWorkspaceLease {
+            requests: Arc::clone(&first_requests),
+        },
+    )
+    .unwrap();
+    first_engine
+        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
+        .unwrap();
+    let mut first = proposal_request(&workspace);
+    first.goal = arany::GoalRequest::new(
+        arany::GoalBudget {
+            max_runs: 2,
+            ..arany::GoalBudget::default()
+        },
+        arany::GoalPhase::Implementation,
+    );
+    first.goal.finish_after_run = false;
+    let initial = first_engine.run(first).await.unwrap();
+    assert_eq!(initial.run.status, RunStatus::Finished);
+    assert_eq!(first_requests.lock().unwrap().len(), 1);
+
+    let blocked_requests = Arc::new(Mutex::new(Vec::new()));
+    let mut blocked_engine = Engine::open(
+        StateRoot::open_existing(&second_state_path).unwrap(),
+        GoalWorkspaceLease {
+            requests: Arc::clone(&blocked_requests),
+        },
+    )
+    .unwrap();
+    blocked_engine
+        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
+        .unwrap();
+    assert!(matches!(
+        blocked_engine.run(proposal_request(&workspace)).await,
+        Err(arany::EngineError::WorkspaceBusy)
+    ));
+    assert!(blocked_requests.lock().unwrap().is_empty());
+    blocked_engine.close().await.unwrap();
+
+    let mut resumed = proposal_request(&workspace);
+    resumed.session_id = Some(initial.session_id);
+    resumed.title = None;
+    resumed.goal =
+        arany::GoalRequest::resume(initial.goal_id, arany::GoalPhase::Implementation, true);
+    let terminal = first_engine.run(resumed).await.unwrap();
+    assert_eq!(terminal.run.status, RunStatus::Finished);
+    assert_eq!(first_requests.lock().unwrap().len(), 2);
+
+    let released_requests = Arc::new(Mutex::new(Vec::new()));
+    let mut released_engine = Engine::open(
+        StateRoot::open_existing(&second_state_path).unwrap(),
+        GoalWorkspaceLease {
+            requests: Arc::clone(&released_requests),
+        },
+    )
+    .unwrap();
+    released_engine
+        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
+        .unwrap();
+    assert_eq!(
+        released_engine
+            .run(proposal_request(&workspace))
+            .await
+            .unwrap()
+            .run
+            .status,
+        RunStatus::Finished
+    );
+    assert_eq!(released_requests.lock().unwrap().len(), 1);
+    released_engine.close().await.unwrap();
+    first_engine.close().await.unwrap();
+}
+
 fn mcp_definition() -> Value {
     let schema = json!({"type":"object","properties":{"value":{"type":"integer"}},"required":["value"],"additionalProperties":false});
     json!({"name":"echo","description":"Return a synthetic value; no host I/O","inputSchema":schema,"outputSchema":schema})
@@ -581,6 +831,9 @@ fn exec_tool_configuration_rejects_before_workspace_content_or_provider_egress()
 #[tokio::test]
 #[ignore = "native Linux real MCP version/framing/schema/capability failure corpus"]
 async fn mcp_stdio_corpus_rejects_unnegotiated_authority_and_hostile_results() {
+    if !super::isolation::enter_account_isolated_test() {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src")).unwrap();
@@ -816,6 +1069,9 @@ impl Provider for BoundedLoop {
 #[tokio::test]
 #[ignore = "native Linux aggregate Tool budget and primary-only team continuation"]
 async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
+    if !super::isolation::enter_account_isolated_test() {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src")).unwrap();
@@ -1042,6 +1298,9 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
 #[tokio::test]
 #[ignore = "native Linux denied-path, atomic-write, descendant and quota Tool conformance"]
 async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
+    if !super::isolation::enter_account_isolated_test() {
+        return;
+    }
     use std::os::unix::fs::symlink;
     let temp = tempfile::tempdir().unwrap();
     let runtime_state_path = temp.path().join("state-runtime-overlap");
@@ -1475,6 +1734,9 @@ async fn unit_properties(
 #[tokio::test]
 #[ignore = "native Linux in-flight double-fork/setsid cancellation Tool conformance"]
 async fn cancellation_owns_the_actual_descendant_unit_and_never_retries_it() {
+    if !super::isolation::enter_account_isolated_test() {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src")).unwrap();
@@ -1576,6 +1838,9 @@ async fn cancellation_owns_the_actual_descendant_unit_and_never_retries_it() {
 #[tokio::test]
 #[ignore = "native Linux host-network/credential isolation and inherited seccomp Tool conformance"]
 async fn command_descendants_cannot_reach_host_canaries_or_guard_memory() {
+    if !super::isolation::enter_account_isolated_test() {
+        return;
+    }
     use std::net::{TcpListener, UdpSocket};
     let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
     let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -1653,6 +1918,9 @@ async fn command_descendants_cannot_reach_host_canaries_or_guard_memory() {
 #[tokio::test]
 #[ignore = "native Linux aggregate memory/PID Tool enforcement, including OOM cleanup"]
 async fn resource_quotas_apply_to_payload_descendants_and_oom_is_uncertain() {
+    if !super::isolation::enter_account_isolated_test() {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src")).unwrap();
@@ -1927,6 +2195,9 @@ impl Provider for ApprovalJourney {
 #[tokio::test]
 #[ignore = "native Linux Guard approval and AI review gate"]
 async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() {
+    if !super::isolation::enter_account_isolated_test() {
+        return;
+    }
     use arany::{
         ApprovalMode, ProviderCallDisposition, RunCancellation, RunProgress, ToolApprovals,
     };

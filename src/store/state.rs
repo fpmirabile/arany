@@ -6,7 +6,7 @@ use directories::ProjectDirs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 mod lock;
-pub(crate) use lock::SessionRunLock;
+pub(crate) use lock::{SessionRunLock, WorkspaceRunLock};
 
 const PROVIDER_PROFILES_FILE: &str = "provider-profiles.json";
 const MAX_PROVIDER_PROFILES_BYTES: usize = 64 * 1024;

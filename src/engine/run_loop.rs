@@ -139,6 +139,9 @@ impl GoalRunBudget {
     }
 
     fn reserve_call(&self) -> bool {
+        if !self.can_start_provider_call() {
+            return false;
+        }
         self.calls_used
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 if used < self.calls_limit.load(Ordering::Acquire) {
@@ -221,11 +224,12 @@ impl GoalRunBudget {
             .fetch_add(elapsed_ms, Ordering::AcqRel);
         self.active_reserved_ms
             .store(reserved_ms, Ordering::Release);
-        let started = Instant::now();
-        *self
+        let mut started = self
             .active_started
             .lock()
-            .map_err(|_| EngineError::CoordinatorFailed)? = started;
+            .map_err(|_| EngineError::CoordinatorFailed)?;
+        *started += Duration::from_millis(elapsed_ms);
+        let started = *started;
         Ok(started + Duration::from_millis(reserved_ms))
     }
 
@@ -264,14 +268,30 @@ impl GoalRunBudget {
     }
 
     fn tokens_within_limit(&self) -> bool {
-        self.token_limit
-            .lock()
-            .ok()
-            .and_then(|limit| *limit)
-            .is_none_or(|limit| {
+        match self.token_limit.lock() {
+            Ok(limit) => limit.is_none_or(|limit| {
                 !self.token_usage_unknown.load(Ordering::Acquire)
                     && self.known_tokens.load(Ordering::Acquire) <= limit
-            })
+            }),
+            Err(_) => false,
+        }
+    }
+
+    fn can_start_provider_call(&self) -> bool {
+        match self.token_limit.lock() {
+            Ok(limit) => limit.is_none_or(|limit| {
+                !self.token_usage_unknown.load(Ordering::Acquire)
+                    && self.known_tokens.load(Ordering::Acquire) < limit
+            }),
+            Err(_) => false,
+        }
+    }
+
+    fn provider_concurrency(&self, admitted: usize) -> usize {
+        match self.token_limit.lock() {
+            Ok(limit) if limit.is_none() => admitted,
+            _ => admitted.min(1),
+        }
     }
 }
 
@@ -655,6 +675,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             && plan_and_call_fit
             && plan_valid
             && contract_budget_available
+            && self.controls.goal_budget.can_start_provider_call()
             && !matches!(call, crate::tools::ToolCall::ApplyChangeset { .. })
             && self.controls.goal_budget.remaining_calls() > 0
             && request.tools.as_ref().is_some_and(|tools| {
@@ -853,7 +874,14 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                 };
             }
         }
-        let observation = if approved {
+        let observation = if approved && !self.controls.goal_budget.can_start_provider_call() {
+            crate::tools::ToolObservation {
+                intent,
+                disposition: crate::tools::ToolDisposition::Limit,
+                output: "Goal token budget exhausted; no operation was dispatched".into(),
+                guard: None,
+            }
+        } else if approved {
             let runtime =
                 runtime.with_queue_progress(self.progress.map(ProgressPublisher::tool_queue));
             let worker_cancellation = RunCancellation::new();
@@ -1149,4 +1177,96 @@ fn valid_finish(finish: &Finish, result_limit: usize) -> bool {
         && finish.result.len() <= result_limit
         && Event::finished_payload_size(&finish.summary, &finish.result)
             .is_ok_and(|bytes| bytes <= crate::store::MAX_EVENT_BYTES)
+}
+
+#[cfg(test)]
+mod goal_budget_tests {
+    use super::*;
+    use crate::engine::GoalAdmission;
+    use crate::session::{GoalBudget, GoalId, GoalPlanContract, GoalSuccessCriterion};
+
+    fn admission() -> GoalAdmission {
+        GoalAdmission {
+            id: GoalId::new(),
+            budget: GoalBudget::default(),
+            plan_contract: None,
+            is_new: true,
+            resume: false,
+            calls_used: 0,
+            known_tokens: 0,
+            token_usage_unknown: false,
+            success_criterion_satisfied: false,
+            observations_before_run: Vec::new(),
+            active_ms: 0,
+            runs_used: 0,
+        }
+    }
+
+    #[test]
+    fn plan_append_latency_stays_inside_the_narrowed_active_reservation() {
+        let started = Instant::now() - Duration::from_millis(100);
+        let budget = GoalRunBudget::new(&admission(), 64, None, 1_000, started);
+        let contract = GoalPlanContract {
+            mission: "complete the task".into(),
+            paths: Vec::new(),
+            commands: Vec::new(),
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: GoalSuccessCriterion::WorkspaceFileDigest {
+                path: "src/main.rs".into(),
+                sha256: "0".repeat(64),
+            },
+            budget: GoalBudget {
+                max_active_ms: 10_000,
+                ..GoalBudget::default()
+            },
+        };
+        let (elapsed_ms, reserved_ms) = budget
+            .active_adjustment(&contract)
+            .expect("plan fits the active reservation");
+        std::thread::sleep(Duration::from_millis(15));
+        let deadline = budget
+            .narrow(&contract, elapsed_ms, reserved_ms)
+            .expect("narrowed deadline");
+
+        assert_eq!(
+            deadline,
+            started + Duration::from_millis(elapsed_ms + reserved_ms)
+        );
+        assert!(budget.elapsed_active_ms() >= 10);
+    }
+
+    #[test]
+    fn finite_token_plan_reduces_parallelism_and_rejects_more_calls_at_the_cap() {
+        let budget = GoalRunBudget::new(&admission(), 64, None, 1_000, Instant::now());
+        let contract = GoalPlanContract {
+            mission: "complete the task".into(),
+            paths: vec!["src".into()],
+            commands: Vec::new(),
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: GoalSuccessCriterion::WorkspaceFileContent {
+                path: "src/main.rs".into(),
+                content: "done".into(),
+            },
+            budget: GoalBudget {
+                max_tokens: Some(10),
+                ..GoalBudget::default()
+            },
+        };
+        let (elapsed_ms, reserved_ms) = budget
+            .active_adjustment(&contract)
+            .expect("plan fits the initial reservation");
+        budget
+            .narrow(&contract, elapsed_ms, reserved_ms)
+            .expect("narrowed deadline");
+        assert_eq!(budget.provider_concurrency(4), 1);
+        budget.known_tokens.store(10, Ordering::Release);
+        assert!(
+            budget.tokens_within_limit(),
+            "an exact-cap Finish is still valid"
+        );
+        assert!(!budget.can_start_provider_call());
+        assert!(!budget.reserve_call());
+    }
 }

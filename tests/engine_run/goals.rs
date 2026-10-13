@@ -169,6 +169,121 @@ async fn goal_call_budget_blocks_a_later_run_before_provider_dispatch() {
     engine.close().await.expect("engine shutdown");
 }
 
+struct FiniteTokenTeam {
+    requests: Arc<Mutex<Vec<ProviderRequest>>>,
+}
+
+impl Provider for FiniteTokenTeam {
+    fn profile_name(&self) -> &str {
+        "scripted"
+    }
+
+    fn model_name(&self) -> &str {
+        "goal-token-team-model"
+    }
+
+    fn max_concurrent_calls(&self) -> u8 {
+        3
+    }
+
+    async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        let phase = request.phase;
+        self.requests
+            .lock()
+            .expect("Provider requests")
+            .push(request);
+        let (outcome, input_tokens, output_tokens) = match phase {
+            AgentPhase::RootPlan => (
+                ProviderOutcome::Delegate(Delegate {
+                    children: vec![
+                        "Review one".into(),
+                        "Review two".into(),
+                        "Review three".into(),
+                    ],
+                }),
+                0,
+                1,
+            ),
+            AgentPhase::ChildWork => (
+                ProviderOutcome::Finish(Finish {
+                    summary: "Review complete".into(),
+                    result: "No issues found".into(),
+                }),
+                1,
+                2,
+            ),
+            _ => return Err(ProviderError::InvalidOutcome),
+        };
+        Ok(ProviderResponse {
+            outcome,
+            response_id: None,
+            input_tokens: Some(input_tokens),
+            output_tokens: Some(output_tokens),
+            wire_provenance: None,
+        })
+    }
+
+    async fn compact(&self, _: CompactionRequest) -> Result<CompactionResponse, ProviderError> {
+        Err(ProviderError::InvalidOutcome)
+    }
+}
+
+#[tokio::test]
+async fn finite_goal_token_budget_observes_a_child_before_filling_another_slot() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let state_path = temp.path().join("state");
+    let provider = FiniteTokenTeam {
+        requests: Arc::new(Mutex::new(Vec::new())),
+    };
+    let requests = Arc::clone(&provider.requests);
+    let mut engine =
+        Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+    let mut input = request(&workspace, "Review the task with a finite token budget");
+    input.include_paths.clear();
+    input.policy = CollaborationPolicy::Team {
+        max_active_children: 3,
+    };
+    input.goal = arany::GoalRequest::new(
+        arany::GoalBudget {
+            max_tokens: Some(4),
+            ..arany::GoalBudget::default()
+        },
+        arany::GoalPhase::Implementation,
+    );
+    let outcome = engine.run(input).await.expect("bounded team Run");
+    assert_eq!(outcome.run.status, RunStatus::Failed);
+    {
+        let requests = requests.lock().expect("Provider requests");
+        assert_eq!(requests.len(), 2, "the queued children have not dispatched");
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.phase == AgentPhase::ChildWork)
+                .count(),
+            1,
+            "the exact-cap child is observed before another queued child is admitted"
+        );
+    }
+    engine.close().await.expect("engine shutdown");
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
+        .expect("read-only Store");
+    let events = store
+        .load_session(outcome.session_id)
+        .await
+        .expect("Events");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(&event.event, Event::GoalProviderCallReserved { .. }))
+            .count(),
+        2,
+        "only dispatched calls consume durable call reservations"
+    );
+    store.close().await.expect("read-only Store shutdown");
+}
+
 #[tokio::test]
 async fn interrupted_goal_resumes_only_by_exact_id_without_replaying_the_old_call() {
     let temp = tempfile::tempdir().expect("temporary root");
@@ -259,4 +374,111 @@ async fn interrupted_goal_resumes_only_by_exact_id_without_replaying_the_old_cal
         "old Run remains history; only one new Run executes"
     );
     store.close().await.expect("Store shutdown");
+}
+
+#[tokio::test]
+async fn interrupted_preaccept_goal_prefixes_resume_without_spending_runs_or_replaying_work() {
+    use std::os::unix::fs::MetadataExt;
+
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let metadata = std::fs::metadata(&workspace).expect("Workspace identity");
+    for prefix in 0..3 {
+        let state_path = temp.path().join(format!("state-{prefix}"));
+        let session_id = SessionId::new();
+        let goal_id = arany::GoalId::new();
+        let orphan_run_id = RunId::new();
+        let store = Store::open(StateRoot::admit(&state_path).expect("state")).expect("Store");
+        store
+            .append(
+                session_id,
+                Event::SessionStarted {
+                    title: "Interrupted before acceptance".into(),
+                    workspace_identity: (metadata.dev(), metadata.ino()),
+                },
+            )
+            .await
+            .expect("Session start");
+        store
+            .append(
+                session_id,
+                Event::GoalStarted {
+                    goal_id,
+                    objective: "Resume an unaccepted task".into(),
+                    workspace_identity: (metadata.dev(), metadata.ino()),
+                    budget: arany::GoalBudget {
+                        max_runs: 1,
+                        ..arany::GoalBudget::default()
+                    },
+                },
+            )
+            .await
+            .expect("Goal start");
+        if prefix >= 1 {
+            store
+                .append(
+                    session_id,
+                    Event::GoalRunLinked {
+                        goal_id,
+                        run_id: orphan_run_id,
+                        phase: arany::GoalPhase::Implementation,
+                    },
+                )
+                .await
+                .expect("preaccept Run link");
+        }
+        if prefix >= 2 {
+            store
+                .append(session_id, Event::GoalResumed { goal_id })
+                .await
+                .expect("preaccept resume acknowledgment");
+        }
+        store.close().await.expect("seed Store shutdown");
+
+        let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
+            summary: "Completed after explicit recovery".into(),
+            result: "Only the new Run was dispatched".into(),
+        })]);
+        let requests = Arc::clone(&provider.requests);
+        let mut engine = Engine::open(
+            StateRoot::open_existing(&state_path).expect("reopened state"),
+            provider,
+        )
+        .expect("Engine");
+        let mut mismatched = request(&workspace, "A different initial objective");
+        mismatched.session_id = Some(session_id);
+        mismatched.title = None;
+        mismatched.include_paths.clear();
+        mismatched.goal =
+            arany::GoalRequest::resume(goal_id, arany::GoalPhase::Implementation, true);
+        assert!(matches!(
+            engine.run(mismatched).await,
+            Err(EngineError::GoalUnavailable)
+        ));
+        assert!(requests.lock().expect("Provider requests").is_empty());
+
+        let mut resumed = request(&workspace, "Resume an unaccepted task");
+        resumed.session_id = Some(session_id);
+        resumed.title = None;
+        resumed.include_paths.clear();
+        resumed.goal = arany::GoalRequest::resume(goal_id, arany::GoalPhase::Implementation, true);
+        let outcome = engine.run(resumed).await.expect("explicit recovery");
+        assert_ne!(outcome.run.id, orphan_run_id);
+        assert_eq!(outcome.run.status, RunStatus::Finished);
+        assert_eq!(requests.lock().expect("Provider requests").len(), 1);
+        engine.close().await.expect("Engine shutdown");
+
+        let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
+            .expect("read-only Store");
+        let view = store
+            .load_view(session_id)
+            .await
+            .expect("replayed Session")
+            .expect("Session");
+        assert_eq!(view.goals[0].status, arany::GoalStatus::Completed);
+        assert_eq!(view.goals[0].run_ids, [outcome.run.id]);
+        assert_eq!(view.runs.len(), 1);
+        store.close().await.expect("read-only Store shutdown");
+    }
 }

@@ -85,7 +85,8 @@ impl ChildQueue {
 
 impl<P: Provider + 'static> RunLoop<'_, P> {
     pub(super) fn valid_delegation(&self, children: &[String]) -> bool {
-        !matches!(self.controls.policy, CollaborationPolicy::Single)
+        self.controls.goal_budget.can_start_provider_call()
+            && !matches!(self.controls.policy, CollaborationPolicy::Single)
             && !children.is_empty()
             && children.len() <= usize::from(self.controls.policy.max_children())
             && children.iter().all(|objective| {
@@ -144,7 +145,9 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         let mut queue = ChildQueue::new(children.len(), parallel);
         self.fill_slots(&mut queue, &children, root_request, deadline)
             .await?;
-        let mut abort_reason = None;
+        let mut abort_reason = (!queue.pending.is_empty()
+            && !self.controls.goal_budget.can_start_provider_call())
+        .then_some(AbortReason::Failed);
         let mut drain_deadline = None;
 
         while !queue.active.is_empty() {
@@ -229,6 +232,9 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         if abort_reason.is_none() && self.controls.cancellation.is_cancelled() {
             abort_reason = Some(AbortReason::Cancelled);
         }
+        if abort_reason.is_none() && !queue.pending.is_empty() {
+            abort_reason = Some(AbortReason::Failed);
+        }
         if let Some(reason) = abort_reason {
             for index in queue.pending {
                 self.finish_child(
@@ -247,6 +253,9 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 AbortReason::Failed => self.fail_primary(primary).await,
                 AbortReason::Cancelled => self.cancel_primary(primary).await,
             };
+        }
+        if !self.controls.goal_budget.can_start_provider_call() {
+            return self.fail_primary(primary).await;
         }
         root_request.phase = AgentPhase::RootSynthesis;
         root_request.child_results = results
@@ -337,7 +346,14 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         root_request: &ProviderRequest,
         deadline: Instant,
     ) -> Result<(), EngineError> {
-        while queue.active.len() < queue.parallel && !self.controls.cancellation.is_cancelled() {
+        while queue.active.len()
+            < self
+                .controls
+                .goal_budget
+                .provider_concurrency(queue.parallel)
+            && !self.controls.cancellation.is_cancelled()
+            && self.controls.goal_budget.can_start_provider_call()
+        {
             let Some(index) = queue.pending.pop_front() else {
                 break;
             };
