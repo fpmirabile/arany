@@ -30,8 +30,17 @@ limits and compatibility.
   propagation fields, stacked entries or descendant mounts; malformed or
   oversized data fails closed. The actual production fixture covers a shared
   source, a pre-existing nested mount refusal at the topology stage and a late
-  host mount that does not appear in the isolated alias. It is separate from
-  the systemd-owned full Guard journey. On macOS, canonicalize selected roots
+  host mount that does not appear in the isolated alias. Its outer test owner
+  uses a private PID namespace with `--kill-child`; a separate forced-timeout
+  gate records the init and held descendant PIDs from each process's own
+  `/proc/self/status`, binds both pidfds before killing and reaping the unshare
+  owner, then awaits both exit signals before dropping the fixture directory.
+  The outer fixture keeps the host procfs view so those reports include host
+  PIDs ([`NSpid` field](https://man7.org/linux/man-pages/man5/proc_pid_status.5.html));
+  the production Bubblewrap profile still mounts its own `/proc`. Captured
+  Rust helper output uses a full exact test filter and proves one test completed.
+  This is separate from the systemd-owned full Guard journey. On macOS,
+  canonicalize selected roots
   and reject strict descendant targets in the native `getfsstat` mount table
   before Seatbelt and before Ready/GO; this is a point-in-time check, not a
   lifetime mount-isolation guarantee.

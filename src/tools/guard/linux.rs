@@ -1117,6 +1117,178 @@ mod tests {
         assert!(node.grant.verify_host().is_ok() && cache.grant.verify_host().is_ok());
     }
 
+    fn fixture_pid_identity(path: &Path) -> Result<(i32, i32), String> {
+        let identity = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+        let fields = identity
+            .split_whitespace()
+            .map(|field| field.parse::<i32>().map_err(|error| error.to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+        if fields.len() != 2 || fields.iter().any(|pid| *pid <= 0) {
+            return Err("fixture must report one positive host and namespace PID".into());
+        }
+        Ok((fields[0], fields[1]))
+    }
+
+    fn process_namespace_ids(pid: i32) -> Result<Vec<i32>, String> {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status"))
+            .map_err(|error| error.to_string())?;
+        let value = status
+            .lines()
+            .find_map(|line| line.strip_prefix("NSpid:"))
+            .ok_or_else(|| "fixture process lacks NSpid status field".to_string())?;
+        value
+            .split_whitespace()
+            .map(|field| field.parse::<i32>().map_err(|error| error.to_string()))
+            .collect()
+    }
+
+    fn bind_fixture_pidfd(
+        identity: (i32, i32),
+    ) -> Result<tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>, String> {
+        let (host_pid, namespace_pid) = identity;
+        let pid = rustix::process::Pid::from_raw(host_pid)
+            .ok_or_else(|| "fixture host PID must be positive".to_string())?;
+        let before = process_namespace_ids(host_pid)?;
+        if before.first() != Some(&host_pid) || before.last() != Some(&namespace_pid) {
+            return Err("fixture process namespace identity changed before pidfd binding".into());
+        }
+        let pidfd = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())
+            .map_err(|error| error.to_string())?;
+        if process_namespace_ids(host_pid)? != before {
+            return Err("fixture process namespace identity changed during pidfd binding".into());
+        }
+        tokio::io::unix::AsyncFd::new(pidfd).map_err(|error| error.to_string())
+    }
+
+    fn bind_host_pidfd(pid: u32) -> Result<tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>, String> {
+        let pid = i32::try_from(pid).map_err(|error| error.to_string())?;
+        let namespace_ids = process_namespace_ids(pid)?;
+        if namespace_ids.first() != Some(&pid) {
+            return Err("direct namespace owner host PID changed before binding".into());
+        }
+        let namespace_pid = *namespace_ids
+            .last()
+            .ok_or_else(|| "direct namespace owner has no namespace PID".to_string())?;
+        bind_fixture_pidfd((pid, namespace_pid))
+    }
+
+    async fn await_fixture_exit(
+        pidfd: &tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>,
+    ) -> Result<(), String> {
+        tokio::time::timeout(Duration::from_secs(10), pidfd.readable())
+            .await
+            .map_err(|_| "fixture process did not exit before cleanup deadline".to_string())?
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    async fn force_timeout_namespace(
+        mut command: Command,
+        fixture: &tempfile::TempDir,
+    ) -> Result<(), String> {
+        let child = command.spawn().map_err(|error| error.to_string())?;
+        let owner_pidfd = child
+            .id()
+            .ok_or_else(|| "timeout namespace owner has no process ID".to_string())
+            .and_then(bind_host_pidfd);
+        let ready = fixture.path().join("timeout-ready");
+        let init_identity_path = fixture.path().join("init.pid");
+        let held_identity_path = fixture.path().join("held.pid");
+        let gate_opened = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if ready.is_file() && init_identity_path.is_file() && held_identity_path.is_file() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        let mut errors = Vec::new();
+        if !gate_opened {
+            errors.push("namespace timeout ready gate did not open".to_string());
+        }
+        let init_identity = if gate_opened {
+            match fixture_pid_identity(&init_identity_path) {
+                Ok(identity) => Some(identity),
+                Err(error) => {
+                    errors.push(format!("read namespace init identity: {error}"));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let held_identity = if gate_opened {
+            match fixture_pid_identity(&held_identity_path) {
+                Ok(identity) => Some(identity),
+                Err(error) => {
+                    errors.push(format!("read held descendant identity: {error}"));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if let Some((_, namespace_pid)) = init_identity {
+            if namespace_pid != 1 {
+                errors.push("reported namespace init did not have PID 1".into());
+            }
+        }
+        if let Some((_, namespace_pid)) = held_identity {
+            if namespace_pid <= 1 {
+                errors.push("reported held descendant was not below namespace init".into());
+            }
+        }
+        let init_pidfd = init_identity.and_then(|identity| match bind_fixture_pidfd(identity) {
+            Ok(pidfd) => Some(pidfd),
+            Err(error) => {
+                errors.push(format!("bind namespace init identity: {error}"));
+                None
+            }
+        });
+        let held_pidfd = held_identity.and_then(|identity| match bind_fixture_pidfd(identity) {
+            Ok(pidfd) => Some(pidfd),
+            Err(error) => {
+                errors.push(format!("bind held descendant identity: {error}"));
+                None
+            }
+        });
+
+        let timeout_result = capture(child, 64 * 1024, Duration::from_millis(100)).await;
+        if !matches!(timeout_result.as_ref(), Err(ToolError::Limit)) {
+            errors.push(format!(
+                "capture did not enforce the forced timeout: {timeout_result:?}"
+            ));
+        }
+        match owner_pidfd {
+            Ok(owner_pidfd) => {
+                if let Err(error) = await_fixture_exit(&owner_pidfd).await {
+                    errors.push(format!("await namespace owner exit: {error}"));
+                }
+            }
+            Err(error) => errors.push(format!("bind namespace owner identity: {error}")),
+        }
+        for (pidfd, role) in [
+            (init_pidfd.as_ref(), "namespace init"),
+            (held_pidfd.as_ref(), "held descendant"),
+        ] {
+            match pidfd {
+                Some(pidfd) => {
+                    if let Err(error) = await_fixture_exit(pidfd).await {
+                        errors.push(format!("await {role} exit: {error}"));
+                    }
+                }
+                None => errors.push(format!("{role} identity was not bound before timeout")),
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+
     #[tokio::test]
     #[cfg_attr(
         not(arany_ci),
@@ -1143,8 +1315,7 @@ mod tests {
                     "production-prefix fixture UID must remain non-root"
                 );
                 let grant_path = std::path::PathBuf::from(
-                    std::env::var_os("ARANY_TEST_RUNTIME_MOUNT_GRANT")
-                        .expect("fixture grant path"),
+                    std::env::var_os("ARANY_TEST_RUNTIME_MOUNT_GRANT").expect("fixture grant path"),
                 );
                 assert!(grant_path.is_file(), "fixture grant exists");
                 let fixture =
@@ -1235,10 +1406,17 @@ mod tests {
                         "/fixture/go",
                         "--",
                         "/fixture/arany-test-bin",
-                        "native_runtime_mount_attestation",
+                        "--exact",
+                        "tools::guard::linux::tests::native_runtime_mount_attestation",
                         "--nocapture",
                     ]);
-                let child = command.spawn().expect("production Bwrap prefix launch");
+                let child = command
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .kill_on_drop(true)
+                    .spawn()
+                    .expect("production Bwrap prefix launch");
                 let (status, _, stderr) = capture(child, 64 * 1024, Duration::from_secs(30))
                     .await
                     .expect("bounded production-prefix fixture");
@@ -1330,13 +1508,16 @@ mod tests {
                 "--user",
                 "--map-current-user",
                 "--mount",
+                "--pid",
+                "--fork",
+                "--kill-child=SIGKILL",
                 "--propagation",
                 "shared",
                 "--keep-caps",
                 "--",
                 "/usr/bin/bash",
             ])
-            .arg(script)
+            .arg(&script)
             .args([
                 source.as_os_str(),
                 alias.as_os_str(),
@@ -1346,8 +1527,13 @@ mod tests {
                 test_binary.as_os_str(),
                 target.as_os_str(),
             ])
+            .arg("topology")
             .env_clear()
-            .env("PATH", "/usr/bin:/bin");
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
         let (status, stdout, stderr) = capture(
             command.spawn().map_err(|_| ToolError::Operation).unwrap(),
             64 * 1024,
@@ -1364,10 +1550,59 @@ mod tests {
             stdout,
             b"private-source-ok\nlate-mount-isolated\nnested-mount-rejected-at-runtime-stage\n"
         );
+        crate::test_process::assert_single_test_completed(
+            &std::fs::read(fixture.path().join("worker-exercise.log")).unwrap(),
+            "runtime mount exercise helper",
+        );
+        crate::test_process::assert_single_test_completed(
+            &std::fs::read(fixture.path().join("worker-reject.log")).unwrap(),
+            "runtime mount rejection helper",
+        );
         assert_eq!(
             std::fs::read(result_path).unwrap(),
             b"{\"stage\":\"runtime_mounts\"}"
         );
+
+        let mut timeout_command = Command::new("/usr/bin/unshare");
+        timeout_command
+            .args([
+                "--user",
+                "--map-current-user",
+                "--mount",
+                "--pid",
+                "--fork",
+                "--kill-child=SIGKILL",
+                "--propagation",
+                "shared",
+                "--keep-caps",
+                "--",
+                "/usr/bin/bash",
+            ])
+            .arg(&script)
+            .args([
+                source.as_os_str(),
+                alias.as_os_str(),
+                late_source.as_os_str(),
+                nested_source.as_os_str(),
+                fixture.path().as_os_str(),
+                test_binary.as_os_str(),
+                target.as_os_str(),
+            ])
+            .arg("timeout")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        if let Err(error) = force_timeout_namespace(timeout_command, &fixture).await {
+            // Keep the private gate if process exit could not be positively established.
+            let retained = fixture.keep();
+            panic!(
+                "native namespace timeout cleanup failed: {error}; fixture retained at {}",
+                retained.display()
+            );
+        }
     }
 
     #[tokio::test]
