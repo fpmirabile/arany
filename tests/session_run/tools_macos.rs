@@ -645,6 +645,7 @@ int main(int argc, char **argv) {
 }
 struct RuntimeJourney {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
+    call: ToolCall,
 }
 
 impl Provider for RuntimeJourney {
@@ -671,14 +672,7 @@ impl Provider for RuntimeJourney {
             return Err(ProviderError::InvalidOutcome);
         }
         let outcome = if step == 0 {
-            ProviderOutcome::Tool(ToolCall::Command {
-                program: "sh".into(),
-                args: vec![
-                    "-c".into(),
-                    "set -eu; test \"$(node)\" = runtime-profile-selected; printf selected-runtime-command".into(),
-                ],
-                cwd: String::new(),
-            })
+            ProviderOutcome::Tool(self.call.clone())
         } else {
             ProviderOutcome::Finish(Finish {
                 summary: "Runtime profile checked".into(),
@@ -787,15 +781,26 @@ async fn native_runtime_mount_journey_helper() {
         .unwrap();
     let permissions = arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
 
+    let runtime_call = ToolCall::Command {
+        program: "sh".into(),
+        args: vec![
+            "-c".into(),
+            "set -eu; test \"$(node)\" = runtime-profile-selected; printf selected-runtime-command"
+                .into(),
+        ],
+        cwd: String::new(),
+    };
     let refused_requests = Arc::new(Mutex::new(Vec::new()));
+    let refused_state = root.join("state-mounted");
     let mut engine = Engine::open(
-        StateRoot::admit(&root.join("state-mounted")).unwrap(),
+        StateRoot::admit(&refused_state).unwrap(),
         RuntimeJourney {
             requests: refused_requests.clone(),
+            call: runtime_call.clone(),
         },
     )
     .unwrap();
-    let (approvals, _) = arany::ToolApprovals::new(arany::ApprovalMode::AutoEdits);
+    let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
     engine
         .enable_trusted_workspace(
             permissions.clone(),
@@ -804,26 +809,38 @@ async fn native_runtime_mount_journey_helper() {
             approvals,
         )
         .unwrap();
-    let refused = engine
-        .run(RunRequest {
-            session_id: None,
-            title: Some("Mounted runtime refusal".into()),
-            objective: "Check runtime mount topology".into(),
-            images: Vec::new(),
-            workspace: workspace.clone(),
-            include_paths: Vec::new(),
-            policy: CollaborationPolicy::Single,
-        })
-        .await
-        .unwrap();
+    let run = engine.run(RunRequest {
+        session_id: None,
+        title: Some("Mounted runtime refusal".into()),
+        objective: "Check runtime mount topology".into(),
+        images: Vec::new(),
+        workspace: workspace.clone(),
+        include_paths: Vec::new(),
+        policy: CollaborationPolicy::Single,
+    });
+    let approve = async {
+        let approval = inbox
+            .next()
+            .await
+            .expect("one approval for the mounted-runtime command");
+        assert_eq!(approval.intent.call, runtime_call);
+        approval.decide(true);
+    };
+    let (refused, ()) = tokio::time::timeout(Duration::from_secs(90), async {
+        tokio::join!(run, approve)
+    })
+    .await
+    .expect("bounded mounted-runtime refusal journey");
+    let refused = refused.unwrap();
     engine.close().await.unwrap();
     assert_eq!(
         refused.run.status,
-        RunStatus::Finished,
+        RunStatus::Failed,
         "runtime mount refusal Run failed: {}",
         crate::safe_run_diagnostics(&refused.run)
     );
     assert_eq!(refused.run.tools.len(), 1);
+    assert_eq!(refused_requests.lock().unwrap().len(), 1);
     let refused_observation = refused.run.tools[0].observation.as_ref().unwrap();
     assert_eq!(refused_observation.disposition, ToolDisposition::Failed);
     assert!(refused_observation.guard.is_none());
@@ -832,25 +849,26 @@ async fn native_runtime_mount_journey_helper() {
             .output
             .contains("runtime mount topology")
     );
-    {
-        let requests = refused_requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
-        assert!(requests[0].tools.as_ref().unwrap().observations.is_empty());
-        let provider_observation = requests[1]
+    assert_eq!(
+        refused_requests.lock().unwrap()[0]
             .tools
             .as_ref()
             .unwrap()
             .observations
-            .last()
-            .unwrap();
-        assert_eq!(provider_observation.disposition, ToolDisposition::Failed);
-        assert!(provider_observation.guard.is_none());
-        assert!(
-            provider_observation
-                .output
-                .contains("runtime mount topology")
-        );
-    }
+            .len(),
+        0
+    );
+    let trace = trace_snapshot(root);
+    assert_eq!(trace["stages"]["worker_go"], "unknown");
+    let store = Store::open_read_only(StateRoot::open_existing(&refused_state).unwrap()).unwrap();
+    let events = store.load_session(refused.session_id).await.unwrap();
+    store.close().await.unwrap();
+    let replay = SessionView::replay(refused.session_id, &events)
+        .unwrap()
+        .unwrap();
+    assert_eq!(replay.runs.len(), 1);
+    assert_eq!(replay.runs[0], refused.run, "closed runtime refusal replay");
+    assert_eq!(replay.runs[0].status, RunStatus::Failed);
     let detached = std::process::Command::new("/usr/bin/hdiutil")
         .args(["detach", "-force", "-quiet"])
         .arg(&mountpoint)
@@ -866,10 +884,11 @@ async fn native_runtime_mount_journey_helper() {
         StateRoot::admit(&root.join("state-success")).unwrap(),
         RuntimeJourney {
             requests: accepted_requests.clone(),
+            call: runtime_call.clone(),
         },
     )
     .unwrap();
-    let (approvals, _) = arany::ToolApprovals::new(arany::ApprovalMode::AutoEdits);
+    let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
     engine
         .enable_trusted_workspace(
             permissions,
@@ -878,18 +897,29 @@ async fn native_runtime_mount_journey_helper() {
             approvals,
         )
         .unwrap();
-    let accepted = engine
-        .run(RunRequest {
-            session_id: None,
-            title: Some("Selected runtime success".into()),
-            objective: "Run a command using the selected runtime".into(),
-            images: Vec::new(),
-            workspace,
-            include_paths: Vec::new(),
-            policy: CollaborationPolicy::Single,
-        })
-        .await
-        .unwrap();
+    let run = engine.run(RunRequest {
+        session_id: None,
+        title: Some("Selected runtime success".into()),
+        objective: "Run a command using the selected runtime".into(),
+        images: Vec::new(),
+        workspace,
+        include_paths: Vec::new(),
+        policy: CollaborationPolicy::Single,
+    });
+    let approve = async {
+        let approval = inbox
+            .next()
+            .await
+            .expect("one approval for the selected-runtime command");
+        assert_eq!(approval.intent.call, runtime_call);
+        approval.decide(true);
+    };
+    let (accepted, ()) = tokio::time::timeout(Duration::from_secs(90), async {
+        tokio::join!(run, approve)
+    })
+    .await
+    .expect("bounded selected-runtime success journey");
+    let accepted = accepted.unwrap();
     engine.close().await.unwrap();
     assert_eq!(
         accepted.run.status,
