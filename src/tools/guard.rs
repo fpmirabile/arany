@@ -23,6 +23,8 @@ mod profile;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
+pub(super) use macos::fixture::{Span as FixtureSpan, Stage as FixtureStage};
+#[cfg(target_os = "macos")]
 pub(super) use macos::{SystemPrograms, macos_enforcement_digest};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -140,6 +142,7 @@ impl BootstrapFailure {
 pub enum GuardStage {
     ResourceAttestation,
     ProcessCleanup,
+    StorageCleanup,
     LauncherReap,
     OutputEof,
     NamespaceBootstrap,
@@ -152,6 +155,7 @@ impl GuardStage {
         match self {
             Self::ResourceAttestation => "resource attestation",
             Self::ProcessCleanup => "process cleanup",
+            Self::StorageCleanup => "storage cleanup",
             Self::LauncherReap => "launcher reap",
             Self::OutputEof => "output EOF",
             Self::NamespaceBootstrap => "namespace bootstrap",

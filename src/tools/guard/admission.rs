@@ -11,6 +11,12 @@ use std::path::Path;
 use std::time::Duration;
 
 const MAX_WAITERS: usize = 1024;
+const ADMISSION_SCAN_LIMIT: usize = MAX_WAITERS + 64 * 4 + 16;
+const RESERVATION_VERSION: u32 = if cfg!(target_os = "linux") { 2 } else { 1 };
+#[cfg(target_os = "linux")]
+const SEED_ENTRY_LIMIT: usize =
+    (crate::tools::types::MAX_SNAPSHOT_FILES + crate::tools::types::MAX_SKILLS * 32 + 12 * 17)
+        * 260;
 pub(super) const RECOVERY_ATTEMPTS: usize = 8;
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -247,7 +253,7 @@ fn boot() -> Result<uuid::Uuid, ToolError> {
 fn reserved(dir: &cap_std::fs::Dir, _root_parent: &Path) -> Result<usize, ToolError> {
     let mut ids = std::collections::BTreeSet::new();
     for (scanned, entry) in dir.entries().map_err(|_| ToolError::Path)?.enumerate() {
-        if scanned >= MAX_WAITERS + 800 {
+        if scanned >= ADMISSION_SCAN_LIMIT {
             return Err(ToolError::Limit);
         }
         let entry = entry.map_err(|_| ToolError::Path)?;
@@ -264,17 +270,18 @@ fn reserved(dir: &cap_std::fs::Dir, _root_parent: &Path) -> Result<usize, ToolEr
             continue;
         };
         let reservation: Reservation = decode(file.try_clone().map_err(|_| ToolError::Operation)?)?;
-        if reservation.version != 1 || reservation.id != id || reservation.boot.is_nil() {
+        if reservation.version != RESERVATION_VERSION
+            || reservation.id != id
+            || reservation.boot.is_nil()
+        {
             return Err(ToolError::ProtectionUnavailable);
         }
+        #[cfg(target_os = "macos")]
         if let Some(_dead) = try_lock(file)? {
-            #[cfg(target_os = "macos")]
             let removable = !_root_parent
                 .join(format!("arany-u-{id}"))
                 .try_exists()
                 .map_err(|_| ToolError::Path)?;
-            #[cfg(target_os = "linux")]
-            let removable = reservation.boot != boot()?;
             if removable {
                 remove(dir, name)?;
                 continue;
@@ -315,29 +322,334 @@ pub(super) struct Permit {
     name: String,
     _lease: Lock,
     pub(super) id: uuid::Uuid,
+    #[cfg(target_os = "linux")]
+    seed_parent: std::path::PathBuf,
+    #[cfg(target_os = "linux")]
+    boot: uuid::Uuid,
     release_on_drop: bool,
-}
-
-impl Permit {
-    #[cfg(target_os = "linux")]
-    pub(super) fn release(&mut self) {
-        self.release_on_drop = true;
-    }
-    #[cfg(target_os = "linux")]
-    pub(super) fn launched(&mut self) {
-        self.release_on_drop = false;
-    }
 }
 
 impl Drop for Permit {
     fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
         if self.release_on_drop {
             let _ = self.dir.remove_file(&self.name);
+        }
+        #[cfg(target_os = "linux")]
+        if self.release_on_drop && self.cleanup_seed().is_ok() {
+            let _ = self.retire();
         }
     }
 }
 
-fn reserve(directory: &PrivateDirectory, id: uuid::Uuid) -> Result<Permit, ToolError> {
+#[cfg(target_os = "linux")]
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SeedRecord {
+    version: u32,
+    id: uuid::Uuid,
+    boot: uuid::Uuid,
+    path: std::path::PathBuf,
+    parent: (u64, u64),
+    phase: SeedPhase,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+enum SeedPhase {
+    Preparing,
+    Ready { root: (u64, u64) },
+    LaunchRequested { root: (u64, u64) },
+    Terminated { root: (u64, u64) },
+}
+
+#[cfg(target_os = "linux")]
+fn namespace_lock(dir: &cap_std::fs::Dir) -> Result<Option<Lock>, ToolError> {
+    let file = checked_file(dir, "admission.lock", true)?;
+    if file.metadata().map_err(|_| ToolError::Path)?.len() != 0 {
+        return Err(ToolError::Path);
+    }
+    try_lock(file)
+}
+
+#[cfg(target_os = "linux")]
+fn sync_directory(dir: &cap_std::fs::Dir) -> Result<(), ToolError> {
+    crate::tools::fs::open_file(dir, ".")?
+        .sync_all()
+        .map_err(|_| ToolError::Operation)
+}
+
+#[cfg(target_os = "linux")]
+impl Permit {
+    fn linked(&self) -> Result<bool, ToolError> {
+        let owned = self._lease.0.metadata().map_err(|_| ToolError::Path)?;
+        let Some(named) = open_file(&self.dir, &self.name, false)? else {
+            return Ok(false);
+        };
+        let named = named.metadata().map_err(|_| ToolError::Path)?;
+        Ok(owned.nlink() == 1 && (owned.dev(), owned.ino()) == (named.dev(), named.ino()))
+    }
+
+    fn seed_name(&self) -> String {
+        format!("{}.seed", self.id)
+    }
+
+    fn seed_path(&self) -> std::path::PathBuf {
+        self.seed_parent.join(format!("arany-tools-{}", self.id))
+    }
+
+    fn seed_record(&self) -> Result<Option<SeedRecord>, ToolError> {
+        let Some(file) = open_file(&self.dir, &self.seed_name(), false)? else {
+            return Ok(None);
+        };
+        let seed: SeedRecord = decode(file)?;
+        if seed.version != 1
+            || seed.id != self.id
+            || seed.boot != self.boot
+            || seed.path != self.seed_path()
+        {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        Ok(Some(seed))
+    }
+
+    pub(super) fn prepare_seed(
+        &self,
+        workspace: &cap_std::fs::Dir,
+        config: &crate::tools::config::Config,
+        include_workspace: bool,
+    ) -> Result<(std::path::PathBuf, cap_std::fs::Dir), ToolError> {
+        use cap_fs_ext::DirExt;
+        use cap_std::fs::DirBuilderExt;
+        if self.seed_record()?.is_some() {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        let parent = crate::tools::fs::open_directory(&self.seed_parent)?;
+        match parent.symlink_metadata(format!("arany-tools-{}", self.id)) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err(ToolError::Path),
+        }
+        let metadata = parent.dir_metadata().map_err(|_| ToolError::Path)?;
+        if !((metadata.uid() == 0 && metadata.mode() & 0o1000 != 0)
+            || (metadata.uid() == rustix::process::geteuid().as_raw()
+                && metadata.mode() & 0o077 == 0))
+        {
+            return Err(ToolError::Path);
+        }
+        let mut seed = SeedRecord {
+            version: 1,
+            id: self.id,
+            boot: self.boot,
+            path: self.seed_path(),
+            parent: crate::tools::fs::identity(&parent)?,
+            phase: SeedPhase::Preparing,
+        };
+        replace_record(&self.dir, &self.seed_name(), &seed)?;
+        #[cfg(test)]
+        self.seed_checkpoint("planned");
+        let name = seed.path.file_name().ok_or(ToolError::Path)?;
+        parent
+            .create_dir_with(name, cap_std::fs::DirBuilder::new().mode(0o700))
+            .map_err(|_| ToolError::Operation)?;
+        sync_directory(&parent)?;
+        #[cfg(test)]
+        self.seed_checkpoint("created");
+        let checked = open_directory(&seed.path, false).map_err(|_| ToolError::Path)?;
+        let dir = cap_std::fs::Dir::from_std_file(crate::tools::fs::open_file(
+            &parent,
+            name.to_str().ok_or(ToolError::Path)?,
+        )?);
+        let root = crate::tools::fs::identity(&dir)?;
+        if root != crate::tools::fs::identity(&checked.dir)? {
+            return Err(ToolError::Path);
+        }
+        seed.phase = SeedPhase::Ready { root };
+        replace_record(&self.dir, &self.seed_name(), &seed)?;
+        #[cfg(test)]
+        self.seed_checkpoint("owned");
+        dir.create_dir_with("workspace", cap_std::fs::DirBuilder::new().mode(0o700))
+            .map_err(|_| ToolError::Operation)?;
+        let project = dir
+            .open_dir_nofollow("workspace")
+            .map_err(|_| ToolError::Path)?;
+        crate::tools::fs::snapshot_into(
+            workspace,
+            config,
+            include_workspace.then_some(&project),
+            &dir,
+        )?;
+        #[cfg(test)]
+        self.seed_checkpoint("copied");
+        Ok((seed.path, dir))
+    }
+
+    pub(super) fn launching(&self) -> Result<(), ToolError> {
+        let mut seed = self
+            .seed_record()?
+            .ok_or(ToolError::ProtectionUnavailable)?;
+        let SeedPhase::Ready { root } = seed.phase else {
+            return Err(ToolError::ProtectionUnavailable);
+        };
+        seed.phase = SeedPhase::LaunchRequested { root };
+        replace_record(&self.dir, &self.seed_name(), &seed)
+    }
+
+    pub(super) fn terminated(&self) -> Result<(), ToolError> {
+        let mut seed = self
+            .seed_record()?
+            .ok_or(ToolError::ProtectionUnavailable)?;
+        let SeedPhase::LaunchRequested { root } = seed.phase else {
+            return Err(ToolError::ProtectionUnavailable);
+        };
+        seed.phase = SeedPhase::Terminated { root };
+        replace_record(&self.dir, &self.seed_name(), &seed)
+    }
+
+    fn cleanup_seed(&self) -> Result<(), ToolError> {
+        if !self.linked()? {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        let seed = self.seed_record()?;
+        let Some(seed) = seed else { return Ok(()) };
+        let root = match seed.phase {
+            SeedPhase::Preparing => None,
+            SeedPhase::Ready { root } | SeedPhase::Terminated { root } => Some(root),
+            SeedPhase::LaunchRequested { .. } => return Err(ToolError::ProtectionUnavailable),
+        };
+        let parent = crate::tools::fs::open_directory(&self.seed_parent)?;
+        if crate::tools::fs::identity(&parent)? != seed.parent {
+            return Err(ToolError::Path);
+        }
+        let name = seed
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(ToolError::Path)?;
+        match parent.symlink_metadata(name) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return sync_directory(&parent);
+            }
+            Err(_) => return Err(ToolError::Path),
+        }
+        let dir = cap_std::fs::Dir::from_std_file(crate::tools::fs::open_file(&parent, name)?);
+        let metadata = dir.dir_metadata().map_err(|_| ToolError::Path)?;
+        if !metadata.is_dir()
+            || metadata.uid() != rustix::process::geteuid().as_raw()
+            || metadata.mode() & 0o077 != 0
+        {
+            return Err(ToolError::Path);
+        }
+        let actual = crate::tools::fs::identity(&dir)?;
+        if let Some(root) = root {
+            if actual != root {
+                return Err(ToolError::Path);
+            }
+            let mut remaining = SEED_ENTRY_LIMIT;
+            remove_seed_contents(&dir, &mut remaining, 0)?;
+        }
+        let named = parent.symlink_metadata(name).map_err(|_| ToolError::Path)?;
+        if !named.is_dir() || (named.dev(), named.ino()) != actual {
+            return Err(ToolError::Path);
+        }
+        parent.remove_dir(name).map_err(|_| ToolError::Operation)?;
+        sync_directory(&parent)?;
+        #[cfg(test)]
+        self.seed_checkpoint("removed");
+        Ok(())
+    }
+
+    fn retire(&self) -> Result<bool, ToolError> {
+        let Some(_namespace) = namespace_lock(&self.dir)? else {
+            return Ok(false);
+        };
+        if !self.linked()? {
+            return Ok(true);
+        }
+        for name in [format!("{}.next", self.seed_name()), self.seed_name()] {
+            if open_file(&self.dir, &name, false)?.is_some() {
+                remove(&self.dir, &name)?;
+            }
+        }
+        sync_directory(&self.dir)?;
+        remove(&self.dir, &self.name)?;
+        sync_directory(&self.dir)?;
+        Ok(true)
+    }
+
+    pub(super) async fn cleanup(&self) -> Result<(), ToolError> {
+        self.cleanup_seed()?;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !self.retire()? {
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| ToolError::ProtectionUnavailable)?
+    }
+
+    #[cfg(test)]
+    pub(super) fn seed_checkpoint(&self, stage: &str) {
+        use std::io::Read;
+        if std::env::var("ARANY_TEST_SEED_STAGE").as_deref() != Ok(stage) {
+            return;
+        }
+        let path = std::env::var_os("ARANY_TEST_ADMISSION").expect("private seed fixture");
+        let mut stream =
+            std::os::unix::net::UnixStream::connect(Path::new(&path).join("control")).unwrap();
+        writeln!(stream, "{}", self.id).unwrap();
+        stream.read_exact(&mut [0]).unwrap();
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn remove_seed_contents(
+    dir: &cap_std::fs::Dir,
+    remaining: &mut usize,
+    depth: usize,
+) -> Result<(), ToolError> {
+    if depth > 260 {
+        return Err(ToolError::Limit);
+    }
+    for entry in dir.entries().map_err(|_| ToolError::Path)? {
+        *remaining = remaining.checked_sub(1).ok_or(ToolError::Limit)?;
+        let entry = entry.map_err(|_| ToolError::Path)?;
+        let name = entry.file_name();
+        let name = name.to_str().ok_or(ToolError::Path)?;
+        let file = crate::tools::fs::open_file(dir, name)?;
+        use std::os::unix::fs::MetadataExt as _;
+        let metadata = file.metadata().map_err(|_| ToolError::Path)?;
+        if metadata.uid() != rustix::process::geteuid().as_raw() || metadata.mode() & 0o022 != 0 {
+            return Err(ToolError::Path);
+        }
+        if metadata.is_dir() {
+            let child = cap_std::fs::Dir::from_std_file(file);
+            remove_seed_contents(&child, remaining, depth + 1)?;
+            let named = dir.symlink_metadata(name).map_err(|_| ToolError::Path)?;
+            if !named.is_dir() || (named.dev(), named.ino()) != (metadata.dev(), metadata.ino()) {
+                return Err(ToolError::Path);
+            }
+            dir.remove_dir(name).map_err(|_| ToolError::Operation)?;
+        } else if metadata.is_file() && metadata.nlink() == 1 {
+            let named = dir.symlink_metadata(name).map_err(|_| ToolError::Path)?;
+            if !named.is_file() || (named.dev(), named.ino()) != (metadata.dev(), metadata.ino()) {
+                return Err(ToolError::Path);
+            }
+            dir.remove_file(name).map_err(|_| ToolError::Operation)?;
+        } else {
+            return Err(ToolError::Path);
+        }
+    }
+    sync_directory(dir)
+}
+
+fn reserve(
+    directory: &PrivateDirectory,
+    id: uuid::Uuid,
+    _root_parent: &Path,
+) -> Result<Permit, ToolError> {
     use std::io::Write;
     let name = format!("{id}.unit");
     let mut file = directory
@@ -362,10 +674,14 @@ fn reserve(directory: &PrivateDirectory, id: uuid::Uuid) -> Result<Permit, ToolE
         _lease: try_lock(file.try_clone().map_err(|_| ToolError::Operation)?)?
             .ok_or(ToolError::ProtectionUnavailable)?,
         id,
+        #[cfg(target_os = "linux")]
+        seed_parent: _root_parent.to_owned(),
+        #[cfg(target_os = "linux")]
+        boot: boot()?,
         release_on_drop: true,
     };
     let bytes = serde_json::to_vec(&Reservation {
-        version: 1,
+        version: RESERVATION_VERSION,
         id,
         boot: boot()?,
     })
@@ -388,7 +704,7 @@ fn reserve(directory: &PrivateDirectory, id: uuid::Uuid) -> Result<Permit, ToolE
 fn waiting(dir: &cap_std::fs::Dir, now_ms: u64) -> Result<Vec<u64>, ToolError> {
     let mut waiters = Vec::new();
     for (scanned, entry) in dir.entries().map_err(|_| ToolError::Path)?.enumerate() {
-        if scanned >= MAX_WAITERS + 80 {
+        if scanned >= ADMISSION_SCAN_LIMIT {
             return Err(ToolError::Limit);
         }
         let entry = entry.map_err(|_| ToolError::Path)?;
@@ -509,7 +825,11 @@ pub(super) async fn acquire(
     let directory = open_directory(&path, true).map_err(|_| ToolError::Path)?;
     acquire_in(
         &directory,
-        Path::new("/private/tmp"),
+        Path::new(if cfg!(target_os = "linux") {
+            "/tmp"
+        } else {
+            "/private/tmp"
+        }),
         id,
         expires_at_ms,
         queued,
@@ -521,6 +841,7 @@ pub(super) async fn acquire(
 #[cfg(target_os = "linux")]
 async fn recover_reservations(
     dir: &cap_std::fs::Dir,
+    root_parent: &Path,
     attempts: &mut usize,
 ) -> Result<(), ToolError> {
     for (scanned, entry) in dir.entries().map_err(|_| ToolError::Path)?.enumerate() {
@@ -538,21 +859,48 @@ async fn recover_reservations(
             continue;
         };
         let reservation: Reservation = decode(file.try_clone().map_err(|_| ToolError::Operation)?)?;
-        if reservation.version != 1 || reservation.id != id || reservation.boot.is_nil() {
-            continue;
+        if reservation.version != RESERVATION_VERSION
+            || reservation.id != id
+            || reservation.boot.is_nil()
+        {
+            return Err(ToolError::ProtectionUnavailable);
         }
-        let Some(_dead) = try_lock(file)? else {
+        let Some(lease) = try_lock(file)? else {
             continue;
         };
+        let permit = Permit {
+            dir: dir.try_clone().map_err(|_| ToolError::Operation)?,
+            name: name.to_owned(),
+            _lease: lease,
+            id,
+            seed_parent: root_parent.to_owned(),
+            boot: reservation.boot,
+            release_on_drop: false,
+        };
+        let Some(namespace) = namespace_lock(dir)? else {
+            continue;
+        };
+        if !permit.linked()? {
+            continue;
+        }
+        let seed = permit.seed_record()?;
+        drop(namespace);
         if *attempts == 0 {
             break;
         }
         *attempts -= 1;
-        if reservation.boot != boot()?
-            || super::linux::recover_reservation(id).await.unwrap_or(false)
+        if seed
+            .as_ref()
+            .is_some_and(|seed| matches!(seed.phase, SeedPhase::LaunchRequested { .. }))
         {
-            remove(dir, name)?;
+            if reservation.boot == boot()?
+                && !super::linux::recover_reservation(id).await.unwrap_or(false)
+            {
+                continue;
+            }
+            permit.terminated()?;
         }
+        permit.cleanup().await?;
     }
     Ok(())
 }
@@ -578,17 +926,21 @@ impl RecoveryBudget {
             .min(Duration::from_millis(expiry.saturating_sub(now_ms)));
         let started = tokio::time::Instant::now();
         #[cfg(target_os = "macos")]
+        let capture = super::macos::fixture::Span::begin(super::macos::fixture::Stage::Recovery);
+        #[cfg(target_os = "macos")]
         let recovery = super::macos::recover_abandoned(root_parent, &mut self.attempts);
         #[cfg(target_os = "linux")]
-        let recovery = recover_reservations(&directory.dir, &mut self.attempts);
+        let recovery = recover_reservations(&directory.dir, root_parent, &mut self.attempts);
         #[cfg(target_os = "macos")]
         let _ = directory;
-        #[cfg(target_os = "linux")]
-        let _ = root_parent;
         let result = tokio::time::timeout(deadline, recovery)
             .await
             .map_err(|_| ToolError::ProtectionUnavailable)?;
         self.remaining = self.remaining.saturating_sub(started.elapsed());
+        #[cfg(target_os = "macos")]
+        if result.is_ok() {
+            capture.complete();
+        }
         result
     }
 }
@@ -630,7 +982,7 @@ pub(super) async fn acquire_in(
                 if now() >= expires_at_ms {
                     return Err(ToolError::Limit);
                 }
-                let unit = reserve(directory, id)?;
+                let unit = reserve(directory, id, root_parent)?;
                 drop(ticket);
                 queued(false);
                 return Ok(unit);
@@ -734,6 +1086,505 @@ mod tests {
     use tokio::io::BufReader;
 
     const HELPER: &str = "tools::guard::admission::tests::admission_process";
+
+    #[cfg(target_os = "linux")]
+    fn seed_config() -> crate::tools::config::Config {
+        crate::tools::config::Config {
+            version: 1,
+            workspace_paths: vec!["sample".into()],
+            write: false,
+            commands: Vec::new(),
+            skills: Vec::new(),
+            mcp: Vec::new(),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "helper-only: activated by Linux seed ownership corpus"]
+    fn seed_process() {
+        let path = PathBuf::from(std::env::var_os("ARANY_TEST_ADMISSION").unwrap());
+        let stage = std::env::var("ARANY_TEST_SEED_STAGE").unwrap();
+        let id = uuid::Uuid::parse_str(&std::env::var("ARANY_TEST_SEED_ID").unwrap()).unwrap();
+        rustix::process::umask(rustix::fs::Mode::empty());
+        let reactor = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        reactor.block_on(async {
+            let directory = open_directory(&path.join("guard"), true).unwrap();
+            if std::env::var_os("ARANY_TEST_SEED_RECOVER").is_some() {
+                recover_reservations(&directory.dir, &path, &mut 8)
+                    .await
+                    .unwrap();
+                return;
+            }
+            let workspace = open_directory(&path.join("source"), true).unwrap();
+            workspace
+                .dir
+                .write("sample", b"private seed canary")
+                .unwrap();
+            workspace.dir.create_dir_all("nested/empty").unwrap();
+            let permit = acquire_in(
+                &directory,
+                &path,
+                id,
+                crate::tools::now_ms() + 60_000,
+                |_| {},
+                crate::tools::now_ms,
+            )
+            .await
+            .unwrap();
+            permit.seed_checkpoint("reserved");
+            let mut config = seed_config();
+            config.workspace_paths.push("nested".into());
+            if stage == "partial" {
+                config.commands.push(crate::tools::config::Program {
+                    name: "missing".into(),
+                    executable: "/arany-nonexistent-runtime".into(),
+                    sha256: "0".repeat(64),
+                    interpreter: false,
+                    inputs: Vec::new(),
+                });
+            }
+            let prepared = permit.prepare_seed(&workspace.dir, &config, true);
+            if stage == "partial" {
+                assert!(prepared.is_err());
+                permit.seed_checkpoint("partial");
+            } else {
+                prepared.unwrap();
+            }
+            if stage == "native" {
+                super::super::linux::hold_seed_unit(&permit, &permit.seed_path()).await;
+                return;
+            }
+            permit.launching().unwrap();
+            permit.seed_checkpoint("launching");
+            permit.terminated().unwrap();
+            permit.seed_checkpoint("terminated");
+            permit.cleanup().await.unwrap();
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    struct SeedController {
+        child: Child,
+        native: Option<uuid::Uuid>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for SeedController {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            if let Some(id) = self.native {
+                super::super::linux::stop_seed_fixture(id);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn start_seed_controller(
+        path: &Path,
+        listener: &tokio::net::UnixListener,
+        stage: &str,
+        id: uuid::Uuid,
+        recover: bool,
+    ) -> (SeedController, BufReader<tokio::net::UnixStream>) {
+        let mut child = SeedController {
+            child: Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "tools::guard::admission::tests::seed_process",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .env("ARANY_TEST_ADMISSION", path)
+                .env("ARANY_TEST_SEED_STAGE", stage)
+                .env("ARANY_TEST_SEED_ID", id.to_string())
+                .envs(recover.then_some(("ARANY_TEST_SEED_RECOVER", "1")))
+                .current_dir("/")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+            native: (stage == "native").then_some(id),
+        };
+        let accepted = tokio::time::timeout(Duration::from_secs(10), listener.accept()).await;
+        let (stream, _) = match accepted {
+            Ok(Ok(accepted)) => accepted,
+            _ => {
+                let _ = child.child.kill();
+                let observed =
+                    crate::test_process::capture(&mut child.child, Duration::from_secs(5), 8192);
+                panic!(
+                    "seed stage {stage} never reached: {:?}",
+                    String::from_utf8_lossy(&observed.stderr)
+                );
+            }
+        };
+        let mut reader = BufReader::new(stream);
+        let line = tokio::time::timeout(
+            Duration::from_secs(5),
+            super::super::read_line_capped(&mut reader, 64),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            uuid::Uuid::parse_str(std::str::from_utf8(&line).unwrap().trim()).unwrap(),
+            id
+        );
+        (child, reader)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn seed_ownership_survives_controller_death_at_each_publication_boundary() {
+        seed_death_cases(&[
+            "reserved",
+            "planned",
+            "created",
+            "owned",
+            "partial",
+            "copied",
+            "launching",
+            "terminated",
+            "removed",
+        ])
+        .await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[cfg_attr(not(arany_ci), ignore = "requires native Linux systemd and Bubblewrap")]
+    fn native_seed_recovery_terminates_the_owned_unit_before_releasing_storage() {
+        let _gate = crate::test_process::NATIVE_GATE.lock().unwrap();
+        super::super::linux::check_available().unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(seed_death_cases(&["native"]));
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn seed_death_cases(stages: &[&str]) {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::process::ExitStatusExt;
+        for &stage in stages {
+            let fixture = tempfile::Builder::new()
+                .permissions(std::fs::Permissions::from_mode(0o700))
+                .tempdir()
+                .unwrap();
+            let listener = UnixListener::bind(fixture.path().join("control")).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+            let id = uuid::Uuid::now_v7();
+            let (mut child, _control) =
+                start_seed_controller(fixture.path(), &listener, stage, id, false).await;
+            let directory = open_directory(&fixture.path().join("guard"), false).unwrap();
+            let seed_path = fixture.path().join(format!("arany-tools-{id}"));
+            let native_group = if stage == "native" {
+                Some(super::super::linux::seed_unit_group(id).await)
+            } else {
+                None
+            };
+            let present = !matches!(stage, "reserved" | "planned" | "removed");
+            assert_eq!(seed_path.exists(), present, "stage {stage}");
+            if matches!(
+                stage,
+                "partial" | "copied" | "launching" | "terminated" | "native"
+            ) {
+                assert_eq!(
+                    std::fs::read(seed_path.join("workspace/sample")).unwrap(),
+                    b"private seed canary"
+                );
+            }
+            recover_reservations(&directory.dir, fixture.path(), &mut 8)
+                .await
+                .unwrap();
+            assert_eq!(
+                reserved(&directory.dir, fixture.path()).unwrap(),
+                1,
+                "live stage {stage}"
+            );
+            child.child.kill().unwrap();
+            let observed =
+                crate::test_process::capture(&mut child.child, Duration::from_secs(5), 8192);
+            assert_eq!(observed.status.signal(), Some(9), "stage {stage}");
+            recover_reservations(&directory.dir, fixture.path(), &mut 0)
+                .await
+                .unwrap();
+            assert_eq!(reserved(&directory.dir, fixture.path()).unwrap(), 1);
+            if stage == "copied" {
+                let (mut reaper, _control) =
+                    start_seed_controller(fixture.path(), &listener, "removed", id, true).await;
+                let mut attempts = 8;
+                recover_reservations(&directory.dir, fixture.path(), &mut attempts)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    attempts, 8,
+                    "a competing reaper cannot acquire the live lease"
+                );
+                assert_eq!(reserved(&directory.dir, fixture.path()).unwrap(), 1);
+                assert!(!seed_path.exists());
+                reaper.child.kill().unwrap();
+                let observed =
+                    crate::test_process::capture(&mut reaper.child, Duration::from_secs(5), 8192);
+                assert_eq!(observed.status.signal(), Some(9));
+            }
+            if stage == "launching" {
+                recover_reservations(&directory.dir, fixture.path(), &mut 8)
+                    .await
+                    .unwrap();
+                assert_eq!(reserved(&directory.dir, fixture.path()).unwrap(), 1);
+                assert!(seed_path.exists());
+                let previous_boot = uuid::Uuid::now_v7();
+                let mut reservation: Reservation =
+                    read_record(&directory.dir, &format!("{id}.unit")).unwrap();
+                reservation.boot = previous_boot;
+                replace_record(&directory.dir, &format!("{id}.unit"), &reservation).unwrap();
+                let mut seed: SeedRecord =
+                    read_record(&directory.dir, &format!("{id}.seed")).unwrap();
+                seed.boot = previous_boot;
+                replace_record(&directory.dir, &format!("{id}.seed"), &seed).unwrap();
+            }
+            recover_reservations(&directory.dir, fixture.path(), &mut 8)
+                .await
+                .unwrap();
+            assert!(!seed_path.exists(), "recovered stage {stage}");
+            if let Some(group) = native_group {
+                match group.read_to_string("cgroup.events") {
+                    Ok(events) => assert!(events.lines().any(|line| line == "populated 0")),
+                    Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
+                }
+            }
+            assert_eq!(
+                reserved(&directory.dir, fixture.path()).unwrap(),
+                0,
+                "recovered stage {stage}"
+            );
+            for suffix in ["unit", "seed", "seed.next"] {
+                assert!(
+                    !fixture
+                        .path()
+                        .join("guard")
+                        .join(format!("{id}.{suffix}"))
+                        .exists()
+                );
+            }
+            let next = acquire_in(
+                &directory,
+                fixture.path(),
+                uuid::Uuid::now_v7(),
+                crate::tools::now_ms() + 60_000,
+                |_| {},
+                crate::tools::now_ms,
+            )
+            .await
+            .unwrap();
+            next.cleanup().await.unwrap();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn seed_cleanup_retains_capacity_on_unsafe_files_and_replaced_roots() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let fixture = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let directory = open_directory(&fixture.path().join("guard"), true).unwrap();
+        let source = open_directory(&fixture.path().join("source"), true).unwrap();
+        source.dir.write("sample", b"source").unwrap();
+        let permit = acquire_in(
+            &directory,
+            fixture.path(),
+            uuid::Uuid::now_v7(),
+            crate::tools::now_ms() + 60_000,
+            |_| {},
+            crate::tools::now_ms,
+        )
+        .await
+        .unwrap();
+        let (path, _) = permit
+            .prepare_seed(&source.dir, &seed_config(), true)
+            .unwrap();
+        let outside = fixture.path().join("outside");
+        std::fs::write(&outside, b"unrelated").unwrap();
+        symlink(&outside, path.join("unexpected")).unwrap();
+        assert!(permit.cleanup().await.is_err());
+        assert_eq!(reserved(&directory.dir, fixture.path()).unwrap(), 1);
+        assert_eq!(std::fs::read(&outside).unwrap(), b"unrelated");
+        std::fs::remove_file(path.join("unexpected")).unwrap();
+        let moved = fixture.path().join("retained");
+        std::fs::rename(&path, &moved).unwrap();
+        let replacement = open_directory(&path, true).unwrap();
+        replacement.dir.write("outside", b"replacement").unwrap();
+        assert!(permit.cleanup().await.is_err());
+        assert_eq!(replacement.dir.read("outside").unwrap(), b"replacement");
+        assert_eq!(reserved(&directory.dir, fixture.path()).unwrap(), 1);
+        std::fs::remove_file(path.join("outside")).unwrap();
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::rename(&moved, &path).unwrap();
+        let stale = checked_file(&directory.dir, &permit.name, false).unwrap();
+        permit.cleanup().await.unwrap();
+        assert!(!path.exists());
+        assert_eq!(reserved(&directory.dir, fixture.path()).unwrap(), 0);
+        assert!(!permit.linked().unwrap());
+        assert!(permit.cleanup().await.is_err());
+        let id = permit.id;
+        drop(permit);
+        let stale = Permit {
+            dir: directory.dir.try_clone().unwrap(),
+            name: format!("{id}.unit"),
+            _lease: try_lock(stale).unwrap().unwrap(),
+            id,
+            seed_parent: fixture.path().to_owned(),
+            boot: boot().unwrap(),
+            release_on_drop: false,
+        };
+        let replacement = open_directory(&path, true).unwrap();
+        replacement
+            .dir
+            .write("unrelated", b"keep after retirement")
+            .unwrap();
+        let _namespace = namespace_lock(&directory.dir).unwrap().unwrap();
+        assert!(
+            !stale.linked().unwrap(),
+            "an opened-before-retirement lease is stale"
+        );
+        assert!(stale.cleanup_seed().is_err());
+        assert_eq!(
+            replacement.dir.read("unrelated").unwrap(),
+            b"keep after retirement"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn seed_metadata_preserves_maximum_admission_capacity() {
+        let fixture = tempfile::tempdir().unwrap();
+        let directory = open_directory(&fixture.path().join("guard"), true).unwrap();
+        replace_record(
+            &directory.dir,
+            "limits.json",
+            &Limits {
+                version: 1,
+                units: 64,
+                queued: 1024,
+            },
+        )
+        .unwrap();
+        let mut permits = Vec::new();
+        for _ in 0..limits(&directory.dir).unwrap().units {
+            let mut permit = reserve(&directory, uuid::Uuid::now_v7(), fixture.path()).unwrap();
+            permit.release_on_drop = false;
+            for suffix in ["seed", "seed.next"] {
+                checked_file(&directory.dir, &format!("{}.{suffix}", permit.id), true).unwrap();
+            }
+            permits.push(permit);
+        }
+        let tickets: Vec<_> = (0..1024)
+            .map(|_| register(&directory, u64::MAX).unwrap())
+            .collect();
+        assert_eq!(reserved(&directory.dir, fixture.path()).unwrap(), 64);
+        assert_eq!(waiting(&directory.dir, 0).unwrap().len(), tickets.len());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn historical_seed_maintenance_removes_only_selected_inactive_objects() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let parent = open_directory(fixture.path(), false).unwrap();
+        let directory = open_directory(&fixture.path().join("guard"), true).unwrap();
+        let settings = limits(&directory.dir).unwrap();
+        let id = uuid::Uuid::now_v7();
+        let lease_name = format!("{id}.unit");
+        replace_record(
+            &directory.dir,
+            &lease_name,
+            &Reservation {
+                version: 1,
+                id,
+                boot: boot().unwrap(),
+            },
+        )
+        .unwrap();
+        let lease = checked_file(&directory.dir, &lease_name, false).unwrap();
+        let live = try_lock(lease).unwrap().unwrap();
+        assert!(
+            try_lock(checked_file(&directory.dir, &lease_name, false).unwrap())
+                .unwrap()
+                .is_none()
+        );
+        assert!(reserved(&directory.dir, fixture.path()).is_err());
+
+        let name = format!("arany-tools-{}", uuid::Uuid::now_v7());
+        let selected = open_directory(&fixture.path().join(&name), true).unwrap();
+        selected.dir.create_dir("workspace").unwrap();
+        selected
+            .dir
+            .write("workspace/private", b"synthetic historical payload")
+            .unwrap();
+        let identity = crate::tools::fs::identity(&selected.dir).unwrap();
+        parent.dir.write("unrelated", b"preserve").unwrap();
+
+        parent.dir.rename(&name, &parent.dir, "held").unwrap();
+        let replacement = open_directory(&fixture.path().join(&name), true).unwrap();
+        replacement.dir.write("unrelated", b"replacement").unwrap();
+        assert_ne!(
+            crate::tools::fs::identity(&replacement.dir).unwrap(),
+            identity
+        );
+        assert_eq!(replacement.dir.read("unrelated").unwrap(), b"replacement");
+        parent
+            .dir
+            .rename(&name, &parent.dir, "replacement")
+            .unwrap();
+        parent.dir.rename("held", &parent.dir, &name).unwrap();
+
+        drop(live);
+        let _dead = try_lock(checked_file(&directory.dir, &lease_name, false).unwrap())
+            .unwrap()
+            .unwrap();
+        let _namespace = namespace_lock(&directory.dir).unwrap().unwrap();
+        let checked = cap_std::fs::Dir::from_std_file(
+            crate::tools::fs::open_file(&parent.dir, &name).unwrap(),
+        );
+        assert_eq!(crate::tools::fs::identity(&checked).unwrap(), identity);
+        let mut remaining = SEED_ENTRY_LIMIT;
+        remove_seed_contents(&checked, &mut remaining, 0).unwrap();
+        let named = parent.dir.symlink_metadata(&name).unwrap();
+        assert_eq!((named.dev(), named.ino()), identity);
+        parent.dir.remove_dir(&name).unwrap();
+        sync_directory(&parent.dir).unwrap();
+        remove(&directory.dir, &lease_name).unwrap();
+        sync_directory(&directory.dir).unwrap();
+
+        assert!(!fixture.path().join(&name).exists());
+        assert!(
+            open_file(&directory.dir, &lease_name, false)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(parent.dir.read("unrelated").unwrap(), b"preserve");
+        assert_eq!(replacement.dir.read("unrelated").unwrap(), b"replacement");
+        let retained = limits(&directory.dir).unwrap();
+        assert_eq!(
+            (retained.units, retained.queued),
+            (settings.units, settings.queued)
+        );
+    }
 
     #[test]
     #[ignore = "helper-only: activated by the shared admission owner"]

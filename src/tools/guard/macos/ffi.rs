@@ -286,8 +286,8 @@ pub(super) fn detach_bootstrap_ports() -> bool {
     }
 }
 
-/// Returns true only for signed code whose signature carries no entitlements.
-pub(super) fn unentitled_code(path: &Path) -> Result<bool, ToolError> {
+/// Returns whether code carries no entitlements, or `None` when Security cannot determine it.
+pub(super) fn unentitled_code(path: &Path) -> Result<Option<bool>, ToolError> {
     use core_foundation::base::{CFType, TCFType};
     use core_foundation::dictionary::CFDictionary;
     use core_foundation::string::CFString;
@@ -296,7 +296,7 @@ pub(super) fn unentitled_code(path: &Path) -> Result<bool, ToolError> {
 
     let url = CFURL::from_path(path, false).ok_or(ToolError::Path)?;
     let Ok(code) = SecStaticCode::from_path(&url, Flags::NONE) else {
-        return Ok(false);
+        return Ok(None);
     };
     let mut information = std::ptr::null();
     // Only immutable OS-owned code is inspected; successful Copy transfers one retained dictionary.
@@ -304,7 +304,7 @@ pub(super) fn unentitled_code(path: &Path) -> Result<bool, ToolError> {
         SecCodeCopySigningInformation(code.as_CFTypeRef(), SIGNING_ENTITLEMENTS, &mut information)
     };
     if status != 0 || information.is_null() {
-        return Ok(false);
+        return Ok(None);
     }
     // The successful SDK Copy owns this dictionary; exported constant keys use the Get rule.
     let (information, dictionary_key, data_key) = unsafe {
@@ -315,11 +315,13 @@ pub(super) fn unentitled_code(path: &Path) -> Result<bool, ToolError> {
         )
     };
     if let Some(value) = information.find(&dictionary_key) {
-        return Ok(value
-            .downcast::<CFDictionary>()
-            .is_some_and(|value| value.is_empty()));
+        return Ok(Some(
+            value
+                .downcast::<CFDictionary>()
+                .is_some_and(|value| value.is_empty()),
+        ));
     }
-    Ok(!information.contains_key(&data_key))
+    Ok(Some(!information.contains_key(&data_key)))
 }
 
 pub(super) fn task_info(pid: u32) -> Result<libc::proc_taskinfo, ToolError> {

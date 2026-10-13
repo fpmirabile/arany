@@ -33,25 +33,30 @@ limits and compatibility.
   retain C string lifetimes through each call and free native error allocations
   once. Never parse or print arbitrary native diagnostics. The syscall-number
   filter and explicit Darwin syscall numbers support only reviewed 64-bit ABIs.
+- Keep Linux runtime aliases distinct: `/lib` targets `/usr/lib`, while `/lib64`
+  targets `/usr/lib64`. Mapping both to `/usr/lib` hides the x86-64 ELF loader
+  even when the ARM64 native gates pass. Native fixtures must preserve the same
+  loader layout as the production mount profile.
 - Grant ancestor metadata only, without directory-data access; unrelated host
   metadata and control-root listings must remain denied. The compiled policy
   fingerprint covers profile rules, admission algorithms and enforced constants.
-  For command/MCP grants, Tool admission reuses one in-memory, process-wide
-  signature scan of the bounded system executable catalogue only while both
-  directories and every pinned entry keep their `lstat` stamps, and rescans
-  otherwise, so added, removed, renamed or replaced admitted programs are
-  rescanned rather than silently retained. An excluded entry modified in place
-  stays excluded, failing closed, until a directory stamp changes or the process
-  restarts. Never skip that per-Run stamp check. Concurrent admissions
-  wait for the one in-progress scan, which is bounded by the catalogue entry cap.
-  Process intents bind its contents and file metadata stamps into the
-  enforcement digest. Pass that typed catalogue only through the trusted
+  For command/MCP grants, Tool admission checks one bounded system executable
+  catalogue per Run; process intents bind its contents and file metadata stamps
+  into the enforcement digest. Pass that typed catalogue only through the trusted
   controller/supervisor Task channel, never Workspace or payload input, and never
   persist it as an authority cache. Workers revalidate every entry through
   no-follow handles: root ownership, non-writable non-set-ID permissions,
   device/inode, size and modification/change timestamps. Reject drift before
-  Ready; do not repeat the signature scan or refresh a stale catalogue within an
-  admitted Run. Keep the catalogue inside the existing Task byte/entry bounds;
+  Ready. Pin the checked `/bin` and `/usr/bin` directory handles once per worker
+  revalidation and open each file relative to its matching handle; never replace
+  fresh file checks with cached metadata or reopen every ancestor for each entry.
+  Encode the catalogue as one allow rule with an explicit union of its exact
+  literal paths; retain all independent denies and the profile byte cap.
+  Do not repeat the signature scan or refresh a stale catalogue within an
+  admitted Run. Across Runs, a process may reuse a determined in-memory
+  signature verdict only for the same path and an identical fresh metadata
+  stamp; any drift reinspects the code. An undetermined Security result excludes
+  the program for that admission only and is never reused. Never persist verdicts. Keep the catalogue inside the existing Task byte/entry bounds;
   overflow rejects without dispatch. File/Skill intents retain the compiled
   digest and carry no catalogue. Configured pins and selected resources remain
   bound by the normalized intent and configuration.

@@ -7,7 +7,7 @@ use arany::{
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -28,6 +28,101 @@ struct Journey {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
     calls: Vec<ToolCall>,
     linked_file: Option<(std::path::PathBuf, std::path::PathBuf)>,
+}
+
+const TRACE_STAGES: &[&str] = &[
+    "tool_admission",
+    "catalogue",
+    "admission",
+    "recovery",
+    "connect",
+    "controller_ready",
+    "controller_receipt",
+    "controller_coalition",
+    "controller_bootout",
+    "controller_storage",
+    "supervisor_storage",
+    "worker_ready",
+    "worker_go",
+    "worker_receipt",
+    "worker_reap",
+    "supervisor_coalition",
+    "supervisor_detach",
+];
+
+fn trace_snapshot(root: &Path) -> serde_json::Value {
+    use std::io::Read;
+    let mut snapshot = serde_json::Map::new();
+    for stage in std::iter::once("case").chain(TRACE_STAGES.iter().copied()) {
+        let record = (|| {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+                .open(
+                    root.join("account/guard-trace")
+                        .join(format!("{stage}.json")),
+                )
+                .ok()?;
+            let metadata = file.metadata().ok()?;
+            if !metadata.is_file()
+                || metadata.nlink() != 1
+                || metadata.uid() != rustix::process::geteuid().as_raw()
+                || metadata.mode() & 0o7777 != 0o600
+                || metadata.len() > 256
+            {
+                return None;
+            }
+            let mut bytes = Vec::new();
+            file.take(257).read_to_end(&mut bytes).ok()?;
+            if bytes.len() > 256 {
+                return None;
+            }
+            let record: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+            if stage == "case" {
+                let case = record["case"].as_str()?;
+                if !matches!(
+                    case,
+                    "journey"
+                        | "refusal"
+                        | "denied"
+                        | "cancelled"
+                        | "overflow"
+                        | "mcp-version"
+                        | "receipt-loss"
+                ) {
+                    return None;
+                }
+                return Some(json!({"case":case}));
+            }
+            let state = record["state"].as_str()?;
+            if record["stage"] != stage || !matches!(state, "active" | "complete" | "interrupted") {
+                return None;
+            }
+            let elapsed = record["elapsed_us"].as_u64();
+            if (state == "active") != elapsed.is_none() {
+                return None;
+            }
+            Some(json!({"state":state,"elapsed_us":elapsed}))
+        })();
+        snapshot.insert(stage.into(), record.unwrap_or(json!("unknown")));
+    }
+    json!({"stages":snapshot})
+}
+
+fn trace_case(root: &Path, case: &str) {
+    let trace = root.join("account/guard-trace");
+    for stage in TRACE_STAGES {
+        let path = trace.join(format!("{stage}.json"));
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("fixture trace reset: {error}"),
+        }
+    }
+    private_file(
+        &trace.join("case.json"),
+        &serde_json::to_vec(&json!({"case":case})).unwrap(),
+    );
 }
 
 impl Provider for Journey {
@@ -92,7 +187,14 @@ fn guarded_native_files_and_skills_survive_closed_replay() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().unwrap();
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
+    for directory in ["account", "account/guard-trace"] {
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(temp.path().join(directory))
+            .unwrap();
+    }
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
         .args([
             "--exact",
             "tools::native_file_journey_helper",
@@ -101,16 +203,29 @@ fn guarded_native_files_and_skills_survive_closed_replay() {
         ])
         .env_clear()
         .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account"))
+        .env(
+            "ARANY_TEST_GUARD_TRACE",
+            temp.path().join("account/guard-trace"),
+        )
         .env("ARANY_TEST_FILE_JOURNEY_ROOT", temp.path())
-        .current_dir(temp.path())
-        .bounded_output_for(Duration::from_secs(180), 32 * 1024)
-        .unwrap();
+        .current_dir(temp.path());
+    let output = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        command.bounded_output_for(Duration::from_secs(180), 32 * 1024)
+    }))
+    .unwrap_or_else(|_| {
+        panic!(
+            "native journey observer failed: {}",
+            trace_snapshot(temp.path())
+        )
+    })
+    .unwrap();
     assert!(
         output.status.success(),
-        "native file journey: {:?}; stdout={:?}; stderr={:?}",
+        "native file journey: {:?}; stdout={:?}; stderr={:?}; trace={}",
         output.status,
         String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&output.stderr),
+        trace_snapshot(temp.path())
     );
     crate::process::assert_single_test_completed(&output.stdout, "native file journey");
     assert!(
@@ -125,6 +240,7 @@ fn guarded_native_files_and_skills_survive_closed_replay() {
 async fn native_file_journey_helper() {
     let root = std::env::var_os("ARANY_TEST_FILE_JOURNEY_ROOT").expect("private fixture root");
     let root = Path::new(&root);
+    trace_case(root, "journey");
     assert_eq!(StateRoot::account_path().unwrap(), root.join("account"));
     let workspace = root.join("workspace");
     std::fs::create_dir_all(workspace.join("src")).unwrap();
@@ -205,7 +321,7 @@ async fn native_file_journey_helper() {
         },
         ToolCall::Command {
             program: "shell".into(),
-            args: vec!["-c".into(), "set -eu; test \"$(/bin/cat src/main.txt)\" = after; test \"$(/bin/cat src/generated/note.txt)\" = replaced; i=0; while test \"$i\" -lt 128; do /usr/bin/true; i=$((i + 1)); done; printf discarded > src/command-output.txt; printf native-command-success".into()],
+            args: vec!["-c".into(), "set -eu; if /bin/cat /etc/passwd >/dev/null 2>&1; then exit 90; fi; if /bin/cat /usr/bin/sudo >/dev/null 2>&1; then exit 91; fi; test \"$(/bin/cat src/main.txt)\" = after; test \"$(/bin/cat src/generated/note.txt)\" = replaced; i=0; while test \"$i\" -lt 128; do /usr/bin/true; i=$((i + 1)); done; printf discarded > src/command-output.txt; printf native-command-success".into()],
             cwd: "".into(),
         },
         ToolCall::McpList {
@@ -365,6 +481,7 @@ async fn native_file_journey_helper() {
     }
     store.close().await.unwrap();
     std::fs::remove_file(workspace.join("src/linked.txt")).unwrap();
+    trace_case(root, "refusal");
     guard_refuses_before_go(root, &workspace, &outcome.run.tools[0].intent);
     stopped_effects_survive_closed_replay(root, &workspace, &config).await;
 }
@@ -412,6 +529,7 @@ int main(void) {
         "mcp-version",
         "receipt-loss",
     ] {
+        trace_case(root, case);
         let state_path = root.join(format!("state-{case}"));
         let state = StateRoot::admit(&state_path).unwrap();
         let mut config = config.clone();
@@ -488,6 +606,7 @@ int main(void) {
             }
         };
         let mut progress = arany::RunProgress::new();
+        let started = std::time::Instant::now();
         let result = tokio::time::timeout(Duration::from_secs(30), async {
             tokio::join!(
                 engine.run_with_progress(
@@ -519,18 +638,48 @@ int main(void) {
                         .ok()
                         .flatten();
                 panic!(
-                    "bounded stopped native command {case}: progress={:?}, queued={}",
+                    "bounded stopped native command {case}: elapsed_ms={}, progress={:?}, queued={}, trace={}",
+                    started.elapsed().as_millis(),
                     update.map(|update| (
                         update.sequence,
                         update.run.status,
                         update.run.tools.len()
                     )),
-                    waiting.is_some()
+                    waiting.is_some(),
+                    trace_snapshot(root)
                 );
             }
         };
         let outcome = outcome.unwrap();
         engine.close().await.unwrap();
+        if cfg!(debug_assertions) {
+            let trace = trace_snapshot(root);
+            for stage in ["tool_admission", "catalogue"] {
+                assert_eq!(
+                    trace["stages"][stage]["state"], "complete",
+                    "{case}: {trace}"
+                );
+            }
+            if matches!(case, "overflow" | "mcp-version" | "receipt-loss") {
+                for stage in [
+                    "admission",
+                    "connect",
+                    "supervisor_storage",
+                    "worker_ready",
+                    "worker_go",
+                    "supervisor_coalition",
+                    "supervisor_detach",
+                    "controller_coalition",
+                    "controller_bootout",
+                    "controller_storage",
+                ] {
+                    assert_eq!(
+                        trace["stages"][stage]["state"], "complete",
+                        "{case}: {trace}"
+                    );
+                }
+            }
+        }
         assert_eq!(
             requests.lock().unwrap().len(),
             if attested { 2 } else { 1 },

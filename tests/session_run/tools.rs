@@ -14,6 +14,14 @@ use std::time::Duration;
 #[path = "tools/native_exec.rs"]
 mod native_exec;
 
+fn assert_seed_retired(id: uuid::Uuid) {
+    assert!(!Path::new("/tmp").join(format!("arany-tools-{id}")).exists());
+    let guard = StateRoot::account_path().unwrap().join("guard");
+    for suffix in ["unit", "seed", "seed.next"] {
+        assert!(!guard.join(format!("{id}.{suffix}")).exists());
+    }
+}
+
 struct Journey {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
     compactions: Arc<Mutex<Vec<CompactionRequest>>>,
@@ -266,6 +274,9 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
         }
     }
     let observations = &requests[12].tools.as_ref().unwrap().observations;
+    for observation in observations {
+        assert_seed_retired(observation.intent.id);
+    }
     assert!(
         observations[..11]
             .iter()
@@ -1723,6 +1734,7 @@ async fn cancellation_owns_the_actual_descendant_unit_and_never_retries_it() {
         } else { assert!(!group.exists()); }
         assert_eq!(outcome.run.status, RunStatus::Cancelled);
         assert_eq!(outcome.run.tools.len(), 1);
+        assert_seed_retired(intent.id);
         assert!(outcome.run.assistant_message.is_none());
         outcome
     }).await.expect("complete cancellation parent deadline");

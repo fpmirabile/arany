@@ -7,14 +7,6 @@ use serde_json::json;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
-#[cfg(not(target_os = "macos"))]
-use std::path::PathBuf;
-
-#[cfg(not(target_os = "macos"))]
-pub(super) struct Snapshot {
-    pub path: PathBuf,
-    pub dir: Dir,
-}
 
 struct Entry {
     path: String,
@@ -214,8 +206,14 @@ fn create_parents(root: &Dir, path: &str) -> Result<(Dir, String), ToolError> {
     let mut parts: Vec<_> = path.split('/').collect();
     let leaf = parts.pop().ok_or(ToolError::Path)?.to_owned();
     let mut dir = root.try_clone().map_err(|_| ToolError::Operation)?;
+    let mut builder = DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use cap_std::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
     for part in parts {
-        if let Err(error) = dir.create_dir(part)
+        if let Err(error) = dir.create_dir_with(part, &builder)
             && error.kind() != std::io::ErrorKind::AlreadyExists
         {
             return Err(ToolError::Operation);
@@ -248,7 +246,13 @@ fn put_entry(root: &Dir, entry: Entry) -> Result<(), ToolError> {
         put(root, &entry.path, &content, entry.executable)
     } else {
         let (parent, leaf) = create_parents(root, &entry.path)?;
-        match parent.create_dir(&leaf) {
+        let mut builder = DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use cap_std::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        match parent.create_dir_with(&leaf, &builder) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => parent
                 .open_dir_nofollow(&leaf)
@@ -256,46 +260,6 @@ fn put_entry(root: &Dir, entry: Entry) -> Result<(), ToolError> {
                 .map_err(|_| ToolError::Path),
             Err(_) => Err(ToolError::Operation),
         }
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-impl Snapshot {
-    pub(super) fn create(
-        workspace: &Dir,
-        config: &Config,
-        include_workspace: bool,
-    ) -> Result<Self, ToolError> {
-        let tmp = open_directory(snapshot_root())?;
-        let name = format!("arany-tools-{}", uuid::Uuid::now_v7());
-        let mut builder = DirBuilder::new();
-        #[cfg(unix)]
-        {
-            use cap_std::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        tmp.create_dir_with(&name, &builder)
-            .map_err(|_| ToolError::Operation)?;
-        let dir = tmp.open_dir_nofollow(&name).map_err(|_| ToolError::Path)?;
-        let snapshot = Self {
-            path: snapshot_root().join(&name),
-            dir,
-        };
-        snapshot
-            .dir
-            .create_dir("workspace")
-            .map_err(|_| ToolError::Operation)?;
-        let target = snapshot
-            .dir
-            .open_dir_nofollow("workspace")
-            .map_err(|_| ToolError::Path)?;
-        snapshot_into(
-            workspace,
-            config,
-            include_workspace.then_some(&target),
-            &snapshot.dir,
-        )?;
-        Ok(snapshot)
     }
 }
 
@@ -370,20 +334,6 @@ pub(super) fn snapshot_into(
         }
     }
     Ok(())
-}
-
-#[cfg(not(target_os = "macos"))]
-impl Drop for Snapshot {
-    fn drop(&mut self) {
-        if let (Ok(tmp), Some(name)) = (open_directory(snapshot_root()), self.path.file_name()) {
-            let _ = tmp.remove_dir_all(name);
-        }
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn snapshot_root() -> &'static Path {
-    Path::new("/tmp")
 }
 
 #[derive(Default)]

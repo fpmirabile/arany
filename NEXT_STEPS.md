@@ -7,26 +7,7 @@ in [domain specs](./docs/specs/README.md); setup instructions live in
 item when its completion condition is met; completed work belongs in Git/CI
 history. Implementation status and verified support are separate claims.
 
-## Open defects
-
-- **Native Engine stopped-command timeout investigation.** The macOS corpus
-  timed out once at its unchanged 30-second case deadline; a diagnostic-enabled
-  repeat passed without raising it. The first failure lacked case/stage
-  evidence, so its cause is unestablished. On recurrence capture the reported
-  case, committed progress and queued hint together with native
-  preparation/recovery/cleanup stages before attributing the timeout to
-  admission, cancellation or host load.
-
 ## Next functional priority
-
-- **Linux host seed ownership after controller death.** Existing
-  `/tmp/arany-tools-*` snapshots contain selected Workspace/runtime data and use
-  Drop-only removal. `SIGKILL` can retain those private files indefinitely after
-  the systemd/cgroup unit ends; the shared unit quota does not bound cumulative
-  host seed storage. Bind new snapshots' checked path/device/inode to their
-  reservation before copying, retain capacity until validated deletion, and
-  prove recovery after actual native termination. Existing unrecorded roots
-  must remain untouched; a filename-prefix sweep cannot authorize deletion.
 
 - **Deferred Anthropic consumer subscriptions.** Native Claude-plan access is
   missing and user-deferred behind the [route/authorization gate](./docs/research/subscription-provider-routes-2026-10.md#decision-boundary-for-beta-1).
