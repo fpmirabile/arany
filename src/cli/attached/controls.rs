@@ -94,12 +94,26 @@ async fn save_settings(admission: &Admission, preferences: Preferences) -> Resul
     .map_err(str::to_owned)
 }
 
-fn settings_rows(preferences: Preferences) -> [String; 2] {
-    let title = |label: &str| label[..1].to_ascii_uppercase() + &label[1..];
-    [
-        format!("Slash menu   < {} >", title(preferences.completion.label())),
-        format!("Chat view    < {} >", title(preferences.view.label())),
-    ]
+fn settings_rows(preferences: Preferences, linear: bool) -> [String; 2] {
+    let completion = match preferences.completion {
+        CompletionLayout::Tabs => "Tabs",
+        CompletionLayout::Combined => "Combined",
+    };
+    let view = match preferences.view {
+        TerminalMode::Fullscreen => "Fullscreen",
+        TerminalMode::Classic => "Classic",
+    };
+    if linear {
+        [
+            format!("Slash menu: {completion}"),
+            format!("Chat view: {view}"),
+        ]
+    } else {
+        [
+            format!("Slash menu   < {completion} >"),
+            format!("Chat view    < {view} >"),
+        ]
+    }
 }
 
 async fn choose_settings(
@@ -111,12 +125,12 @@ async fn choose_settings(
     let mut answer = Composer::default();
     let mut invalid = false;
     loop {
-        let rows = settings_rows(chosen);
+        let rows = settings_rows(chosen, linear);
         if linear {
             terminal.draw_setup_choices(
                 0,
                 "Settings",
-                &format!("{} · {}; empty Enter saves, q closes", rows[0], rows[1]),
+                &format!("{}; {}; empty Enter saves, q closes", rows[0], rows[1]),
                 &[
                     (1, "tabs"),
                     (2, "combined"),
@@ -201,7 +215,8 @@ pub(super) async fn settings(
                 let view_changed = chosen.view != *saved_view;
                 *saved_view = chosen.view;
                 composer.set_completion_layout(chosen.completion);
-                if !linear && view_changed && chosen.view != terminal.mode() {
+                let pinned = terminal.classic_pinned() && chosen.view != terminal.mode();
+                if !linear && !pinned && view_changed && chosen.view != terminal.mode() {
                     terminal
                         .set_mode(chosen.view, composer.text().len())
                         .map_err(|error| error.to_string())?;
@@ -210,7 +225,13 @@ pub(super) async fn settings(
                     "Settings: slash menu {} · chat view {}{} · saved",
                     chosen.completion.label(),
                     chosen.view.label(),
-                    if linear { " (visual sessions)" } else { "" },
+                    if linear {
+                        " (visual sessions)"
+                    } else if pinned {
+                        " (sessions without --classic)"
+                    } else {
+                        ""
+                    },
                 )
             }
             Err(error) => format!("Error: {error}; current settings kept"),

@@ -616,7 +616,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         std::fs::Permissions::from_mode(0o600),
     )
     .unwrap();
-    let shell = "stty rows 24 cols 40; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider anthropic --tools --no-color; first_code=$?; printf 'SETTINGS_RESTART\n'; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider openai --tools --no-color; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; test \"$first_code\" -eq 0 || exit \"$first_code\"; exit \"$exit_code\"";
+    let shell = "stty rows 24 cols 40; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider anthropic --tools --no-color; first_code=$?; printf 'SETTINGS_RESTART\n'; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider openai --tools --no-color; second_code=$?; printf 'VIEW_RESTART\n'; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider openai --tools --no-color; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; test \"$first_code\" -eq 0 || exit \"$first_code\"; test \"$second_code\" -eq 0 || exit \"$second_code\"; exit \"$exit_code\"";
     let mut command =
         crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
     command
@@ -1236,7 +1236,135 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
             .unwrap(),
         br#"{"version":2,"preferences":{"completion":"tabs","view":"fullscreen"}}"#
     );
-    input.write_all(b"/exit\r").expect("exit fresh process");
+    let record = |view: &str| {
+        format!(r#"{{"version":2,"preferences":{{"completion":"tabs","view":"{view}"}}}}"#)
+    };
+    for (view, pinned) in [("classic", false), ("fullscreen", true), ("classic", false)] {
+        let chosen_at = transcript.len();
+        input
+            .write_all(b"/settings\r\x1b[B\x1b[C\r")
+            .expect("chat view selected with Down and Right");
+        wait_for_after(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            chosen_at,
+            b"saved",
+        );
+        wait_for_caret(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            chosen_at,
+            3,
+        );
+        assert_eq!(
+            StateRoot::open_existing(&state)
+                .unwrap()
+                .read_ui_preferences_record()
+                .unwrap()
+                .unwrap(),
+            record(view).as_bytes()
+        );
+        let frames = &transcript[chosen_at..];
+        assert!(
+            !frames.windows(8).any(|part| part == b"\x1b[?1049h"),
+            "--classic keeps this process classic: {}",
+            tail(frames)
+        );
+        assert_eq!(
+            frames.windows(7).any(|part| part == b"without"),
+            pinned,
+            "pinned notice: {}",
+            tail(frames)
+        );
+    }
+    input
+        .write_all(b"/exit\r")
+        .expect("exit pinned classic process");
+    let view_at = transcript.len();
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        view_at,
+        b"VIEW_RESTART",
+    );
+    let view_at = view_at
+        + transcript[view_at..]
+            .windows(b"VIEW_RESTART".len())
+            .position(|part| part == b"VIEW_RESTART")
+            .unwrap()
+        + b"VIEW_RESTART".len();
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        view_at,
+        b"Ask Arany",
+    );
+    wait_for_caret(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        view_at,
+        3,
+    );
+    assert!(
+        !transcript[view_at..]
+            .windows(8)
+            .any(|part| part == b"\x1b[?1049h"),
+        "saved classic starts on the primary screen"
+    );
+    let _viewed_product = ProductGuard::new(product_child_of(shell_pid), state.clone());
+    let switched_at = transcript.len();
+    input
+        .write_all(b"/settings\r\x1b[B\x1b[C\r")
+        .expect("saved fullscreen switches the live view");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        switched_at,
+        b"\x1b[?1049h",
+    );
+    wait_for_caret(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        switched_at,
+        3,
+    );
+    assert_eq!(
+        StateRoot::open_existing(&state)
+            .unwrap()
+            .read_ui_preferences_record()
+            .unwrap()
+            .unwrap(),
+        record("fullscreen").as_bytes()
+    );
+    let draft_at = transcript.len();
+    input
+        .write_all(b"abc")
+        .expect("draft after the live switch");
+    wait_for_caret(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        draft_at,
+        6,
+    );
+    input
+        .write_all(b"\x7f\x7f\x7f/exit\r")
+        .expect("exit fullscreen process");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         pump(&mut output, &mut input, &mut transcript, &mut answered);

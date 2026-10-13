@@ -39,8 +39,10 @@ limits and compatibility.
   For command/MCP grants, Tool admission reuses one in-memory, process-wide
   signature scan of the bounded system executable catalogue only while both
   directories and every pinned entry keep their `lstat` stamps, and rescans
-  otherwise, so added, removed or replaced programs are rescanned rather than
-  silently retained. Never skip that per-Run stamp check. Concurrent admissions
+  otherwise, so added, removed, renamed or replaced admitted programs are
+  rescanned rather than silently retained. An excluded entry modified in place
+  stays excluded, failing closed, until a directory stamp changes or the process
+  restarts. Never skip that per-Run stamp check. Concurrent admissions
   wait for the one in-progress scan, which is bounded by the catalogue entry cap.
   Process intents bind its contents and file metadata stamps into the
   enforcement digest. Pass that typed catalogue only through the trusted

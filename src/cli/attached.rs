@@ -257,6 +257,9 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         },
     )
     .map_err(|error| error.to_string())?;
+    if admission.classic {
+        terminal.pin_classic();
+    }
     if admission.no_color {
         terminal.disable_color();
     }

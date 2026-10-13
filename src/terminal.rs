@@ -346,6 +346,7 @@ pub struct AttachedTerminal {
     terminal: Option<Terminal<TerminalBackend>>,
     parked_terminal: Option<Terminal<TerminalBackend>>,
     mode: TerminalMode,
+    classic_pinned: bool,
     alternate: Option<AlternateScreen>,
     transcript_open: bool,
     native: NativeTranscript,
@@ -562,6 +563,7 @@ impl AttachedTerminal {
             waiting_tool: None,
             parked_terminal: None,
             mode,
+            classic_pinned: false,
             alternate,
             transcript_open: false,
             native: NativeTranscript::default(),
@@ -672,6 +674,16 @@ impl AttachedTerminal {
 
     pub fn mode(&self) -> TerminalMode {
         self.mode
+    }
+
+    /// Keeps Classic for this process; saved chat-view changes apply to later sessions.
+    pub fn pin_classic(&mut self) {
+        self.classic_pinned = true;
+    }
+
+    #[must_use]
+    pub fn classic_pinned(&self) -> bool {
+        self.classic_pinned
     }
 
     pub fn user_run_recorded(&self, id: crate::session::RunId) -> bool {
@@ -1177,7 +1189,14 @@ impl AttachedTerminal {
         let history_status =
             if self.mode == TerminalMode::Classic && !self.transcript_open && !view.runs.is_empty()
             {
-                Some("Classic · Ctrl+T details · /settings".to_owned())
+                Some(
+                    if self.classic_pinned {
+                        "Classic (--classic) · Ctrl+T details"
+                    } else {
+                        "Classic · Ctrl+T details · /settings"
+                    }
+                    .to_owned(),
+                )
             } else {
                 self.history_mut().status()
             };

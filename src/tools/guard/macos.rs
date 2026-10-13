@@ -458,10 +458,13 @@ fn install_command(task: &Task) -> Result<PathBuf, ToolError> {
 #[serde(deny_unknown_fields)]
 pub(crate) struct SystemPrograms {
     // Compact stamps keep the catalogue inside the shared Task byte cap.
-    programs: Vec<(String, [u64; 7])>,
+    programs: Vec<(String, FileStamp)>,
 }
 
-fn program_stamp(metadata: &std::fs::Metadata) -> [u64; 7] {
+/// Device, inode, size and modification/change times from `lstat`.
+type FileStamp = [u64; 7];
+
+fn program_stamp(metadata: &std::fs::Metadata) -> FileStamp {
     use std::os::unix::fs::MetadataExt;
     [
         metadata.dev(),
@@ -494,7 +497,12 @@ pub(crate) fn macos_enforcement_digest(
 
 const SYSTEM_PROGRAM_DIRECTORIES: [&str; 2] = ["/bin", "/usr/bin"];
 
-fn directory_stamps() -> Result<[[u64; 7]; 2], ToolError> {
+type DirectoryStamps = [FileStamp; 2];
+
+static ADMITTED: std::sync::Mutex<Option<(DirectoryStamps, Arc<SystemPrograms>)>> =
+    std::sync::Mutex::new(None);
+
+fn directory_stamps() -> Result<DirectoryStamps, ToolError> {
     let stamp = |directory| {
         std::fs::symlink_metadata(directory)
             .map(|metadata| program_stamp(&metadata))
@@ -507,8 +515,6 @@ fn directory_stamps() -> Result<[[u64; 7]; 2], ToolError> {
 impl SystemPrograms {
     /// Reuses this process's signature scan while both directories and every pinned entry keep their stamps.
     pub(crate) fn admit_current() -> Result<Arc<Self>, ToolError> {
-        type Admitted = Option<([[u64; 7]; 2], Arc<SystemPrograms>)>;
-        static ADMITTED: std::sync::Mutex<Admitted> = std::sync::Mutex::new(None);
         let mut admitted = ADMITTED
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -885,6 +891,12 @@ mod tests {
         ));
         let programs: &SystemPrograms = &cached;
         assert!(programs.current());
+        let directories = directory_stamps().unwrap();
+        ADMITTED.lock().unwrap().as_mut().unwrap().0[0][1] ^= 1;
+        let rescanned = SystemPrograms::admit_current().unwrap();
+        assert!(!Arc::ptr_eq(&cached, &rescanned));
+        assert_eq!(rescanned.programs, programs.programs);
+        assert_eq!(ADMITTED.lock().unwrap().as_ref().unwrap().0, directories);
         let mut required = vec![PathBuf::from("/bin/sh"), PathBuf::from("/usr/bin/true")];
         let mut profile = String::new();
         programs.allow(&mut profile, &mut required).unwrap();
