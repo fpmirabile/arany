@@ -28,22 +28,13 @@ impl Provider for CacheCanary {
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
-        let mut requests = self.requests.lock().unwrap();
-        let step = requests.len();
-        let context = request
-            .tools
-            .as_ref()
-            .ok_or(ProviderError::InvalidOutcome)?;
-        let serialized = serde_json::to_vec(context).map_err(|_| ProviderError::InvalidOutcome)?;
-        if step == 0 {
-            assert!(
-                !serialized
-                    .windows(CACHE_CANARY.len())
-                    .any(|part| part == CACHE_CANARY.as_bytes())
-            );
-        } else if step == 1 {
-            assert!(context.observations[0].output.contains(CACHE_CANARY));
-        } else {
+        let step = {
+            let mut requests = self.requests.lock().unwrap();
+            let step = requests.len();
+            requests.push(request);
+            step
+        };
+        if step > 1 {
             return Err(ProviderError::InvalidOutcome);
         }
         let outcome = if step == 0 {
@@ -62,7 +53,6 @@ impl Provider for CacheCanary {
                     .into(),
             })
         };
-        requests.push(request);
         Ok(ProviderResponse {
             outcome,
             response_id: None,
@@ -185,12 +175,27 @@ async fn selected_cache_canary_helper() {
         .await
         .unwrap();
     engine.close().await.unwrap();
-    assert_eq!(outcome.run.status, RunStatus::Finished);
+    assert_eq!(
+        outcome.run.status,
+        RunStatus::Finished,
+        "cache canary Run failed: {}",
+        crate::safe_run_diagnostics(&outcome.run)
+    );
     assert_eq!(outcome.run.tools.len(), 1);
     let observation = outcome.run.tools[0].observation.as_ref().unwrap();
     assert!(observation.output.contains(CACHE_CANARY));
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
+    let initial_tools = requests[0]
+        .tools
+        .as_ref()
+        .expect("first cache canary request includes Tool context");
+    let initial = serde_json::to_vec(initial_tools).unwrap();
+    assert!(
+        !initial
+            .windows(CACHE_CANARY.len())
+            .any(|part| part == CACHE_CANARY.as_bytes())
+    );
     assert!(
         requests[1].tools.as_ref().unwrap().observations[0]
             .output

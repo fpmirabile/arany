@@ -68,6 +68,10 @@ struct Task {
 
 impl Task {
     fn enforcement_digest(&self) -> Result<[u8; 32], ToolError> {
+        #[cfg(target_os = "macos")]
+        if !self.intent.call.is_process() && self.system_programs.is_some() {
+            return Err(ToolError::Configuration);
+        }
         intent_enforcement_digest(
             self.intent.call.is_process(),
             &self.config.runtime_grants,

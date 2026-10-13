@@ -7,6 +7,38 @@ use arany::{
 use process::BoundedOutput;
 use std::process::Command;
 
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+fn safe_run_diagnostics(run: &arany::RunView) -> String {
+    let agents = run
+        .agents
+        .iter()
+        .map(|agent| {
+            (
+                agent.status,
+                agent
+                    .provider_calls
+                    .iter()
+                    .map(|call| call.disposition)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let tools = run
+        .tools
+        .iter()
+        .map(|tool| {
+            tool.observation.as_ref().map(|observation| {
+                (
+                    observation.disposition,
+                    observation.guard.is_some(),
+                    observation.output.len(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    format!("agents={agents:?}; tools={tools:?}")
+}
+
 #[path = "common/process.rs"]
 pub mod process;
 
