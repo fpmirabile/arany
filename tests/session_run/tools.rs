@@ -646,9 +646,10 @@ async fn exact_goal_token_cap_fails_before_a_tool_request_is_journaled() {
         std::fs::read(workspace.join("src/current.txt")).unwrap(),
         b"current"
     );
-    let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    drop(requests);
+    {
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+    }
     let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
     let events = store.load_session(outcome.session_id).await.unwrap();
     assert!(events.iter().any(|event| matches!(

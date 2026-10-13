@@ -347,7 +347,11 @@ pub fn command_completions(prefix: &str) -> Vec<&'static str> {
     let Some(name) = prefix.strip_prefix('/') else {
         return Vec::new();
     };
-    if name.len() > MAX_COMMAND_NAME_BYTES || !name.bytes().all(|byte| byte.is_ascii_lowercase()) {
+    if name.len() > MAX_COMMAND_NAME_BYTES
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'-')
+    {
         return Vec::new();
     }
     COMMANDS
@@ -689,6 +693,7 @@ mod tests {
         assert_eq!(command_completions("/set"), vec!["setup", "settings"]);
         assert_eq!(command_completions("/pas"), vec!["paste"]);
         assert_eq!(command_completions("/mo"), vec!["model"]);
+        assert_eq!(command_completions("/resume-g"), vec!["resume-goal"]);
         assert_eq!(
             parse_submission("/models"),
             Err(CommandParseError::Unknown {
