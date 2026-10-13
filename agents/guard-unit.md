@@ -23,8 +23,10 @@ resource semantics and unavailable-capability rejection.
   identity after failed resource samples too: confirmed reaping or PID reuse
   retires that member; unavailable observation of a live member still rejects.
 - Convert native CPU counters through the validated Mach timebase. Aggregate
-  resident memory and live threads, and enforce the accepted per-process CPU
-  threshold outside the payload. Missing live observation fails closed.
+  physical footprint (`ri_phys_footprint`) and live threads, and enforce the
+  accepted per-process CPU threshold outside the payload. Resident size omits
+  compressed and swapped pages, so host memory pressure can hide an over-limit
+  payload. Missing live observation fails closed.
 - Cleanup repeatedly stops and kills current coalition members with audit-token
   signals and requires positively observed emptiness within its deadline. Job
   removal alone does not terminate an escaped orphan. An exact-target `bootout`

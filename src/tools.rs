@@ -138,6 +138,8 @@ impl ToolRuntime {
         state: &StateRoot,
         guard_executable: PathBuf,
     ) -> Result<Self, ToolError> {
+        #[cfg(target_os = "macos")]
+        let capture = guard::FixtureSpan::begin(guard::FixtureStage::ToolAdmission);
         guard::check_available()?;
         let enforcement_digest = guard::enforcement_digest()?;
         let root = fs::open_directory(workspace)?;
@@ -177,6 +179,8 @@ impl ToolRuntime {
         #[cfg(target_os = "macos")]
         let process_enforcement_digest =
             guard::macos_enforcement_digest(system_programs.as_deref())?;
+        #[cfg(target_os = "macos")]
+        capture.complete();
         Ok(Self {
             config,
             queue_progress: None,

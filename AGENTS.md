@@ -33,6 +33,7 @@ Arany is a Rust-first, CLI-only agent harness. The product and executable are na
 | Native Guard launch, sandbox profiles, resources, FFI and process ownership | [Guard](./agents/guard.md) |
 | Shared Guard capacity, FIFO waiting and user settings | [Guard admission](./agents/guard-admission.md) |
 | Native macOS coalition ownership, control transport and resource supervision | [Guard unit](./agents/guard-unit.md) |
+| Explicit native fixture stage capture and timeout observations | [Guard fixture](./agents/guard-fixture.md) |
 | Development skill installation or maintenance | [Project skills](./agents/skills/README.md) |
 | CLI admission, modes, channels, `exec` composition | [CLI](./agents/cli.md) |
 | OTLP endpoints, privacy, bounds, shutdown | [Telemetry](./agents/telemetry.md) |

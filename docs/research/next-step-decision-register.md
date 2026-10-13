@@ -138,6 +138,37 @@ provide containment. [Security rules](../../agents/security.md) and
 [the Tool contract](../specs/tools.md) own current requirements. Incident evidence
 remains in [security research](./harness-security-lessons-and-controls.md).
 
+The macOS executable catalogue uses one union of exact literal paths to avoid
+repeating the same operation rule for each admitted program. This keeps the
+intended allow set narrow; directory-wide grants would broaden it. Fresh file
+revalidation and independent denies remain governed by
+[Guard rules](../../agents/guard.md).
+
+Source syntax reviewed on 2026-10-12: Apple's shipped
+`/System/Library/Sandbox/Profiles/application.sb` and
+`com.apple.storereceiptinstaller.sb` in the same directory (macOS 26.6.2,
+build 25G83), and the
+[WebKit WebProcess profile](https://raw.githubusercontent.com/WebKit/WebKit/main/Source/WebKit/WebProcess/com.apple.WebProcess.sb.in)
+compose literal filters with `require-any`. The WebKit link tracks mutable
+`main`. These examples support union composition, not a stable public DSL,
+compiler performance or the timeout's cause. Native fixtures own enforcement
+evidence.
+
+Fixture capture on 2026-10-13 attributed the stopped-command timeout: under
+host memory pressure the over-limit `receipt-loss` payload stayed below the
+512 MiB resident-size threshold, so supervision never stopped it and the case
+reached its 30-second deadline in `controller_receipt`. Supervision now bounds
+`ri_phys_footprint`, which counts compressed memory whether held in RAM or
+swapped out. The same
+capture showed the Security signature scan costing about 1.3 seconds of every
+command-capable Run, and up to 5 seconds under parallel load; stamp-bound
+in-process verdict reuse removes the repeated scan without caching authority
+across processes. Earlier `mcp-version` timeouts were captured with most time
+before Ready, where that scan ran; after both changes the case completed in
+about 4 seconds across three `arany_ci` suites and twelve journeys run four at a
+time. A recurrence is a new defect; capture its stages through the
+[fixture](../../agents/guard-fixture.md) before changing budgets.
+
 ### D-16 — Evidence-dense testing
 
 Exercise real Engine, filesystem and SQLite behavior with only Provider scripted.

@@ -7,16 +7,6 @@ in [domain specs](./docs/specs/README.md); setup instructions live in
 item when its completion condition is met; completed work belongs in Git/CI
 history. Implementation status and verified support are separate claims.
 
-## Open defects
-
-- **Native Engine stopped-command timeout investigation.** The macOS corpus
-  timed out once at its unchanged 30-second case deadline; a diagnostic-enabled
-  repeat passed without raising it. The first failure lacked case/stage
-  evidence, so its cause is unestablished. On recurrence capture the reported
-  case, committed progress and queued hint together with native
-  preparation/recovery/cleanup stages before attributing the timeout to
-  admission, cancellation or host load.
-
 ## Next functional priority
 
 - **Deferred Anthropic consumer subscriptions.** Native Claude-plan access is
