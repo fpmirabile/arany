@@ -2,11 +2,12 @@
 
 Load when changing Session lifecycle, resume/fork/rename, compaction, context reconstruction, collaboration policy, agent topology, queued input, or per-Run budgets.
 
-The [decision register](../docs/research/next-step-decision-register.md) and [context research](../docs/research/context-memory-and-compaction.md) retain reasons and alternatives. This file retains the unmigrated Session lifecycle/context contract and editing constraints; the [execution spec](../docs/specs/execution.md) owns bounded Run coordination and delegation.
+The [decision register](../docs/research/next-step-decision-register.md) and [context research](../docs/research/context-memory-and-compaction.md) retain reasons and alternatives. This file retains the Session lifecycle/context contract and editing constraints; the [Goals spec](../docs/specs/goals.md) owns durable Goal transitions, budgets and plan contracts, while the [execution spec](../docs/specs/execution.md) owns bounded Run coordination and delegation.
 
 ## Domain boundaries
 
 - A Session is one durable ordered conversation across process exits. A Run is one bounded execution caused by one accepted user Message. An AgentRun is one primary or child execution inside that Run.
+- Every accepted task belongs to a durable Goal; each Run is linked before its accepted Message. Replay rejects missing linkage and projects unfinished Goals as interrupted without retrying prior calls or effects. Goal is task lifecycle; Session remains conversation/history identity.
 - Resume preserves Session identity. Fork creates a new Session from an exact committed Run boundary and records immutable source Session, Run, sequence, and prefix digest.
 - A fork's first Event is `SessionForked`; replay resolves at most eight lineage links and 10,000 total Events, verifies each canonical Event-prefix digest, and includes only inherited committed Runs through the recorded boundary. A missing or changed source fails replay before context compilation.
 - Historical agents remain inspectable after resume; no in-memory child is fabricated or restarted. Retrying interrupted work creates a new Run ID.

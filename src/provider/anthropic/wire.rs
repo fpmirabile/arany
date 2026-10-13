@@ -272,10 +272,14 @@ pub(super) fn decode_run(
             ProviderOutcome::Finish(Finish { summary, result })
         }
         WireOutcome::Delegate { children } => ProviderOutcome::Delegate(Delegate { children }),
-        WireOutcome::Tool { call }
-            if call.valid() && !matches!(call, crate::tools::ToolCall::ApplyChangeset { .. }) =>
-        {
-            ProviderOutcome::Tool(call)
+        WireOutcome::Tool {
+            call,
+            plan_contract,
+        } if call.valid() && !matches!(call, crate::tools::ToolCall::ApplyChangeset { .. }) => {
+            ProviderOutcome::Tool {
+                call,
+                plan_contract,
+            }
         }
         WireOutcome::Tool { .. } => return Err(ProviderError::InvalidOutcome),
     };
@@ -311,11 +315,16 @@ pub(super) fn run_body(request: &ProviderRequest, effort: Effort) -> Value {
     let input = run_input(request);
     let schema = crate::provider::restrict_outcome_schema(outcome_schema(), request);
     let instructions = format!(
-        "{} {}",
+        "{} {} {}",
         if request.tools.is_some() {
             TOOL_INSTRUCTIONS
         } else {
             READ_ONLY_INSTRUCTIONS
+        },
+        if request.tools.is_some() && request.goal_plan_contract.is_none() {
+            "Before your first Tool other than read-only MCP catalog listing, include a model-authored plan_contract with a bounded mission, exact path/command/Skill resource/MCP tool scope, typed success_criterion, and budget no larger than goal_budget. success_criterion must be tool_call_succeeded with the exact command/write/edit/mkdir/Skill/MCP call, workspace_file_digest with an exact path and SHA-256, or workspace_file_content with exact path and desired content (at most 8 KiB); generic successful Read is never enough. Arany persists and credential-checks the bounded contract before dispatch and rejects missing, invalid or later widened scope."
+        } else {
+            ""
         },
         crate::provider::COLLABORATION_INSTRUCTIONS
     );
@@ -485,9 +494,18 @@ struct OutcomeEnvelope {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 enum WireOutcome {
-    Finish { summary: String, result: String },
-    Delegate { children: Vec<String> },
-    Tool { call: crate::tools::ToolCall },
+    Finish {
+        summary: String,
+        result: String,
+    },
+    Delegate {
+        children: Vec<String>,
+    },
+    Tool {
+        call: crate::tools::ToolCall,
+        #[serde(default)]
+        plan_contract: Option<Box<crate::session::GoalPlanContract>>,
+    },
 }
 
 #[derive(Deserialize)]

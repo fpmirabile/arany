@@ -20,6 +20,8 @@ fn run_request() -> ProviderRequest {
             assistant: "previous assistant canary".into(),
         }],
         context_summary: Some("derived summary canary".into()),
+        goal_budget: None,
+        goal_plan_contract: None,
         child_results: vec![ChildResult {
             objective: "child objective canary".into(),
             summary: "child summary canary".into(),
@@ -28,6 +30,130 @@ fn run_request() -> ProviderRequest {
         max_output_tokens: 4096,
         tools: None,
     }
+}
+
+fn goal_plan_contract() -> crate::session::GoalPlanContract {
+    crate::session::GoalPlanContract {
+        mission: "Verify the requested Workspace update".into(),
+        paths: vec!["src".into()],
+        commands: vec!["bash".into()],
+        skills: vec![crate::session::GoalSkillBinding {
+            name: "review".into(),
+            resource: Some("references/checklist.md".into()),
+        }],
+        mcp_tools: vec![crate::session::GoalMcpTool {
+            server: "local".into(),
+            tool: "inspect".into(),
+        }],
+        success_criterion: crate::session::GoalSuccessCriterion::WorkspaceFileContent {
+            path: "src/main.rs".into(),
+            content: "verified\n".into(),
+        },
+        budget: crate::session::GoalBudget::default(),
+    }
+}
+
+#[test]
+fn first_primary_tool_schema_requires_a_plan_and_catalog_listing_stays_available() {
+    let mut request = run_request();
+    request.collaboration = crate::session::CollaborationPolicy::Single;
+    request.goal_budget = Some(crate::session::GoalBudget::default());
+    request.tools = Some(crate::tools::ToolContext {
+        catalog: json!({
+            "write": true,
+            "commands": [{"name":"bash"}],
+            "skills": [{"name":"sample"}],
+            "mcp_servers": [{"name":"local"}]
+        })
+        .to_string(),
+        observations: Vec::new(),
+    });
+    for phase in [AgentPhase::RootPlan, AgentPhase::RootSynthesis] {
+        request.phase = phase;
+        let body = run_body(&request, Effort::Low);
+        let branches = body["output_config"]["format"]["schema"]["properties"]["outcome"]["anyOf"]
+            .as_array()
+            .unwrap();
+        let tool_branches: Vec<_> = branches
+            .iter()
+            .filter(|branch| branch["properties"]["type"]["enum"][0] == "tool")
+            .collect();
+        assert_eq!(tool_branches.len(), 2);
+        for branch in tool_branches {
+            let calls = branch["properties"]["call"]["anyOf"].as_array().unwrap();
+            let catalog_only =
+                calls.len() == 1 && calls[0]["properties"]["operation"]["enum"][0] == "mcp_list";
+            assert_eq!(
+                branch["required"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|field| field == "plan_contract"),
+                !catalog_only
+            );
+            if !catalog_only {
+                let contract = &branch["properties"]["plan_contract"];
+                assert!(
+                    contract["required"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!("skills"))
+                );
+                assert_eq!(
+                    contract["properties"]["skills"]["items"]["required"],
+                    json!(["name", "resource"])
+                );
+            }
+        }
+        assert!(body["system"].as_str().unwrap().contains("first Tool"));
+    }
+    request.phase = AgentPhase::RootSynthesis;
+    request.goal_plan_contract = Some(goal_plan_contract());
+    let continued = run_body(&request, Effort::Low);
+    let branches = continued["output_config"]["format"]["schema"]["properties"]["outcome"]["anyOf"]
+        .as_array()
+        .unwrap();
+    let tool = branches
+        .iter()
+        .find(|branch| branch["properties"]["type"]["enum"][0] == "tool")
+        .unwrap();
+    assert!(
+        !tool["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "plan_contract")
+    );
+}
+
+#[test]
+fn structured_tool_outcome_preserves_the_sibling_goal_contract() {
+    let call = crate::tools::ToolCall::Write {
+        path: "src/new.rs".into(),
+        expected_digest: None,
+        content: "verified\n".into(),
+    };
+    let text = json!({
+        "outcome": {
+            "type": "tool",
+            "call": call.clone(),
+            "plan_contract": goal_plan_contract()
+        }
+    })
+    .to_string();
+    let decoded = decode_run(
+        &serde_json::to_vec(&response("end_turn", json!([text_block(&text)]))).unwrap(),
+        "claude-sonnet-5",
+        4096,
+    )
+    .unwrap();
+    assert!(matches!(
+        decoded.outcome,
+        ProviderOutcome::Tool {
+            plan_contract: Some(_),
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -294,7 +420,7 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
         )
         .unwrap();
         assert!(
-            matches!(decoded.outcome, ProviderOutcome::Tool(call) if serde_json::to_value(&call).unwrap() == row["outcome"]["call"])
+            matches!(decoded.outcome, ProviderOutcome::Tool { call, .. } if serde_json::to_value(&call).unwrap() == row["outcome"]["call"])
         );
     }
     for call in [

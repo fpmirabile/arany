@@ -643,6 +643,12 @@ pub(super) async fn native_command_changeset_corpus(
                 .iter()
                 .filter(|request| request.phase != AgentPhase::ToolReview)
                 .count();
+            let catalog = request
+                .tools
+                .as_ref()
+                .map(|tools| serde_json::from_str::<serde_json::Value>(&tools.catalog))
+                .transpose()
+                .map_err(|_| ProviderError::InvalidOutcome)?;
             if step > self.calls.len() || review && !self.review {
                 return Err(ProviderError::InvalidOutcome);
             }
@@ -659,7 +665,50 @@ pub(super) async fn native_command_changeset_corpus(
                             result: "Observed both effect stages.".into(),
                         })
                     },
-                    ProviderOutcome::Tool,
+                    |call| {
+                        let plan_contract = (step == 0)
+                            .then(|| {
+                                let mut paths: Vec<_> = catalog
+                                    .as_ref()
+                                    .and_then(|catalog| catalog["workspace_paths"].as_array())
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(|path| path.as_str().map(str::to_owned))
+                                    .collect();
+                                paths.sort();
+                                paths.dedup();
+                                let mut commands: Vec<_> = self
+                                    .calls
+                                    .iter()
+                                    .filter_map(|call| match call {
+                                        ToolCall::Command { program, .. } => Some(program.clone()),
+                                        _ => None,
+                                    })
+                                    .collect();
+                                commands.sort();
+                                commands.dedup();
+                                let success_call =
+                                    self.calls.last().cloned().unwrap_or(call.clone());
+                                arany::GoalPlanContract {
+                                    mission: "Exercise and verify the bounded command snapshot"
+                                        .into(),
+                                    paths,
+                                    commands,
+                                    skills: Vec::new(),
+                                    mcp_tools: Vec::new(),
+                                    success_criterion:
+                                        arany::GoalSuccessCriterion::ToolCallSucceeded {
+                                            call: Box::new(success_call),
+                                        },
+                                    budget: arany::GoalBudget::default(),
+                                }
+                            })
+                            .map(Box::new);
+                        ProviderOutcome::Tool {
+                            call,
+                            plan_contract,
+                        }
+                    },
                 )
             };
             requests.push(request);
@@ -892,6 +941,7 @@ pub(super) async fn native_command_changeset_corpus(
                         workspace: workspace.clone(),
                         include_paths: Vec::new(),
                         policy: CollaborationPolicy::Single,
+                        goal: arany::GoalRequest::default(),
                     },
                     cancellation,
                     RunProgress::new()
@@ -905,11 +955,24 @@ pub(super) async fn native_command_changeset_corpus(
         engine.close().await.unwrap();
         let human_denied = matches!(case, "deny" | "drop" | "cancel");
         let stopped = human_denied || matches!(case, "partial" | "budget");
+        let criterion_unmet = matches!(
+            case,
+            "conflict"
+                | "scope"
+                | "symlink"
+                | "hardlink"
+                | "fifo"
+                | "setid"
+                | "excluded"
+                | "bytes-overflow"
+                | "files-overflow"
+                | "directory-conversion"
+        );
         assert_eq!(
             outcome.run.status,
             if case == "cancel" {
                 RunStatus::Cancelled
-            } else if stopped {
+            } else if stopped || criterion_unmet {
                 RunStatus::Failed
             } else {
                 RunStatus::Finished

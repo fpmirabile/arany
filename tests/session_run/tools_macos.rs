@@ -170,7 +170,94 @@ impl Provider for Journey {
                     result: "Created and edited synthetic files.".into(),
                 })
             },
-            ProviderOutcome::Tool,
+            |call| {
+                let plan_contract = (step == 0 && !matches!(call, ToolCall::McpList { .. }))
+                    .then(|| {
+                        let mut paths: Vec<_> = catalog["workspace_paths"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|path| path.as_str().map(str::to_owned))
+                            .collect();
+                        paths.sort();
+                        paths.dedup();
+                        let mut commands: Vec<_> = self
+                            .calls
+                            .iter()
+                            .filter_map(|call| match call {
+                                ToolCall::Command { program, .. } => Some(program.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        commands.sort();
+                        commands.dedup();
+                        let mut mcp_tools: Vec<_> = self
+                            .calls
+                            .iter()
+                            .filter_map(|call| match call {
+                                ToolCall::McpCall { server, tool, .. } => {
+                                    Some(arany::GoalMcpTool {
+                                        server: server.clone(),
+                                        tool: tool.clone(),
+                                    })
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        mcp_tools.sort_by(|left, right| {
+                            (&left.server, &left.tool).cmp(&(&right.server, &right.tool))
+                        });
+                        mcp_tools.dedup();
+                        let mut skills: Vec<_> = self
+                            .calls
+                            .iter()
+                            .filter_map(|call| match call {
+                                ToolCall::Skill { name, resource } => {
+                                    Some(arany::GoalSkillBinding {
+                                        name: name.clone(),
+                                        resource: if resource.as_deref() == Some("SKILL.md") {
+                                            None
+                                        } else {
+                                            resource.clone()
+                                        },
+                                    })
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        skills.sort_by(|left, right| {
+                            (&left.name, left.resource.as_deref().unwrap_or("SKILL.md")).cmp(&(
+                                &right.name,
+                                right.resource.as_deref().unwrap_or("SKILL.md"),
+                            ))
+                        });
+                        skills.dedup();
+                        let success_criterion = if matches!(call, ToolCall::Read { .. }) {
+                            arany::GoalSuccessCriterion::WorkspaceFileContent {
+                                path: "src/main.txt".into(),
+                                content: "after\n".into(),
+                            }
+                        } else {
+                            arany::GoalSuccessCriterion::ToolCallSucceeded {
+                                call: Box::new(call.clone()),
+                            }
+                        };
+                        arany::GoalPlanContract {
+                            mission: "Complete the bounded native Tool journey".into(),
+                            paths,
+                            commands,
+                            skills,
+                            mcp_tools,
+                            success_criterion,
+                            budget: arany::GoalBudget::default(),
+                        }
+                    })
+                    .map(Box::new);
+                ProviderOutcome::Tool {
+                    call,
+                    plan_contract,
+                }
+            },
         );
         requests.push(request);
         Ok(ProviderResponse {
@@ -397,6 +484,7 @@ async fn native_file_journey_helper() {
             workspace: workspace.clone(),
             include_paths: Vec::new(),
             policy: CollaborationPolicy::Single,
+            goal: arany::GoalRequest::default(),
         })
         .await
         .unwrap();
@@ -552,6 +640,7 @@ async fn native_file_journey_helper() {
             workspace: workspace.clone(),
             include_paths: Vec::new(),
             policy: CollaborationPolicy::Single,
+            goal: arany::GoalRequest::default(),
         })
         .await
         .unwrap();
@@ -765,6 +854,7 @@ int main(void) {
                         workspace: workspace.into(),
                         include_paths: Vec::new(),
                         policy: CollaborationPolicy::Single,
+                        goal: arany::GoalRequest::default(),
                     },
                     cancellation,
                     progress.clone()

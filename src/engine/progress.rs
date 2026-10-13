@@ -245,7 +245,7 @@ pub(super) async fn append_observed(
         Event::AgentFinished { .. } => Some(TraceEventKind::AgentFinished),
         Event::MessageCommitted { .. } => Some(TraceEventKind::MessageCommitted),
         Event::RunFinished { .. } => Some(TraceEventKind::RunFinished),
-        _ => return Err(EngineError::CoordinatorFailed),
+        _ => None,
     };
     let committed = store.append(session_id, event).await?;
     crate::diagnostics::event_failure(&committed.event);

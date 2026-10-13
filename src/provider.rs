@@ -126,6 +126,8 @@ fn run_input(request: &ProviderRequest) -> Value {
         "includes": request.includes,
         "history": request.history.iter().map(|turn| json!({"user": turn.user, "assistant": turn.assistant})).collect::<Vec<_>>(),
         "derived_context_summary": request.context_summary,
+        "goal_budget": request.goal_budget,
+        "goal_plan_contract": request.goal_plan_contract,
         "child_results": request.child_results.iter().map(|item| json!({"objective": item.objective, "summary": item.summary, "result": item.result})).collect::<Vec<_>>(),
     });
     if let Some(tools) = &request.tools {
@@ -331,6 +333,8 @@ pub struct ProviderRequest {
     pub history: Vec<HistoryTurn>,
     /// Model-authored derived data; adapters must render it as data, never instructions.
     pub context_summary: Option<String>,
+    pub goal_budget: Option<crate::session::GoalBudget>,
+    pub goal_plan_contract: Option<crate::session::GoalPlanContract>,
     pub child_results: Vec<ChildResult>,
     pub tools: Option<crate::tools::ToolContext>,
     pub max_output_tokens: u32,
@@ -370,7 +374,10 @@ pub(crate) fn restrict_outcome_schema(
         },
     );
     if let Some(tools) = &request.tools {
-        branches.push(tools.outcome_branch());
+        branches.extend(tools.outcome_branch_with_plan(
+            request.goal_plan_contract.is_none(),
+            request.goal_budget.as_ref(),
+        ));
     }
     schema
 }
@@ -436,7 +443,10 @@ pub struct Delegate {
 pub enum ProviderOutcome {
     Finish(Finish),
     Delegate(Delegate),
-    Tool(crate::tools::ToolCall),
+    Tool {
+        call: crate::tools::ToolCall,
+        plan_contract: Option<Box<crate::session::GoalPlanContract>>,
+    },
 }
 
 /// Accepted wire condition and local request control, not a remote retention guarantee.
@@ -483,7 +493,10 @@ impl ProviderResponse {
                 ProviderOutcome::Delegate(value) => {
                     value.children.iter().any(|child| child.contains(secret))
                 }
-                ProviderOutcome::Tool(call) => {
+                ProviderOutcome::Tool {
+                    call,
+                    plan_contract,
+                } => {
                     serde_json::to_value(call)
                         .is_ok_and(|value| tool_reflects_secret(&value, secret))
                         || if let crate::tools::ToolCall::McpCall { arguments, .. } = call {
@@ -492,6 +505,10 @@ impl ProviderResponse {
                         } else {
                             false
                         }
+                        || plan_contract.as_ref().is_some_and(|contract| {
+                            serde_json::to_value(contract)
+                                .is_ok_and(|value| tool_reflects_secret(&value, secret))
+                        })
                 }
             }
     }
@@ -847,6 +864,37 @@ mod tests {
         response.outcome = ProviderOutcome::Delegate(Delegate {
             children: vec![format!("child {secret}")],
         });
+        assert!(response.reflects_secret(secret));
+        response.outcome = ProviderOutcome::Tool {
+            call: crate::tools::ToolCall::Write {
+                path: "src/main.rs".into(),
+                expected_digest: None,
+                content: "safe".into(),
+            },
+            plan_contract: Some(Box::new(crate::session::GoalPlanContract {
+                mission: format!("verified with {secret}"),
+                paths: vec!["src".into()],
+                commands: Vec::new(),
+                skills: vec![crate::session::GoalSkillBinding {
+                    name: format!("skill-{secret}"),
+                    resource: None,
+                }],
+                mcp_tools: Vec::new(),
+                success_criterion: crate::session::GoalSuccessCriterion::WorkspaceFileContent {
+                    path: "src/main.rs".into(),
+                    content: "safe".into(),
+                },
+                budget: crate::session::GoalBudget::default(),
+            })),
+        };
+        assert!(response.reflects_secret(secret));
+        if let ProviderOutcome::Tool {
+            plan_contract: Some(contract),
+            ..
+        } = &mut response.outcome
+        {
+            contract.mission = "safe".into();
+        }
         assert!(response.reflects_secret(secret));
 
         let mut compact = CompactionResponse {

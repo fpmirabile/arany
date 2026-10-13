@@ -63,6 +63,8 @@ fn request() -> ProviderRequest {
         includes: Vec::new(),
         history: Vec::new(),
         context_summary: None,
+        goal_budget: None,
+        goal_plan_contract: None,
         child_results: Vec::new(),
         max_output_tokens: 64,
         tools: None,
@@ -649,11 +651,14 @@ async fn streaming_transport_accepts_only_final_usage_within_local_cap() {
         .unwrap();
     assert!(matches!(
         decoded.outcome,
-        ProviderOutcome::Tool(crate::tools::ToolCall::Read {
-            offset: 0,
-            limit: 4096,
+        ProviderOutcome::Tool {
+            call: crate::tools::ToolCall::Read {
+                offset: 0,
+                limit: 4096,
+                ..
+            },
             ..
-        })
+        }
     ));
     let wire_request = server.await.unwrap();
     let body: Value = serde_json::from_str(wire_request.split("\r\n\r\n").nth(1).unwrap()).unwrap();

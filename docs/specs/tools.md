@@ -113,7 +113,7 @@ Attached completion exposes admitted Skill names according to the [terminal comp
 
 At attached startup, a root regular `skills-lock.json` with no `.agents/skills` directory produces a notice to run `npx --yes skills@1.7.0 experimental_install` in the project. The [Skills 1.7.0 installer](https://github.com/vercel-labs/skills/blob/v1.7.0/src/install.ts) restores the project lock through that command; `install` aliases `add` and requires a source. Arany inspects installation state, not lock contents or historical command execution. An existing Skill directory, including an empty one, does not trigger that missing-directory notice. Arany never runs the installer automatically.
 
-YAML parsing occurs only inside the killable Guard, not the credential-owning Engine. Linux mounts Skills read-only under `/skills/SKILL_ID`; the macOS file worker opens only the requested admitted resource through checked handles and validates its pinned digest before dispatch and use. Unlisted resources cannot be loaded by the Skill tool.
+YAML parsing occurs only inside the killable Guard, not the credential-owning Engine. Linux mounts Skills read-only under `/skills/SKILL_ID`; the macOS file worker opens only the requested admitted resource through checked handles and validates its pinned digest before dispatch and use. Unlisted resources cannot be loaded by the Skill tool. A Goal plan names each Skill resource exactly (`resource: null` means `SKILL.md`) and that list narrows the Run's already admitted Skill names and files; it never grants discovery or additional resources. A matching successful Skill receipt may satisfy the Goal's typed success criterion.
 
 ## Local MCP
 

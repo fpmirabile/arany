@@ -2,11 +2,11 @@
 
 ## Scope and related contracts
 
-This contract owns bounded Run coordination, delegation, accepted outcomes and history-capacity rejection. [Tools](./tools.md) owns grants and effect continuations; [terminal](./terminal.md) owns attached controls and agent inspection. Session lifecycle and account/profile admission remain in the [Session](../../agents/session.md) and [Provider](../../agents/provider.md) contracts. [Engine](../../agents/engine.md), [Store](../../agents/store.md) and [security](../../agents/security.md) rules retain implementation and privilege constraints.
+This contract owns bounded Run coordination, delegation, accepted outcomes and history-capacity rejection. The [Goals contract](./goals.md) owns durable task lifecycle, Goal budgets, plan contracts and recovery; every accepted task links its Runs to one Goal. [Tools](./tools.md) owns grants and effect continuations; [terminal](./terminal.md) owns attached controls and agent inspection. Remaining Session lifecycle and account/profile admission stay in the [Session](../../agents/session.md) and [Provider](../../agents/provider.md) contracts. [Engine](../../agents/engine.md), [Store](../../agents/store.md) and [security](../../agents/security.md) rules retain implementation and privilege constraints.
 
 ## Collaboration
 
-Each accepted task has one accountable primary AgentRun and an ordered, bounded collection of direct read-only children. Children reason over supplied data and cannot create nested teams, acquire Tools or mutate files. The primary obtains file evidence, performs authorized effects and owns the final answer.
+Each accepted task is durably linked to a Goal before its first `MessageAccepted`. Each Run has one accountable primary AgentRun and an ordered, bounded collection of direct read-only children. Children reason over supplied data and cannot create nested teams, acquire Tools or mutate files. The primary obtains file evidence, performs authorized effects and owns the final answer. Goal completion and Run completion are separate receipts as defined by the [Goal lifecycle](./goals.md#lifecycle-budgets-and-recovery).
 
 Pin one policy before the Run: `single` admits no children; default `auto` allows up to three total direct children when useful; explicit `team` requires decomposition on the first non-Tool outcome. The persisted `max_active_children` field limits total direct children for the delegation. Policy, process safety and remaining call/token/byte/time budgets bound team size; the Provider concurrency ceiling separately bounds simultaneous calls while admitted children wait in order. A ceiling is permission, not a required team size.
 
@@ -30,7 +30,7 @@ Malformed/non-object/duplicate-key MCP arguments and selected-credential reflect
 
 ## Admission, persistence and recovery
 
-Persist only the current internal format: SQLite schema 4, Event payload version 2 and compaction compiler version 3. Required nullable fields are explicit, including Run configuration and Provider provenance. Reading unsupported stored formats or missing fields rejects without conversion, automatic deletion or an optimistic projection. Attached startup offers the [explicit history reset](./terminal.md#setup-and-account-choices); it discards history rather than converting or admitting an unsupported format.
+Persist only the current internal format: SQLite schema 4, Event payload version 2 and compaction compiler version 3. Required nullable fields are explicit, including Goal linkage, Run configuration and Provider provenance. Reading unsupported stored formats or missing fields rejects without conversion, automatic deletion or an optimistic projection. Replay rejects an accepted task without a valid Goal linkage; no unlinked legacy Run path or compatibility projection exists. Attached startup offers the [explicit history reset](./terminal.md#setup-and-account-choices); it discards history rather than converting or admitting an unsupported format.
 
 Admit the selected Provider and complete bounded request before Workspace disclosure. Pin the Workspace, instructions/includes, policy, model/effort and caps for the Run. Commit accepted Message, Run and primary identity before inference; commit each observed call before its terminal AgentRun disposition. Replay requires an observed delegation before child spawn and an observed successful call before successful Agent completion. Known call usage survives an interrupted journal prefix.
 

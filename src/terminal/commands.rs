@@ -15,6 +15,7 @@ pub enum InteractiveCommand {
     Status,
     New,
     Resume,
+    ResumeGoal,
     Fork,
     Rename,
     Compact,
@@ -48,6 +49,7 @@ impl InteractiveCommand {
             | Self::Settings
             | Self::New
             | Self::Resume
+            | Self::ResumeGoal
             | Self::Fork
             | Self::Rename
             | Self::Compact => CommandAvailability::Locked,
@@ -98,7 +100,7 @@ const fn spec(
     }
 }
 
-const COMMANDS: [CommandSpec; 17] = [
+const COMMANDS: [CommandSpec; 18] = [
     spec("help", InteractiveCommand::Help, None, &[]),
     spec("setup", InteractiveCommand::Setup, None, &[]),
     spec("paste", InteractiveCommand::Paste, None, &[]),
@@ -111,6 +113,7 @@ const COMMANDS: [CommandSpec; 17] = [
         Some("[session-id]"),
         &[],
     ),
+    spec("resume-goal", InteractiveCommand::ResumeGoal, None, &[]),
     spec("fork", InteractiveCommand::Fork, Some("[session-id]"), &[]),
     spec("rename", InteractiveCommand::Rename, Some("<title>"), &[]),
     spec("compact", InteractiveCommand::Compact, None, &[]),
@@ -160,6 +163,7 @@ pub(super) fn help_entry(index: usize) -> Option<HelpEntry> {
         InteractiveCommand::Status => "Session status",
         InteractiveCommand::New => "New Session",
         InteractiveCommand::Resume => "Resume Session",
+        InteractiveCommand::ResumeGoal => "Confirm resume of the interrupted Goal",
         InteractiveCommand::Fork => "Fork Session",
         InteractiveCommand::Rename => "Rename Session",
         InteractiveCommand::Compact => "Compact context",
@@ -606,7 +610,7 @@ mod tests {
 
     #[test]
     fn closed_registry_aliases_completion_and_lifecycle_are_exact() {
-        assert_eq!(COMMANDS.len(), 17);
+        assert_eq!(COMMANDS.len(), 18);
         for spec in COMMANDS {
             assert_eq!(
                 parse_submission(&format!("/{}", spec.name)),

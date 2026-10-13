@@ -47,7 +47,8 @@ pub(super) fn validate_objective_inputs(
 
 pub(super) async fn submit_objective(
     terminal: &mut AttachedTerminal,
-    admission: &Admission,
+    admission: &mut Admission,
+    goal_resume: &mut Option<arany::GoalId>,
     view: &mut SessionView,
     composer: &mut Composer,
     objective: String,
@@ -86,6 +87,39 @@ pub(super) async fn submit_objective(
         workspace: admission.workspace.clone(),
         include_paths,
         policy: view.defaults.policy,
+        goal: match (view.active_goal(), goal_resume.take()) {
+            (Some(goal), Some(id))
+                if goal.id == id && goal.status == arany::GoalStatus::Interrupted =>
+            {
+                arany::GoalRequest::resume(
+                    id,
+                    goal.phase.unwrap_or(arany::GoalPhase::Implementation),
+                    true,
+                )
+            }
+            (Some(goal), None) if goal.status == arany::GoalStatus::Interrupted => {
+                return Err(format!(
+                    "Interrupted Goal {} requires explicit confirmation with /resume-goal",
+                    goal.id
+                ));
+            }
+            (Some(goal), Some(_)) => {
+                return Err(format!(
+                    "Goal {} is no longer the interrupted Goal in this Session",
+                    goal.id
+                ));
+            }
+            (None, Some(_)) => {
+                return Err("the confirmed Goal is no longer active in this Session".into());
+            }
+            (Some(goal), None) => {
+                return Err(format!(
+                    "Goal {} is still active and cannot accept another Run",
+                    goal.id
+                ));
+            }
+            (None, None) => arany::GoalRequest::default(),
+        },
     };
     draw_active_snapshot(terminal, view, composer, false, false, None)
         .map_err(|error| error.to_string())?;

@@ -426,6 +426,14 @@ pub(super) fn validate_idle_command(
         {
             Err("Usage: /resume SESSION_ID")
         }
+        InteractiveCommand::ResumeGoal if argument.is_some() => Err("Usage: /resume-goal"),
+        InteractiveCommand::ResumeGoal
+            if !view
+                .active_goal()
+                .is_some_and(|goal| goal.status == arany::GoalStatus::Interrupted) =>
+        {
+            Err("No interrupted Goal is available to resume")
+        }
         InteractiveCommand::Fork if argument.is_some_and(|id| SessionId::from_str(id).is_err()) => {
             Err("Usage: /fork [SESSION_ID]")
         }
@@ -495,6 +503,9 @@ pub(super) async fn handle_command(
                 }
                 Err(error) => format!("Error: {error}"),
             }
+        }
+        InteractiveCommand::ResumeGoal => {
+            "Use /resume-goal while an interrupted Goal is selected".into()
         }
         InteractiveCommand::Fork => {
             if argument.is_none() && view.created_sequence == 0 {
@@ -776,6 +787,7 @@ mod tests {
             created_sequence: 1,
             last_sequence: 1,
             lineage: None,
+            goals: Vec::new(),
             runs: Vec::new(),
             compactions: Vec::new(),
         };
@@ -1088,6 +1100,7 @@ mod tests {
             created_sequence: 1,
             last_sequence: 1,
             lineage: None,
+            goals: Vec::new(),
             runs: Vec::new(),
             compactions: Vec::new(),
         };

@@ -156,6 +156,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                     created_sequence: 0,
                     last_sequence: 0,
                     lineage: None,
+                    goals: Vec::new(),
                     runs: Vec::new(),
                     compactions: Vec::new(),
                 };
@@ -2431,6 +2432,7 @@ fn process_lock_holder() {
                 workspace: workspace.into(),
                 include_paths: Vec::new(),
                 policy: CollaborationPolicy::Single,
+                goal: arany::GoalRequest::default(),
             })
             .await
             .expect("Provider remains held");

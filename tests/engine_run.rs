@@ -21,6 +21,9 @@ use uuid::Uuid;
 #[path = "engine_run/performance.rs"]
 mod performance;
 
+#[path = "engine_run/goals.rs"]
+mod goals;
+
 #[cfg(unix)]
 #[path = "common/process.rs"]
 pub mod process;
@@ -346,6 +349,7 @@ fn request(workspace: &Path, objective: &str) -> RunRequest {
         workspace: workspace.to_path_buf(),
         include_paths: vec!["notes/facts.txt".into()],
         policy: CollaborationPolicy::Single,
+        goal: arany::GoalRequest::default(),
     }
 }
 
@@ -740,7 +744,8 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                     objective: objective.into(), images: expected_images, includes: vec![include_data("notes/facts.txt", "Fact two")],
                     history: expected_history,
                     context_summary: (index == 4).then(|| "Image conversation summary".into()),
-                    child_results, max_output_tokens: 4096, tools: None,
+                    child_results, goal_budget: Some(arany::GoalBudget::default()),
+                    goal_plan_contract: None, max_output_tokens: 4096, tools: None,
                 }, "image request {index}");
             }
             assert!(calls[..3].iter().all(|call| call.run_id == third.run.id));

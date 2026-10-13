@@ -209,6 +209,7 @@ fn failed_child_aborts_sibling_provider_span_as_cancelled() {
                 policy: CollaborationPolicy::Team {
                     max_active_children: 2,
                 },
+                goal: crate::engine::GoalRequest::default(),
             };
             let mut run = tokio::spawn(async move {
                 let outcome = engine.run(request).await;
@@ -349,6 +350,7 @@ fn timed_out_provider_call_exports_closed_error_type() {
             workspace,
             include_paths: Vec::new(),
             policy: CollaborationPolicy::Single,
+            goal: crate::engine::GoalRequest::default(),
         };
         let mut run = tokio::spawn(async move {
             let outcome = engine.run(request).await;

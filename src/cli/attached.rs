@@ -59,6 +59,12 @@ pub(crate) struct AttachedArgs {
     resume: Option<Option<String>>,
     #[arg(long, conflicts_with = "resume")]
     fork: Option<String>,
+    #[arg(
+        long,
+        requires = "resume",
+        help = "Explicitly resume an interrupted Goal in --resume SESSION_ID"
+    )]
+    resume_goal: Option<String>,
     #[arg(long = "continue", conflicts_with_all = ["resume", "fork"])]
     continue_session: bool,
     prompt: Option<String>,
@@ -147,11 +153,12 @@ impl AttachedArgs {
             && !self.tools
             && self.resume.is_none()
             && self.fork.is_none()
+            && self.resume_goal.is_none()
             && !self.continue_session
             && self.prompt.is_none()
     }
 
-    fn admit(self, telemetry: Telemetry) -> Result<Admission, String> {
+    fn admit(self, telemetry: Telemetry) -> Result<(Admission, Option<arany::GoalId>), String> {
         if self.model.as_ref().is_some_and(|model| {
             model.is_empty() || model.len() > 128 || model.chars().any(char::is_control)
         }) {
@@ -176,6 +183,15 @@ impl AttachedArgs {
             (None, None, false) => EntryMode::New,
             _ => return Err("choose only one Session entry mode".into()),
         };
+        let goal_resume = self
+            .resume_goal
+            .as_deref()
+            .map(arany::GoalId::from_str)
+            .transpose()
+            .map_err(|_| "invalid Goal ID".to_owned())?;
+        if goal_resume.is_some() && !matches!(entry, EntryMode::Resume(_)) {
+            return Err("--resume-goal requires --resume SESSION_ID".into());
+        }
         if self.model.is_some()
             && self.provider.is_none()
             && !matches!(
@@ -225,27 +241,30 @@ impl AttachedArgs {
             account_id: None,
             policy: CollaborationPolicy::default(),
         };
-        Ok(Admission {
-            telemetry,
-            state_dir,
-            workspace,
-            include_paths: self.include_paths,
-            tools: self.tools,
-            workspace_permissions: None,
-            defaults,
-            classic: self.classic,
-            screen_reader: self.screen_reader
-                || std::env::var("ARANY_SCREEN_READER").ok().as_deref() == Some("1"),
-            no_color: self.no_color || std::env::var_os("NO_COLOR").is_some(),
-            setup_requested: self.setup,
-            entry,
-            prompt: self.prompt,
-        })
+        Ok((
+            Admission {
+                telemetry,
+                state_dir,
+                workspace,
+                include_paths: self.include_paths,
+                tools: self.tools,
+                workspace_permissions: None,
+                defaults,
+                classic: self.classic,
+                screen_reader: self.screen_reader
+                    || std::env::var("ARANY_SCREEN_READER").ok().as_deref() == Some("1"),
+                no_color: self.no_color || std::env::var_os("NO_COLOR").is_some(),
+                setup_requested: self.setup,
+                entry,
+                prompt: self.prompt,
+            },
+            goal_resume,
+        ))
     }
 }
 
 pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), String> {
-    let mut admission = args.admit(telemetry)?;
+    let (mut admission, mut goal_resume) = args.admit(telemetry)?;
     let restored_settings = controls::restore_settings(&admission).await;
     let mut saved_view = restored_settings.as_ref().copied().unwrap_or_default().view;
     let mut terminal = AttachedTerminal::acquire_with_mode(
@@ -413,6 +432,13 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         ),
     }
     let (mut session_id, mut view) = start_session(&admission).await?;
+    if let Some(goal_id) = goal_resume
+        && !view
+            .active_goal()
+            .is_some_and(|goal| goal.id == goal_id && goal.status == arany::GoalStatus::Interrupted)
+    {
+        return Err("selected Session does not contain that interrupted Goal".into());
+    }
     if !matches!(admission.entry, EntryMode::New) {
         match authorize_or_notice(&mut terminal, &view.defaults, &mut setup_notice).await? {
             ControlFlow::Continue(authorized) => access_authorized = authorized,
@@ -502,7 +528,16 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         terminal
             .draw_progress(&view, notice.as_deref().expect("startup notice exists"))
             .map_err(|error| error.to_string())?;
-        match submit_objective(&mut terminal, &admission, &mut view, &mut composer, prompt).await? {
+        match submit_objective(
+            &mut terminal,
+            &mut admission,
+            &mut goal_resume,
+            &mut view,
+            &mut composer,
+            prompt,
+        )
+        .await?
+        {
             RunSubmission::Completed(outcome, user_recorded) => {
                 (view, notice) = finish_submission(
                     &mut terminal,
@@ -629,6 +664,9 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                         ));
                     }
                     QuickChoice::Selected(selector) => {
+                        if matches!(selector, Selector::Resume) {
+                            goal_resume = None;
+                        }
                         notice = Some(
                             run_selector(
                                 selector,
@@ -711,6 +749,21 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                             continue;
                         }
                     }
+                    Ok(Submission::Objective(_))
+                        if goal_resume.is_some_and(|id| {
+                            !view.active_goal().is_some_and(|goal| {
+                                goal.id == id && goal.status == arany::GoalStatus::Interrupted
+                            })
+                        }) =>
+                    {
+                        goal_resume = None;
+                        notice = Some(Feedback::History(
+                            "The confirmed Goal is no longer the interrupted Goal in this Session"
+                                .into(),
+                        ));
+                        empty_interrupt = None;
+                        continue;
+                    }
                     Ok(Submission::Objective(_)) if view.defaults.provider.is_none() => {
                         notice = Some(Feedback::History("Use /setup to choose an account".into()));
                         if terminal.is_linear() {
@@ -744,6 +797,18 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                         continue;
                     }
                     Ok(Submission::Objective(_)) => {
+                        if let Some(goal) = view
+                            .active_goal()
+                            .filter(|goal| goal.status == arany::GoalStatus::Interrupted)
+                            && goal_resume != Some(goal.id)
+                        {
+                            notice = Some(Feedback::History(format!(
+                                "Interrupted Goal {} is waiting; use /resume-goal to confirm before submitting",
+                                goal.id
+                            )));
+                            empty_interrupt = None;
+                            continue;
+                        }
                         if !composer.images().is_empty()
                             && view
                                 .defaults
@@ -807,7 +872,8 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                         materialize_session(&admission, &mut session_id, &mut view).await?;
                         match submit_objective(
                             &mut terminal,
-                            &admission,
+                            &mut admission,
+                            &mut goal_resume,
                             &mut view,
                             &mut composer,
                             objective.to_owned(),
@@ -851,7 +917,26 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                         if command == InteractiveCommand::Exit {
                             break;
                         }
-                        if command == InteractiveCommand::Paste {
+                        if matches!(
+                            command,
+                            InteractiveCommand::New
+                                | InteractiveCommand::Resume
+                                | InteractiveCommand::Fork
+                        ) {
+                            goal_resume = None;
+                        }
+                        if command == InteractiveCommand::ResumeGoal {
+                            goal_resume = view
+                                .active_goal()
+                                .filter(|goal| goal.status == arany::GoalStatus::Interrupted)
+                                .map(|goal| goal.id);
+                            notice = Some(Feedback::History(match goal_resume {
+                                Some(id) => format!(
+                                    "Confirmed resume of Goal {id}; submit a message to continue it"
+                                ),
+                                None => "No interrupted Goal is available to resume".into(),
+                            }));
+                        } else if command == InteractiveCommand::Paste {
                             notice = Some(match terminal.request_clipboard_paste() {
                                 Ok(()) => Feedback::Transient(
                                     "Reading clipboard... draft retained".into(),
@@ -1589,6 +1674,7 @@ fn new_conversation(defaults: SessionDefaults) -> SessionView {
         lineage: None,
         runs: Vec::new(),
         compactions: Vec::new(),
+        goals: Vec::new(),
     }
 }
 

@@ -55,6 +55,8 @@ pub enum StoreError {
     StorageFull,
     #[error("Session has an active operation")]
     SessionBusy,
+    #[error("Workspace has an active writer")]
+    WorkspaceBusy,
     #[error("account replacement is already active")]
     AccountBusy,
     #[error("history is in use by another Arany process; close it and retry")]

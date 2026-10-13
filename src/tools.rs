@@ -61,6 +61,11 @@ pub fn list_workspace_entries(
 ) -> Result<Vec<String>, ToolError> {
     fs::workspace_entries(workspace, folder, prefix)
 }
+
+pub(crate) fn workspace_identity(workspace: &Path) -> Result<(u64, u64), ToolError> {
+    let root = fs::open_directory(workspace)?;
+    fs::identity(&root)
+}
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 pub use types::{
@@ -132,6 +137,48 @@ impl ToolRuntime {
     }
     pub(crate) fn allows(&self, call: &ToolCall) -> bool {
         self.config.allows(call)
+    }
+    pub(crate) fn allows_goal_contract(&self, contract: &crate::session::GoalPlanContract) -> bool {
+        let criterion_allowed = match &contract.success_criterion {
+            crate::session::GoalSuccessCriterion::ToolCallSucceeded { call } => {
+                self.config.allows(call)
+            }
+            crate::session::GoalSuccessCriterion::WorkspaceFileDigest { path, .. }
+            | crate::session::GoalSuccessCriterion::WorkspaceFileContent { path, .. } => {
+                self.config.workspace_paths == ["."]
+                    || self
+                        .config
+                        .workspace_paths
+                        .iter()
+                        .any(|root| Path::new(path).starts_with(root))
+            }
+        };
+        criterion_allowed
+            && contract.paths.iter().all(|path| {
+                self.config.workspace_paths == ["."]
+                    || self
+                        .config
+                        .workspace_paths
+                        .iter()
+                        .any(|root| Path::new(path).starts_with(root))
+            })
+            && contract.commands.iter().all(|command| {
+                self.config
+                    .commands
+                    .iter()
+                    .any(|program| program.name == *command)
+            })
+            && contract.skills.iter().all(|binding| {
+                self.config.allows(&ToolCall::Skill {
+                    name: binding.name.clone(),
+                    resource: binding.resource.clone(),
+                })
+            })
+            && contract.mcp_tools.iter().all(|binding| {
+                self.config.mcp.iter().any(|server| {
+                    server.name == binding.server && server.tools.contains(&binding.tool)
+                })
+            })
     }
     pub(crate) fn admit(
         mut config: Config,

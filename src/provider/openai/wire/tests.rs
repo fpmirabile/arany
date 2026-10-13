@@ -20,6 +20,8 @@ fn run_request() -> ProviderRequest {
             assistant: "previous assistant canary".into(),
         }],
         context_summary: Some("derived summary canary".into()),
+        goal_budget: None,
+        goal_plan_contract: None,
         child_results: vec![ChildResult {
             objective: "child objective canary".into(),
             summary: "child summary canary".into(),
@@ -28,6 +30,150 @@ fn run_request() -> ProviderRequest {
         max_output_tokens: 4096,
         tools: None,
     }
+}
+
+fn goal_plan_contract() -> crate::session::GoalPlanContract {
+    crate::session::GoalPlanContract {
+        mission: "Verify the requested Workspace update".into(),
+        paths: vec!["src".into()],
+        commands: vec!["bash".into()],
+        skills: vec![crate::session::GoalSkillBinding {
+            name: "review".into(),
+            resource: Some("references/checklist.md".into()),
+        }],
+        mcp_tools: vec![crate::session::GoalMcpTool {
+            server: "local".into(),
+            tool: "inspect".into(),
+        }],
+        success_criterion: crate::session::GoalSuccessCriterion::WorkspaceFileContent {
+            path: "src/main.rs".into(),
+            content: "verified\n".into(),
+        },
+        budget: crate::session::GoalBudget::default(),
+    }
+}
+
+#[test]
+fn first_primary_tool_schema_requires_a_plan_and_catalog_listing_stays_available() {
+    let mut request = run_request();
+    request.collaboration = crate::session::CollaborationPolicy::Single;
+    request.goal_budget = Some(crate::session::GoalBudget::default());
+    request.tools = Some(crate::tools::ToolContext {
+        catalog: json!({
+            "write": true,
+            "commands": [{"name":"bash"}],
+            "skills": [{"name":"sample"}],
+            "mcp_servers": [{"name":"local"}]
+        })
+        .to_string(),
+        observations: Vec::new(),
+    });
+    for phase in [AgentPhase::RootPlan, AgentPhase::RootSynthesis] {
+        request.phase = phase;
+        let body = run_body_with_effort(&request, Effort::Low);
+        let functions = body["tools"].as_array().unwrap();
+        assert!(
+            functions
+                .iter()
+                .any(|function| function["name"] == "arany_mcp_list")
+        );
+        assert!(
+            functions
+                .iter()
+                .any(|function| function["name"] == "arany_mcp_call")
+        );
+        for function in functions {
+            let name = function["name"].as_str().unwrap();
+            let required = function["parameters"]["required"].as_array().unwrap();
+            assert_eq!(
+                required.iter().any(|field| field == "plan_contract"),
+                name != "arany_mcp_list",
+                "{name}"
+            );
+            if name != "arany_mcp_list" {
+                let contract = &function["parameters"]["properties"]["plan_contract"];
+                assert!(
+                    contract["required"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!("skills"))
+                );
+                let skill = &contract["properties"]["skills"]["items"];
+                assert_eq!(skill["required"], json!(["name", "resource"]));
+            }
+        }
+    }
+    request.phase = AgentPhase::RootSynthesis;
+    request.goal_plan_contract = Some(goal_plan_contract());
+    let continued = run_body_with_effort(&request, Effort::Low);
+    assert!(
+        continued["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|function| !function["parameters"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "plan_contract"))
+    );
+}
+
+#[test]
+fn structured_and_native_tool_outcomes_preserve_the_sibling_goal_contract() {
+    let call = crate::tools::ToolCall::Write {
+        path: "src/new.rs".into(),
+        expected_digest: None,
+        content: "verified\n".into(),
+    };
+    let contract = goal_plan_contract();
+    let text = json!({
+        "outcome": {
+            "type": "tool",
+            "call": call.clone(),
+            "plan_contract": contract.clone()
+        }
+    })
+    .to_string();
+    let decoded = decode_run(
+        &serde_json::to_vec(&response("completed", json!([message(&text)]))).unwrap(),
+        "gpt-5.4",
+    )
+    .unwrap();
+    assert!(matches!(
+        decoded.outcome,
+        ProviderOutcome::Tool {
+            plan_contract: Some(_),
+            ..
+        }
+    ));
+
+    let mut arguments = serde_json::to_value(call).unwrap();
+    let operation = arguments
+        .as_object_mut()
+        .unwrap()
+        .remove("operation")
+        .unwrap();
+    arguments["plan_contract"] = serde_json::to_value(contract).unwrap();
+    let decoded = decode_tool_run(
+        &serde_json::to_vec(&response(
+            "completed",
+            json!([function_call(
+                &format!("arany_{}", operation.as_str().unwrap()),
+                &arguments
+            )]),
+        ))
+        .unwrap(),
+        "gpt-5.4",
+    )
+    .unwrap();
+    assert!(matches!(
+        decoded.outcome,
+        ProviderOutcome::Tool {
+            plan_contract: Some(_),
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -643,14 +789,14 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
         let bytes = serde_json::to_vec(&fixture).unwrap();
         let decoded = decode_tool_run(&bytes, "gpt-5.4").unwrap();
         assert!(
-            matches!(decoded.outcome, ProviderOutcome::Tool(call) if serde_json::to_value(&call).unwrap() == row["outcome"]["call"])
+            matches!(decoded.outcome, ProviderOutcome::Tool { call, .. } if serde_json::to_value(&call).unwrap() == row["outcome"]["call"])
         );
         let streamed = json!({"type":"response.completed","response":fixture});
         assert!(matches!(
             decode_streamed_tool_run(&serde_json::to_vec(&streamed).unwrap(), "gpt-5.4")
                 .unwrap()
                 .outcome,
-            ProviderOutcome::Tool(_)
+            ProviderOutcome::Tool { .. }
         ));
     }
     let read = function_call(

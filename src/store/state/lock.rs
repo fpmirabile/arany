@@ -22,6 +22,10 @@ const HISTORY_LOCK_FILE: &str = "history.lock";
 #[cfg(unix)]
 const MAX_SESSION_LOCK_FILES: usize = 65_536;
 #[cfg(unix)]
+const WORKSPACE_LOCK_NAMESPACE_FILE: &str = "workspace-locks.guard";
+#[cfg(unix)]
+const MAX_WORKSPACE_LOCK_FILES: usize = 4096;
+#[cfg(unix)]
 const MAX_STATE_OVERHEAD_FILES: usize = 32;
 
 #[cfg(unix)]
@@ -58,6 +62,15 @@ pub(crate) struct SessionRunLock {
     dir: Dir,
     name: String,
     remove_on_drop: bool,
+}
+
+pub(crate) struct WorkspaceRunLock(File);
+
+impl Drop for WorkspaceRunLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        let _ = rustix::fs::flock(&self.0, rustix::fs::FlockOperation::Unlock);
+    }
 }
 
 impl SessionRunLock {
@@ -147,6 +160,21 @@ impl StateRoot {
             Err(StoreError::InvalidStateDirectory)
         }
     }
+
+    pub(crate) fn lock_workspace(
+        &self,
+        identity: (u64, u64),
+    ) -> Result<WorkspaceRunLock, StoreError> {
+        #[cfg(unix)]
+        {
+            lock_workspace(identity)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = identity;
+            Err(StoreError::InvalidStateDirectory)
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -208,12 +236,52 @@ fn lock_session_with_limit(
 }
 
 #[cfg(unix)]
+fn lock_workspace(identity: (u64, u64)) -> Result<WorkspaceRunLock, StoreError> {
+    use rustix::fs::{FlockOperation, flock};
+
+    if identity.1 == 0 {
+        return Err(StoreError::InvalidStateDirectory);
+    }
+    let path = StateRoot::account_path()?.join("guard/workspace-locks");
+    let private = crate::private_fs::open_directory(&path, true)
+        .map_err(|_| StoreError::InvalidStateDirectory)?;
+    let dir = private.dir;
+    let _namespace = lock_named_namespace(&dir, WORKSPACE_LOCK_NAMESPACE_FILE)?;
+    let name = format!("workspace-{}-{}.lock", identity.0, identity.1);
+    let (file, _) = open_private_lock_file(&dir, &name, || {
+        check_named_lock_file_quota(&dir, "workspace-", MAX_WORKSPACE_LOCK_FILES)
+    })?;
+    match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => {}
+        Err(rustix::io::Errno::WOULDBLOCK) => return Err(StoreError::WorkspaceBusy),
+        Err(error) => return Err(StoreError::Io(io::Error::from(error))),
+    }
+    use cap_std::fs::MetadataExt;
+    let held = file.metadata()?;
+    let current = dir.symlink_metadata(&name)?;
+    if held.dev() != current.dev() || held.ino() != current.ino() {
+        return Err(StoreError::InvalidStateDirectory);
+    }
+    Ok(WorkspaceRunLock(file))
+}
+
+#[cfg(unix)]
 fn lock_namespace(dir: &Dir) -> Result<NamespaceLock, StoreError> {
     use rustix::fs::{FlockOperation, flock};
 
     let (file, _) = open_private_lock_file(dir, LOCK_NAMESPACE_FILE, || Ok(()))?;
     flock(&file, FlockOperation::LockExclusive)
         .map_err(|error| StoreError::Io(io::Error::from_raw_os_error(error.raw_os_error())))?;
+    Ok(NamespaceLock(file))
+}
+
+#[cfg(unix)]
+fn lock_named_namespace(dir: &Dir, name: &str) -> Result<NamespaceLock, StoreError> {
+    use rustix::fs::{FlockOperation, flock};
+
+    let (file, _) = open_private_lock_file(dir, name, || Ok(()))?;
+    flock(&file, FlockOperation::LockExclusive)
+        .map_err(|error| StoreError::Io(io::Error::from(error)))?;
     Ok(NamespaceLock(file))
 }
 
@@ -287,6 +355,32 @@ fn check_lock_file_quota(dir: &Dir, limit: usize) -> Result<(), StoreError> {
 }
 
 #[cfg(unix)]
+fn check_named_lock_file_quota(dir: &Dir, prefix: &str, limit: usize) -> Result<(), StoreError> {
+    if limit == 0 {
+        return Err(StoreError::StorageFull);
+    }
+    let mut entries = 0;
+    let mut lock_files = 0;
+    for entry in dir.entries()? {
+        entries += 1;
+        if entries > limit.saturating_add(MAX_STATE_OVERHEAD_FILES) {
+            return Err(StoreError::StorageFull);
+        }
+        if entry?
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(prefix) && name.ends_with(".lock"))
+        {
+            lock_files += 1;
+            if lock_files >= limit {
+                return Err(StoreError::StorageFull);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn remove_matching_file(dir: &Dir, name: &str, file: &File) {
     use cap_std::fs::MetadataExt;
 
@@ -302,6 +396,24 @@ fn remove_matching_file(dir: &Dir, name: &str, file: &File) {
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn workspace_writer_lock_is_shared_across_state_roots() {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let first = StateRoot::admit(&temp.path().join("state-a")).expect("first StateRoot");
+        let second = StateRoot::admit(&temp.path().join("state-b")).expect("second StateRoot");
+        let identity = (7, 11);
+
+        let writer = first.lock_workspace(identity).expect("first writer");
+        assert!(matches!(
+            second.lock_workspace(identity),
+            Err(StoreError::WorkspaceBusy)
+        ));
+        drop(writer);
+        second
+            .lock_workspace(identity)
+            .expect("writer after release");
+    }
 
     #[test]
     fn account_replacement_lock_is_private_bounded_and_reusable() {

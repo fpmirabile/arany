@@ -73,6 +73,12 @@ pub(crate) struct ExecArgs {
     pub effort: Option<Effort>,
     #[arg(long)]
     pub session_id: Option<String>,
+    #[arg(
+        long,
+        requires = "session_id",
+        help = "Explicitly resume an interrupted Goal in --session-id"
+    )]
+    pub resume_goal: Option<String>,
     #[arg(long, value_enum, default_value_t = OutputArg::Text)]
     pub output: OutputArg,
     #[arg(long, value_enum, default_value_t = CollaborationArg::Auto)]
@@ -90,6 +96,7 @@ struct Admission {
     state_dir: PathBuf,
     workspace: PathBuf,
     session_id: Option<SessionId>,
+    resume_goal: Option<arany::GoalId>,
     policy: CollaborationPolicy,
 }
 
@@ -137,12 +144,22 @@ impl ExecArgs {
             .as_deref()
             .map(SessionId::from_str)
             .transpose()?;
+        if self.resume_goal.is_some() && session_id.is_none() {
+            return Err("--resume-goal requires --session-id");
+        }
+        let resume_goal = self
+            .resume_goal
+            .as_deref()
+            .map(arany::GoalId::from_str)
+            .transpose()
+            .map_err(|_| "invalid Goal ID")?;
         let (workspace, state_dir) =
             super::admit_workspace(self.workspace.clone(), self.state_dir.clone())?;
         Ok(Admission {
             state_dir,
             workspace,
             session_id,
+            resume_goal,
             policy,
         })
     }
@@ -219,6 +236,11 @@ async fn run_with_provider<P: Provider + 'static>(
             )
             .map_err(|error| error.to_string())?;
     }
+    let goal = admission
+        .resume_goal
+        .map_or_else(arany::GoalRequest::default, |id| {
+            arany::GoalRequest::resume(id, arany::GoalPhase::Implementation, true)
+        });
     let result = engine
         .run(RunRequest {
             session_id: admission.session_id,
@@ -228,6 +250,7 @@ async fn run_with_provider<P: Provider + 'static>(
             workspace: admission.workspace,
             include_paths: args.include_paths,
             policy: admission.policy,
+            goal,
         })
         .await;
     engine
@@ -354,6 +377,7 @@ mod tests {
             model: "gpt-5.4".into(),
             effort: None,
             session_id: None,
+            resume_goal: None,
             output: OutputArg::Text,
             collaboration: CollaborationArg::Single,
             max_active_children: None,
@@ -361,6 +385,21 @@ mod tests {
             tools: false,
             prompt: prompt.into(),
         }
+    }
+
+    #[test]
+    fn interrupted_goal_resume_requires_an_explicit_session() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let mut args = args(
+            temp.path().join("state"),
+            temp.path().join("workspace"),
+            "resume",
+        );
+        args.resume_goal = Some(arany::GoalId::new().to_string());
+        assert_eq!(
+            args.admit().err(),
+            Some("--resume-goal requires --session-id")
+        );
     }
 
     fn scripted(
@@ -454,16 +493,19 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).expect("JSONL Event"))
             .collect();
-        assert_eq!(lines.len(), 7);
-        assert_eq!(lines[0]["kind"], "MessageAccepted");
-        assert_eq!(lines[0]["payload"]["text"], "@literal follow-up");
-        assert_eq!(lines[3]["kind"], "ProviderCallRecorded");
-        assert_eq!(lines[3]["payload"]["phase"], "root_plan");
-        assert_eq!(lines[3]["payload"]["disposition"], "finished");
-        assert_eq!(lines[3]["payload"]["response_id"], "resp_test");
-        assert_eq!(lines[3]["payload"]["input_tokens"], 20);
-        assert_eq!(lines[3]["payload"]["output_tokens"], 10);
-        assert_eq!(lines[6]["kind"], "RunFinished");
+        assert_eq!(lines.len(), 12);
+        assert_eq!(lines[0]["kind"], "GoalRunLinked");
+        assert_eq!(lines[1]["kind"], "MessageAccepted");
+        assert_eq!(lines[1]["payload"]["text"], "@literal follow-up");
+        assert_eq!(lines[5]["kind"], "GoalProviderCallReserved");
+        assert_eq!(lines[6]["kind"], "ProviderCallRecorded");
+        assert_eq!(lines[6]["payload"]["phase"], "root_plan");
+        assert_eq!(lines[6]["payload"]["disposition"], "finished");
+        assert_eq!(lines[6]["payload"]["response_id"], "resp_test");
+        assert_eq!(lines[6]["payload"]["input_tokens"], 20);
+        assert_eq!(lines[6]["payload"]["output_tokens"], 10);
+        assert_eq!(lines[9]["kind"], "RunFinished");
+        assert_eq!(lines[11]["kind"], "GoalFinished");
         assert!(
             lines
                 .iter()
@@ -584,11 +626,13 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).expect("new JSONL Event"))
             .collect();
-        assert_eq!(new_lines.len(), 8);
+        assert_eq!(new_lines.len(), 13);
         assert_eq!(new_lines[0]["kind"], "SessionStarted");
-        assert_eq!(new_lines[1]["kind"], "MessageAccepted");
-        assert_eq!(new_lines[1]["payload"]["text"], "//literal new");
-        assert_eq!(new_lines[7]["kind"], "RunFinished");
+        assert_eq!(new_lines[1]["kind"], "GoalRunLinked");
+        assert_eq!(new_lines[2]["kind"], "MessageAccepted");
+        assert_eq!(new_lines[2]["payload"]["text"], "//literal new");
+        assert_eq!(new_lines[10]["kind"], "RunFinished");
+        assert_eq!(new_lines[12]["kind"], "GoalFinished");
 
         let calls = observed.lock().expect("observations");
         assert_eq!(calls.len(), 3);

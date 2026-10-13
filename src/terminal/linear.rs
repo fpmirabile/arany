@@ -551,6 +551,7 @@ mod tests {
             lineage: None,
             runs: Vec::new(),
             compactions: Vec::new(),
+            goals: Vec::new(),
         };
         let mut linear = LinearState::new("screen-reader");
         let mut output = Vec::new();

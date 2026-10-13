@@ -276,6 +276,17 @@ impl ToolCall {
         )
     }
 
+    pub(crate) fn read_only(&self) -> bool {
+        matches!(
+            self,
+            Self::List { .. }
+                | Self::Read { .. }
+                | Self::Search { .. }
+                | Self::Skill { .. }
+                | Self::McpList { .. }
+        )
+    }
+
     pub(crate) fn label(&self) -> &'static str {
         match self {
             Self::List { .. } => "list",
@@ -549,7 +560,19 @@ impl ToolContext {
         json!({"catalog":catalog,"observations":observations})
     }
 
+    #[cfg(test)]
     pub(crate) fn outcome_branch(&self) -> Value {
+        self.outcome_branch_with_plan(false, None)
+            .into_iter()
+            .next()
+            .unwrap_or(Value::Null)
+    }
+
+    pub(crate) fn outcome_branch_with_plan(
+        &self,
+        require_plan_contract: bool,
+        budget: Option<&crate::session::GoalBudget>,
+    ) -> Vec<Value> {
         let catalog = super::skills::parse_json(self.catalog.as_bytes(), MAX_TOOL_CATALOG_BYTES)
             .unwrap_or(Value::Null);
         let mut branch = outcome_branch();
@@ -578,8 +601,125 @@ impl ToolContext {
                 call["properties"][field]["enum"] = json!(names);
                 true
             });
-        branch
+        let Some(schema) = require_plan_contract
+            .then(|| plan_contract_schema(budget))
+            .flatten()
+        else {
+            return vec![branch];
+        };
+        let calls = branch["properties"]["call"]["anyOf"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let mut discovery = Vec::new();
+        let mut planned = Vec::new();
+        for call in calls {
+            if call["properties"]["operation"]["enum"][0] == "mcp_list" {
+                discovery.push(call);
+            } else {
+                planned.push(call);
+            }
+        }
+        let mut branches = Vec::with_capacity(2);
+        if !discovery.is_empty() {
+            let mut discovery_branch = branch.clone();
+            discovery_branch["properties"]["call"]["anyOf"] = json!(discovery);
+            branches.push(discovery_branch);
+        }
+        if !planned.is_empty() {
+            let mut planned_branch = branch;
+            planned_branch["properties"]["call"]["anyOf"] = json!(planned);
+            planned_branch["properties"]
+                .as_object_mut()
+                .expect("Tool properties")
+                .insert("plan_contract".into(), schema);
+            planned_branch["required"]
+                .as_array_mut()
+                .expect("Tool required fields")
+                .push(json!("plan_contract"));
+            branches.push(planned_branch);
+        }
+        branches
     }
+}
+
+fn plan_contract_schema(budget: Option<&crate::session::GoalBudget>) -> Option<Value> {
+    let budget = budget?;
+    let calls = budget.max_provider_calls;
+    let active_ms = budget.max_active_ms;
+    let runs = budget.max_runs;
+    let max_tokens = budget.max_tokens.unwrap_or(u64::MAX);
+    let call_schema = outcome_branch()["properties"]["call"].clone();
+    Some(json!({
+        "type": "object",
+        "properties": {
+            "mission": {"type":"string", "minLength":1, "maxLength":2048},
+            "paths": {"type":"array", "maxItems":64, "items":{"type":"string", "maxLength":512}},
+            "commands": {"type":"array", "maxItems":8, "items":{"type":"string", "maxLength":64}},
+            "skills": {"type":"array", "maxItems":64, "items":{
+                "type":"object",
+                "properties": {
+                    "name":{"type":"string", "minLength":1, "maxLength":64},
+                    "resource":{"type":["string", "null"], "minLength":1, "maxLength":512},
+                },
+                "required":["name","resource"],
+                "additionalProperties":false
+            }},
+            "mcp_tools": {"type":"array", "maxItems":64, "items":{
+                "type":"object",
+                "properties": {
+                    "server":{"type":"string", "minLength":1, "maxLength":64},
+                    "tool":{"type":"string", "minLength":1, "maxLength":128},
+                },
+                "required":["server","tool"],
+                "additionalProperties":false
+            }},
+            "success_criterion": {"anyOf":[
+                {
+                    "type":"object",
+                    "properties":{
+                        "kind":{"type":"string","enum":["tool_call_succeeded"]},
+                        "call":call_schema
+                    },
+                    "required":["kind","call"],
+                    "additionalProperties":false
+                },
+                {
+                    "type":"object",
+                    "properties":{
+                        "kind":{"type":"string","enum":["workspace_file_digest"]},
+                        "path":{"type":"string","minLength":1,"maxLength":512},
+                        "sha256":{"type":"string","minLength":64,"maxLength":64}
+                    },
+                    "required":["kind","path","sha256"],
+                    "additionalProperties":false
+                },
+                {
+                    "type":"object",
+                    "properties":{
+                        "kind":{"type":"string","enum":["workspace_file_content"]},
+                        "path":{"type":"string","minLength":1,"maxLength":512},
+                        "content":{"type":"string","maxLength":8192}
+                    },
+                    "required":["kind","path","content"],
+                    "additionalProperties":false
+                }
+            ]},
+            "budget": {
+                "type":"object",
+                "properties": {
+                    "max_provider_calls": {"type":"integer", "minimum":1, "maximum":calls},
+                    "max_tokens": {"type":["integer","null"], "minimum":1, "maximum":max_tokens},
+                    "max_active_ms": {"type":"integer", "minimum":1, "maximum":active_ms},
+                    "max_runs": {"type":"integer", "minimum":1, "maximum":runs}
+                },
+                "required":["max_provider_calls","max_tokens","max_active_ms","max_runs"],
+                "additionalProperties":false
+            }
+        },
+        "required":["mission","paths","commands","skills","mcp_tools","success_criterion","budget"],
+        "additionalProperties":false
+    }))
 }
 
 pub(crate) fn outcome_branch() -> Value {

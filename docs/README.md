@@ -31,7 +31,8 @@ Specs state the agreed contract. Source and tests establish implementation and e
 | Task | Read first | Related boundary |
 |---|---|---|
 | Terminal interaction, draft retention, selectors, accessibility or output | [Terminal spec](./specs/terminal.md), [terminal rules](../agents/terminal.md) | [CLI](../agents/cli.md), [history](../agents/history.md); clipboard/image rules when involved |
-| Session lifecycle, teams, context or compaction | [Execution spec](./specs/execution.md), [Session rules](../agents/session.md), [Engine rules](../agents/engine.md) | [Store](../agents/store.md), Provider and terminal for cross-boundary changes |
+| Goal lifecycle, task budgets, plan contracts or recovery | [Goals spec](./specs/goals.md), [Engine rules](../agents/engine.md) | [Session](../agents/session.md), [Store](../agents/store.md), [CLI](../agents/cli.md), Provider and Tools for cross-boundary changes |
+| Run coordination, teams, context or compaction | [Execution spec](./specs/execution.md), [Session rules](../agents/session.md), [Engine rules](../agents/engine.md) | [Store](../agents/store.md), Provider and terminal for cross-boundary changes |
 | Provider, model or billing route | [Provider rules](../agents/provider.md) | [Credential spec](./specs/credentials.md), [ChatGPT](../agents/chatgpt.md), [security](../agents/security.md) |
 | Saved accounts, OS-store authorization, storage or recovery | [Credential spec](./specs/credentials.md), [credential rules](../agents/credentials.md) | [ChatGPT](../agents/chatgpt.md), [Store](../agents/store.md), [terminal](./specs/terminal.md), [security](../agents/security.md) |
 | Model-driven Tools, commands, Skills or MCP | [Tool spec](./specs/tools.md), [Tool rules](../agents/tools.md), [Guard rules](../agents/guard.md), [tool guide](./tools.md) | Engine, Provider, Session, Store and security |

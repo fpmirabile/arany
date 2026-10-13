@@ -66,6 +66,14 @@ impl<P: Provider + 'static> Engine<P> {
             return Err(EngineError::CompactionNotIdle);
         }
         let covered_run_id = last_run.id;
+        let goal_id = view
+            .goals
+            .last()
+            .filter(|goal| {
+                goal.status == crate::session::GoalStatus::Running
+                    && goal.run_ids.last() == Some(&covered_run_id)
+            })
+            .map(|goal| goal.id);
         let covered_sequence = events
             .iter()
             .rev()
@@ -95,7 +103,9 @@ impl<P: Provider + 'static> Engine<P> {
         {
             return Err(EngineError::CompactionLimit);
         }
-        self.store.admit_operation(session_id, 1).await?;
+        self.store
+            .admit_operation(session_id, 1 + usize::from(goal_id.is_some()))
+            .await?;
         let source_digest =
             prefix_digest(&events, covered_sequence).map_err(|_| EngineError::InvalidHistory)?;
         let prepared = PreparedCompaction::prepare(&view).map_err(|error| match error {
@@ -117,6 +127,19 @@ impl<P: Provider + 'static> Engine<P> {
             items: prepared.items,
             max_output_tokens: MAX_COMPACTION_OUTPUT_TOKENS,
         };
+        if let Some(goal_id) = goal_id {
+            let reserved = self
+                .store
+                .append(
+                    session_id,
+                    Event::GoalCompactionCallReserved {
+                        goal_id,
+                        run_id: covered_run_id,
+                    },
+                )
+                .await?;
+            crate::diagnostics::event_failure(&reserved.event);
+        }
         let provider_trace = trace.begin_provider(&selection.model);
         let response =
             tokio::time::timeout(COMPACTION_CALL_DEADLINE, self.provider.compact(request)).await;

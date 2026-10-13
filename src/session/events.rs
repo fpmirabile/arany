@@ -1,6 +1,6 @@
 use crate::provider::AgentPhase;
 use serde::{Deserialize, Serialize};
-use std::{fmt, str::FromStr};
+use std::{fmt, path::Path, str::FromStr};
 use uuid::{Uuid, Version};
 
 fn parse_v7(value: &str) -> Result<Uuid, &'static str> {
@@ -62,6 +62,629 @@ impl FromStr for RunId {
     type Err = &'static str;
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         parse_v7(value).map(Self)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct GoalId(Uuid);
+
+impl GoalId {
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+
+    fn valid(self) -> bool {
+        self.0.get_version() == Some(Version::SortRand)
+    }
+}
+impl Default for GoalId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl fmt::Display for GoalId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl FromStr for GoalId {
+    type Err = &'static str;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        parse_v7(value).map(Self)
+    }
+}
+
+pub const MAX_GOAL_PROVIDER_CALLS: u32 = 64;
+pub const MAX_GOAL_ACTIVE_MS: u64 = 30 * 60 * 1000;
+pub const MAX_GOAL_RUNS: u8 = 16;
+pub const MAX_GOAL_PLAN_PATHS: usize = 64;
+pub const MAX_GOAL_PLAN_COMMANDS: usize = 8;
+pub const MAX_GOAL_PLAN_MCP_TOOLS: usize = 64;
+pub const MAX_GOAL_PLAN_SKILLS: usize = 64;
+pub const MAX_GOAL_REPORT_BYTES: usize = 8 * 1024;
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoalBudget {
+    pub max_provider_calls: u32,
+    pub max_tokens: Option<u64>,
+    pub max_active_ms: u64,
+    pub max_runs: u8,
+}
+
+impl Default for GoalBudget {
+    fn default() -> Self {
+        Self {
+            max_provider_calls: MAX_GOAL_PROVIDER_CALLS,
+            max_tokens: None,
+            max_active_ms: MAX_GOAL_ACTIVE_MS,
+            max_runs: MAX_GOAL_RUNS,
+        }
+    }
+}
+
+impl GoalBudget {
+    pub(crate) fn validate(&self) -> Result<(), ReplayError> {
+        if self.max_provider_calls == 0
+            || self.max_provider_calls > MAX_GOAL_PROVIDER_CALLS
+            || self.max_tokens.is_some_and(|tokens| tokens == 0)
+            || self.max_active_ms == 0
+            || self.max_active_ms > MAX_GOAL_ACTIVE_MS
+            || self.max_runs == 0
+            || self.max_runs > MAX_GOAL_RUNS
+        {
+            return Err(ReplayError::InvalidPayload);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn is_within(&self, pinned: &Self) -> bool {
+        self.max_provider_calls <= pinned.max_provider_calls
+            && self.max_active_ms <= pinned.max_active_ms
+            && self.max_runs <= pinned.max_runs
+            && match (self.max_tokens, pinned.max_tokens) {
+                (None, None) | (Some(_), None) => true,
+                (Some(candidate), Some(pinned)) => candidate <= pinned,
+                (None, Some(_)) => false,
+            }
+    }
+
+    pub(crate) fn event_slots(
+        &self,
+        max_children: u8,
+        tools_enabled: bool,
+        previews_enabled: bool,
+    ) -> Option<usize> {
+        let runs = usize::from(self.max_runs);
+        let providers = usize::try_from(self.max_provider_calls).ok()?;
+        let per_run = 9 + usize::from(max_children).checked_mul(2)?;
+        let lifecycle = runs.checked_mul(per_run)?;
+        let display = if previews_enabled {
+            runs.checked_mul(MAX_DISPLAY_CHUNKS)?
+        } else {
+            0
+        };
+        let tool_events = if tools_enabled {
+            providers.checked_mul(4)?
+        } else {
+            0
+        };
+        lifecycle
+            .checked_add(providers)?
+            .checked_add(providers)?
+            .checked_add(display)?
+            .checked_add(tool_events)?
+            .checked_add(super::MAX_COMPACTIONS)?
+            .checked_add(runs.saturating_sub(1))?
+            .checked_add(usize::from(tools_enabled))?
+            .checked_add(2)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalPhase {
+    Research,
+    Plan,
+    Implementation,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalStatus {
+    Running,
+    Interrupted,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoalPlanContract {
+    pub mission: String,
+    pub paths: Vec<String>,
+    pub commands: Vec<String>,
+    pub skills: Vec<GoalSkillBinding>,
+    pub mcp_tools: Vec<GoalMcpTool>,
+    pub success_criterion: GoalSuccessCriterion,
+    pub budget: GoalBudget,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GoalSuccessCriterion {
+    ToolCallSucceeded { call: Box<crate::tools::ToolCall> },
+    WorkspaceFileDigest { path: String, sha256: String },
+    WorkspaceFileContent { path: String, content: String },
+}
+
+impl GoalPlanContract {
+    pub(crate) fn matches_success(&self, observations: &[crate::tools::ToolObservation]) -> bool {
+        use crate::tools::{ToolCall, ToolDisposition};
+
+        match &self.success_criterion {
+            GoalSuccessCriterion::ToolCallSucceeded { call } => {
+                let Some(observation) = observations
+                    .iter()
+                    .rev()
+                    .find(|observation| observation.intent.call == **call)
+                    .filter(|observation| {
+                        observation.disposition == ToolDisposition::Succeeded
+                            && observation.attested_for(&observation.intent)
+                    })
+                else {
+                    return false;
+                };
+                if let ToolCall::Command { .. } = &**call {
+                    let Ok(result) = serde_json::from_str::<crate::tools::types::CommandResult>(
+                        &observation.output,
+                    ) else {
+                        return false;
+                    };
+                    result.valid()
+                        && result.exit_code == Some(0)
+                        && (result.changeset.files.is_empty()
+                            || observations
+                                .iter()
+                                .rev()
+                                .find(|integration| {
+                                    matches!(
+                                        integration.intent.call,
+                                        ToolCall::ApplyChangeset {
+                                            source_intent_digest,
+                                            ..
+                                        } if source_intent_digest == observation.intent.digest()
+                                    )
+                                })
+                                .is_some_and(|integration| {
+                                    integration.disposition == ToolDisposition::Succeeded
+                                        && integration.attested_for(&integration.intent)
+                                }))
+                } else {
+                    true
+                }
+            }
+            GoalSuccessCriterion::WorkspaceFileDigest { path, sha256 } => {
+                file_digest_observed(observations, path).as_deref() == Some(sha256)
+            }
+            GoalSuccessCriterion::WorkspaceFileContent { path, content } => {
+                let expected = crate::tools::types::hex_digest(content.as_bytes());
+                file_digest_observed(observations, path).as_deref() == Some(&expected)
+            }
+        }
+    }
+}
+
+fn file_digest_observed(
+    observations: &[crate::tools::ToolObservation],
+    path: &str,
+) -> Option<String> {
+    use crate::tools::{ToolCall, ToolDisposition};
+
+    for observation in observations.iter().rev() {
+        let digest = match &observation.intent.call {
+            ToolCall::Read { path: observed, .. }
+            | ToolCall::Write { path: observed, .. }
+            | ToolCall::Edit { path: observed, .. }
+                if observed == path =>
+            {
+                Some(
+                    serde_json::from_str::<serde_json::Value>(&observation.output)
+                        .ok()?
+                        .get("sha256")?
+                        .as_str()?
+                        .to_owned(),
+                )
+            }
+            ToolCall::ApplyChangeset { changeset, .. } => {
+                let Some(change) = changeset.files.iter().find(|change| change.path == path) else {
+                    continue;
+                };
+                change.after.as_ref().map(|version| version.sha256.clone())
+            }
+            ToolCall::McpCall { .. } => return None,
+            _ => continue,
+        };
+        if observation.disposition != ToolDisposition::Succeeded
+            || !observation.attested_for(&observation.intent)
+        {
+            return None;
+        }
+        return digest;
+    }
+    None
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoalMcpTool {
+    pub server: String,
+    pub tool: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoalSkillBinding {
+    pub name: String,
+    #[serde(deserialize_with = "required_nullable")]
+    pub resource: Option<String>,
+}
+
+fn required_nullable<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(deserializer)
+}
+
+#[cfg(test)]
+mod goal_success_tests {
+    use super::*;
+    use crate::tools::{
+        EffectIntent, GuardReceipt, ToolCall, ToolDisposition, ToolLimits, ToolObservation,
+    };
+
+    fn observation(
+        call: ToolCall,
+        disposition: ToolDisposition,
+        output: String,
+    ) -> ToolObservation {
+        let intent = EffectIntent {
+            id: Uuid::now_v7(),
+            run_id: RunId::new(),
+            agent_run_id: AgentRunId::new(),
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call,
+            limits: ToolLimits::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        };
+        ToolObservation {
+            guard: Some(GuardReceipt {
+                contract_version: 1,
+                intent_digest: intent.digest(),
+                enforcement_digest: intent.enforcement_digest,
+                limits: intent.limits.clone(),
+            }),
+            intent,
+            disposition,
+            output,
+        }
+    }
+
+    fn criterion(criterion: GoalSuccessCriterion) -> GoalPlanContract {
+        GoalPlanContract {
+            mission: "Verify the requested result".into(),
+            paths: Vec::new(),
+            commands: Vec::new(),
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: criterion,
+            budget: GoalBudget::default(),
+        }
+    }
+
+    #[test]
+    fn later_failed_receipt_invalidates_an_earlier_matching_call() {
+        let call = ToolCall::Read {
+            path: "src/main.rs".into(),
+            offset: 0,
+            limit: 1024,
+        };
+        let contract = criterion(GoalSuccessCriterion::ToolCallSucceeded {
+            call: Box::new(call.clone()),
+        });
+        let observations = [
+            observation(call.clone(), ToolDisposition::Succeeded, "{}".into()),
+            observation(call, ToolDisposition::Failed, "".into()),
+        ];
+        assert!(!contract.matches_success(&observations));
+    }
+
+    #[test]
+    fn skill_only_plan_requires_an_exact_binding_and_successful_receipt() {
+        let call = ToolCall::Skill {
+            name: "review".into(),
+            resource: None,
+        };
+        let contract = GoalPlanContract {
+            mission: "Read the requested Skill guidance".into(),
+            paths: Vec::new(),
+            commands: Vec::new(),
+            skills: vec![GoalSkillBinding {
+                name: "review".into(),
+                resource: None,
+            }],
+            mcp_tools: Vec::new(),
+            success_criterion: GoalSuccessCriterion::ToolCallSucceeded {
+                call: Box::new(call.clone()),
+            },
+            budget: GoalBudget::default(),
+        };
+        assert!(contract.validate().is_ok());
+        assert!(contract.allows_call(&call));
+        assert!(contract.allows_call(&ToolCall::Skill {
+            name: "review".into(),
+            resource: Some("SKILL.md".into()),
+        }));
+        let success = observation(
+            call.clone(),
+            ToolDisposition::Succeeded,
+            "review guidance".into(),
+        );
+        assert!(contract.matches_success(std::slice::from_ref(&success)));
+        assert!(!contract.matches_success(&[
+            success,
+            observation(call.clone(), ToolDisposition::Failed, "failed".into()),
+        ]));
+        let resource_call = ToolCall::Skill {
+            name: "review".into(),
+            resource: Some("references/checklist.md".into()),
+        };
+        let mut resource_contract = contract.clone();
+        resource_contract.skills[0].resource = Some("references/checklist.md".into());
+        resource_contract.success_criterion = GoalSuccessCriterion::ToolCallSucceeded {
+            call: Box::new(resource_call.clone()),
+        };
+        assert!(resource_contract.validate().is_ok());
+        assert!(resource_contract.matches_success(&[observation(
+            resource_call,
+            ToolDisposition::Succeeded,
+            "checklist".into(),
+        )]));
+        let mut missing_resource = serde_json::to_value(&contract).unwrap();
+        missing_resource["skills"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("resource");
+        assert!(serde_json::from_value::<GoalPlanContract>(missing_resource).is_err());
+
+        let wrong_resource = ToolCall::Skill {
+            name: "review".into(),
+            resource: Some("references/other.md".into()),
+        };
+        let undeclared_skill = ToolCall::Skill {
+            name: "other".into(),
+            resource: None,
+        };
+        assert!(!contract.allows_call(&wrong_resource));
+        assert!(!contract.allows_call(&undeclared_skill));
+        let mut invalid = contract;
+        invalid.success_criterion = GoalSuccessCriterion::ToolCallSucceeded {
+            call: Box::new(wrong_resource),
+        };
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn later_file_edit_invalidates_an_earlier_matching_read() {
+        let expected = crate::tools::types::hex_digest(b"before");
+        let contract = criterion(GoalSuccessCriterion::WorkspaceFileDigest {
+            path: "src/main.rs".into(),
+            sha256: expected,
+        });
+        let observations = [
+            observation(
+                ToolCall::Read {
+                    path: "src/main.rs".into(),
+                    offset: 0,
+                    limit: 1024,
+                },
+                ToolDisposition::Succeeded,
+                serde_json::json!({
+                    "sha256": crate::tools::types::hex_digest(b"before")
+                })
+                .to_string(),
+            ),
+            observation(
+                ToolCall::Write {
+                    path: "src/main.rs".into(),
+                    expected_digest: None,
+                    content: "after".into(),
+                },
+                ToolDisposition::Succeeded,
+                serde_json::json!({
+                    "sha256": crate::tools::types::hex_digest(b"after")
+                })
+                .to_string(),
+            ),
+        ];
+        assert!(!contract.matches_success(&observations));
+    }
+}
+
+impl GoalPlanContract {
+    pub(crate) fn allows_call(&self, call: &crate::tools::ToolCall) -> bool {
+        use crate::tools::ToolCall;
+        match call {
+            ToolCall::List { path }
+            | ToolCall::Read { path, .. }
+            | ToolCall::Search { path, .. }
+            | ToolCall::Mkdir { path }
+            | ToolCall::Write { path, .. }
+            | ToolCall::Edit { path, .. } => self.allows_path(path),
+            ToolCall::Command { program, .. } => self.commands.contains(program),
+            ToolCall::ApplyChangeset { changeset, .. } => changeset
+                .files
+                .iter()
+                .all(|change| self.allows_path(&change.path)),
+            ToolCall::McpCall { server, tool, .. } => self
+                .mcp_tools
+                .iter()
+                .any(|binding| binding.server == *server && binding.tool == *tool),
+            ToolCall::Skill { name, resource } => self.skills.iter().any(|binding| {
+                binding.name == *name
+                    && binding.resource.as_deref().unwrap_or("SKILL.md")
+                        == resource.as_deref().unwrap_or("SKILL.md")
+            }),
+            ToolCall::McpList { .. } => true,
+        }
+    }
+
+    fn allows_path(&self, path: &str) -> bool {
+        self.paths.iter().any(|scope| {
+            scope == "."
+                || Path::new(path) == Path::new(scope)
+                || Path::new(path).starts_with(scope)
+        })
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ReplayError> {
+        if self.paths.is_empty()
+            && self.commands.is_empty()
+            && self.skills.is_empty()
+            && self.mcp_tools.is_empty()
+            || self.paths.len() > MAX_GOAL_PLAN_PATHS
+            || self.commands.len() > MAX_GOAL_PLAN_COMMANDS
+            || self.paths.windows(2).any(|pair| pair[0] >= pair[1])
+            || self.commands.windows(2).any(|pair| pair[0] >= pair[1])
+            || self.mcp_tools.len() > MAX_GOAL_PLAN_MCP_TOOLS
+            || self.skills.len() > MAX_GOAL_PLAN_SKILLS
+            || self.skills.windows(2).any(|pair| {
+                (
+                    pair[0].name.as_str(),
+                    pair[0].resource.as_deref().unwrap_or("SKILL.md"),
+                ) >= (
+                    pair[1].name.as_str(),
+                    pair[1].resource.as_deref().unwrap_or("SKILL.md"),
+                )
+            })
+            || self
+                .mcp_tools
+                .windows(2)
+                .any(|pair| (&pair[0].server, &pair[0].tool) >= (&pair[1].server, &pair[1].tool))
+        {
+            return Err(ReplayError::InvalidPayload);
+        }
+        if !serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= 8 * 1024) {
+            return Err(ReplayError::InvalidPayload);
+        }
+        bounded(&self.mission, 2048)?;
+        match &self.success_criterion {
+            GoalSuccessCriterion::ToolCallSucceeded { call } => {
+                if !call.valid()
+                    || matches!(
+                        call.as_ref(),
+                        crate::tools::ToolCall::List { .. }
+                            | crate::tools::ToolCall::Read { .. }
+                            | crate::tools::ToolCall::Search { .. }
+                            | crate::tools::ToolCall::ApplyChangeset { .. }
+                            | crate::tools::ToolCall::McpList { .. }
+                    )
+                {
+                    return Err(ReplayError::InvalidPayload);
+                }
+            }
+            GoalSuccessCriterion::WorkspaceFileDigest { path, sha256 } => {
+                if !crate::tools::types::valid_relative(path, false)
+                    || !crate::tools::types::valid_digest(sha256)
+                {
+                    return Err(ReplayError::InvalidPayload);
+                }
+            }
+            GoalSuccessCriterion::WorkspaceFileContent { path, content } => {
+                if !crate::tools::types::valid_relative(path, false) || content.len() > 8 * 1024 {
+                    return Err(ReplayError::InvalidPayload);
+                }
+            }
+        }
+        if self.paths.iter().any(|path| {
+            path != "." && !crate::tools::types::valid_relative(path, false)
+                || path.len() > 512
+                || self
+                    .paths
+                    .iter()
+                    .any(|other| other != path && Path::new(path).starts_with(other))
+        }) || self.paths.contains(&".".to_owned()) && self.paths.len() != 1
+            || self
+                .commands
+                .iter()
+                .any(|command| !crate::tools::types::valid_name(command) || command.len() > 64)
+            || self.skills.iter().any(|binding| {
+                !crate::tools::types::valid_name(&binding.name)
+                    || binding.name.len() > 64
+                    || binding.resource.as_ref().is_some_and(|resource| {
+                        !crate::tools::types::valid_relative(resource, false)
+                    })
+            })
+            || self.mcp_tools.iter().any(|binding| {
+                !crate::tools::types::valid_name(&binding.server)
+                    || binding.server.len() > 64
+                    || !crate::tools::types::valid_name(&binding.tool)
+                    || binding.tool.len() > 128
+            })
+        {
+            return Err(ReplayError::InvalidPayload);
+        }
+        match &self.success_criterion {
+            GoalSuccessCriterion::ToolCallSucceeded { call } if !self.allows_call(call) => {
+                return Err(ReplayError::InvalidPayload);
+            }
+            GoalSuccessCriterion::WorkspaceFileDigest { path, .. }
+            | GoalSuccessCriterion::WorkspaceFileContent { path, .. }
+                if !self.allows_path(path) =>
+            {
+                return Err(ReplayError::InvalidPayload);
+            }
+            _ => {}
+        }
+        self.budget.validate()?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoalReport {
+    pub summary: String,
+    pub changes: Vec<String>,
+    pub evidence: Vec<String>,
+    pub unresolved: Vec<String>,
+}
+
+impl GoalReport {
+    pub(crate) fn validate(&self) -> Result<(), ReplayError> {
+        for item in [&self.summary]
+            .into_iter()
+            .chain(self.changes.iter())
+            .chain(self.evidence.iter())
+            .chain(self.unresolved.iter())
+        {
+            bounded(item, 2048)?;
+        }
+        if self.changes.len() > 32
+            || self.evidence.len() > 32
+            || self.unresolved.len() > 32
+            || serde_json::to_vec(self).map_or(true, |bytes| bytes.len() > MAX_GOAL_REPORT_BYTES)
+        {
+            return Err(ReplayError::InvalidPayload);
+        }
+        Ok(())
     }
 }
 
@@ -1010,6 +1633,43 @@ pub enum Event {
     SessionRenamed {
         title: String,
     },
+    GoalStarted {
+        goal_id: GoalId,
+        objective: String,
+        workspace_identity: (u64, u64),
+        budget: GoalBudget,
+    },
+    GoalRunLinked {
+        goal_id: GoalId,
+        run_id: RunId,
+        phase: GoalPhase,
+    },
+    GoalResumed {
+        goal_id: GoalId,
+    },
+    GoalActiveTimeReserved {
+        goal_id: GoalId,
+        run_id: RunId,
+        reserved_ms: u64,
+    },
+    GoalActiveTimeSettled {
+        goal_id: GoalId,
+        run_id: RunId,
+        active_ms: u64,
+    },
+    GoalPlanContractRecorded {
+        goal_id: GoalId,
+        run_id: RunId,
+        contract: GoalPlanContract,
+        active_ms: u64,
+        reserved_ms: u64,
+    },
+    GoalFinished {
+        goal_id: GoalId,
+        status: GoalStatus,
+        active_ms: u64,
+        report: GoalReport,
+    },
     MessageAccepted {
         run_id: RunId,
         text: String,
@@ -1030,6 +1690,15 @@ pub enum Event {
         run_id: RunId,
         agent_run_id: AgentRunId,
         record: ProviderCallRecord,
+    },
+    GoalProviderCallReserved {
+        goal_id: GoalId,
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+    },
+    GoalCompactionCallReserved {
+        goal_id: GoalId,
+        run_id: RunId,
     },
     AssistantDisplayRecorded {
         run_id: RunId,
@@ -1128,6 +1797,53 @@ struct MessagePayload {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct GoalStartedPayload {
+    goal_id: GoalId,
+    objective: String,
+    workspace_device: u64,
+    workspace_inode: u64,
+    budget: GoalBudget,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoalRunPayload {
+    goal_id: GoalId,
+    phase: GoalPhase,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoalActiveTimePayload {
+    goal_id: GoalId,
+    active_ms: u64,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoalIdPayload {
+    goal_id: GoalId,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoalContractPayload {
+    goal_id: GoalId,
+    contract: GoalPlanContract,
+    active_ms: u64,
+    reserved_ms: u64,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoalFinishedPayload {
+    goal_id: GoalId,
+    status: GoalStatus,
+    active_ms: u64,
+    report: GoalReport,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoalProviderCallPayload {
+    goal_id: GoalId,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SpawnPayload {
     role: AgentRole,
     ordinal: u8,
@@ -1170,10 +1886,19 @@ impl Event {
             Self::SessionForked { .. } => "SessionForked",
             Self::ContextCompacted { .. } => "ContextCompacted",
             Self::SessionRenamed { .. } => "SessionRenamed",
+            Self::GoalStarted { .. } => "GoalStarted",
+            Self::GoalRunLinked { .. } => "GoalRunLinked",
+            Self::GoalResumed { .. } => "GoalResumed",
+            Self::GoalActiveTimeReserved { .. } => "GoalActiveTimeReserved",
+            Self::GoalActiveTimeSettled { .. } => "GoalActiveTimeSettled",
+            Self::GoalPlanContractRecorded { .. } => "GoalPlanContractRecorded",
+            Self::GoalFinished { .. } => "GoalFinished",
             Self::MessageAccepted { .. } => "MessageAccepted",
             Self::RunStarted { .. } => "RunStarted",
             Self::AgentSpawned { .. } => "AgentSpawned",
             Self::ProviderCallRecorded { .. } => "ProviderCallRecorded",
+            Self::GoalProviderCallReserved { .. } => "GoalProviderCallReserved",
+            Self::GoalCompactionCallReserved { .. } => "GoalCompactionCallReserved",
             Self::AssistantDisplayRecorded { .. } => "AssistantDisplayRecorded",
             Self::ToolStarted { .. } => "ToolStarted",
             Self::ToolFinished { .. } => "ToolFinished",
@@ -1189,8 +1914,16 @@ impl Event {
             | Self::SessionDefaultChanged { .. }
             | Self::SessionForked { .. }
             | Self::ContextCompacted { .. }
-            | Self::SessionRenamed { .. } => (None, None),
-            Self::MessageAccepted { run_id, .. }
+            | Self::SessionRenamed { .. }
+            | Self::GoalStarted { .. }
+            | Self::GoalResumed { .. }
+            | Self::GoalFinished { .. } => (None, None),
+            Self::GoalRunLinked { run_id, .. }
+            | Self::GoalActiveTimeReserved { run_id, .. }
+            | Self::GoalActiveTimeSettled { run_id, .. }
+            | Self::GoalPlanContractRecorded { run_id, .. }
+            | Self::GoalCompactionCallReserved { run_id, .. }
+            | Self::MessageAccepted { run_id, .. }
             | Self::RunStarted { run_id, .. }
             | Self::MessageCommitted { run_id, .. }
             | Self::RunFinished { run_id, .. } => (Some(*run_id), None),
@@ -1200,6 +1933,11 @@ impl Event {
                 ..
             }
             | Self::ProviderCallRecorded {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::GoalProviderCallReserved {
                 run_id,
                 agent_run_id,
                 ..
@@ -1256,6 +1994,61 @@ impl Event {
                 prefix_digest: *prefix_digest,
             }),
             Self::ContextCompacted { record } => serialize(record),
+            Self::GoalStarted {
+                goal_id,
+                objective,
+                workspace_identity: (workspace_device, workspace_inode),
+                budget,
+                ..
+            } => serialize(&GoalStartedPayload {
+                goal_id: *goal_id,
+                objective: objective.clone(),
+                workspace_device: *workspace_device,
+                workspace_inode: *workspace_inode,
+                budget: budget.clone(),
+            }),
+            Self::GoalRunLinked { goal_id, phase, .. } => serialize(&GoalRunPayload {
+                goal_id: *goal_id,
+                phase: *phase,
+            }),
+            Self::GoalResumed { goal_id } => serialize(&GoalIdPayload { goal_id: *goal_id }),
+            Self::GoalActiveTimeReserved {
+                goal_id,
+                reserved_ms,
+                ..
+            } => serialize(&GoalActiveTimePayload {
+                goal_id: *goal_id,
+                active_ms: *reserved_ms,
+            }),
+            Self::GoalActiveTimeSettled {
+                goal_id, active_ms, ..
+            } => serialize(&GoalActiveTimePayload {
+                goal_id: *goal_id,
+                active_ms: *active_ms,
+            }),
+            Self::GoalPlanContractRecorded {
+                goal_id,
+                contract,
+                active_ms,
+                reserved_ms,
+                ..
+            } => serialize(&GoalContractPayload {
+                goal_id: *goal_id,
+                contract: contract.clone(),
+                active_ms: *active_ms,
+                reserved_ms: *reserved_ms,
+            }),
+            Self::GoalFinished {
+                goal_id,
+                status,
+                active_ms,
+                report,
+            } => serialize(&GoalFinishedPayload {
+                goal_id: *goal_id,
+                status: *status,
+                active_ms: *active_ms,
+                report: report.clone(),
+            }),
             Self::MessageAccepted { text, images, .. } => serialize(&MessagePayload {
                 text: text.clone(),
                 images: images.clone(),
@@ -1273,6 +2066,12 @@ impl Event {
                 objective: objective.clone(),
             }),
             Self::ProviderCallRecorded { record, .. } => serialize(record),
+            Self::GoalProviderCallReserved { goal_id, .. } => {
+                serialize(&GoalProviderCallPayload { goal_id: *goal_id })
+            }
+            Self::GoalCompactionCallReserved { goal_id, .. } => {
+                serialize(&GoalIdPayload { goal_id: *goal_id })
+            }
             Self::AssistantDisplayRecorded { chunk, .. } => serialize(chunk),
             Self::ToolStarted { intent, .. } => serialize(intent),
             Self::ToolFinished { observation, .. } => serialize(observation),
@@ -1335,6 +2134,61 @@ impl Event {
                     title: parse::<TitlePayload>(payload)?.title,
                 }
             }
+            "GoalStarted" if run_id.is_none() && agent_run_id.is_none() => {
+                let data: GoalStartedPayload = parse(payload)?;
+                Self::GoalStarted {
+                    goal_id: data.goal_id,
+                    objective: data.objective,
+                    workspace_identity: (data.workspace_device, data.workspace_inode),
+                    budget: data.budget,
+                }
+            }
+            "GoalRunLinked" if run_id.is_some() && agent_run_id.is_none() => {
+                let data: GoalRunPayload = parse(payload)?;
+                Self::GoalRunLinked {
+                    goal_id: data.goal_id,
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    phase: data.phase,
+                }
+            }
+            "GoalResumed" if run_id.is_none() && agent_run_id.is_none() => Self::GoalResumed {
+                goal_id: parse::<GoalIdPayload>(payload)?.goal_id,
+            },
+            "GoalActiveTimeReserved" if run_id.is_some() && agent_run_id.is_none() => {
+                let data: GoalActiveTimePayload = parse(payload)?;
+                Self::GoalActiveTimeReserved {
+                    goal_id: data.goal_id,
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    reserved_ms: data.active_ms,
+                }
+            }
+            "GoalActiveTimeSettled" if run_id.is_some() && agent_run_id.is_none() => {
+                let data: GoalActiveTimePayload = parse(payload)?;
+                Self::GoalActiveTimeSettled {
+                    goal_id: data.goal_id,
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    active_ms: data.active_ms,
+                }
+            }
+            "GoalPlanContractRecorded" if run_id.is_some() && agent_run_id.is_none() => {
+                let data: GoalContractPayload = parse(payload)?;
+                Self::GoalPlanContractRecorded {
+                    goal_id: data.goal_id,
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    contract: data.contract,
+                    active_ms: data.active_ms,
+                    reserved_ms: data.reserved_ms,
+                }
+            }
+            "GoalFinished" if run_id.is_none() && agent_run_id.is_none() => {
+                let data: GoalFinishedPayload = parse(payload)?;
+                Self::GoalFinished {
+                    goal_id: data.goal_id,
+                    status: data.status,
+                    active_ms: data.active_ms,
+                    report: data.report,
+                }
+            }
             "MessageAccepted" if run_id.is_some() && agent_run_id.is_none() => {
                 let data: MessagePayload = parse(payload)?;
                 Self::MessageAccepted {
@@ -1374,6 +2228,19 @@ impl Event {
                     record: parse(payload)?,
                 }
             }
+            "GoalProviderCallReserved" if run_id.is_some() && agent_run_id.is_some() => {
+                Self::GoalProviderCallReserved {
+                    goal_id: parse::<GoalProviderCallPayload>(payload)?.goal_id,
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                }
+            }
+            "GoalCompactionCallReserved" if run_id.is_some() && agent_run_id.is_none() => {
+                Self::GoalCompactionCallReserved {
+                    goal_id: parse::<GoalIdPayload>(payload)?.goal_id,
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                }
+            }
             "ToolStarted" if run_id.is_some() && agent_run_id.is_some() => Self::ToolStarted {
                 run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
                 agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
@@ -1406,10 +2273,18 @@ impl Event {
             | "SessionForked"
             | "ContextCompacted"
             | "SessionRenamed"
+            | "GoalStarted"
+            | "GoalRunLinked"
+            | "GoalResumed"
+            | "GoalActiveTimeReserved"
+            | "GoalActiveTimeSettled"
+            | "GoalPlanContractRecorded"
+            | "GoalFinished"
             | "MessageAccepted"
             | "RunStarted"
             | "AgentSpawned"
             | "ProviderCallRecorded"
+            | "GoalCompactionCallReserved"
             | "AssistantDisplayRecorded"
             | "ToolStarted"
             | "ToolFinished"
@@ -1425,6 +2300,20 @@ impl Event {
     }
 
     pub(super) fn validate(&self) -> Result<(), ReplayError> {
+        let valid_goal_ids = match self {
+            Self::GoalStarted { goal_id, .. }
+            | Self::GoalRunLinked { goal_id, .. }
+            | Self::GoalResumed { goal_id }
+            | Self::GoalActiveTimeReserved { goal_id, .. }
+            | Self::GoalActiveTimeSettled { goal_id, .. }
+            | Self::GoalPlanContractRecorded { goal_id, .. }
+            | Self::GoalCompactionCallReserved { goal_id, .. }
+            | Self::GoalFinished { goal_id, .. } => goal_id.valid(),
+            _ => true,
+        };
+        if !valid_goal_ids {
+            return Err(ReplayError::InvalidPayload);
+        }
         match self {
             Self::SessionStarted { title, .. } | Self::SessionRenamed { title } => {
                 bounded(title, 128)
@@ -1437,6 +2326,61 @@ impl Event {
             } if *source_sequence > 0 => bounded(title, 128),
             Self::SessionForked { .. } => Err(ReplayError::InvalidPayload),
             Self::ContextCompacted { record } => record.validate(),
+            Self::GoalStarted {
+                objective,
+                workspace_identity: (_, inode),
+                budget,
+                ..
+            } => {
+                if objective.len() > super::MAX_USER_MESSAGE_BYTES || *inode == 0 {
+                    return Err(ReplayError::InvalidPayload);
+                }
+                budget.validate()
+            }
+            Self::GoalRunLinked { .. } | Self::GoalResumed { .. } => Ok(()),
+            Self::GoalActiveTimeReserved { reserved_ms, .. } => {
+                if *reserved_ms == 0 || *reserved_ms > MAX_GOAL_ACTIVE_MS {
+                    return Err(ReplayError::InvalidPayload);
+                }
+                Ok(())
+            }
+            Self::GoalActiveTimeSettled { active_ms, .. } => {
+                if *active_ms > MAX_GOAL_ACTIVE_MS {
+                    return Err(ReplayError::InvalidPayload);
+                }
+                Ok(())
+            }
+            Self::GoalCompactionCallReserved { .. } => Ok(()),
+            Self::GoalPlanContractRecorded {
+                contract,
+                active_ms,
+                reserved_ms,
+                ..
+            } => {
+                contract.validate()?;
+                if *active_ms > MAX_GOAL_ACTIVE_MS
+                    || *reserved_ms == 0
+                    || *reserved_ms > MAX_GOAL_ACTIVE_MS
+                {
+                    return Err(ReplayError::InvalidPayload);
+                }
+                Ok(())
+            }
+            Self::GoalFinished {
+                status,
+                active_ms,
+                report,
+                ..
+            } => {
+                if !matches!(
+                    status,
+                    GoalStatus::Completed | GoalStatus::Failed | GoalStatus::Cancelled
+                ) || *active_ms > MAX_GOAL_ACTIVE_MS
+                {
+                    return Err(ReplayError::InvalidPayload);
+                }
+                report.validate()
+            }
             Self::MessageAccepted { text, images, .. } => {
                 if text.len() > super::MAX_USER_MESSAGE_BYTES
                     || text.is_empty() && images.is_empty()
@@ -1464,6 +2408,13 @@ impl Event {
                 _ => Err(ReplayError::InvalidPayload),
             },
             Self::ProviderCallRecorded { record, .. } => record.validate(),
+            Self::GoalProviderCallReserved { goal_id, .. } => {
+                if goal_id.valid() {
+                    Ok(())
+                } else {
+                    Err(ReplayError::InvalidPayload)
+                }
+            }
             Self::AssistantDisplayRecorded { chunk, .. } => chunk.validate(),
             Self::ToolStarted {
                 run_id,

@@ -21,6 +21,68 @@ fn assert_seed_retired(id: uuid::Uuid) {
     }
 }
 
+fn journey_plan_contract() -> arany::GoalPlanContract {
+    arany::GoalPlanContract {
+        mission: "Update and verify the synthetic Workspace files".into(),
+        paths: vec!["src".into()],
+        commands: vec!["bash".into()],
+        skills: vec![
+            arany::GoalSkillBinding {
+                name: "synthetic".into(),
+                resource: None,
+            },
+            arany::GoalSkillBinding {
+                name: "synthetic".into(),
+                resource: Some("references/note.txt".into()),
+            },
+        ],
+        mcp_tools: vec![arany::GoalMcpTool {
+            server: "synthetic".into(),
+            tool: "echo".into(),
+        }],
+        success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
+            path: "src/main.c".into(),
+            content: "int main(void) { return 0; }\n".into(),
+        },
+        budget: arany::GoalBudget::default(),
+    }
+}
+
+fn proposal_plan_contract(call: &ToolCall) -> Option<arany::GoalPlanContract> {
+    match call {
+        ToolCall::McpList { .. } => None,
+        ToolCall::McpCall { server, tool, .. } => Some(arany::GoalPlanContract {
+            mission: "Invoke the exact synthetic MCP tool".into(),
+            paths: Vec::new(),
+            commands: Vec::new(),
+            skills: Vec::new(),
+            mcp_tools: vec![arany::GoalMcpTool {
+                server: server.clone(),
+                tool: tool.clone(),
+            }],
+            success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
+                call: Box::new(call.clone()),
+            },
+            budget: arany::GoalBudget::default(),
+        }),
+        _ => Some(arany::GoalPlanContract {
+            mission: "Exercise the proposed Tool and verify the unchanged sentinel".into(),
+            paths: vec!["src".into()],
+            commands: match call {
+                ToolCall::Command { program, .. } => vec![program.clone()],
+                _ => Vec::new(),
+            },
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
+                path: "src/current.txt".into(),
+                content: "current".into(),
+            },
+            budget: arany::GoalBudget::default(),
+        }),
+    }
+}
+
 struct Journey {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
     compactions: Arc<Mutex<Vec<CompactionRequest>>>,
@@ -45,7 +107,7 @@ impl Provider for Journey {
             .as_ref()
             .ok_or(ProviderError::InvalidOutcome)?;
         let call = match step {
-            0 => ToolCall::List { path: ".".into() },
+            0 => ToolCall::List { path: "src".into() },
             1 => ToolCall::Read {
                 path: "src/main.c".into(),
                 offset: 0,
@@ -126,7 +188,10 @@ impl Provider for Journey {
         };
         requests.push(request);
         Ok(ProviderResponse {
-            outcome: ProviderOutcome::Tool(call),
+            outcome: ProviderOutcome::Tool {
+                call,
+                plan_contract: (step == 0).then(|| Box::new(journey_plan_contract())),
+            },
             response_id: None,
             input_tokens: None,
             output_tokens: None,
@@ -214,6 +279,7 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
             workspace: workspace.clone(),
             include_paths: Vec::new(),
             policy: CollaborationPolicy::Single,
+            goal: arany::GoalRequest::default(),
         }),
     )
     .await
@@ -392,15 +458,26 @@ impl Provider for Proposal {
     }
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         let mut requests = self.requests.lock().unwrap();
-        let outcome = if requests.is_empty() {
-            ProviderOutcome::Tool(self.call.clone())
-        } else if requests.len() == 1 {
-            ProviderOutcome::Finish(Finish {
-                summary: "Observed result".into(),
-                result: "Observed the Tool result without retrying.".into(),
-            })
-        } else {
-            return Err(ProviderError::InvalidOutcome);
+        let outcome = match (requests.len(), &self.call) {
+            (0, call) => ProviderOutcome::Tool {
+                call: call.clone(),
+                plan_contract: proposal_plan_contract(call).map(Box::new),
+            },
+            (1, ToolCall::McpList { .. } | ToolCall::McpCall { .. }) | (2, _) => {
+                ProviderOutcome::Finish(Finish {
+                    summary: "Observed result".into(),
+                    result: "Observed the Tool result without retrying.".into(),
+                })
+            }
+            (1, _) => ProviderOutcome::Tool {
+                call: ToolCall::Read {
+                    path: "src/current.txt".into(),
+                    offset: 0,
+                    limit: 64,
+                },
+                plan_contract: None,
+            },
+            _ => return Err(ProviderError::InvalidOutcome),
         };
         requests.push(request);
         Ok(ProviderResponse {
@@ -431,6 +508,7 @@ fn proposal_request(workspace: &Path) -> RunRequest {
         workspace: workspace.into(),
         include_paths: Vec::new(),
         policy: CollaborationPolicy::Single,
+        goal: arany::GoalRequest::default(),
     }
 }
 
@@ -545,7 +623,15 @@ async fn mcp_stdio_corpus_rejects_unnegotiated_authority_and_hostile_results() {
         .expect("MCP case parent deadline")
         .unwrap();
         engine.close().await.unwrap();
-        assert_eq!(outcome.run.status, RunStatus::Finished, "MCP case {mode}");
+        assert_eq!(
+            outcome.run.status,
+            if !call || expected == ToolDisposition::Succeeded {
+                RunStatus::Finished
+            } else {
+                RunStatus::Failed
+            },
+            "MCP case {mode}"
+        );
         let observation = outcome.run.tools[0].observation.as_ref().unwrap();
         assert_eq!(
             observation.disposition, expected,
@@ -586,13 +672,29 @@ fn assert_proposal_requests(requests: &[ProviderRequest], count: usize) {
                 && request.context_summary.is_none()
         );
         assert_eq!(request.max_output_tokens, 4096);
-        assert_eq!(request.tools.as_ref().unwrap().observations.len(), index);
+        let observations = request.tools.as_ref().unwrap().observations.len();
+        assert_eq!(observations, index);
     }
 }
 
 struct BoundedLoop {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
     team: bool,
+}
+
+fn bounded_loop_plan() -> arany::GoalPlanContract {
+    arany::GoalPlanContract {
+        mission: "Append the stated line after verifying the file".into(),
+        paths: vec!["src".into()],
+        commands: Vec::new(),
+        skills: Vec::new(),
+        mcp_tools: Vec::new(),
+        success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
+            path: "src/current.txt".into(),
+            content: "current\n2026-10-06\n".into(),
+        },
+        budget: arany::GoalBudget::default(),
+    }
 }
 
 impl Provider for BoundedLoop {
@@ -609,48 +711,23 @@ impl Provider for BoundedLoop {
         let mut requests = self.requests.lock().unwrap();
         let outcome = if self.team {
             match requests.len() {
-                0 => ProviderOutcome::Tool(ToolCall::Search {
-                    path: "src/current.txt".into(),
-                    query: "current".into(),
+                0 => ProviderOutcome::Delegate(arany::Delegate {
+                    children: vec!["Review the stated task without effects".into()],
                 }),
-                3 => ProviderOutcome::Tool(ToolCall::Read {
-                    path: "src/current.txt".into(),
-                    offset: 0,
-                    limit: 4096,
-                }),
-                1 => {
-                    let observation = &request.tools.as_ref().unwrap().observations[0];
-                    assert_eq!(observation.disposition, ToolDisposition::Succeeded);
-                    let search: Value = serde_json::from_str(&observation.output).unwrap();
-                    assert_eq!(
-                        search["entries"],
-                        json!([{"path":"src/current.txt","line":1,"text":"current"}])
-                    );
-                    ProviderOutcome::Delegate(arany::Delegate {
-                        children: vec!["Review the stated task without effects".into()],
-                    })
-                }
-                2 => ProviderOutcome::Finish(Finish {
+                1 => ProviderOutcome::Finish(Finish {
                     summary: "Child reasoning".into(),
                     result: "Read-only child result".into(),
                 }),
-                4 => {
-                    let observation = request.tools.as_ref().unwrap().observations.last().unwrap();
-                    assert_eq!(observation.disposition, ToolDisposition::Succeeded);
-                    assert!(
-                        matches!(&observation.intent.call, ToolCall::Read { path, .. } if path == "src/current.txt")
-                    );
-                    let read: serde_json::Value =
-                        serde_json::from_str(&observation.output).unwrap();
-                    assert_eq!(read["text"], "current");
-                    ProviderOutcome::Tool(ToolCall::Edit {
+                2 => ProviderOutcome::Tool {
+                    call: ToolCall::Edit {
                         path: "src/current.txt".into(),
-                        expected_digest: read["sha256"].as_str().unwrap().into(),
+                        expected_digest: hash(b"current"),
                         old: "current".into(),
                         new: "current\n2026-10-06\n".into(),
-                    })
-                }
-                5 => {
+                    },
+                    plan_contract: Some(Box::new(bounded_loop_plan())),
+                },
+                3 => {
                     assert_eq!(
                         request
                             .tools
@@ -664,18 +741,35 @@ impl Provider for BoundedLoop {
                     );
                     ProviderOutcome::Finish(Finish {
                         summary: "Finished team".into(),
-                        result: "Appended 2026-10-06 after reading the file; child only reasoned."
+                        result: "Appended 2026-10-06 after the attested Edit; child only reasoned."
                             .into(),
                     })
                 }
                 _ => return Err(ProviderError::InvalidOutcome),
             }
         } else {
-            ProviderOutcome::Tool(ToolCall::Read {
-                path: "unselected.txt".into(),
-                offset: 0,
-                limit: 1,
-            })
+            ProviderOutcome::Tool {
+                call: ToolCall::Read {
+                    path: "src/unselected.txt".into(),
+                    offset: 0,
+                    limit: 1,
+                },
+                plan_contract: (requests.is_empty()).then(|| {
+                    Box::new(arany::GoalPlanContract {
+                        mission: "Verify the requested Workspace file without following links"
+                            .into(),
+                        paths: vec!["src".into()],
+                        commands: Vec::new(),
+                        skills: Vec::new(),
+                        mcp_tools: Vec::new(),
+                        success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
+                            path: "src/current.txt".into(),
+                            content: "current".into(),
+                        },
+                        budget: arany::GoalBudget::default(),
+                    })
+                }),
+            }
         };
         requests.push(request);
         Ok(ProviderResponse {
@@ -695,6 +789,9 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src")).unwrap();
     private_file(&workspace.join("src/current.txt"), b"current");
+    let outside = temp.path().join("unselected.txt");
+    private_file(&outside, b"OUTSIDE_GUARD_CANARY");
+    std::os::unix::fs::symlink(&outside, workspace.join("src/unselected.txt")).unwrap();
     for team in [true, false] {
         let state_path = temp
             .path()
@@ -798,15 +895,13 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
                 std::fs::read_to_string(workspace.join("src/current.txt")).unwrap(),
                 "current\n2026-10-06\n"
             );
-            assert_eq!(requests.len(), 6);
+            assert_eq!(requests.len(), 4);
             for (index, request) in requests.iter().enumerate() {
                 assert_eq!(
                     request.phase,
                     [
                         AgentPhase::RootPlan,
-                        AgentPhase::RootPlan,
                         AgentPhase::ChildWork,
-                        AgentPhase::RootSynthesis,
                         AgentPhase::RootSynthesis,
                         AgentPhase::RootSynthesis
                     ][index]
@@ -835,7 +930,7 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
                         hash(b"current")
                     )]
                 );
-                if index == 2 {
+                if index == 1 {
                     assert!(request.history.is_empty());
                     assert_eq!(request.objective, "Review the stated task without effects");
                     assert!(request.tools.is_none() && request.child_results.is_empty());
@@ -854,15 +949,15 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
                     assert_eq!(request.objective, "Guard corpus");
                     assert_eq!(
                         request.tools.as_ref().unwrap().observations.len(),
-                        [0, 1, 0, 1, 2, 3][index]
+                        index.saturating_sub(2)
                     );
-                    assert_eq!(request.child_results.len(), usize::from(index >= 3));
-                    if index >= 3 {
+                    assert_eq!(request.child_results.len(), usize::from(index >= 2));
+                    if index >= 2 {
                         assert_eq!(request.child_results[0].result, "Read-only child result");
                     }
                 }
             }
-            assert_eq!(outcome.run.tools.len(), 3);
+            assert_eq!(outcome.run.tools.len(), 1);
         } else {
             assert_eq!(outcome.run.status, RunStatus::Failed);
             assert_eq!(outcome.run.tools.len(), 16);
@@ -1079,39 +1174,43 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
         .expect("path-case parent deadline")
         .unwrap();
         engine.close().await.unwrap();
-        assert_eq!(outcome.run.status, RunStatus::Finished, "case {name}");
+        let rejected_by_plan = name == "scope";
         assert_eq!(
-            outcome.run.tools[0]
-                .observation
-                .as_ref()
-                .unwrap()
-                .disposition,
-            expected,
+            outcome.run.status,
+            if rejected_by_plan {
+                RunStatus::Failed
+            } else {
+                RunStatus::Finished
+            },
             "case {name}"
         );
-        assert_proposal_requests(&requests.lock().unwrap(), 2);
-        if name.starts_with("root-search-") {
+        assert_proposal_requests(
+            &requests.lock().unwrap(),
+            if rejected_by_plan { 1 } else { 3 },
+        );
+        if rejected_by_plan {
             assert!(
-                !outcome.run.tools[0]
-                    .observation
-                    .as_ref()
-                    .unwrap()
-                    .output
-                    .contains("OUTSIDE_GUARD_CANARY")
+                outcome.run.tools.is_empty(),
+                "out-of-plan call is never dispatched"
             );
-        }
-        if expected == ToolDisposition::Succeeded {
+        } else {
             let observation = outcome.run.tools[0].observation.as_ref().unwrap();
-            assert!(observation.output.len() <= 128);
-            match &observation.intent.call {
-                ToolCall::Mkdir { path } => assert!(workspace.join(path).is_dir()),
-                ToolCall::Write { path, content, .. } => {
-                    assert_eq!(
-                        std::fs::read(workspace.join(path)).unwrap(),
-                        content.as_bytes()
-                    );
+            assert_eq!(observation.disposition, expected, "case {name}");
+            if name.starts_with("root-search-") {
+                assert!(!observation.output.contains("OUTSIDE_GUARD_CANARY"));
+            }
+            if expected == ToolDisposition::Succeeded {
+                assert!(observation.output.len() <= 128);
+                match &observation.intent.call {
+                    ToolCall::Mkdir { path } => assert!(workspace.join(path).is_dir()),
+                    ToolCall::Write { path, content, .. } => {
+                        assert_eq!(
+                            std::fs::read(workspace.join(path)).unwrap(),
+                            content.as_bytes()
+                        );
+                    }
+                    _ => panic!("unexpected successful mutation case"),
                 }
-                _ => panic!("unexpected successful mutation case"),
             }
         }
         assert_eq!(std::fs::read(&outside).unwrap(), b"OUTSIDE_GUARD_CANARY");
@@ -1185,7 +1284,7 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
         );
         let observation = outcome.run.tools[0].observation.as_ref().unwrap();
         assert_eq!(observation.disposition, expected, "case {name}");
-        assert_proposal_requests(&requests.lock().unwrap(), 2);
+        assert_proposal_requests(&requests.lock().unwrap(), 3);
         assert!(observation.guard.is_some());
         if name == "descendant" {
             let unit = format!("arany-tool-{}.service", observation.intent.id);
@@ -1408,6 +1507,7 @@ async fn command_descendants_cannot_reach_host_canaries_or_guard_memory() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src")).unwrap();
+    private_file(&workspace.join("src/current.txt"), b"current");
     private_file(
         &workspace.join("src/isolation.c"),
         include_bytes!("../fixtures/tool-isolation.c"),
@@ -1467,7 +1567,7 @@ async fn command_descendants_cannot_reach_host_canaries_or_guard_memory() {
             .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
     );
     assert_eq!(std::fs::read(&outside).unwrap(), b"HOST_ONLY_CANARY");
-    assert_proposal_requests(&requests.lock().unwrap(), 2);
+    assert_proposal_requests(&requests.lock().unwrap(), 3);
 }
 
 #[tokio::test]
@@ -1581,7 +1681,7 @@ async fn resource_quotas_apply_to_payload_descendants_and_oom_is_uncertain() {
             assert_eq!(output["exit_code"], 0);
             assert_eq!(output["stdout"], "descendant quota enforced\n");
             assert_eq!(outcome.run.status, RunStatus::Finished);
-            assert_proposal_requests(&requests.lock().unwrap(), 2);
+            assert_proposal_requests(&requests.lock().unwrap(), 3);
         } else {
             assert_eq!(
                 observation.disposition,
@@ -1691,9 +1791,26 @@ impl Provider for ApprovalJourney {
         if review && self.review == "error" {
             return Err(ProviderError::InvalidOutcome);
         }
+        let plan_contract = arany::GoalPlanContract {
+            mission: "Perform the exact approved Tool action".into(),
+            paths: vec![".".into()],
+            commands: match &self.call {
+                ToolCall::Command { program, .. } => vec![program.clone()],
+                _ => Vec::new(),
+            },
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
+                call: Box::new(self.call.clone()),
+            },
+            budget: arany::GoalBudget::default(),
+        };
         Ok(ProviderResponse {
             outcome: if first {
-                ProviderOutcome::Tool(self.call.clone())
+                ProviderOutcome::Tool {
+                    call: self.call.clone(),
+                    plan_contract: Some(Box::new(plan_contract)),
+                }
             } else {
                 ProviderOutcome::Finish(Finish {
                     summary: "Synthetic decision".into(),

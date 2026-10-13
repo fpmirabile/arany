@@ -86,10 +86,14 @@ fn decode_outcome(
             ProviderOutcome::Finish(Finish { summary, result })
         }
         WireOutcome::Delegate { children } => ProviderOutcome::Delegate(Delegate { children }),
-        WireOutcome::Tool { call }
-            if call.valid() && !matches!(call, crate::tools::ToolCall::ApplyChangeset { .. }) =>
-        {
-            ProviderOutcome::Tool(call)
+        WireOutcome::Tool {
+            call,
+            plan_contract,
+        } if call.valid() && !matches!(call, crate::tools::ToolCall::ApplyChangeset { .. }) => {
+            ProviderOutcome::Tool {
+                call,
+                plan_contract,
+            }
         }
         WireOutcome::Tool { .. } => return Err(ResponseError::Outcome),
     };
@@ -149,7 +153,7 @@ pub(crate) fn outcome_failure_diagnostic(
         Err(error) if error.is_syntax() || error.is_eof() => (Stage::OutcomeEncoding, None),
         Err(_) => (Stage::OutcomeFields, None),
         Ok(OutcomeEnvelope {
-            outcome: WireOutcome::Tool { call },
+            outcome: WireOutcome::Tool { call, .. },
         }) => {
             let stage = match &call {
                 crate::tools::ToolCall::Read { limit, .. } if !(1..=4096).contains(limit) => {
@@ -266,11 +270,16 @@ fn run_body_inner(request: &ProviderRequest, effort: Option<Effort>) -> Value {
     }
     let schema = crate::provider::restrict_outcome_schema(outcome_schema(), request);
     let instructions = format!(
-        "{} {}",
+        "{} {} {}",
         if request.tools.is_some() {
             TOOL_INSTRUCTIONS
         } else {
             READ_ONLY_INSTRUCTIONS
+        },
+        if request.tools.is_some() && request.goal_plan_contract.is_none() {
+            "Before your first Tool other than read-only MCP catalog listing, include a model-authored plan_contract with a bounded mission, exact path/command/Skill resource/MCP tool scope, typed success_criterion, and budget no larger than goal_budget. success_criterion must be tool_call_succeeded with the exact command/write/edit/mkdir/Skill/MCP call, workspace_file_digest with an exact path and SHA-256, or workspace_file_content with exact path and desired content (at most 8 KiB); generic successful Read is never enough. Arany persists and credential-checks the bounded contract before dispatch and rejects missing, invalid or later widened scope."
+        } else {
+            ""
         },
         crate::provider::COLLABORATION_INSTRUCTIONS
     );
@@ -307,11 +316,23 @@ fn run_body_inner(request: &ProviderRequest, effort: Option<Effort>) -> Value {
                 .as_str()
                 .expect("compiled outcome name");
             if operation == "tool" {
+                let contract_schema = branch["properties"]["plan_contract"].clone();
                 for call in branch["properties"]["call"]["anyOf"]
                     .as_array()
                     .expect("compiled Tool branches")
                 {
-                    functions.push(function_definition(call.clone(), "operation"));
+                    let mut call = call.clone();
+                    if !contract_schema.is_null() {
+                        call["properties"]
+                            .as_object_mut()
+                            .expect("typed Tool schema")
+                            .insert("plan_contract".into(), contract_schema.clone());
+                        call["required"]
+                            .as_array_mut()
+                            .expect("typed Tool required fields")
+                            .push(json!("plan_contract"));
+                    }
+                    functions.push(function_definition(call, "operation"));
                 }
             } else {
                 functions.push(function_definition(branch.clone(), "type"));
@@ -603,13 +624,14 @@ impl WireResponse {
                         }
                         "list" | "read" | "search" | "mkdir" | "write" | "edit" | "command"
                         | "skill" | "mcp_list" | "mcp_call" => {
+                            let plan_contract = fields.remove("plan_contract");
                             if fields
                                 .insert("operation".into(), json!(operation))
                                 .is_some()
                             {
                                 return Err(ResponseError::Outcome);
                             }
-                            json!({"outcome": {"type": "tool", "call": fields}}).to_string()
+                            json!({"outcome": {"type": "tool", "call": fields, "plan_contract": plan_contract}}).to_string()
                         }
                         _ => return Err(ResponseError::Outcome),
                     };
@@ -703,9 +725,18 @@ struct OutcomeEnvelope {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 enum WireOutcome {
-    Finish { summary: String, result: String },
-    Delegate { children: Vec<String> },
-    Tool { call: crate::tools::ToolCall },
+    Finish {
+        summary: String,
+        result: String,
+    },
+    Delegate {
+        children: Vec<String>,
+    },
+    Tool {
+        call: crate::tools::ToolCall,
+        #[serde(default)]
+        plan_contract: Option<Box<crate::session::GoalPlanContract>>,
+    },
 }
 
 #[derive(Deserialize)]

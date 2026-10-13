@@ -7,6 +7,66 @@ fn config_value() -> Value {
     json!({"version":1,"workspace_paths":["src","Cargo.toml"],"write":false,"commands":[],"skills":[],"mcp":[]})
 }
 
+#[test]
+fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
+    use super::ToolRuntime;
+    use super::config::Skill;
+    use crate::session::{GoalBudget, GoalPlanContract, GoalSkillBinding, GoalSuccessCriterion};
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    let config = Config {
+        version: 1,
+        workspace_paths: vec![".agents/skills".into()],
+        write: false,
+        commands: Vec::new(),
+        skills: vec![Skill {
+            name: "review".into(),
+            description: "Review guidance".into(),
+            directory: "/tmp/skills/review".into(),
+            files: BTreeMap::from([
+                ("SKILL.md".into(), "0".repeat(64)),
+                ("references/note.md".into(), "1".repeat(64)),
+            ]),
+        }],
+        mcp: Vec::new(),
+    };
+    let runtime = ToolRuntime {
+        config,
+        workspace: PathBuf::new(),
+        workspace_identity: (1, 2),
+        guard_executable: PathBuf::new(),
+        enforcement_digest: [1; 32],
+        queue_progress: None,
+        #[cfg(target_os = "macos")]
+        system_programs: None,
+        #[cfg(target_os = "macos")]
+        process_enforcement_digest: [1; 32],
+    };
+    let contract_for = |name: &str, resource: Option<&str>| GoalPlanContract {
+        mission: "Read the requested Skill guidance".into(),
+        paths: Vec::new(),
+        commands: Vec::new(),
+        skills: vec![GoalSkillBinding {
+            name: name.into(),
+            resource: resource.map(str::to_owned),
+        }],
+        mcp_tools: Vec::new(),
+        success_criterion: GoalSuccessCriterion::ToolCallSucceeded {
+            call: Box::new(ToolCall::Skill {
+                name: name.into(),
+                resource: resource.map(str::to_owned),
+            }),
+        },
+        budget: GoalBudget::default(),
+    };
+
+    assert!(runtime.allows_goal_contract(&contract_for("review", None)));
+    assert!(runtime.allows_goal_contract(&contract_for("review", Some("references/note.md"))));
+    assert!(!runtime.allows_goal_contract(&contract_for("review", Some("references/other.md"))));
+    assert!(!runtime.allows_goal_contract(&contract_for("undeclared", None)));
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn checked_tool_files_reject_links_traversal_and_special_objects() {
