@@ -347,11 +347,7 @@ pub fn command_completions(prefix: &str) -> Vec<&'static str> {
     let Some(name) = prefix.strip_prefix('/') else {
         return Vec::new();
     };
-    if name.len() > MAX_COMMAND_NAME_BYTES
-        || !name
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte == b'-')
-    {
+    if !valid_command_prefix(name) {
         return Vec::new();
     }
     COMMANDS
@@ -534,8 +530,14 @@ fn command_parts(draft: &str) -> Option<(&str, Option<&str>)> {
     let (name, argument) = control
         .split_once(' ')
         .map_or((control, None), |(name, argument)| (name, Some(argument)));
-    (name.len() <= MAX_COMMAND_NAME_BYTES && name.bytes().all(|byte| byte.is_ascii_lowercase()))
-        .then_some((name, argument))
+    valid_command_prefix(name).then_some((name, argument))
+}
+
+fn valid_command_prefix(name: &str) -> bool {
+    name.len() <= MAX_COMMAND_NAME_BYTES
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'-')
 }
 
 fn unique_value<'a>(values: impl Iterator<Item = &'a str>, prefix: &str) -> Option<&'a str> {
@@ -694,6 +696,15 @@ mod tests {
         assert_eq!(command_completions("/pas"), vec!["paste"]);
         assert_eq!(command_completions("/mo"), vec!["model"]);
         assert_eq!(command_completions("/resume-g"), vec!["resume-goal"]);
+        let preview = command_preview("/resume-goal", &CommandChoices::default()).unwrap();
+        assert_eq!(
+            (
+                preview.ghost.as_str(),
+                preview.ghost_is_placeholder,
+                preview.status.as_str()
+            ),
+            ("", false, "Command: /resume-goal")
+        );
         assert_eq!(
             parse_submission("/models"),
             Err(CommandParseError::Unknown {
