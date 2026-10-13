@@ -1158,6 +1158,14 @@ impl<P: Provider + 'static> Engine<P> {
                 event_slots + usize::from(request.session_id.is_none()),
             )
             .await?;
+        let provisional_workspace_lock = if request.goal.phase
+            == crate::session::GoalPhase::Implementation
+            && self.tools.as_ref().is_some_and(|(config, _)| config.write)
+        {
+            self.acquire_goal_workspace(goal.id, workspace_identity)?
+        } else {
+            None
+        };
         if let Some(permissions) = &self.workspace_permissions {
             permissions.verify(&request.workspace)?;
         }
@@ -1187,14 +1195,6 @@ impl<P: Provider + 'static> Engine<P> {
             .as_ref()
             .map(crate::tools::ToolRuntime::context)
             .transpose()?;
-        let provisional_workspace_lock = if request.goal.phase
-            == crate::session::GoalPhase::Implementation
-            && self.tools.as_ref().is_some_and(|(config, _)| config.write)
-        {
-            self.acquire_goal_workspace(goal.id, workspace_identity)?
-        } else {
-            None
-        };
         let inputs = match &tools {
             Some(runtime) => WorkspaceInputs::load_pinned(
                 &request.workspace,

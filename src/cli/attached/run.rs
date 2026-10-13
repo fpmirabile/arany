@@ -1451,8 +1451,8 @@ mod tests {
             #[cfg(not(debug_assertions))]
             assert_eq!(
                 error,
-                arany::ToolError::Path.to_string(),
-                "the optimized account override must reject before executable verification or host account access"
+                arany::EngineError::Store(arany::StoreError::InvalidStateDirectory).to_string(),
+                "the optimized account override must reject from the Workspace lease before Tool discovery or Provider use"
             );
             assert_eq!(
                 observed.lock().unwrap().len(),

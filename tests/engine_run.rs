@@ -2173,16 +2173,18 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(workspace.join("notes")).unwrap();
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").unwrap();
+        // Finite one-Run budgets reserve 77/83/82/141 Events for single/team/Tools/previews.
         for (index, (prefix, policy, admitted, tools, branch, previews)) in [
-            (9995, CollaborationPolicy::Single, false, false, false, false),
-            (9993, CollaborationPolicy::Single, true, false, false, false),
-            (9990, CollaborationPolicy::Team { max_active_children: 1 }, false, false, false, false),
-            (9989, CollaborationPolicy::Team { max_active_children: 1 }, true, false, false, false),
-            (9950, CollaborationPolicy::Single, false, true, false, false),
-            (9993, CollaborationPolicy::Single, false, false, true, false),
-            (9992, CollaborationPolicy::Single, true, false, true, false),
-            (9930, CollaborationPolicy::Single, false, false, false, true),
-            (9929, CollaborationPolicy::Single, true, false, false, true),
+            (9924, CollaborationPolicy::Single, false, false, false, false),
+            (9923, CollaborationPolicy::Single, true, false, false, false),
+            (9918, CollaborationPolicy::Team { max_active_children: 1 }, false, false, false, false),
+            (9917, CollaborationPolicy::Team { max_active_children: 1 }, true, false, false, false),
+            (9919, CollaborationPolicy::Single, false, true, false, false),
+            (9918, CollaborationPolicy::Single, true, true, false, false),
+            (9923, CollaborationPolicy::Single, false, false, true, false),
+            (9922, CollaborationPolicy::Single, true, false, true, false),
+            (9860, CollaborationPolicy::Single, false, false, false, true),
+            (9859, CollaborationPolicy::Single, true, false, false, true),
         ].into_iter().enumerate() {
             let path = temp.path().join(format!("state-{index}"));
             let finish = || ProviderOutcome::Finish(Finish { summary: "done".into(), result: "answer".into() });
@@ -2215,10 +2217,23 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
                 std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
                 engine.enable_tools(env!("CARGO_BIN_EXE_arany").into()).unwrap();
             }
+            let max_provider_calls = match &policy {
+                CollaborationPolicy::Single => 1,
+                CollaborationPolicy::Auto { max_active_children }
+                | CollaborationPolicy::Team { max_active_children } => {
+                    u32::from(*max_active_children) + 2
+                }
+            };
             let mut next = request(&workspace, "Next");
             next.session_id = Some(id);
             next.title = None;
             next.policy = policy;
+            next.goal.budget = Some(arany::GoalBudget {
+                max_provider_calls,
+                max_tokens: None,
+                max_active_ms: 30 * 60 * 1000,
+                max_runs: 1,
+            });
             let result = if previews {
                 engine.run_with_progress(next, RunCancellation::new(), RunProgress::with_previews()).await
             } else { engine.run(next).await };
@@ -2231,17 +2246,33 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             let phases: Vec<_> = requests.lock().unwrap().iter().map(|request| request.phase).collect();
             assert_eq!(phases, if !admitted { vec![] } else if matches!(policy, CollaborationPolicy::Single) { vec![AgentPhase::RootPlan] } else { vec![AgentPhase::RootPlan, AgentPhase::ChildWork, AgentPhase::RootSynthesis] }, "case {index}");
             let store = Store::open_read_only(StateRoot::open_existing(&path).unwrap()).unwrap();
-            assert_eq!(store.load_session(id).await.unwrap().len(), if branch { if admitted { 8 } else { 1 } } else if admitted { if previews { prefix as usize + 7 } else { 10_000 } } else { prefix as usize });
+            let expected_event_count = if branch {
+                if admitted { 14 } else { 1 }
+            } else if admitted {
+                prefix as usize
+                    + if matches!(policy, CollaborationPolicy::Single) {
+                        13
+                    } else {
+                        19
+                    }
+            } else {
+                prefix as usize
+            };
+            assert_eq!(
+                store.load_session(id).await.unwrap().len(),
+                expected_event_count,
+                "case {index}: exact committed Event count"
+            );
             let view = store.load_view(id).await.unwrap().unwrap();
             assert_eq!(view.runs.len(), if admitted { 2 } else { 1 });
             assert!(view.runs.iter().all(|run| run.status == RunStatus::Finished));
             store.close().await.unwrap();
         }
         for (index, (prefix, prior_forks, admitted)) in [
-            (9999, 0, true),
-            (10_000, 0, false),
-            (8, 7, true),
-            (8, 8, false),
+            (Some(9999), 0, true),
+            (Some(10_000), 0, false),
+            (None, 7, true),
+            (None, 8, false),
         ].into_iter().enumerate() {
             let path = temp.path().join(format!("fork-admission-{index}"));
             let mut engine = Engine::open(StateRoot::admit(&path).unwrap(), ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish { summary: "done".into(), result: "answer".into() })])).unwrap();
@@ -2249,9 +2280,17 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             engine.close().await.unwrap();
             let mut connection = rusqlite::Connection::open(path.join("events.sqlite3")).unwrap();
             let transaction = connection.transaction().unwrap();
-            for sequence in 9..=prefix {
-                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',2,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, root.to_string()]).unwrap();
+            let first_padding_sequence: i64 = transaction
+                .query_row("SELECT COALESCE(MAX(sequence), 0) + 1 FROM events", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            if let Some(prefix) = prefix {
+                for sequence in first_padding_sequence..=prefix {
+                    transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',2,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, root.to_string()]).unwrap();
+                }
             }
+            let event_count_before_forks = prefix.unwrap_or(first_padding_sequence - 1);
             transaction.commit().unwrap();
             drop(connection);
             let provider = ScriptedProvider::new(Vec::new());
@@ -2280,7 +2319,11 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             store.close().await.unwrap();
             let connection = rusqlite::Connection::open_with_flags(path.join("events.sqlite3"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
             let count: i64 = connection.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0)).unwrap();
-            assert_eq!(count, prefix + prior_forks + i64::from(admitted), "fork case {index}: rejected insert must roll back");
+            assert_eq!(
+                count,
+                event_count_before_forks + i64::from(prior_forks) + i64::from(admitted),
+                "fork case {index}: rejected insert must roll back"
+            );
         }
         let path = temp.path().join("compactions");
         let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish { summary: "source".into(), result: "answer".into() }), ProviderOutcome::Finish(Finish { summary: "later".into(), result: "later answer".into() })])
