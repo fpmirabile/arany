@@ -622,18 +622,14 @@ fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
                 input: &mut std::process::ChildStdin,
                 transcript: &mut Vec<u8>,
                 answered: &mut crate::session_picker::PtyResponses,
-                from: usize,
-                needle: &[u8]| {
+                needle: &str| {
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !transcript[from..]
-            .windows(needle.len())
-            .any(|part| part == needle)
-        {
+        while !super::session_picker::screen_contains(transcript, 80, 24, needle) {
             super::session_picker::pump(output, input, transcript, answered);
             assert!(
                 Instant::now() < deadline,
-                "trusted startup stage missing: {}",
-                super::session_picker::tail(transcript)
+                "trusted startup screen stage missing: {}",
+                super::session_picker::screen_rows(transcript, 80, 24).join(" | ")
             );
             thread::yield_now();
         }
@@ -643,34 +639,43 @@ fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
         &mut input,
         &mut transcript,
         &mut answered,
-        0,
-        b"Ask Arany",
+        "Ask a question, or type / for commands",
     );
     assert!(
-        !transcript
-            .windows(b"Do you trust this folder?".len())
-            .any(|part| part == b"Do you trust this folder?"),
+        !super::session_picker::screen_contains(&transcript, 80, 24, "Do you trust this folder?"),
         "remembered trust must skip optional candidate discovery"
     );
-    let from = transcript.len();
-    input.write_all(b"/permissions\r").unwrap();
+    input.write_all(b"/permissions").unwrap();
     wait(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
-        from,
-        b"Could not prepare folder permission choices",
+        "/permissions",
     );
-    let from = transcript.len();
-    input.write_all(b"/status\r").unwrap();
+    input.write_all(b"\r").unwrap();
     wait(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
-        from,
-        b"New conversation",
+        "Could not prepare folder permission choices",
+    );
+    input.write_all(b"/status").unwrap();
+    wait(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "/status",
+    );
+    input.write_all(b"\r").unwrap();
+    wait(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "New conversation",
     );
     input.write_all(b"\x03").unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -743,18 +748,14 @@ fn tab_cannot_skip_narrow_folder_consent_pages() {
                 input: &mut std::process::ChildStdin,
                 transcript: &mut Vec<u8>,
                 answered: &mut crate::session_picker::PtyResponses,
-                from: usize,
-                needle: &[u8]| {
+                needle: &str| {
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !transcript[from..]
-            .windows(needle.len())
-            .any(|part| part == needle)
-        {
+        while !super::session_picker::screen_contains(transcript, 16, 8, needle) {
             super::session_picker::pump(output, input, transcript, answered);
             assert!(
                 Instant::now() < deadline,
-                "narrow consent stage missing: {}",
-                super::session_picker::tail(transcript)
+                "narrow consent screen stage missing: {}",
+                super::session_picker::screen_rows(transcript, 16, 8).join(" | ")
             );
             thread::yield_now();
         }
@@ -764,18 +765,18 @@ fn tab_cannot_skip_narrow_folder_consent_pages() {
         &mut input,
         &mut transcript,
         &mut answered,
-        0,
-        b"Page 1/",
+        "Page 1/17",
     );
-    input.write_all(b"\t\t\r").unwrap();
-    let from = transcript.len();
+    for key in [b'\t', b'\t', b'\r'] {
+        input.write_all(&[key]).unwrap();
+        super::session_picker::pump(&mut output, &mut input, &mut transcript, &mut answered);
+    }
     wait(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
-        from,
-        b"Page 2/",
+        "Page 2/17",
     );
     assert!(
         !account.join("workspace-permissions.json").exists(),

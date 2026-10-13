@@ -645,7 +645,6 @@ int main(int argc, char **argv) {
 }
 struct RuntimeJourney {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
-    expect_mount_refusal: bool,
 }
 
 impl Provider for RuntimeJourney {
@@ -662,29 +661,13 @@ impl Provider for RuntimeJourney {
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
-        let mut requests = self.requests.lock().unwrap();
-        let step = requests.len();
-        let context = request
-            .tools
-            .as_ref()
-            .ok_or(ProviderError::InvalidOutcome)?;
-        if step == 0 {
-            assert!(context.observations.is_empty());
-        } else if step == 1 {
-            let observation = context
-                .observations
-                .last()
-                .ok_or(ProviderError::InvalidOutcome)?;
-            if self.expect_mount_refusal {
-                assert_eq!(observation.disposition, ToolDisposition::Failed);
-                assert!(observation.output.contains("runtime mount topology"));
-                assert!(observation.guard.is_none());
-            } else {
-                assert_eq!(observation.disposition, ToolDisposition::Succeeded);
-                let output: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
-                assert_eq!(output["stdout"], "selected-runtime-command");
-            }
-        } else {
+        let step = {
+            let mut requests = self.requests.lock().unwrap();
+            let step = requests.len();
+            requests.push(request);
+            step
+        };
+        if step > 1 {
             return Err(ProviderError::InvalidOutcome);
         }
         let outcome = if step == 0 {
@@ -702,7 +685,6 @@ impl Provider for RuntimeJourney {
                 result: "The selected runtime command completed under Guard.".into(),
             })
         };
-        requests.push(request);
         Ok(ProviderResponse {
             outcome,
             response_id: None,
@@ -805,11 +787,11 @@ async fn native_runtime_mount_journey_helper() {
         .unwrap();
     let permissions = arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
 
+    let refused_requests = Arc::new(Mutex::new(Vec::new()));
     let mut engine = Engine::open(
         StateRoot::admit(&root.join("state-mounted")).unwrap(),
         RuntimeJourney {
-            requests: Arc::new(Mutex::new(Vec::new())),
-            expect_mount_refusal: true,
+            requests: refused_requests.clone(),
         },
     )
     .unwrap();
@@ -835,15 +817,37 @@ async fn native_runtime_mount_journey_helper() {
         .await
         .unwrap();
     engine.close().await.unwrap();
-    assert_eq!(refused.run.status, RunStatus::Finished);
     assert_eq!(
-        refused.run.tools[0]
-            .observation
-            .as_ref()
-            .unwrap()
-            .disposition,
-        ToolDisposition::Failed
+        refused.run.status,
+        RunStatus::Finished,
+        "runtime mount refusal Run failed: {}",
+        crate::safe_run_diagnostics(&refused.run)
     );
+    assert_eq!(refused.run.tools.len(), 1);
+    let refused_observation = refused.run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(refused_observation.disposition, ToolDisposition::Failed);
+    assert!(refused_observation.guard.is_none());
+    assert!(
+        refused_observation
+            .output
+            .contains("runtime mount topology")
+    );
+    {
+        let requests = refused_requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].tools.as_ref().unwrap().observations.is_empty());
+        assert_eq!(
+            requests[1]
+                .tools
+                .as_ref()
+                .unwrap()
+                .observations
+                .last()
+                .unwrap()
+                .disposition,
+            ToolDisposition::Failed
+        );
+    }
     let detached = std::process::Command::new("/usr/bin/hdiutil")
         .args(["detach", "-force", "-quiet"])
         .arg(&mountpoint)
@@ -854,11 +858,11 @@ async fn native_runtime_mount_journey_helper() {
     assert!(detached.status.success(), "hdiutil detach: {detached:?}");
     drop(mounted);
 
+    let accepted_requests = Arc::new(Mutex::new(Vec::new()));
     let mut engine = Engine::open(
         StateRoot::admit(&root.join("state-success")).unwrap(),
         RuntimeJourney {
-            requests: Arc::new(Mutex::new(Vec::new())),
-            expect_mount_refusal: false,
+            requests: accepted_requests.clone(),
         },
     )
     .unwrap();
@@ -884,11 +888,35 @@ async fn native_runtime_mount_journey_helper() {
         .await
         .unwrap();
     engine.close().await.unwrap();
-    assert_eq!(accepted.run.status, RunStatus::Finished);
     assert_eq!(
-        accepted.run.tools[0]
-            .observation
+        accepted.run.status,
+        RunStatus::Finished,
+        "selected runtime Run failed: {}",
+        crate::safe_run_diagnostics(&accepted.run)
+    );
+    assert_eq!(accepted.run.tools.len(), 1);
+    let accepted_observation = accepted.run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(accepted_observation.disposition, ToolDisposition::Succeeded);
+    let accepted_output: serde_json::Value =
+        serde_json::from_str(&accepted_observation.output).unwrap();
+    assert_eq!(accepted_output["stdout"], "selected-runtime-command");
+    let accepted_requests = accepted_requests.lock().unwrap();
+    assert_eq!(accepted_requests.len(), 2);
+    assert!(
+        accepted_requests[0]
+            .tools
             .as_ref()
+            .unwrap()
+            .observations
+            .is_empty()
+    );
+    assert_eq!(
+        accepted_requests[1]
+            .tools
+            .as_ref()
+            .unwrap()
+            .observations
+            .last()
             .unwrap()
             .disposition,
         ToolDisposition::Succeeded
