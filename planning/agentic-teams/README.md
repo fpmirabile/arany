@@ -111,8 +111,12 @@ unsupported enforcement fails closed. Child authority remains
 
 2. **Persistent build cache.** A private per-Workspace cache under
    StateRoot, outside the Workspace, is mounted writable for build outputs and
-   dependency caches. It never carries credentials, is bounded by quota, and
-   the user can clear it. Its contents are build data, never authority.
+   dependency caches. It never carries credentials, is bounded by per-Workspace
+   and StateRoot-wide quotas, and the user can clear the current cache or all
+   caches to reclaim stale identities. A committed-cache admission overflow
+   rejects before GO; candidate-output overflow rejects publication after the
+   command and preserves the previous cache. Its contents are build data, never
+   authority.
 3. **Flexible limits.** Today's ceilings are compile-time constants
    (`MAX_TOOL_CALLS = 16` and a 64 KiB Tool context in
    [src/tools/types.rs](../../src/tools/types.rs), plus the 300-second Run).
