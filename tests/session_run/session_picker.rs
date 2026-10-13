@@ -505,7 +505,7 @@ fn screen_reader_entry(
         }
         std::fs::set_permissions(state, original_mode).expect("restore fixture State mode");
     }
-    input.write_all(b"/exit\r").expect("quit Session");
+    input.write_all(b"/exit\r").expect("exit Session");
     let result = wait_product(child.take());
     pump(&mut output, &mut input, &mut transcript, &mut answered);
     assert!(

@@ -37,10 +37,13 @@ limits and compatibility.
   metadata and control-root listings must remain denied. The compiled policy
   fingerprint covers profile rules, admission algorithms and enforced constants.
   For command/MCP grants, Tool admission reuses one in-memory, process-wide
-  signature scan of the bounded system executable catalogue only while every
-  entry's no-follow stamp still matches, and rescans otherwise; never skip that
-  per-Run stamp check. Process intents bind its contents and file metadata stamps
-  into the enforcement digest. Pass that typed catalogue only through the trusted
+  signature scan of the bounded system executable catalogue only while both
+  directories and every pinned entry keep their `lstat` stamps, and rescans
+  otherwise, so added, removed or replaced programs are rescanned rather than
+  silently retained. Never skip that per-Run stamp check. Concurrent admissions
+  wait for the one in-progress scan, which is bounded by the catalogue entry cap.
+  Process intents bind its contents and file metadata stamps into the
+  enforcement digest. Pass that typed catalogue only through the trusted
   controller/supervisor Task channel, never Workspace or payload input, and never
   persist it as an authority cache. Workers revalidate every entry through
   no-follow handles: root ownership, non-writable non-set-ID permissions,

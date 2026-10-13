@@ -492,34 +492,51 @@ pub(crate) fn macos_enforcement_digest(
     Ok(digest(&bytes))
 }
 
+const SYSTEM_PROGRAM_DIRECTORIES: [&str; 2] = ["/bin", "/usr/bin"];
+
+fn directory_stamps() -> Result<[[u64; 7]; 2], ToolError> {
+    let stamp = |directory| {
+        std::fs::symlink_metadata(directory)
+            .map(|metadata| program_stamp(&metadata))
+            .map_err(|_| ToolError::ProtectionUnavailable)
+    };
+    let [bin, usr_bin] = SYSTEM_PROGRAM_DIRECTORIES;
+    Ok([stamp(bin)?, stamp(usr_bin)?])
+}
+
 impl SystemPrograms {
-    /// Reuses this process's signature scan while every pinned stamp still matches.
+    /// Reuses this process's signature scan while both directories and every pinned entry keep their stamps.
     pub(crate) fn admit_current() -> Result<Arc<Self>, ToolError> {
-        static ADMITTED: std::sync::Mutex<Option<Arc<SystemPrograms>>> =
-            std::sync::Mutex::new(None);
+        type Admitted = Option<([[u64; 7]; 2], Arc<SystemPrograms>)>;
+        static ADMITTED: std::sync::Mutex<Admitted> = std::sync::Mutex::new(None);
         let mut admitted = ADMITTED
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(programs) = admitted.as_ref().filter(|programs| programs.current()) {
+        let directories = directory_stamps()?;
+        if let Some((_, programs)) = admitted
+            .as_ref()
+            .filter(|(cached, programs)| *cached == directories && programs.current())
+        {
             return Ok(programs.clone());
         }
         let programs = Arc::new(Self::admit()?);
-        *admitted = Some(programs.clone());
+        *admitted = Some((directories, programs.clone()));
         Ok(programs)
     }
 
     fn current(&self) -> bool {
         self.programs.iter().all(|(path, expected)| {
-            matches!(system_program_metadata(path), Ok(Some(metadata)) if program_stamp(&metadata) == *expected)
+            std::fs::symlink_metadata(path)
+                .is_ok_and(|metadata| program_stamp(&metadata) == *expected)
         })
     }
 
-    pub(crate) fn admit() -> Result<Self, ToolError> {
+    fn admit() -> Result<Self, ToolError> {
         use cap_std::fs::MetadataExt;
 
         let mut count = 0;
         let mut programs = Vec::new();
-        for directory in ["/bin", "/usr/bin"] {
+        for directory in SYSTEM_PROGRAM_DIRECTORIES {
             let dir = crate::tools::fs::open_directory(Path::new(directory))?;
             let metadata = dir
                 .dir_metadata()

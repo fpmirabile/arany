@@ -62,18 +62,17 @@ pub enum TerminalMode {
 }
 
 impl TerminalMode {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "classic" => Some(Self::Classic),
-            "fullscreen" => Some(Self::Fullscreen),
-            _ => None,
-        }
-    }
-
     pub const fn label(self) -> &'static str {
         match self {
             Self::Classic => "classic",
             Self::Fullscreen => "fullscreen",
+        }
+    }
+
+    pub const fn toggled(self) -> Self {
+        match self {
+            Self::Classic => Self::Fullscreen,
+            Self::Fullscreen => Self::Classic,
         }
     }
 }
@@ -496,14 +495,6 @@ impl AttachedTerminal {
             })?;
         Ok(more)
     }
-    pub fn acquire() -> Result<Self, TerminalError> {
-        Self::acquire_with_preference(false)
-    }
-
-    pub fn acquire_with_preference(screen_reader: bool) -> Result<Self, TerminalError> {
-        Self::acquire_with_mode(screen_reader, TerminalMode::Classic)
-    }
-
     pub fn acquire_with_mode(
         screen_reader: bool,
         mode: TerminalMode,

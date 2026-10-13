@@ -461,7 +461,7 @@ fn run_pty_with_gate(
         b"Input:\r\n",
     );
     let quit_at = transcript.len();
-    input.write_all(b"/exit\r").expect("quit Session");
+    input.write_all(b"/exit\r").expect("exit Session");
     wait_for_sanitized(
         &mut output,
         &mut input,

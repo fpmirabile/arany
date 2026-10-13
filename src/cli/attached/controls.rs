@@ -12,24 +12,29 @@ use std::str::FromStr;
 #[serde(deny_unknown_fields)]
 struct UiPreferences {
     version: u8,
-    completion: CompletionLayout,
-    view: TerminalMode,
+    preferences: Preferences,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct Preferences {
     pub completion: CompletionLayout,
     pub view: TerminalMode,
 }
 
 fn apply_setting(preferences: &mut Preferences, value: &str) -> bool {
-    match value {
-        "tabs" => preferences.completion = CompletionLayout::Tabs,
-        "combined" => preferences.completion = CompletionLayout::Combined,
-        _ => match TerminalMode::parse(value) {
-            Some(view) => preferences.view = view,
-            None => return false,
-        },
+    if let Some(completion) = [CompletionLayout::Tabs, CompletionLayout::Combined]
+        .into_iter()
+        .find(|completion| completion.label() == value)
+    {
+        preferences.completion = completion;
+    } else if let Some(view) = [TerminalMode::Fullscreen, TerminalMode::Classic]
+        .into_iter()
+        .find(|view| view.label() == value)
+    {
+        preferences.view = view;
+    } else {
+        return false;
     }
     true
 }
@@ -60,15 +65,12 @@ fn read_settings(root: &StateRoot) -> Result<Preferences, String> {
     else {
         return Ok(Preferences::default());
     };
-    let preferences: UiPreferences = serde_json::from_slice(&record)
+    let record: UiPreferences = serde_json::from_slice(&record)
         .map_err(|_| "invalid display settings; use /settings to replace them")?;
-    if preferences.version != 2 {
+    if record.version != 2 {
         return Err("unsupported display settings; use /settings to replace them".into());
     }
-    Ok(Preferences {
-        completion: preferences.completion,
-        view: preferences.view,
-    })
+    Ok(record.preferences)
 }
 
 async fn save_settings(admission: &Admission, preferences: Preferences) -> Result<(), String> {
@@ -78,8 +80,7 @@ async fn save_settings(admission: &Admission, preferences: Preferences) -> Resul
         let root = StateRoot::admit(&path).map_err(|_| "display settings unavailable or unsafe")?;
         let record = serde_json::to_vec(&UiPreferences {
             version: 2,
-            completion: preferences.completion,
-            view: preferences.view,
+            preferences,
         })
         .map_err(|_| "display settings unavailable")?;
         root.with_account_replacement_lock(&workspace, || {
@@ -94,25 +95,13 @@ async fn save_settings(admission: &Admission, preferences: Preferences) -> Resul
 }
 
 fn settings_rows(preferences: Preferences) -> [String; 2] {
+    let title = |label: &str| label[..1].to_ascii_uppercase() + &label[1..];
     [
-        format!(
-            "Slash menu   < {} >",
-            match preferences.completion {
-                CompletionLayout::Tabs => "Tabs",
-                CompletionLayout::Combined => "Combined",
-            }
-        ),
-        format!(
-            "Chat view    < {} >",
-            match preferences.view {
-                TerminalMode::Fullscreen => "Fullscreen",
-                TerminalMode::Classic => "Classic",
-            }
-        ),
+        format!("Slash menu   < {} >", title(preferences.completion.label())),
+        format!("Chat view    < {} >", title(preferences.view.label())),
     ]
 }
 
-/// Returns `None` when the user closes without choosing.
 async fn choose_settings(
     terminal: &mut AttachedTerminal,
     mut chosen: Preferences,
@@ -122,12 +111,12 @@ async fn choose_settings(
     let mut answer = Composer::default();
     let mut invalid = false;
     loop {
+        let rows = settings_rows(chosen);
         if linear {
-            let rows = settings_rows(chosen);
             terminal.draw_setup_choices(
                 0,
                 "Settings",
-                &format!("{} · {}; empty Enter keeps them", rows[0], rows[1]),
+                &format!("{} · {}; empty Enter saves, q closes", rows[0], rows[1]),
                 &[
                     (1, "tabs"),
                     (2, "combined"),
@@ -138,7 +127,6 @@ async fn choose_settings(
                 invalid.then_some("Type tabs, combined, fullscreen or classic; q closes"),
             )
         } else {
-            let rows = settings_rows(chosen);
             terminal.draw_setup_choices(
                 0,
                 "Settings",
@@ -155,17 +143,11 @@ async fn choose_settings(
             .map_err(|error| error.to_string())?
         {
             TerminalInput::Up | TerminalInput::Down if !linear => row = 1 - row,
-            TerminalInput::Left | TerminalInput::Right | TerminalInput::Tab if !linear => {
+            TerminalInput::Left | TerminalInput::Right if !linear => {
                 if row == 0 {
-                    chosen.completion = match chosen.completion {
-                        CompletionLayout::Tabs => CompletionLayout::Combined,
-                        CompletionLayout::Combined => CompletionLayout::Tabs,
-                    };
+                    chosen.completion = chosen.completion.toggled();
                 } else {
-                    chosen.view = match chosen.view {
-                        TerminalMode::Fullscreen => TerminalMode::Classic,
-                        TerminalMode::Classic => TerminalMode::Fullscreen,
-                    };
+                    chosen.view = chosen.view.toggled();
                 }
             }
             TerminalInput::Character(character) if linear => {
@@ -179,10 +161,7 @@ async fn choose_settings(
                 match value.as_str() {
                     "" => return Ok(Some(chosen)),
                     "q" => return Ok(None),
-                    value if apply_setting(&mut chosen, value) => {
-                        return Ok(Some(chosen));
-                    }
-                    _ => invalid = true,
+                    value => invalid = !apply_setting(&mut chosen, value),
                 }
             }
             TerminalInput::Submit => return Ok(Some(chosen)),
@@ -208,30 +187,28 @@ pub(super) async fn settings(
     terminal: &mut AttachedTerminal,
     admission: &Admission,
     composer: &mut Composer,
-    saved: &mut Preferences,
+    saved_view: &mut TerminalMode,
 ) -> Result<String, String> {
     let linear = terminal.is_linear();
     let current = Preferences {
         completion: composer.completion_layout(),
-        view: if linear { saved.view } else { terminal.mode() },
+        view: *saved_view,
     };
     let notice = match choose_settings(terminal, current).await? {
         None => "Settings unchanged".to_owned(),
         Some(chosen) => match save_settings(admission, chosen).await {
             Ok(()) => {
-                *saved = chosen;
+                let view_changed = chosen.view != *saved_view;
+                *saved_view = chosen.view;
                 composer.set_completion_layout(chosen.completion);
-                if !linear && chosen.view != terminal.mode() {
+                if !linear && view_changed && chosen.view != terminal.mode() {
                     terminal
                         .set_mode(chosen.view, composer.text().len())
                         .map_err(|error| error.to_string())?;
                 }
                 format!(
                     "Settings: slash menu {} · chat view {}{} · saved",
-                    match chosen.completion {
-                        CompletionLayout::Tabs => "tabs",
-                        CompletionLayout::Combined => "combined",
-                    },
+                    chosen.completion.label(),
                     chosen.view.label(),
                     if linear { " (visual sessions)" } else { "" },
                 )
@@ -1218,11 +1195,15 @@ mod tests {
         let root = StateRoot::open_existing(&admission.state_dir).unwrap();
         for document in [
             br#"{"version":1,"completion":"tabs"}"#.as_slice(),
-            br#"{"version":3,"completion":"tabs","view":"classic"}"#.as_slice(),
-            br#"{"version":2,"completion":"tabs"}"#.as_slice(),
-            br#"{"version":2,"completion":"unknown","view":"classic"}"#.as_slice(),
-            br#"{"version":2,"completion":"tabs","view":"unknown"}"#.as_slice(),
-            br#"{"version":2,"completion":"tabs","view":"classic","tools":true}"#.as_slice(),
+            br#"{"version":2,"completion":"tabs","view":"classic"}"#.as_slice(),
+            br#"{"version":3,"preferences":{"completion":"tabs","view":"classic"}}"#.as_slice(),
+            br#"{"version":2,"preferences":{"completion":"tabs"}}"#.as_slice(),
+            br#"{"version":2,"preferences":{"completion":"unknown","view":"classic"}}"#.as_slice(),
+            br#"{"version":2,"preferences":{"completion":"tabs","view":"unknown"}}"#.as_slice(),
+            br#"{"version":2,"preferences":{"completion":"tabs","view":"classic","tools":true}}"#
+                .as_slice(),
+            br#"{"version":2,"preferences":{"completion":"tabs","view":"classic"},"tools":true}"#
+                .as_slice(),
             br#"{"version":2}"#.as_slice(),
             b"malformed",
         ] {

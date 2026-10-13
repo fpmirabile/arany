@@ -247,13 +247,13 @@ impl AttachedArgs {
 pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), String> {
     let mut admission = args.admit(telemetry)?;
     let restored_settings = controls::restore_settings(&admission).await;
-    let mut preferences = restored_settings.as_ref().copied().unwrap_or_default();
+    let mut saved_view = restored_settings.as_ref().copied().unwrap_or_default().view;
     let mut terminal = AttachedTerminal::acquire_with_mode(
         admission.screen_reader,
         if admission.classic {
             arany::TerminalMode::Classic
         } else {
-            preferences.view
+            saved_view
         },
     )
     .map_err(|error| error.to_string())?;
@@ -867,7 +867,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                     &mut terminal,
                                     &admission,
                                     &mut composer,
-                                    &mut preferences,
+                                    &mut saved_view,
                                 )
                                 .await?,
                             ));

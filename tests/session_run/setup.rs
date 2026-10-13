@@ -189,7 +189,7 @@ fn bare_start_reuses_private_file_account_without_setup_or_run() {
         .expect("shell PID number");
     let product_pid = product_child_of(shell_pid);
     let _product = ProductGuard::new(product_pid, state.clone());
-    input.write_all(b"/exit\r").expect("quit Session");
+    input.write_all(b"/exit\r").expect("exit Session");
     let result = wait_product(child.take());
     pump(&mut output, &mut input, &mut transcript, &mut answered);
     assert!(result.status.success(), "saved-account startup failed");
@@ -344,7 +344,7 @@ fn bare_start_with_both_accounts_requires_an_explicit_billing_route() {
                         choice_at,
                         b"Input:\r\n",
                     );
-                    input.write_all(b"/exit\r").expect("quit Session");
+                    input.write_all(b"/exit\r").expect("exit Session");
                 }
             }
             None => input.write_all(b"\x03").expect("cancel billing choice"),
@@ -870,7 +870,7 @@ fn bare_start_without_account_keeps_chat_input_and_offers_named_setup_choices() 
         &mut answered,
         b"Notice: Setup closed\r\nInput:\r\n",
     );
-    input.write_all(b"/exit\r").expect("quit Session");
+    input.write_all(b"/exit\r").expect("exit Session");
     let result = wait_product(child.take());
     pump(&mut output, &mut input, &mut transcript, &mut answered);
     assert!(result.status.success(), "unconfigured chat failed");
@@ -1237,7 +1237,7 @@ fn release_bare_session(
         );
     }
     if !cancelled {
-        input.write_all(b"/exit\r").expect("quit Session");
+        input.write_all(b"/exit\r").expect("exit Session");
     }
     wait_for_after(
         &mut output,
@@ -1511,7 +1511,7 @@ fn release_saved_account_is_private_across_os_users() {
             &mut answered,
             b"Input:\r\n",
         );
-        input.write_all(b"/exit\r").expect("quit Session");
+        input.write_all(b"/exit\r").expect("exit Session");
         let result = wait_product(child.take());
         pump(&mut output, &mut input, &mut transcript, &mut answered);
         assert!(result.status.success(), "cross-user product exit");
@@ -2039,7 +2039,7 @@ fn unconfigured_inline_composer_shows_draft_and_setup_selection_at_narrow_widths
             closed_at,
             b"\x1b[?25h",
         );
-        input.write_all(b"/exit\r").expect("quit Session");
+        input.write_all(b"/exit\r").expect("exit Session");
         let result = wait_product(child.take());
         output
             .read_to_end(&mut transcript)

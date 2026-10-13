@@ -26,6 +26,22 @@ pub enum CompletionLayout {
     Combined,
 }
 
+impl CompletionLayout {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Tabs => "tabs",
+            Self::Combined => "combined",
+        }
+    }
+
+    pub const fn toggled(self) -> Self {
+        match self {
+            Self::Tabs => Self::Combined,
+            Self::Combined => Self::Tabs,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Composer {
     text: String,

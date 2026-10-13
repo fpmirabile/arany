@@ -187,7 +187,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         &mut transcript,
         &mut answered,
         settings_at,
-        b"empty Enter keeps them; type a choice name: tabs or combined or fullscreen or classic\r\nInput:\r\n",
+        b"empty Enter saves, q closes; type a choice name: tabs or combined or fullscreen or classic\r\nInput:\r\n",
     );
     let invalid_at = transcript.len();
     input
@@ -203,8 +203,8 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
     );
     let selected_at = transcript.len();
     input
-        .write_all(b"combined\r")
-        .expect("linear combined selection");
+        .write_all(b"combined\r\r")
+        .expect("linear combined selection saved by empty Enter");
     wait_for_after(
         &mut output,
         &mut input,
@@ -219,7 +219,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
             .read_ui_preferences_record()
             .unwrap()
             .unwrap(),
-        br#"{"version":2,"completion":"combined","view":"fullscreen"}"#
+        br#"{"version":2,"preferences":{"completion":"combined","view":"fullscreen"}}"#
     );
     for (command, feedback) in [
         ("/provider anthropic", "Provider: anthropic; set /model"),
@@ -407,7 +407,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
             b"Notice: Provider: anthropic\r\nInput:\r\n",
         );
     }
-    input.write_all(b"/exit\r").expect("quit");
+    input.write_all(b"/exit\r").expect("exit");
     let result = super::loopback::wait_product(child.take());
     pump(&mut output, &mut input, &mut transcript, &mut answered);
     assert!(result.status.success());
@@ -836,7 +836,8 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
             .read_ui_preferences_record()
             .unwrap()
             .unwrap(),
-        br#"{"version":2,"completion":"combined","view":"classic"}"#
+        br#"{"version":2,"preferences":{"completion":"combined","view":"fullscreen"}}"#,
+        "--classic must not leak into the saved chat view"
     );
     let menu_at = transcript.len();
     input.write_all(b"/resum").expect("single command prefix");
@@ -1091,7 +1092,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     answered = crate::session_picker::PtyResponses::default();
     input
         .write_all(b"/exit\r")
-        .expect("quit after corrected rename");
+        .expect("exit after corrected rename");
     let restart_at = transcript.len();
     wait_for_after(
         &mut output,
@@ -1180,7 +1181,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
             .read_ui_preferences_record()
             .unwrap()
             .unwrap(),
-        br#"{"version":2,"completion":"combined","view":"classic"}"#
+        br#"{"version":2,"preferences":{"completion":"combined","view":"fullscreen"}}"#
     );
     assert_eq!(std::fs::read(&outside).unwrap(), b"unchanged");
     assert!(
@@ -1218,7 +1219,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     let tabs_at = transcript.len();
     input
         .write_all(b"/settings\r\x1b[C\r")
-        .expect("typed display selection");
+        .expect("tabs selected with Right in the settings window");
     wait_for_caret(
         &mut output,
         &mut input,
@@ -1233,9 +1234,9 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
             .read_ui_preferences_record()
             .unwrap()
             .unwrap(),
-        br#"{"version":2,"completion":"tabs","view":"classic"}"#
+        br#"{"version":2,"preferences":{"completion":"tabs","view":"fullscreen"}}"#
     );
-    input.write_all(b"/exit\r").expect("quit fresh process");
+    input.write_all(b"/exit\r").expect("exit fresh process");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
@@ -1673,7 +1674,7 @@ fn session_picker_close_case(quick: bool) {
         );
         thread::yield_now();
     }
-    input.write_all(b"/exit\r").expect("quit");
+    input.write_all(b"/exit\r").expect("exit");
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
@@ -2077,7 +2078,7 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
     );
     input
         .write_all(b"/exit\r")
-        .expect("quit after fresh rename");
+        .expect("exit after fresh rename");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
@@ -2834,7 +2835,7 @@ esac
         );
         input
             .write_all(b"/exit\r")
-            .expect("quit without submitting");
+            .expect("exit without submitting");
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             pump(&mut output, &mut input, &mut transcript, &mut answered);
