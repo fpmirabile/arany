@@ -24,13 +24,30 @@ report_identity() {
   return 1
 }
 run_worker() {
-  ARANY_TEST_RUNTIME_MOUNT_MODE="launch-$1" \
-  ARANY_TEST_RUNTIME_MOUNT_GRANT="$fixture/grant.json" \
-  ARANY_TEST_RUNTIME_MOUNT_FIXTURE="$fixture" \
-  ARANY_TEST_RUNTIME_MOUNT_ALIAS="$alias" \
-  ARANY_TEST_RUNTIME_MOUNT_TARGET="$target" \
-  ARANY_TEST_RUNTIME_MOUNT_BINARY="$binary" \
-    "$binary" --exact tools::guard::linux::tests::native_runtime_mount_attestation --nocapture
+  local phase=$1
+  report_identity "$fixture/worker-$phase.pid"
+  for ((i = 0; i < 1000; i++)); do
+    [ -e "$fixture/worker-$phase-go" ] && break
+    /usr/bin/sleep .01
+  done
+  [ -e "$fixture/worker-$phase-go" ]
+  export ARANY_TEST_RUNTIME_MOUNT_MODE="launch-$phase"
+  export ARANY_TEST_RUNTIME_MOUNT_GRANT="$fixture/grant.json"
+  export ARANY_TEST_RUNTIME_MOUNT_FIXTURE="$fixture"
+  export ARANY_TEST_RUNTIME_MOUNT_ALIAS="$alias"
+  export ARANY_TEST_RUNTIME_MOUNT_TARGET="$target"
+  export ARANY_TEST_RUNTIME_MOUNT_BINARY="$binary"
+  exec "$binary" --exact tools::guard::linux::tests::native_runtime_mount_attestation --nocapture
+}
+wait_worker_identity() {
+  local phase=$1 worker=$2 namespace_pid
+  for ((i = 0; i < 1000; i++)); do
+    [ -s "$fixture/worker-$phase.pid" ] && break
+    /usr/bin/sleep .01
+  done
+  [ -s "$fixture/worker-$phase.pid" ]
+  read -r _ namespace_pid < "$fixture/worker-$phase.pid"
+  [ "$namespace_pid" = "$worker" ]
 }
 cleanup() { /usr/bin/umount --recursive "$alias" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
@@ -52,9 +69,18 @@ if [ "$mode" = timeout ]; then
   wait "$held"
   exit 0
 fi
+if [ "$mode" = topology ]; then
+  report_identity "$fixture/init.pid"
+  for ((i = 0; i < 1000; i++)); do
+    [ -e "$fixture/init-go" ] && break
+    /usr/bin/sleep .01
+  done
+  [ -e "$fixture/init-go" ]
+fi
 setup_alias
 /usr/bin/grep -F "$alias" /proc/self/mountinfo | /usr/bin/grep -Eq ' shared:[0-9]+'
 run_worker exercise > "$fixture/worker-exercise.log" 2>&1 & worker=$!
+wait_worker_identity exercise "$worker"
 for ((i = 0; i < 1000; i++)); do
   [ -e "$fixture/ready" ] && break
   if ! kill -0 "$worker" 2>/dev/null; then wait "$worker"; exit 1; fi
@@ -69,6 +95,8 @@ cleanup
 /usr/bin/rm -f "$fixture/result" "$fixture/ready" "$fixture/go"
 setup_alias
 /usr/bin/mount --bind "$nested" "$alias/nested"
-run_worker reject > "$fixture/worker-reject.log" 2>&1
+run_worker reject > "$fixture/worker-reject.log" 2>&1 & worker=$!
+wait_worker_identity reject "$worker"
+wait "$worker"
 /usr/bin/grep -qx '{"stage":"runtime_mounts"}' "$fixture/result"
 /usr/bin/printf 'private-source-ok\nlate-mount-isolated\nnested-mount-rejected-at-runtime-stage\n'
