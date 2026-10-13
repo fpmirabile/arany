@@ -2,7 +2,7 @@
 
 ## Metadata
 
-- Status: `Draft`
+- Status: `In progress`
 - Owner: Fernando Mirabile
 - Last updated: 2026-10-13
 
@@ -46,7 +46,7 @@ the user-owned checks in [next steps](../../NEXT_STEPS.md).
 - **Finish gate.** No agent reports success without a successful receipt for
   its success criterion (B5).
 - **Changeset.** A bounded set of created, modified and deleted regular files
-  that the Engine validates before publishing to the Workspace (A1).
+  that the Engine validates before publishing to the Workspace ([command changesets](../../docs/specs/tools.md#command-changesets)).
 - **Review point.** A Supervisor evaluation moment: before changeset
   integration and before Finish (B, B4).
 - **Checkpoint.** A rewind point taken at every user prompt and Goal phase
@@ -71,13 +71,14 @@ the user-owned checks in [next steps](../../NEXT_STEPS.md).
   ([execution](../../docs/specs/execution.md), decision
   [D-03](../../docs/research/next-step-decision-register.md#d-03--generic-bounded-agent-protocol)).
   This is a fan-out of advisors, not a coding team.
-- Commands run on a discarded snapshot: their own writes never reach the
-  Workspace, no artifact or build cache survives a call, and the network is
-  denied ([Tools](../../docs/specs/tools.md#commands)).
+- Commands return bounded changesets from a private offline snapshot; a separate
+  validated mutation publishes them to the Workspace. Scratch data and build
+  caches do not survive calls
+  ([Tools](../../docs/specs/tools.md#command-changesets)).
 - Folder trust pins only the system `sh`; home-installed toolchains need manual
   executable pins, and the Linux runtime mount is `/usr` only.
 - Fixed ceilings block real builds: 60 seconds per unit, 300 seconds per Run,
-  16 Tool proposals per Run, 512 MiB memory, 64 MiB scratch and writable
+  16 Tool effects per Run, 512 MiB memory, 64 MiB scratch and writable
   project storage, 2,048-entry snapshots and 8 KiB edit strings
   ([limits](../../docs/specs/tools.md#limits-and-failure-behavior)).
 - A Run pins one ProviderProfile: the primary and every child share one
@@ -104,18 +105,6 @@ unsupported enforcement fails closed. Child authority remains
 
 ### A. Coding foundation
 
-1. **Command changesets.** Guard compares the command's private writable
-   snapshot with its admitted input and returns a bounded changeset (created,
-   modified and deleted regular files with digests and content). The Engine
-   validates it against Workspace preconditions and publishes it through the
-   existing typed-mutation path. Subprocess-created paths are never integrated
-   unvalidated; links, special files, set-ID bits, excluded paths and overflow
-   reject the whole changeset. Formatters, code generators and `cargo fix`
-   become usable. Each command starts from a fresh snapshot that already
-   contains integrated edits, and its changeset integrates when it completes.
-   Integration follows the approval mode (B6): in-scope changesets integrate
-   without a prompt in edit-accepting modes, out-of-scope paths ask, and
-   ask-for-everything modes always show the diff.
 2. **Toolchain runtime profiles.** Named read-only runtime profiles (`rust`,
    `node`, `python`) mount exact toolchain subtrees as declared runtime, like
    `/usr` today, for example `~/.rustup/toolchains/<pinned>` and registry
@@ -458,7 +447,7 @@ execution contracts own the resulting behavior.
 
 ## OS impact
 
-- A1, A3–A5, B and D are platform-independent Engine/Guard logic over
+- A3–A5, B and D are platform-independent Engine/Guard logic over
   existing private storage on Linux (tmpfs) and macOS (native images); judge
   adapters are Provider HTTP.
 - A2 needs native mounts on Linux and Seatbelt read grants on macOS.
@@ -472,10 +461,6 @@ execution contracts own the resulting behavior.
 Each slice that crosses one of these boundaries runs the
 [security pass](../../agents/security.md#security-pass-triggers) before merge.
 
-- **Changeset integration (A1).** Subprocess output becomes Workspace content
-  only through Engine validation: regular files, digest preconditions,
-  excluded paths and bounded size; links, special files and set-ID bits
-  reject the whole changeset.
 - **Runtime mounts and cache (A2, A3).** Toolchain subtrees and the build cache
   must exclude credential files and never overlap Workspace, StateRoot or
   account roots; cache contents are data, never authority.
@@ -505,7 +490,6 @@ Each slice that crosses one of these boundaries runs the
 Each item is one PR with its own contract update, security pass where
 triggered and evidence under [testing rules](../../agents/testing.md).
 
-1. A1 Command changesets.
 2. A2–A4 Toolchain profiles, build cache and flexible limits.
 3. **Dogfooding milestone: Arany develops Arany.** Use Arany for this
    repository's own work from here on. Requires Beta 1 check 7 (live
@@ -532,8 +516,9 @@ per-slice specification and evidence cost slows delivery.
 
 E13 telemetry spans land with the slice that introduces each span's subject.
 
-Next action: specify A1 in the [Tools contract](../../docs/specs/tools.md) with
-successful, rejected, oversized and cancelled changeset scenarios.
+Next action: specify A2–A4 toolchain profiles, build cache and flexible limits
+in the [Tools contract](../../docs/specs/tools.md), including native admission,
+credential exclusion, cache quotas and larger offline build scenarios.
 
 ## Open questions
 

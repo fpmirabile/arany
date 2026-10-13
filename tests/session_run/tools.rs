@@ -5,7 +5,6 @@ use arany::{
     RunRequest, RunStatus, SessionView, StateRoot, Store, ToolCall, ToolDisposition,
 };
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -76,19 +75,24 @@ impl Provider for Journey {
                 args: vec!["src/check.sh".into()],
                 cwd: "".into(),
             },
-            7 => ToolCall::Skill {
-                name: "synthetic".into(),
-                resource: None,
+            7 => ToolCall::Command {
+                program: "bash".into(),
+                args: vec!["-c".into(), "set -eu; test \"$(cat src/command-output.txt)\" = 'command create'; test \"$(cat src/generated/note.txt)\" = 'command modify'; test ! -e src/deleted.txt; printf fresh-snapshot".into()],
+                cwd: "".into(),
             },
             8 => ToolCall::Skill {
                 name: "synthetic".into(),
+                resource: None,
+            },
+            9 => ToolCall::Skill {
+                name: "synthetic".into(),
                 resource: Some("references/note.txt".into()),
             },
-            9 => ToolCall::McpList {
+            10 => ToolCall::McpList {
                 server: "synthetic".into(),
             },
-            10 => {
-                let catalog: Value = serde_json::from_str(&context.observations[9].output)
+            11 => {
+                let catalog: Value = serde_json::from_str(&context.observations.iter().find(|observation| matches!(observation.intent.call, ToolCall::McpList { .. })).ok_or(ProviderError::InvalidOutcome)?.output)
                     .map_err(|_| ProviderError::InvalidOutcome)?;
                 ToolCall::McpCall {
                     server: "synthetic".into(),
@@ -100,12 +104,12 @@ impl Provider for Journey {
                     arguments: "{\"value\":42}".into(),
                 }
             }
-            11 => ToolCall::Read {
+            12 => ToolCall::Read {
                 path: "omitted.txt".into(),
                 offset: 0,
                 limit: 16,
             },
-            12 => {
+            13 => {
                 requests.push(request);
                 return Ok(ProviderResponse {
                     outcome: ProviderOutcome::Finish(Finish {
@@ -156,6 +160,7 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
         b"int main(void) { return 1; }\n",
     );
     private_file(&workspace.join("omitted.txt"), b"OMITTED_TOOL_CANARY");
+    private_file(&workspace.join("src/deleted.txt"), b"command delete\n");
     std::fs::create_dir(workspace.join("src/empty")).unwrap();
     private_file(
         &workspace.join("src/executable.sh"),
@@ -166,7 +171,7 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
         std::fs::Permissions::from_mode(0o700),
     )
     .unwrap();
-    private_file(&workspace.join("src/check.sh"), b"set -eu\ntest \"$HOME\" = /scratch\ntest ! -e /run/user\ntest ! -e /home\ntest -z \"${OPENAI_API_KEY-}\"\ntest -z \"${ANTHROPIC_API_KEY-}\"\ntest -d src/empty\ntest \"$(./src/executable.sh)\" = executable-copy-passed\n/usr/bin/gcc src/main.c -o /scratch/check\n/scratch/check\nprintf discarded > src/command-output.txt\nprintf 'build and test passed'\n");
+    private_file(&workspace.join("src/check.sh"), b"set -eu\ntest \"$HOME\" = /scratch\ntest ! -e /run/user\ntest ! -e /home\ntest -z \"${OPENAI_API_KEY-}\"\ntest -z \"${ANTHROPIC_API_KEY-}\"\ntest -d src/empty\ntest \"$(./src/executable.sh)\" = executable-copy-passed\n/usr/bin/gcc src/main.c -o /scratch/check\n/scratch/check\nprintf 'command create\\n' > src/command-output.txt\nprintf 'command modify\\n' > src/generated/note.txt\n/usr/bin/rm src/deleted.txt\nprintf 'build and test passed'\n");
     let state_path = temp.path().join("state");
     let state = StateRoot::admit(&state_path).unwrap();
     let skill = workspace.join(".agents/skills/synthetic");
@@ -240,14 +245,15 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
     );
     assert_eq!(
         std::fs::read(workspace.join("src/generated/note.txt")).unwrap(),
-        b"typed create\n"
+        b"command modify\n"
     );
-    assert!(
-        !workspace.join("src/command-output.txt").exists(),
-        "subprocess source changes stay isolated"
+    assert_eq!(
+        std::fs::read(workspace.join("src/command-output.txt")).unwrap(),
+        b"command create\n"
     );
+    assert!(!workspace.join("src/deleted.txt").exists());
     let requests = requests.lock().unwrap().clone();
-    assert_eq!(requests.len(), 13);
+    assert_eq!(requests.len(), 14);
     for (step, request) in requests.iter().enumerate() {
         assert_eq!(request.phase, AgentPhase::RootPlan);
         assert_eq!(request.model, "tool-model");
@@ -262,7 +268,7 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
         );
         assert_eq!(request.max_output_tokens, 4096);
         let context = request.tools.as_ref().unwrap();
-        assert_eq!(context.observations.len(), step);
+        assert_eq!(context.observations.len(), step + usize::from(step > 6));
         assert!(
             !serde_json::to_string(context)
                 .unwrap()
@@ -273,32 +279,39 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
             assert_eq!(observation.intent.agent_run_id, request.agent_run_id);
         }
     }
-    let observations = &requests[12].tools.as_ref().unwrap().observations;
+    let observations = &requests[13].tools.as_ref().unwrap().observations;
     for observation in observations {
         assert_seed_retired(observation.intent.id);
     }
     assert!(
-        observations[..11]
+        observations[..13]
             .iter()
             .all(
                 |observation| observation.disposition == ToolDisposition::Succeeded
                     && observation.guard.is_some()
             )
     );
-    assert_eq!(observations[11].disposition, ToolDisposition::Denied);
-    assert!(observations[11].guard.is_none());
+    assert_eq!(observations[13].disposition, ToolDisposition::Denied);
+    assert!(observations[13].guard.is_none());
     let read: Value = serde_json::from_str(&observations[3].output).unwrap();
     assert_eq!(read["text"], "int main(void) { return 0; }\n");
     let command: Value = serde_json::from_str(&observations[6].output).unwrap();
     assert_eq!(command["exit_code"], 0);
     assert_eq!(command["stdout"], "build and test passed");
     assert_eq!(command["stderr"], "");
+    assert_eq!(command["changeset"]["files"].as_array().unwrap().len(), 3);
+    assert!(
+        matches!(&observations[7].intent.call, ToolCall::ApplyChangeset { changeset, .. } if changeset.files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>() == ["src/command-output.txt", "src/deleted.txt", "src/generated/note.txt"])
+    );
+    let fresh: Value = serde_json::from_str(&observations[8].output).unwrap();
+    assert_eq!(fresh["stdout"], "fresh-snapshot");
+    assert_eq!(fresh["changeset"]["files"], json!([]));
     assert_eq!(
-        observations[7].output,
+        observations[9].output,
         std::str::from_utf8(skill_body).unwrap()
     );
-    assert_eq!(observations[8].output, "A lazy resource.\n");
-    let mcp: Value = serde_json::from_str(&observations[10].output).unwrap();
+    assert_eq!(observations[10].output, "A lazy resource.\n");
+    let mcp: Value = serde_json::from_str(&observations[12].output).unwrap();
     assert_eq!(mcp["structured_content"], json!({"value":42}));
     drop(requests);
     {
@@ -350,14 +363,14 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
             .iter()
             .filter(|event| matches!(event.event, arany::Event::ToolStarted { .. }))
             .count(),
-        12
+        14
     );
     assert_eq!(
         events
             .iter()
             .filter(|event| matches!(event.event, arany::Event::ToolFinished { .. }))
             .count(),
-        12
+        14
     );
     store.close().await.unwrap();
 }
@@ -454,380 +467,6 @@ fn exec_tool_configuration_rejects_before_workspace_content_or_provider_egress()
         let connection = rusqlite::Connection::open(state_path.join("events.sqlite3")).unwrap();
         assert_eq!(connection.query_row("SELECT COUNT(*) FROM events", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
         assert_eq!(std::fs::read(&omitted).unwrap(), b"OMITTED_CONFIG_CANARY");
-    }
-}
-
-#[test]
-fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
-    use arany::{
-        AgentDisposition, AgentRole, AgentRunId, Event, EventEnvelope, OutputTokenBound,
-        ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition, RunId, SessionId,
-    };
-    let session = SessionId::new();
-    let run = RunId::new();
-    let primary = AgentRunId::new();
-    let policy = arany::ToolPolicyReceipt {
-        contract_version: 1,
-        config_digest: [1; 32],
-        max_tool_calls: 16,
-        max_model_steps: 32,
-        max_context_bytes: 65536,
-    };
-    let config = RunConfig {
-        provider: "scripted".into(),
-        model: "replay-model".into(),
-        effort: None,
-        custom_profile_provenance: None,
-        saved_api_account_id: None,
-        chatgpt_provenance: None,
-        output_token_bound: OutputTokenBound::ProviderEnforced,
-        policy: CollaborationPolicy::Single,
-        output_token_cap: 4096,
-        provider_concurrency: 1,
-        workspace_device: 1,
-        workspace_inode: 2,
-        instruction_digest: None,
-        include_digests: Vec::new(),
-        history_run_ids: Vec::new(),
-        excluded_history_runs: 0,
-        context_usage: None,
-        compaction_event_sequence: None,
-        compaction_content_digest: None,
-        tool_policy: Some(policy),
-    };
-    let intent = arany::EffectIntent {
-        id: uuid::Uuid::now_v7(),
-        run_id: run,
-        agent_run_id: primary,
-        policy_digest: [1; 32],
-        enforcement_digest: [2; 32],
-        workspace_device: 1,
-        workspace_inode: 2,
-        call: ToolCall::List { path: "src".into() },
-        limits: arany::ToolLimits::default(),
-        expires_at_ms: 1,
-        use_count: 1,
-    };
-    let observation = arany::ToolObservation {
-        intent: intent.clone(),
-        disposition: ToolDisposition::Succeeded,
-        output: "historical observation".into(),
-        guard: Some(arany::GuardReceipt {
-            contract_version: 1,
-            intent_digest: Sha256::digest(serde_json::to_vec(&intent).unwrap()).into(),
-            enforcement_digest: intent.enforcement_digest,
-            limits: intent.limits.clone(),
-        }),
-    };
-    let record = |disposition| Event::ProviderCallRecorded {
-        run_id: run,
-        agent_run_id: primary,
-        record: ProviderCallRecord {
-            phase: AgentPhase::RootPlan,
-            disposition,
-            response_id: None,
-            input_tokens: None,
-            output_tokens: None,
-            wire_provenance: None,
-            failure_reason: None,
-        },
-    };
-    let prefix = [
-        Event::SessionStarted {
-            title: "Historical tool facts".into(),
-            workspace_identity: (1, 2),
-        },
-        Event::MessageAccepted {
-            run_id: run,
-            text: "Past work".into(),
-            images: Vec::new(),
-        },
-        Event::RunStarted {
-            run_id: run,
-            config,
-        },
-        Event::AgentSpawned {
-            run_id: run,
-            agent_run_id: primary,
-            role: AgentRole::Primary,
-            ordinal: 0,
-            objective: None,
-        },
-        record(ProviderCallDisposition::ToolRequested),
-        Event::ToolStarted {
-            run_id: run,
-            agent_run_id: primary,
-            intent,
-        },
-        Event::ToolFinished {
-            run_id: run,
-            agent_run_id: primary,
-            observation,
-        },
-    ];
-    let suffix = vec![
-        record(ProviderCallDisposition::Finished),
-        Event::AgentFinished {
-            run_id: run,
-            agent_run_id: primary,
-            disposition: AgentDisposition::Finished,
-            summary: Some("Past summary".into()),
-            result: Some("Past result".into()),
-        },
-        Event::MessageCommitted {
-            run_id: run,
-            text: "Past result".into(),
-        },
-        Event::RunFinished {
-            run_id: run,
-            disposition: RunDisposition::Finished,
-        },
-    ];
-    let replay = |events: Vec<Event>| {
-        let envelopes: Vec<_> = events
-            .into_iter()
-            .enumerate()
-            .map(|(index, event)| {
-                let scope = match &event {
-                    Event::SessionStarted { .. } => (None, None),
-                    Event::MessageAccepted { run_id, .. }
-                    | Event::RunStarted { run_id, .. }
-                    | Event::MessageCommitted { run_id, .. }
-                    | Event::RunFinished { run_id, .. } => (Some(*run_id), None),
-                    Event::AgentSpawned {
-                        run_id,
-                        agent_run_id,
-                        ..
-                    }
-                    | Event::ProviderCallRecorded {
-                        run_id,
-                        agent_run_id,
-                        ..
-                    }
-                    | Event::ToolStarted {
-                        run_id,
-                        agent_run_id,
-                        ..
-                    }
-                    | Event::ToolFinished {
-                        run_id,
-                        agent_run_id,
-                        ..
-                    }
-                    | Event::AgentFinished {
-                        run_id,
-                        agent_run_id,
-                        ..
-                    } => (Some(*run_id), Some(*agent_run_id)),
-                    _ => unreachable!(),
-                };
-                EventEnvelope {
-                    sequence: index as u64 + 1,
-                    session_id: session,
-                    run_id: scope.0,
-                    agent_run_id: scope.1,
-                    event,
-                    created_at_ms: 1,
-                }
-            })
-            .collect();
-        SessionView::replay(session, &envelopes)
-    };
-    let all: Vec<_> = prefix.iter().chain(&suffix).cloned().collect();
-    assert_eq!(
-        replay(all.clone()).unwrap().unwrap().runs[0].status,
-        RunStatus::Finished
-    );
-    let mut review = record(ProviderCallDisposition::Finished);
-    if let Event::ProviderCallRecorded { record, .. } = &mut review {
-        record.phase = AgentPhase::ToolReview;
-        record.input_tokens = Some(3);
-        record.output_tokens = Some(1);
-    }
-    let mut reviewed = all.clone();
-    reviewed.insert(6, review.clone());
-    let view = replay(reviewed.clone()).unwrap().unwrap();
-    assert_eq!(view.runs[0].status, RunStatus::Finished);
-    assert_eq!(
-        view.runs[0].agents[0].provider_calls[1].input_tokens,
-        Some(3)
-    );
-    for case in 0..6 {
-        let mut row = reviewed.clone();
-        match case {
-            0 => {
-                row.remove(6);
-                row.insert(5, review.clone());
-            }
-            1 => {
-                row.remove(6);
-                row.insert(7, review.clone());
-            }
-            2 => row.insert(7, review.clone()),
-            3 => {
-                row.remove(8);
-            }
-            4 | 5 => {
-                if let Event::ProviderCallRecorded { record, .. } = &mut row[6] {
-                    record.disposition = if case == 4 {
-                        ProviderCallDisposition::ToolRequested
-                    } else {
-                        ProviderCallDisposition::Delegated
-                    };
-                }
-            }
-            _ => unreachable!(),
-        }
-        assert!(replay(row).is_err(), "invalid review transition {case}");
-    }
-    let interrupted = replay(prefix[..6].to_vec()).unwrap().unwrap();
-    assert_eq!(interrupted.runs[0].status, RunStatus::Interrupted);
-    assert!(interrupted.runs[0].tools[0].observation.is_none());
-    for case in 0..11 {
-        let mut row = all.clone();
-        match case {
-            0 => {
-                row.remove(5);
-            }
-            1 => row.insert(7, row[6].clone()),
-            2 => {
-                if let Event::ToolStarted { intent, .. } = &mut row[5] {
-                    intent.policy_digest = [9; 32];
-                }
-            }
-            3 => {
-                if let Event::ToolStarted { intent, .. } = &mut row[5] {
-                    intent.workspace_inode += 1;
-                }
-            }
-            4 => {
-                if let Event::ToolStarted { intent, .. } = &mut row[5] {
-                    intent.use_count = 2;
-                }
-            }
-            5 => {
-                if let Event::ToolFinished { observation, .. } = &mut row[6] {
-                    observation.guard.as_mut().unwrap().intent_digest = [9; 32];
-                }
-            }
-            6 => {
-                if let Event::ToolFinished { observation, .. } = &mut row[6] {
-                    observation.disposition = ToolDisposition::Uncertain;
-                }
-            }
-            7 => {
-                if let Event::ToolFinished { observation, .. } = &mut row[6] {
-                    observation.disposition = ToolDisposition::Cancelled;
-                }
-            }
-            8 => {
-                if let Event::ToolStarted {
-                    agent_run_id,
-                    intent,
-                    ..
-                } = &mut row[5]
-                {
-                    *agent_run_id = AgentRunId::new();
-                    intent.agent_run_id = *agent_run_id;
-                }
-            }
-            9 => {
-                if let Event::RunStarted { config, .. } = &mut row[2] {
-                    config.tool_policy = None;
-                }
-            }
-            10 => {
-                if let Event::ToolFinished { observation, .. } = &mut row[6] {
-                    observation.disposition = ToolDisposition::Failed;
-                    observation.guard = None;
-                }
-            }
-            _ => unreachable!(),
-        }
-        assert!(replay(row).is_err(), "Tool journal transition {case}");
-    }
-    for (guarded, later_failure) in [(true, true), (false, true), (false, false)] {
-        let mut denied = prefix.to_vec();
-        if let Event::ToolFinished { observation, .. } = &mut denied[6] {
-            observation.disposition = ToolDisposition::Denied;
-            observation.output = "UNTRUSTED_TOOL_ERROR_CANARY".into();
-            if !guarded {
-                observation.guard = None;
-            }
-        }
-        if later_failure {
-            let mut failure = record(ProviderCallDisposition::InvalidResponse);
-            if let Event::ProviderCallRecorded { record, .. } = &mut failure {
-                record.failure_reason = Some(arany::ProviderFailureReason::OutcomeContract);
-            }
-            denied.push(failure);
-        }
-        denied.extend([
-            Event::AgentFinished {
-                run_id: run,
-                agent_run_id: primary,
-                disposition: AgentDisposition::Failed,
-                summary: None,
-                result: None,
-            },
-            Event::RunFinished {
-                run_id: run,
-                disposition: RunDisposition::Failed,
-            },
-        ]);
-        let view = replay(denied).unwrap().unwrap();
-        let feedback = arany::render_run_feedback(&view.runs[0]).unwrap();
-        if later_failure {
-            assert!(
-                feedback.contains("structured outcome contract"),
-                "recoverable denial must not mask the later Provider failure"
-            );
-            assert!(!feedback.contains("approval expired"));
-        } else {
-            assert!(feedback.contains("Action denied or approval expired"));
-        }
-        assert!(!feedback.contains("CANARY"));
-    }
-    let mut observed_failure = all.clone();
-    if let Event::ToolFinished { observation, .. } = &mut observed_failure[6] {
-        observation.disposition = ToolDisposition::Failed;
-    }
-    assert!(
-        replay(observed_failure).is_ok(),
-        "an attested ordinary failure can continue"
-    );
-    for (count, output, accepted) in [
-        (16, "", true),
-        (17, "", false),
-        (16, &"x".repeat(8192), false),
-    ] {
-        let mut rows = prefix[..4].to_vec();
-        for _ in 0..count {
-            let mut start = prefix[5].clone();
-            let Event::ToolStarted { intent, .. } = &mut start else {
-                unreachable!()
-            };
-            intent.id = uuid::Uuid::now_v7();
-            let mut result = prefix[6].clone();
-            let Event::ToolFinished { observation, .. } = &mut result else {
-                unreachable!()
-            };
-            observation.intent = intent.clone();
-            observation.output = output.into();
-            observation.guard.as_mut().unwrap().intent_digest =
-                Sha256::digest(serde_json::to_vec(intent).unwrap()).into();
-            rows.extend([
-                record(ProviderCallDisposition::ToolRequested),
-                start,
-                result,
-            ]);
-        }
-        rows.extend(suffix.clone());
-        assert_eq!(
-            replay(rows).is_ok(),
-            accepted,
-            "aggregate Tool journal bound"
-        );
     }
 }
 
@@ -1566,6 +1205,10 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
             );
         }
     }
+    let config: Value =
+        serde_json::from_slice(&std::fs::read(temp.path().join("state-flood/tools.json")).unwrap())
+            .unwrap();
+    crate::tool_replay::native_command_changeset_corpus(temp.path(), &config, "bash").await;
 }
 
 async fn unit_group(unit: &str) -> Option<String> {
@@ -2116,7 +1759,7 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
                 program: "bash".into(),
                 args: vec![
                     "-c".into(),
-                    "printf discarded > command-output.txt; printf approval-command-passed".into(),
+                    "printf published > command-output.txt; printf approval-command-passed".into(),
                 ],
                 cwd: "".into(),
             }
@@ -2199,7 +1842,16 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
                 b"2026-10-06\n"
             );
         }
-        assert!(!workspace.join("command-output.txt").exists());
+        assert_eq!(
+            workspace.join("command-output.txt").exists(),
+            allowed && command
+        );
+        if allowed && command {
+            assert_eq!(
+                std::fs::read(workspace.join("command-output.txt")).unwrap(),
+                b"published"
+            );
+        }
         let observed = requests.lock().unwrap().clone();
         let review_count = usize::from(mode == ApprovalMode::Auto);
         assert_eq!(
@@ -2233,7 +1885,7 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
             let continuation = observed.last().unwrap();
             assert_eq!(continuation.phase, AgentPhase::RootPlan);
             let observations = &continuation.tools.as_ref().unwrap().observations;
-            assert_eq!(observations.len(), 1);
+            assert_eq!(observations.len(), if command { 2 } else { 1 });
             assert_eq!(observations[0].intent.call, call);
             assert_eq!(
                 observations[0].disposition,
@@ -2241,10 +1893,16 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
                 "{name}"
             );
             if command {
-                assert_eq!(
-                    serde_json::from_str::<Value>(&observations[0].output).unwrap(),
-                    json!({"exit_code":0,"stderr":"","stdout":"approval-command-passed","workspace_changes":"discarded"})
-                );
+                let result: Value = serde_json::from_str(&observations[0].output).unwrap();
+                assert_eq!(result["exit_code"], 0);
+                assert_eq!(result["stdout"], "approval-command-passed");
+                assert_eq!(result["stderr"], "");
+                assert_eq!(result["changeset"]["files"].as_array().unwrap().len(), 1);
+                assert!(matches!(
+                    observations[1].intent.call,
+                    ToolCall::ApplyChangeset { .. }
+                ));
+                assert_eq!(observations[1].disposition, ToolDisposition::Succeeded);
             }
         }
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();

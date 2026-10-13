@@ -498,6 +498,7 @@ mod tests {
         run.tools.push(crate::session::ToolView {
             intent: intent.clone(),
             observation: None,
+            review_call_index: None,
         });
         assert!(
             tool_capacity_notice(&view, Some(id))

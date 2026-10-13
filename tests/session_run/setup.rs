@@ -2961,7 +2961,8 @@ fn unsafe_dbus_address_cannot_launch_a_credential_command() {
         &workspace,
     );
     prepare_selected_chatgpt_account(temp.path());
-    let output = Command::new("/usr/bin/script")
+    let mut command = Command::new("/usr/bin/script");
+    command
         .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
         .env("ARANY_TEST_STATE", &state)
@@ -2981,10 +2982,42 @@ fn unsafe_dbus_address_cannot_launch_a_credential_command() {
             "exec \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"",
             "/dev/null",
         ])
-        .bounded_output()
-        .expect("setup PTY process");
-    let text = String::from_utf8_lossy(&output.stdout);
-    assert!(text.contains("unsafe or unsupported D-Bus session address"));
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = ChildGuard::new(command.spawn().expect("setup PTY process"));
+    let _product = ProductGuard::new(product_child_of(child.child().id()), state.clone());
+    let mut input = child.child().stdin.take().expect("PTY input");
+    let mut output = child.child().stdout.take().expect("PTY output");
+    let flags = fcntl_getfl(&output).expect("stdout flags");
+    fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
+    let mut transcript = Vec::new();
+    let mut answered = crate::session_picker::PtyResponses::default();
+    wait_for(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        b"Input:\r\n",
+    );
+    assert!(
+        String::from_utf8_lossy(&transcript)
+            .contains("unsafe or unsupported D-Bus session address"),
+        "unsafe transport rejection missing: {}",
+        tail(&transcript)
+    );
+    input.write_all(b"/exit\r").expect("exit unconfigured chat");
+    child.child().stdout = Some(output);
+    let result = wait_product(child.take());
+    transcript.extend_from_slice(&result.stdout);
+    assert!(
+        result.status.success(),
+        "unsafe transport startup exit: {:?}; stdout: {}; stderr: {}",
+        result.status,
+        tail(&transcript),
+        tail(&result.stderr)
+    );
+    let text = String::from_utf8_lossy(&transcript);
     assert!(!marker.exists(), "credential command was not executed");
     // Rejected startup authorization keeps unconfigured chat; it saves no conversation.
     assert!(text.contains("No conversation saved."));

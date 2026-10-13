@@ -203,6 +203,15 @@ impl Config {
             ToolCall::Command { program, .. } => {
                 return self.commands.iter().any(|value| &value.name == program);
             }
+            ToolCall::ApplyChangeset { changeset, .. } => {
+                return changeset.files.iter().all(|change| {
+                    self.workspace_paths == ["."]
+                        || self
+                            .workspace_paths
+                            .iter()
+                            .any(|root| std::path::Path::new(&change.path).starts_with(root))
+                });
+            }
             ToolCall::Skill { name, resource } => {
                 return self.skills.iter().any(|value| {
                     &value.name == name

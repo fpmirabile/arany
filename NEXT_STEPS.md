@@ -15,7 +15,7 @@ history. Implementation status and verified support are separate claims.
   narrowing-only Supervisor, per-agent Provider routing and writable team
   workers. The [initiative plan](./planning/agentic-teams/README.md) is
   self-contained and orders the slices; start at its next action (execution
-  step 1, command changesets). Remote
+  step 2, toolchain profiles, build cache and flexible limits). Remote
   MCP/OAuth, interactive/background jobs and other network grants need their
   own Policy/Guard/protocol evidence; retain the existing
   [Tool scope](./docs/specs/tools.md) until each slice lands.
@@ -77,8 +77,9 @@ to the user's credential store or clipboard.
    [clipboard rules](./agents/clipboard.md) and [image rules](./agents/image.md).
 7. **Real coding workflow.** Review private grants on a disposable small project,
    then inspect/edit, run an offline check, load pinned Skill data and call local
-   MCP. Inspect files and reopened observations; subprocess writes stay in the
-   private snapshot, uncertainty stops continuation and no action retries itself.
+   MCP. Inspect files and reopened observations; command changes publish only through
+   a matching validated changeset receipt, MCP writes stay private, uncertainty
+   stops continuation and no action retries itself.
    Validate the chosen real model's strict Tool encoding before claiming support.
 8. **Native macOS stores and clipboard.** On a macOS account, verify setup,
    restart/reuse, replacement, refresh and logout through the login Keychain,
@@ -93,7 +94,7 @@ to the user's credential store or clipboard.
 
 | Pending gate | Completion condition and owner |
 | --- | --- |
-| Hosted CI and native Linux regression checks | Publish when authorized, verify the pull-request jobs on a hosted runner (format and Clippy, Linux and macOS debug/release tests with `--cfg arany_ci`), and run the native consent, terminal, setup, Session picker, pinned-Skill and Tool owners. [Workflow](./.github/workflows/ci.yml), [testing rules](./agents/testing.md) |
+| Hosted CI and native Linux regression checks | Publish when authorized, verify the pull-request jobs on a hosted runner (format and Clippy, Linux and macOS debug/release tests with `--cfg arany_ci`), and run the native consent, terminal, setup, Session picker, pinned-Skill and Tool owners, including Linux command descendant termination before changeset capture and create/modify/delete publication, rejection, approval and cancellation with closed replay. Native Linux command changeset execution remains unverified on the current macOS host. [Workflow](./.github/workflows/ci.yml), [testing rules](./agents/testing.md) |
 | macOS optimized product/account isolation | On a disposable effective-user home, run the full optimized Engine/active-CLI and account setup/refresh/logout/cross-user gates. Changing HOME does not isolate account paths; debug fixtures and override refusal do not prove this gate. [Fixture rules](./agents/references/testing-details.md#host-and-account-isolation) |
 | Native TLS to compiled endpoints | Provide isolated resolution/routing and ordinary trust for a compiled-endpoint HTTPS journey. Generated-anchor chain/name rejection alone does not prove a public trusted chain or production-endpoint success. [Security rules](./agents/security.md) |
 | Native terminal faults and tmux | Run available native tmux and acquisition/output/input-loss owners, including optimized macOS and supported architectures; verify restoration on the exact distributed binary. [Terminal fixture rules](./agents/references/testing-details.md#terminal-process-fixtures), [PTY finding](./docs/security/findings/terminal-pty-hangup-spin.md) |

@@ -574,6 +574,58 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
                 .contains("RESULT_CANARY")
         );
     }
+    let integration = crate::tools::ToolCall::ApplyChangeset {
+        source_intent_digest: [9; 32],
+        changeset: crate::tools::CommandChangeset {
+            files: vec![crate::tools::FileChange {
+                path: "src/generated.rs".into(),
+                before: None,
+                after: Some(crate::tools::FileVersion::from_bytes(
+                    b"RESULT_CANARY",
+                    false,
+                )),
+            }],
+        },
+    };
+    let mut observation = request.tools.as_ref().unwrap().observations[0].clone();
+    observation.intent.call = integration.clone();
+    observation.output = json!({"applied":1}).to_string();
+    observation.disposition = crate::tools::ToolDisposition::Succeeded;
+    observation.guard.as_mut().unwrap().intent_digest = observation.intent.digest();
+    request.tools.as_mut().unwrap().observations = vec![observation.clone()];
+    let body = run_body_with_effort(&request, Effort::Low);
+    let data: Value = serde_json::from_str(body["input"][1]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(data["engine_integration"]["workspace_effect"], "applied");
+    let mut projected_integration = json!(integration);
+    projected_integration
+        .as_object_mut()
+        .unwrap()
+        .remove("source_intent_digest");
+    assert_eq!(data["engine_integration"]["call"], projected_integration);
+    assert!(
+        data["engine_integration"]["call"]
+            .get("source_intent_digest")
+            .is_none()
+    );
+    assert_eq!(body["input"].as_array().unwrap().len(), 2);
+    assert!(
+        body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|function| function["name"] != "arany_apply_changeset")
+    );
+    assert_eq!(request.tools.as_ref().unwrap().observations[0], observation);
+    let text = json!({"outcome":{"type":"tool","call":integration}}).to_string();
+    let forbidden = response("completed", json!([message(&text)]));
+    assert!(decode_run(&serde_json::to_vec(&forbidden).unwrap(), "gpt-5.4").is_err());
+    let mut arguments = json!(integration);
+    arguments.as_object_mut().unwrap().remove("operation");
+    let forbidden = response(
+        "completed",
+        json!([function_call("arany_apply_changeset", &arguments)]),
+    );
+    assert!(decode_tool_run(&serde_json::to_vec(&forbidden).unwrap(), "gpt-5.4").is_err());
     for row in rows {
         let mut arguments = row["outcome"]["call"].clone();
         let operation = arguments

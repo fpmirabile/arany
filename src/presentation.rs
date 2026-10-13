@@ -56,6 +56,9 @@ pub(crate) fn tool_summary(tool: &crate::session::ToolView) -> String {
         ToolCall::Write { path, .. } => format!("Write {path}"),
         ToolCall::Edit { path, .. } => format!("Edit {path}"),
         ToolCall::Command { program, .. } => format!("Command {program}"),
+        ToolCall::ApplyChangeset { changeset, .. } => {
+            format!("Publish {} command file changes", changeset.files.len())
+        }
         ToolCall::Skill { name, .. } => format!("Skill {name}"),
         ToolCall::McpList { server } => format!("MCP list {server}"),
         ToolCall::McpCall { server, tool, .. } => format!("MCP {server} / {tool}"),
@@ -200,13 +203,33 @@ pub(crate) fn tool_approval_lines(intent: &crate::tools::EffectIntent) -> Vec<St
                     escape_terminal(cwd)
                 }
             ));
-            lines.push("Offline isolated copy · command changes are discarded".into());
+            lines.push("Offline isolated copy · changes are validated before publication".into());
             for (index, argument) in args.iter().enumerate() {
                 lines.push(format!(
                     "Argument {}: {}",
                     index + 1,
                     escape_terminal(&serde_json::to_string(argument).expect("argument string"))
                 ));
+            }
+        }
+        ToolCall::ApplyChangeset { changeset, .. } => {
+            lines.push(format!(
+                "Publish {} command file changes",
+                changeset.files.len()
+            ));
+            for file in &changeset.files {
+                let operation = match (&file.before, &file.after) {
+                    (None, Some(_)) => "Create",
+                    (Some(_), None) => "Delete",
+                    _ => "Replace",
+                };
+                lines.push(format!("{operation} {}", escape_terminal(&file.path)));
+                if let Some(before) = &file.before {
+                    changeset_version_lines(&mut lines, "Before", "-", before);
+                }
+                if let Some(after) = &file.after {
+                    changeset_version_lines(&mut lines, "After", "+", after);
+                }
             }
         }
         ToolCall::McpCall {
@@ -229,6 +252,36 @@ pub(crate) fn tool_approval_lines(intent: &crate::tools::EffectIntent) -> Vec<St
     lines.push(String::new());
     lines.push("Allow once for this exact action · expires within one minute".into());
     lines
+}
+
+fn changeset_version_lines(
+    lines: &mut Vec<String>,
+    label: &str,
+    prefix: &str,
+    version: &crate::tools::types::FileVersion,
+) {
+    let Some(bytes) = version.bytes() else {
+        lines.push(format!("{label}: invalid file version"));
+        return;
+    };
+    lines.push(format!(
+        "{label}: {} bytes · sha256 {} · executable {}",
+        bytes.len(),
+        version.sha256,
+        version.executable
+    ));
+    if let Ok(text) = std::str::from_utf8(&bytes)
+        && text
+            .chars()
+            .all(|character| !character.is_control() || matches!(character, '\n' | '\r' | '\t'))
+    {
+        lines.extend(
+            text.split('\n')
+                .map(|line| format!("{prefix} {}", escape_terminal(line))),
+        );
+    } else {
+        lines.push("Binary content".into());
+    }
 }
 
 pub(crate) fn workspace_permission_lines(path: &std::path::Path) -> Vec<String> {

@@ -210,6 +210,614 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
             b"replaced"
         );
     }
+
+    use std::os::unix::fs::MetadataExt;
+    let host_root = super::fs::open_directory(std::path::Path::new("/")).unwrap();
+    assert_ne!(
+        std::fs::metadata("/").unwrap().dev(),
+        std::fs::metadata("/dev").unwrap().dev(),
+        "the native mount fixture must cross devices"
+    );
+    assert!(
+        super::fs::open_file(&host_root, "dev").is_err(),
+        "the handle traversal shared by scans and publication rejects mount crossings"
+    );
+
+    let workspace = temp.path().join("changes-workspace");
+    let command = temp.path().join("changes-command");
+    for directory in [&workspace, &command] {
+        std::fs::create_dir(directory).unwrap();
+        std::fs::create_dir(directory.join("empty")).unwrap();
+        for (path, bytes, mode) in [
+            ("binary", b"\0\xff\x01".as_slice(), 0o600),
+            ("modified", b"original".as_slice(), 0o640),
+            ("mode-off", b"off".as_slice(), 0o750),
+            ("mode-on", b"on".as_slice(), 0o640),
+            ("removed", b"removed".as_slice(), 0o600),
+            ("unchanged", b"unchanged".as_slice(), 0o600),
+        ] {
+            std::fs::write(directory.join(path), bytes).unwrap();
+            std::fs::set_permissions(directory.join(path), std::fs::Permissions::from_mode(mode))
+                .unwrap();
+        }
+    }
+    let modified = std::fs::File::open(workspace.join("modified")).unwrap();
+    let original_inode = modified.metadata().unwrap().ino();
+    let removed = std::fs::File::open(workspace.join("removed")).unwrap();
+    let before = super::fs::command_snapshot(&command).unwrap();
+    std::fs::write(command.join("binary"), b"\xff\0\x02").unwrap();
+    std::fs::write(command.join("modified"), b"formatted").unwrap();
+    std::fs::remove_file(command.join("removed")).unwrap();
+    std::fs::remove_dir(command.join("empty")).unwrap();
+    std::fs::create_dir_all(command.join("new/nested")).unwrap();
+    std::fs::create_dir(command.join("unpublished-empty")).unwrap();
+    std::fs::write(command.join("new/nested/first"), b"created").unwrap();
+    std::fs::write(command.join("new/nested/second"), b"\0\xff").unwrap();
+    std::fs::set_permissions(
+        command.join("mode-off"),
+        std::fs::Permissions::from_mode(0o640),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        command.join("mode-on"),
+        std::fs::Permissions::from_mode(0o750),
+    )
+    .unwrap();
+    let changeset = super::fs::command_changeset(&command, &before).unwrap();
+    let version = |bytes: &[u8], executable| Some(FileVersion::from_bytes(bytes, executable));
+    let expected = CommandChangeset {
+        files: [
+            (
+                "binary",
+                version(b"\0\xff\x01", false),
+                version(b"\xff\0\x02", false),
+            ),
+            ("mode-off", version(b"off", true), version(b"off", false)),
+            ("mode-on", version(b"on", false), version(b"on", true)),
+            (
+                "modified",
+                version(b"original", false),
+                version(b"formatted", false),
+            ),
+            ("new/nested/first", None, version(b"created", false)),
+            ("new/nested/second", None, version(b"\0\xff", false)),
+            ("removed", version(b"removed", false), None),
+        ]
+        .into_iter()
+        .map(|(path, before, after)| FileChange {
+            path: path.into(),
+            before,
+            after,
+        })
+        .collect(),
+    };
+    assert_eq!(
+        changeset, expected,
+        "the command receipt retains complete sorted deltas"
+    );
+    let result = super::fs::native(
+        &workspace,
+        &ToolCall::ApplyChangeset {
+            source_intent_digest: [1; 32],
+            changeset,
+        },
+        &config,
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&result).unwrap(),
+        json!({"applied":7})
+    );
+    for (path, bytes, mode) in [
+        ("binary", b"\xff\0\x02".as_slice(), 0o600),
+        ("modified", b"formatted".as_slice(), 0o640),
+        ("mode-off", b"off".as_slice(), 0o640),
+        ("mode-on", b"on".as_slice(), 0o740),
+        ("new/nested/first", b"created".as_slice(), 0o600),
+        ("new/nested/second", b"\0\xff".as_slice(), 0o600),
+        ("unchanged", b"unchanged".as_slice(), 0o600),
+    ] {
+        assert_eq!(
+            std::fs::read(workspace.join(path)).unwrap(),
+            bytes,
+            "published {path}"
+        );
+        assert_eq!(
+            std::fs::metadata(workspace.join(path))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            mode,
+            "published mode {path}"
+        );
+    }
+    assert!(
+        workspace.join("empty").is_dir(),
+        "empty-directory removal is not integrated"
+    );
+    assert!(!workspace.join("unpublished-empty").exists());
+    assert!(!workspace.join("removed").exists());
+    assert_ne!(
+        std::fs::metadata(workspace.join("modified")).unwrap().ino(),
+        original_inode
+    );
+    for (file, expected) in [
+        (modified, b"original".as_slice()),
+        (removed, b"removed".as_slice()),
+    ] {
+        let mut retained = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::Read::take(file, 32), &mut retained).unwrap();
+        assert_eq!(
+            retained, expected,
+            "publication never truncates an admitted inode"
+        );
+    }
+    let next = temp.path().join("next-command");
+    std::fs::create_dir_all(next.join("project")).unwrap();
+    std::fs::create_dir(next.join("resources")).unwrap();
+    let next_project = super::fs::open_directory(&next.join("project")).unwrap();
+    let next_resources = super::fs::open_directory(&next.join("resources")).unwrap();
+    super::fs::snapshot_into(
+        &super::fs::open_directory(&workspace).unwrap(),
+        &config,
+        Some(&next_project),
+        &next_resources,
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read(next.join("project/modified")).unwrap(),
+        b"formatted"
+    );
+    assert_eq!(
+        std::fs::read(next.join("project/new/nested/second")).unwrap(),
+        b"\0\xff"
+    );
+    assert!(!next.join("project/removed").exists());
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() {
+    use nix::{sys::stat::Mode, unistd::mkfifo};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    for case in [
+        "changed-bytes",
+        "changed-executable",
+        "create-conflict",
+        "missing-before",
+        "symlink",
+        "symlink-parent",
+        "hardlink",
+        "fifo",
+        "set-id-file",
+        "set-id-parent",
+        "directory-target",
+        "file-parent",
+        "excluded",
+        "write-denied",
+        "grant-denied",
+        "malformed-base64",
+        "noncanonical-base64",
+        "wrong-digest",
+        "malformed-digest",
+        "unchanged-delta",
+        "absent-delta",
+        "reordered",
+        "duplicate",
+        "path-collision",
+        "too-many-files",
+        "too-many-bytes",
+        "too-deep",
+        "oversized-record",
+        "unbound-source",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("project");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("a-good"), b"stable").unwrap();
+        std::fs::write(workspace.join("z-target"), b"old").unwrap();
+        std::fs::set_permissions(
+            workspace.join("z-target"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let sibling_inode = std::fs::metadata(workspace.join("a-good")).unwrap().ino();
+        let mut config: Config = serde_json::from_value(json!({
+            "version":1,"workspace_paths":["."],"write":true,
+            "commands":[],"skills":[],"mcp":[]
+        }))
+        .unwrap();
+        let mut changeset = CommandChangeset {
+            files: vec![
+                FileChange {
+                    path: "a-good".into(),
+                    before: Some(FileVersion::from_bytes(b"stable", false)),
+                    after: Some(FileVersion::from_bytes(b"published", false)),
+                },
+                FileChange {
+                    path: "z-target".into(),
+                    before: Some(FileVersion::from_bytes(b"old", false)),
+                    after: Some(FileVersion::from_bytes(b"new", false)),
+                },
+            ],
+        };
+        let mut source_intent_digest = [1; 32];
+        match case {
+            "changed-bytes" => std::fs::write(workspace.join("z-target"), b"concurrent").unwrap(),
+            "changed-executable" => std::fs::set_permissions(
+                workspace.join("z-target"),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap(),
+            "create-conflict" => changeset.files[1].before = None,
+            "missing-before" => std::fs::remove_file(workspace.join("z-target")).unwrap(),
+            "symlink" | "hardlink" | "fifo" | "directory-target" => {
+                std::fs::remove_file(workspace.join("z-target")).unwrap();
+                match case {
+                    "symlink" => {
+                        std::os::unix::fs::symlink("a-good", workspace.join("z-target")).unwrap()
+                    }
+                    "hardlink" => {
+                        std::fs::hard_link(workspace.join("a-good"), workspace.join("z-target"))
+                            .unwrap()
+                    }
+                    "fifo" => {
+                        mkfifo(&workspace.join("z-target"), Mode::S_IRUSR | Mode::S_IWUSR).unwrap()
+                    }
+                    _ => std::fs::create_dir(workspace.join("z-target")).unwrap(),
+                }
+            }
+            "symlink-parent" | "set-id-parent" => {
+                std::fs::remove_file(workspace.join("z-target")).unwrap();
+                std::fs::create_dir(workspace.join("directory")).unwrap();
+                std::fs::write(workspace.join("directory/file"), b"old").unwrap();
+                if case == "symlink-parent" {
+                    std::os::unix::fs::symlink("directory", workspace.join("z-target")).unwrap();
+                } else {
+                    std::fs::rename(workspace.join("directory"), workspace.join("z-target"))
+                        .unwrap();
+                    std::fs::set_permissions(
+                        workspace.join("z-target"),
+                        std::fs::Permissions::from_mode(0o4700),
+                    )
+                    .unwrap();
+                }
+                changeset.files[1].path = "z-target/file".into();
+            }
+            "set-id-file" => std::fs::set_permissions(
+                workspace.join("z-target"),
+                std::fs::Permissions::from_mode(0o4600),
+            )
+            .unwrap(),
+            "file-parent" => changeset.files[1].path = "z-target/file".into(),
+            "excluded" => changeset.files[1].path = "z-target/.git/config".into(),
+            "write-denied" => config.write = false,
+            "grant-denied" => config.workspace_paths = vec!["a-good".into()],
+            "malformed-base64" => changeset.files[1].after.as_mut().unwrap().content = "%%".into(),
+            "noncanonical-base64" => {
+                changeset.files[1].after.as_mut().unwrap().content = "bmV3\n".into()
+            }
+            "wrong-digest" => {
+                changeset.files[1].after.as_mut().unwrap().sha256 = hex_digest(b"other")
+            }
+            "malformed-digest" => {
+                changeset.files[1].after.as_mut().unwrap().sha256 = "F".repeat(64)
+            }
+            "unchanged-delta" => changeset.files[1].after = changeset.files[1].before.clone(),
+            "absent-delta" => {
+                changeset.files[1].before = None;
+                changeset.files[1].after = None;
+            }
+            "reordered" => changeset.files.reverse(),
+            "duplicate" => changeset.files.push(changeset.files[1].clone()),
+            "path-collision" => changeset.files.push(FileChange {
+                path: "z-target/child".into(),
+                before: None,
+                after: Some(FileVersion::from_bytes(b"child", false)),
+            }),
+            "too-many-files" | "oversized-record" => {
+                let count = if case == "too-many-files" {
+                    MAX_CHANGESET_FILES
+                } else {
+                    MAX_CHANGESET_FILES - 1
+                };
+                for index in 0..count {
+                    changeset.files.insert(
+                        index + 1,
+                        FileChange {
+                            path: if case == "too-many-files" {
+                                format!("y-{index:02}")
+                            } else {
+                                format!("y-{index:02}-{}", "x".repeat(480))
+                            },
+                            before: None,
+                            after: Some(FileVersion::from_bytes(b"", false)),
+                        },
+                    );
+                }
+                if case == "oversized-record" {
+                    changeset.files.pop();
+                }
+            }
+            "too-many-bytes" => {
+                changeset.files[1].after = Some(FileVersion::from_bytes(
+                    &vec![0; MAX_CHANGESET_BYTES],
+                    false,
+                ))
+            }
+            "too-deep" => changeset.files[1].path = format!("z-target/{}", vec!["d"; 16].join("/")),
+            "unbound-source" => source_intent_digest = [0; 32],
+            _ => unreachable!(),
+        }
+        if matches!(case, "set-id-file" | "set-id-parent") {
+            assert_ne!(
+                std::fs::metadata(workspace.join("z-target"))
+                    .unwrap()
+                    .mode()
+                    & 0o6000,
+                0,
+                "the native fixture must retain set-ID bits: {case}"
+            );
+        }
+        let result = super::fs::native(
+            &workspace,
+            &ToolCall::ApplyChangeset {
+                source_intent_digest,
+                changeset,
+            },
+            &config,
+        );
+        assert!(result.is_err(), "batch rejection case {case}");
+        assert!(
+            !matches!(result, Err(super::ToolError::Uncertain)),
+            "preflight must reject before effects: {case}"
+        );
+        assert_eq!(
+            std::fs::read(workspace.join("a-good")).unwrap(),
+            b"stable",
+            "unchanged sibling: {case}"
+        );
+        assert_eq!(
+            std::fs::metadata(workspace.join("a-good")).unwrap().ino(),
+            sibling_inode,
+            "unpublished sibling inode: {case}"
+        );
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("partial-publication");
+    std::fs::create_dir_all(workspace.join("a")).unwrap();
+    std::fs::create_dir(workspace.join("z")).unwrap();
+    std::fs::write(workspace.join("a/new"), b"original").unwrap();
+    let original = std::fs::File::open(workspace.join("a/new")).unwrap();
+    let original_inode = original.metadata().unwrap().ino();
+    let blocked_parent = workspace.join("z");
+    std::fs::set_permissions(&blocked_parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let parent_metadata = std::fs::metadata(&blocked_parent).unwrap();
+    let effective_uid = rustix::process::geteuid().as_raw();
+    assert_ne!(
+        effective_uid, 0,
+        "the fixture requires ordinary-user write denial"
+    );
+    assert_eq!(
+        parent_metadata.uid(),
+        effective_uid,
+        "the blocked parent is fixture-owned"
+    );
+    assert_eq!(
+        parent_metadata.mode() & 0o7777,
+        0o500,
+        "the fixture must retain read-only parent permissions"
+    );
+    let config: Config = serde_json::from_value(json!({
+        "version":1,"workspace_paths":["."],"write":true,
+        "commands":[],"skills":[],"mcp":[]
+    }))
+    .unwrap();
+    let result = super::fs::native(
+        &workspace,
+        &ToolCall::ApplyChangeset {
+            source_intent_digest: [1; 32],
+            changeset: CommandChangeset {
+                files: vec![
+                    FileChange {
+                        path: "a/new".into(),
+                        before: Some(FileVersion::from_bytes(b"original", false)),
+                        after: Some(FileVersion::from_bytes(b"published", false)),
+                    },
+                    FileChange {
+                        path: "z/new".into(),
+                        before: None,
+                        after: Some(FileVersion::from_bytes(b"blocked", false)),
+                    },
+                ],
+            },
+        },
+        &config,
+    );
+    let retained_parent_mode = std::fs::metadata(&blocked_parent).unwrap().mode() & 0o7777;
+    std::fs::set_permissions(&blocked_parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        matches!(result, Err(super::ToolError::Uncertain)),
+        "a failure after publication cannot become an ordinary retryable error"
+    );
+    assert_eq!(
+        retained_parent_mode, 0o500,
+        "publication does not widen parent permissions"
+    );
+    assert_eq!(
+        std::fs::read(workspace.join("a/new")).unwrap(),
+        b"published",
+        "an uncertain batch does not roll back its published prefix"
+    );
+    let published = std::fs::metadata(workspace.join("a/new")).unwrap();
+    assert!(published.is_file());
+    assert_eq!(published.nlink(), 1);
+    assert_ne!(
+        published.ino(),
+        original_inode,
+        "the published prefix uses a fresh inode"
+    );
+    assert!(
+        !workspace.join("z/new").exists(),
+        "the later file was not published"
+    );
+    let mut retained = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(original, 32), &mut retained).unwrap();
+    assert_eq!(
+        retained, b"original",
+        "partial publication does not truncate the original inode"
+    );
+
+    for case in [
+        "symlink",
+        "symlink-parent",
+        "hardlink",
+        "fifo",
+        "set-id-file",
+        "set-id-directory",
+        "set-id-root",
+        "excluded",
+        "invalid-name",
+        "file-to-directory",
+        "directory-to-file",
+        "replaced-root",
+        "file-overflow",
+        "snapshot-bytes-overflow",
+        "snapshot-count-overflow",
+        "changeset-count-limit",
+        "changeset-count-overflow",
+        "changeset-byte-limit",
+        "changeset-byte-overflow",
+        "depth-limit",
+        "depth-overflow",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let command = temp.path().join("command");
+        std::fs::create_dir(&command).unwrap();
+        std::fs::write(command.join("unchanged"), b"seed").unwrap();
+        if case == "file-to-directory" {
+            std::fs::write(command.join("target"), b"old").unwrap();
+        }
+        if case == "directory-to-file" {
+            std::fs::create_dir(command.join("target")).unwrap();
+        }
+        let before = super::fs::command_snapshot(&command).unwrap();
+        match case {
+            "symlink" => std::os::unix::fs::symlink("unchanged", command.join("target")).unwrap(),
+            "symlink-parent" => {
+                std::fs::create_dir(command.join("directory")).unwrap();
+                std::fs::write(command.join("directory/file"), b"child").unwrap();
+                std::os::unix::fs::symlink("directory", command.join("target")).unwrap();
+            }
+            "hardlink" => {
+                std::fs::hard_link(command.join("unchanged"), command.join("target")).unwrap()
+            }
+            "fifo" => mkfifo(&command.join("target"), Mode::S_IRUSR | Mode::S_IWUSR).unwrap(),
+            "set-id-file" | "set-id-directory" | "set-id-root" => {
+                let target = if case == "set-id-root" {
+                    command.clone()
+                } else {
+                    command.join("target")
+                };
+                if case == "set-id-file" {
+                    std::fs::write(&target, b"child").unwrap();
+                }
+                if case == "set-id-directory" {
+                    std::fs::create_dir(&target).unwrap();
+                }
+                std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o4700)).unwrap();
+                let target = if case == "set-id-root" {
+                    &command
+                } else {
+                    &command.join("target")
+                };
+                assert_ne!(
+                    std::fs::metadata(target).unwrap().mode() & 0o6000,
+                    0,
+                    "the native fixture must retain set-ID bits: {case}"
+                );
+            }
+            "excluded" => {
+                std::fs::create_dir(command.join(".git")).unwrap();
+                std::fs::write(command.join(".git/config"), b"excluded").unwrap();
+            }
+            "invalid-name" => std::fs::write(command.join("line\nbreak"), b"invalid").unwrap(),
+            "file-to-directory" => {
+                std::fs::remove_file(command.join("target")).unwrap();
+                std::fs::create_dir(command.join("target")).unwrap();
+            }
+            "directory-to-file" => {
+                std::fs::remove_dir(command.join("target")).unwrap();
+                std::fs::write(command.join("target"), b"new").unwrap();
+            }
+            "replaced-root" => {
+                std::fs::rename(&command, temp.path().join("replaced")).unwrap();
+                std::fs::create_dir(&command).unwrap();
+                std::fs::write(command.join("unchanged"), b"seed").unwrap();
+            }
+            "file-overflow" => {
+                std::fs::write(command.join("target"), vec![0; MAX_FILE_BYTES + 1]).unwrap()
+            }
+            "snapshot-bytes-overflow" => {
+                for index in 0..MAX_SNAPSHOT_BYTES / MAX_FILE_BYTES {
+                    std::fs::write(
+                        command.join(format!("file-{index:02}")),
+                        vec![0; MAX_FILE_BYTES],
+                    )
+                    .unwrap();
+                }
+            }
+            "snapshot-count-overflow" | "changeset-count-limit" | "changeset-count-overflow" => {
+                let count = match case {
+                    "snapshot-count-overflow" => MAX_SNAPSHOT_FILES,
+                    "changeset-count-limit" => MAX_CHANGESET_FILES,
+                    _ => MAX_CHANGESET_FILES + 1,
+                };
+                for index in 0..count {
+                    std::fs::write(command.join(format!("file-{index:04}")), b"").unwrap();
+                }
+            }
+            "changeset-byte-limit" | "changeset-byte-overflow" => {
+                let count = MAX_CHANGESET_BYTES + usize::from(case == "changeset-byte-overflow");
+                std::fs::write(command.join("target"), vec![0; count]).unwrap();
+            }
+            "depth-limit" | "depth-overflow" => {
+                let path = vec!["d"; if case == "depth-limit" { 15 } else { 16 }].join("/");
+                std::fs::create_dir_all(command.join(&path)).unwrap();
+                std::fs::write(command.join(path).join("target"), b"child").unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let result = super::fs::command_changeset(&command, &before);
+        match case {
+            "changeset-count-limit" => {
+                assert_eq!(result.unwrap().files.len(), MAX_CHANGESET_FILES, "{case}")
+            }
+            "changeset-byte-limit" | "depth-limit" => {
+                assert_eq!(result.unwrap().files.len(), 1, "{case}")
+            }
+            "file-overflow"
+            | "snapshot-bytes-overflow"
+            | "snapshot-count-overflow"
+            | "changeset-count-overflow"
+            | "changeset-byte-overflow"
+            | "depth-overflow" => assert!(
+                matches!(result, Err(super::ToolError::Limit)),
+                "snapshot bound: {case}"
+            ),
+            "replaced-root" => assert!(
+                matches!(result, Err(super::ToolError::ChangedInput)),
+                "snapshot identity: {case}"
+            ),
+            _ => assert!(
+                matches!(result, Err(super::ToolError::Path)),
+                "snapshot object: {case}"
+            ),
+        }
+    }
 }
 
 #[cfg(unix)]

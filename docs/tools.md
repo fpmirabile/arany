@@ -7,7 +7,7 @@ target/debug/arany --tools
 target/debug/arany exec --tools --provider openai --model gpt-5.4 "Inspect and fix the selected code"
 ```
 
-Submitting work can consume Provider usage. The [Tool contract](./specs/tools.md) defines supported operations, enforcement and limits. The primary alone performs effects; commands/MCP use offline disposable project copies, while typed Edit/Write integrates approved changes.
+Submitting work can consume Provider usage. The [Tool contract](./specs/tools.md) defines supported operations, enforcement and limits. The primary alone performs effects; commands/MCP use offline project copies. Command changesets and typed Edit/Write publish only through approved, validated mutations; MCP writes remain disposable.
 
 ## Folder trust and approvals
 
@@ -19,7 +19,7 @@ Use the [minimal file-only configuration](./specs/tools.md#private-grants) to cr
 
 ## Commands
 
-Follow the [executable and input pin format](./specs/tools.md#commands). Pin resolved executable paths and current SHA-256 digests. Disposable command writes are discarded; use typed file operations to integrate project changes.
+Follow the [executable and input pin format](./specs/tools.md#commands). Pin resolved executable paths and current SHA-256 digests. Command file changes return as bounded changesets and require a separate validated integration receipt; see the command changeset contract for limits and approval.
 
 ## Portable Skills
 

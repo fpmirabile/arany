@@ -146,7 +146,17 @@ impl Provider for Journey {
         let catalog: serde_json::Value = serde_json::from_str(&context.catalog).unwrap();
         assert_eq!(catalog["commands"][0]["name"], "shell");
         assert_eq!(catalog["mcp_servers"][0]["name"], "synthetic");
-        assert_eq!(context.observations.len(), step);
+        assert_eq!(
+            context
+                .observations
+                .iter()
+                .filter(|observation| !matches!(
+                    observation.intent.call,
+                    ToolCall::ApplyChangeset { .. }
+                ))
+                .count(),
+            step
+        );
         if let Some(ToolCall::Read { path, .. }) = self.calls.get(step)
             && path == "src/linked.txt"
             && let Some((target, link)) = &self.linked_file
@@ -183,11 +193,30 @@ impl Provider for Journey {
     ignore = "native launchd/Seatbelt Tool journey; about 35 seconds"
 )]
 fn guarded_native_files_and_skills_survive_closed_replay() {
+    native_journey("tools::native_file_journey_helper");
+}
+
+#[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native command changeset integration and refusal corpus"
+)]
+fn guarded_command_changesets_survive_closed_replay() {
+    native_journey("tools::native_command_changeset_helper");
+}
+
+fn native_journey(helper: &str) {
     let _gate = crate::process::NATIVE_GATE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().unwrap();
-    for directory in ["account", "account/guard-trace"] {
+    for directory in [
+        "account",
+        "account/guard-trace",
+        "home",
+        "environment-state",
+        "environment-data",
+    ] {
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(temp.path().join(directory))
@@ -195,12 +224,7 @@ fn guarded_native_files_and_skills_survive_closed_replay() {
     }
     let mut command = std::process::Command::new(std::env::current_exe().unwrap());
     command
-        .args([
-            "--exact",
-            "tools::native_file_journey_helper",
-            "--ignored",
-            "--nocapture",
-        ])
+        .args(["--exact", helper, "--ignored", "--nocapture"])
         .env_clear()
         .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account"))
         .env(
@@ -208,9 +232,12 @@ fn guarded_native_files_and_skills_survive_closed_replay() {
             temp.path().join("account/guard-trace"),
         )
         .env("ARANY_TEST_FILE_JOURNEY_ROOT", temp.path())
+        .env("HOME", temp.path().join("home"))
+        .env("XDG_STATE_HOME", temp.path().join("environment-state"))
+        .env("XDG_DATA_HOME", temp.path().join("environment-data"))
         .current_dir(temp.path());
     let output = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        command.bounded_output_for(Duration::from_secs(180), 32 * 1024)
+        command.bounded_output_for(Duration::from_secs(360), 32 * 1024)
     }))
     .unwrap_or_else(|_| {
         panic!(
@@ -274,6 +301,7 @@ async fn native_file_journey_helper() {
         &state_path.join("tools.json"),
         &serde_json::to_vec(&config).unwrap(),
     );
+    private_file(&workspace.join("src/deleted.txt"), b"command delete\n");
     let calls = vec![
         ToolCall::Read {
             path: "src/main.txt".into(),
@@ -302,11 +330,6 @@ async fn native_file_journey_helper() {
         ToolCall::List {
             path: "src/generated".into(),
         },
-        ToolCall::Read {
-            path: "src/main.txt".into(),
-            offset: 0,
-            limit: 4096,
-        },
         ToolCall::Search {
             path: "src/main.txt".into(),
             query: "after".into(),
@@ -321,7 +344,7 @@ async fn native_file_journey_helper() {
         },
         ToolCall::Command {
             program: "shell".into(),
-            args: vec!["-c".into(), "set -eu; if /bin/cat /etc/passwd >/dev/null 2>&1; then exit 90; fi; if /bin/cat /usr/bin/sudo >/dev/null 2>&1; then exit 91; fi; test \"$(/bin/cat src/main.txt)\" = after; test \"$(/bin/cat src/generated/note.txt)\" = replaced; i=0; while test \"$i\" -lt 128; do /usr/bin/true; i=$((i + 1)); done; printf discarded > src/command-output.txt; printf native-command-success".into()],
+            args: vec!["-c".into(), "set -eu; if /bin/cat /etc/passwd >/dev/null 2>&1; then exit 90; fi; if /bin/cat /usr/bin/sudo >/dev/null 2>&1; then exit 91; fi; test \"$(/bin/cat src/main.txt)\" = after; test \"$(/bin/cat src/generated/note.txt)\" = replaced; i=0; while test \"$i\" -lt 128; do /usr/bin/true; i=$((i + 1)); done; printf 'command create\\n' > src/command-output.txt; printf 'command modify\\n' > src/generated/note.txt; /usr/bin/find src/deleted.txt -type f -delete; printf native-command-success".into()],
             cwd: "".into(),
         },
         ToolCall::McpList {
@@ -420,9 +443,17 @@ async fn native_file_journey_helper() {
     );
     assert_eq!(
         std::fs::read(workspace.join("src/generated/note.txt")).unwrap(),
-        b"replaced\n"
+        b"command modify\n"
     );
-    assert!(!workspace.join("src/command-output.txt").exists());
+    assert_eq!(
+        std::fs::read(workspace.join("src/command-output.txt")).unwrap(),
+        b"command create\n"
+    );
+    assert!(
+        !workspace.join("src/deleted.txt").exists(),
+        "delete publication: {:?}",
+        &outcome.run.tools[9..11]
+    );
     let store = Store::open_read_only(StateRoot::admit(&state_path).unwrap()).unwrap();
     let events = store.load_session(outcome.session_id).await.unwrap();
     let replay = SessionView::replay(outcome.session_id, &events)
@@ -431,10 +462,27 @@ async fn native_file_journey_helper() {
     let run = replay.runs.last().unwrap();
     assert_eq!(*run, outcome.run);
     assert_eq!(run.status, RunStatus::Finished);
-    assert_eq!(run.tools.len(), calls.len());
+    assert_eq!(run.tools.len(), calls.len() + 1);
+    let mut proposed = calls.iter();
     for (index, tool) in run.tools.iter().enumerate() {
         let observation = tool.observation.as_ref().expect("persisted receipt");
-        assert_eq!(observation.intent.call, calls[index]);
+        if let ToolCall::ApplyChangeset { changeset, .. } = &observation.intent.call {
+            assert_eq!(index, 10);
+            assert_eq!(
+                changeset
+                    .files
+                    .iter()
+                    .map(|file| file.path.as_str())
+                    .collect::<Vec<_>>(),
+                [
+                    "src/command-output.txt",
+                    "src/deleted.txt",
+                    "src/generated/note.txt"
+                ]
+            );
+        } else {
+            assert_eq!(&observation.intent.call, proposed.next().unwrap());
+        }
         assert_eq!(
             observation.disposition,
             match index {
@@ -455,13 +503,12 @@ async fn native_file_journey_helper() {
         );
         assert_eq!(receipt.limits, observation.intent.limits);
     }
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(
-            &run.tools[10].observation.as_ref().unwrap().output
-        )
-        .unwrap(),
-        json!({"exit_code":0,"stdout":"native-command-success","stderr":"","workspace_changes":"discarded"})
-    );
+    let command: serde_json::Value =
+        serde_json::from_str(&run.tools[9].observation.as_ref().unwrap().output).unwrap();
+    assert_eq!(command["exit_code"], 0);
+    assert_eq!(command["stdout"], "native-command-success");
+    assert_eq!(command["stderr"], "");
+    assert_eq!(command["changeset"]["files"].as_array().unwrap().len(), 3);
     let mcp: serde_json::Value =
         serde_json::from_str(&run.tools[12].observation.as_ref().unwrap().output).unwrap();
     assert_eq!(mcp["content"][0]["text"], "native MCP success");
@@ -481,9 +528,109 @@ async fn native_file_journey_helper() {
     }
     store.close().await.unwrap();
     std::fs::remove_file(workspace.join("src/linked.txt")).unwrap();
+    let mut fresh = Engine::open(
+        StateRoot::open_existing(&state_path).unwrap(),
+        Journey {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            calls: vec![ToolCall::Command {
+                program: "shell".into(),
+                args: vec!["-c".into(), "set -eu; test \"$(/bin/cat src/command-output.txt)\" = 'command create'; test \"$(/bin/cat src/generated/note.txt)\" = 'command modify'; test ! -e src/deleted.txt; printf fresh-snapshot".into()],
+                cwd: "".into(),
+            }],
+            linked_file: None,
+        },
+    ).unwrap();
+    fresh
+        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
+        .unwrap();
+    let fresh_outcome = fresh
+        .run(RunRequest {
+            session_id: Some(outcome.session_id),
+            title: None,
+            objective: "Verify a fresh native command snapshot".into(),
+            images: Vec::new(),
+            workspace: workspace.clone(),
+            include_paths: Vec::new(),
+            policy: CollaborationPolicy::Single,
+        })
+        .await
+        .unwrap();
+    fresh.close().await.unwrap();
+    assert_eq!(fresh_outcome.run.status, RunStatus::Finished);
+    let fresh_result: serde_json::Value = serde_json::from_str(
+        &fresh_outcome.run.tools[0]
+            .observation
+            .as_ref()
+            .unwrap()
+            .output,
+    )
+    .unwrap();
+    assert_eq!(fresh_result["stdout"], "fresh-snapshot");
+    assert_eq!(fresh_result["changeset"]["files"], json!([]));
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+    let replay = store.load_view(outcome.session_id).await.unwrap().unwrap();
+    assert_eq!(replay.runs.len(), 2);
+    assert_eq!(replay.runs[1], fresh_outcome.run);
+    store.close().await.unwrap();
     trace_case(root, "refusal");
     guard_refuses_before_go(root, &workspace, &outcome.run.tools[0].intent);
     stopped_effects_survive_closed_replay(root, &workspace, &config).await;
+}
+
+#[tokio::test]
+#[ignore = "isolated helper owned by native command changeset corpus"]
+async fn native_command_changeset_helper() {
+    let root = std::env::var_os("ARANY_TEST_FILE_JOURNEY_ROOT").expect("private fixture root");
+    let root = Path::new(&root);
+    assert_eq!(StateRoot::account_path().unwrap(), root.join("account"));
+    let source = root.join("native-links.c");
+    let executable = root.join("native-links");
+    private_file(
+        &source,
+        br#"#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+static int write_file(const char *path, const void *bytes, size_t size) {
+    FILE *file = fopen(path, "wb");
+    return !file || fwrite(bytes, 1, size, file) != size || fclose(file);
+}
+int main(int argc, char **argv) {
+    const unsigned char bytes[] = {0, 255};
+    if (argc != 2 || write_file("src/a-created", bytes, 2) || chmod("src/a-created", 0700)
+        || write_file("src/m-modified", "modified\n", 9) || unlink("src/z-deleted")) return 1;
+    int result = !strcmp(argv[1], "symlink") ? symlink("m-modified", "src/hostile")
+        : link("src/m-modified", "src/hostile");
+    if (result) return 2;
+    return fputs("payload-complete", stdout) == EOF ? 3 : 0;
+}
+"#,
+    );
+    let compiled = std::process::Command::new("/usr/bin/xcrun")
+        .args(["--sdk", "macosx", "clang", "-O0"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&executable)
+        .env_clear()
+        .env("TMPDIR", root)
+        .current_dir(root)
+        .bounded_output_for(Duration::from_secs(20), 16 * 1024)
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "native link fixture: {compiled:?}"
+    );
+    assert!(compiled.stdout.is_empty() && compiled.stderr.is_empty());
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = json!({
+        "version":1,"workspace_paths":["src"],"write":true,
+        "commands":[
+            {"name":"shell","executable":"/bin/sh","sha256":hash(&std::fs::read("/bin/sh").unwrap()),"interpreter":true,"inputs":[]},
+            {"name":"native-links","executable":executable,"sha256":hash(&std::fs::read(&executable).unwrap()),"interpreter":false,"inputs":[]}
+        ],
+        "skills":[],"mcp":[]
+    });
+    crate::tool_replay::native_command_changeset_corpus(root, &config, "shell").await;
 }
 
 async fn stopped_effects_survive_closed_replay(

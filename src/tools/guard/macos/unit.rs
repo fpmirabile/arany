@@ -8,7 +8,7 @@ use super::{
 };
 use crate::engine::RunCancellation;
 use crate::private_fs::{PrivateDirectory, open_directory};
-use crate::tools::types::{MAX_PROCESSES_OR_THREADS, MEMORY_BYTES};
+use crate::tools::types::{CommandResult, MAX_PROCESSES_OR_THREADS, MEMORY_BYTES, ToolDisposition};
 use crate::tools::{EffectIntent, ToolError, ToolObservation, ToolRuntime};
 use core_foundation::array::CFArray;
 use core_foundation::base::TCFType;
@@ -910,10 +910,12 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 }
                 watched.cancel();
             });
+            let mut storage = None;
+            let mut command_before = None;
             let result = async {
                 stage = super::super::BootstrapStage::Workspace;
                 let capture = FixtureSpan::begin(FixtureStage::SupervisorStorage);
-                let _storage = if intent.call.is_process() {
+                storage = if intent.call.is_process() {
                     Some(
                         prepare_command_storage(path.parent().ok_or(ToolError::Path)?, &runtime)
                             .await?,
@@ -921,6 +923,11 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 } else {
                     None
                 };
+                if matches!(intent.call, crate::tools::ToolCall::Command { .. }) {
+                    command_before = Some(crate::tools::fs::command_snapshot(
+                        &path.parent().ok_or(ToolError::Path)?.join("workspace"),
+                    )?);
+                }
                 capture.complete();
                 stage = super::super::BootstrapStage::Capabilities;
                 super::execute_worker(
@@ -938,6 +945,45 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             let capture = FixtureSpan::begin(FixtureStage::SupervisorCoalition);
             let cleanup = scope.stop(Some(std::process::id())).await;
             capture.finish(cleanup.is_ok());
+            let result = result.and_then(|mut observation| {
+                if cleanup.is_ok()
+                    && let Some(before) = &command_before
+                    && let Ok(mut command) =
+                        serde_json::from_str::<CommandResult>(&observation.output)
+                {
+                    let captured = crate::tools::fs::command_changeset(
+                        &path.parent().ok_or(ToolError::Path)?.join("workspace"),
+                        before,
+                    )
+                    .and_then(|changeset| {
+                        command.changeset = changeset;
+                        if !command.valid() {
+                            return Err(ToolError::Limit);
+                        }
+                        serde_json::to_string(&command).map_err(|_| ToolError::Operation)
+                    });
+                    match captured {
+                        Ok(output) => {
+                            observation.output = output;
+                            if !observation.valid() {
+                                observation.disposition = ToolDisposition::Limit;
+                                observation.output =
+                                    "Command changeset exceeded its reserved capacity".into();
+                            }
+                        }
+                        Err(error) => {
+                            observation.disposition = match error {
+                                ToolError::Limit => ToolDisposition::Limit,
+                                ToolError::Path => ToolDisposition::Denied,
+                                _ => ToolDisposition::Failed,
+                            };
+                            observation.output = "Command changeset could not be captured".into();
+                        }
+                    }
+                }
+                Ok(observation)
+            });
+            drop(storage);
             let storage_cleanup = if cleanup.is_ok() {
                 let capture = FixtureSpan::begin(FixtureStage::SupervisorDetach);
                 let result = cleanup_storage(path.parent().ok_or(ToolError::Path)?).await;

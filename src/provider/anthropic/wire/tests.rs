@@ -298,6 +298,16 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
         );
     }
     for call in [
+        json!(crate::tools::ToolCall::ApplyChangeset {
+            source_intent_digest: [9; 32],
+            changeset: crate::tools::CommandChangeset {
+                files: vec![crate::tools::FileChange {
+                    path: "generated".into(),
+                    before: None,
+                    after: Some(crate::tools::FileVersion::from_bytes(b"value", false)),
+                }]
+            },
+        }),
         json!({"operation":"skill","name":"example"}),
         json!({"operation":"read","path":"../outside","offset":0,"limit":1}),
         json!({"operation":"command","program":"bash","args":[],"cwd":"","network":true}),

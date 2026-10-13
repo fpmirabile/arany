@@ -4,6 +4,7 @@ use super::{ToolError, ToolRuntime};
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, DirBuilder, OpenOptions};
 use serde_json::json;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -12,6 +13,172 @@ struct Entry {
     path: String,
     content: Option<Vec<u8>>,
     executable: bool,
+}
+
+pub(super) struct CommandSnapshot {
+    root_identity: (u64, u64),
+    entries: BTreeMap<String, Entry>,
+}
+
+pub(super) fn command_snapshot(workspace: &Path) -> Result<CommandSnapshot, ToolError> {
+    let root = open_directory(workspace)?;
+    check_change_directory(&root, &root)?;
+    let mut entries = BTreeMap::new();
+    let mut budget = ScanBudget::default();
+    let mut retained = 0usize;
+    command_collect(&root, "", &mut entries, &mut budget, &mut retained)?;
+    Ok(CommandSnapshot {
+        root_identity: identity(&root)?,
+        entries,
+    })
+}
+
+fn command_collect(
+    root: &Dir,
+    path: &str,
+    entries: &mut BTreeMap<String, Entry>,
+    budget: &mut ScanBudget,
+    retained: &mut usize,
+) -> Result<(), ToolError> {
+    let directory = if path.is_empty() {
+        root.try_clone().map_err(|_| ToolError::Path)?
+    } else {
+        Dir::from_std_file(open_file(root, path)?)
+    };
+    let mut names = Vec::new();
+    for entry in directory.entries().map_err(|_| ToolError::Path)? {
+        budget.entry()?;
+        let name = entry
+            .map_err(|_| ToolError::Path)?
+            .file_name()
+            .into_string()
+            .map_err(|_| ToolError::Path)?;
+        let selected = if path.is_empty() {
+            name
+        } else {
+            format!("{path}/{name}")
+        };
+        if !valid_relative(&selected, false) {
+            return Err(ToolError::Path);
+        }
+        if selected.split('/').count() > 16 {
+            return Err(ToolError::Limit);
+        }
+        names.push(selected);
+    }
+    names.sort();
+    if names.is_empty() && !path.is_empty() {
+        *retained += 1;
+    }
+    for selected in names {
+        let file = open_file(root, &selected)?;
+        let metadata = file.metadata().map_err(|_| ToolError::Path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.mode() & 0o6000 != 0 {
+                return Err(ToolError::Path);
+            }
+        }
+        let entry = if metadata.is_dir() {
+            command_collect(root, &selected, entries, budget, retained)?;
+            Entry {
+                path: selected.clone(),
+                content: None,
+                executable: false,
+            }
+        } else {
+            #[cfg(unix)]
+            let executable = {
+                use std::os::unix::fs::PermissionsExt;
+                metadata.permissions().mode() & 0o111 != 0
+            };
+            #[cfg(not(unix))]
+            let executable = false;
+            let content = read_regular(file, MAX_FILE_BYTES)?;
+            budget.bytes = budget
+                .bytes
+                .checked_add(content.len())
+                .ok_or(ToolError::Limit)?;
+            if budget.bytes > MAX_SNAPSHOT_BYTES {
+                return Err(ToolError::Limit);
+            }
+            *retained += 1;
+            Entry {
+                path: selected.clone(),
+                content: Some(content),
+                executable,
+            }
+        };
+        if *retained > MAX_SNAPSHOT_FILES {
+            return Err(ToolError::Limit);
+        }
+        entries.insert(selected, entry);
+    }
+    Ok(())
+}
+
+pub(super) fn command_changeset(
+    workspace: &Path,
+    before: &CommandSnapshot,
+) -> Result<CommandChangeset, ToolError> {
+    let after = command_snapshot(workspace)?;
+    if after.root_identity != before.root_identity {
+        return Err(ToolError::ChangedInput);
+    }
+    let mut files = Vec::new();
+    let mut changed_bytes = 0usize;
+    let paths: BTreeSet<_> = before.entries.keys().chain(after.entries.keys()).collect();
+    for path in paths {
+        let old = before.entries.get(path);
+        let new = after.entries.get(path);
+        if old.is_some_and(|entry| entry.content.is_none())
+            && new.is_some_and(|entry| entry.content.is_some())
+            || old.is_some_and(|entry| entry.content.is_some())
+                && new.is_some_and(|entry| entry.content.is_none())
+        {
+            return Err(ToolError::Path);
+        }
+        if old.map(|entry| (&entry.content, entry.executable))
+            == new.map(|entry| (&entry.content, entry.executable))
+            || old
+                .into_iter()
+                .chain(new)
+                .all(|entry| entry.content.is_none())
+        {
+            continue;
+        }
+        for entry in old.into_iter().chain(new) {
+            changed_bytes = changed_bytes
+                .checked_add(entry.content.as_ref().map_or(0, Vec::len))
+                .ok_or(ToolError::Limit)?;
+        }
+        if changed_bytes > MAX_CHANGESET_BYTES || files.len() >= MAX_CHANGESET_FILES {
+            return Err(ToolError::Limit);
+        }
+        let version = |entry: Option<&Entry>| {
+            entry.and_then(|entry| {
+                entry
+                    .content
+                    .as_ref()
+                    .map(|content| FileVersion::from_bytes(content, entry.executable))
+            })
+        };
+        let old = version(old);
+        let new = version(new);
+        if old != new {
+            files.push(FileChange {
+                path: path.clone(),
+                before: old,
+                after: new,
+            });
+        }
+    }
+    let changeset = CommandChangeset { files };
+    if !changeset.valid() {
+        return Err(ToolError::Limit);
+    }
+    Ok(changeset)
 }
 
 pub(crate) fn open_directory(path: &Path) -> Result<Dir, ToolError> {
@@ -811,8 +978,257 @@ pub(super) fn native(
             }
             replace(&root, path, Some(expected_digest), replacement.as_bytes())
         }
+        ToolCall::ApplyChangeset { changeset, .. } => {
+            config.validate()?;
+            if !config.allows(call) {
+                return Err(ToolError::Path);
+            }
+            apply_changeset(&root, changeset)
+        }
         _ => Err(ToolError::Operation),
     }
+}
+
+struct ChangeParent {
+    directory: Dir,
+    path: String,
+    missing: Vec<String>,
+    leaf: String,
+}
+
+fn change_parent(root: &Dir, path: &str) -> Result<ChangeParent, ToolError> {
+    let mut parts = path.split('/').collect::<Vec<_>>();
+    let leaf = parts.pop().ok_or(ToolError::Path)?.to_owned();
+    let mut directory = Dir::from_std_file(open_file(root, ".")?);
+    let mut existing = String::new();
+    for (index, part) in parts.iter().enumerate() {
+        match directory.symlink_metadata(part) {
+            Ok(_) => {
+                let next = Dir::from_std_file(open_file(&directory, part)?);
+                check_change_directory(root, &next)?;
+                directory = next;
+                if !existing.is_empty() {
+                    existing.push('/');
+                }
+                existing.push_str(part);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ChangeParent {
+                    directory,
+                    path: existing,
+                    missing: parts[index..]
+                        .iter()
+                        .map(|part| (*part).to_owned())
+                        .collect(),
+                    leaf,
+                });
+            }
+            Err(_) => return Err(ToolError::Path),
+        }
+    }
+    check_change_directory(root, &directory)?;
+    Ok(ChangeParent {
+        directory,
+        path: existing,
+        missing: Vec::new(),
+        leaf,
+    })
+}
+
+fn check_change_directory(root: &Dir, directory: &Dir) -> Result<(), ToolError> {
+    let metadata = directory.dir_metadata().map_err(|_| ToolError::Path)?;
+    if !metadata.is_dir() || identity(directory)?.0 != identity(root)?.0 {
+        return Err(ToolError::Path);
+    }
+    #[cfg(unix)]
+    {
+        use cap_std::fs::MetadataExt;
+        if metadata.mode() & 0o6000 != 0 {
+            return Err(ToolError::Path);
+        }
+    }
+    Ok(())
+}
+
+fn check_change_file(
+    parent: &Dir,
+    leaf: &str,
+    expected: Option<&FileVersion>,
+) -> Result<u32, ToolError> {
+    let Some(expected) = expected else {
+        return if parent
+            .symlink_metadata(leaf)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            Ok(0o600)
+        } else {
+            Err(ToolError::Conflict)
+        };
+    };
+    let file = open_file(parent, leaf).map_err(|_| ToolError::Conflict)?;
+    let metadata = file.metadata().map_err(|_| ToolError::Conflict)?;
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode()
+    };
+    #[cfg(not(unix))]
+    let mode = 0o600;
+    if mode & 0o6000 != 0 {
+        return Err(ToolError::Path);
+    }
+    let bytes = read_regular(file, MAX_FILE_BYTES)?;
+    if hex_digest(&bytes) != expected.sha256 || (mode & 0o111 != 0) != expected.executable {
+        return Err(ToolError::Conflict);
+    }
+    Ok(mode & 0o777)
+}
+
+fn verify_change_parent(root: &Dir, parent: &ChangeParent) -> Result<(), ToolError> {
+    let live = Dir::from_std_file(open_file(
+        root,
+        if parent.path.is_empty() {
+            "."
+        } else {
+            &parent.path
+        },
+    )?);
+    check_change_directory(root, &live)?;
+    if identity(&live)? != identity(&parent.directory)? {
+        return Err(ToolError::Conflict);
+    }
+    Ok(())
+}
+
+fn apply_changeset(root: &Dir, changeset: &CommandChangeset) -> Result<String, ToolError> {
+    if !changeset.valid() {
+        return Err(ToolError::Path);
+    }
+    check_change_directory(root, root)?;
+    let mut parents = Vec::new();
+    for change in &changeset.files {
+        let parent = change_parent(root, &change.path)?;
+        if parent.missing.is_empty() {
+            check_change_file(&parent.directory, &parent.leaf, change.before.as_ref())?;
+        } else if change.before.is_some() {
+            return Err(ToolError::Conflict);
+        }
+        parents.push(parent);
+    }
+    for (change, parent) in changeset.files.iter().zip(&parents) {
+        verify_change_parent(root, parent)?;
+        if parent.missing.is_empty() {
+            check_change_file(&parent.directory, &parent.leaf, change.before.as_ref())?;
+        } else if !parent
+            .directory
+            .symlink_metadata(&parent.missing[0])
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            return Err(ToolError::Conflict);
+        }
+    }
+    let mut created = BTreeMap::new();
+    let mut affected = false;
+    for (change, mut parent) in changeset.files.iter().zip(parents) {
+        let result = (|| {
+            verify_change_parent(root, &parent)?;
+            for part in &parent.missing {
+                let path = if parent.path.is_empty() {
+                    part.clone()
+                } else {
+                    format!("{}/{part}", parent.path)
+                };
+                if let Some(expected) = created.get(&path) {
+                    let live = Dir::from_std_file(open_file(&parent.directory, part)?);
+                    check_change_directory(root, &live)?;
+                    if identity(&live)? != *expected {
+                        return Err(ToolError::Conflict);
+                    }
+                    parent.directory = live;
+                } else {
+                    let mut builder = DirBuilder::new();
+                    #[cfg(unix)]
+                    {
+                        use cap_std::fs::DirBuilderExt;
+                        builder.mode(0o700);
+                    }
+                    parent
+                        .directory
+                        .create_dir_with(part, &builder)
+                        .map_err(|error| {
+                            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                                ToolError::Conflict
+                            } else {
+                                ToolError::Operation
+                            }
+                        })?;
+                    affected = true;
+                    parent
+                        .directory
+                        .try_clone()
+                        .map_err(|_| ToolError::Uncertain)?
+                        .into_std_file()
+                        .sync_all()
+                        .map_err(|_| ToolError::Uncertain)?;
+                    let live = Dir::from_std_file(open_file(&parent.directory, part)?);
+                    check_change_directory(root, &live)?;
+                    created.insert(path.clone(), identity(&live)?);
+                    parent.directory = live;
+                }
+                parent.path = path;
+            }
+            verify_change_parent(root, &parent)?;
+            let mode = check_change_file(&parent.directory, &parent.leaf, change.before.as_ref())?;
+            if let Some(after) = &change.after {
+                let bytes = after.bytes().ok_or(ToolError::Path)?;
+                let mode = mode & 0o666
+                    | if after.executable {
+                        if mode & 0o111 == 0 {
+                            0o100
+                        } else {
+                            mode & 0o111
+                        }
+                    } else {
+                        0
+                    };
+                replace_file(
+                    &parent.directory,
+                    &parent.leaf,
+                    change.before.is_none(),
+                    &bytes,
+                    mode,
+                    || {
+                        verify_change_parent(root, &parent)?;
+                        check_change_file(&parent.directory, &parent.leaf, change.before.as_ref())
+                            .map(|_| ())
+                    },
+                )?;
+            } else {
+                parent
+                    .directory
+                    .remove_file(&parent.leaf)
+                    .map_err(|_| ToolError::Operation)?;
+                affected = true;
+                parent
+                    .directory
+                    .try_clone()
+                    .map_err(|_| ToolError::Uncertain)?
+                    .into_std_file()
+                    .sync_all()
+                    .map_err(|_| ToolError::Uncertain)?;
+            }
+            affected = true;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            return Err(if affected {
+                ToolError::Uncertain
+            } else {
+                error
+            });
+        }
+    }
+    Ok(json!({"applied":changeset.files.len()}).to_string())
 }
 
 fn replace(
@@ -851,6 +1267,20 @@ fn replace(
         }
         Err(_) => 0o600,
     };
+    #[cfg(not(unix))]
+    let mode = 0o600;
+    replace_file(&parent, &leaf, expected.is_none(), bytes, mode, verify)?;
+    Ok(json!({"sha256":hex_digest(bytes),"bytes":bytes.len()}).to_string())
+}
+
+fn replace_file(
+    parent: &Dir,
+    leaf: &str,
+    create: bool,
+    bytes: &[u8],
+    mode: u32,
+    verify: impl Fn() -> Result<(), ToolError>,
+) -> Result<(), ToolError> {
     let temporary = format!(".arany-write-{}", uuid::Uuid::now_v7());
     let mut options = OpenOptions::new();
     options
@@ -878,18 +1308,18 @@ fn replace(
         verify()?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            if expected.is_none() {
+            if create {
                 rustix::fs::renameat_with(
-                    &parent,
+                    parent,
                     &temporary,
-                    &parent,
-                    &leaf,
+                    parent,
+                    leaf,
                     rustix::fs::RenameFlags::NOREPLACE,
                 )
                 .map_err(|_| ToolError::Conflict)?;
             } else {
                 parent
-                    .rename(&temporary, &parent, &leaf)
+                    .rename(&temporary, parent, leaf)
                     .map_err(|_| ToolError::Operation)?;
             }
             parent
@@ -898,7 +1328,7 @@ fn replace(
                 .into_std_file()
                 .sync_all()
                 .map_err(|_| ToolError::Uncertain)?;
-            Ok(json!({"sha256":hex_digest(bytes),"bytes":bytes.len()}).to_string())
+            Ok(())
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
