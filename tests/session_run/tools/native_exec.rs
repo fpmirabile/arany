@@ -217,7 +217,10 @@ async fn selected_cache_canary_helper() {
     assert_eq!(receipt.limits, observation.intent.limits);
     let command: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
     assert_eq!(command["exit_code"], 0);
-    assert_eq!(command["stderr"], "");
+    assert!(
+        command["stderr"].as_str().is_some_and(str::is_empty),
+        "cache command stderr was not empty"
+    );
     assert!(
         command["stdout"]
             .as_str()
@@ -227,15 +230,16 @@ async fn selected_cache_canary_helper() {
     {
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        let initial_tools = requests[0]
+        let _initial_tools = requests[0]
             .tools
             .as_ref()
             .expect("first cache canary request includes Tool context");
-        let initial = serde_json::to_vec(initial_tools).unwrap();
+        let initial = serde_json::to_vec(&requests[0]).unwrap();
         assert!(
             !initial
                 .windows(CACHE_CANARY.len())
-                .any(|part| part == CACHE_CANARY.as_bytes())
+                .any(|part| part == CACHE_CANARY.as_bytes()),
+            "cache canary was present in the initial Provider request"
         );
         assert!(
             requests[1].tools.as_ref().unwrap().observations[0]
