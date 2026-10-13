@@ -71,22 +71,18 @@ impl GoalView {
         if self.active_run.is_some() {
             return false;
         }
-        if !self.awaiting_plan_contract {
-            return true;
-        }
-        let Some(run_id) = self.run_ids.last() else {
-            return false;
-        };
-        view.runs
-            .iter()
-            .find(|run| run.id == *run_id)
-            .is_some_and(|run| {
-                run.tools.iter().all(|tool| {
-                    tool.observation
-                        .as_ref()
-                        .is_some_and(|observation| !observation.stops_run())
+        self.run_ids.iter().all(|run_id| {
+            view.runs
+                .iter()
+                .find(|run| run.id == *run_id)
+                .is_some_and(|run| {
+                    run.tools.iter().all(|tool| {
+                        tool.observation
+                            .as_ref()
+                            .is_some_and(|observation| !observation.stops_run())
+                    })
                 })
-            })
+        })
     }
 }
 
@@ -107,8 +103,10 @@ mod goal_recovery_tests {
             enforcement_digest: [2; 32],
             workspace_device: 1,
             workspace_inode: 2,
-            call: ToolCall::McpList {
-                server: "catalog".into(),
+            call: ToolCall::Read {
+                path: "src/main.rs".into(),
+                offset: 0,
+                limit: 32,
             },
             limits: crate::tools::ToolLimits::default(),
             expires_at_ms: 1,
@@ -185,6 +183,12 @@ mod goal_recovery_tests {
     fn pending_plan_recovery_accepts_closed_inspection_and_refuses_open_or_uncertain_tools() {
         let closed = pending_plan_view(Some(ToolDisposition::Succeeded));
         assert!(closed.goals[0].can_resume(&closed));
+
+        let mut started_only = closed.clone();
+        started_only.runs.clear();
+        started_only.goals[0].run_ids.clear();
+        started_only.goals[0].awaiting_plan_contract = false;
+        assert!(started_only.goals[0].can_resume(&started_only));
 
         let open = pending_plan_view(None);
         assert!(!open.goals[0].can_resume(&open));
@@ -576,20 +580,13 @@ impl SessionView {
             )
             && !matches!(
                 &envelope.event,
-                Event::ToolStarted {
-                    intent: crate::tools::EffectIntent {
-                        call: crate::tools::ToolCall::McpList { .. },
-                        ..
-                    },
-                    ..
-                }
+                Event::ToolStarted { intent, .. }
+                    if intent.call.is_goal_plan_prelude()
             )
             && !matches!(
                 &envelope.event,
-                Event::ToolFinished {
-                    observation,
-                    ..
-                } if matches!(observation.intent.call, crate::tools::ToolCall::McpList { .. })
+                Event::ToolFinished { observation, .. }
+                    if observation.intent.call.is_goal_plan_prelude()
             )
             && !matches!(
                 &envelope.event,
@@ -809,21 +806,17 @@ impl SessionView {
                     .filter(|run| run.id == *run_id)
                     .ok_or(ReplayError::InvalidTransition)?;
                 let primary = run.primary().ok_or(ReplayError::InvalidTransition)?;
-                let valid_previous_tools = run
-                    .tools
-                    .iter()
-                    .all(|tool| matches!(tool.intent.call, crate::tools::ToolCall::McpList { .. }));
+                let valid_previous_tools = run.tools.iter().all(|tool| {
+                    tool.intent.call.is_goal_plan_prelude()
+                        && tool
+                            .observation
+                            .as_ref()
+                            .is_some_and(|observation| !observation.stops_run())
+                });
                 let requested_tools = primary
                     .provider_calls
                     .iter()
                     .filter(|call| call.disposition == ProviderCallDisposition::ToolRequested)
-                    .count();
-                let discovery_tools = run
-                    .tools
-                    .iter()
-                    .filter(|tool| {
-                        matches!(tool.intent.call, crate::tools::ToolCall::McpList { .. })
-                    })
                     .count();
                 let valid_contract_call = run.status == RunStatus::Active
                     && primary.role == AgentRole::Primary
@@ -835,7 +828,7 @@ impl SessionView {
                             )
                     })
                     && valid_previous_tools
-                    && requested_tools.saturating_sub(discovery_tools) == 1;
+                    && requested_tools == model_tool_count(run) + 1;
                 let goal = current_goal_mut(current, *goal_id)?;
                 let reserved = goal
                     .reserved_active_ms
@@ -1300,17 +1293,16 @@ impl SessionView {
                 intent,
             } => {
                 let goal = current.goals.last().ok_or(ReplayError::InvalidTransition)?;
-                let discovery = matches!(&intent.call, crate::tools::ToolCall::McpList { .. });
-                let phase_allows_call =
-                    goal.phase == Some(GoalPhase::Implementation) || intent.call.read_only();
+                let phase_allows_call = goal.phase == Some(GoalPhase::Implementation)
+                    || intent.call.is_goal_plan_prelude();
+                let plan_allows_call = if let Some(contract) = &goal.plan_contract {
+                    !goal.awaiting_plan_contract && contract.allows_call(&intent.call)
+                } else {
+                    goal.awaiting_plan_contract && intent.call.is_goal_plan_prelude()
+                };
                 if goal.active_run != Some(*run_id)
                     || !phase_allows_call
-                    || !discovery
-                        && (goal.awaiting_plan_contract
-                            || goal
-                                .plan_contract
-                                .as_ref()
-                                .is_none_or(|contract| !contract.allows_call(&intent.call)))
+                    || !plan_allows_call
                     || goal
                         .plan_contract
                         .as_ref()
@@ -1405,11 +1397,12 @@ impl SessionView {
                 {
                     goal.success_criterion_satisfied = contract.matches_success(&observations);
                 }
-                let catalog_listing = matches!(
-                    observation.intent.call,
-                    crate::tools::ToolCall::McpList { .. }
-                );
-                if catalog_listing && let Some(goal) = current.goals.last_mut() {
+                let unplanned_prelude = current
+                    .goals
+                    .last()
+                    .is_some_and(|goal| goal.plan_contract.is_none())
+                    && observation.intent.call.is_goal_plan_prelude();
+                if unplanned_prelude && let Some(goal) = current.goals.last_mut() {
                     goal.awaiting_plan_contract = false;
                 }
             }

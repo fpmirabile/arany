@@ -444,6 +444,9 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
 struct Proposal {
     call: ToolCall,
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
+    inspect_first: bool,
+    plan_on_inspection: bool,
+    omit_plan: bool,
 }
 
 impl Provider for Proposal {
@@ -458,10 +461,37 @@ impl Provider for Proposal {
     }
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         let mut requests = self.requests.lock().unwrap();
-        let outcome = match (requests.len(), &self.call) {
+        let request_index = requests.len();
+        if self.inspect_first && request_index == 0 {
+            requests.push(request);
+            return Ok(ProviderResponse {
+                outcome: ProviderOutcome::Tool {
+                    call: ToolCall::Read {
+                        path: "src/current.txt".into(),
+                        offset: 0,
+                        limit: 64,
+                    },
+                    plan_contract: if self.plan_on_inspection {
+                        proposal_plan_contract(&self.call).map(Box::new)
+                    } else {
+                        None
+                    },
+                },
+                response_id: None,
+                input_tokens: None,
+                output_tokens: None,
+                wire_provenance: None,
+            });
+        }
+        let step = request_index.saturating_sub(if self.inspect_first { 1 } else { 0 });
+        let outcome = match (step, &self.call) {
             (0, call) => ProviderOutcome::Tool {
                 call: call.clone(),
-                plan_contract: proposal_plan_contract(call).map(Box::new),
+                plan_contract: if self.omit_plan || self.plan_on_inspection {
+                    None
+                } else {
+                    proposal_plan_contract(call).map(Box::new)
+                },
             },
             (1, ToolCall::McpList { .. } | ToolCall::McpCall { .. }) | (2, _) => {
                 ProviderOutcome::Finish(Finish {
@@ -609,6 +639,9 @@ async fn mcp_stdio_corpus_rejects_unnegotiated_authority_and_hostile_results() {
             Proposal {
                 call: proposal,
                 requests: requests.clone(),
+                inspect_first: false,
+                plan_on_inspection: false,
+                omit_plan: false,
             },
         )
         .unwrap();
@@ -644,15 +677,13 @@ async fn mcp_stdio_corpus_rejects_unnegotiated_authority_and_hostile_results() {
             assert_eq!(result["content"][0]["fetch"], "not authorized or performed");
         }
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
-        assert_eq!(
-            store
-                .load_view(outcome.session_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .runs[0],
-            outcome.run
-        );
+        let view = store.load_view(outcome.session_id).await.unwrap().unwrap();
+        assert_eq!(view.runs[0], outcome.run);
+        if !call {
+            assert_eq!(view.goals[0].status, arany::GoalStatus::Completed);
+            assert!(view.goals[0].plan_contract.is_none());
+            assert!(view.goals[0].report.is_some());
+        }
         store.close().await.unwrap();
     }
 }
@@ -820,6 +851,9 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
                         new: "must not run".into(),
                     },
                     requests: failed_requests.clone(),
+                    inspect_first: false,
+                    plan_on_inspection: false,
+                    omit_plan: false,
                 },
             )
             .unwrap();
@@ -1019,6 +1053,9 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
         Proposal {
             call: ToolCall::List { path: "".into() },
             requests: runtime_requests.clone(),
+            inspect_first: false,
+            plan_on_inspection: false,
+            omit_plan: false,
         },
     )
     .unwrap();
@@ -1094,7 +1131,24 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
             search(&deep_path),
             ToolDisposition::Denied,
         ),
-        ("scope", read("unselected.txt"), ToolDisposition::Denied),
+        (
+            "scope",
+            ToolCall::Write {
+                path: "unselected.txt".into(),
+                expected_digest: None,
+                content: "must not be written".into(),
+            },
+            ToolDisposition::Denied,
+        ),
+        (
+            "unplanned",
+            ToolCall::Write {
+                path: "src/unplanned.txt".into(),
+                expected_digest: None,
+                content: "must not be written".into(),
+            },
+            ToolDisposition::Denied,
+        ),
         (
             "parent",
             ToolCall::Write {
@@ -1160,6 +1214,9 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
             Proposal {
                 call,
                 requests: requests.clone(),
+                inspect_first: matches!(name, "scope" | "unplanned" | "long-mkdir"),
+                plan_on_inspection: name == "long-mkdir",
+                omit_plan: name == "unplanned",
             },
         )
         .unwrap();
@@ -1174,7 +1231,7 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
         .expect("path-case parent deadline")
         .unwrap();
         engine.close().await.unwrap();
-        let rejected_by_plan = name == "scope";
+        let rejected_by_plan = matches!(name, "scope" | "unplanned");
         assert_eq!(
             outcome.run.status,
             if rejected_by_plan {
@@ -1186,15 +1243,29 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
         );
         assert_proposal_requests(
             &requests.lock().unwrap(),
-            if rejected_by_plan { 1 } else { 3 },
+            if rejected_by_plan {
+                2
+            } else {
+                if name == "long-mkdir" { 4 } else { 3 }
+            },
         );
         if rejected_by_plan {
             assert!(
-                outcome.run.tools.is_empty(),
+                outcome.run.tools.len() == 1
+                    && matches!(outcome.run.tools[0].intent.call, ToolCall::Read { .. })
+                    && outcome.run.tools[0]
+                        .observation
+                        .as_ref()
+                        .is_some_and(|observation| {
+                            observation.disposition == ToolDisposition::Succeeded
+                        }),
                 "out-of-plan call is never dispatched"
             );
+            assert!(!workspace.join("unselected.txt").exists());
+            assert!(!workspace.join("src/unplanned.txt").exists());
         } else {
-            let observation = outcome.run.tools[0].observation.as_ref().unwrap();
+            let tool_index = if name == "long-mkdir" { 1 } else { 0 };
+            let observation = outcome.run.tools[tool_index].observation.as_ref().unwrap();
             assert_eq!(observation.disposition, expected, "case {name}");
             if name.starts_with("root-search-") {
                 assert!(!observation.output.contains("OUTSIDE_GUARD_CANARY"));
@@ -1220,15 +1291,15 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
         );
         assert!(!temp.path().join("created").exists());
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
-        assert_eq!(
-            store
-                .load_view(outcome.session_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .runs[0],
-            outcome.run
-        );
+        let view = store.load_view(outcome.session_id).await.unwrap().unwrap();
+        assert_eq!(view.runs[0], outcome.run);
+        if name == "long-mkdir" {
+            assert!(view.goals[0].plan_contract.is_some());
+            assert!(matches!(
+                view.runs[0].tools[0].intent.call,
+                ToolCall::Read { .. }
+            ));
+        }
         store.close().await.unwrap();
     }
     std::fs::remove_file(workspace.join("src/link")).unwrap();
@@ -1262,6 +1333,9 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
                     cwd: "".into(),
                 },
                 requests: requests.clone(),
+                inspect_first: false,
+                plan_on_inspection: false,
+                omit_plan: false,
             },
         )
         .unwrap();
@@ -1425,6 +1499,9 @@ async fn cancellation_owns_the_actual_descendant_unit_and_never_retries_it() {
                 cwd: "".into(),
             },
             requests: requests.clone(),
+            inspect_first: false,
+            plan_on_inspection: false,
+            omit_plan: false,
         },
     )
     .unwrap();
@@ -1534,6 +1611,9 @@ async fn command_descendants_cannot_reach_host_canaries_or_guard_memory() {
                 cwd: "".into(),
             },
             requests: requests.clone(),
+            inspect_first: false,
+            plan_on_inspection: false,
+            omit_plan: false,
         },
     )
     .unwrap();
@@ -1599,6 +1679,9 @@ async fn resource_quotas_apply_to_payload_descendants_and_oom_is_uncertain() {
                     cwd: "".into(),
                 },
                 requests: requests.clone(),
+                inspect_first: false,
+                plan_on_inspection: false,
+                omit_plan: false,
             },
         )
         .unwrap();

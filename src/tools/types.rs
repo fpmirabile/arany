@@ -276,7 +276,7 @@ impl ToolCall {
         )
     }
 
-    pub(crate) fn read_only(&self) -> bool {
+    pub(crate) fn is_goal_plan_prelude(&self) -> bool {
         matches!(
             self,
             Self::List { .. }
@@ -611,20 +611,32 @@ impl ToolContext {
             .as_array()
             .cloned()
             .unwrap_or_default();
-        let mut discovery = Vec::new();
+        let mut prelude = Vec::new();
         let mut planned = Vec::new();
         for call in calls {
-            if call["properties"]["operation"]["enum"][0] == "mcp_list" {
-                discovery.push(call);
+            if matches!(
+                call["properties"]["operation"]["enum"][0].as_str(),
+                Some("list" | "read" | "search" | "skill" | "mcp_list")
+            ) {
+                prelude.push(call);
             } else {
                 planned.push(call);
             }
         }
         let mut branches = Vec::with_capacity(2);
-        if !discovery.is_empty() {
-            let mut discovery_branch = branch.clone();
-            discovery_branch["properties"]["call"]["anyOf"] = json!(discovery);
-            branches.push(discovery_branch);
+        if !prelude.is_empty() {
+            let mut prelude_branch = branch.clone();
+            prelude_branch["properties"]["call"]["anyOf"] = json!(prelude);
+            let prelude_schema = json!({"anyOf":[schema.clone(), {"type":"null"}]});
+            prelude_branch["properties"]
+                .as_object_mut()
+                .expect("Tool properties")
+                .insert("plan_contract".into(), prelude_schema);
+            prelude_branch["required"]
+                .as_array_mut()
+                .expect("Tool required fields")
+                .push(json!("plan_contract"));
+            branches.push(prelude_branch);
         }
         if !planned.is_empty() {
             let mut planned_branch = branch;

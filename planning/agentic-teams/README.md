@@ -196,12 +196,17 @@ a research note verifies its API from primary sources.
   asks the user instead of skipping evaluation.
 
 1. **Plan contract.** The primary declares each worker's mission, direction
-   and scope in its assignment; a worker can only narrow it. Each agent's
-   first Tool outcome carries its scope
-   (paths and command names), success criterion (an explicit check such as a
-   named test command) and budget, without an extra model call. It is
-   mandatory for every agent that performs effects, bounded, validated and journaled.
-   Changing it requires approval under the current approval mode.
+   and scope in its assignment; a worker can only narrow it. Before its plan,
+   an agent may use bounded Workspace List/Read/Search, an admitted Skill read,
+   and configured bounded MCP catalog listing to inspect the task. Before any
+   other Tool, a bounded contract covers paths, command names, exact Skill
+   resources and MCP tools, a typed success criterion and budget, without an
+   extra model call. Catalog listing discovers names only; every MCP tool
+   invocation requires a contract even if the catalog labels it read-only. A
+   contract may accompany pre-plan inspection and is always validated and
+   journaled. A task limited to read-only inspection can finish without
+   inventing effect scope. Contract changes require approval under the current
+   approval mode.
 2. **Deterministic signals.** Each signal has a fixed threshold and response:
 
    | Signal | Detection | Default response |
@@ -431,9 +436,10 @@ execution contracts own the resulting behavior.
    the final report. Without the flag it goes straight to Implementation. Goal
    progress and the final report use the existing JSONL channel.
 11. **Every task is a Goal.** RPI adds Research and Plan; Ask, Accept edits and
-    Auto go straight to Implementation with the plan contract in the first
-    outcome. A Session holds at most one active Goal; a prompt while it runs
-    is a steering note, and the next prompt after it ends starts a new Goal.
+    Auto go straight to Implementation. In every mode, bounded read-only
+    inspection may precede the plan contract; every other Tool requires it
+    before dispatch. A Session holds at most one active Goal; a prompt while it
+    runs is a steering note, and the next prompt after it ends starts a new Goal.
 12. **Settings.** New settings live in one private, owner-only, versioned
     user settings file edited through `/settings`; per-folder values live with
     the folder-trust record; project files never set them. `tools.json`,
@@ -497,7 +503,8 @@ triggered and evidence under [testing rules](../../agents/testing.md).
    [next steps](../../NEXT_STEPS.md#beta-1-final-user-owned-checks). Every
    later slice is exercised through real use, which supplies the shadow-mode
    calibration data B2 needs.
-4. Goal core: E11 every task is a Goal, B1 plan contract, E1–E4 steering,
+4. Goal core: E11 every task is a Goal, B1 plan contract after bounded
+   read-only inspection, E1–E4 steering,
    context, Workspace lock and checkpoints, E8 compaction and E10 `exec`
    integration. Creates the `docs/specs/goals.md` domain spec.
 5. B6 modes including RPI and grilling, E7 Goal view and E12 settings.

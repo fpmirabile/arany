@@ -54,7 +54,7 @@ fn goal_plan_contract() -> crate::session::GoalPlanContract {
 }
 
 #[test]
-fn first_primary_tool_schema_requires_a_plan_and_catalog_listing_stays_available() {
+fn first_effect_requires_a_plan_and_bounded_read_only_prelude_is_available() {
     let mut request = run_request();
     request.collaboration = crate::session::CollaborationPolicy::Single;
     request.goal_budget = Some(crate::session::GoalBudget::default());
@@ -81,31 +81,48 @@ fn first_primary_tool_schema_requires_a_plan_and_catalog_listing_stays_available
         assert_eq!(tool_branches.len(), 2);
         for branch in tool_branches {
             let calls = branch["properties"]["call"]["anyOf"].as_array().unwrap();
-            let catalog_only =
-                calls.len() == 1 && calls[0]["properties"]["operation"]["enum"][0] == "mcp_list";
-            assert_eq!(
+            let prelude = calls.iter().all(|call| {
+                matches!(
+                    call["properties"]["operation"]["enum"][0].as_str(),
+                    Some("list" | "read" | "search" | "skill" | "mcp_list")
+                )
+            });
+            assert!(
                 branch["required"]
                     .as_array()
                     .unwrap()
                     .iter()
-                    .any(|field| field == "plan_contract"),
-                !catalog_only
+                    .any(|field| field == "plan_contract")
             );
-            if !catalog_only {
-                let contract = &branch["properties"]["plan_contract"];
+            let contract = &branch["properties"]["plan_contract"];
+            let contract = if prelude {
                 assert!(
-                    contract["required"]
+                    contract["anyOf"]
                         .as_array()
                         .unwrap()
-                        .contains(&json!("skills"))
+                        .contains(&json!({"type":"null"}))
                 );
-                assert_eq!(
-                    contract["properties"]["skills"]["items"]["required"],
-                    json!(["name", "resource"])
-                );
-            }
+                &contract["anyOf"][0]
+            } else {
+                contract
+            };
+            assert!(
+                contract["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("skills"))
+            );
+            assert_eq!(
+                contract["properties"]["skills"]["items"]["required"],
+                json!(["name", "resource"])
+            );
         }
-        assert!(body["system"].as_str().unwrap().contains("first Tool"));
+        assert!(
+            body["system"]
+                .as_str()
+                .unwrap()
+                .contains("MCP catalog listing is the only process-backed prelude")
+        );
     }
     request.phase = AgentPhase::RootSynthesis;
     request.goal_plan_contract = Some(goal_plan_contract());
@@ -151,6 +168,32 @@ fn structured_tool_outcome_preserves_the_sibling_goal_contract() {
         decoded.outcome,
         ProviderOutcome::Tool {
             plan_contract: Some(_),
+            ..
+        }
+    ));
+
+    let text = json!({
+        "outcome": {
+            "type": "tool",
+            "call": crate::tools::ToolCall::Read {
+                path: "src/main.rs".into(),
+                offset: 0,
+                limit: 4096
+            },
+            "plan_contract": null
+        }
+    })
+    .to_string();
+    let decoded = decode_run(
+        &serde_json::to_vec(&response("end_turn", json!([text_block(&text)]))).unwrap(),
+        "claude-sonnet-5",
+        4096,
+    )
+    .unwrap();
+    assert!(matches!(
+        decoded.outcome,
+        ProviderOutcome::Tool {
+            plan_contract: None,
             ..
         }
     ));

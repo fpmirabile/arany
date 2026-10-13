@@ -620,40 +620,38 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         call: &crate::tools::ToolCall,
         plan_contract: &Option<Box<crate::session::GoalPlanContract>>,
     ) -> bool {
-        let discovery = matches!(call, crate::tools::ToolCall::McpList { .. });
         let plan_and_call_fit = plan_contract.as_ref().is_none_or(|contract| {
             serde_json::to_vec(&(call, contract))
                 .is_ok_and(|bytes| bytes.len() <= crate::tools::types::MAX_TOOL_ARGUMENT_BYTES)
         });
-        let plan_valid = if discovery {
-            plan_contract.is_none()
-        } else if let Some(existing) = &request.goal_plan_contract {
+        let plan_valid = if let Some(existing) = &request.goal_plan_contract {
             plan_contract.is_none()
                 && existing.allows_call(call)
                 && self
                     .controls
                     .tools
                     .is_some_and(|tools| tools.allows_goal_contract(existing))
+        } else if let Some(contract) = plan_contract {
+            request
+                .goal_budget
+                .as_ref()
+                .is_some_and(|budget| contract.budget.is_within(budget))
+                && contract.validate().is_ok()
+                && contract.allows_call(call)
+                && self
+                    .controls
+                    .tools
+                    .is_some_and(|tools| tools.allows_goal_contract(contract))
         } else {
-            plan_contract.as_ref().is_some_and(|contract| {
-                request
-                    .goal_budget
-                    .as_ref()
-                    .is_some_and(|budget| contract.budget.is_within(budget))
-                    && contract.validate().is_ok()
-                    && contract.allows_call(call)
-                    && self
-                        .controls
-                        .tools
-                        .is_some_and(|tools| tools.allows_goal_contract(contract))
-            })
+            call.is_goal_plan_prelude()
         };
         let contract_budget_available = plan_contract
             .as_ref()
             .is_none_or(|contract| self.controls.goal_budget.can_narrow(contract));
         self.controls.tools.is_some()
             && call.valid()
-            && (self.controls.goal_phase == GoalPhase::Implementation || call.read_only())
+            && (self.controls.goal_phase == GoalPhase::Implementation
+                || call.is_goal_plan_prelude())
             && plan_and_call_fit
             && plan_valid
             && contract_budget_available
