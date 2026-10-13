@@ -1118,7 +1118,16 @@ mod tests {
     }
 
     fn fixture_pid_identity(path: &Path) -> Result<(i32, i32), String> {
-        let identity = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .map_err(|error| error.to_string())?
+            .take(65)
+            .read_to_end(&mut bytes)
+            .map_err(|error| error.to_string())?;
+        if bytes.len() > 64 {
+            return Err("fixture PID identity exceeds its bound".into());
+        }
+        let identity = String::from_utf8(bytes).map_err(|error| error.to_string())?;
         let fields = identity
             .split_whitespace()
             .map(|field| field.parse::<i32>().map_err(|error| error.to_string()))
@@ -1127,6 +1136,24 @@ mod tests {
             return Err("fixture must report one positive host and namespace PID".into());
         }
         Ok((fields[0], fields[1]))
+    }
+
+    async fn wait_fixture_pidfd(
+        path: &Path,
+        deadline: tokio::time::Instant,
+    ) -> Result<((i32, i32), tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>), String> {
+        tokio::time::timeout_at(deadline, async {
+            loop {
+                if path.is_file() {
+                    let identity = fixture_pid_identity(path)?;
+                    let pidfd = bind_fixture_pidfd(identity)?;
+                    return Ok((identity, pidfd));
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .map_err(|_| "fixture PID identity gate timed out".to_string())?
     }
 
     fn process_namespace_ids(pid: i32) -> Result<Vec<i32>, String> {
@@ -1175,11 +1202,177 @@ mod tests {
     async fn await_fixture_exit(
         pidfd: &tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>,
     ) -> Result<(), String> {
-        tokio::time::timeout(Duration::from_secs(10), pidfd.readable())
+        await_fixture_exit_until(pidfd, tokio::time::Instant::now() + Duration::from_secs(10)).await
+    }
+
+    async fn await_fixture_exit_until(
+        pidfd: &tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), String> {
+        tokio::time::timeout_at(deadline, pidfd.readable())
             .await
             .map_err(|_| "fixture process did not exit before cleanup deadline".to_string())?
             .map_err(|error| error.to_string())?;
         Ok(())
+    }
+
+    fn publish_fixture_gate(fixture: &Path, name: &str) -> std::io::Result<()> {
+        use std::io::Write;
+
+        let temporary = fixture.join(format!("{name}.next"));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(b"continue")?;
+        std::fs::rename(temporary, fixture.join(name))
+    }
+
+    async fn capture_runtime_mount_topology(
+        mut command: Command,
+        fixture: &Path,
+    ) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), (String, bool)> {
+        const CAPTURE: Duration = Duration::from_secs(40);
+        const OWNER_DEADLINE: Duration = Duration::from_secs(60);
+        const CAPTURE_CLEANUP_RESERVE: Duration = Duration::from_secs(10);
+        const OUTPUT_CAP: usize = 64 * 1024;
+
+        let deadline = tokio::time::Instant::now() + OWNER_DEADLINE;
+        let child = command.spawn().map_err(|error| (error.to_string(), true))?;
+        let owner_pidfd = child.id().and_then(|pid| bind_host_pidfd(pid).ok());
+        let init_deadline = std::cmp::min(
+            deadline - CAPTURE_CLEANUP_RESERVE,
+            tokio::time::Instant::now() + Duration::from_secs(10),
+        );
+        let (init_identity, init_pidfd) =
+            match wait_fixture_pidfd(&fixture.join("init.pid"), init_deadline).await {
+                Ok(identity) => identity,
+                Err(error) => {
+                    let capture = capture(child, OUTPUT_CAP, Duration::from_millis(100)).await;
+                    if let Some(owner_pidfd) = owner_pidfd.as_ref() {
+                        let _ = await_fixture_exit_until(owner_pidfd, deadline).await;
+                    }
+                    let suffix = match capture {
+                        Ok((status, _, _)) => format!("; setup exited with {status}"),
+                        Err(capture_error) => format!("; setup capture failed: {capture_error:?}"),
+                    };
+                    return Err((
+                        format!("read topology namespace init identity: {error}{suffix}"),
+                        false,
+                    ));
+                }
+            };
+        let mut setup_error = None;
+        if init_identity.1 != 1 {
+            setup_error = Some("topology init identity did not report namespace PID 1".to_string());
+        }
+        if owner_pidfd.is_none() {
+            setup_error.get_or_insert_with(|| "topology owner pidfd could not be bound".into());
+        }
+        if setup_error.is_none()
+            && let Err(error) = publish_fixture_gate(fixture, "init-go")
+        {
+            setup_error = Some(format!("release topology init gate: {error}"));
+        }
+        if let Some(error) = setup_error {
+            let capture = capture(child, OUTPUT_CAP, Duration::from_millis(100)).await;
+            let owner_exited = match owner_pidfd.as_ref() {
+                Some(pidfd) => await_fixture_exit_until(pidfd, deadline).await.is_ok(),
+                None => false,
+            };
+            let init_exited = await_fixture_exit_until(&init_pidfd, deadline)
+                .await
+                .is_ok();
+            let capture_detail = match capture {
+                Ok((status, _, _)) => format!("; setup exited with {status}"),
+                Err(capture_error) => format!("; setup capture failed: {capture_error:?}"),
+            };
+            return Err((
+                format!("topology setup failed: {error}{capture_detail}"),
+                owner_exited && init_exited && init_identity.1 == 1,
+            ));
+        }
+
+        let capture_deadline = std::cmp::min(
+            deadline - CAPTURE_CLEANUP_RESERVE,
+            tokio::time::Instant::now() + CAPTURE,
+        );
+        let capture_duration =
+            capture_deadline.saturating_duration_since(tokio::time::Instant::now());
+        let capture_future = capture(child, OUTPUT_CAP, capture_duration);
+        tokio::pin!(capture_future);
+        let mut capture_result = None;
+        let mut worker_pidfds = Vec::with_capacity(2);
+        let mut cleanup_errors = Vec::new();
+        let mut coordination_error = None;
+        for phase in ["exercise", "reject"] {
+            let identity_path = fixture.join(format!("worker-{phase}.pid"));
+            let identity = tokio::select! {
+                result = &mut capture_future => {
+                    capture_result = Some(result);
+                    coordination_error = Some(format!("topology capture ended before {phase} worker identity"));
+                    break;
+                }
+                result = wait_fixture_pidfd(&identity_path, capture_deadline) => result,
+            };
+            let (identity, pidfd) = match identity {
+                Ok(identity) => identity,
+                Err(error) => {
+                    coordination_error = Some(format!("bind {phase} worker identity: {error}"));
+                    break;
+                }
+            };
+            worker_pidfds.push((pidfd, phase));
+            if identity.1 <= 1 || identity.0 == init_identity.0 {
+                cleanup_errors.push(format!(
+                    "{phase} worker identity was not distinct and nested"
+                ));
+                coordination_error = Some(format!("invalid {phase} worker identity"));
+                break;
+            }
+            if let Err(error) = publish_fixture_gate(fixture, &format!("worker-{phase}-go")) {
+                coordination_error = Some(format!("release {phase} worker gate: {error}"));
+                break;
+            }
+        }
+        if capture_result.is_none() {
+            capture_result = Some(capture_future.await);
+        }
+
+        match owner_pidfd.as_ref() {
+            Some(pidfd) => {
+                if let Err(error) = await_fixture_exit_until(pidfd, deadline).await {
+                    cleanup_errors.push(format!("await topology owner exit: {error}"));
+                }
+            }
+            None => cleanup_errors.push("topology owner pidfd was not bound".into()),
+        }
+        if let Err(error) = await_fixture_exit_until(&init_pidfd, deadline).await {
+            cleanup_errors.push(format!("await topology init exit: {error}"));
+        }
+        for (pidfd, phase) in &worker_pidfds {
+            if let Err(error) = await_fixture_exit_until(pidfd, deadline).await {
+                cleanup_errors.push(format!("await {phase} worker exit: {error}"));
+            }
+        }
+        if worker_pidfds.len() != 2 {
+            cleanup_errors.push("topology did not bind both worker identities".into());
+        }
+
+        if !cleanup_errors.is_empty() {
+            return Err((cleanup_errors.join("; "), false));
+        }
+        if let Some(error) = coordination_error {
+            return Err((error, true));
+        }
+        let capture_result = match capture_result {
+            Some(result) => result,
+            None => return Err(("topology capture future did not complete".into(), true)),
+        };
+        match capture_result {
+            Ok(output) => Ok(output),
+            Err(error) => Err((format!("topology capture failed: {error:?}"), true)),
+        }
     }
 
     async fn force_timeout_namespace(
@@ -1295,6 +1488,7 @@ mod tests {
         ignore = "native private mount propagation fixture; requires unprivileged user namespaces"
     )]
     async fn native_runtime_mount_attestation() {
+        let _native_gate = crate::test_process::NATIVE_GATE.lock().unwrap();
         use crate::tools::toolchains::RuntimeGrant;
 
         const MODE: &str = "ARANY_TEST_RUNTIME_MOUNT_MODE";
@@ -1534,13 +1728,19 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let (status, stdout, stderr) = capture(
-            command.spawn().map_err(|_| ToolError::Operation).unwrap(),
-            64 * 1024,
-            Duration::from_secs(40),
-        )
-        .await
-        .unwrap();
+        let (status, stdout, stderr) = match capture_runtime_mount_topology(command, fixture.path())
+            .await
+        {
+            Ok(output) => output,
+            Err((error, true)) => panic!("native mount topology failed after cleanup: {error}"),
+            Err((error, false)) => {
+                let retained = fixture.keep();
+                panic!(
+                    "native mount topology cleanup was not confirmed: {error}; fixture retained at {}",
+                    retained.display()
+                );
+            }
+        };
         assert!(
             status.success(),
             "native mount attestation fixture: {}",

@@ -35,6 +35,12 @@ limits and compatibility.
   gate records the init and held descendant PIDs from each process's own
   `/proc/self/status`, binds both pidfds before killing and reaping the unshare
   owner, then awaits both exit signals before dropping the fixture directory.
+  The topology path also gates the namespace init and each exact-filter worker
+  until their host identities are bound, then confirms their pidfd exits after
+  capture on success and failure. It keeps the fixture directory if any
+  identity or exit remains unproved; assertions run only after confirmed exit.
+  Publish PID records and release gates atomically so pollers observe either no
+  signal or a complete record.
   The outer fixture keeps the host procfs view so those reports include host
   PIDs ([`NSpid` field](https://man7.org/linux/man-pages/man5/proc_pid_status.5.html));
   the production Bubblewrap profile still mounts its own `/proc`. Captured
