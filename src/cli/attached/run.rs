@@ -1279,8 +1279,11 @@ mod tests {
                 Duration::from_secs(30),
                 64 * 1024,
                 |bytes| {
-                    if !cancelled && String::from_utf8_lossy(bytes).replace("\r\n", "\n")
-                        .contains("Type trust or read only; empty Enter selects read only. Ctrl+C exits:\n") {
+                    if !cancelled
+                        && String::from_utf8_lossy(bytes)
+                            .replace("\r\n", "\n")
+                            .contains(crate::test_process::READ_ONLY_CONSENT_PROMPT)
+                    {
                         input.write_all(b"\x04").unwrap();
                         cancelled = true;
                     }
