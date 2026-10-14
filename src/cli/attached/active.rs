@@ -1,4 +1,6 @@
-use super::{Admission, Feedback, controls::ActiveSubmission, emit_outcome, run};
+use super::{
+    Admission, Feedback, controls::ActiveSubmission, emit_outcome, load_confirmed_outcome, run,
+};
 use arany::{
     AttachedTerminal, CompactionFailure, CompactionRecord, CompactionStatus, Composer,
     ComposerEdit, RunCancellation, RunOutcome, RunProgress, RunRequest, SessionView,
@@ -464,16 +466,11 @@ pub(super) async fn submit_objective(
     let mut reason = shutdown_reason;
     match tokio::time::timeout(SHUTDOWN_GRACE, future.as_mut()).await {
         Ok(Ok(outcome)) if restored.is_ok() => {
-            if emit_outcome(
-                &admission.state_dir,
-                &outcome,
-                preview_printed,
-                !linear,
-                mode,
-            )
-            .await
-            .is_err()
-            {
+            let emitted = match load_confirmed_outcome(&admission.state_dir, &outcome).await {
+                Ok(confirmed) => emit_outcome(&confirmed, &outcome, preview_printed, !linear, mode),
+                Err(error) => Err(error),
+            };
+            if emitted.is_err() {
                 reason.push_str("; committed receipt unavailable; check Session history");
             }
         }

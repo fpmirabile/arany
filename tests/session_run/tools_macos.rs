@@ -939,7 +939,9 @@ async fn native_runtime_mount_journey_helper() {
     assert!(attached.status.success(), "hdiutil attach: {attached:?}");
     let mounted = MountedRuntimeImage(mountpoint.clone());
 
-    let permissions = arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
+    let permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
     let options = permissions.runtime_profile_choices();
     let node = options
         .iter()
@@ -954,7 +956,9 @@ async fn native_runtime_mount_journey_helper() {
             std::slice::from_ref(&node_token),
         )
         .unwrap();
-    let permissions = arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
+    let permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
 
     let runtime_call = ToolCall::Command {
         program: "sh".into(),
@@ -1166,8 +1170,9 @@ async fn native_runtime_mount_journey_helper() {
         arany::CacheUpdate::Published
     );
 
-    let mut permissions =
-        arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
+    let mut permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
     let cargo_cache = permissions
         .runtime_profile_choices()
         .into_iter()
@@ -1178,7 +1183,9 @@ async fn native_runtime_mount_journey_helper() {
     permissions
         .remember_profiles(true, arany::ApprovalMode::AutoEdits, &selected_tokens)
         .unwrap();
-    let permissions = arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
+    let permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
 
     let accepted_requests = Arc::new(Mutex::new(Vec::new()));
     let cache_write = ToolCall::Command {
@@ -1389,8 +1396,9 @@ async fn native_runtime_mount_journey_helper() {
     assert!(finished[1] == accepted.run.tools[1].observation.as_ref().unwrap());
     assert!(finished[2] == accepted.run.tools[2].observation.as_ref().unwrap());
 
-    let mut permissions =
-        arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
+    let mut permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
     permissions
         .remember_profiles(
             true,
@@ -1398,7 +1406,9 @@ async fn native_runtime_mount_journey_helper() {
             std::slice::from_ref(&node_token),
         )
         .unwrap();
-    let permissions = arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
+    let permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
     let verify_cache = ToolCall::Command {
         program: "sh".into(),
         args: vec![

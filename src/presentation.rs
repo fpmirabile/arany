@@ -376,6 +376,14 @@ pub fn render_run_feedback(run: &RunView) -> Option<String> {
             }
             if run.tools.last().is_some_and(|tool| {
                 tool.observation.as_ref().is_some_and(|observation| {
+                    observation.disposition == crate::tools::ToolDisposition::Succeeded
+                        && observation.cache_update == crate::tools::CacheUpdate::Uncertain
+                })
+            }) {
+                return Some("Error: The command succeeded but its build cache update is uncertain; the Run stopped without retrying. No answer was committed.".into());
+            }
+            if run.tools.last().is_some_and(|tool| {
+                tool.observation.as_ref().is_some_and(|observation| {
                     observation.disposition == crate::tools::ToolDisposition::Denied
                         && observation.guard.is_none()
                 })
@@ -388,7 +396,7 @@ pub fn render_run_feedback(run: &RunView) -> Option<String> {
                         observation.disposition,
                         crate::tools::ToolDisposition::Uncertain
                             | crate::tools::ToolDisposition::Cancelled
-                    )
+                    ) || observation.cache_update == crate::tools::CacheUpdate::Uncertain
                 })
             {
                 return Some("Error: Tool completion is uncertain. Files or effects may have changed; inspect them before retrying. No answer was committed.".into());

@@ -29,6 +29,7 @@ use picker::{PickerChoice, QuickChoice, pick_quick_action, pick_session};
 
 const MAX_OBJECTIVE_BYTES: usize = 8 * 1024;
 const EMPTY_INTERRUPT_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+const STATE_UNAVAILABLE: &str = "state directory unavailable or unsafe";
 
 #[derive(Args, Default)]
 pub(crate) struct AttachedArgs {
@@ -114,6 +115,39 @@ impl std::fmt::Display for Feedback {
     }
 }
 
+/// `Notice` keeps the Session; `Fatal` ends it through terminal restoration. Unclassified errors are `Fatal`.
+#[derive(Debug)]
+enum LoopError {
+    Fatal(String),
+    Notice(String),
+}
+
+impl From<String> for LoopError {
+    fn from(error: String) -> Self {
+        Self::Fatal(error)
+    }
+}
+
+impl From<&str> for LoopError {
+    fn from(error: &str) -> Self {
+        Self::Fatal(error.to_owned())
+    }
+}
+
+/// The attached loop's only decision point for command failures.
+fn feedback_or_end<T: Into<Feedback>>(result: Result<T, LoopError>) -> Result<Feedback, String> {
+    match result {
+        Ok(feedback) => Ok(feedback.into()),
+        Err(LoopError::Notice(text)) => Ok(Feedback::History(text)),
+        Err(LoopError::Fatal(reason)) => Err(reason),
+    }
+}
+
+fn open_state(admission: &Admission) -> Result<StateRoot, LoopError> {
+    StateRoot::open_existing(&admission.state_dir)
+        .map_err(|_| LoopError::Notice(format!("Error: {STATE_UNAVAILABLE}")))
+}
+
 #[derive(Clone, Copy)]
 enum Selector {
     Models,
@@ -125,6 +159,7 @@ enum Selector {
 struct Admission {
     telemetry: Telemetry,
     state_dir: PathBuf,
+    explicit_state_dir: bool,
     workspace: PathBuf,
     include_paths: Vec<PathBuf>,
     tools: bool,
@@ -231,6 +266,7 @@ impl AttachedArgs {
         {
             return Err("a prompt requires --provider and --model".into());
         }
+        let explicit_state_dir = self.state_dir.is_some();
         let (workspace, state_dir) =
             super::admit_workspace(self.workspace, self.state_dir).map_err(str::to_owned)?;
         let provider = self.provider.map(|value| value.profile_label());
@@ -245,6 +281,7 @@ impl AttachedArgs {
             Admission {
                 telemetry,
                 state_dir,
+                explicit_state_dir,
                 workspace,
                 include_paths: self.include_paths,
                 tools: self.tools,
@@ -539,19 +576,25 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         .await?
         {
             RunSubmission::Completed(outcome, user_recorded) => {
-                (view, notice) = finish_submission(
+                notice = finish_submission(
                     &mut terminal,
                     &admission,
                     &mut composer,
+                    &mut view,
                     &outcome,
                     user_recorded,
                 )
                 .await?;
             }
             RunSubmission::InterruptedBeforeRun => {
-                (view, notice) =
-                    finish_interrupted_submission(&mut terminal, &admission, &composer, session_id)
-                        .await?;
+                notice = finish_interrupted_submission(
+                    &mut terminal,
+                    &admission,
+                    &composer,
+                    &mut view,
+                    session_id,
+                )
+                .await?;
             }
             RunSubmission::Shutdown(reason) => return Err(reason),
         }
@@ -667,7 +710,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                         if matches!(selector, Selector::Resume) {
                             goal_resume = None;
                         }
-                        notice = Some(
+                        notice = Some(feedback_or_end(
                             run_selector(
                                 selector,
                                 &mut terminal,
@@ -676,8 +719,8 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 &mut view,
                                 &mut composer,
                             )
-                            .await?,
-                        );
+                            .await,
+                        )?);
                     }
                     QuickChoice::Closed => {}
                     QuickChoice::Shutdown(signal) => {
@@ -881,35 +924,43 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                         .await
                         {
                             Ok(RunSubmission::Completed(outcome, user_recorded)) => {
-                                (view, notice) = finish_submission(
+                                notice = finish_submission(
                                     &mut terminal,
                                     &admission,
                                     &mut composer,
+                                    &mut view,
                                     &outcome,
                                     user_recorded,
                                 )
                                 .await?;
                             }
                             Ok(RunSubmission::InterruptedBeforeRun) => {
-                                (view, notice) = finish_interrupted_submission(
+                                notice = finish_interrupted_submission(
                                     &mut terminal,
                                     &admission,
                                     &composer,
+                                    &mut view,
                                     session_id,
                                 )
                                 .await?;
                             }
                             Ok(RunSubmission::Shutdown(reason)) => return Err(reason),
                             Err(error) => {
-                                notice = Some(Feedback::History(if composer.is_empty() {
+                                let text = if composer.is_empty() {
                                     format!("Error: {error}")
                                 } else {
                                     format!(
                                         "Error: {error}; draft retained ({} characters)",
                                         composer.character_count()
                                     )
-                                }));
-                                view = load_view(&admission.state_dir, session_id).await?;
+                                };
+                                notice = reload_view_or_keep(
+                                    &mut view,
+                                    load_view(&admission.state_dir, session_id).await,
+                                    Some(text),
+                                    None,
+                                )
+                                .map(Feedback::History);
                             }
                         }
                     }
@@ -960,14 +1011,13 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 .await?,
                             ));
                         } else if command == InteractiveCommand::Permissions {
-                            let permissions =
-                                arany::WorkspacePermissions::open(&admission.workspace)
-                                    .map_err(|error| error.to_string())?;
-                            let permissions = match permissions.prepare_profile_selection() {
-                                Ok(permissions) => permissions,
+                            let permissions = match arany::WorkspacePermissions::open(
+                                &admission.workspace,
+                            ) {
+                                Ok(permissions) => permissions.prepare_profile_selection(),
                                 Err(error) => {
                                     notice = Some(Feedback::History(format!(
-                                        "Error: Could not prepare folder permission choices: {error}; existing permissions unchanged"
+                                        "Error: Could not load folder trust: {error}; existing permissions unchanged"
                                     )));
                                     continue;
                                 }
@@ -984,6 +1034,12 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 permissions::PermissionChoice::Closed(_) => {
                                     notice =
                                         Some(Feedback::History("Permissions unchanged".into()));
+                                    continue;
+                                }
+                                permissions::PermissionChoice::Rejected(_, error) => {
+                                    notice = Some(Feedback::History(format!(
+                                        "Error: {error}; existing permissions unchanged"
+                                    )));
                                     continue;
                                 }
                                 permissions::PermissionChoice::Exit => return Ok(()),
@@ -1028,7 +1084,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                         } else if command == InteractiveCommand::Help {
                             terminal.open_help().map_err(|error| error.to_string())?;
                         } else if command == InteractiveCommand::Resume && argument.is_none() {
-                            notice = Some(
+                            notice = Some(feedback_or_end(
                                 run_selector(
                                     Selector::Resume,
                                     &mut terminal,
@@ -1037,8 +1093,8 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                     &mut view,
                                     &mut composer,
                                 )
-                                .await?,
-                            );
+                                .await,
+                            )?);
                         } else if command == InteractiveCommand::Compact {
                             if view.created_sequence == 0 {
                                 notice = Some(Feedback::History(
@@ -1064,12 +1120,17 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                     return Err(format!("terminated by {}", signal.name()));
                                 }
                             };
-                            notice =
-                                Some(Feedback::History(match retained_draft_notice(&composer) {
-                                    Some(draft) => format!("{maintenance}; {draft}"),
-                                    None => maintenance,
-                                }));
-                            view = load_view(&admission.state_dir, session_id).await?;
+                            let text = match retained_draft_notice(&composer) {
+                                Some(draft) => format!("{maintenance}; {draft}"),
+                                None => maintenance,
+                            };
+                            notice = reload_view_or_keep(
+                                &mut view,
+                                load_view(&admission.state_dir, session_id).await,
+                                Some(text),
+                                None,
+                            )
+                            .map(Feedback::History);
                         } else if argument.is_none()
                             && matches!(
                                 command,
@@ -1081,7 +1142,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                             } else {
                                 Selector::Models
                             };
-                            notice = Some(
+                            notice = Some(feedback_or_end(
                                 run_selector(
                                     selector,
                                     &mut terminal,
@@ -1090,10 +1151,10 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                     &mut view,
                                     &mut composer,
                                 )
-                                .await?,
-                            );
+                                .await,
+                            )?);
                         } else {
-                            notice = Some(Feedback::History(
+                            notice = Some(feedback_or_end(
                                 controls::handle_command(
                                     &admission,
                                     &mut session_id,
@@ -1101,8 +1162,8 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                     command,
                                     argument,
                                 )
-                                .await?,
-                            ));
+                                .await,
+                            )?);
                         }
                     }
                 }
@@ -1167,27 +1228,28 @@ async fn run_selector(
     session_id: &mut SessionId,
     view: &mut SessionView,
     composer: &mut Composer,
-) -> Result<Feedback, String> {
+) -> Result<Feedback, LoopError> {
     match selector {
         Selector::Setup => {
-            configure_account(terminal, admission, *session_id, view, composer).await
+            Ok(configure_account(terminal, admission, *session_id, view, composer).await?)
         }
         Selector::Models => {
             match models::browse(terminal, admission, *session_id, view, composer).await? {
                 ModelBrowse::Notice(notice) => Ok(notice),
-                ModelBrowse::Shutdown(signal) => Err(format!("terminated by {}", signal.name())),
+                ModelBrowse::Shutdown(signal) => {
+                    Err(format!("terminated by {}", signal.name()).into())
+                }
             }
         }
         Selector::Agents => match agents::inspect(terminal, view).await? {
-            Some(signal) => Err(format!("terminated by {}", signal.name())),
+            Some(signal) => Err(format!("terminated by {}", signal.name()).into()),
             None => Ok(Feedback::Transient("Agent inspection closed".into())),
         },
         Selector::Resume => {
             let choice = pick_session(terminal, admission, Some(&view.defaults)).await?;
             match choice {
                 PickerChoice::Selected(id) => {
-                    let root = StateRoot::open_existing(&admission.state_dir)
-                        .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+                    let root = open_state(admission)?;
                     match resume_session(root, admission.workspace.clone(), id).await {
                         Ok(selected) => {
                             let selected =
@@ -1223,7 +1285,9 @@ async fn run_selector(
                     Ok(Feedback::History("No Sessions for this Workspace".into()))
                 }
                 PickerChoice::Closed => Ok(Feedback::Transient("Session selection closed".into())),
-                PickerChoice::Shutdown(signal) => Err(format!("terminated by {}", signal.name())),
+                PickerChoice::Shutdown(signal) => {
+                    Err(format!("terminated by {}", signal.name()).into())
+                }
             }
         }
     }
@@ -1305,59 +1369,73 @@ async fn finish_interrupted_submission(
     terminal: &mut AttachedTerminal,
     admission: &Admission,
     composer: &Composer,
+    view: &mut SessionView,
     session_id: SessionId,
-) -> Result<(SessionView, Option<Feedback>), String> {
-    let view = load_view(&admission.state_dir, session_id).await?;
+) -> Result<Option<Feedback>, String> {
+    let reload_error = reload_view_or_keep(
+        view,
+        load_view(&admission.state_dir, session_id).await,
+        None,
+        None,
+    );
+    let interrupted = "Submission interrupted before Run admission; no task was accepted. Account work already started may still complete.";
+    let drawn = match &reload_error {
+        Some(error) => format!("{interrupted}; {error}"),
+        None => interrupted.to_owned(),
+    };
     terminal
-        .draw(
-            &view,
-            composer,
-            Some("Submission interrupted before Run admission; no task was accepted. Account work already started may still complete."),
-        )
+        .draw(view, composer, Some(drawn.as_str()))
         .map_err(|error| error.to_string())?;
-    Ok((view, retained_draft_notice(composer)))
+    let draft = retained_draft_notice(composer);
+    Ok(match reload_error {
+        Some(error) => Some(Feedback::History(match draft {
+            Some(draft) => format!("{draft}; {error}"),
+            None => error,
+        })),
+        None => draft,
+    })
 }
 
 async fn finish_submission(
     terminal: &mut AttachedTerminal,
     admission: &Admission,
     composer: &mut Composer,
+    view: &mut SessionView,
     outcome: &RunOutcome,
     user_recorded: bool,
-) -> Result<(SessionView, Option<Feedback>), String> {
+) -> Result<Option<Feedback>, String> {
     let automatic =
         outcome.run.config.as_ref().filter(|config| {
             outcome.run.status == RunStatus::Finished && config.auto_compaction_due()
         });
     let linear = terminal.is_linear();
     let preview_already_printed = user_recorded && linear;
-    let confirmed = if linear {
-        terminal.restore().map_err(|error| error.to_string())?;
-        emit_outcome(
-            &admission.state_dir,
-            outcome,
-            preview_already_printed,
-            false,
-            None,
-        )
-        .await?;
-        terminal
-            .reacquire_after_output()
-            .map_err(|error| error.to_string())?;
-        load_confirmed_outcome(&admission.state_dir, outcome).await?
-    } else {
-        let confirmed = load_confirmed_outcome(&admission.state_dir, outcome).await?;
-        if !std::io::stdout().is_terminal() {
-            AttachedTerminal::print_assistant_run(&outcome.run)
-                .map_err(|_| "output failed".to_owned())?;
-        }
+    let hidden_answer = hidden_answer_guidance(linear);
+    let show = show_command(
+        outcome.run.id,
+        admission
+            .explicit_state_dir
+            .then_some(admission.state_dir.as_path()),
+    );
+    let reloaded = load_view(&admission.state_dir, outcome.session_id).await;
+    if let Ok(confirmed) = &reloaded {
+        confirm_outcome(confirmed, outcome)?;
+    }
+    print_run_answer(
+        terminal,
+        reloaded.as_ref().ok(),
+        outcome,
+        preview_already_printed,
+        &show,
+    )?;
+    if !linear {
         terminal.finish_run_display();
-        confirmed
-    };
+    }
+    let mut reload_error = reload_view_or_keep(view, reloaded, None, Some(hidden_answer));
     if automatic.is_some() {
         terminal
             .draw(
-                &confirmed,
+                view,
                 composer,
                 Some("Context threshold reached; attempting automatic compaction"),
             )
@@ -1366,7 +1444,6 @@ async fn finish_submission(
     terminal
         .restore_draft_input(composer.text().len())
         .map_err(|error| error.to_string())?;
-    let mut view = confirmed;
     let mut notice = retained_draft_notice(composer);
     let feedback = render_run_feedback(&outcome.run);
     if let Some(feedback) = feedback {
@@ -1374,7 +1451,7 @@ async fn finish_submission(
             notice = Some(Feedback::History(feedback));
         } else {
             terminal
-                .draw(&view, composer, Some(&feedback))
+                .draw(view, composer, Some(&feedback))
                 .map_err(|error| error.to_string())?;
         }
     }
@@ -1382,7 +1459,7 @@ async fn finish_submission(
         let compaction_notice = match compact_current(
             terminal,
             admission,
-            &view,
+            view,
             composer,
             Some((config, outcome.run.id)),
         )
@@ -1399,13 +1476,39 @@ async fn finish_submission(
                 return Err(format!("terminated by {}", signal.name()));
             }
         };
-        notice = Some(Feedback::History(match retained_draft_notice(composer) {
+        let text = match retained_draft_notice(composer) {
             Some(draft) => format!("{compaction_notice}; {draft}"),
             None => compaction_notice,
-        }));
-        view = load_view(&admission.state_dir, outcome.session_id).await?;
+        };
+        // The compaction reload supersedes an earlier failed reload, which is reported at most once here.
+        let answer_hidden = reload_error.is_some();
+        reload_error = None;
+        let reloaded = load_view(&admission.state_dir, outcome.session_id).await;
+        if let (true, Ok(confirmed)) = (answer_hidden, &reloaded) {
+            confirm_outcome(confirmed, outcome)?;
+            print_run_answer(
+                terminal,
+                Some(confirmed),
+                outcome,
+                preview_already_printed,
+                &show,
+            )?;
+        }
+        notice = reload_view_or_keep(
+            view,
+            reloaded,
+            Some(text),
+            answer_hidden.then_some(hidden_answer),
+        )
+        .map(Feedback::History);
     }
-    Ok((view, notice))
+    if let Some(error) = reload_error {
+        notice = Some(Feedback::History(match notice.as_deref() {
+            Some(previous) => format!("{previous}; {error}"),
+            None => error,
+        }));
+    }
+    Ok(notice)
 }
 
 async fn start_session(admission: &Admission) -> Result<(SessionId, SessionView), String> {
@@ -1543,10 +1646,20 @@ async fn admit_startup(
     setup_notice: &mut Option<String>,
 ) -> Result<ControlFlow<()>, String> {
     match permissions::admit(terminal, &admission.workspace, composer, admission.tools).await {
-        Ok(
-            permissions::PermissionChoice::Selected(access)
-            | permissions::PermissionChoice::Closed(access),
-        ) => {
+        Ok(permissions::PermissionChoice::Selected(access)) => {
+            for notice in access.stale_runtime_notices() {
+                append_notice(setup_notice, &notice);
+            }
+            admission.workspace_permissions = Some(access);
+        }
+        Ok(permissions::PermissionChoice::Closed(access)) => {
+            admission.workspace_permissions = Some(access);
+        }
+        Ok(permissions::PermissionChoice::Rejected(access, error)) => {
+            append_notice(
+                setup_notice,
+                &format!("Error: {error}; continuing read only"),
+            );
             admission.workspace_permissions = Some(access);
         }
         Ok(permissions::PermissionChoice::Exit) => return Ok(ControlFlow::Break(())),
@@ -1734,10 +1847,14 @@ async fn update_defaults(
         view.defaults = defaults;
         return Ok(());
     }
-    persist_defaults(admission, session_id, defaults).await?;
-    *view = load_view(&admission.state_dir, session_id)
-        .await
-        .map_err(DefaultsError::Reload)?;
+    persist_defaults(admission, session_id, defaults.clone()).await?;
+    match load_view(&admission.state_dir, session_id).await {
+        Ok(reloaded) => *view = reloaded,
+        Err(error) => {
+            view.defaults = defaults;
+            return Err(DefaultsError::Reload(error));
+        }
+    }
     Ok(())
 }
 
@@ -1855,6 +1972,12 @@ async fn load_confirmed_outcome(
     outcome: &RunOutcome,
 ) -> Result<SessionView, String> {
     let view = load_view(state_dir, outcome.session_id).await?;
+    confirm_outcome(&view, outcome)?;
+    Ok(view)
+}
+
+/// A mismatch means the committed Run is not in the loaded history; it is an integrity failure, not a reload failure.
+fn confirm_outcome(view: &SessionView, outcome: &RunOutcome) -> Result<(), String> {
     if !view.runs.iter().any(|run| {
         run.id == outcome.run.id
             && run == &outcome.run
@@ -1865,17 +1988,16 @@ async fn load_confirmed_outcome(
     }) {
         return Err("Run history unavailable or invalid".into());
     }
-    Ok(view)
+    Ok(())
 }
 
-async fn emit_outcome(
-    state_dir: &Path,
+fn emit_outcome(
+    view: &SessionView,
     outcome: &RunOutcome,
     user_recorded: bool,
     inline: bool,
     visual_mode: Option<arany::TerminalMode>,
 ) -> Result<(), String> {
-    let view = load_confirmed_outcome(state_dir, outcome).await?;
     let run = view
         .runs
         .iter()
@@ -1923,7 +2045,7 @@ async fn emit_outcome(
 
 #[derive(Debug, thiserror::Error)]
 enum DefaultsError {
-    #[error("state directory unavailable or unsafe")]
+    #[error("{}", STATE_UNAVAILABLE)]
     StateAdmission,
     #[error("{0}")]
     Operation(arany::EngineError),
@@ -1937,13 +2059,19 @@ impl From<DefaultsError> for String {
     }
 }
 
-fn recover_defaults_change(error: DefaultsError) -> Result<String, String> {
+fn settings_reload_notice(error: &str) -> String {
+    format!("Error: Settings saved, but the conversation could not be reloaded: {error}")
+}
+
+fn recover_defaults_change(error: DefaultsError) -> Result<String, LoopError> {
     match error {
         DefaultsError::Operation(arany::EngineError::SessionBusy) => Ok(
             "Error: Session has an active operation; selection unchanged. Try again when it finishes"
                 .into(),
         ),
-        error => Err(error.into()),
+        DefaultsError::StateAdmission => Err(LoopError::Notice(format!("Error: {STATE_UNAVAILABLE}"))),
+        DefaultsError::Reload(error) => Err(LoopError::Notice(settings_reload_notice(&error))),
+        error => Err(LoopError::Fatal(error.into())),
     }
 }
 
@@ -1973,9 +2101,143 @@ async fn load_view(state_dir: &Path, session_id: SessionId) -> Result<SessionVie
     Ok(view)
 }
 
+/// Events are already committed when this runs, so a failed reload keeps the displayed history
+/// and returns the notice with the reload failure appended. `hidden` tells the user how to read a
+/// committed answer this presentation did not show.
+fn reload_view_or_keep(
+    view: &mut SessionView,
+    reloaded: Result<SessionView, String>,
+    notice: Option<String>,
+    hidden: Option<&str>,
+) -> Option<String> {
+    match reloaded {
+        Ok(reloaded) => {
+            *view = reloaded;
+            notice
+        }
+        Err(error) => {
+            let failure = reload_failure(&error, hidden);
+            Some(match notice {
+                Some(notice) => format!("{notice}; {failure}"),
+                None => failure,
+            })
+        }
+    }
+}
+
+fn reload_failure(error: &str, hidden: Option<&str>) -> String {
+    format!(
+        "Error: history could not be reloaded: {error}; {}",
+        hidden.unwrap_or("use /resume to reload it")
+    )
+}
+
+/// Linear output has no history view, so `/resume` cannot show the answer there. Its notice points to
+/// the recovery line that `print_run_answer` writes untruncated; other presentations use `/resume`.
+fn hidden_answer_guidance(linear: bool) -> &'static str {
+    if linear {
+        "the committed answer was not shown; see the command above"
+    } else {
+        "the committed answer was not shown; use /resume to reload it"
+    }
+}
+
+/// Builds the `show` command that replays a Run. Only an explicit `--state-dir` must be repeated;
+/// `show` also reads `ARANY_STATE_DIR` and the default store.
+fn show_command(run: arany::RunId, explicit_state_dir: Option<&Path>) -> String {
+    match explicit_state_dir {
+        Some(dir) => format!(
+            "arany show --state-dir {} --output text {run}",
+            shell_quote(&dir.to_string_lossy())
+        ),
+        None => format!("arany show --output text {run}"),
+    }
+}
+
+fn write_hidden_answer_recovery(writer: &mut impl Write, show: &str) -> std::io::Result<()> {
+    writeln!(
+        writer,
+        "Committed answer not shown; read it with: {}",
+        arany::escape_terminal(show)
+    )
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
+/// Prints a confirmed Run answer for this presentation. Linear output runs on the restored terminal;
+/// a missing `confirmed` view (failed reload) writes the untruncated `show` recovery line instead.
+fn print_run_answer(
+    terminal: &mut AttachedTerminal,
+    confirmed: Option<&SessionView>,
+    outcome: &RunOutcome,
+    preview_already_printed: bool,
+    show: &str,
+) -> Result<(), String> {
+    if terminal.is_linear() {
+        terminal.restore().map_err(|error| error.to_string())?;
+        let emitted = match confirmed {
+            Some(view) => emit_outcome(view, outcome, preview_already_printed, false, None),
+            None => write_hidden_answer_recovery(&mut std::io::stderr(), show)
+                .map_err(|_| "output failed".to_owned()),
+        };
+        terminal
+            .reacquire_after_output()
+            .map_err(|error| error.to_string())?;
+        return emitted;
+    }
+    if confirmed.is_some() && !std::io::stdout().is_terminal() {
+        AttachedTerminal::print_assistant_run(&outcome.run)
+            .map_err(|_| "output failed".to_owned())?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linear_hidden_answer_guidance_repeats_only_an_explicit_state_dir() {
+        let run = arany::RunId::new();
+        let mut plain = Vec::new();
+        write_hidden_answer_recovery(&mut plain, &show_command(run, None)).unwrap();
+        assert_eq!(
+            plain,
+            format!("Committed answer not shown; read it with: arany show --output text {run}\n")
+                .into_bytes()
+        );
+        let mut explicit = Vec::new();
+        write_hidden_answer_recovery(
+            &mut explicit,
+            &show_command(run, Some(Path::new("/tmp/a b/it's"))),
+        )
+        .unwrap();
+        assert_eq!(
+            explicit,
+            format!(
+                "Committed answer not shown; read it with: arany show --state-dir '/tmp/a b/it'\\''s' --output text {run}\n"
+            )
+            .into_bytes()
+        );
+        let long_dir = format!("/tmp/{}", "d".repeat(300));
+        let long = show_command(run, Some(Path::new(&long_dir)));
+        assert!(long.starts_with(&format!("arany show --state-dir '{long_dir}' ")));
+        assert!(long.ends_with(&format!(" --output text {run}")));
+    }
+
+    #[test]
+    fn linear_hidden_answer_notice_is_short_and_fixed() {
+        assert_eq!(
+            hidden_answer_guidance(true),
+            "the committed answer was not shown; see the command above"
+        );
+        assert_eq!(
+            hidden_answer_guidance(false),
+            "the committed answer was not shown; use /resume to reload it"
+        );
+    }
 
     #[test]
     fn startup_rejects_invalid_model_before_workspace_or_state_admission() {
@@ -2004,6 +2266,7 @@ mod tests {
         let new = Admission {
             telemetry: Telemetry::disabled(),
             state_dir: state_dir.clone(),
+            explicit_state_dir: false,
             workspace: workspace.clone(),
             include_paths: Vec::new(),
             tools: false,
@@ -2035,6 +2298,7 @@ mod tests {
         let resumed = Admission {
             telemetry: Telemetry::disabled(),
             state_dir: state_dir.clone(),
+            explicit_state_dir: false,
             workspace: workspace.clone(),
             include_paths: Vec::new(),
             tools: false,
@@ -2061,6 +2325,7 @@ mod tests {
         let continued = Admission {
             telemetry: Telemetry::disabled(),
             state_dir: state_dir.clone(),
+            explicit_state_dir: false,
             workspace: workspace.clone(),
             include_paths: Vec::new(),
             tools: false,
@@ -2103,6 +2368,7 @@ mod tests {
         let forked = Admission {
             telemetry: Telemetry::disabled(),
             state_dir,
+            explicit_state_dir: false,
             workspace,
             include_paths: Vec::new(),
             tools: false,

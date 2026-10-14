@@ -1355,9 +1355,20 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
     let mut encoded = serde_json::to_value(&worker_observation).unwrap();
     encoded.as_object_mut().unwrap().remove("cache_update");
     assert!(serde_json::from_value::<ToolObservation>(encoded).is_err());
-    let mut false_cache_status = uncertain_cache.clone();
-    false_cache_status.disposition = ToolDisposition::Succeeded;
-    assert!(!false_cache_status.valid());
+    let mut succeeded_uncertain_cache = uncertain_cache.clone();
+    succeeded_uncertain_cache.disposition = ToolDisposition::Succeeded;
+    assert!(succeeded_uncertain_cache.valid());
+    assert!(succeeded_uncertain_cache.stops_run());
+    assert_eq!(
+        succeeded_uncertain_cache.disposition,
+        ToolDisposition::Succeeded
+    );
+    let mut unattempted_error = uncertain_cache.clone();
+    unattempted_error.disposition = ToolDisposition::Uncertain;
+    unattempted_error.guard = None;
+    unattempted_error.cache_update = CacheUpdate::NotAttempted;
+    assert!(unattempted_error.valid());
+    assert!(unattempted_error.stops_run());
     let mut widened = intent.clone();
     widened.limits.runtime_ms += 1;
     assert!(!widened.valid());
@@ -1418,4 +1429,48 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
     let mut oversized = observation;
     oversized.output = "x".repeat(MAX_TOOL_RESULT_BYTES + 1);
     assert!(!oversized.valid());
+}
+
+#[test]
+fn guard_error_after_dispatch_marks_only_a_selected_command_cache_not_attempted() {
+    let command = ToolCall::Command {
+        program: "cargo".into(),
+        args: vec!["build".into()],
+        cwd: ".".into(),
+    };
+    assert_eq!(
+        super::guard_error_cache_update(&command, true),
+        CacheUpdate::NotAttempted
+    );
+    assert_eq!(
+        super::guard_error_cache_update(&command, false),
+        CacheUpdate::NotApplicable
+    );
+    assert_eq!(
+        super::guard_error_cache_update(&ToolCall::List { path: "src".into() }, true),
+        CacheUpdate::NotApplicable
+    );
+
+    let intent = EffectIntent {
+        id: uuid::Uuid::now_v7(),
+        run_id: crate::session::RunId::new(),
+        agent_run_id: crate::session::AgentRunId::new(),
+        policy_digest: [1; 32],
+        enforcement_digest: [2; 32],
+        workspace_device: 1,
+        workspace_inode: 2,
+        call: command,
+        limits: ToolLimits::default(),
+        expires_at_ms: 1,
+        use_count: 1,
+    };
+    let observation = super::uncertain_observation(
+        intent,
+        super::ToolError::Operation,
+        CacheUpdate::NotAttempted,
+    );
+    assert!(observation.valid());
+    assert!(observation.stops_run());
+    assert!(observation.guard.is_none());
+    assert_eq!(observation.cache_update, CacheUpdate::NotAttempted);
 }
