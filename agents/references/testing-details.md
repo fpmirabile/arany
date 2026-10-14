@@ -22,7 +22,7 @@ Repeat with `--release` for the optimized profile. To run one ignored gate, use 
 
 ## Opt-in release-policy CI
 
-Manually dispatch the CI workflow with `release_policy=true` to install the locked `cargo-audit 0.22.2` and `cargo-deny 0.20.2` tools on a disposable Linux runner. The job uses new per-run RustSec database paths, fails if fetching, strict audit, or configured deny checks fail, and records bounded revision/count/time metadata only after success. This lane is configured but has no passing run recorded yet; it checks the current `Cargo.lock` and selected-target `deny.toml` policy, not notices, redistribution, compiler/native provenance or MSRV. See the [dependency inventory](../../docs/security/beta-dependency-inventory.md) for the remaining release gates.
+Manually dispatch the CI workflow with `release_policy=true` to install the locked `cargo-audit 0.22.2` and `cargo-deny 0.20.2` tools on a disposable Linux runner. The job uses new per-run RustSec database paths, fails if fetching, strict audit, or configured deny checks fail, and records bounded revision/count/time metadata only after success. This lane is configured but has no passing run recorded yet; it checks the current `Cargo.lock` and selected-target `deny.toml` policy, not notices, redistribution, compiler/native provenance or MSRV. See the [dependency inventory](../../docs/security/beta-dependency-inventory.md) for the remaining release gates. When editing workflow expressions, check each context against GitHub's [availability table for that exact workflow key](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability); YAML parsing does not validate context availability.
 
 ## Native and live evidence
 

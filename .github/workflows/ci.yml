@@ -151,9 +151,6 @@ jobs:
       contents: read
     env:
       RUSTFLAGS: ''
-      ARANY_AUDIT_DB_PATH: ${{ runner.temp }}/arany-release-policy-audit-db
-      ARANY_DENY_DB_PATH: ${{ runner.temp }}/arany-release-policy-deny-db
-      ARANY_POLICY_TMP: ${{ runner.temp }}/arany-release-policy-work
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -163,6 +160,10 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install pinned scanners and check fresh policy
         shell: bash
+        env:
+          ARANY_AUDIT_DB_PATH: ${{ runner.temp }}/arany-release-policy-audit-db
+          ARANY_DENY_DB_PATH: ${{ runner.temp }}/arany-release-policy-deny-db
+          ARANY_POLICY_TMP: ${{ runner.temp }}/arany-release-policy-work
         run: |
           set -euo pipefail
 
