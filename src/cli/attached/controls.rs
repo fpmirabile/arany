@@ -1,5 +1,6 @@
 use super::{
-    Admission, LoopError, load_view, open_state, recover_defaults_change, update_defaults,
+    Admission, DefaultsError, LoopError, load_view, open_state, recover_defaults_change,
+    update_defaults,
 };
 use crate::cli::{chatgpt, exec::ProviderArg};
 use arany::{
@@ -341,21 +342,30 @@ pub(super) async fn select_model(
     let mut defaults = view.defaults.clone();
     defaults.model = Some(model.to_owned());
     defaults.effort = effort;
-    if let Err(error) = update_defaults(admission, session_id, view, defaults).await {
-        return recover_defaults_change(error);
-    }
-    let notice = format!(
-        "Model: {model} · {}",
-        effort.map_or("default", Effort::as_str)
-    );
+    let reload_error = match update_defaults(admission, session_id, view, defaults).await {
+        Ok(()) => None,
+        Err(DefaultsError::Reload(error)) => Some(error),
+        Err(error) => return recover_defaults_change(error),
+    };
+    let mut notice = match &reload_error {
+        Some(error) => {
+            format!("Error: Settings saved, but the conversation could not be reloaded: {error}")
+        }
+        None => format!(
+            "Model: {model} · {}",
+            effort.map_or("default", Effort::as_str)
+        ),
+    };
+    // After a Reload failure, view.defaults still holds the saved selection.
     if let Err(error) =
         super::models::remember_models(&admission.workspace, &view.defaults, None, true).await
     {
-        return Ok(format!(
-            "{notice}; Error: {error}; selection kept for this conversation only"
-        ));
+        notice = format!("{notice}; Error: {error}; selection kept for this conversation only");
     }
-    Ok(notice)
+    match reload_error {
+        Some(_) => Err(LoopError::Notice(notice)),
+        None => Ok(notice),
+    }
 }
 
 pub(super) enum ActiveSubmission {

@@ -889,7 +889,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                     &mut view,
                                     load_view(&admission.state_dir, session_id).await,
                                     Some(text),
-                                    false,
+                                    None,
                                 )
                                 .map(Feedback::History);
                             }
@@ -1040,7 +1040,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 &mut view,
                                 load_view(&admission.state_dir, session_id).await,
                                 Some(text),
-                                false,
+                                None,
                             )
                             .map(Feedback::History);
                         } else if argument.is_none()
@@ -1288,7 +1288,7 @@ async fn finish_interrupted_submission(
         view,
         load_view(&admission.state_dir, session_id).await,
         None,
-        false,
+        None,
     );
     let interrupted = "Submission interrupted before Run admission; no task was accepted. Account work already started may still complete.";
     let drawn = match &reload_error {
@@ -1322,28 +1322,21 @@ async fn finish_submission(
         });
     let linear = terminal.is_linear();
     let preview_already_printed = user_recorded && linear;
+    let hidden_answer = hidden_answer_guidance(linear, outcome.run.id);
     let reloaded = load_view(&admission.state_dir, outcome.session_id).await;
     if let Ok(confirmed) = &reloaded {
         confirm_outcome(confirmed, outcome)?;
     }
-    if linear {
-        terminal.restore().map_err(|error| error.to_string())?;
-        let emitted = match &reloaded {
-            Ok(confirmed) => emit_outcome(confirmed, outcome, preview_already_printed, false, None),
-            Err(_) => Ok(()),
-        };
-        terminal
-            .reacquire_after_output()
-            .map_err(|error| error.to_string())?;
-        emitted?;
-    } else {
-        if reloaded.is_ok() && !std::io::stdout().is_terminal() {
-            AttachedTerminal::print_assistant_run(&outcome.run)
-                .map_err(|_| "output failed".to_owned())?;
-        }
+    print_run_answer(
+        terminal,
+        reloaded.as_ref().ok(),
+        outcome,
+        preview_already_printed,
+    )?;
+    if !linear {
         terminal.finish_run_display();
     }
-    let mut reload_error = reload_view_or_keep(view, reloaded, None, true);
+    let mut reload_error = reload_view_or_keep(view, reloaded, None, Some(&hidden_answer));
     if automatic.is_some() {
         terminal
             .draw(
@@ -1395,11 +1388,16 @@ async fn finish_submission(
         // The compaction reload supersedes an earlier failed reload, which is reported at most once here.
         let answer_hidden = reload_error.is_some();
         reload_error = None;
+        let reloaded = load_view(&admission.state_dir, outcome.session_id).await;
+        if let (true, Ok(confirmed)) = (answer_hidden, &reloaded) {
+            confirm_outcome(confirmed, outcome)?;
+            print_run_answer(terminal, Some(confirmed), outcome, preview_already_printed)?;
+        }
         notice = reload_view_or_keep(
             view,
-            load_view(&admission.state_dir, outcome.session_id).await,
+            reloaded,
             Some(text),
-            answer_hidden,
+            answer_hidden.then_some(hidden_answer.as_str()),
         )
         .map(Feedback::History);
     }
@@ -2000,12 +1998,13 @@ async fn load_view(state_dir: &Path, session_id: SessionId) -> Result<SessionVie
 }
 
 /// Events are already committed when this runs, so a failed reload keeps the displayed history
-/// and returns the notice with the reload failure appended.
+/// and returns the notice with the reload failure appended. `hidden` tells the user how to read a
+/// committed answer this presentation did not show.
 fn reload_view_or_keep(
     view: &mut SessionView,
     reloaded: Result<SessionView, String>,
     notice: Option<String>,
-    answer_hidden: bool,
+    hidden: Option<&str>,
 ) -> Option<String> {
     match reloaded {
         Ok(reloaded) => {
@@ -2013,7 +2012,7 @@ fn reload_view_or_keep(
             notice
         }
         Err(error) => {
-            let failure = reload_failure(&error, answer_hidden);
+            let failure = reload_failure(&error, hidden);
             Some(match notice {
                 Some(notice) => format!("{notice}; {failure}"),
                 None => failure,
@@ -2022,14 +2021,48 @@ fn reload_view_or_keep(
     }
 }
 
-/// `answer_hidden` says a committed Run answer was not shown, so `/resume` is the way to read it.
-fn reload_failure(error: &str, answer_hidden: bool) -> String {
-    let hidden = if answer_hidden {
-        "the committed answer was not shown; "
+fn reload_failure(error: &str, hidden: Option<&str>) -> String {
+    format!(
+        "Error: history could not be reloaded: {error}; {}",
+        hidden.unwrap_or("use /resume to reload it")
+    )
+}
+
+/// Linear output has no history view, so `/resume` cannot show the answer there; `show` replays it.
+fn hidden_answer_guidance(linear: bool, run: arany::RunId) -> String {
+    if linear {
+        format!(
+            "the committed answer was not shown; use `arany show --output text {run}` to read it"
+        )
     } else {
-        ""
-    };
-    format!("Error: history could not be reloaded: {error}; {hidden}use /resume to reload it")
+        "the committed answer was not shown; use /resume to reload it".into()
+    }
+}
+
+/// Prints a confirmed Run answer for this presentation. Linear output runs on the restored terminal;
+/// a missing `confirmed` view (failed reload) prints nothing but still restores and reacquires it.
+fn print_run_answer(
+    terminal: &mut AttachedTerminal,
+    confirmed: Option<&SessionView>,
+    outcome: &RunOutcome,
+    preview_already_printed: bool,
+) -> Result<(), String> {
+    if terminal.is_linear() {
+        terminal.restore().map_err(|error| error.to_string())?;
+        let emitted = match confirmed {
+            Some(view) => emit_outcome(view, outcome, preview_already_printed, false, None),
+            None => Ok(()),
+        };
+        terminal
+            .reacquire_after_output()
+            .map_err(|error| error.to_string())?;
+        return emitted;
+    }
+    if confirmed.is_some() && !std::io::stdout().is_terminal() {
+        AttachedTerminal::print_assistant_run(&outcome.run)
+            .map_err(|_| "output failed".to_owned())?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
