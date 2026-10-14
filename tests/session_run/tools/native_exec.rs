@@ -184,7 +184,7 @@ async fn selected_cache_canary_helper_inner() {
         program: "sh".into(),
         args: vec![
             "-c".into(),
-            "set -eu; /usr/bin/mkdir -p \"$CARGO_HOME/registry/cache\"; /usr/bin/dd if=/dev/zero of=\"$CARGO_HOME/registry/cache/private-bulk.crate\" bs=1048576 count=40 2>/dev/null".into(),
+            "set -eu; /usr/bin/mkdir -p \"$CARGO_HOME/registry/cache\"; cache=\"$CARGO_HOME/registry/cache/private-bulk.crate\"; : > \"$cache\"; i=0; while test \"$i\" -lt 40; do printf '%1048576s' '' >> \"$cache\"; i=$((i + 1)); done".into(),
         ],
         cwd: ".".into(),
     };
@@ -307,7 +307,7 @@ async fn selected_cache_canary_helper_inner() {
         program: "sh".into(),
         args: vec![
             "-c".into(),
-            "set -eu; /usr/bin/mkdir -p \"$CARGO_TARGET_DIR\"; /usr/bin/dd if=/dev/zero of=\"$CARGO_TARGET_DIR/overflow-marker\" bs=1048576 count=32 2>/dev/null".into(),
+            "set -eu; /usr/bin/mkdir -p \"$CARGO_TARGET_DIR\"; cache=\"$CARGO_TARGET_DIR/overflow-marker\"; : > \"$cache\"; i=0; while test \"$i\" -lt 32; do printf '%1048576s' '' >> \"$cache\"; i=$((i + 1)); done".into(),
         ],
         cwd: ".".into(),
     };

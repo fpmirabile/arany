@@ -848,7 +848,7 @@ mod goal_report_tests {
             .expect("byte-boundary Goal report remains valid");
         assert!(byte_report.unresolved.len() < 32);
         assert!(byte_report.unresolved.iter().any(|item| {
-            item.contains("Read src/report-failure failed")
+            item.contains("read src/report-failure failed")
                 && item.contains("effect was not recorded as successful")
         }));
         assert!(

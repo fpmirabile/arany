@@ -53,10 +53,6 @@ impl BuildCacheIdentity {
         if !valid_identity_path(path) || inode == 0 {
             return Err(StoreError::InvalidStateDirectory);
         }
-        let path = path.canonicalize()?;
-        if !valid_identity_path(&path) {
-            return Err(StoreError::InvalidStateDirectory);
-        }
         let path = path
             .to_str()
             .ok_or(StoreError::InvalidStateDirectory)?
@@ -313,10 +309,13 @@ impl StateRoot {
         &self,
         identity: BuildCacheIdentity,
     ) -> Result<BuildCacheLease, StoreError> {
-        let workspace = crate::private_fs::open_directory(Path::new(&identity.path), false)
+        if !valid_identity_path(Path::new(&identity.path)) || identity.inode == 0 {
+            return Err(StoreError::InvalidStateDirectory);
+        }
+        let workspace = crate::private_fs::open_workspace_directory(Path::new(&identity.path))
             .map_err(StoreError::from)?;
-        self.ensure_outside_workspace(&workspace.dir)?;
-        let workspace_metadata = workspace.dir.dir_metadata()?;
+        self.ensure_outside_workspace(&workspace)?;
+        let workspace_metadata = workspace.dir_metadata()?;
         if workspace_metadata.dev() != identity.device || workspace_metadata.ino() != identity.inode
         {
             return Err(StoreError::InvalidStateDirectory);
@@ -388,10 +387,13 @@ impl StateRoot {
     }
 
     pub(crate) fn clear_build_cache(&self, identity: BuildCacheIdentity) -> Result<(), StoreError> {
-        let workspace = crate::private_fs::open_directory(Path::new(&identity.path), false)
+        if !valid_identity_path(Path::new(&identity.path)) || identity.inode == 0 {
+            return Err(StoreError::InvalidStateDirectory);
+        }
+        let workspace = crate::private_fs::open_workspace_directory(Path::new(&identity.path))
             .map_err(StoreError::from)?;
-        self.ensure_outside_workspace(&workspace.dir)?;
-        let metadata = workspace.dir.dir_metadata()?;
+        self.ensure_outside_workspace(&workspace)?;
+        let metadata = workspace.dir_metadata()?;
         if metadata.dev() != identity.device || metadata.ino() != identity.inode {
             return Err(StoreError::InvalidStateDirectory);
         }
@@ -420,12 +422,11 @@ impl StateRoot {
     }
 
     pub fn clear_workspace_build_cache(&self, workspace: &Path) -> Result<(), StoreError> {
-        let canonical = workspace.canonicalize()?;
         let opened =
-            crate::private_fs::open_directory(&canonical, false).map_err(StoreError::from)?;
-        self.ensure_outside_workspace(&opened.dir)?;
-        let metadata = opened.dir.dir_metadata()?;
-        let identity = BuildCacheIdentity::new(&opened.path, metadata.dev(), metadata.ino())?;
+            crate::private_fs::open_workspace_directory(workspace).map_err(StoreError::from)?;
+        self.ensure_outside_workspace(&opened)?;
+        let metadata = opened.dir_metadata()?;
+        let identity = BuildCacheIdentity::new(workspace, metadata.dev(), metadata.ino())?;
         self.clear_build_cache(identity)
     }
 
@@ -1983,10 +1984,64 @@ mod tests {
     }
 
     fn identity(path: &Path) -> BuildCacheIdentity {
-        let opened = crate::private_fs::open_directory(path, false).expect("Workspace admission");
-        let metadata = opened.dir.dir_metadata().expect("Workspace metadata");
-        BuildCacheIdentity::new(&opened.path, metadata.dev(), metadata.ino())
+        let opened =
+            crate::private_fs::open_workspace_directory(path).expect("Workspace admission");
+        let metadata = opened.dir_metadata().expect("Workspace metadata");
+        BuildCacheIdentity::new(path, metadata.dev(), metadata.ino())
             .expect("Workspace cache identity")
+    }
+
+    fn ordinary_dir(path: &Path) {
+        std::fs::DirBuilder::new()
+            .mode(0o755)
+            .create(path)
+            .expect("ordinary Workspace directory");
+    }
+
+    #[test]
+    fn ordinary_workspace_cache_admission_pins_identity_and_rejects_overlap() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("fixture");
+        let state_path = temp.path().join("state");
+        let workspace = temp.path().join("workspace");
+        private_dir(&state_path);
+        ordinary_dir(&workspace);
+        std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o755))
+            .expect("ordinary Workspace mode");
+        let state = StateRoot::admit(&state_path).expect("StateRoot");
+        let admitted = identity(&workspace);
+        let metadata = std::fs::metadata(&workspace).expect("Workspace metadata");
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o755);
+        drop(
+            state
+                .begin_build_cache(admitted.clone())
+                .expect("ordinary Workspace cache admission"),
+        );
+        state
+            .clear_workspace_build_cache(&workspace)
+            .expect("clear ordinary Workspace cache");
+
+        let drifting = temp.path().join("drifting-workspace");
+        let displaced = temp.path().join("displaced-workspace");
+        ordinary_dir(&drifting);
+        let stale_identity = identity(&drifting);
+        std::fs::rename(&drifting, &displaced).expect("preserve original inode");
+        ordinary_dir(&drifting);
+        assert!(matches!(
+            state.begin_build_cache(stale_identity),
+            Err(StoreError::InvalidStateDirectory)
+        ));
+
+        let overlap_workspace = temp.path().join("overlap-workspace");
+        ordinary_dir(&overlap_workspace);
+        let nested_state_path = overlap_workspace.join("state");
+        private_dir(&nested_state_path);
+        let nested_state = StateRoot::admit(&nested_state_path).expect("nested StateRoot");
+        assert!(matches!(
+            nested_state.begin_build_cache(identity(&overlap_workspace)),
+            Err(StoreError::StateNotPrivate)
+        ));
     }
 
     fn archive(identity: &BuildCacheIdentity, source: &Path, exclusions: &[String]) -> Vec<u8> {

@@ -28,6 +28,60 @@ pub(crate) struct PrivateDirectory {
     pub ancestors: Vec<(u64, u64)>,
 }
 
+pub(crate) fn open_workspace_directory(path: &Path) -> Result<Dir, Error> {
+    if !path.is_absolute() {
+        return Err(Error::InvalidPath);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use rustix::fs::{Mode, OFlags, open, openat};
+        use std::fs::File;
+
+        let common = OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW;
+        let search = OFlags::from_bits_retain(nix::libc::O_SEARCH as _);
+        let mut components = path.components().skip(1).peekable();
+        let access = if components.peek().is_none() {
+            OFlags::RDONLY
+        } else {
+            search
+        };
+        let mut file = File::from(
+            open("/", common | access, Mode::empty())
+                .map_err(|error| Error::Io(io::Error::from(error)))?,
+        );
+        while let Some(component) = components.next() {
+            let std::path::Component::Normal(name) = component else {
+                return Err(Error::InvalidPath);
+            };
+            let access = if components.peek().is_none() {
+                OFlags::RDONLY
+            } else {
+                search
+            };
+            file = File::from(
+                openat(&file, name, common | access, Mode::empty())
+                    .map_err(|error| Error::Io(io::Error::from(error)))?,
+            );
+        }
+        Ok(Dir::from_std_file(file))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut dir = Dir::open_ambient_dir(Path::new("/"), ambient_authority())?;
+        for component in path.components().skip(1) {
+            let Component::Normal(name) = component else {
+                return Err(Error::InvalidPath);
+            };
+            dir = dir.open_dir_nofollow(name)?;
+        }
+        Ok(dir)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        Err(Error::InvalidPath)
+    }
+}
+
 pub(crate) fn open_directory(path: &Path, create: bool) -> Result<PrivateDirectory, Error> {
     if !path.is_absolute() {
         return Err(Error::InvalidPath);
