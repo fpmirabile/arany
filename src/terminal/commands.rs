@@ -815,6 +815,10 @@ mod tests {
                 suggestion: Some("model"),
             })
         );
+        assert_eq!(
+            parse_submission("/resume-goa"),
+            Err(CommandParseError::Unknown { suggestion: None })
+        );
         assert!(command_completions("/sessions").is_empty());
         assert_eq!(
             InteractiveCommand::Resume.availability(true),

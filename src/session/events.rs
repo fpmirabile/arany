@@ -111,6 +111,7 @@ pub const MAX_GOAL_REPORT_BYTES: usize = 8 * 1024;
 #[serde(deny_unknown_fields)]
 pub struct GoalBudget {
     pub max_provider_calls: u32,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub max_tokens: Option<u64>,
     pub max_active_ms: u64,
     pub max_runs: u8,
@@ -951,6 +952,27 @@ mod account_default_tests {
             let mut missing = encoded.clone();
             missing.as_object_mut().unwrap().remove(field);
             assert!(serde_json::from_value::<SessionDefaults>(missing).is_err());
+        }
+    }
+
+    #[test]
+    fn goal_budget_requires_explicit_nullable_token_limit() {
+        let budget = GoalBudget::default();
+        let encoded = serde_json::to_value(&budget).unwrap();
+        assert!(encoded["max_tokens"].is_null());
+        assert_eq!(
+            serde_json::from_value::<GoalBudget>(encoded.clone()).unwrap(),
+            budget
+        );
+        for field in [
+            "max_tokens",
+            "max_provider_calls",
+            "max_active_ms",
+            "max_runs",
+        ] {
+            let mut missing = encoded.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<GoalBudget>(missing).is_err());
         }
     }
 
