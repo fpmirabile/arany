@@ -762,7 +762,9 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 (4, AgentPhase::RootPlan, maximal_objective.as_str(), Vec::new(), Vec::new(), Vec::new()),
                 (5, AgentPhase::RootPlan, "After fork", [history, vec![arany::HistoryTurn { user: "".into(), assistant: "Team answer".into() }]].concat(), [historical_images, vec![ProviderImage { origin: ImageOrigin::History { turn_index: 2 }, image: second_image.clone() }]].concat(), Vec::new()),
             ] {
-                assert_eq!(calls[index], ProviderRequest {
+                let mut actual = calls[index].clone();
+                let facts = actual.goal_context_facts.take();
+                assert_eq!(actual, ProviderRequest {
                     run_id: calls[index].run_id, agent_run_id: calls[index].agent_run_id,
                     phase, model: "test-model".into(), instructions: Some("Changed instruction".into()),
                     collaboration: if index == 0 || index == 2 { CollaborationPolicy::Team { max_active_children: 1 } } else { CollaborationPolicy::Single },
@@ -770,8 +772,13 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                     history: expected_history,
                     context_summary: (index == 4).then(|| "Image conversation summary".into()),
                     child_results, goal_budget: Some(arany::GoalBudget::default()),
-                    goal_plan_contract: None, max_output_tokens: 4096, tools: None,
+                    goal_plan_contract: None, goal_context_facts: None, max_output_tokens: 4096, tools: None,
                 }, "image request {index}");
+                if phase == AgentPhase::ChildWork {
+                    assert!(facts.is_none(), "child calls do not receive primary Goal state");
+                } else {
+                    assert!(facts.is_some(), "primary calls receive current Goal state");
+                }
             }
             assert!(calls[..3].iter().all(|call| call.run_id == third.run.id));
             assert_eq!(calls[0].agent_run_id, third.run.agents[0].id);
@@ -891,14 +898,14 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 assert_eq!(lines.len(), events.len());
                 let accepted = lines.iter().filter(|line| line["kind"] == "MessageAccepted").collect::<Vec<_>>();
                 assert_eq!(accepted.len(), 5);
-                assert_eq!(accepted[0]["event_version"], 3);
+                assert_eq!(accepted[0]["event_version"], 4);
                 assert_eq!(accepted[0]["payload"]["images"][0]["media_type"], "image/png");
                 assert_eq!(accepted[0]["payload"]["images"][0]["data"], view.runs[0].images[0].base64());
                 assert_eq!(accepted[2]["payload"]["text"], "");
                 assert!(accepted[3]["payload"]["text"].as_str() == Some(maximal_objective.as_str()));
                 let image_payload_bytes = accepted[3]["payload"].to_string().len();
                 assert!((300 * 1024..=320 * 1024).contains(&image_payload_bytes), "maximally escaped image input fits its Event");
-                assert_eq!(accepted[4]["event_version"], 3);
+                assert_eq!(accepted[4]["event_version"], 4);
                 assert!(accepted[4]["payload"]["text"].as_str() == Some(maximal_objective.as_str()));
                 assert_eq!(accepted[4]["payload"].to_string().len(), 6 * 8 * 1024 + 23, "maximally escaped text-only input fits its Event");
                 assert_eq!(accepted[4]["payload"]["images"], serde_json::json!([]), "text-only input retains the current Message shape");
@@ -919,11 +926,11 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         let original: serde_json::Value = serde_json::from_str(&payload).unwrap();
         for fault in ["unsupported version", "unknown version", "missing images", "empty Message", "five images", "aggregate bytes", "non-PNG", "corrupted image", "URL", "extra field", "text overflow", "payload overflow", "agent scope"] {
             let mut invalid = original.clone();
-            let mut version = 3;
+            let mut version = 4;
             let mut agent_scope = None;
             match fault {
                 "unsupported version" => version = 1,
-                "unknown version" => version = 4,
+                "unknown version" => version = 5,
                 "missing images" => { invalid.as_object_mut().unwrap().remove("images"); }
                 "empty Message" => { invalid["text"] = "".into(); invalid["images"] = serde_json::json!([]); },
                 "five images" => invalid["images"] = serde_json::to_value(vec![second_image.clone(); 5]).unwrap(),
@@ -943,7 +950,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             assert!(matches!(store.load_view(first.session_id).await, Err(arany::StoreError::InvalidHistory)), "image replay fault: {fault}");
             store.close().await.unwrap();
         }
-        connection.execute("UPDATE events SET event_version=3, payload=?1, agent_run_id=NULL WHERE sequence=?2", rusqlite::params![payload, sequence]).unwrap();
+        connection.execute("UPDATE events SET event_version=4, payload=?1, agent_run_id=NULL WHERE sequence=?2", rusqlite::params![payload, sequence]).unwrap();
         drop(connection);
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
         assert_eq!(store.load_view(first.session_id).await.unwrap().unwrap(), view);
@@ -2142,6 +2149,7 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
                     objective: "Unfinished question".into(),
                     workspace_identity,
                     budget: arany::GoalBudget::default(),
+                    resource_settings: arany::ToolResourceSettings::default(),
                 },
             )
             .await
@@ -2260,7 +2268,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
                 })
                 .unwrap();
             for sequence in first_padding_sequence..=i64::from(prefix) {
-                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',3,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string()]).unwrap();
+                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',4,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string()]).unwrap();
             }
             transaction.commit().unwrap();
             drop(connection);
@@ -2290,9 +2298,9 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             next.title = None;
             next.policy = policy;
             next.goal.budget = Some(arany::GoalBudget {
-                max_provider_calls,
+                max_provider_calls: Some(max_provider_calls),
                 max_tokens: None,
-                max_active_ms: 30 * 60 * 1000,
+                max_active_ms: Some(30 * 60 * 1000),
                 max_runs: 1,
             });
             let result = if previews {
@@ -2348,7 +2356,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
                 .unwrap();
             if let Some(prefix) = prefix {
                 for sequence in first_padding_sequence..=prefix {
-                    transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',3,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, root.to_string()]).unwrap();
+                    transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',4,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, root.to_string()]).unwrap();
                 }
             }
             let event_count_before_forks = prefix.unwrap_or(first_padding_sequence - 1);
@@ -2392,22 +2400,21 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
         let calls = provider.compact_requests.clone();
         let mut engine = Engine::open(StateRoot::admit(&path).unwrap(), provider).unwrap();
         let id = engine.run(request(&workspace, "Source")).await.unwrap().session_id;
-        for _ in 0..64 {
+        for _ in 0..65 {
             assert!(matches!(engine.compact_session(id, workspace.clone()).await.unwrap().status, CompactionStatus::Failed { .. }));
         }
-        assert!(matches!(engine.compact_session(id, workspace.clone()).await, Err(EngineError::CompactionLimit)));
-        assert_eq!(calls.lock().unwrap().len(), 64, "quota rejection must precede inference");
+        assert_eq!(calls.lock().unwrap().len(), 65);
         let mut later = request(&workspace, "Later");
         later.session_id = Some(id);
         later.title = None;
         engine.run(later).await.unwrap();
         let branch = engine.fork_session(id, workspace.clone(), None).await.unwrap();
         assert!(matches!(engine.compact_session(branch, workspace.clone()).await.unwrap().status, CompactionStatus::Failed { .. }), "inherited compactions do not consume the fork's direct quota");
-        assert_eq!(calls.lock().unwrap().len(), 65);
+        assert_eq!(calls.lock().unwrap().len(), 66);
         engine.close().await.unwrap();
         let store = Store::open_read_only(StateRoot::open_existing(&path).unwrap()).unwrap();
-        assert_eq!(store.load_view(id).await.unwrap().unwrap().compactions.len(), 64);
-        assert_eq!(store.load_view(branch).await.unwrap().unwrap().compactions.len(), 65);
+        assert_eq!(store.load_view(id).await.unwrap().unwrap().compactions.len(), 65);
+        assert_eq!(store.load_view(branch).await.unwrap().unwrap().compactions.len(), 66);
         store.close().await.unwrap();
     });
 }
@@ -4095,7 +4102,7 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                         if let Event::ProviderCallRecorded { record, .. } = &envelope.event {
                             let document: serde_json::Value =
                                 serde_json::from_str(line).expect("canonical JSONL");
-                            assert_eq!(document["event_version"], 3);
+                            assert_eq!(document["event_version"], 4);
                             assert_eq!(document["payload"], serde_json::to_value(record).unwrap());
                         }
                     }

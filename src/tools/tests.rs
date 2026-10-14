@@ -33,6 +33,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         runtime_grants: Vec::new(),
     };
     let runtime = ToolRuntime {
+        context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
         config,
         workspace: PathBuf::new(),
@@ -40,6 +41,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         guard_executable: PathBuf::new(),
         enforcement_digest: [1; 32],
         queue_progress: None,
+        active_action_gate: None,
         #[cfg(target_os = "macos")]
         system_programs: None,
         process_enforcement_digest: [1; 32],
@@ -48,6 +50,8 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         mission: "Read the requested Skill guidance".into(),
         paths: Vec::new(),
         commands: Vec::new(),
+        resource_class: ToolResourceClass::Default,
+        command_timeout_ms: None,
         skills: vec![GoalSkillBinding {
             name: name.into(),
             resource: resource.map(str::to_owned),
@@ -1031,6 +1035,7 @@ fn project_skill_discovery_preserves_grants_and_reports_missing_installation() {
             }
             let context = ToolContext {
                 catalog,
+                history_summary: None,
                 observations: Vec::new(),
             };
             assert!(context.model_input()["catalog"].is_object());

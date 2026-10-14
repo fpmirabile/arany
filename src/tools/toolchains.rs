@@ -183,7 +183,7 @@ impl RuntimeGrant {
             Ok(PathBuf::from("/runtime/toolchains").join(self.token()?))
         } else {
             let relative = self.kind.cache_root().ok_or(ToolError::Configuration)?;
-            Ok(Path::new("/scratch").join(relative))
+            Ok(Path::new("/cache").join(relative))
         }
     }
 

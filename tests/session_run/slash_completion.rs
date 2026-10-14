@@ -14,6 +14,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+fn saved_ui_preferences(completion: &str, view: &str) -> Vec<u8> {
+    format!(
+        r#"{{"version":3,"preferences":{{"completion":"{completion}","view":"{view}","goal_budget":{{"max_provider_calls":64,"max_tokens":null,"max_active_ms":1800000,"max_runs":16}},"resources":{{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592}}}}}}"#
+    )
+    .into_bytes()
+}
+
 #[track_caller]
 fn wait_for(
     output: &mut impl Read,
@@ -233,7 +240,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         &mut transcript,
         &mut answered,
         settings_at,
-        b"empty Enter saves, q closes; type a choice name: tabs or combined or fullscreen or classic\r\nInput:\r\n",
+        b"Type calls=<n|unlimited>, tokens=<n|unlimited>, active-ms=<ms|unlimited>, default-timeout-ms=<ms>, max-timeout-ms=<ms>, build-memory-bytes=<n>, build-processes=<n>, build-project-bytes=<n>, build-cache-bytes=<n>; empty Enter saves, q cancels\r\nInput:\r\n",
     );
     let invalid_at = transcript.len();
     input
@@ -245,7 +252,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         &mut transcript,
         &mut answered,
         invalid_at,
-        b"Notice: Type tabs, combined, fullscreen or classic; q closes\r\nInput:\r\n",
+        b"Notice: Type a valid setting and value; q cancels\r\nInput:\r\n",
     );
     let selected_at = transcript.len();
     input
@@ -257,7 +264,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         &mut transcript,
         &mut answered,
         selected_at,
-        "Notice: Settings: slash menu combined · chat view fullscreen (visual sessions) · saved\r\nInput:\r\n".as_bytes(),
+        "Notice: Settings saved · calls 64 · active ms 1800000 · command max 600000 ms · visual sessions\r\nInput:\r\n".as_bytes(),
     );
     assert_eq!(
         StateRoot::open_existing(&state)
@@ -265,7 +272,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
             .read_ui_preferences_record()
             .unwrap()
             .unwrap(),
-        br#"{"version":2,"preferences":{"completion":"combined","view":"fullscreen"}}"#
+        saved_ui_preferences("combined", "fullscreen")
     );
     for (command, feedback) in [
         ("/provider anthropic", "Provider: anthropic; set /model"),
@@ -984,7 +991,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
             .read_ui_preferences_record()
             .unwrap()
             .unwrap(),
-        br#"{"version":2,"preferences":{"completion":"combined","view":"fullscreen"}}"#,
+        saved_ui_preferences("combined", "fullscreen"),
         "--classic must not leak into the saved chat view"
     );
     let menu_at = transcript.len();
@@ -1329,7 +1336,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
             .read_ui_preferences_record()
             .unwrap()
             .unwrap(),
-        br#"{"version":2,"preferences":{"completion":"combined","view":"fullscreen"}}"#
+        saved_ui_preferences("combined", "fullscreen")
     );
     assert_eq!(std::fs::read(&outside).unwrap(), b"unchanged");
     assert!(
@@ -1382,11 +1389,9 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
             .read_ui_preferences_record()
             .unwrap()
             .unwrap(),
-        br#"{"version":2,"preferences":{"completion":"tabs","view":"fullscreen"}}"#
+        saved_ui_preferences("tabs", "fullscreen")
     );
-    let record = |view: &str| {
-        format!(r#"{{"version":2,"preferences":{{"completion":"tabs","view":"{view}"}}}}"#)
-    };
+    let record = |view: &str| saved_ui_preferences("tabs", view);
     for (view, pinned) in [("classic", false), ("fullscreen", true), ("classic", false)] {
         let chosen_at = transcript.len();
         input
@@ -1414,7 +1419,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
                 .read_ui_preferences_record()
                 .unwrap()
                 .unwrap(),
-            record(view).as_bytes()
+            record(view)
         );
         let frames = &transcript[chosen_at..];
         assert!(

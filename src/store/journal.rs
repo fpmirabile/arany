@@ -44,7 +44,7 @@ pub(super) fn admit_operation(
     let event_bytes = i64::try_from(event_slots).map_err(|_| StoreError::ReplayLimit)?
         * (super::MAX_EVENT_BYTES as i64 + EVENT_SQLITE_OVERHEAD_PAGES * page_size);
     let image_message_extra =
-        (event_payload_limit("MessageAccepted", 3) - super::MAX_EVENT_BYTES) as i64;
+        (event_payload_limit("MessageAccepted", 4) - super::MAX_EVENT_BYTES) as i64;
     if MAX_DATABASE_BYTES - page_count * page_size
         < ADMISSION_HEADROOM_BYTES + event_bytes + image_message_extra
     {

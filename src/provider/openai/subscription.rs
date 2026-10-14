@@ -204,6 +204,7 @@ async fn probe_model_at(
         context_summary: None,
         goal_budget: None,
         goal_plan_contract: None,
+        goal_context_facts: None,
         child_results: Vec::new(),
         max_output_tokens: PROBE_OUTPUT_CAP,
         tools: None,

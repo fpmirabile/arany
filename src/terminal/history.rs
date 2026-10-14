@@ -31,7 +31,7 @@ enum MessageSource {
     Assistant(usize),
     Notice(u64),
     Tool(usize, usize),
-    Commentary(usize, u8, u8),
+    Commentary(usize, u32, u8),
 }
 
 struct Notice {
@@ -210,7 +210,7 @@ impl History {
                         .any(|chunk| chunk.category == crate::session::DisplayCategory::Limit)
                 {
                     self.push_owned(
-                        MessageSource::Commentary(index, u8::MAX, 0),
+                        MessageSource::Commentary(index, u32::MAX, 0),
                         MessageKind::Notice,
                         crate::session::DISPLAY_LIMIT_TEXT.to_owned(),
                         width,
@@ -720,7 +720,7 @@ fn message_text<'a>(
         } else {
             crate::presentation::tool_summary(&view.runs[run].tools[tool])
         }),
-        MessageSource::Commentary(_, u8::MAX, _) => {
+        MessageSource::Commentary(_, u32::MAX, _) => {
             Cow::Borrowed(crate::session::DISPLAY_LIMIT_TEXT)
         }
         MessageSource::Commentary(run, call, item) => Cow::Owned(
@@ -896,6 +896,8 @@ mod tests {
             accepted_sequence: 2,
             finished_sequence: Some(3),
             tools: Vec::new(),
+            tool_compaction_summary: None,
+            tool_compaction_covered_count: 0,
             display: Vec::new(),
         }
     }

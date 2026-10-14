@@ -24,8 +24,6 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     let policy = arany::ToolPolicyReceipt {
         contract_version: 1,
         config_digest: [1; 32],
-        max_tool_calls: 16,
-        max_model_steps: 32,
         max_context_bytes: 65536,
     };
     let config = RunConfig {
@@ -109,6 +107,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             objective: "Past work".into(),
             workspace_identity: (1, 2),
             budget: arany::GoalBudget::default(),
+            resource_settings: arany::ToolResourceSettings::default(),
         },
         Event::GoalRunLinked {
             goal_id: goal,
@@ -149,6 +148,8 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 mission: "Verify the bounded command result".into(),
                 paths: vec!["src".into()],
                 commands: vec!["shell".into()],
+                resource_class: arany::ToolResourceClass::Default,
+                command_timeout_ms: None,
                 skills: Vec::new(),
                 mcp_tools: Vec::new(),
                 success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
@@ -157,8 +158,6 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 },
                 budget: arany::GoalBudget::default(),
             },
-            active_ms: 0,
-            reserved_ms: 30_000,
         },
         Event::ToolStarted {
             run_id: run,
@@ -266,6 +265,78 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     assert_eq!(
         replay(all.clone()).unwrap().unwrap().runs[0].status,
         RunStatus::Finished
+    );
+    let timeout_refusal = || {
+        let mut row = prefix.to_vec();
+        for event in &mut row {
+            match event {
+                Event::GoalStarted {
+                    resource_settings, ..
+                } => {
+                    resource_settings.default_command_timeout_ms = 1_000;
+                    resource_settings.max_command_timeout_ms = 1_000;
+                }
+                Event::GoalPlanContractRecorded { contract, .. } => {
+                    contract.command_timeout_ms = Some(2_000);
+                }
+                Event::ToolStarted { intent, .. } => {
+                    intent.limits.runtime_ms = 2_000;
+                    intent.limits.cache_bytes = 0;
+                    intent.limits.cache_candidate_bytes = 0;
+                    intent.limits.cache_transfer_ms = 0;
+                }
+                Event::ToolFinished { observation, .. } => {
+                    observation.intent.limits.runtime_ms = 2_000;
+                    observation.intent.limits.cache_bytes = 0;
+                    observation.intent.limits.cache_candidate_bytes = 0;
+                    observation.intent.limits.cache_transfer_ms = 0;
+                    observation.disposition = ToolDisposition::Limit;
+                    observation.output = "Timeout 2000 ms exceeds pinned max 1000 ms. Lower request or change /settings; Goal remains pinned.".into();
+                    observation.guard = None;
+                    observation.cache_update = arany::CacheUpdate::NotApplicable;
+                }
+                _ => {}
+            }
+        }
+        row
+    };
+    let admitted_timeout_refusal = timeout_refusal();
+    assert!(
+        replay(admitted_timeout_refusal.clone()).is_ok(),
+        "over-max command is recorded as a correlated non-dispatched Limit"
+    );
+    let mut dispatched_over_max = admitted_timeout_refusal.clone();
+    if let Event::ToolFinished { observation, .. } = &mut dispatched_over_max[TOOL_FINISHED] {
+        let digest = Sha256::digest(serde_json::to_vec(&observation.intent).unwrap()).into();
+        observation.disposition = ToolDisposition::Succeeded;
+        observation.output = serde_json::json!({
+            "exit_code": 0,
+            "stdout": "",
+            "stderr": "",
+            "changeset": {"files": []}
+        })
+        .to_string();
+        observation.guard = Some(arany::GuardReceipt {
+            contract_version: 1,
+            intent_digest: digest,
+            enforcement_digest: observation.intent.enforcement_digest,
+            limits: observation.intent.limits.clone(),
+        });
+    }
+    assert!(
+        replay(dispatched_over_max).is_err(),
+        "replay rejects a guarded success above the pinned maximum"
+    );
+    let mut mismatched_limit = admitted_timeout_refusal;
+    if let Event::ToolStarted { intent, .. } = &mut mismatched_limit[TOOL_STARTED] {
+        intent.limits.runtime_ms = 1_000;
+    }
+    if let Event::ToolFinished { observation, .. } = &mut mismatched_limit[TOOL_FINISHED] {
+        observation.intent.limits.runtime_ms = 1_000;
+    }
+    assert!(
+        replay(mismatched_limit).is_err(),
+        "replay requires the requested timeout to match the plan and receipt"
     );
     let mut review = record(ProviderCallDisposition::Finished);
     if let Event::ProviderCallRecorded { record, .. } = &mut review {
@@ -804,6 +875,8 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                         mission: "Admit the synthetic command changeset".into(),
                         paths: vec!["src".into()],
                         commands: vec!["shell".into()],
+                        resource_class: arany::ToolResourceClass::Default,
+                        command_timeout_ms: None,
                         skills: Vec::new(),
                         mcp_tools: Vec::new(),
                         success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
@@ -811,8 +884,6 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                         },
                         budget: arany::GoalBudget::default(),
                     },
-                    active_ms: 0,
-                    reserved_ms: 30_000,
                 });
             }
             rows.extend([
@@ -1064,6 +1135,8 @@ pub(super) async fn native_command_changeset_corpus(
                                         .into(),
                                     paths,
                                     commands,
+                                    resource_class: arany::ToolResourceClass::Default,
+                                    command_timeout_ms: None,
                                     skills: Vec::new(),
                                     mcp_tools: Vec::new(),
                                     success_criterion:

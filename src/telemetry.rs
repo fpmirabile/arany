@@ -129,6 +129,7 @@ pub(crate) enum TraceEventKind {
     GoalFinished,
     GoalProviderCallReserved,
     GoalCompactionCallReserved,
+    GoalContextCompacted,
     MessageAccepted,
     RunStarted,
     AgentSpawned,
@@ -370,6 +371,23 @@ impl Default for Telemetry {
 }
 
 impl RunTrace {
+    pub(crate) fn begin_context_compaction(&self) -> CompactionTrace {
+        let span = self.span.child(
+            "compact arany.goal_tool_context",
+            SpanKind::Internal,
+            vec![
+                KeyValue::new("arany.operation", "compact_goal_tool_context"),
+                KeyValue::new("arany.session.id", self.session_id.to_string()),
+                KeyValue::new("arany.run.id", self.run_id.to_string()),
+            ],
+            None,
+        );
+        CompactionTrace {
+            span,
+            provider: self.provider,
+        }
+    }
+
     fn context_compiled(&self, started: SystemTime, ended: SystemTime) {
         if self.span.context.is_none() {
             return;
@@ -865,6 +883,7 @@ impl TraceEventKind {
                 | Self::GoalFinished
                 | Self::GoalProviderCallReserved
                 | Self::GoalCompactionCallReserved
+                | Self::GoalContextCompacted
         )
     }
 
@@ -879,6 +898,7 @@ impl TraceEventKind {
             Self::GoalFinished => "GoalFinished",
             Self::GoalProviderCallReserved => "GoalProviderCallReserved",
             Self::GoalCompactionCallReserved => "GoalCompactionCallReserved",
+            Self::GoalContextCompacted => "GoalContextCompacted",
             Self::MessageAccepted => "MessageAccepted",
             Self::RunStarted => "RunStarted",
             Self::AgentSpawned => "AgentSpawned",

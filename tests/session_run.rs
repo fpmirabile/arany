@@ -84,6 +84,14 @@ fn private_file(path: &std::path::Path, bytes: &[u8]) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
 }
 
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+fn saved_ui_preferences(completion: &str, view: &str) -> Vec<u8> {
+    format!(
+        r#"{{"version":3,"preferences":{{"completion":"{completion}","view":"{view}","goal_budget":{{"max_provider_calls":64,"max_tokens":null,"max_active_ms":1800000,"max_runs":16}},"resources":{{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592}}}}}}"#
+    )
+    .into_bytes()
+}
+
 #[cfg(unix)]
 #[path = "session_run/custom.rs"]
 mod custom;
@@ -218,6 +226,8 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                         accepted_sequence: 1,
                         finished_sequence: None,
                         tools: Vec::new(),
+                        tool_compaction_summary: None,
+                        tool_compaction_covered_count: 0,
                         display: Vec::new(),
                     });
                     terminal.record_user_run(&view.runs[0]).unwrap();
@@ -1250,8 +1260,8 @@ fn exact_resume_and_rename_survive_file_backed_reopen() {
         assert!(shown.status.success());
         assert_eq!(shown.stderr, b"");
         let expected = format!(
-            "{{\"sequence\":1,\"session_id\":\"{id}\",\"run_id\":null,\"agent_run_id\":null,\"kind\":\"SessionStarted\",\"event_version\":3,\"payload\":{{\"title\":\"New Session\",\"workspace_device\":{device},\"workspace_inode\":{inode}}},\"created_at_ms\":{}}}\n\
-             {{\"sequence\":2,\"session_id\":\"{id}\",\"run_id\":null,\"agent_run_id\":null,\"kind\":\"SessionRenamed\",\"event_version\":3,\"payload\":{{\"title\":\"Research thread\"}},\"created_at_ms\":{}}}\n",
+            "{{\"sequence\":1,\"session_id\":\"{id}\",\"run_id\":null,\"agent_run_id\":null,\"kind\":\"SessionStarted\",\"event_version\":4,\"payload\":{{\"title\":\"New Session\",\"workspace_device\":{device},\"workspace_inode\":{inode}}},\"created_at_ms\":{}}}\n\
+             {{\"sequence\":2,\"session_id\":\"{id}\",\"run_id\":null,\"agent_run_id\":null,\"kind\":\"SessionRenamed\",\"event_version\":4,\"payload\":{{\"title\":\"Research thread\"}},\"created_at_ms\":{}}}\n",
             events[0].created_at_ms, events[1].created_at_ms
         );
         assert_eq!(shown.stdout, expected.as_bytes());
@@ -1262,7 +1272,7 @@ fn exact_resume_and_rename_survive_file_backed_reopen() {
                 row.get(0)
             })
             .expect("start Event version");
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         connection
             .execute("UPDATE events SET event_version=1 WHERE sequence=1", [])
             .expect("version fault injection");
@@ -1512,6 +1522,7 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
                     objective: "pending objective".into(),
                     workspace_identity: (workspace_device, workspace_inode),
                     budget: arany::GoalBudget::default(),
+                    resource_settings: arany::ToolResourceSettings::default(),
                 },
             )
             .await
@@ -1743,7 +1754,7 @@ fn session_journal_survives_reopen_and_rejects_invalid_history() {
             assert_eq!(line["session_id"], id.to_string());
             assert!(line["run_id"].is_null());
             assert!(line["agent_run_id"].is_null());
-            assert_eq!(line["event_version"], 3);
+            assert_eq!(line["event_version"], 4);
             assert_eq!(line["created_at_ms"], event.created_at_ms);
         }
 
@@ -2167,6 +2178,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                     objective: "Question".into(),
                     workspace_identity: identity,
                     budget: arany::GoalBudget::default(),
+                    resource_settings: arany::ToolResourceSettings::default(),
                 },
                 Event::GoalRunLinked {
                     goal_id,

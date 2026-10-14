@@ -167,10 +167,14 @@ pub(crate) fn display_answer(run: &RunView) -> Option<String> {
     )
 }
 
-pub(crate) fn display_call_visible(run: &RunView, call: u8) -> bool {
+pub(crate) fn display_call_visible(run: &RunView, call: u32) -> bool {
     run.agents
         .first()
-        .and_then(|agent| agent.provider_calls.get(usize::from(call)))
+        .and_then(|agent| {
+            usize::try_from(call)
+                .ok()
+                .and_then(|index| agent.provider_calls.get(index))
+        })
         .is_none_or(|record| {
             matches!(
                 record.disposition,
@@ -185,8 +189,8 @@ pub(crate) fn display_call_visible(run: &RunView, call: u8) -> bool {
         })
 }
 
-pub(crate) fn display_commentary(run: &RunView) -> Vec<(u8, u8, String)> {
-    let mut items: Vec<(u8, u8, String)> = Vec::new();
+pub(crate) fn display_commentary(run: &RunView) -> Vec<(u32, u8, String)> {
+    let mut items: Vec<(u32, u8, String)> = Vec::new();
     for chunk in &run.display {
         if chunk.category != crate::session::DisplayCategory::Commentary
             || !display_call_visible(run, chunk.call_index)
@@ -601,6 +605,7 @@ mod exec_jsonl_tests {
             objective: objective.into(),
             workspace_identity: (1, 2),
             budget: GoalBudget::default(),
+            resource_settings: crate::tools::ToolResourceSettings::default(),
         }
     }
 
@@ -698,6 +703,8 @@ mod exec_jsonl_tests {
             accepted_sequence: 8,
             finished_sequence: Some(8),
             tools: Vec::new(),
+            tool_compaction_summary: None,
+            tool_compaction_covered_count: 0,
             display: Vec::new(),
         };
 

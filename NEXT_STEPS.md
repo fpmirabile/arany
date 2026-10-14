@@ -14,9 +14,10 @@ history. Implementation status and verified support are separate claims.
   flexible limits, registry fetch, Git, a
   narrowing-only Supervisor, per-agent Provider routing and writable team
   workers. The [initiative plan](./planning/agentic-teams/README.md) is
-  self-contained and orders the slices; start at Goal Foundation prerequisites
-  (lifecycle, cancellation, budgets, plan contract and Workspace lock;
-  execution step 3), then A4, dogfooding and the remaining Goal artifacts. The
+  self-contained and orders the slices; the reviewed Goal Foundation
+  prerequisite (lifecycle, cancellation, budgets, plan contract and Workspace
+  lock; execution step 3) is in place. A4 is the current implementation slice,
+  followed by authorized dogfooding and the remaining Goal artifacts. The
   approved A4 maxima are 4 GiB memory, 8 GiB
   cache, 1 GiB project storage and 256 tasks; the current cache view remains
   64 MiB until A4 enables the build profile. Native build

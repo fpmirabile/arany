@@ -236,11 +236,17 @@ async fn run_with_provider<P: Provider + 'static>(
             )
             .map_err(|error| error.to_string())?;
     }
-    let goal = admission
+    let (goal_budget, resource_settings) =
+        crate::cli::attached::execution_limits(&admission.state_dir).await?;
+    let mut goal = admission
         .resume_goal
         .map_or_else(arany::GoalRequest::default, |id| {
             arany::GoalRequest::resume(id, arany::GoalPhase::Implementation, true)
         });
+    if goal.id.is_none() {
+        goal.budget = Some(goal_budget);
+    }
+    goal.resource_settings = resource_settings;
     let result = engine
         .run(RunRequest {
             session_id: admission.session_id,
@@ -574,7 +580,7 @@ mod tests {
         for (line, event) in run_lines.into_iter().zip(run_events) {
             assert_eq!(line["sequence"], event.sequence);
             assert_eq!(line["created_at_ms"], event.created_at_ms);
-            assert_eq!(line["event_version"], 3);
+            assert_eq!(line["event_version"], 4);
         }
         store.close().await.expect("closed store");
 

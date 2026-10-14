@@ -540,9 +540,7 @@ fn native_saved_classic_chat_view_selects_the_primary_screen() {
     std::fs::create_dir(&workspace).unwrap();
     StateRoot::admit(&state)
         .unwrap()
-        .replace_ui_preferences_record(
-            br#"{"version":2,"preferences":{"completion":"tabs","view":"classic"}}"#,
-        )
+        .replace_ui_preferences_record(&super::saved_ui_preferences("tabs", "classic"))
         .unwrap();
     let geometry = nix::pty::Winsize {
         ws_row: 24,

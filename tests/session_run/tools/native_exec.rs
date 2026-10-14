@@ -110,6 +110,22 @@ struct CacheCanary {
     requests: std::sync::Arc<std::sync::Mutex<Vec<ProviderRequest>>>,
     calls: Vec<ToolCall>,
     stage: &'static str,
+    resource_class: arany::ToolResourceClass,
+}
+
+fn build_goal_request() -> arany::GoalRequest {
+    let mut goal = arany::GoalRequest::new(
+        arany::GoalBudget::default(),
+        arany::GoalPhase::Implementation,
+    );
+    goal.resource_settings = arany::ToolResourceSettings {
+        build_memory_bytes: 512 * 1024 * 1024,
+        build_processes: 32,
+        build_project_bytes: 128 * 1024 * 1024,
+        build_cache_bytes: 64 * 1024 * 1024,
+        ..arany::ToolResourceSettings::default()
+    };
+    goal
 }
 
 impl Provider for CacheCanary {
@@ -152,6 +168,8 @@ impl Provider for CacheCanary {
                     mission: "Use the selected cache through authorized commands".into(),
                     paths: Vec::new(),
                     commands: vec![program],
+                    resource_class: self.resource_class,
+                    command_timeout_ms: None,
                     skills: Vec::new(),
                     mcp_tools: Vec::new(),
                     success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
@@ -293,6 +311,7 @@ async fn selected_cache_canary_helper_inner() {
             requests: seed_requests.clone(),
             calls: vec![seed_cache.clone()],
             stage: "seed",
+            resource_class: arany::ToolResourceClass::Default,
         },
     )
     .unwrap();
@@ -429,6 +448,7 @@ async fn selected_cache_canary_helper_inner() {
             requests: requests.clone(),
             calls: calls.clone(),
             stage: "selected",
+            resource_class: arany::ToolResourceClass::Build,
         },
     )
     .unwrap();
@@ -454,7 +474,7 @@ async fn selected_cache_canary_helper_inner() {
                 workspace: workspace.clone(),
                 include_paths: Vec::new(),
                 policy: CollaborationPolicy::Single,
-                goal: arany::GoalRequest::default(),
+                goal: build_goal_request(),
             })
             .await;
         cache_progress("selected-run-returned");
@@ -497,6 +517,21 @@ async fn selected_cache_canary_helper_inner() {
         let observation = tool.observation.as_ref().unwrap();
         assert_eq!(observation.disposition, ToolDisposition::Succeeded);
         assert_eq!(observation.intent, tool.intent);
+        let limits = &observation.intent.limits;
+        assert_eq!(limits.resource_class, arany::ToolResourceClass::Build);
+        assert_eq!(
+            limits.resource_profile,
+            arany::ToolResourceProfile::LinuxKernel
+        );
+        assert_eq!(limits.runtime_ms, 120_000);
+        assert_eq!(limits.cache_transfer_ms, 120_000);
+        assert_eq!(limits.memory_bytes, 512 * 1024 * 1024);
+        assert_eq!(limits.max_processes, 32);
+        assert_eq!(limits.project_bytes, 128 * 1024 * 1024);
+        assert_eq!(limits.cache_requested_bytes, 64 * 1024 * 1024);
+        assert!(limits.cache_bytes >= 40 * 1024 * 1024);
+        assert!(limits.cache_bytes <= limits.cache_requested_bytes);
+        assert!(limits.cache_candidate_bytes <= limits.cache_bytes);
         let receipt = observation
             .guard
             .as_ref()
@@ -640,6 +675,7 @@ async fn selected_cache_canary_helper_inner() {
             requests: verify_requests,
             calls: vec![verify_cache.clone()],
             stage: "verify",
+            resource_class: arany::ToolResourceClass::Default,
         },
     )
     .unwrap();

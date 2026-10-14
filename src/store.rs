@@ -17,17 +17,17 @@ pub use state::HistoryReset;
 pub use state::StateRoot;
 pub(crate) use state::{
     BUILD_CACHE_ARCHIVE_BYTES, BuildCacheIdentity, BuildCacheLease, SessionRunLock,
-    WorkspaceRunLock, archive_size,
+    WorkspaceRunLock, archive_size_with_limit,
 };
-#[cfg(target_os = "linux")]
-pub(crate) use state::{capture_archive, restore_archive};
 #[cfg(target_os = "macos")]
-pub(crate) use state::{capture_archive_async, restore_archive_async};
+pub(crate) use state::{capture_archive_async_with_limit, restore_archive_async_with_limit};
+#[cfg(target_os = "linux")]
+pub(crate) use state::{capture_archive_with_limit, restore_archive_with_limit};
 
 const DATABASE_FILE: &str = "events.sqlite3";
 pub(crate) const MAX_EVENT_BYTES: usize = 64 * 1024;
 fn event_payload_limit(kind: &str, version: i64) -> usize {
-    if kind == "MessageAccepted" && version == 3 {
+    if kind == "MessageAccepted" && version == 4 {
         320 * 1024
     } else {
         MAX_EVENT_BYTES

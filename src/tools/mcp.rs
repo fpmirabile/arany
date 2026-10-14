@@ -166,6 +166,7 @@ pub(super) async fn execute(
         "",
         root,
         &config.runtime_grants,
+        false,
     )?;
     command.stdin(Stdio::piped());
     let mut child = command.spawn().map_err(|_| ToolError::Operation)?;

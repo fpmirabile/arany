@@ -130,13 +130,16 @@ fn run_input(request: &ProviderRequest) -> Value {
         "goal_plan_contract": request.goal_plan_contract,
         "child_results": request.child_results.iter().map(|item| json!({"objective": item.objective, "summary": item.summary, "result": item.result})).collect::<Vec<_>>(),
     });
+    if let Some(facts) = request.goal_context_facts {
+        input["goal_context_facts"] = json!(facts);
+    }
     if let Some(tools) = &request.tools {
         input["tools"] = tools.model_input();
     }
     input
 }
 
-fn compaction_input(request: &CompactionRequest) -> Value {
+pub(crate) fn compaction_input(request: &CompactionRequest) -> Value {
     let items = request
         .items
         .iter()
@@ -156,6 +159,12 @@ fn compaction_input(request: &CompactionRequest) -> Value {
         .collect::<Vec<_>>();
     let input = json!({"previous_derived_summary": request.previous_summary, "items": items});
     input
+}
+
+pub(crate) fn compaction_input_bytes(
+    request: &CompactionRequest,
+) -> Result<usize, serde_json::Error> {
+    serde_json::to_vec(&compaction_input(request)).map(|input| input.len())
 }
 
 pub const MAX_NATIVE_API_KEY_BYTES: usize = 512;
@@ -335,9 +344,36 @@ pub struct ProviderRequest {
     pub context_summary: Option<String>,
     pub goal_budget: Option<crate::session::GoalBudget>,
     pub goal_plan_contract: Option<crate::session::GoalPlanContract>,
+    pub goal_context_facts: Option<GoalContextFacts>,
     pub child_results: Vec<ChildResult>,
     pub tools: Option<crate::tools::ToolContext>,
     pub max_output_tokens: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoalContextFacts {
+    pub provider_calls: u32,
+    pub known_tokens: u64,
+    pub token_usage_unknown: bool,
+    pub active_ms: u64,
+    pub reserved_active_ms: u64,
+    pub uncertain_active_ms: u64,
+    pub success_criterion_satisfied: Option<bool>,
+}
+
+impl GoalContextFacts {
+    pub(crate) const fn maximum() -> Self {
+        Self {
+            provider_calls: u32::MAX,
+            known_tokens: u64::MAX,
+            token_usage_unknown: true,
+            active_ms: u64::MAX,
+            reserved_active_ms: u64::MAX,
+            uncertain_active_ms: u64::MAX,
+            success_criterion_satisfied: Some(true),
+        }
+    }
 }
 
 impl ProviderRequest {
@@ -346,7 +382,9 @@ impl ProviderRequest {
             .validate()
             .map_err(|_| ProviderError::Rejected)?;
         if self.phase == AgentPhase::ChildWork
-            && (self.collaboration != CollaborationPolicy::Single || self.tools.is_some())
+            && (self.collaboration != CollaborationPolicy::Single
+                || self.tools.is_some()
+                || self.goal_context_facts.is_some())
         {
             return Err(ProviderError::Rejected);
         }
@@ -732,6 +770,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn provider_input_carries_bounded_typed_goal_facts() {
+        let facts = GoalContextFacts {
+            provider_calls: 7,
+            known_tokens: 1_024,
+            token_usage_unknown: true,
+            active_ms: 2_000,
+            reserved_active_ms: 30_000,
+            uncertain_active_ms: 0,
+            success_criterion_satisfied: Some(false),
+        };
+        let request = ProviderRequest {
+            run_id: RunId::new(),
+            agent_run_id: AgentRunId::new(),
+            phase: AgentPhase::RootPlan,
+            collaboration: CollaborationPolicy::Single,
+            model: "bounded-context-model".into(),
+            instructions: Some("trusted project instructions".into()),
+            objective: "current objective".into(),
+            images: Vec::new(),
+            includes: vec!["pinned include".into()],
+            history: Vec::new(),
+            context_summary: None,
+            goal_budget: Some(crate::session::GoalBudget::default()),
+            goal_plan_contract: None,
+            goal_context_facts: Some(facts),
+            child_results: Vec::new(),
+            tools: None,
+            max_output_tokens: 4_096,
+        };
+        assert_eq!(run_input(&request)["goal_context_facts"], json!(facts));
+    }
+
+    #[test]
     fn remote_http_status_keeps_engine_failure_class() {
         for (status, expected, reason) in [
             (302, ProviderFailureClass::InvalidOutcome, None),
@@ -875,6 +946,8 @@ mod tests {
                 mission: format!("verified with {secret}"),
                 paths: vec!["src".into()],
                 commands: Vec::new(),
+                resource_class: crate::tools::ToolResourceClass::Default,
+                command_timeout_ms: None,
                 skills: vec![crate::session::GoalSkillBinding {
                     name: format!("skill-{secret}"),
                     resource: None,

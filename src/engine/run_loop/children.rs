@@ -98,11 +98,15 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         &self,
         root_request: &mut ProviderRequest,
         objectives: Vec<String>,
-        mut deadline: Instant,
         primary: AgentTrace,
     ) -> Result<(), EngineError> {
-        if self.controls.goal_budget.remaining_calls()
-            < u32::try_from(objectives.len().saturating_add(1)).unwrap_or(u32::MAX)
+        if self
+            .controls
+            .goal_budget
+            .remaining_calls()
+            .is_some_and(|remaining| {
+                remaining < u32::try_from(objectives.len().saturating_add(1)).unwrap_or(u32::MAX)
+            })
         {
             return self.fail_primary(primary).await;
         }
@@ -128,7 +132,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         }
         if self.controls.cancellation.is_cancelled() {
             for mut child in children {
-                self.finish_child(child.agent_run_id, AgentDisposition::Cancelled, None)
+                self.finish_child(child.agent_run_id, AgentDisposition::Cancelled, None, false)
                     .await?;
                 child
                     .trace
@@ -140,9 +144,35 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         }
 
         let mut results = vec![None; children.len()];
-        let parallel = usize::from(self.controls.concurrency)
-            .min(usize::from(self.controls.policy.max_children()));
+        let parallel = self.controls.goal_budget.provider_concurrency(
+            usize::from(self.controls.concurrency)
+                .min(usize::from(self.controls.policy.max_children())),
+        );
         let mut queue = ChildQueue::new(children.len(), parallel);
+        let waves = children.len().div_ceil(parallel.max(1));
+        let active_bound =
+            super::CALL_DEADLINE.saturating_mul(u32::try_from(waves).unwrap_or(u32::MAX));
+        let active_event_tail = 10_usize.saturating_add(children.len().saturating_mul(3));
+        let active_segment = match self
+            .reserve_active_segment_with_tail(active_bound, active_event_tail)
+            .await
+        {
+            Ok(segment) => segment,
+            Err(EngineError::GoalBudgetExhausted) => {
+                for child in &mut children {
+                    self.finish_child(child.agent_run_id, AgentDisposition::Cancelled, None, false)
+                        .await?;
+                    child
+                        .trace
+                        .take()
+                        .expect("child trace exists")
+                        .finish(TraceOutcome::Cancelled);
+                }
+                return self.fail_primary(primary).await;
+            }
+            Err(error) => return Err(error),
+        };
+        let deadline = active_segment.deadline();
         self.fill_slots(&mut queue, &children, root_request, deadline)
             .await?;
         let mut abort_reason = (!queue.pending.is_empty()
@@ -185,7 +215,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 return Err(error);
             }
             if let Err(error) = self
-                .finish_child(children[index].agent_run_id, disposition, finish)
+                .finish_child(children[index].agent_run_id, disposition, finish, true)
                 .await
             {
                 queue.abort_and_drain().await?;
@@ -229,6 +259,8 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
             }
         }
 
+        self.settle_active_segment(active_segment).await?;
+
         if abort_reason.is_none() && self.controls.cancellation.is_cancelled() {
             abort_reason = Some(AbortReason::Cancelled);
         }
@@ -241,6 +273,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                     children[index].agent_run_id,
                     AgentDisposition::Cancelled,
                     None,
+                    false,
                 )
                 .await?;
                 children[index]
@@ -262,10 +295,10 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
             .into_iter()
             .collect::<Option<Vec<_>>>()
             .ok_or(EngineError::CoordinatorFailed)?;
-        for _ in 0..=crate::tools::MAX_TOOL_CALLS {
+        loop {
             let synthesis_trace =
                 primary.begin_provider(AgentPhase::RootSynthesis, &root_request.model);
-            let synthesis = self.invoke_primary(root_request.clone(), deadline).await?;
+            let (synthesis, active_segment) = self.invoke_primary(root_request.clone()).await?;
             let (input_tokens, output_tokens) = call_trace_usage(&synthesis);
             let valid_response = self.controls.goal_budget.tokens_within_limit()
                 && (matches!(
@@ -286,6 +319,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 record: call_record(AgentPhase::RootSynthesis, &synthesis, valid_response),
             })
             .await?;
+            self.settle_active_segment(active_segment).await?;
             match synthesis {
                 CallResult::Response(ProviderResponse {
                     outcome: ProviderOutcome::Finish(finish),
@@ -301,32 +335,32 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 }) if valid_response => {
                     if let Some(contract) = plan_contract {
                         let contract = *contract;
-                        let (active_ms, reserved_ms) = self
-                            .controls
-                            .goal_budget
-                            .active_adjustment(&contract)
-                            .ok_or(EngineError::GoalBudgetExhausted)?;
                         self.append(Event::GoalPlanContractRecorded {
                             goal_id: self.goal_id,
                             run_id: self.run_id,
                             contract: contract.clone(),
-                            active_ms,
-                            reserved_ms,
                         })
                         .await?;
+                        let success_state = self
+                            .store
+                            .load_view(self.session_id)
+                            .await?
+                            .and_then(|view| {
+                                view.goals
+                                    .last()
+                                    .filter(|goal| goal.id == self.goal_id)
+                                    .map(|goal| goal.success_state.clone())
+                            })
+                            .ok_or(EngineError::InvalidHistory)?;
                         self.controls
                             .goal_budget
-                            .set_plan_contract(contract.clone());
-                        deadline = deadline.min(self.controls.goal_budget.narrow(
-                            &contract,
-                            active_ms,
-                            reserved_ms,
-                        )?);
-                        root_request.goal_budget = Some(contract.budget.clone());
+                            .set_plan_contract(contract.clone(), success_state);
+                        self.controls.goal_budget.narrow(&contract)?;
+                        root_request.goal_budget = Some(contract.budget);
                         root_request.goal_plan_contract = Some(contract);
                     }
                     if !self
-                        .execute_tool(root_request, call, deadline, false, &primary)
+                        .execute_tool(root_request, call, false, &primary)
                         .await?
                     {
                         return self.fail_primary(primary).await;
@@ -336,7 +370,6 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 _ => return self.fail_primary(primary).await,
             }
         }
-        self.fail_primary(primary).await
     }
 
     async fn fill_slots(
@@ -376,8 +409,9 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 includes: root_request.includes.clone(),
                 history: Vec::new(),
                 context_summary: None,
-                goal_budget: root_request.goal_budget.clone(),
+                goal_budget: root_request.goal_budget,
                 goal_plan_contract: None,
+                goal_context_facts: None,
                 child_results: Vec::new(),
                 max_output_tokens: OUTPUT_TOKEN_CAP,
                 tools: None,
@@ -412,6 +446,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         agent_run_id: AgentRunId,
         disposition: AgentDisposition,
         finish: Option<&Finish>,
+        call_reserved: bool,
     ) -> Result<(), EngineError> {
         self.append(Event::AgentFinished {
             run_id: self.run_id,
@@ -421,6 +456,9 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
             result: finish.map(|value| value.result.clone()),
         })
         .await?;
+        if call_reserved {
+            self.controls.goal_budget.child_call_finished()?;
+        }
         Ok(())
     }
 }

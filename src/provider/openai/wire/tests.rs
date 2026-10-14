@@ -22,6 +22,7 @@ fn run_request() -> ProviderRequest {
         context_summary: Some("derived summary canary".into()),
         goal_budget: None,
         goal_plan_contract: None,
+        goal_context_facts: None,
         child_results: vec![ChildResult {
             objective: "child objective canary".into(),
             summary: "child summary canary".into(),
@@ -37,6 +38,8 @@ fn goal_plan_contract() -> crate::session::GoalPlanContract {
         mission: "Verify the requested Workspace update".into(),
         paths: vec!["src".into()],
         commands: vec!["bash".into()],
+        resource_class: crate::tools::ToolResourceClass::Default,
+        command_timeout_ms: None,
         skills: vec![crate::session::GoalSkillBinding {
             name: "review".into(),
             resource: Some("references/checklist.md".into()),
@@ -66,6 +69,7 @@ fn first_effect_requires_a_plan_and_bounded_read_only_prelude_is_available() {
             "mcp_servers": [{"name":"local"}]
         })
         .to_string(),
+        history_summary: None,
         observations: Vec::new(),
     });
     for phase in [AgentPhase::RootPlan, AgentPhase::RootSynthesis] {
@@ -581,6 +585,7 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
     request.phase = AgentPhase::RootPlan;
     request.tools = Some(crate::tools::ToolContext {
         catalog: "UNTRUSTED_TOOL_CATALOG_CANARY".into(),
+        history_summary: None,
         observations: Vec::new(),
     });
     let body = run_body_with_effort(&request, Effort::Low);
@@ -745,6 +750,7 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
         let catalog = json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]});
         request.tools = Some(crate::tools::ToolContext {
             catalog: catalog.to_string(),
+            history_summary: None,
             observations: vec![observation],
         });
         let body = run_body_with_effort(&request, Effort::Low);

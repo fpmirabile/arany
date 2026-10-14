@@ -9,11 +9,10 @@ pub(crate) const MAX_CONTEXT_CONTENT_BYTES: usize = 376 * 1024;
 pub(crate) const MAX_HISTORY_RUNS: usize = 32;
 pub(crate) const MAX_USER_MESSAGE_BYTES: usize = 8 * 1024;
 pub(crate) const MAX_ASSISTANT_MESSAGE_BYTES: usize = 32 * 1024;
-pub(crate) const MAX_COMPACTIONS: usize = 64;
 
 pub(crate) use compaction::{
-    CompactionInputError, MAX_COMPACTION_OUTPUT_TOKENS, PreparedCompaction,
-    validate_compaction_references,
+    CompactionInputError, MAX_COMPACTION_INPUT_BYTES, MAX_COMPACTION_OUTPUT_TOKENS,
+    PreparedCompaction, validate_compaction_references,
 };
 pub(crate) use context::CompiledContext;
 pub(crate) use events::ReplayError;
@@ -27,6 +26,7 @@ pub use events::{
     MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS, ProviderCallDisposition,
     ProviderCallRecord, RunConfig, RunDisposition, RunId, SessionDefaults, SessionId,
 };
+pub(crate) use events::{GoalSuccessState, MAX_GOAL_PLAN_CONTRACT_BYTES};
 pub(crate) use lineage::prefix_digest;
 pub use reducer::{
     AgentStatus, AgentView, CompactionView, GoalView, RunStatus, RunView, SessionView, ToolView,

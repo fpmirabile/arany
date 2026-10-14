@@ -8,7 +8,7 @@ use super::{
 };
 use crate::engine::RunCancellation;
 use crate::private_fs::{PrivateDirectory, open_directory};
-use crate::tools::types::{CommandResult, MAX_PROCESSES_OR_THREADS, MEMORY_BYTES, ToolDisposition};
+use crate::tools::types::{CommandResult, ToolDisposition, ToolLimits, ToolResourceClass};
 use crate::tools::{EffectIntent, ToolError, ToolObservation, ToolRuntime};
 use core_foundation::array::CFArray;
 use core_foundation::base::TCFType;
@@ -151,6 +151,7 @@ pub(super) struct Scope {
     coalition: u64,
     pids: Vec<i32>,
     timebase: ffi::Timebase,
+    limits: ToolLimits,
 }
 
 impl Scope {
@@ -170,7 +171,12 @@ impl Scope {
             coalition,
             pids: vec![0; maximum as usize + 1],
             timebase,
+            limits: ToolLimits::default(),
         })
+    }
+
+    fn apply_limits(&mut self, limits: ToolLimits) {
+        self.limits = limits;
     }
 
     fn members(&mut self) -> Result<Vec<Identity>, ToolError> {
@@ -233,12 +239,17 @@ impl Scope {
             threads = threads
                 .checked_add(task.pti_threadnum as u64)
                 .ok_or(ToolError::Limit)?;
-            if memory > MEMORY_BYTES
-                || threads > u64::from(MAX_PROCESSES_OR_THREADS)
+            let cpu_limit = if self.limits.resource_class == ToolResourceClass::Build {
+                Duration::from_millis(u64::from(self.limits.runtime_ms))
+            } else {
+                CPU_LIMIT
+            };
+            if memory > self.limits.memory_bytes
+                || threads > u64::from(self.limits.max_processes)
                 || (u128::from(usage.ri_user_time) + u128::from(usage.ri_system_time))
                     * u128::from(self.timebase.numer)
                     / u128::from(self.timebase.denom)
-                    > CPU_LIMIT.as_nanos()
+                    > cpu_limit.as_nanos()
             {
                 return Err(ToolError::Limit);
             }
@@ -289,6 +300,7 @@ struct Unit {
     domain: String,
     label: String,
     scope: Option<Scope>,
+    limits: Option<ToolLimits>,
     stopped: bool,
     _permit: Option<super::super::admission::Permit>,
 }
@@ -504,15 +516,20 @@ impl Unit {
     }
 
     async fn admit(
-        id: uuid::Uuid,
-        expires_at_ms: u64,
-        queued: impl Fn(bool),
-    ) -> Result<Self, ToolError> {
+        runtime: &ToolRuntime,
+        intent: &EffectIntent,
+    ) -> Result<(Self, Option<crate::tools::ActiveToolWindow>), ToolError> {
         let capture = FixtureSpan::begin(FixtureStage::Admission);
-        let permit = super::super::admission::acquire(id, expires_at_ms, queued).await?;
-        let unit = Self::create(permit, Path::new(UNIT_ROOT_PARENT))?;
+        let permit = super::super::admission::acquire(intent.id, intent.expires_at_ms, |queued| {
+            runtime.queue_changed(intent.id, queued)
+        })
+        .await?;
+        let admitted_at = tokio::time::Instant::now();
+        let active_window = runtime.begin_active_action(admitted_at).await?;
+        let mut unit = Self::create(permit, Path::new(UNIT_ROOT_PARENT))?;
+        unit.limits = Some(intent.limits.clone());
         capture.complete();
-        Ok(unit)
+        Ok((unit, active_window))
     }
 
     fn create(permit: super::super::admission::Permit, parent: &Path) -> Result<Self, ToolError> {
@@ -543,6 +560,7 @@ impl Unit {
             domain: format!("user/{}", rustix::process::geteuid().as_raw()),
             label: format!("dev.arany.tool.{name}"),
             scope: None,
+            limits: None,
             stopped: false,
             _permit: Some(permit),
         };
@@ -661,7 +679,13 @@ impl Unit {
         if launched.coalition == own.coalition {
             return Err(ToolError::ProtectionUnavailable);
         }
-        self.scope = Some(Scope::new(launched.coalition)?);
+        let limits = self
+            .limits
+            .clone()
+            .ok_or(ToolError::ProtectionUnavailable)?;
+        let mut scope = Scope::new(launched.coalition)?;
+        scope.apply_limits(limits);
+        self.scope = Some(scope);
         let (stream, _) = listener.accept().await.map_err(|_| ToolError::Operation)?;
         let stream = stream.into_std().map_err(|_| ToolError::Operation)?;
         let pid = peer(&stream)?;
@@ -756,14 +780,36 @@ pub(super) async fn execute(
     mut cancellation: RunCancellation,
     dispatched: &AtomicBool,
 ) -> Result<ToolObservation, ToolError> {
-    let mut unit = tokio::select! {
+    let (mut unit, active_window) = tokio::select! {
         biased;
         () = cancellation.cancelled() => return Err(ToolError::Operation),
-        unit = Unit::admit(intent.id, intent.expires_at_ms, |queued| runtime.queue_changed(intent.id, queued)) => unit?,
+        unit = Unit::admit(runtime, intent) => unit?,
     };
     crate::tools::fs::reject_overlap(&unit.root, &runtime.workspace)?;
     let mut cache = super::super::build_cache_session(runtime, intent)?;
     let cache_transfer = cache.as_ref().map(|session| session.transfer.clone());
+    let fallback_started = tokio::time::Instant::now();
+    let preparation_deadline = active_window.map_or(
+        fallback_started + CONNECT_DEADLINE + PREPARATION_DEADLINE,
+        |window| window.preparation_deadline,
+    );
+    let go_deadline = active_window.map_or(
+        preparation_deadline + Duration::from_millis(u64::from(intent.limits.cache_transfer_ms)),
+        |window| window.go_deadline,
+    );
+    let completion_deadline = active_window.map_or_else(
+        || {
+            fallback_started
+                + CONNECT_DEADLINE
+                + PREPARATION_DEADLINE
+                + Duration::from_millis(
+                    u64::from(intent.limits.cache_transfer_ms).saturating_mul(2),
+                )
+                + Duration::from_millis(u64::from(intent.limits.runtime_ms))
+                + Duration::from_secs(10)
+        },
+        |window| window.completion_deadline,
+    );
     let execution = async {
         let capture = FixtureSpan::begin(FixtureStage::Connect);
         let mut stream = BufReader::new(
@@ -774,16 +820,29 @@ pub(super) async fn execute(
         capture.complete();
         let capture = FixtureSpan::begin(FixtureStage::ControllerReady);
         let task = super::super::encode_task(&Task::new(runtime, intent, cache_transfer))?;
-        stream
-            .get_mut()
-            .write_all(&task)
-            .await
-            .map_err(|_| ToolError::Operation)?;
-        let mut bytes = read_line_capped(&mut stream, 2048).await?;
+        let mut bytes = tokio::time::timeout_at(preparation_deadline, async {
+            stream
+                .get_mut()
+                .write_all(&task)
+                .await
+                .map_err(|_| ToolError::Operation)?;
+            read_line_capped(&mut stream, 2048).await
+        })
+        .await
+        .map_err(|_| ToolError::Limit)??;
         if bytes == b"CACHE_READY\n" {
             let session = cache.as_ref().ok_or(ToolError::Operation)?;
-            super::super::send_cache_archive(stream.get_mut(), &session.lease).await?;
-            bytes = read_line_capped(&mut stream, 2048).await?;
+            let transfer_deadline =
+                super::super::cache_transfer_deadline(intent, Some(go_deadline));
+            tokio::time::timeout_at(
+                transfer_deadline,
+                super::super::send_cache_archive(stream.get_mut(), &session.lease),
+            )
+            .await
+            .map_err(|_| ToolError::Limit)??;
+            bytes = tokio::time::timeout_at(go_deadline, read_line_capped(&mut stream, 2048))
+                .await
+                .map_err(|_| ToolError::Limit)??;
         }
         if let Ok(failure) = serde_json::from_slice::<BootstrapFailure>(&bytes) {
             return Err(ToolError::GuardBootstrap(failure));
@@ -805,49 +864,84 @@ pub(super) async fn execute(
             .map_err(|_| ToolError::GuardRejected(GuardStage::ResourceAttestation))?;
         capture.complete();
         let capture = FixtureSpan::begin(FixtureStage::ControllerReceipt);
+        runtime.before_dispatch(active_window, intent.limits.runtime_ms)?;
         dispatched.store(true, Ordering::Release);
-        stream
-            .get_mut()
-            .write_all(b"GO\n")
-            .await
-            .map_err(|_| ToolError::Operation)?;
-        let observation = if let Some(session) = cache.as_ref() {
-            let observation = super::super::read_observation_line(&mut stream, intent).await?;
-            let candidate =
-                super::super::receive_cache_candidate(&mut stream, &session.lease).await?;
-            match read_line_capped(&mut stream, 32).await?.as_slice() {
-                b"CACHE_DONE\n" => {}
-                b"CACHE_FAILED\n" => {
-                    return Err(ToolError::GuardRejected(GuardStage::StorageCleanup));
-                }
-                _ => return Err(ToolError::Operation),
-            }
-            Ok((observation, candidate))
-        } else {
-            super::super::read_observation(&mut stream, intent)
+        let observation = async {
+            stream
+                .get_mut()
+                .write_all(b"GO\n")
                 .await
-                .map(|observation| (observation, super::super::CacheCandidate::Received))
-        }?;
+                .map_err(|_| ToolError::Operation)?;
+            if let Some(session) = cache.as_ref() {
+                let observation = super::super::read_observation_line(&mut stream, intent).await?;
+                let update_deadline = super::super::cache_transfer_deadline(
+                    intent,
+                    active_window.map(|window| window.completion_deadline),
+                );
+                let candidate = match tokio::time::timeout_at(
+                    update_deadline,
+                    super::super::receive_cache_candidate(&mut stream, &session.lease),
+                )
+                .await
+                {
+                    Ok(Ok(candidate)) => candidate,
+                    Ok(Err(_)) | Err(_) => super::super::CacheCandidate::Uncertain,
+                };
+                if candidate == super::super::CacheCandidate::Uncertain {
+                    return Ok((observation, candidate));
+                }
+                let cache_status =
+                    tokio::time::timeout_at(completion_deadline, read_line_capped(&mut stream, 32))
+                        .await
+                        .map_err(|_| ToolError::Limit)??;
+                match cache_status.as_slice() {
+                    b"CACHE_DONE\n" => {}
+                    b"CACHE_FAILED\n" => {
+                        return Err(ToolError::GuardRejected(GuardStage::StorageCleanup));
+                    }
+                    _ => return Err(ToolError::Operation),
+                }
+                Ok((observation, candidate))
+            } else {
+                super::super::read_observation(&mut stream, intent)
+                    .await
+                    .map(|observation| (observation, super::super::CacheCandidate::Received))
+            }
+        }
+        .await;
         capture.complete();
-        Ok(observation)
-    };
-    let deadline = CONNECT_DEADLINE
-        + PREPARATION_DEADLINE
-        + Duration::from_millis(u64::from(intent.limits.runtime_ms))
-        + Duration::from_secs(5);
-    let result = tokio::select! {
-        biased;
-        () = cancellation.cancelled() => Err(ToolError::Operation),
-        result = tokio::time::timeout(deadline, execution) => result.unwrap_or(Err(ToolError::Limit)),
-    };
-    unit.stop()
-        .await
-        .map_err(|_| ToolError::GuardRejected(GuardStage::ProcessCleanup))?;
-    result.map(|(observation, candidate)| {
-        let mut observation = observation;
-        super::super::publish_cache_candidate(&mut observation, candidate, cache.as_mut());
         observation
-    })
+    };
+    let result = if let Some(window) = active_window {
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => Err(ToolError::Operation),
+            result = tokio::time::timeout_at(window.completion_deadline, execution) => result.unwrap_or(Err(ToolError::Limit)),
+        }
+    } else {
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => Err(ToolError::Operation),
+            result = tokio::time::timeout_at(completion_deadline, execution) => result.unwrap_or(Err(ToolError::Limit)),
+        }
+    };
+    tokio::time::timeout_at(completion_deadline, unit.stop())
+        .await
+        .map_err(|_| ToolError::GuardRejected(GuardStage::ProcessCleanup))?
+        .map_err(|_| ToolError::GuardRejected(GuardStage::ProcessCleanup))?;
+    match result {
+        Ok((mut observation, candidate)) => {
+            super::super::publish_cache_candidate(
+                &mut observation,
+                candidate,
+                cache.take(),
+                completion_deadline,
+            )
+            .await;
+            Ok(observation)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn connect_control(path: &Path) -> Result<(PrivateDirectory, UnixStream), ToolError> {
@@ -911,6 +1005,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             return Err(ToolError::ProtectionUnavailable);
         }
         let (runtime, intent, cache) = task.into_runtime();
+        scope.apply_limits(intent.limits.clone());
         stream
             .set_read_timeout(None)
             .map_err(|_| ToolError::Operation)?;
@@ -931,15 +1026,19 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             let (mut input, mut output) = stream.into_split();
             let cancellation = RunCancellation::new();
             let mut reader = None;
-            let mut storage = None;
+            let mut storage: Option<Vec<cap_std::fs::Dir>> = None;
             let mut command_before = None;
             let result = async {
                 stage = super::super::BootstrapStage::Workspace;
                 let capture = FixtureSpan::begin(FixtureStage::SupervisorStorage);
                 storage = if intent.call.is_process() {
                     Some(
-                        prepare_command_storage(path.parent().ok_or(ToolError::Path)?, &runtime)
-                            .await?,
+                        prepare_command_storage(
+                            path.parent().ok_or(ToolError::Path)?,
+                            &runtime,
+                            &intent.limits,
+                        )
+                        .await?,
                     )
                 } else {
                     None
@@ -955,17 +1054,18 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                         .await
                         .map_err(|_| ToolError::Operation)?;
                     let length = u64::from_le_bytes(length);
-                    if length > crate::store::BUILD_CACHE_ARCHIVE_BYTES {
+                    if length > cache.view_bytes {
                         return Err(ToolError::Limit);
                     }
                     if length > 0 {
                         let volumes = storage.as_ref().ok_or(ToolError::Operation)?;
                         let mut archive = (&mut input).take(length);
-                        crate::store::restore_archive_async(
+                        crate::store::restore_archive_async_with_limit(
                             &mut archive,
-                            &volumes[1],
+                            volumes.get(2).ok_or(ToolError::Operation)?,
                             &cache.identity,
                             &cache.exclusions,
+                            cache.view_bytes,
                         )
                         .await
                         .map_err(|_| ToolError::ProtectionUnavailable)?;
@@ -1063,43 +1163,52 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                         .map_err(|_| ToolError::Operation)?;
                     response_sent = true;
                     if cleanup.is_ok() && observation.disposition == ToolDisposition::Succeeded {
-                        match crate::store::archive_size(
-                            &volumes[1],
-                            &cache.identity,
-                            &cache.exclusions,
-                        ) {
-                            Ok(size) => {
-                                output
-                                    .write_all(b"CACHE_CANDIDATE\n")
-                                    .await
-                                    .map_err(|_| ToolError::Operation)?;
-                                output
-                                    .write_all(&size.to_le_bytes())
-                                    .await
-                                    .map_err(|_| ToolError::Operation)?;
-                                let captured = crate::store::capture_archive_async(
-                                    &volumes[1],
-                                    &cache.identity,
-                                    &cache.exclusions,
-                                    &mut output,
-                                )
+                        if cache.candidate_bytes == 0 {
+                            output
+                                .write_all(b"CACHE_REJECTED\n")
                                 .await
                                 .map_err(|_| ToolError::Operation)?;
-                                if captured != size {
-                                    return Err(ToolError::Operation);
+                        } else {
+                            match crate::store::archive_size_with_limit(
+                                volumes.get(2).ok_or(ToolError::Operation)?,
+                                &cache.identity,
+                                &cache.exclusions,
+                                cache.candidate_bytes,
+                            ) {
+                                Ok(size) => {
+                                    output
+                                        .write_all(b"CACHE_CANDIDATE\n")
+                                        .await
+                                        .map_err(|_| ToolError::Operation)?;
+                                    output
+                                        .write_all(&size.to_le_bytes())
+                                        .await
+                                        .map_err(|_| ToolError::Operation)?;
+                                    let captured = crate::store::capture_archive_async_with_limit(
+                                        volumes.get(2).ok_or(ToolError::Operation)?,
+                                        &cache.identity,
+                                        &cache.exclusions,
+                                        &mut output,
+                                        cache.candidate_bytes,
+                                    )
+                                    .await
+                                    .map_err(|_| ToolError::Operation)?;
+                                    if captured != size {
+                                        return Err(ToolError::Operation);
+                                    }
                                 }
-                            }
-                            Err(crate::store::StoreError::StorageFull) => {
-                                output
-                                    .write_all(b"CACHE_REJECTED\n")
-                                    .await
-                                    .map_err(|_| ToolError::Operation)?;
-                            }
-                            Err(_) => {
-                                output
-                                    .write_all(b"CACHE_FAILED\n")
-                                    .await
-                                    .map_err(|_| ToolError::Operation)?;
+                                Err(crate::store::StoreError::StorageFull) => {
+                                    output
+                                        .write_all(b"CACHE_REJECTED\n")
+                                        .await
+                                        .map_err(|_| ToolError::Operation)?;
+                                }
+                                Err(_) => {
+                                    output
+                                        .write_all(b"CACHE_FAILED\n")
+                                        .await
+                                        .map_err(|_| ToolError::Operation)?;
+                                }
                             }
                         }
                     } else {
@@ -1505,7 +1614,9 @@ done
         )
         .unwrap();
         ToolRuntime {
+            context_limit_bytes: crate::tools::types::MAX_TOOL_CONTEXT_BYTES,
             queue_progress: None,
+            active_action_gate: None,
             cache_state: None,
             config: crate::tools::config::Config {
                 version: 1,
@@ -2084,6 +2195,7 @@ done
             scope: record
                 .supervisor
                 .map(|supervisor| Scope::new(supervisor.coalition).unwrap()),
+            limits: None,
             stopped: false,
         });
         let mut observer = DiskGate::start(gate, "mount", &root, "scratch").await;
@@ -2700,8 +2812,15 @@ done
                 .unwrap();
             let source = std::env::var_os("ARANY_TEST_NATIVE_UNIT_WORKSPACE").unwrap();
             let runtime = snapshot_runtime(Path::new(&source));
+            let limits = crate::tools::types::ToolLimits {
+                cache_requested_bytes: 0,
+                cache_bytes: 0,
+                cache_candidate_bytes: 0,
+                cache_transfer_ms: 0,
+                ..crate::tools::types::ToolLimits::default()
+            };
             let volumes = reactor
-                .block_on(prepare_command_storage(root, &runtime))
+                .block_on(prepare_command_storage(root, &runtime, &limits))
                 .unwrap();
             assert_eq!(volumes[0].read("selected").unwrap(), b"after typed edit");
             assert!(!volumes[0].exists("omitted"));
@@ -2857,6 +2976,7 @@ done
                         ".",
                         root,
                         &runtime.config.runtime_grants,
+                        false,
                     )
                     .unwrap();
                     let (status, stdout, stderr) = reactor
@@ -2908,6 +3028,7 @@ printf 'native command success'
                     ".",
                     root,
                     &runtime.config.runtime_grants,
+                    false,
                 )
                 .unwrap();
                 let (status, stdout, stderr) = reactor

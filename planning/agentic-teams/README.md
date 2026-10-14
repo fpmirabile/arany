@@ -110,7 +110,7 @@ unsupported enforcement fails closed. Child authority remains
 
 ### A. Coding foundation
 
-3. **Flexible limits.** Today's ceilings are compile-time constants
+3. **Flexible limits.** Before A4, the ceilings were compile-time constants
    (`MAX_TOOL_CALLS = 16` and a 64 KiB Tool context in
    [src/tools/types.rs](../../src/tools/types.rs), plus the 300-second Run).
    Follow the established harness pattern instead of inventing one:
@@ -120,10 +120,13 @@ unsupported enforcement fails closed. Child authority remains
      compaction instead of a fixed 64 KiB.
    - Commands default to 120 seconds and may request up to the approved
      user-configurable maximum of 600 seconds.
-   - The plan contract may request a larger resource profile or timeout;
-     Plan-gate approval grants it. In Accept edits and Auto, requests within
-     the settings maxima are granted without a prompt; beyond them always
-     asks. The Engine never exceeds user-set maxima.
+   - The plan contract may declare a Build profile and command timeout within
+     the saved Goal settings. The Engine binds the exact selected resource
+     values into each immutable Tool intent and receipt. A request above the
+     pinned timeout maximum gets a durable non-dispatched `Limit` with clear
+     guidance to lower the request or change `/settings`; approval never
+     exceeds a Goal's pinned settings. Prospective approved revisions belong
+     to the later RPI/modes slice.
    - Runs remain the durable recovery unit, closed at milestone or wave
      boundaries, never because an arbitrary cap was hit.
    - Named, closed resource profiles (current `default` plus a larger
@@ -535,7 +538,8 @@ per-slice specification and evidence cost slows delivery.
 
 E13 telemetry spans land with the slice that introduces each span's subject.
 
-Next action: complete Goal Foundation, then A4 and dogfooding before the
+Next action: finish A4 Flexible limits on the reviewed Goal Foundation and A3
+dependencies, then complete the authorized dogfooding milestone before the
 remaining Goal workflows. The A3 per-Workspace cache has a 64 MiB initial
 archive/view limit and shares an 8 GiB StateRoot aggregate; A4 binds the
 effective admitted cache quota to the native build profile. Approved build

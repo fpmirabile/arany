@@ -178,6 +178,7 @@ mod tests {
                 CollaborationPolicy::Single,
                 Some(crate::tools::ToolContext {
                     catalog: "NO_DISCLOSURE".into(),
+                    history_summary: None,
                     observations: Vec::new(),
                 }),
             ),
@@ -210,6 +211,7 @@ mod tests {
                 context_summary: None,
                 goal_budget: None,
                 goal_plan_contract: None,
+                goal_context_facts: None,
                 child_results: Vec::new(),
                 tools,
                 max_output_tokens: 4096,

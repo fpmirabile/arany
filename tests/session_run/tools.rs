@@ -441,6 +441,45 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
             .count(),
         14
     );
+    for observation in &outcome.run.tools {
+        let id = observation.intent.id;
+        let start = events
+            .iter()
+            .position(|event| {
+                matches!(&event.event, arany::Event::ToolStarted { intent, .. } if intent.id == id)
+            })
+            .expect("canonical ToolStarted");
+        let finish = events
+            .iter()
+            .position(|event| {
+                matches!(&event.event, arany::Event::ToolFinished { observation, .. } if observation.intent.id == id)
+            })
+            .expect("canonical ToolFinished");
+        assert!(start < finish);
+        let active_reservations = events[start + 1..finish]
+            .iter()
+            .filter(|event| matches!(event.event, arany::Event::GoalActiveTimeReserved { .. }))
+            .count();
+        if observation
+            .observation
+            .as_ref()
+            .is_some_and(|observation| observation.guard.is_some())
+        {
+            assert_eq!(
+                active_reservations, 1,
+                "an admitted Tool reserves its Goal action after ToolStarted and before Guard setup"
+            );
+            assert!(matches!(
+                events.get(finish + 1).map(|event| &event.event),
+                Some(arany::Event::GoalActiveTimeSettled { run_id, .. }) if *run_id == outcome.run.id
+            ));
+        } else {
+            assert_eq!(
+                active_reservations, 0,
+                "a denied Tool that never reaches Guard has no action reservation"
+            );
+        }
+    }
     store.close().await.unwrap();
 }
 
@@ -1510,6 +1549,11 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
             },
             "case {name}"
         );
+        for tool in &outcome.run.tools {
+            if matches!(tool.intent.call, ToolCall::Read { .. }) {
+                assert_eq!(tool.intent.limits.runtime_ms, 60_000, "case {name}");
+            }
+        }
         assert_proposal_requests(
             &requests.lock().unwrap(),
             if rejected_by_plan {
@@ -1625,6 +1669,7 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
             "case {name}: {:?}",
             outcome.run.tools
         );
+        assert_eq!(outcome.run.tools[0].intent.limits.runtime_ms, 120_000);
         let observation = outcome.run.tools[0].observation.as_ref().unwrap();
         assert_eq!(observation.disposition, expected, "case {name}");
         assert_proposal_requests(&requests.lock().unwrap(), 3);
@@ -2394,6 +2439,32 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
             .unwrap();
         assert_eq!(replay.runs[0].status, outcome.run.status);
         assert_eq!(replay.runs[0].tools, outcome.run.tools);
+        if matches!(
+            name,
+            "request-allow" | "request-deny" | "request-drop" | "request-cancel"
+        ) {
+            let id = replay.runs[0].tools[0].intent.id;
+            let start = events
+                .iter()
+                .position(|event| {
+                    matches!(&event.event, arany::Event::ToolStarted { intent, .. } if intent.id == id)
+                })
+                .unwrap();
+            let finish = events
+                .iter()
+                .position(|event| {
+                    matches!(&event.event, arany::Event::ToolFinished { observation, .. } if observation.intent.id == id)
+                })
+                .unwrap();
+            let has_full_action_reservation = events[start + 1..finish].iter().any(|event| {
+                matches!(&event.event, arany::Event::GoalActiveTimeReserved { reserved_ms, .. } if *reserved_ms > 20_000)
+            });
+            assert_eq!(
+                has_full_action_reservation,
+                name == "request-allow",
+                "{name}: approval wait/cancellation has only a pause reservation; the full Tool action is reserved only after approval and Guard admission"
+            );
+        }
         let calls = &replay.runs[0].agents[0].provider_calls;
         assert_eq!(calls.len(), 1 + review_count + usize::from(allowed));
         if review_count == 1 {
