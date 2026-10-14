@@ -11,6 +11,11 @@ on:
         description: Run the ignored native Linux long-history measurement
         type: boolean
         default: false
+      linux_arm64:
+        description: Run native Linux ARM64 debug and release tests
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -122,6 +127,40 @@ jobs:
           if not re.search(r"test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; \d+ filtered out", output):
               raise SystemExit("The history measurement must complete exactly one test")
           PY
+
+  linux-arm64-tests:
+    name: Linux ARM64 Tests (${{ matrix.profile }})
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.linux_arm64 }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [debug, release]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install repository Rust toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: linux-arm64-${{ matrix.profile }}
+      - name: Verify native Linux ARM64 host and Rust target
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = aarch64
+          test "$(rustc -vV | sed -n 's/^host: //p')" = aarch64-unknown-linux-gnu
+      - name: Prepare isolated Linux terminal fixtures
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap util-linux
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --unshare-user --unshare-net --ro-bind / / -- true
+      - name: Fetch locked Rust dependencies
+        run: cargo fetch --locked
+      - name: Run workspace tests (${{ matrix.profile }})
+        run: cargo test --workspace --locked --offline ${{ matrix.profile == 'release' && '--release' || '' }}
 
   macos-tests:
     name: macOS tests (${{ matrix.profile }})

@@ -16,12 +16,14 @@ history. Implementation status and verified support are separate claims.
   workers. The [initiative plan](./planning/agentic-teams/README.md) is
   self-contained and orders the slices; the reviewed Goal Foundation
   prerequisite (lifecycle, cancellation, budgets, plan contract and Workspace
-  lock; execution step 3) is in place. A4 is the current implementation slice,
-  followed by authorized dogfooding and the remaining Goal artifacts. The
-  approved A4 maxima are 4 GiB memory, 8 GiB
-  cache, 1 GiB project storage and 256 tasks; the current cache view remains
-  64 MiB until A4 enables the build profile. Native build
-  evidence and named-host measurements still precede support claims. Remote
+  lock; execution step 3) and A3 cache are in place. A4 implementation is
+  complete on the current branch and awaits full review and hosted CI. Once
+  those pass, authorized dogfooding is next, followed by the remaining Goal
+  artifacts. The Build profile has finite approved maxima of 4 GiB memory, 8
+  GiB requested cache, 1 GiB project storage and 256 tasks; effective cache
+  capacity is derived from StateRoot headroom, so the requested maximum is not
+  guaranteed usable capacity. Native build evidence and named-host measurements
+  still precede support claims. Remote
   MCP/OAuth, interactive/background jobs and other network grants need their
   own Policy/Guard/protocol evidence; retain the existing
   [Tool scope](./docs/specs/tools.md) until each slice lands.
@@ -107,7 +109,7 @@ to the user's credential store or clipboard.
 | Readiness, load and observer faults | Measure cancellation/cleanup and resource enforcement under declared load. [Guard unit rules](./agents/guard-unit.md) |
 | Performance | Run the opt-in ignored Linux release history fixture on a named hosted runner. Its seed now encodes 800 Runs across 50 complete current Goal/Run/Provider lifecycles (8,901 Events, leaving 1,099 below the 10,000 lineage cap), and asserts strict replay plus serialized payload and SQLite file bytes. It reports 100 fresh read-only Store `load_view` samples (nearest-rank p50/p95/max), one process resume-to-ready interval, retained input/delegation latency and product VmRSS/VmHWM. The text workload is 32,764,000 objective/answer bytes, about half the former 65.5 MB intent; it is not the same workload. The fixture has not run, so neither replay validity nor performance is yet evidence. Record sanitized kernel/CPU/load/pressure metadata; OS page-cache state is uncontrolled, so these samples do not establish cold-disk replay. This fixture does not test the exact 10,000-Event boundary, the 128 MiB HotSession boundary, the 256 MiB shared-Store quota, or near-quota fallback; keep those gates distinct. Also measure telemetry on named hosts and the bounded macOS host-PID scan at its nominal supervision interval before choosing another membership primitive or interval. [History gate](./tests/session_run/active_terminal/tmux/history_latency.rs), [native measurement rules](./agents/references/testing-details.md#native-and-live-evidence) |
 | Distribution and dependency policy | Verify fresh advisories, license/source bundles, exact source/binary pairing, compiler/native provenance and MSRV. Resolve changed notice exceptions and the unreached standard-library gate without weakening pins. [Release review](./docs/security/beta-license-release-review.md#current-result), [dependency inventory](./docs/security/beta-dependency-inventory.md) |
-| Other platforms and enforcers | Verify native Linux ARM64, alternative Linux-native enforcement and the Linux build under WSL2 (user namespaces, cgroup v2 and Guard enforcement), and require actual platform behavior evidence before support claims. Native Windows is out of scope. [OS-parity priority](./AGENTS.md#product-and-implementation-priorities) |
+| Other platforms and enforcers | Dispatch the existing [CI workflow](./.github/workflows/ci.yml) with `linux_arm64=true` against the ref containing this change; the workflow file itself must exist on the default branch. Require both native `ubuntu-24.04-arm` debug and release jobs to pass their `aarch64` host/Rust-target assertions, Linux namespace prerequisites and `--cfg arany_ci` workspace tests; keep this evidence pending until the hosted run completes green. Do not use emulation or skip gates. Separately verify alternative Linux-native enforcement and the Linux build under WSL2 (user namespaces, cgroup v2 and Guard enforcement), and require actual platform behavior evidence before support claims. Native Windows is out of scope. [OS-parity priority](./AGENTS.md#product-and-implementation-priorities), [native CI procedure](./agents/references/testing-details.md#local-verification-and-ci) |
 
 These gates remain unverified until their named procedure completes. Specs and
 existing tests describe what must hold; neither implemented code nor an old

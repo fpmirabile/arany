@@ -511,7 +511,9 @@ triggered and evidence under [testing rules](../../agents/testing.md).
    with Finish, compaction, cancellation and Goal-budget bounds; add the
    agreed command timeout and finite build resource profile settings. Guard
    resource ceilings remain finite. This slice depends on Goal Foundation and
-   must not make the current fixed Run loop unlimited by itself.
+   must not make the current fixed Run loop unlimited by itself. The
+   implementation is complete on the current branch and awaits full review and
+   hosted CI.
 5. **Dogfooding milestone: Arany develops Arany.** Use Arany for this
    repository's own work from here on. Requires Beta 1 check 7 (live
    validation of the chosen model's strict Tool encoding) in
@@ -538,14 +540,14 @@ per-slice specification and evidence cost slows delivery.
 
 E13 telemetry spans land with the slice that introduces each span's subject.
 
-Next action: finish A4 Flexible limits on the reviewed Goal Foundation and A3
-dependencies, then complete the authorized dogfooding milestone before the
-remaining Goal workflows. The A3 per-Workspace cache has a 64 MiB initial
-archive/view limit and shares an 8 GiB StateRoot aggregate; A4 binds the
-effective admitted cache quota to the native build profile. Approved build
-maxima are 4 GiB memory, 8 GiB requested cache, 1 GiB writable project storage
-and 256 processes/threads. These remain finite policy ceilings, not support
-evidence. Native build verification and named-host measurements remain
+Next action: after A4's full review and hosted CI pass, complete the authorized
+dogfooding milestone before the remaining Goal workflows. The A3 per-Workspace
+cache retains its 64 MiB default and shares an 8 GiB StateRoot aggregate; A4
+derives the effective admitted cache quota from remaining aggregate headroom,
+so the 8 GiB requested maximum is not guaranteed usable capacity. Approved
+Build maxima are 4 GiB memory, 8 GiB requested cache, 1 GiB writable project
+storage and 256 processes/threads. These are finite policy ceilings, not
+support evidence. Native build verification and named-host measurements remain
 required before support claims.
 
 ## Open questions
