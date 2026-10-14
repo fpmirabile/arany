@@ -113,9 +113,146 @@ cannot replace project-specific adversarial and task evaluations.
 [evaluation research](./evaluation-and-quality-strategy.md) covers model quality;
 [next steps](../../NEXT_STEPS.md) owns current gaps.
 
+## Long-lived canonical history
+
+**Question:** Does Arany need persisted replay snapshots, another history index,
+or an archive/new-Session policy before reaching its current admission bounds?
+**Source checked:** 2026-10-14. This is an evaluation; it authorizes no runtime
+change.
+
+**Conclusion:** The Store already reuses a bounded in-memory projection for
+consecutive appends to one direct Session while cumulative serialized payload
+stays at or below 128 MiB. Above that cache bound, each append cold-resolves the
+prefix even though the shared Store can hold up to 256 MiB. No quota-scale
+benchmark currently establishes whether that fallback needs a change. Cold
+replay and terminal reindexing after restart, Session or width/detail changes
+also reduce canonical Events. Measure those paths before adding persisted
+snapshots or another index. Keep canonical Events and fork ancestry intact. A
+new Session in the same StateRoot avoids adding old Events to a separate
+Session's lineage, but it does not reclaim shared database bytes or make a
+fork's inherited Events disappear.
+
+### Current path and evidence
+
+The single SQLite-owner thread holds one `HotSession`: its reduced view, Event
+count and serialized payload-byte count, capped at 128 MiB. An append reuses it
+only for the same Session, unchanged `PRAGMA data_version`, and the next global
+sequence; it drops the cache for another Session, a fork, compaction, or a
+failed append. Once the serialized payload sum exceeds 128 MiB, it cannot be
+installed, so subsequent appends cold-resolve and reduce the persisted prefix.
+The view becomes the next cache only after the transaction commits. The Store
+replies to append only after commit, so the optimization preserves durable
+acknowledgement. [Store append path](../../src/store/journal.rs)
+and [Store rules](../../agents/store.md) own these constraints. SQLite defines
+`data_version` as connection-local: it changes on commits from other
+connections and does not change for that connection's own commits, so Arany also
+checks global sequence. It is an invalidation hint, not a durable revision
+identifier. [SQLite `data_version`](https://www.sqlite.org/pragma.html#pragma_data_version)
+
+Cold `load_session_events` currently filters by Session while scanning and
+decoding the journal in global sequence order. That scan checks contiguous
+global sequence and bounded, decodable envelopes. Fork resolution loads each
+ancestor, verifies the recorded committed boundary and SHA-256 prefix digest,
+then includes only committed Runs through that boundary; at most eight links
+and 10,000 combined Events are admitted. The schema already has
+`events_by_session(session_id, sequence)`, but replay does not use it. Replacing
+the global scan with a per-Session lookup alone would stop checking the global
+journal properties on that path. Keep canonical replay and its integrity checks
+as the source of truth. [Replay](../../src/store/replay.rs), [digest
+implementation](../../src/session/lineage.rs), and [Session rules](../../agents/session.md)
+own this behavior.
+
+Terminal history is an ephemeral row-count/source-anchor index over the
+already-loaded `SessionView`; it does not retain another transcript or read
+State. A same-Session/same-width append replaces only the last Run's index.
+Session switches, width changes and detail-mode changes rebuild it; find scans
+its bounded rows synchronously. [History implementation](../../src/terminal/history.rs)
+and [terminal-history rules](../../agents/history.md) own this boundary.
+
+**Smallest path, proposed:** Measure serialized Event payload, DB size, append
+latency and peak RSS through the 128 MiB cache boundary and toward the shared
+Store limit. If scans of unrelated Sessions dominate cold resume, evaluate the
+existing per-Session index only with an integrity path that retains current
+global sequence/envelope checks and strict selected-lineage replay; a direct
+indexed lookup alone would weaken validation. If reduction after that dominates
+above the hot-cache bound, compare a bounded in-memory continuation with a
+digest-bound rebuildable snapshot; do not raise the payload cap without an RSS
+bound or skip canonical validation. Add or persist a separate find index only if
+measured search latency misses its target at the admitted Event bound.
+
+The current limits remain: 10,000 Events across the selected fork lineage,
+256 MiB for the shared SQLite file, and 65,536 discovered Session heads. The
+Session lock namespace separately caps lock files at 65,536. A new ordinary
+Session starts a separate lineage count, but all its Events still consume the
+same SQLite file and it consumes a Session slot. Forks continue to count their
+inherited source Events. Event admission and append-byte preflight preserve the
+current rejection-before-disclosure and commit-before-acknowledgement rules;
+byte preflight is not a reservation against independent writers. The
+[execution contract](../specs/execution.md#admission-persistence-and-recovery)
+owns those public limits.
+
+The existing ignored Linux tmux gate,
+[`active_keyboard_stays_visible_with_near_cap_history`](../../tests/session_run/active_terminal/tmux/history_latency.rs),
+is written to seed one 1,600-Run/9,601-Event Session with 65,528,000 bytes of
+objective and answer text, then exercise resume and row indexing while measuring
+Run submission-to-Provider dispatch and active key response during delegation.
+As currently checked in, however, its seed records `AgentFinished(Finished)`
+without a preceding `ProviderCallRecorded(Finished)`. The current reducer
+requires that observed successful call, so it rejects the first Run before the
+fixture reaches its intended history or measurements. Treat this source as an
+intended workload, not valid or runnable benchmark evidence; recheck and repair
+it against the current lifecycle contract before measuring. Even after that,
+the test does not isolate cold replay duration, assert serialized payload across
+128 MiB, assert database size or sample RSS. The separate named-host
+`show_replay_latency_on_named_host` gate in
+[`tests/session_run/performance.rs`](../../tests/session_run/performance.rs)
+uses a 100-Event Session. A different ignored
+`database_capacity_is_admitted_before_provider_usage` gate in
+[`tests/engine_run.rs`](../../tests/engine_run.rs) pads a non-Event table near
+the shared file limit to check StorageFull admission and canonical reopen; it
+is not history replay or latency evidence. None of these gates were run for
+this evaluation. The existing named-host owners and remaining evidence gap are
+recorded in [`agents/history.md`](../../agents/history.md) and
+[`NEXT_STEPS.md`](../../NEXT_STEPS.md).
+
+### Proposed policy, not accepted behavior
+
+Keep the current fail-closed limits. Do not automatically prune Events or
+archive individual Sessions: a fork's source Events and prefix digest remain
+necessary to replay it, while per-Session deletion cannot reclaim the one
+shared database safely. The `--state-dir` option
+([setup guide](../setup.md#storage-and-recovery)) can select an independent
+StateRoot for future work, but that only starts a separate journal. The old
+root must be retained to inspect or resume its Sessions; a Session in the new
+root cannot fork a source stored only in the old root. Moving the complete
+closed StateRoot to user-managed archive storage and selecting a new root would
+reduce active root growth only after the user deliberately makes that change.
+It does not erase the archived bytes. StateRoot also owns Tool configuration,
+so a new root starts without the old root's grants
+([Store rules](../../agents/store.md)).
+
+The proposed pre-quota choice is therefore split: a fresh ordinary Session
+avoids inheriting a source lineage when Event-count pressure is high; shared
+byte pressure requires a separate StateRoot, since starting a Session inside
+the full root cannot make `StorageFull` recoverable. The UI thresholds and
+recovery wording remain unaccepted until measured and specified.
+
+If an in-app archive is later accepted, archive the complete StateRoot and keep
+it independently readable; do not delete canonical Events or promise
+cross-root lineage. An online copy must use SQLite's snapshot-capable backup
+mechanism or a checked Store-closed copy, then reopen and strictly validate the
+archive before switching. SQLite's Online Backup API describes the result as a
+snapshot from when copying commenced and allows incremental copying while other
+connections use the database. [SQLite Online Backup API](https://www.sqlite.org/backup.html)
+Any early warning threshold, archive lifecycle or user-facing recovery choice
+needs a separate accepted contract and measured trigger. No new threshold,
+snapshot schema, migration, or archive operation is proposed as current
+behavior.
+
 ## Primary sources
 
 - OpenAI: [prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching), [compaction](https://developers.openai.com/api/docs/guides/compaction), [conversation state](https://developers.openai.com/api/docs/guides/conversation-state), [data controls](https://developers.openai.com/api/docs/guides/your-data)
 - Anthropic: [context windows](https://platform.claude.com/docs/en/build-with-claude/context-windows), [prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching), [Memory tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/memory-tool), [data retention](https://platform.claude.com/docs/en/manage-claude/api-and-data-retention)
-- [SQLite FTS5](https://www.sqlite.org/fts5.html), [pgvector filtering and search](https://github.com/pgvector/pgvector), [OCI content descriptors](https://github.com/opencontainers/image-spec/blob/main/descriptor.md)
+- SQLite: [`data_version`](https://www.sqlite.org/pragma.html#pragma_data_version), [transactions](https://www.sqlite.org/lang_transaction.html), [Online Backup API](https://www.sqlite.org/backup.html), [FTS5](https://www.sqlite.org/fts5.html)
+- [pgvector filtering and search](https://github.com/pgvector/pgvector), [OCI content descriptors](https://github.com/opencontainers/image-spec/blob/main/descriptor.md)
 - [LongMemEval](https://proceedings.iclr.cc/paper_files/paper/2025/hash/d813d324dbf0598bbdc9c8e79740ed01-Abstract-Conference.html), [LoCoMo](https://aclanthology.org/2024.acl-long.747/), [RULER](https://github.com/NVIDIA/RULER), [Lost in the Middle](https://direct.mit.edu/tacl/article/doi/10.1162/tacl_a_00638/119630/Lost-in-the-Middle-How-Language-Models-Use-Long)
