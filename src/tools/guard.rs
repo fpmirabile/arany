@@ -132,7 +132,6 @@ pub(super) fn build_cache_session(
 fn cache_exclusions(grants: &[RuntimeGrant]) -> Result<Vec<String>, ToolError> {
     let mut exclusions = Vec::new();
     for grant in grants.iter().filter(|grant| grant.kind.is_cache()) {
-        grant.verify_host()?;
         let path = grant.kind.cache_root().ok_or(ToolError::Configuration)?;
         exclusions.push(path.to_owned());
     }
