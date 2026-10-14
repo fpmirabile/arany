@@ -4,55 +4,70 @@ Load the section named by [testing rules](../testing.md) when its task applies. 
 
 ## Local verification and CI
 
+Use the standard checks in [the development guide](../../docs/development.md#verification). The [CI workflow](../../.github/workflows/ci.yml) runs formatting and Clippy on Linux, Clippy on macOS, and debug and release tests on both OSes. Pull-request and push runs always select the full matrix. Markdown-only pull requests skip these steps after bounded change detection; the five required checks still complete for branch protection. Detection failure, any non-`.md` path (including the old path of a rename), and pushes to `main` run the full matrix.
+
 Manual `workflow_dispatch` runs have one closed `lane` choice: `full`
 (default), `linux-debug`, `linux-release`, `macos-debug`, or
-`macos-release`. A focused choice selects exactly one standard OS/profile
-test lane and is diagnostic only; it does not satisfy required pull-request
-checks or final release evidence. The optional ARM64 matrix and history
-benchmark are independent additions when selected: ARM64 adds its debug and
-release jobs, while the benchmark runs inside the Linux release job. The
-workflow rejects unknown values and accepts no test-name, command, or argument
-input. Use a focused lane only after a failure has been diagnosed. After the
+`macos-release`. A focused choice selects exactly one standard Linux/macOS
+OS/profile test lane and is diagnostic only; it does not satisfy required
+pull-request checks or final release evidence. The independent
+`linux_arm64`, `linux_native_advanced`, and `history_benchmark` inputs can add
+native jobs or measurement work to the selected standard lane. ARM64 adds its
+debug and release jobs, native advanced adds x86_64 and ARM64 jobs, and the
+history benchmark runs inside the Linux release job. The workflow rejects
+unknown values and accepts no test-name, command, or arbitrary argument input.
+Use a focused lane only after a failure has been diagnosed. After the
 correction, require a full workflow on the exact final head before marking the
 change ready. Automatic PR/push runs always use the full matrix; when no
 automatic run covers that head, a manual `workflow_dispatch` run with
 `lane=full` qualifies. Focused lanes never qualify.
 
-Use the standard checks in [the development guide](../../docs/development.md#verification).
-The [CI workflow](../../.github/workflows/ci.yml) runs formatting and Clippy
-on Linux, Clippy on macOS, and debug/release tests on both OSes. Pull-request
-and push runs always select the full matrix. Markdown-only pull requests skip
-these steps after bounded change detection; the five required checks still
-complete for branch protection. Detection failure, any non-`.md` path
-(including the old path of a rename), and pushes to `main` run the full matrix.
-CodeQL default setup is managed separately by GitHub. CI provisions prerequisites
-on disposable hosted runners. Linux terminal fixtures need Bubblewrap and
-util-linux `script`, with user and network namespaces enabled. For macOS
-temporary-root and account isolation, read [host and account
-isolation](#host-and-account-isolation).
-
-Manual dispatch also offers the optional `linux_arm64` boolean (default `false`).
+Manual dispatch offers the optional `linux_arm64` boolean (default `false`).
 Enabling it runs the native Linux ARM64 debug and release test matrix. The
 workflow verifies both the `aarch64` host and Rust target, then runs the same
 Bubblewrap and user/network namespace prerequisites before the `--cfg arany_ci`
-workspace suite. This opt-in lane does not change pull-request checks. GitHub
+workspace suite. This opt-in does not change pull-request checks. GitHub
 documents `ubuntu-24.04-arm` for both public and private repositories; private
 runner use consumes the account's included Actions minutes and is billed after
 that allotment ([runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)).
 The workflow file must be on the default branch to enable manual dispatch;
-select the ref containing the relevant input and job changes ([manual workflow
+select the ref containing the input and job changes ([manual workflow
 runs](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)).
 If GitHub cannot provide the runner or a native prerequisite fails, ARM64
 evidence remains pending; do not substitute emulation, skip gates or claim
 support.
 
-Manual CI dispatch with `history_benchmark: true` additionally runs the exact
-ignored long-history tmux owner in the Linux release job and requires one
-completed test. It reports that runner's workload, timings and resource
-metrics; the ordinary suite leaves this benchmark ignored, and its measurements
-do not establish other-host performance or cold-disk behavior. The workflow
-accepts this option only with `lane=full` or `lane=linux-release`, so a
-requested benchmark cannot be silently skipped by a focused non-release lane.
+Manual dispatch offers `linux_native_advanced` (default `false`). On native
+`ubuntu-24.04` x86_64 and `ubuntu-24.04-arm`, it runs the ignored shipped-CLI
+systemd Guard parent and the two non-history tmux parents as separate
+release-profile `--ignored --exact` invocations. The lane installs and verifies
+`/usr/bin/tmux`, reuses the Linux Bubblewrap/user/network namespace preflight,
+and fails unless each invocation reports exactly one completed named test.
+The Guard parent uses `enter_native_account_isolated_test`: its private
+passwd/home and State roots are isolated while the host user-manager socket and
+cgroup remain available. Its parent bounds the helper to 90 seconds and 32 MiB
+output and retains its fixture if cleanup is uncertain; each tmux parent owns
+its private socket, bounded process/pane captures and server cleanup. No test
+output artifact is uploaded. Dispatch the existing workflow on a ref
+containing these inputs and jobs; the workflow file must already exist on the
+default branch. Evidence remains pending until both architecture jobs pass.
+This lane excludes the near-cap history measurement and establishes neither
+optimized macOS nor exact distributed-binary behavior. Missing native
+enforcement fails the gate; do not create a fallback service or skip it.
+
+Manual CI dispatch with `history_benchmark: true` runs the exact ignored
+long-history tmux owner in the Linux release job and requires one completed
+test. It reports that runner's workload, timings and resource metrics; the
+ordinary suite leaves this benchmark ignored, and its measurements do not
+establish other-host performance or cold-disk behavior. The workflow accepts
+this option only with `lane=full` or `lane=linux-release`, so a requested
+benchmark cannot be silently skipped by a focused non-release lane.
+
+CodeQL default setup is managed separately by GitHub. CI provisions prerequisites
+on disposable hosted runners. Linux terminal fixtures need Bubblewrap and
+util-linux `script`, with user and network namespaces enabled. For macOS
+temporary-root and account isolation, read [host and account
+isolation](#host-and-account-isolation).
 
 Default suites exercise only the scenarios enabled for their native OS. The heavy native Guard, clipboard, credential-helper and database-capacity gates use the activation rules in [testing rules](../testing.md#evidence-lanes). To reproduce CI locally, set `RUSTFLAGS=--cfg arany_ci` for the test invocation; in a POSIX shell:
 
@@ -113,17 +128,19 @@ Repeat with `--release` for the optimized profile. To run one ignored gate, use 
 - Account tests using `ARANY_TEST_ACCOUNT_ROOT` are debug-only: optimized Arany intentionally rejects that override. Isolate environment-selected Session/preference state too with explicit absolute synthetic `HOME`, `XDG_STATE_HOME` and `XDG_DATA_HOME` beneath the fixture account root's parent; [Store admission](../store.md) rejects an ambient default root when that override is set. Clearing those variables can otherwise fall back to the real passwd home for Session/preference state. Verify both roots stay fixture-owned before state access. Test optimized account behavior with a private passwd home and no-network mount namespace, and first prove the no-leaf control reaches the intended boundary; otherwise an early account-root rejection can make a failure test pass without exercising its fixture.
 - Native Linux Guard account fixtures retain the host user-manager socket,
   cgroup hierarchy and host-visible `/tmp` seed paths. Their private mount/network
-  namespace uses passwordless `sudo` only for namespace and synthetic passwd-file
-  mount setup,
-  then drops to the original UID/GID with cleared groups, environment and
-  privileges before a deadline-supervised helper. A user namespace around the
-  controller changes root-owned ancestor identities and hides the manager's seed
-  paths; the ordinary offline account wrapper does not prove native execution.
+  namespace uses passwordless `sudo` only for namespace creation, synthetic
+  passwd-file mounting and the fixed `/usr/sbin/ip` command that raises loopback
+  inside that namespace. It then drops to the original UID/GID with cleared
+  groups, environment and privileges before a deadline-supervised helper.
+  `iproute2` is an explicit CI prerequisite; missing setup fails closed. A user
+  namespace around the controller changes root-owned ancestor identities and
+  hides the manager's seed paths; the ordinary offline account wrapper does not
+  prove native execution.
   Serialize the native parent with `NATIVE_GATE` and retain its private fixture
   after any failed capture or receipt check; reaping `sudo` alone does not prove
   that its descendant helper has exited.
 - To prove the no-account composer without a live keyring lookup, use a private default user StateRoot and an admitted test-owned unavailable local credential-bus address. This can prove local rejection and setup cancellation, not saved-account write/reuse or native keyring behavior.
-- Every attached PTY now reaches OS-user folder trust before account/Session work, including with explicit Provider/`--tools` flags. Isolate the account and environment-selected state roots and explicitly answer or dismiss the initial consent; a private Session directory and Provider flag do not isolate trust metadata. Linux fixtures use the private passwd-home command owner, retaining host loopback only for synthetic peers. Tests outside the consent owner use its bounded response pump; the consent owner keeps manual input. Continue selecting an explicit Provider/model with a synthetic cleared-environment credential when setup is not under test, since bare account selection can reach the fixed OS credential slot.
+- Every attached PTY now reaches OS-user folder trust before account/Session work, including with explicit Provider/`--tools` flags. Isolate the account and environment-selected state roots and explicitly answer or dismiss the initial consent; a private Session directory and Provider flag do not isolate trust metadata. Ordinary Linux PTY fixtures use the private passwd-home command owner while retaining host loopback only for synthetic peers; native Guard fixtures raise loopback only in their private network namespace. Tests outside the consent owner use its bounded response pump; the consent owner keeps manual input. Continue selecting an explicit Provider/model with a synthetic cleared-environment credential when setup is not under test, since bare account selection can reach the fixed OS credential slot.
 - Command snapshot-refusal fixtures must use admitted executable identities and
   assert the actual capture disposition. A denied system executable or missing
   interpreter runtime proves no snapshot rejection. macOS OS hard links can

@@ -1,5 +1,5 @@
 use std::{
-    io::{self, Read},
+    io::{self, Read, Write},
     os::fd::AsFd,
     process::{Child, Command, Output, Stdio},
     sync::Mutex,
@@ -18,6 +18,130 @@ pub const CONFIG_CONSENT_PROMPT: &str = concat!(
     "Type trust [profile numbers], trust none, or config; bare trust ",
     "preserves selected profiles. Ctrl+C exits:"
 );
+
+pub fn annotate_native_fixture(message: &str) {
+    const PREFIX: &str = "::error title=Arany native fixture::";
+    const MAX_LINE_BYTES: usize = 2048;
+    let mut annotation = String::from(PREFIX);
+    for character in message.chars() {
+        let escaped = match character {
+            '%' => "%25",
+            '\r' => "%0D",
+            '\n' => "%0A",
+            character if character.is_control() => "?",
+            character => {
+                if annotation.len() + character.len_utf8() + 1 > MAX_LINE_BYTES {
+                    break;
+                }
+                annotation.push(character);
+                continue;
+            }
+        };
+        if annotation.len() + escaped.len() + 1 > MAX_LINE_BYTES {
+            break;
+        }
+        annotation.push_str(escaped);
+    }
+    annotation.push('\n');
+    let _ = io::stderr().lock().write_all(annotation.as_bytes());
+}
+
+pub fn relay_native_fixture_annotation(stdout: &[u8], stderr: &[u8]) -> bool {
+    const PREFIX: &[u8] = b"::error title=Arany native fixture::";
+    const MAX_LINE_BYTES: usize = 2048;
+    for captured in [stdout, stderr] {
+        for line in captured.split(|byte| *byte == b'\n') {
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            let Some(message) = line.strip_prefix(PREFIX) else {
+                continue;
+            };
+            if line.len() > MAX_LINE_BYTES
+                || !message.is_ascii()
+                || !(message.starts_with(b"fixture=shipped_exec;")
+                    || message.starts_with(b"fixture=direct_cancellation;"))
+                || !message.iter().all(|byte| {
+                    byte.is_ascii_alphanumeric()
+                        || matches!(
+                            byte,
+                            b' ' | b'_'
+                                | b'='
+                                | b';'
+                                | b':'
+                                | b','
+                                | b'.'
+                                | b'?'
+                                | b'['
+                                | b']'
+                                | b'"'
+                                | b'('
+                                | b')'
+                                | b'-'
+                        )
+                })
+            {
+                continue;
+            }
+            let mut output = io::stderr().lock();
+            let _ = output.write_all(line);
+            let _ = output.write_all(b"\n");
+            return true;
+        }
+    }
+    false
+}
+
+pub fn relay_native_panic_location(stderr: &[u8], expected_case: &str) -> bool {
+    const PREFIX: &str = "ARANY_NATIVE_PANIC; case=";
+    const MAX_LINE_BYTES: usize = 256;
+    if !matches!(
+        expected_case,
+        "shipped_exec" | "goal_token_cap" | "workspace_lease" | "native_account_test"
+    ) {
+        return false;
+    }
+    for line in stderr.split(|byte| *byte == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.len() > MAX_LINE_BYTES {
+            continue;
+        }
+        let Ok(line) = std::str::from_utf8(line) else {
+            continue;
+        };
+        let Some(fields) = line.strip_prefix(PREFIX) else {
+            continue;
+        };
+        let Some((case, fields)) = fields.split_once("; file=") else {
+            continue;
+        };
+        let Some((file, fields)) = fields.split_once("; line=") else {
+            continue;
+        };
+        let Some((line_number, column)) = fields.split_once("; column=") else {
+            continue;
+        };
+        if case != expected_case
+            || file.is_empty()
+            || file.len() > 64
+            || !file
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        {
+            continue;
+        }
+        let (Ok(line_number), Ok(column)) = (line_number.parse::<u32>(), column.parse::<u32>())
+        else {
+            continue;
+        };
+        if line_number == 0 {
+            continue;
+        }
+        annotate_native_fixture(&format!(
+            "fixture=isolated_child_panic; case={case}; file={file}; line={line_number}; column={column}"
+        ));
+        return true;
+    }
+    false
+}
 
 pub trait BoundedOutput {
     fn bounded_output(&mut self) -> io::Result<Output>;

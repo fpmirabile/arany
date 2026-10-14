@@ -255,6 +255,11 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
     };
     let mut start =
         crate::isolation::account_isolated_command(temp.path(), "/usr/bin/tmux", executable);
+    crate::isolation::remember_workspace_trust(
+        &temp.path().join("account-home/.local/state/arany"),
+        &workspace,
+        &workspace,
+    );
     start
         .env_clear()
         .env("TERM", "xterm")
@@ -293,6 +298,24 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
         "tmux pane started: {}",
         String::from_utf8_lossy(&started.stderr)
     );
+    let pane = server.run(&[
+        "display-message",
+        "-p",
+        "-t",
+        "arany-test:0.0",
+        "#{pane_pid}",
+    ]);
+    assert!(pane.status.success(), "tmux pane PID available");
+    let shell_pid = std::str::from_utf8(&pane.stdout)
+        .expect("pane PID UTF-8")
+        .trim()
+        .parse::<u32>()
+        .expect("pane PID");
+    let product_pid = try_product_child_of_executable(shell_pid, executable)
+        .expect("active Arany process beneath tmux pane");
+    let product_guard =
+        ProductGuard::for_executable(product_pid, state.clone(), executable.to_path_buf());
+    assert!(product_guard.is_owned_and_running(), "private Arany child");
 
     let mut declined = false;
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -827,20 +850,6 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
     }
 
     let before = read_trimmed(&before_path);
-    let pane = server.run(&[
-        "display-message",
-        "-p",
-        "-t",
-        "arany-test:0.0",
-        "#{pane_pid}",
-    ]);
-    assert!(pane.status.success(), "tmux pane PID available");
-    let shell_pid = std::str::from_utf8(&pane.stdout)
-        .expect("pane PID UTF-8")
-        .trim()
-        .parse::<u32>()
-        .expect("pane PID");
-    let product_pid = product_child_of_executable(shell_pid, executable);
     assert_ne!(tty_settings(product_pid), before, "raw mode inside tmux");
 
     let command = "stty rows 24 cols 80; before=$(stty -g); printf 'OUTER_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_TMUX\" -S \"$ARANY_TEST_SOCKET\" attach-session -t arany-test; exit_code=$?; after=$(stty -g); printf 'OUTER_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
@@ -1034,6 +1043,11 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     };
     let mut start =
         crate::isolation::account_isolated_command(temp.path(), "/usr/bin/tmux", &executable);
+    crate::isolation::remember_workspace_trust(
+        &temp.path().join("account-home/.local/state/arany"),
+        &workspace,
+        &workspace,
+    );
     start
         .env_clear()
         .env("TERM", "xterm")
@@ -1065,6 +1079,24 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
         .stderr(Stdio::piped());
     let started = wait_product(start.spawn().expect("tmux server start"));
     assert!(started.status.success(), "tmux pane started");
+    let pane_pid = server.run(&[
+        "display-message",
+        "-p",
+        "-t",
+        "arany-test:0.0",
+        "#{pane_pid}",
+    ]);
+    assert!(pane_pid.status.success(), "test-owned pane PID");
+    let pane_pid = String::from_utf8(pane_pid.stdout)
+        .expect("pane PID UTF-8")
+        .trim()
+        .parse::<u32>()
+        .expect("pane PID");
+    let product_pid = try_product_child_of_executable(pane_pid, &executable)
+        .expect("active Arany process beneath tmux pane");
+    let product_guard =
+        ProductGuard::for_executable(product_pid, state.clone(), executable.clone());
+    assert!(product_guard.is_owned_and_running(), "private Arany child");
     let mut declined = false;
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -1861,22 +1893,6 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
         );
         thread::yield_now();
     }
-    let pane_pid = server.run(&[
-        "display-message",
-        "-p",
-        "-t",
-        "arany-test:0.0",
-        "#{pane_pid}",
-    ]);
-    assert!(pane_pid.status.success(), "test-owned pane PID");
-    let pane_pid = String::from_utf8(pane_pid.stdout)
-        .expect("pane PID UTF-8")
-        .trim()
-        .parse::<u32>()
-        .expect("pane PID");
-    let product_pid = product_child_of_executable(pane_pid, &executable);
-    let product_guard = ProductGuard::for_executable(product_pid, state.clone(), executable);
-    assert!(product_guard.is_owned_and_running(), "private Arany child");
     assert!(
         server
             .run(&["send-keys", "-t", "arany-test:0.0", "C-k"])

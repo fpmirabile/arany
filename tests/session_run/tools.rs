@@ -26,6 +26,8 @@ fn journey_plan_contract() -> arany::GoalPlanContract {
         mission: "Update and verify the synthetic Workspace files".into(),
         paths: vec!["src".into()],
         commands: vec!["bash".into()],
+        resource_class: arany::ToolResourceClass::Default,
+        command_timeout_ms: None,
         skills: vec![
             arany::GoalSkillBinding {
                 name: "synthetic".into(),
@@ -55,6 +57,8 @@ fn proposal_plan_contract(call: &ToolCall) -> Option<arany::GoalPlanContract> {
             mission: "Invoke the exact synthetic MCP tool".into(),
             paths: Vec::new(),
             commands: Vec::new(),
+            resource_class: arany::ToolResourceClass::Default,
+            command_timeout_ms: None,
             skills: Vec::new(),
             mcp_tools: vec![arany::GoalMcpTool {
                 server: server.clone(),
@@ -72,6 +76,8 @@ fn proposal_plan_contract(call: &ToolCall) -> Option<arany::GoalPlanContract> {
                 ToolCall::Command { program, .. } => vec![program.clone()],
                 _ => Vec::new(),
             },
+            resource_class: arany::ToolResourceClass::Default,
+            command_timeout_ms: None,
             skills: Vec::new(),
             mcp_tools: Vec::new(),
             success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
@@ -758,6 +764,15 @@ async fn over_max_command_is_closed_as_a_non_dispatched_limit() {
     store.close().await.unwrap();
 }
 
+fn assert_goal_provider_request(request: &ProviderRequest, expected_budget: &arany::GoalBudget) {
+    assert_eq!(request.phase, AgentPhase::RootPlan);
+    assert_eq!(request.collaboration, CollaborationPolicy::Single);
+    assert_eq!(request.objective, "Guard corpus");
+    assert_eq!(request.goal_budget.as_ref(), Some(expected_budget));
+    assert!(request.goal_plan_contract.is_none());
+    assert!(request.tools.is_some());
+}
+
 struct ExactTokenTool {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
 }
@@ -792,6 +807,8 @@ impl arany::Provider for ExactTokenTool {
                     mission: "Change the exact selected file".into(),
                     paths: vec!["src".into()],
                     commands: Vec::new(),
+                    resource_class: arany::ToolResourceClass::Default,
+                    command_timeout_ms: None,
                     skills: Vec::new(),
                     mcp_tools: Vec::new(),
                     success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
@@ -866,6 +883,13 @@ async fn exact_goal_token_cap_fails_before_a_tool_request_is_journaled() {
     {
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
+        assert_goal_provider_request(
+            &requests[0],
+            &arany::GoalBudget {
+                max_tokens: Some(8),
+                ..arany::GoalBudget::default()
+            },
+        );
     }
     let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
     let events = store.load_session(outcome.session_id).await.unwrap();
@@ -960,7 +984,15 @@ async fn unfinished_implementation_goal_holds_workspace_lease_across_runs() {
     first.goal.finish_after_run = false;
     let initial = first_engine.run(first).await.unwrap();
     assert_eq!(initial.run.status, RunStatus::Finished);
-    assert_eq!(first_requests.lock().unwrap().len(), 1);
+    let lease_budget = arany::GoalBudget {
+        max_runs: 2,
+        ..arany::GoalBudget::default()
+    };
+    {
+        let requests = first_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_goal_provider_request(&requests[0], &lease_budget);
+    }
 
     let blocked_requests = Arc::new(Mutex::new(Vec::new()));
     let mut blocked_engine = Engine::open(
@@ -987,7 +1019,13 @@ async fn unfinished_implementation_goal_holds_workspace_lease_across_runs() {
         arany::GoalRequest::resume(initial.goal_id, arany::GoalPhase::Implementation, true);
     let terminal = first_engine.run(resumed).await.unwrap();
     assert_eq!(terminal.run.status, RunStatus::Finished);
-    assert_eq!(first_requests.lock().unwrap().len(), 2);
+    {
+        let requests = first_requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        for request in requests.iter() {
+            assert_goal_provider_request(request, &lease_budget);
+        }
+    }
 
     let released_requests = Arc::new(Mutex::new(Vec::new()));
     let mut released_engine = Engine::open(
@@ -1009,7 +1047,11 @@ async fn unfinished_implementation_goal_holds_workspace_lease_across_runs() {
             .status,
         RunStatus::Finished
     );
-    assert_eq!(released_requests.lock().unwrap().len(), 1);
+    {
+        let requests = released_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_goal_provider_request(&requests[0], &arany::GoalBudget::default());
+    }
     released_engine.close().await.unwrap();
     first_engine.close().await.unwrap();
 }
@@ -1193,6 +1235,8 @@ fn bounded_loop_plan() -> arany::GoalPlanContract {
         mission: "Append the stated line after verifying the file".into(),
         paths: vec!["src".into()],
         commands: Vec::new(),
+        resource_class: arany::ToolResourceClass::Default,
+        command_timeout_ms: None,
         skills: Vec::new(),
         mcp_tools: Vec::new(),
         success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
@@ -1266,6 +1310,8 @@ impl Provider for BoundedLoop {
                             .into(),
                         paths: vec!["src".into()],
                         commands: Vec::new(),
+                        resource_class: arany::ToolResourceClass::Default,
+                        command_timeout_ms: None,
                         skills: Vec::new(),
                         mcp_tools: Vec::new(),
                         success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
@@ -2378,6 +2424,8 @@ impl Provider for ApprovalJourney {
                 ToolCall::Command { program, .. } => vec![program.clone()],
                 _ => Vec::new(),
             },
+            resource_class: arany::ToolResourceClass::Default,
+            command_timeout_ms: None,
             skills: Vec::new(),
             mcp_tools: Vec::new(),
             success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
