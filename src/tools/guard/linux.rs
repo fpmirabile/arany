@@ -770,10 +770,13 @@ fn mount_directories(target: &Path, root: &Path) -> Vec<PathBuf> {
     directories
 }
 
+/// Directories to create, then read-only `(source, target)` binds.
+type RuntimeMounts = (Vec<PathBuf>, Vec<(PathBuf, PathBuf)>);
+
 /// Verifies every grant before any seed exists; a rejected grant leaves no state behind.
 fn runtime_mounts(
     grants: &[super::super::toolchains::RuntimeGrant],
-) -> Result<(Vec<PathBuf>, Vec<(PathBuf, PathBuf)>), ToolError> {
+) -> Result<RuntimeMounts, ToolError> {
     let mut directories = Vec::new();
     let mut mounts = Vec::new();
     for grant in grants {
