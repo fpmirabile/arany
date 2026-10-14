@@ -321,12 +321,20 @@ fn read_bounded_request(stream: &mut TcpStream) {
     }
 }
 
-#[tokio::test]
+#[test]
 #[ignore = "native Linux near-cap active keyboard measurement; requires /usr/bin/tmux"]
-async fn active_keyboard_stays_visible_with_near_cap_history() {
+fn active_keyboard_stays_visible_with_near_cap_history() {
     let _gate = crate::process::NATIVE_GATE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("history fixture runtime");
+    runtime.block_on(run_history_fixture());
+}
+
+async fn run_history_fixture() {
     let executable = super::test_product_executable();
     assert!(
         std::env::current_exe()
