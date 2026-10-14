@@ -89,6 +89,7 @@ fn trace_snapshot(root: &Path) -> serde_json::Value {
                         | "overflow"
                         | "mcp-version"
                         | "receipt-loss"
+                        | "runtime-mounts"
                 ) {
                     return None;
                 }
@@ -203,6 +204,15 @@ fn guarded_native_files_and_skills_survive_closed_replay() {
 )]
 fn guarded_command_changesets_survive_closed_replay() {
     native_journey("tools::native_command_changeset_helper");
+}
+
+#[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native macOS selected-runtime Guard command and mounted-image refusal"
+)]
+fn guarded_runtime_profile_checks_mount_topology_before_dispatch() {
+    native_journey("tools::native_runtime_mount_journey_helper");
 }
 
 fn native_journey(helper: &str) {
@@ -595,6 +605,7 @@ static int write_file(const char *path, const void *bytes, size_t size) {
     FILE *file = fopen(path, "wb");
     return !file || fwrite(bytes, 1, size, file) != size || fclose(file);
 }
+
 int main(int argc, char **argv) {
     const unsigned char bytes[] = {0, 255};
     if (argc != 2 || write_file("src/a-created", bytes, 2) || chmod("src/a-created", 0700)
@@ -631,6 +642,322 @@ int main(int argc, char **argv) {
         "skills":[],"mcp":[]
     });
     crate::tool_replay::native_command_changeset_corpus(root, &config, "shell").await;
+}
+struct RuntimeJourney {
+    requests: Arc<Mutex<Vec<ProviderRequest>>>,
+    call: ToolCall,
+}
+
+impl Provider for RuntimeJourney {
+    fn profile_name(&self) -> &str {
+        "scripted"
+    }
+
+    fn model_name(&self) -> &str {
+        "runtime-profile-model"
+    }
+
+    fn max_concurrent_calls(&self) -> u8 {
+        1
+    }
+
+    async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        let step = {
+            let mut requests = self.requests.lock().unwrap();
+            let step = requests.len();
+            requests.push(request);
+            step
+        };
+        if step > 1 {
+            return Err(ProviderError::InvalidOutcome);
+        }
+        let outcome = if step == 0 {
+            ProviderOutcome::Tool(self.call.clone())
+        } else {
+            ProviderOutcome::Finish(Finish {
+                summary: "Runtime profile checked".into(),
+                result: "The selected runtime command completed under Guard.".into(),
+            })
+        };
+        Ok(ProviderResponse {
+            outcome,
+            response_id: None,
+            input_tokens: None,
+            output_tokens: None,
+            wire_provenance: None,
+        })
+    }
+
+    async fn compact(&self, _: CompactionRequest) -> Result<CompactionResponse, ProviderError> {
+        Err(ProviderError::InvalidOutcome)
+    }
+}
+
+struct MountedRuntimeImage(std::path::PathBuf);
+
+impl Drop for MountedRuntimeImage {
+    fn drop(&mut self) {
+        use crate::process::BoundedOutput;
+
+        let _ = std::process::Command::new("/usr/bin/hdiutil")
+            .args(["detach", "-force", "-quiet"])
+            .arg(&self.0)
+            .env_clear()
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .bounded_output_for(Duration::from_secs(20), 4096);
+    }
+}
+
+#[tokio::test]
+#[ignore = "isolated helper owned by native macOS runtime profile journey"]
+async fn native_runtime_mount_journey_helper() {
+    use crate::process::BoundedOutput;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    let root = std::env::var_os("ARANY_TEST_FILE_JOURNEY_ROOT").expect("private fixture root");
+    let root = Path::new(&root);
+    trace_case(root, "runtime-mounts");
+    assert_eq!(StateRoot::account_path().unwrap(), root.join("account"));
+    let workspace = root.join("workspace");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&workspace)
+        .unwrap();
+    let runtime = root.join("home/.nvm/versions/node/v22.3.0");
+    std::fs::create_dir_all(runtime.join("bin")).unwrap();
+    let node = runtime.join("bin/node");
+    private_file(&node, b"#!/bin/sh\nprintf 'runtime-profile-selected\\n'\n");
+    std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mountpoint = runtime.join("mounted-image");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let image = root.join("runtime.sparseimage");
+    let created = std::process::Command::new("/usr/bin/hdiutil")
+        .args([
+            "create",
+            "-quiet",
+            "-size",
+            "8m",
+            "-fs",
+            "HFS+",
+            "-volname",
+            "AranyRuntimeFixture",
+            "-type",
+            "SPARSE",
+            "-ov",
+        ])
+        .arg(&image)
+        .env_clear()
+        .env("HOME", root.join("home"))
+        .env("TMPDIR", root)
+        .current_dir(root)
+        .bounded_output_for(Duration::from_secs(30), 4096)
+        .unwrap();
+    assert!(created.status.success(), "hdiutil create: {created:?}");
+    let attached = std::process::Command::new("/usr/bin/hdiutil")
+        .args(["attach", "-quiet", "-nobrowse", "-mountpoint"])
+        .arg(&mountpoint)
+        .arg(&image)
+        .env_clear()
+        .env("HOME", root.join("home"))
+        .env("TMPDIR", root)
+        .current_dir(root)
+        .bounded_output_for(Duration::from_secs(30), 4096)
+        .unwrap();
+    assert!(attached.status.success(), "hdiutil attach: {attached:?}");
+    let mounted = MountedRuntimeImage(mountpoint.clone());
+
+    let permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
+    let options = permissions.runtime_profile_choices();
+    let node = options
+        .iter()
+        .find(|option| option.label.starts_with("Node"))
+        .expect("metadata-only Node candidate");
+    let token = node.token.clone();
+    let mut permissions = permissions;
+    permissions
+        .remember_profiles(true, arany::ApprovalMode::AutoEdits, &[token])
+        .unwrap();
+    let permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
+
+    let runtime_call = ToolCall::Command {
+        program: "sh".into(),
+        args: vec![
+            "-c".into(),
+            "set -eu; test \"$(node)\" = runtime-profile-selected; printf selected-runtime-command"
+                .into(),
+        ],
+        cwd: String::new(),
+    };
+    let refused_requests = Arc::new(Mutex::new(Vec::new()));
+    let refused_state = root.join("state-mounted");
+    let mut engine = Engine::open(
+        StateRoot::admit(&refused_state).unwrap(),
+        RuntimeJourney {
+            requests: refused_requests.clone(),
+            call: runtime_call.clone(),
+        },
+    )
+    .unwrap();
+    let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+    engine
+        .enable_trusted_workspace(
+            permissions.clone(),
+            &workspace,
+            env!("CARGO_BIN_EXE_arany").into(),
+            approvals,
+        )
+        .unwrap();
+    let run = engine.run(RunRequest {
+        session_id: None,
+        title: Some("Mounted runtime refusal".into()),
+        objective: "Check runtime mount topology".into(),
+        images: Vec::new(),
+        workspace: workspace.clone(),
+        include_paths: Vec::new(),
+        policy: CollaborationPolicy::Single,
+    });
+    let approve = async {
+        let approval = inbox
+            .next()
+            .await
+            .expect("one approval for the mounted-runtime command");
+        assert_eq!(approval.intent.call, runtime_call);
+        approval.decide(true);
+    };
+    let (refused, ()) = tokio::time::timeout(Duration::from_secs(90), async {
+        tokio::join!(run, approve)
+    })
+    .await
+    .expect("bounded mounted-runtime refusal journey");
+    let refused = refused.unwrap();
+    engine.close().await.unwrap();
+    assert_eq!(
+        refused.run.status,
+        RunStatus::Failed,
+        "runtime mount refusal Run failed: {}",
+        crate::safe_run_diagnostics(&refused.run)
+    );
+    assert_eq!(refused.run.tools.len(), 1);
+    assert_eq!(refused_requests.lock().unwrap().len(), 1);
+    let refused_observation = refused.run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(refused_observation.disposition, ToolDisposition::Failed);
+    assert!(refused_observation.guard.is_none());
+    assert!(
+        refused_observation
+            .output
+            .contains("runtime mount topology")
+    );
+    assert_eq!(
+        refused_requests.lock().unwrap()[0]
+            .tools
+            .as_ref()
+            .unwrap()
+            .observations
+            .len(),
+        0
+    );
+    let trace = trace_snapshot(root);
+    assert_eq!(trace["stages"]["worker_go"], "unknown");
+    let store = Store::open_read_only(StateRoot::open_existing(&refused_state).unwrap()).unwrap();
+    let events = store.load_session(refused.session_id).await.unwrap();
+    store.close().await.unwrap();
+    let replay = SessionView::replay(refused.session_id, &events)
+        .unwrap()
+        .unwrap();
+    assert_eq!(replay.runs.len(), 1);
+    assert_eq!(replay.runs[0], refused.run, "closed runtime refusal replay");
+    assert_eq!(replay.runs[0].status, RunStatus::Failed);
+    let detached = std::process::Command::new("/usr/bin/hdiutil")
+        .args(["detach", "-force", "-quiet"])
+        .arg(&mountpoint)
+        .env_clear()
+        .current_dir(root)
+        .bounded_output_for(Duration::from_secs(20), 4096)
+        .unwrap();
+    assert!(detached.status.success(), "hdiutil detach: {detached:?}");
+    drop(mounted);
+
+    let accepted_requests = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = Engine::open(
+        StateRoot::admit(&root.join("state-success")).unwrap(),
+        RuntimeJourney {
+            requests: accepted_requests.clone(),
+            call: runtime_call.clone(),
+        },
+    )
+    .unwrap();
+    let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+    engine
+        .enable_trusted_workspace(
+            permissions,
+            &workspace,
+            env!("CARGO_BIN_EXE_arany").into(),
+            approvals,
+        )
+        .unwrap();
+    let run = engine.run(RunRequest {
+        session_id: None,
+        title: Some("Selected runtime success".into()),
+        objective: "Run a command using the selected runtime".into(),
+        images: Vec::new(),
+        workspace,
+        include_paths: Vec::new(),
+        policy: CollaborationPolicy::Single,
+    });
+    let approve = async {
+        let approval = inbox
+            .next()
+            .await
+            .expect("one approval for the selected-runtime command");
+        assert_eq!(approval.intent.call, runtime_call);
+        approval.decide(true);
+    };
+    let (accepted, ()) = tokio::time::timeout(Duration::from_secs(90), async {
+        tokio::join!(run, approve)
+    })
+    .await
+    .expect("bounded selected-runtime success journey");
+    let accepted = accepted.unwrap();
+    engine.close().await.unwrap();
+    assert_eq!(
+        accepted.run.status,
+        RunStatus::Finished,
+        "selected runtime Run failed: {}",
+        crate::safe_run_diagnostics(&accepted.run)
+    );
+    assert_eq!(accepted.run.tools.len(), 1);
+    let accepted_observation = accepted.run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(accepted_observation.disposition, ToolDisposition::Succeeded);
+    let accepted_output: serde_json::Value =
+        serde_json::from_str(&accepted_observation.output).unwrap();
+    assert_eq!(accepted_output["stdout"], "selected-runtime-command");
+    let accepted_requests = accepted_requests.lock().unwrap();
+    assert_eq!(accepted_requests.len(), 2);
+    assert!(
+        accepted_requests[0]
+            .tools
+            .as_ref()
+            .unwrap()
+            .observations
+            .is_empty()
+    );
+    let provider_observation = accepted_requests[1]
+        .tools
+        .as_ref()
+        .unwrap()
+        .observations
+        .last()
+        .unwrap();
+    assert_eq!(provider_observation.disposition, ToolDisposition::Succeeded);
+    let provider_output: serde_json::Value =
+        serde_json::from_str(&provider_observation.output).unwrap();
+    assert_eq!(provider_output["stdout"], "selected-runtime-command");
 }
 
 async fn stopped_effects_survive_closed_replay(

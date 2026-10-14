@@ -364,7 +364,8 @@ async fn compact_with_provider<P: Provider + 'static>(
     Ok(record)
 }
 
-#[cfg(all(test, unix))]
+// Linux release builds have no tests here: each one is debug-only or macOS-only.
+#[cfg(all(test, unix, any(debug_assertions, target_os = "macos")))]
 mod tests {
     use super::*;
     #[cfg(target_os = "macos")]
@@ -803,8 +804,9 @@ mod tests {
         let state = StateRoot::admit(&root.join("account")).unwrap();
         let metadata = std::fs::metadata(&workspace).unwrap();
         let trust = serde_json::to_vec(&serde_json::json!({
-            "version": 1, "workspaces": [{ "path": workspace,
-                "device": metadata.dev(), "inode": metadata.ino(), "mode": "auto_edits" }]
+            "version": 2, "workspaces": [{ "path": workspace,
+                "device": metadata.dev(), "inode": metadata.ino(), "mode": "auto_edits",
+                "runtime_grants": [] }]
         }))
         .unwrap();
         let trust_path = state.path().join("workspace-permissions.json");
@@ -1278,8 +1280,11 @@ mod tests {
                 Duration::from_secs(30),
                 64 * 1024,
                 |bytes| {
-                    if !cancelled && String::from_utf8_lossy(bytes).replace("\r\n", "\n")
-                        .contains("Type trust or read only; empty Enter selects read only. Ctrl+C exits:\n") {
+                    if !cancelled
+                        && String::from_utf8_lossy(bytes)
+                            .replace("\r\n", "\n")
+                            .contains(crate::test_process::READ_ONLY_CONSENT_PROMPT)
+                    {
                         input.write_all(b"\x04").unwrap();
                         cancelled = true;
                     }
@@ -1304,8 +1309,9 @@ mod tests {
         let account = StateRoot::admit(&root.join("account")).unwrap();
         let metadata = std::fs::metadata(&workspace).unwrap();
         let remembered = serde_json::to_vec(&serde_json::json!({
-            "version": 1, "workspaces": [{ "path": workspace,
-                "device": metadata.dev(), "inode": metadata.ino(), "mode": "auto_edits" }]
+            "version": 2, "workspaces": [{ "path": workspace,
+                "device": metadata.dev(), "inode": metadata.ino(), "mode": "auto_edits",
+                "runtime_grants": [] }]
         }))
         .unwrap();
         let trust_record = account.path().join("workspace-permissions.json");
@@ -1465,22 +1471,29 @@ mod tests {
             );
             store.close().await.unwrap();
         }
-        let choice = tokio::time::timeout(
-            Duration::from_secs(3),
-            super::super::permissions::choose(&mut terminal, &workspace, &mut composer, false),
-        )
-        .await
-        .unwrap();
+        let choice = match arany::WorkspacePermissions::open(&workspace) {
+            Ok(access) => Some(
+                tokio::time::timeout(
+                    Duration::from_secs(3),
+                    super::super::permissions::choose(
+                        &mut terminal,
+                        access.prepare_profile_selection(),
+                        &mut composer,
+                        false,
+                    ),
+                )
+                .await
+                .unwrap(),
+            ),
+            Err(_) => None,
+        };
         #[cfg(debug_assertions)]
         assert!(matches!(
             choice,
-            Ok(super::super::permissions::PermissionChoice::Exit)
+            Some(Ok(super::super::permissions::PermissionChoice::Exit))
         ));
         #[cfg(not(debug_assertions))]
-        assert!(matches!(
-            choice,
-            Err(super::super::setup::SetupError::Recoverable(_))
-        ));
+        assert!(choice.is_none(), "release rejects the test account root");
         assert_eq!(
             super::super::permissions::cycle(&mut composer),
             if permissions.is_some() {

@@ -1,11 +1,295 @@
 use super::*;
 use crate::{loopback::ChildGuard, process::BoundedOutput};
+use sha2::{Digest, Sha256};
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
+    path::PathBuf,
     process::{Command, Stdio},
     time::Instant,
 };
+
+const CACHE_CANARY: &str = "EXPLICIT_CACHE_OUTPUT_CANARY";
+
+struct CacheCanary {
+    requests: std::sync::Arc<std::sync::Mutex<Vec<ProviderRequest>>>,
+    call: ToolCall,
+}
+
+impl Provider for CacheCanary {
+    fn profile_name(&self) -> &str {
+        "scripted"
+    }
+
+    fn model_name(&self) -> &str {
+        "cache-canary-model"
+    }
+
+    fn max_concurrent_calls(&self) -> u8 {
+        1
+    }
+
+    async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        let step = {
+            let mut requests = self.requests.lock().unwrap();
+            let step = requests.len();
+            requests.push(request);
+            step
+        };
+        if step > 1 {
+            return Err(ProviderError::InvalidOutcome);
+        }
+        let outcome = if step == 0 {
+            ProviderOutcome::Tool(self.call.clone())
+        } else {
+            ProviderOutcome::Finish(Finish {
+                summary: "Selected cache output was explicit".into(),
+                result: "The selected cache content appeared only after the command read it."
+                    .into(),
+            })
+        };
+        Ok(ProviderResponse {
+            outcome,
+            response_id: None,
+            input_tokens: None,
+            output_tokens: None,
+            wire_provenance: None,
+        })
+    }
+
+    async fn compact(&self, _: CompactionRequest) -> Result<CompactionResponse, ProviderError> {
+        Err(ProviderError::InvalidOutcome)
+    }
+}
+
+#[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native Linux selected-cache disclosure through an explicit guarded command"
+)]
+fn selected_cache_is_disclosed_only_after_explicit_command_output() {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let _gate = crate::process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::tempdir().unwrap();
+    for name in ["account-home", "home", "state"] {
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(temp.path().join(name))
+            .unwrap();
+    }
+    let home = temp.path().join("home");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let cache = home.join(".cargo/registry/cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    private_file(&cache.join("canary.crate"), CACHE_CANARY.as_bytes());
+    let test_executable = std::env::current_exe().unwrap();
+    let guard_executable = Path::new(env!("CARGO_BIN_EXE_arany"));
+    let mut helper = crate::isolation::native_account_isolated_test_command(
+        temp.path(),
+        &test_executable,
+        guard_executable,
+    );
+    helper
+        .args([
+            "--exact",
+            "tools::native_exec::selected_cache_canary_helper",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env_clear()
+        .current_dir(temp.path());
+    let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let output = helper
+            .bounded_output_for(Duration::from_secs(90), 32 * 1024)
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "selected-cache canary: stdout={:?}; stderr={:?}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        crate::process::assert_single_test_completed(&output.stdout, "selected-cache canary");
+        assert!(output.stderr.is_empty());
+    }));
+    if let Err(error) = checked {
+        let _ = temp.keep();
+        std::panic::resume_unwind(error);
+    }
+}
+
+#[tokio::test]
+#[ignore = "isolated helper owned by selected-cache canary integration"]
+async fn selected_cache_canary_helper() {
+    let root = std::env::var_os("ARANY_TEST_CACHE_CANARY_ROOT").expect("private fixture root");
+    let root = Path::new(&root);
+    let workspace = root.join("workspace");
+    let user = nix::unistd::User::from_uid(nix::unistd::geteuid())
+        .unwrap()
+        .unwrap();
+    assert_eq!(user.dir, root.join("account-home"), "private passwd home");
+    let account = user.dir.join(".local/state/arany");
+    assert_eq!(StateRoot::account_path().unwrap(), account);
+    let mut permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
+    let options = permissions.runtime_profile_choices();
+    let cache = options
+        .iter()
+        .find(|option| option.label.starts_with("Cargo archive cache"))
+        .expect("metadata-only Cargo cache candidate");
+    assert!(!cache.selected);
+    permissions
+        .remember_profiles(
+            true,
+            arany::ApprovalMode::AutoEdits,
+            std::slice::from_ref(&cache.token),
+        )
+        .unwrap();
+    let permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
+    assert!(
+        permissions
+            .runtime_profile_choices()
+            .iter()
+            .any(|option| option.selected && option.label.starts_with("Cargo archive cache"))
+    );
+
+    let state_path = root.join("state");
+    let state = StateRoot::admit(&state_path).unwrap();
+    let call = ToolCall::Command {
+        program: "sh".into(),
+        args: vec![
+            "-c".into(),
+            "/usr/bin/cat \"$CARGO_HOME/registry/cache/canary.crate\"".into(),
+        ],
+        cwd: ".".into(),
+    };
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut engine = Engine::open(
+        state,
+        CacheCanary {
+            requests: requests.clone(),
+            call: call.clone(),
+        },
+    )
+    .unwrap();
+    let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+    engine
+        .enable_trusted_workspace(
+            permissions,
+            &workspace,
+            PathBuf::from(env!("CARGO_BIN_EXE_arany")),
+            approvals,
+        )
+        .unwrap();
+    let run = engine.run(RunRequest {
+        session_id: None,
+        title: Some("Selected cache canary".into()),
+        objective: "Read the selected cache canary with the shell Tool".into(),
+        images: Vec::new(),
+        workspace: workspace.clone(),
+        include_paths: Vec::new(),
+        policy: CollaborationPolicy::Single,
+    });
+    let approve = async {
+        let approval = inbox
+            .next()
+            .await
+            .expect("one approval for the selected-cache command");
+        assert_eq!(approval.intent.call, call);
+        approval.decide(true);
+    };
+    let (outcome, ()) = tokio::time::timeout(Duration::from_secs(90), async {
+        tokio::join!(run, approve)
+    })
+    .await
+    .expect("bounded selected-cache approval journey");
+    let outcome = outcome.unwrap();
+    engine.close().await.unwrap();
+    assert_eq!(
+        outcome.run.status,
+        RunStatus::Finished,
+        "cache canary Run failed: {}",
+        crate::safe_run_diagnostics(&outcome.run)
+    );
+    assert_eq!(outcome.run.tools.len(), 1);
+    let observation = outcome.run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+    assert_eq!(observation.intent, outcome.run.tools[0].intent);
+    assert_eq!(observation.intent.call, call);
+    let receipt = observation
+        .guard
+        .as_ref()
+        .expect("successful cache command has a Guard receipt");
+    let expected_digest: [u8; 32] =
+        Sha256::digest(serde_json::to_vec(&observation.intent).unwrap()).into();
+    assert_eq!(receipt.contract_version, 1);
+    assert_eq!(receipt.intent_digest, expected_digest);
+    assert_eq!(
+        receipt.enforcement_digest,
+        observation.intent.enforcement_digest
+    );
+    assert_eq!(receipt.limits, observation.intent.limits);
+    let command: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
+    assert_eq!(command["exit_code"], 0);
+    assert!(
+        command["stderr"].as_str().is_some_and(str::is_empty),
+        "cache command stderr was not empty"
+    );
+    assert!(
+        command["stdout"]
+            .as_str()
+            .is_some_and(|stdout| stdout == CACHE_CANARY),
+        "explicit cache command stdout mismatch"
+    );
+    {
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let _initial_tools = requests[0]
+            .tools
+            .as_ref()
+            .expect("first cache canary request includes Tool context");
+        let initial = format!("{:?}", requests[0]);
+        assert!(
+            !initial.contains(CACHE_CANARY),
+            "cache canary was present in the initial Provider request"
+        );
+        assert!(
+            requests[1].tools.as_ref().unwrap().observations[0]
+                .output
+                .contains(CACHE_CANARY),
+            "explicit cache output missing from the later Provider request"
+        );
+    }
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+    let events = store.load_session(outcome.session_id).await.unwrap();
+    store.close().await.unwrap();
+    let replay = SessionView::replay(outcome.session_id, &events)
+        .unwrap()
+        .unwrap();
+    assert_eq!(replay.runs.len(), 1);
+    assert!(
+        replay.runs[0] == outcome.run,
+        "closed cache canary replay differs"
+    );
+    let finished = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            arany::Event::ToolFinished { observation, .. } => Some(observation),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(finished.len(), 1);
+    assert!(
+        finished[0] == observation,
+        "ToolFinished cache observation differs"
+    );
+}
 
 fn request(pipe: &mut impl Read) -> Vec<u8> {
     let deadline = Instant::now() + Duration::from_secs(10);

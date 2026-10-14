@@ -1286,12 +1286,107 @@ done
             .unwrap()
     }
 
+    #[test]
+    fn drifted_runtime_grant_is_rejected_before_command_storage() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("project");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("script"), b"#!/bin/sh\n").unwrap();
+        let runtime = snapshot_runtime(&workspace);
+        let node_path = temp.path().join("profile-home/.nvm/versions/node/v22.3.0");
+        // Keep the previous directory alive so the recreated root cannot reuse its inode.
+        std::fs::rename(&node_path, temp.path().join("previous-node")).unwrap();
+        std::fs::create_dir_all(node_path.join("bin")).unwrap();
+        let root = temp.path().join("command-root");
+        std::fs::create_dir(&root).unwrap();
+        let reactor = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let storage = reactor.block_on(prepare_command_storage(&root, &runtime));
+        assert!(matches!(storage, Err(ToolError::ChangedInput)));
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+    }
+
     fn snapshot_runtime(workspace: &Path) -> ToolRuntime {
         let directory = crate::tools::fs::open_directory(workspace).unwrap();
         let shell = "/bin/sh";
         let system_programs = super::super::SystemPrograms::admit().unwrap();
-        let process_enforcement_digest =
-            super::super::macos_enforcement_digest(Some(&system_programs)).unwrap();
+        let home = workspace.parent().unwrap().join("profile-home");
+        let node_path = home.join(".nvm/versions/node/v22.3.0");
+        std::fs::create_dir_all(node_path.join("bin")).unwrap();
+        let node = node_path.join("bin/node");
+        std::fs::write(&node, b"#!/bin/sh\nprintf runtime-profile-selected\n").unwrap();
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Like nvm/fnm/Volta shims: a `bin` symlink whose resolved target lives outside `bin`.
+        std::fs::create_dir_all(node_path.join("lib")).unwrap();
+        let tool = node_path.join("lib/tool.sh");
+        std::fs::write(&tool, b"#!/bin/sh\nprintf runtime-tool-ran\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let tool_link = node_path.join("bin/tool");
+        let _ = std::fs::remove_file(&tool_link);
+        std::os::unix::fs::symlink("../lib/tool.sh", &tool_link).unwrap();
+        let cache_path = home.join(".cargo/registry/cache");
+        std::fs::create_dir_all(&cache_path).unwrap();
+        std::fs::write(
+            cache_path.join("index.marker"),
+            b"private registry metadata",
+        )
+        .unwrap();
+        std::fs::create_dir_all(home.join(".cargo")).unwrap();
+        std::fs::write(home.join(".cargo/credentials.toml"), b"synthetic secret").unwrap();
+        let npm_cache_path = home.join(".npm/_cacache");
+        std::fs::create_dir_all(&npm_cache_path).unwrap();
+        std::fs::write(npm_cache_path.join("index.marker"), b"private npm metadata").unwrap();
+        let pip_cache_path = home.join("Library/Caches/pip/http-v2");
+        std::fs::create_dir_all(&pip_cache_path).unwrap();
+        std::fs::write(pip_cache_path.join("index.marker"), b"private pip metadata").unwrap();
+        let identity = |path: &Path| {
+            crate::tools::fs::identity(&crate::tools::fs::open_directory(path).unwrap()).unwrap()
+        };
+        let (node_device, node_inode) = identity(&node_path);
+        let (cache_device, cache_inode) = identity(&cache_path);
+        let (npm_cache_device, npm_cache_inode) = identity(&npm_cache_path);
+        let (pip_cache_device, pip_cache_inode) = identity(&pip_cache_path);
+        let runtime_grants = vec![
+            crate::tools::toolchains::RuntimeGrant {
+                kind: crate::tools::toolchains::RuntimeKind::Node,
+                manager: crate::tools::toolchains::RuntimeManager::Nvm,
+                version: Some("v22.3.0".into()),
+                path: node_path,
+                device: node_device,
+                inode: node_inode,
+            },
+            crate::tools::toolchains::RuntimeGrant {
+                kind: crate::tools::toolchains::RuntimeKind::CargoCache,
+                manager: crate::tools::toolchains::RuntimeManager::HostCache,
+                version: None,
+                path: cache_path,
+                device: cache_device,
+                inode: cache_inode,
+            },
+            crate::tools::toolchains::RuntimeGrant {
+                kind: crate::tools::toolchains::RuntimeKind::NpmCache,
+                manager: crate::tools::toolchains::RuntimeManager::HostCache,
+                version: None,
+                path: npm_cache_path,
+                device: npm_cache_device,
+                inode: npm_cache_inode,
+            },
+            crate::tools::toolchains::RuntimeGrant {
+                kind: crate::tools::toolchains::RuntimeKind::PipHttpCache,
+                manager: crate::tools::toolchains::RuntimeManager::HostCache,
+                version: None,
+                path: pip_cache_path,
+                device: pip_cache_device,
+                inode: pip_cache_inode,
+            },
+        ];
+        let process_enforcement_digest = super::super::super::macos_runtime_enforcement_digest(
+            Some(&system_programs),
+            &runtime_grants,
+        )
+        .unwrap();
         ToolRuntime {
             queue_progress: None,
             config: crate::tools::config::Config {
@@ -1337,14 +1432,120 @@ done
                     args: vec!["/inputs/mcp-shell/server.sh".into()],
                     tools: vec!["echo".into()],
                 }],
+                runtime_grants: runtime_grants.clone(),
             },
             workspace: workspace.to_path_buf(),
             workspace_identity: crate::tools::fs::identity(&directory).unwrap(),
             guard_executable: std::env::current_exe().unwrap(),
-            enforcement_digest: super::super::enforcement_digest().unwrap(),
+            enforcement_digest: super::super::super::enforcement_digest(&[]).unwrap(),
             system_programs: Some(std::sync::Arc::new(system_programs)),
             process_enforcement_digest,
         }
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(arany_ci),
+        ignore = "native macOS mounted-image runtime topology check; requires hdiutil"
+    )]
+    fn runtime_mount_attestation_rejects_nested_mounted_image() {
+        use crate::test_process::BoundedOutput;
+        use crate::tools::toolchains::{RuntimeGrant, RuntimeKind, RuntimeManager};
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        struct MountedImage(std::path::PathBuf);
+
+        impl Drop for MountedImage {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("/usr/bin/hdiutil")
+                    .args(["detach", "-force", "-quiet"])
+                    .arg(&self.0)
+                    .env_clear()
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .bounded_output_for(Duration::from_secs(20), 4096);
+            }
+        }
+
+        let fixture = tempfile::tempdir().unwrap();
+        let runtime = fixture.path().join("home/.nvm/versions/node/v22.3.0");
+        let mountpoint = runtime.join("mounted-image");
+        std::fs::create_dir_all(runtime.join("bin")).unwrap();
+        std::fs::create_dir(&mountpoint).unwrap();
+        let node = runtime.join("bin/node");
+        std::fs::write(&node, b"synthetic node executable").unwrap();
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let image = fixture.path().join("runtime.sparseimage");
+        let created = std::process::Command::new("/usr/bin/hdiutil")
+            .args([
+                "create",
+                "-quiet",
+                "-size",
+                "8m",
+                "-fs",
+                "HFS+",
+                "-volname",
+                "AranyRuntimeFixture",
+                "-type",
+                "SPARSE",
+                "-ov",
+            ])
+            .arg(&image)
+            .env_clear()
+            .env("HOME", fixture.path())
+            .env("TMPDIR", fixture.path())
+            .current_dir(fixture.path())
+            .bounded_output_for(Duration::from_secs(30), 4096)
+            .unwrap();
+        assert!(created.status.success(), "hdiutil create: {created:?}");
+        let attached = std::process::Command::new("/usr/bin/hdiutil")
+            .args(["attach", "-quiet", "-nobrowse", "-mountpoint"])
+            .arg(&mountpoint)
+            .arg(&image)
+            .env_clear()
+            .env("HOME", fixture.path())
+            .env("TMPDIR", fixture.path())
+            .current_dir(fixture.path())
+            .bounded_output_for(Duration::from_secs(30), 4096)
+            .unwrap();
+        assert!(attached.status.success(), "hdiutil attach: {attached:?}");
+        let _mounted = MountedImage(mountpoint.clone());
+
+        let metadata = std::fs::metadata(&runtime).unwrap();
+        let grant = RuntimeGrant {
+            kind: RuntimeKind::Node,
+            manager: RuntimeManager::Nvm,
+            version: Some("v22.3.0".into()),
+            path: runtime,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        };
+        let target = std::fs::canonicalize(&mountpoint).unwrap();
+        assert!(
+            ffi::mounts()
+                .unwrap()
+                .iter()
+                .any(|(_, path)| path == &target)
+        );
+        let call = ToolCall::Command {
+            program: "node".into(),
+            args: Vec::new(),
+            cwd: String::new(),
+        };
+        let mut stage = super::super::super::BootstrapStage::Workspace;
+        assert!(matches!(
+            super::super::super::attest_runtime_mounts(
+                &call,
+                std::slice::from_ref(&grant),
+                &mut stage,
+            ),
+            Err(ToolError::ProtectionUnavailable)
+        ));
+        assert!(matches!(
+            stage,
+            super::super::super::BootstrapStage::RuntimeMounts
+        ));
     }
 
     /// Compiles the native actor and returns its entitlement-signed and plain copies.
@@ -2438,7 +2639,8 @@ done
                 wake_receiver.read_exact(&mut [0]).unwrap();
                 assert!(Path::new("/bin/launchctl").is_file());
                 super::super::configure_resources().unwrap();
-                super::super::install(&task).unwrap();
+                let mut stage = super::super::super::BootstrapStage::Workspace;
+                super::super::install(&task, &mut stage).unwrap();
                 let cpu = rustix::process::getrlimit(rustix::process::Resource::Cpu);
                 assert_eq!(cpu.current, None);
                 assert_eq!(cpu.maximum, None);
@@ -2530,8 +2732,14 @@ done
                     } else {
                         vec!["-c".into(), "exec ./script workspace".into()]
                     };
-                    let mut command =
-                        super::super::super::payload(definition, &args, ".", root).unwrap();
+                    let mut command = super::super::super::payload(
+                        definition,
+                        &args,
+                        ".",
+                        root,
+                        &runtime.config.runtime_grants,
+                    )
+                    .unwrap();
                     let (status, stdout, stderr) = reactor
                         .block_on(async {
                             super::super::super::capture(
@@ -2554,12 +2762,36 @@ done
                         definition.name
                     );
                 }
+                let script = r#"
+set -eu
+/usr/bin/true
+test "$(/bin/cat "$ARANY_TOOL_INPUTS/shell/fixture.txt")" = 'pinned synthetic input'
+test "$(node)" = runtime-profile-selected
+test "$(tool)" = runtime-tool-ran
+test -r "$CARGO_HOME/registry/cache/index.marker"
+test "$npm_config_cache" = "$TMPDIR/.npm"
+test -r "$npm_config_cache/_cacache/index.marker"
+test "$PIP_CACHE_DIR" = "$TMPDIR/.cache/pip"
+test -r "$PIP_CACHE_DIR/http-v2/index.marker"
+if printf changed 2>/dev/null > "$CARGO_HOME/registry/cache/write-marker"; then exit 97; fi
+test ! -e "$CARGO_HOME/registry/cache/write-marker"
+test ! -e "$CARGO_HOME/credentials.toml"
+printf 'command change' > "$1"
+printf 'native command success'
+"#;
                 let mut command = super::super::super::payload(
                     &runtime.config.commands[0],
-                    &["-c".into(), "set -eu; /usr/bin/true; test \"$(/bin/cat \"$ARANY_TOOL_INPUTS/shell/fixture.txt\")\" = 'pinned synthetic input'; printf 'command change' > \"$1\"; printf 'native command success'".into(), "--".into(), "/workspace/selected".into()],
+                    &[
+                        "-c".into(),
+                        script.into(),
+                        "--".into(),
+                        "/workspace/selected".into(),
+                    ],
                     ".",
                     root,
-                ).unwrap();
+                    &runtime.config.runtime_grants,
+                )
+                .unwrap();
                 let (status, stdout, stderr) = reactor
                     .block_on(async {
                         super::super::super::capture(

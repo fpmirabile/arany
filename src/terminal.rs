@@ -380,6 +380,15 @@ pub struct AttachedTerminal {
     terminate: tokio::signal::unix::Signal,
 }
 
+/// Profile rows and cursor state for the folder consent screen; `options` and `selected` align by index.
+pub struct ProfileSelection<'a> {
+    pub options: &'a [crate::tools::RuntimeProfileOption],
+    pub selected: &'a [bool],
+    pub focused: Option<usize>,
+    pub enabled: bool,
+    pub discovery_error: Option<&'a str>,
+}
+
 impl AttachedTerminal {
     pub fn set_waiting_tool(&mut self, id: Option<uuid::Uuid>) {
         self.waiting_tool = id;
@@ -388,10 +397,18 @@ impl AttachedTerminal {
         &mut self,
         id: uuid::Uuid,
         workspace: &std::path::Path,
+        profile_selection: ProfileSelection<'_>,
         page: usize,
         trust: bool,
         configured: bool,
-    ) -> Result<bool, TerminalError> {
+    ) -> Result<(bool, usize), TerminalError> {
+        let ProfileSelection {
+            options,
+            selected: selected_profiles,
+            focused: focused_profile,
+            enabled: profile_selection_enabled,
+            discovery_error,
+        } = profile_selection;
         self.cancel_clipboard_paste();
         let mut lines = crate::presentation::workspace_permission_lines(workspace);
         if configured {
@@ -399,49 +416,83 @@ impl AttachedTerminal {
                 "--tools is selected. Continue with its private configuration or remember folder trust; the explicit configuration keeps precedence.".into(),
             );
         }
+        if let Some(error) = discovery_error {
+            lines.push(format!(
+                "Runtime profile discovery failed: {}; saved profiles stay listed.",
+                crate::presentation::escape_terminal(error)
+            ));
+        }
+        let profile_start;
+        if options.is_empty() {
+            lines.push("No supported runtime profiles were detected.".into());
+            profile_start = None;
+        } else {
+            lines.push("Profiles are opt-in. Selected caches may contain private package data or embedded credential URLs. They are not loaded automatically, but commands can read and print them; bounded Tool output may be persisted and sent to the selected Provider.".into());
+            lines.push(
+                "Separate package-manager configuration and credential files stay excluded.".into(),
+            );
+            profile_start = Some(lines.len());
+            lines.extend(options.iter().enumerate().map(|(index, option)| {
+                let marker = if focused_profile == Some(index) {
+                    "›"
+                } else {
+                    " "
+                };
+                let checked = selected_profiles
+                    .get(index)
+                    .copied()
+                    .unwrap_or(option.selected);
+                let number = index + 3;
+                format!(
+                    "{marker} [{}] {number}. {}",
+                    if checked { "x" } else { " " },
+                    crate::presentation::escape_terminal(&option.label)
+                )
+            }));
+        }
         if let Some(linear) = &mut self.linear {
             linear
                 .draw_permission_prompt(
                     id,
                     &lines,
                     if configured {
-                        "1. Use explicit Tool config\n2. Trust this folder\nType trust or config; empty Enter uses explicit config. Ctrl+C exits:"
+                        "1. Use explicit Tool config\n2. Trust this folder; 3+ select profiles. Type trust [profile numbers], trust none, or config; bare trust preserves selected profiles. Ctrl+C exits:"
                     } else {
-                        "1. Continue read only\n2. Trust this folder\nType trust or read only; empty Enter selects read only. Ctrl+C exits:"
+                        "1. Continue read only\n2. Trust this folder; 3+ select profiles. Type trust [profile numbers], trust none, or read only; bare trust preserves selected profiles. Ctrl+C exits:"
                     },
                 )
                 .map_err(TerminalError::Io)?;
-            return Ok(false);
+            return Ok((false, page));
         }
         let palette = self.palette();
-        let mut more = true;
+        let mut progress = view::PermissionFrameProgress { more: true, page };
         self.terminal
             .as_mut()
             .expect("inline terminal")
             .draw(|frame| {
                 if frame.area().width >= 16 && frame.area().height >= 8 {
-                    more = view::draw_permission_frame(
+                    progress = view::draw_permission_frame(
                         frame,
                         &lines,
-                        if configured && frame.area().width < 24 {
-                            ("Use config", "Trust folder")
-                        } else if configured {
-                            ("Use explicit config", "Trust this folder")
-                        } else if frame.area().width < 24 {
-                            ("Read only", "Trust folder")
-                        } else {
-                            ("Continue read only", "Trust this folder")
+                        view::PermissionFrameState {
+                            choices: if configured && frame.area().width < 24 {
+                                ("Use config", "Trust folder")
+                            } else if configured {
+                                ("Use explicit config", "Trust this folder")
+                            } else if frame.area().width < 24 {
+                                ("Read only", "Trust folder")
+                            } else {
+                                ("Continue read only", "Trust this folder")
+                            },
+                            page,
+                            allow: trust,
+                            profile_start,
+                            profile_count: options.len(),
+                            focused_profile,
+                            profile_selection_enabled: Some(profile_selection_enabled),
+                            footer: None,
+                            palette,
                         },
-                        page,
-                        trust,
-                        if frame.area().width < 24 {
-                            "↑↓ Enter ^C exit"
-                        } else if frame.area().width < 50 {
-                            "↑↓ Enter · Ctrl+C exits"
-                        } else {
-                            "↑↓ choose · Enter confirm · Ctrl+C exit"
-                        },
-                        palette,
                     );
                 } else {
                     frame.render_widget(
@@ -450,7 +501,7 @@ impl AttachedTerminal {
                     );
                 }
             })?;
-        Ok(more)
+        Ok((progress.more, progress.page))
     }
     pub fn draw_tool_approval(
         &mut self,
@@ -475,18 +526,25 @@ impl AttachedTerminal {
                     more = view::draw_permission_frame(
                         frame,
                         &crate::presentation::tool_approval_lines(intent),
-                        ("Deny", "Allow once"),
-                        page,
-                        allow,
-                        if frame.area().width < 24 {
-                            "↑↓ Enter Esc"
-                        } else if frame.area().width < 50 {
-                            "↑↓ Enter · Esc denies"
-                        } else {
-                            "↑↓ choose · Enter confirm · Esc denies"
+                        view::PermissionFrameState {
+                            choices: ("Deny", "Allow once"),
+                            page,
+                            allow,
+                            profile_start: None,
+                            profile_count: 0,
+                            focused_profile: None,
+                            profile_selection_enabled: None,
+                            footer: Some(if frame.area().width < 24 {
+                                "↑↓ Enter Esc"
+                            } else if frame.area().width < 50 {
+                                "↑↓ Enter · Esc denies"
+                            } else {
+                                "↑↓ choose · Enter confirm · Esc denies"
+                            }),
+                            palette,
                         },
-                        palette,
-                    );
+                    )
+                    .more;
                 } else {
                     frame.render_widget(
                         ratatui::widgets::Paragraph::new("Resize to review; Esc denies"),

@@ -2279,20 +2279,27 @@ fn permission_choices_are_vertical_and_complete_before_selection() {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         let mut rendered = String::new();
         for page in 0..100 {
-            let mut more = true;
+            let mut progress = PermissionFrameProgress { more: true, page };
             terminal
                 .draw(|frame| {
-                    more = draw_permission_frame(
+                    progress = draw_permission_frame(
                         frame,
                         &lines,
-                        ("Read only", "Trust folder"),
-                        page,
-                        false,
-                        "↑↓ Enter ^C exit",
-                        Palette { color: false },
+                        PermissionFrameState {
+                            choices: ("Read only", "Trust folder"),
+                            page,
+                            allow: false,
+                            profile_start: None,
+                            profile_count: 0,
+                            focused_profile: None,
+                            profile_selection_enabled: None,
+                            footer: Some("↑↓ Enter ^C exit"),
+                            palette: Palette { color: false },
+                        },
                     );
                 })
                 .unwrap();
+            assert_eq!(progress.page, page);
             let buffer = terminal.backend().buffer();
             let panel_width = width
                 .saturating_sub(if width >= 40 { 4 } else { 0 })
@@ -2305,7 +2312,7 @@ fn permission_choices_are_vertical_and_complete_before_selection() {
                         .collect::<String>()
                 })
                 .collect::<Vec<_>>();
-            if more {
+            if progress.more {
                 assert!(
                     !rows
                         .iter()
@@ -2329,7 +2336,7 @@ fn permission_choices_are_vertical_and_complete_before_selection() {
                 }
                 rendered.push_str(row);
             }
-            if !more {
+            if !progress.more {
                 if width == 80 {
                     println!("{}", rows.join("\n"));
                 }
