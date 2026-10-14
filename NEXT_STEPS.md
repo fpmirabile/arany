@@ -10,16 +10,17 @@ history. Implementation status and verified support are separate claims.
 ## Next functional priority
 
 - **Agentic coding teams (Beta 1 scope, current implementation priority).**
-  RPI Goals, command changesets, toolchain profiles and a persistent cache, flexible limits, registry
-  fetch, Git, a
+  RPI Goals, command changesets, toolchain profiles and a persistent cache,
+  flexible limits, registry fetch, Git, a
   narrowing-only Supervisor, per-agent Provider routing and writable team
   workers. The [initiative plan](./planning/agentic-teams/README.md) is
-  self-contained and orders the slices; start at its next action (Goal core and
-  budgets, execution step 3). The approved A4 maxima are 4 GiB memory, 8 GiB
+  self-contained and orders the slices; start at Goal Foundation prerequisites
+  (lifecycle, cancellation, budgets, plan contract and Workspace lock;
+  execution step 3), then A4, dogfooding and the remaining Goal artifacts. The
+  approved A4 maxima are 4 GiB memory, 8 GiB
   cache, 1 GiB project storage and 256 tasks; the current cache view remains
   64 MiB until A4 enables the build profile. Native build
-  evidence and named-host measurements still precede support claims. Goal
-  budgets precede A4's flexible limits, and both precede dogfooding. Remote
+  evidence and named-host measurements still precede support claims. Remote
   MCP/OAuth, interactive/background jobs and other network grants need their
   own Policy/Guard/protocol evidence; retain the existing
   [Tool scope](./docs/specs/tools.md) until each slice lands.

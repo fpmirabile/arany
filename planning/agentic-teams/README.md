@@ -491,23 +491,25 @@ Each slice that crosses one of these boundaries runs the
 Each item is one PR with its own contract update, security pass where
 triggered and evidence under [testing rules](../../agents/testing.md).
 
-3. **Goal core and budgets.** E11 every task is a Goal, B1 plan contract,
-   E1–E4 steering, context, Workspace lock and checkpoints, E8 compaction,
-   E10 `exec` integration and bounded Goal budgets. Creates the
-   `docs/specs/goals.md` domain spec. This provides the actual cancellation,
-   context and budget owner required by A4.
+3. **Goal Foundation prerequisites.** E11 Goal lifecycle, B1 plan contract,
+   bounded Goal budgets, cancellation and the E3 Workspace lock. Creates the
+   initial `docs/specs/goals.md` domain spec and supplies the lifecycle,
+   cancellation, budget and ownership contracts required by A4.
 4. **A4 Flexible limits.** Replace the Run's fixed tool/model/context ceilings
    with Finish, compaction, cancellation and Goal-budget bounds; add the
    agreed command timeout and finite build resource profile settings. Guard
-   resource ceilings remain finite. This slice depends on Goal core and must
-   not make the current fixed Run loop unlimited by itself.
+   resource ceilings remain finite. This slice depends on Goal Foundation
+   prerequisites and must not make the current fixed Run loop unlimited by
+   itself.
 5. **Dogfooding milestone: Arany develops Arany.** Use Arany for this
    repository's own work from here on. Requires Beta 1 check 7 (live
    validation of the chosen model's strict Tool encoding) in
    [next steps](../../NEXT_STEPS.md#beta-1-final-user-owned-checks). Every
    later slice is exercised through real use, which supplies the shadow-mode
    calibration data B2 needs.
-6. B6 modes including RPI and grilling, E7 Goal view and E12 settings.
+6. **Remaining Goal artifacts.** E1 steering, E2 phase context, E4 checkpoints
+   and rewind, E8 compaction and E10 `exec` integration. B6 modes including
+   RPI and grilling, E7 Goal view and E12 settings follow dogfooding as listed.
 7. B2, B3, B5 and E5 Supervisor signals, escalation, Finish gate and override.
 8. A5 Typed Git reads and E6 Git writes.
 9. A6 Registry fetch.
@@ -523,14 +525,14 @@ per-slice specification and evidence cost slows delivery.
 
 E13 telemetry spans land with the slice that introduces each span's subject.
 
-Next action: implement Goal core and budgets, the cancellation/context owner
-required by A4. The per-Workspace cache currently uses a 64 MiB writable view
-and shares an 8 GiB StateRoot aggregate; A4 will bind a selected cache quota to
-the native build profile. Approved build maxima are 4 GiB memory, 8 GiB cache,
-1 GiB writable project storage and 256 tasks. These remain finite policy
-ceilings, not support evidence. A4 follows Goal core, then dogfooding. Native
-build verification and named-host measurements remain required before support
-claims.
+Next action: implement Goal Foundation prerequisites (lifecycle, cancellation,
+budgets, plan contract and Workspace lock), then A4 and dogfooding before the
+remaining Goal artifacts. The per-Workspace cache currently uses a 64 MiB
+writable view and shares an 8 GiB StateRoot aggregate; A4 will bind a selected
+cache quota to the native build profile. Approved build maxima are 4 GiB
+memory, 8 GiB cache, 1 GiB writable project storage and 256 tasks. These remain finite policy
+ceilings, not support evidence. Native build verification and named-host
+measurements remain required before support claims.
 
 ## Open questions
 

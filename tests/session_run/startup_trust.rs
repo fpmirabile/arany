@@ -600,7 +600,6 @@ fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
     let mut command = super::isolation::isolated_script(temp.path());
     command
         .env_clear()
-        .env("ARANY_TEST_ACCOUNT_ROOT", &account)
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
         .env("OPENAI_API_KEY", "synthetic-never-sent-key")
@@ -678,6 +677,14 @@ fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
         "New conversation",
     );
     input.write_all(b"\x03").unwrap();
+    wait(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "Ctrl+C again exits",
+    );
+    input.write_all(b"\x03").unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let status = loop {
         super::session_picker::pump(&mut output, &mut input, &mut transcript, &mut answered);
@@ -726,7 +733,6 @@ fn tab_cannot_skip_narrow_folder_consent_pages() {
     let mut command = super::isolation::isolated_script(temp.path());
     command
         .env_clear()
-        .env("ARANY_TEST_ACCOUNT_ROOT", &account)
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
         .env("OPENAI_API_KEY", "synthetic-never-sent-key")
@@ -767,7 +773,7 @@ fn tab_cannot_skip_narrow_folder_consent_pages() {
         &mut answered,
         "Page 1/17",
     );
-    for key in [b'\t', b'\t', b'\r'] {
+    for &key in b"\t\t\r" {
         input.write_all(&[key]).unwrap();
         super::session_picker::pump(&mut output, &mut input, &mut transcript, &mut answered);
     }
