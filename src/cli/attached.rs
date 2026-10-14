@@ -1301,20 +1301,19 @@ async fn submit_idle_run(
 }
 
 const INTERRUPTED_GOAL_NOTICE: &str =
-    "Goal interrupted before the next Run; use /goal resume to continue";
+    "Goal interrupted before the next Run; use /goal resume to continue.";
 
-/// An interrupted Goal's resume hint precedes the Run's own feedback, which would otherwise
-/// describe a cancelled Run as a fresh task.
+/// An interrupted Goal's resume hint follows the Run's feedback. Cancelled Run feedback only
+/// restates the cancellation that the hint already covers, so the hint replaces it.
 fn submission_notice(
     interrupted_goal: Option<arany::GoalId>,
     run_status: RunStatus,
     run_feedback: Option<String>,
 ) -> Option<String> {
     match interrupted_goal {
-        // A cancelled Run's feedback only restates the cancellation that the resume hint already covers.
         Some(_) if run_status == RunStatus::Cancelled => Some(INTERRUPTED_GOAL_NOTICE.to_owned()),
         Some(_) => Some(match run_feedback {
-            Some(feedback) => format!("{feedback}; {INTERRUPTED_GOAL_NOTICE}"),
+            Some(feedback) => format!("{feedback} {INTERRUPTED_GOAL_NOTICE}"),
             None => INTERRUPTED_GOAL_NOTICE.to_owned(),
         }),
         None => run_feedback,
@@ -2186,7 +2185,7 @@ mod tests {
         assert_eq!(
             submission_notice(Some(goal), RunStatus::Finished, cache),
             Some(format!(
-                "Cache updated for the next Run.; {INTERRUPTED_GOAL_NOTICE}"
+                "Cache updated for the next Run. {INTERRUPTED_GOAL_NOTICE}"
             ))
         );
         assert_eq!(

@@ -274,10 +274,7 @@ pub(super) async fn submit_objective(
                     user_recorded = true;
                 }
                 if let Some(goal) = update.goal {
-                    match view.goals.iter_mut().find(|known| known.id == goal.id) {
-                        Some(known) => *known = goal,
-                        None => view.goals.push(goal),
-                    }
+                    upsert_goal(&mut view.goals, goal);
                 }
                 if let Some(last) = view.runs.last_mut()
                     && last.id == update.run.id
@@ -765,9 +762,72 @@ fn compaction_notice(record: &CompactionRecord) -> String {
     }
 }
 
+/// Goals are appended in start order, so `goals.last()` is the newest Goal; a known Goal is replaced in place.
+fn upsert_goal(goals: &mut Vec<arany::GoalView>, goal: arany::GoalView) {
+    match goals.iter_mut().find(|known| known.id == goal.id) {
+        Some(known) => *known = goal,
+        None => goals.push(goal),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn goal_update_appends_new_goal_and_replaces_known_goal() {
+        let mut first = session_with_goal_view();
+        let mut second = first.clone();
+        second.id = arany::GoalId::new();
+        let mut goals = Vec::new();
+
+        upsert_goal(&mut goals, first.clone());
+        upsert_goal(&mut goals, second.clone());
+        assert_eq!(
+            goals.iter().map(|goal| goal.id).collect::<Vec<_>>(),
+            [first.id, second.id]
+        );
+
+        first.objective = "Replaced in place".into();
+        upsert_goal(&mut goals, first.clone());
+        assert_eq!(goals.len(), 2);
+        assert_eq!(goals[0], first);
+        assert_eq!(goals.last().map(|goal| goal.id), Some(second.id));
+    }
+
+    fn session_with_goal_view() -> arany::GoalView {
+        let session_id = arany::SessionId::new();
+        let events = [
+            arany::Event::SessionStarted {
+                title: "Goals".into(),
+                workspace_identity: (1, 2),
+            },
+            arany::Event::GoalStarted {
+                goal_id: arany::GoalId::new(),
+                objective: "Ship the parser".into(),
+                workspace_identity: (1, 2),
+                budget: arany::GoalBudget::default(),
+                phase: arany::GoalPhase::Implementation,
+                autonomous: false,
+            },
+        ]
+        .into_iter()
+        .zip(1..)
+        .map(|(event, sequence)| arany::EventEnvelope {
+            sequence,
+            session_id,
+            run_id: None,
+            agent_run_id: None,
+            event,
+            created_at_ms: 0,
+        })
+        .collect::<Vec<_>>();
+        SessionView::replay(session_id, &events)
+            .expect("valid Goal history")
+            .expect("Session")
+            .goals
+            .remove(0)
+    }
 
     #[test]
     fn compaction_notice_reports_committed_status_without_exposing_summary() {

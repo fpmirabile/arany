@@ -1605,6 +1605,7 @@ impl<P: Provider + 'static> Engine<P> {
                 policy,
                 goal: GoalRequest::resume(turn.outcome.goal_id, false),
             };
+            // Settlement left the Goal open under the same admits_next_run check, so this cannot be refused for budget.
             turn = match self
                 .run_turn(next, cancellation.clone(), progress.clone(), true)
                 .await
@@ -2052,7 +2053,10 @@ impl<P: Provider + 'static> Engine<P> {
             .goal(goal.id)
             .ok_or(EngineError::InvalidHistory)?
             .clone();
-        goal_view.active_ms += active_ms;
+        goal_view.active_ms = goal_view
+            .active_ms
+            .checked_add(active_ms)
+            .ok_or(EngineError::InvalidHistory)?;
         // An autonomous Goal ends only at its own stop conditions; a cancelled Run leaves it open to resume.
         let terminal = match run.status {
             crate::session::RunStatus::Finished if goal.autonomous => {
