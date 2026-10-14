@@ -645,8 +645,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         });
         let actions_acknowledged = run.tools.iter().all(|tool| {
             tool.observation.as_ref().is_some_and(|observation| {
-                !observation.stops_run()
-                    || observation.disposition == crate::tools::ToolDisposition::Cancelled
+                observation.disposition != crate::tools::ToolDisposition::Uncertain
             })
         });
         if has_uncertain_tool {
