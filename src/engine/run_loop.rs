@@ -867,7 +867,8 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         })
         .await?;
         let mut approved = true;
-        if runtime.allows(&intent.call)
+        if goal_allows
+            && runtime.allows(&intent.call)
             && let Some(approvals) = self.controls.approvals
             && approvals.mode().asks(&intent.call)
         {
