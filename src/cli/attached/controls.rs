@@ -8,6 +8,9 @@ use arany::{
 };
 use std::str::FromStr;
 
+const CACHE_USAGE: &str = "Usage: /cache clear [all]";
+const CACHE_CLEAR_FAILED: &str = "Error: private build cache could not be cleared";
+
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct UiPreferences {
@@ -449,7 +452,7 @@ pub(super) fn validate_idle_command(
             Err("invalid collaboration policy")
         }
         InteractiveCommand::Cache if !matches!(argument, Some("clear" | "clear all")) => {
-            Err("Usage: /cache clear [all]")
+            Err(CACHE_USAGE)
         }
         _ => Ok(()),
     }
@@ -664,8 +667,9 @@ pub(super) async fn handle_command(
             }
         }
         InteractiveCommand::Cache => {
-            let root = StateRoot::open_existing(&admission.state_dir)
-                .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+            let Ok(root) = StateRoot::open_existing(&admission.state_dir) else {
+                return Ok(CACHE_CLEAR_FAILED.into());
+            };
             let (result, cleared) = match argument {
                 Some("clear") => (
                     root.clear_workspace_build_cache(&admission.workspace),
@@ -675,14 +679,14 @@ pub(super) async fn handle_command(
                     root.clear_all_build_caches(),
                     "Cleared all private build caches",
                 ),
-                _ => return Ok("Usage: /cache clear [all]".into()),
+                _ => return Err(CACHE_USAGE.into()),
             };
             match result {
                 Ok(()) => cleared.into(),
                 Err(arany::StoreError::BuildCacheBusy) => {
                     "Build cache is in use; retry after its command finishes".into()
                 }
-                Err(_) => "Error: private build cache could not be cleared".into(),
+                Err(_) => CACHE_CLEAR_FAILED.into(),
             }
         }
         _ => "Command is not available in this build".into(),

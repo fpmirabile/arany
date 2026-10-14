@@ -277,20 +277,22 @@ impl ToolRuntime {
                 cache_update: crate::tools::CacheUpdate::NotApplicable,
             };
         }
-        let cache_selected =
-            matches!(&intent.call, ToolCall::Command { .. }) && self.cache_state.is_some();
         match guard::execute(self, &intent, cancellation).await {
             Ok(observation) => observation,
-            Err(error) => uncertain_observation(
-                intent,
-                error,
-                if cache_selected {
-                    crate::tools::CacheUpdate::NotAttempted
-                } else {
-                    crate::tools::CacheUpdate::NotApplicable
-                },
-            ),
+            Err(error) => {
+                let cache_update =
+                    guard_error_cache_update(&intent.call, self.cache_state.is_some());
+                uncertain_observation(intent, error, cache_update)
+            }
         }
+    }
+}
+
+fn guard_error_cache_update(call: &ToolCall, cache_selected: bool) -> CacheUpdate {
+    if cache_selected && matches!(call, ToolCall::Command { .. }) {
+        CacheUpdate::NotAttempted
+    } else {
+        CacheUpdate::NotApplicable
     }
 }
 

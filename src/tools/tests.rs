@@ -1369,3 +1369,47 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
     oversized.output = "x".repeat(MAX_TOOL_RESULT_BYTES + 1);
     assert!(!oversized.valid());
 }
+
+#[test]
+fn guard_error_after_dispatch_marks_only_a_selected_command_cache_not_attempted() {
+    let command = ToolCall::Command {
+        program: "cargo".into(),
+        args: vec!["build".into()],
+        cwd: ".".into(),
+    };
+    assert_eq!(
+        super::guard_error_cache_update(&command, true),
+        CacheUpdate::NotAttempted
+    );
+    assert_eq!(
+        super::guard_error_cache_update(&command, false),
+        CacheUpdate::NotApplicable
+    );
+    assert_eq!(
+        super::guard_error_cache_update(&ToolCall::List { path: "src".into() }, true),
+        CacheUpdate::NotApplicable
+    );
+
+    let intent = EffectIntent {
+        id: uuid::Uuid::now_v7(),
+        run_id: crate::session::RunId::new(),
+        agent_run_id: crate::session::AgentRunId::new(),
+        policy_digest: [1; 32],
+        enforcement_digest: [2; 32],
+        workspace_device: 1,
+        workspace_inode: 2,
+        call: command,
+        limits: ToolLimits::default(),
+        expires_at_ms: 1,
+        use_count: 1,
+    };
+    let observation = super::uncertain_observation(
+        intent,
+        super::ToolError::Operation,
+        CacheUpdate::NotAttempted,
+    );
+    assert!(observation.valid());
+    assert!(observation.stops_run());
+    assert!(observation.guard.is_none());
+    assert_eq!(observation.cache_update, CacheUpdate::NotAttempted);
+}

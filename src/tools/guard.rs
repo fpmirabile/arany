@@ -182,9 +182,7 @@ pub(super) fn publish_cache_candidate(
         },
     };
     observation.cache_update = update;
-    if !observation.valid() {
-        observation.cache_update = CacheUpdate::Uncertain;
-    }
+    debug_assert!(observation.valid());
 }
 
 impl Task {
@@ -599,7 +597,25 @@ pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
     }
     // A host-side staging failure keeps the command result: stop staging but keep draining
     // the archive so the protocol stays in sync with the worker's trailing marker.
-    let mut staged = lease.candidate_writer().ok();
+    let staged = drain_candidate(reader, length, lease.candidate_writer().ok()).await?;
+    let Some(file) = staged else {
+        return Ok(CacheCandidate::Failed);
+    };
+    if file.sync_all().is_err() {
+        return Ok(CacheCandidate::Failed);
+    }
+    Ok(CacheCandidate::Received)
+}
+
+/// Consumes exactly `length` archive bytes, writing them while `staged` is present. A write
+/// failure drops the writer but keeps draining so the stream stays aligned.
+async fn drain_candidate<R: tokio::io::AsyncRead + Unpin, W: Write>(
+    reader: &mut R,
+    length: u64,
+    mut staged: Option<W>,
+) -> Result<Option<W>, ToolError> {
+    use tokio::io::AsyncReadExt;
+
     let mut buffer = [0; 32 * 1024];
     let mut remaining = length;
     while remaining > 0 {
@@ -616,13 +632,7 @@ pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
         }
         remaining -= wanted as u64;
     }
-    let Some(file) = staged else {
-        return Ok(CacheCandidate::Failed);
-    };
-    if file.sync_all().is_err() {
-        return Ok(CacheCandidate::Failed);
-    }
-    Ok(CacheCandidate::Received)
+    Ok(staged)
 }
 
 /// Reaps a child this process owns. On macOS it closes stdin first and polls `try_wait`
@@ -1378,11 +1388,61 @@ mod tests {
         assert!(observation.valid());
     }
 
+    /// Accepts `remaining` bytes, then reports zero-length writes so `write_all` fails.
+    struct FailAfter {
+        remaining: usize,
+    }
+
+    impl Write for FailAfter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let accepted = bytes.len().min(self.remaining);
+            self.remaining -= accepted;
+            Ok(accepted)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[tokio::test]
-    async fn candidate_staging_failure_drains_the_archive_and_keeps_the_command_result() {
+    async fn candidate_drain_consumes_the_archive_after_a_write_failure() {
+        let archive = b"ARCHIVE\nbytes";
+        let mut stream = archive.to_vec();
+        stream.extend(b"CACHE_DONE\n");
+        let mut reader = tokio::io::BufReader::new(stream.as_slice());
+        let staged = drain_candidate(
+            &mut reader,
+            archive.len() as u64,
+            Some(FailAfter { remaining: 4 }),
+        )
+        .await
+        .unwrap();
+        assert!(staged.is_none());
+        let mut trailer = String::new();
+        reader.read_line(&mut trailer).await.unwrap();
+        assert_eq!(trailer, "CACHE_DONE\n");
+    }
+
+    #[tokio::test]
+    async fn candidate_staging_failure_drains_the_archive_and_keeps_the_prior_archive() {
         let temp = tempfile::tempdir().unwrap();
         let (state, identity) = cache_fixture(temp.path());
-        let lease = state.begin_build_cache(identity).unwrap();
+        let mut session = cache_session(&state, &identity);
+        let mut valid = session.lease.candidate_writer().unwrap();
+        valid.write_all(&empty_archive(&identity)).unwrap();
+        valid.sync_all().unwrap();
+        drop(valid);
+        let mut observation = command_observation();
+        publish_cache_candidate(
+            &mut observation,
+            CacheCandidate::Received,
+            Some(&mut session),
+        );
+        assert_eq!(observation.cache_update, CacheUpdate::Published);
+        drop(session);
+
+        let lease = state.begin_build_cache(identity.clone()).unwrap();
         // Occupies the candidate name, so the create_new staging step fails.
         drop(lease.candidate_writer().unwrap());
 
@@ -1397,5 +1457,13 @@ mod tests {
         let mut trailer = String::new();
         reader.read_line(&mut trailer).await.unwrap();
         assert_eq!(trailer, "CACHE_DONE\n");
+        drop(lease);
+
+        let lease = state.begin_build_cache(identity.clone()).unwrap();
+        let (mut file, length) = lease.archive().unwrap().unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(length, bytes.len() as u64);
+        assert_eq!(bytes, empty_archive(&identity));
     }
 }
