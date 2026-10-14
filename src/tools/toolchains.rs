@@ -67,6 +67,18 @@ impl RuntimeKind {
         }
     }
 
+    pub(crate) fn cache_root(self) -> Option<&'static str> {
+        match self {
+            Self::CargoCache => Some("cargo/registry/cache"),
+            Self::CargoSource => Some("cargo/registry/src"),
+            Self::CargoIndex => Some("cargo/registry/index"),
+            Self::NpmCache => Some(".npm/_cacache"),
+            Self::PipHttpCache => Some(".cache/pip/http-v2"),
+            Self::PipWheelCache => Some(".cache/pip/wheels"),
+            _ => None,
+        }
+    }
+
     fn toolchain_token(self, grant: &RuntimeGrant) -> Result<String, ToolError> {
         let prefix = match self {
             Self::Rust => "rust",
@@ -170,15 +182,7 @@ impl RuntimeGrant {
         if self.kind.is_toolchain() {
             Ok(PathBuf::from("/runtime/toolchains").join(self.token()?))
         } else {
-            let relative = match self.kind {
-                RuntimeKind::CargoCache => "cargo/registry/cache",
-                RuntimeKind::CargoSource => "cargo/registry/src",
-                RuntimeKind::CargoIndex => "cargo/registry/index",
-                RuntimeKind::NpmCache => ".npm/_cacache",
-                RuntimeKind::PipHttpCache => ".cache/pip/http-v2",
-                RuntimeKind::PipWheelCache => ".cache/pip/wheels",
-                _ => return Err(ToolError::Configuration),
-            };
+            let relative = self.kind.cache_root().ok_or(ToolError::Configuration)?;
             Ok(Path::new("/scratch").join(relative))
         }
     }

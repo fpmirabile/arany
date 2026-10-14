@@ -110,6 +110,17 @@ pub struct CommandResult {
     pub changeset: CommandChangeset,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheUpdate {
+    NotApplicable,
+    NotAttempted,
+    Published,
+    Rejected,
+    Failed,
+    Uncertain,
+}
+
 impl CommandResult {
     pub(crate) fn valid(&self) -> bool {
         self.changeset.valid()
@@ -496,6 +507,7 @@ pub struct ToolObservation {
     pub disposition: ToolDisposition,
     pub output: String,
     pub guard: Option<GuardReceipt>,
+    pub cache_update: CacheUpdate,
 }
 
 impl ToolObservation {
@@ -518,6 +530,23 @@ impl ToolObservation {
                 .as_ref()
                 .is_none_or(|guard| guard.valid_for(&self.intent))
             && (self.disposition != ToolDisposition::Succeeded || self.guard.is_some())
+            && match self.cache_update {
+                CacheUpdate::NotApplicable => true,
+                CacheUpdate::NotAttempted => self.intent.call.is_process() && self.guard.is_some(),
+                CacheUpdate::Published | CacheUpdate::Rejected => {
+                    self.intent.call.is_process()
+                        && self.guard.is_some()
+                        && self.disposition == ToolDisposition::Succeeded
+                }
+                CacheUpdate::Failed => {
+                    self.intent.call.is_process()
+                        && self.guard.is_some()
+                        && self.disposition == ToolDisposition::Succeeded
+                }
+                CacheUpdate::Uncertain => {
+                    self.intent.call.is_process() && self.disposition == ToolDisposition::Uncertain
+                }
+            }
     }
 }
 
@@ -554,7 +583,7 @@ impl ToolContext {
                 if let ToolCall::ApplyChangeset { .. } = observation.intent.call {
                     call.as_object_mut().expect("typed call").remove("source_intent_digest");
                 }
-                json!({"call":call,"disposition":observation.disposition,"output":output,"workspace_effect":effect})
+                json!({"call":call,"disposition":observation.disposition,"output":output,"workspace_effect":effect,"cache_update":observation.cache_update})
             })
             .collect();
         json!({"catalog":catalog,"observations":observations})
@@ -661,7 +690,7 @@ fn plan_contract_schema(budget: Option<&crate::session::GoalBudget>) -> Option<V
     let active_ms = budget.max_active_ms;
     let runs = budget.max_runs;
     let max_tokens = budget.max_tokens.unwrap_or(u64::MAX);
-    let call_schema = outcome_branch()["properties"]["call"].clone();
+    let call_schema = goal_success_call_schema();
     Some(json!({
         "type": "object",
         "properties": {
@@ -732,6 +761,20 @@ fn plan_contract_schema(budget: Option<&crate::session::GoalBudget>) -> Option<V
         "required":["mission","paths","commands","skills","mcp_tools","success_criterion","budget"],
         "additionalProperties":false
     }))
+}
+
+fn goal_success_call_schema() -> Value {
+    let mut schema = outcome_branch()["properties"]["call"].clone();
+    schema["anyOf"]
+        .as_array_mut()
+        .expect("closed Tool call schema")
+        .retain(|branch| {
+            matches!(
+                branch["properties"]["operation"]["enum"][0].as_str(),
+                Some("mkdir" | "write" | "edit" | "command" | "skill" | "mcp_call")
+            )
+        });
+    schema
 }
 
 pub(crate) fn outcome_branch() -> Value {

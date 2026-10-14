@@ -4,7 +4,7 @@
 
 - Status: `In progress`
 - Owner: Fernando Mirabile
-- Last updated: 2026-10-13
+- Last updated: 2026-10-14
 
 ## Outcome
 
@@ -72,10 +72,11 @@ the user-owned checks in [next steps](../../NEXT_STEPS.md).
   [D-03](../../docs/research/next-step-decision-register.md#d-03--generic-bounded-agent-protocol)).
   This is a fan-out of advisors, not a coding team.
 - Commands return bounded changesets from a private offline snapshot; a separate
-  validated mutation publishes them to the Workspace. Scratch writes and build
-  outputs do not survive calls; explicitly selected host registry caches are
-  read-only inputs, not Arany's writable cache
-  ([Tools](../../docs/specs/tools.md#command-changesets)).
+  validated mutation publishes them to the Workspace. A private per-Workspace
+  StateRoot archive reuses bounded build outputs and dependency data inside each
+  command's quota-backed scratch view. Explicitly selected host registry caches
+  remain read-only and separate from Arany's archive
+  ([Tools](../../docs/specs/tools.md#persistent-workspace-build-cache)).
 - Folder trust pins the system `sh` and can explicitly select exact Rust, Node
   and Python runtime roots or known host-cache subtrees. Linux uses private
   mount propagation plus bounded namespace mount-table checks; macOS uses exact
@@ -109,10 +110,6 @@ unsupported enforcement fails closed. Child authority remains
 
 ### A. Coding foundation
 
-2. **Persistent build cache.** A private per-Workspace cache under
-   StateRoot, outside the Workspace, is mounted writable for build outputs and
-   dependency caches. It never carries credentials, is bounded by quota, and
-   the user can clear it. Its contents are build data, never authority.
 3. **Flexible limits.** Today's ceilings are compile-time constants
    (`MAX_TOOL_CALLS = 16` and a 64 KiB Tool context in
    [src/tools/types.rs](../../src/tools/types.rs), plus the 300-second Run).
@@ -452,8 +449,6 @@ execution contracts own the resulting behavior.
 
 ## OS impact
 
-- A3 needs bounded private writable storage on Linux and macOS, with explicit
-  ownership, cleanup and quota admission; its initial quota is 64 MiB.
 - A4 needs native Linux and macOS resource enforcement and evidence. The
   approved configurable ceilings do not establish build support.
 - A2's exact runtime roots, private Linux mount bootstrap, namespace topology
@@ -502,19 +497,13 @@ Each slice that crosses one of these boundaries runs the
 Each item is one PR with its own contract update, security pass where
 triggered and evidence under [testing rules](../../agents/testing.md).
 
-2. **A3 Persistent build cache.** Add the private per-Workspace writable cache
-   under StateRoot, with complete bounded streaming, isolation, quota and an
-   explicit clear operation. Its initial default quota is 64 MiB and its
-   approved configurable maximum is 8 GiB; A4 binds the selected quota to the
-   native build profile. A4's approved maxima are 4 GiB memory, 1 GiB writable
-   project storage and 256 tasks. These ceilings are policy choices, not
-   measured support claims.
 3. **Goal Foundation and budgets.** E11 every task is a Goal, B1 plan contract
    after bounded read-only inspection, typed success receipts, bounded reports,
-   explicit recovery, Goal budgets, and cross-StateRoot Workspace writer
-   exclusion. Creates the `docs/specs/goals.md` domain spec. This provides the
-   cancellation, context and budget owner required by A4; it does not claim
-   the follow-on steering, checkpoint, rewind or RPI workflows are delivered.
+   explicit recovery, Goal budgets and cross-StateRoot Workspace writer
+   exclusion. Creates the `docs/specs/goals.md` domain spec and supplies the
+   lifecycle, cancellation, context and budget owner required by A4. The
+   follow-on steering, checkpoint, rewind and RPI workflows remain in Goal
+   completion.
 4. **A4 Flexible limits.** Replace the Run's fixed tool/model/context ceilings
    with Finish, compaction, cancellation and Goal-budget bounds; add the
    agreed command timeout and finite build resource profile settings. Guard
@@ -527,9 +516,9 @@ triggered and evidence under [testing rules](../../agents/testing.md).
    later slice is exercised through real use, which supplies the shadow-mode
    calibration data B2 needs.
 6. **Goal completion.** E1–E4 steering, context reinjection, Workspace
-   checkpoints and rewind, E8 compaction and E10 follow-through. This slice
-   follows dogfooding and extends the Goal Foundation with the remaining
-   durable workflows and UI.
+   checkpoints and rewind, E8 compaction and E10 `exec` integration. This
+   follows dogfooding and extends Goal Foundation with the remaining durable
+   workflows and UI.
 7. B6 modes including RPI and grilling, E7 Goal view and E12 settings.
 8. B2, B3, B5 and E5 Supervisor signals, escalation, Finish gate and override.
 9. A5 Typed Git reads and E6 Git writes.
@@ -546,13 +535,13 @@ per-slice specification and evidence cost slows delivery.
 
 E13 telemetry spans land with the slice that introduces each span's subject.
 
-Next action: implement A3's persistent per-Workspace cache under the
-[Tools contract](../../docs/specs/tools.md), starting with the current 64 MiB
-quota and preserving the approved configurable maximum of 8 GiB. The approved
-build maxima are 4 GiB memory, 1 GiB writable project storage and 256 tasks;
-they remain finite policy ceilings, not support evidence. Goal Foundation
-precedes A4, which precedes dogfooding; the remaining Goal workflows follow
-dogfooding. Native build verification and named-host measurements remain
+Next action: complete Goal Foundation, then A4 and dogfooding before the
+remaining Goal workflows. The A3 per-Workspace cache has a 64 MiB initial
+archive/view limit and shares an 8 GiB StateRoot aggregate; A4 binds the
+effective admitted cache quota to the native build profile. Approved build
+maxima are 4 GiB memory, 8 GiB requested cache, 1 GiB writable project storage
+and 256 processes/threads. These remain finite policy ceilings, not support
+evidence. Native build verification and named-host measurements remain
 required before support claims.
 
 ## Open questions
@@ -568,7 +557,7 @@ data-dependent questions remain:
 
 ## Contract owners
 
-- `docs/specs/goals.md` (created in execution step 4): Goal lifecycle, RPI, steering, checkpoints, budgets and Goal view facts.
+- `docs/specs/goals.md` (created in execution step 3): Goal lifecycle, RPI, steering, checkpoints, budgets and Goal view facts.
 - [Execution](../../docs/specs/execution.md): Run admission, coordination, teams and recovery.
 - [Tools](../../docs/specs/tools.md): grants, effects, changesets, Guard and native differences.
 - [Terminal](../../docs/specs/terminal.md): interaction, Supervisor prompts and accessibility.

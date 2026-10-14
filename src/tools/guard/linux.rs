@@ -553,6 +553,8 @@ pub(super) async fn execute_inner(
         + Duration::from_secs(5);
     crate::tools::fs::validate_workspace(runtime)?;
     let workspace = crate::tools::fs::open_directory(&runtime.workspace)?;
+    let mut cache = super::build_cache_session(runtime, intent)?;
+    let cache_transfer = cache.as_ref().map(|session| session.transfer.clone());
     let (seed_path, seed_dir) =
         permit.prepare_seed(&workspace, &runtime.config, intent.call.is_process())?;
     let runtime_grants = if intent.call.is_process() {
@@ -719,13 +721,20 @@ pub(super) async fn execute_inner(
         let task = encode_task(&Task {
             config: runtime.config.clone(),
             intent: intent.clone(),
+            cache: cache_transfer,
             parent_namespaces: parent_namespaces.clone(),
         })?;
         stdin
             .write_all(&task)
             .await
             .map_err(|_| ToolError::Operation)?;
-        let ready = parse_ready(&read_line_capped(&mut stdout, 2048).await?, intent)?;
+        let mut ready_bytes = read_line_capped(&mut stdout, 2048).await?;
+        if ready_bytes == b"CACHE_READY\n" {
+            let session = cache.as_ref().ok_or(ToolError::Operation)?;
+            super::send_cache_archive(&mut stdin, &session.lease).await?;
+            ready_bytes = read_line_capped(&mut stdout, 2048).await?;
+        }
+        let ready = parse_ready(&ready_bytes, intent)?;
         if ready.pid != 1 && ready.pid != 2 {
             return Err(ToolError::ProtectionUnavailable);
         }
@@ -741,7 +750,16 @@ pub(super) async fn execute_inner(
             .await
             .map_err(|_| ToolError::Operation)?;
         stdin.shutdown().await.map_err(|_| ToolError::Operation)?;
-        let observation = read_observation(&mut stdout, intent).await?;
+        let (observation, candidate) = if let Some(session) = cache.as_ref() {
+            let observation = super::read_observation_line(&mut stdout, intent).await?;
+            let candidate = super::receive_cache_candidate(&mut stdout, &session.lease).await?;
+            (observation, candidate)
+        } else {
+            (
+                read_observation(&mut stdout, intent).await?,
+                super::CacheCandidate::Received,
+            )
+        };
         if !child
             .wait()
             .await
@@ -750,7 +768,10 @@ pub(super) async fn execute_inner(
         {
             return Err(ToolError::Operation);
         }
-        Ok(observation)
+        if cache.is_some() && !read_capped(&mut stdout, 1).await?.is_empty() {
+            return Err(ToolError::Operation);
+        }
+        Ok((observation, candidate))
     };
     let result = tokio::select! {
         biased;
@@ -798,7 +819,11 @@ pub(super) async fn execute_inner(
         };
         return Err(ToolError::GuardRejected(stage));
     }
-    result
+    result.map(|(observation, candidate)| {
+        let mut observation = observation;
+        super::publish_cache_candidate(&mut observation, candidate, cache.as_mut());
+        observation
+    })
 }
 
 fn runtime_path(grants: &[super::super::toolchains::RuntimeGrant]) -> Result<String, ToolError> {

@@ -116,6 +116,21 @@ fn first_effect_requires_a_plan_and_bounded_read_only_prelude_is_available() {
                 contract["properties"]["skills"]["items"]["required"],
                 json!(["name", "resource"])
             );
+            let eligible_calls = contract["properties"]["success_criterion"]["anyOf"][0]
+                ["properties"]["call"]["anyOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|call| {
+                    call["properties"]["operation"]["enum"][0]
+                        .as_str()
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                eligible_calls,
+                vec!["mkdir", "write", "edit", "command", "skill", "mcp_call"]
+            );
         }
         assert!(
             body["system"]

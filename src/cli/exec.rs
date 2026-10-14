@@ -288,26 +288,33 @@ async fn run_with_provider<P: Provider + 'static>(
     }
     let stdout = render_exec(run, &events, args.output.into(), new_session);
     let stderr = match args.output {
-        OutputArg::Text => format!(
-            "Session: {}\nRun: {}\nStatus: {}\n{}",
-            outcome.session_id,
-            run.id,
-            match run.status {
-                RunStatus::Finished => "finished",
-                RunStatus::Failed => "failed",
-                RunStatus::Cancelled => "cancelled",
-                _ => return Err("Run did not reach a terminal state".into()),
-            },
-            match run.config.as_ref() {
-                Some(config) if config.chatgpt_provenance.is_some() => {
-                    "Provider: ChatGPT plan\nOutput bound: local only; remote usage is not capped\n"
-                }
-                Some(config) if config.custom_profile_provenance.is_some() => {
-                    "Provider: custom verified\n"
-                }
-                _ => "",
-            },
-        ),
+        OutputArg::Text => {
+            let mut receipt = format!(
+                "Session: {}\nRun: {}\nStatus: {}\n{}",
+                outcome.session_id,
+                run.id,
+                match run.status {
+                    RunStatus::Finished => "finished",
+                    RunStatus::Failed => "failed",
+                    RunStatus::Cancelled => "cancelled",
+                    _ => return Err("Run did not reach a terminal state".into()),
+                },
+                match run.config.as_ref() {
+                    Some(config) if config.chatgpt_provenance.is_some() => {
+                        "Provider: ChatGPT plan\nOutput bound: local only; remote usage is not capped\n"
+                    }
+                    Some(config) if config.custom_profile_provenance.is_some() => {
+                        "Provider: custom verified\n"
+                    }
+                    _ => "",
+                },
+            );
+            if let Some(notice) = arany::render_cache_update_feedback(run) {
+                receipt.push_str(notice);
+                receipt.push('\n');
+            }
+            receipt
+        }
         OutputArg::Jsonl if success => String::new(),
         OutputArg::Jsonl => "error: Run failed\n".into(),
     };
@@ -567,7 +574,7 @@ mod tests {
         for (line, event) in run_lines.into_iter().zip(run_events) {
             assert_eq!(line["sequence"], event.sequence);
             assert_eq!(line["created_at_ms"], event.created_at_ms);
-            assert_eq!(line["event_version"], 2);
+            assert_eq!(line["event_version"], 3);
         }
         store.close().await.expect("closed store");
 

@@ -789,10 +789,15 @@ pub(super) async fn execute_inner(
 }
 
 impl Task {
-    fn new(runtime: &ToolRuntime, intent: &EffectIntent) -> Self {
+    fn new(
+        runtime: &ToolRuntime,
+        intent: &EffectIntent,
+        cache: Option<super::BuildCacheTransfer>,
+    ) -> Self {
         Self {
             config: runtime.config.clone(),
             intent: intent.clone(),
+            cache,
             workspace: runtime.workspace.clone(),
             guard_executable: runtime.guard_executable.clone(),
             system_programs: if intent.call.is_process() {
@@ -803,9 +808,11 @@ impl Task {
         }
     }
 
-    fn into_runtime(self) -> (ToolRuntime, EffectIntent) {
+    fn into_runtime(self) -> (ToolRuntime, EffectIntent, Option<super::BuildCacheTransfer>) {
+        let cache = self.cache;
         let runtime = ToolRuntime {
             queue_progress: None,
+            cache_state: None,
             config: self.config,
             workspace: self.workspace,
             workspace_identity: (self.intent.workspace_device, self.intent.workspace_inode),
@@ -814,7 +821,7 @@ impl Task {
             process_enforcement_digest: self.intent.enforcement_digest,
             system_programs: self.system_programs.map(Arc::new),
         };
-        (runtime, self.intent)
+        (runtime, self.intent, cache)
     }
 }
 
@@ -828,7 +835,7 @@ async fn execute_worker(
     root: &Path,
 ) -> Result<ToolObservation, ToolError> {
     crate::tools::fs::validate_workspace(runtime)?;
-    let task = super::encode_task(&Task::new(runtime, intent))?;
+    let task = super::encode_task(&Task::new(runtime, intent, None))?;
     let mut child = Command::new(&runtime.guard_executable)
         .arg("--internal-tool-guard")
         .env_clear()
@@ -1116,6 +1123,7 @@ mod tests {
                 use_count: 1,
             },
             config,
+            cache: None,
             workspace,
             guard_executable: std::env::current_exe().unwrap(),
             system_programs: None,

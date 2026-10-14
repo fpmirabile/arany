@@ -456,6 +456,7 @@ mod goal_report_tests {
                         "sha256": crate::tools::types::hex_digest(b"evidence")
                     })
                     .to_string(),
+                    cache_update: crate::tools::CacheUpdate::NotApplicable,
                 };
                 ToolView {
                     intent,

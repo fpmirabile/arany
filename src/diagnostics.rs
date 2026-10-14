@@ -541,6 +541,7 @@ mod tests {
                 disposition: crate::tools::ToolDisposition::Uncertain,
                 output: CANARY.into(),
                 guard: None,
+                cache_update: crate::tools::CacheUpdate::NotApplicable,
             },
         });
         event_failure(&crate::session::Event::RunFinished {

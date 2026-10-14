@@ -12,15 +12,15 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     let run = RunId::new();
     let primary = AgentRunId::new();
     const AGENT_SPAWNED: usize = 6;
-    const TOOL_STARTED: usize = 9;
-    const TOOL_FINISHED: usize = 10;
-    const NEXT_CALL_RESERVED: usize = 11;
-    const NEXT_CALL_RECORDED: usize = 12;
-    const COMMAND_STARTED: usize = TOOL_STARTED + 1;
-    const COMMAND_FINISHED: usize = TOOL_STARTED + 2;
-    const INTEGRATION_STARTED: usize = TOOL_STARTED + 3;
-    const INTEGRATION_FINISHED: usize = TOOL_STARTED + 4;
-    const INTEGRATED_NEXT_CALL_RESERVED: usize = TOOL_STARTED + 5;
+    const TOOL_STARTED: usize = 10;
+    const TOOL_FINISHED: usize = 11;
+    const NEXT_CALL_RESERVED: usize = 12;
+    const NEXT_CALL_RECORDED: usize = 13;
+    const COMMAND_STARTED: usize = TOOL_STARTED;
+    const COMMAND_FINISHED: usize = TOOL_STARTED + 1;
+    const INTEGRATION_STARTED: usize = TOOL_STARTED + 2;
+    const INTEGRATION_FINISHED: usize = TOOL_STARTED + 3;
+    const INTEGRATED_NEXT_CALL_RESERVED: usize = TOOL_STARTED + 4;
     let policy = arany::ToolPolicyReceipt {
         contract_version: 1,
         config_digest: [1; 32],
@@ -50,6 +50,11 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         compaction_content_digest: None,
         tool_policy: Some(policy),
     };
+    let call = ToolCall::Command {
+        program: "shell".into(),
+        args: Vec::new(),
+        cwd: String::new(),
+    };
     let intent = arany::EffectIntent {
         id: uuid::Uuid::now_v7(),
         run_id: run,
@@ -58,7 +63,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         enforcement_digest: [2; 32],
         workspace_device: 1,
         workspace_inode: 2,
-        call: ToolCall::List { path: "src".into() },
+        call: call.clone(),
         limits: arany::ToolLimits::default(),
         expires_at_ms: 1,
         use_count: 1,
@@ -66,13 +71,20 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     let observation = arany::ToolObservation {
         intent: intent.clone(),
         disposition: ToolDisposition::Succeeded,
-        output: "historical observation".into(),
+        output: serde_json::json!({
+            "exit_code": 0,
+            "stdout": "",
+            "stderr": "",
+            "changeset": {"files": []}
+        })
+        .to_string(),
         guard: Some(arany::GuardReceipt {
             contract_version: 1,
             intent_digest: Sha256::digest(serde_json::to_vec(&intent).unwrap()).into(),
             enforcement_digest: intent.enforcement_digest,
             limits: intent.limits.clone(),
         }),
+        cache_update: arany::CacheUpdate::NotApplicable,
     };
     let record = |disposition| Event::ProviderCallRecorded {
         run_id: run,
@@ -130,6 +142,24 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             agent_run_id: primary,
         },
         record(ProviderCallDisposition::ToolRequested),
+        Event::GoalPlanContractRecorded {
+            goal_id: goal,
+            run_id: run,
+            contract: arany::GoalPlanContract {
+                mission: "Verify the bounded command result".into(),
+                paths: vec!["src".into()],
+                commands: vec!["shell".into()],
+                skills: Vec::new(),
+                mcp_tools: Vec::new(),
+                success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
+                    path: "src/new.txt".into(),
+                    content: "new\n".into(),
+                },
+                budget: arany::GoalBudget::default(),
+            },
+            active_ms: 0,
+            reserved_ms: 30_000,
+        },
         Event::ToolStarted {
             run_id: run,
             agent_run_id: primary,
@@ -479,6 +509,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 limits: intent.limits.clone(),
             }),
             intent,
+            cache_update: arany::CacheUpdate::NotApplicable,
         },
     };
     let command_result = serde_json::json!({
@@ -486,23 +517,6 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     })
     .to_string();
     let mut integrated = prefix[..TOOL_STARTED].to_vec();
-    integrated.push(Event::GoalPlanContractRecorded {
-        goal_id: goal,
-        run_id: run,
-        contract: arany::GoalPlanContract {
-            mission: "Record the synthetic changeset".into(),
-            paths: vec!["src".into()],
-            commands: vec!["shell".into()],
-            skills: Vec::new(),
-            mcp_tools: Vec::new(),
-            success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
-                call: Box::new(command_intent.call.clone()),
-            },
-            budget: arany::GoalBudget::default(),
-        },
-        active_ms: 0,
-        reserved_ms: 30_000,
-    });
     integrated.extend([
         Event::ToolStarted {
             run_id: run,
@@ -543,7 +557,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         ],
     );
     reviewed_integration.splice(
-        INTEGRATION_FINISHED + 3..INTEGRATION_FINISHED + 3,
+        INTEGRATION_FINISHED + 2..INTEGRATION_FINISHED + 2,
         [
             Event::GoalProviderCallReserved {
                 goal_id: goal,
@@ -605,6 +619,58 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     let view = replay(unpublished).unwrap().unwrap();
     assert_eq!(view.runs[0].status, RunStatus::Failed);
     assert_eq!(view.runs[0].tools.len(), 1);
+    let mut unfinalized_cache = integrated[..COMMAND_FINISHED + 1].to_vec();
+    if let Event::ToolFinished { observation, .. } = &mut unfinalized_cache[COMMAND_FINISHED] {
+        observation.disposition = ToolDisposition::Succeeded;
+        observation.output = serde_json::json!({
+            "exit_code": 0,
+            "stdout": "build complete",
+            "stderr": "",
+            "changeset": changeset,
+        })
+        .to_string();
+        observation.cache_update = arany::CacheUpdate::NotAttempted;
+    }
+    assert!(
+        replay(unfinalized_cache).is_err(),
+        "successful cache-backed command requires controller finalization before Event commit"
+    );
+    let mut uncertain_cache = integrated[..COMMAND_FINISHED + 1].to_vec();
+    if let Event::ToolFinished { observation, .. } = &mut uncertain_cache[COMMAND_FINISHED] {
+        observation.disposition = ToolDisposition::Uncertain;
+        observation.output = serde_json::json!({
+            "exit_code": 0,
+            "stdout": "build complete",
+            "stderr": "",
+            "changeset": changeset,
+        })
+        .to_string();
+        observation.cache_update = arany::CacheUpdate::Uncertain;
+    }
+    uncertain_cache.extend([
+        Event::AgentFinished {
+            run_id: run,
+            agent_run_id: primary,
+            disposition: AgentDisposition::Failed,
+            summary: None,
+            result: None,
+        },
+        Event::RunFinished {
+            run_id: run,
+            disposition: RunDisposition::Failed,
+        },
+    ]);
+    let view = replay(uncertain_cache).unwrap().unwrap();
+    assert_eq!(view.runs[0].status, RunStatus::Failed);
+    assert_eq!(view.runs[0].tools.len(), 1);
+    assert_eq!(
+        view.runs[0].tools[0]
+            .observation
+            .as_ref()
+            .unwrap()
+            .cache_update,
+        arany::CacheUpdate::Uncertain
+    );
     for case in [
         "source",
         "content",
@@ -736,7 +802,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 reserved_ms: 30_000,
             },
         ]);
-        for _ in 0..pairs {
+        for pair in 0..pairs {
             let mut command = command_intent.clone();
             command.id = uuid::Uuid::now_v7();
             let mut integration = integration_intent.clone();
@@ -756,6 +822,11 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                     agent_run_id: primary,
                 },
                 record(ProviderCallDisposition::ToolRequested),
+            ]);
+            if pair == 0 {
+                rows.push(prefix[TOOL_STARTED - 1].clone());
+            }
+            rows.extend([
                 Event::ToolStarted {
                     run_id: run,
                     agent_run_id: primary,
@@ -787,7 +858,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         (16, &"x".repeat(8192), false),
     ] {
         let mut rows = prefix[..AGENT_SPAWNED + 1].to_vec();
-        for _ in 0..count {
+        for call_index in 0..count {
             let mut start = prefix[TOOL_STARTED].clone();
             let Event::ToolStarted { intent, .. } = &mut start else {
                 unreachable!()
@@ -808,9 +879,11 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                     agent_run_id: primary,
                 },
                 record(ProviderCallDisposition::ToolRequested),
-                start,
-                result,
             ]);
+            if call_index == 0 {
+                rows.push(prefix[TOOL_STARTED - 1].clone());
+            }
+            rows.extend([start, result]);
         }
         rows.extend(suffix.clone());
         assert_eq!(
@@ -1170,7 +1243,9 @@ pub(super) async fn native_command_changeset_corpus(
         })
         .await
         .unwrap_or_else(|_| panic!("{case}: native changeset deadline"));
-        let outcome = outcome.unwrap();
+        let outcome = outcome.unwrap_or_else(|error| {
+            panic!("{case}: native changeset Engine run failed: {error:?}")
+        });
         engine.close().await.unwrap();
         let human_denied = matches!(case, "deny" | "drop" | "cancel");
         let stopped = human_denied || matches!(case, "partial" | "budget");
