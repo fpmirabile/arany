@@ -119,6 +119,10 @@ pub(super) fn product_child_of(shell_pid: u32) -> Pid {
 }
 
 pub(super) fn product_child_of_executable(shell_pid: u32, product: &Path) -> Pid {
+    try_product_child_of_executable(shell_pid, product).expect("active product child not found")
+}
+
+pub(super) fn try_product_child_of_executable(shell_pid: u32, product: &Path) -> Option<Pid> {
     let children_path = format!("/proc/{shell_pid}/task/{shell_pid}/children");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -132,11 +136,13 @@ pub(super) fn product_child_of_executable(shell_pid: u32, product: &Path) -> Pid
                     .as_deref()
                     == Some(product)
                 {
-                    return Pid::from_raw(raw_pid).expect("positive product PID");
+                    return Some(Pid::from_raw(raw_pid).expect("positive product PID"));
                 }
             }
         }
-        assert!(Instant::now() < deadline, "active product child not found");
+        if Instant::now() >= deadline {
+            return None;
+        }
         thread::yield_now();
     }
 }

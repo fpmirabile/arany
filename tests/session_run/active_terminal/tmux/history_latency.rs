@@ -561,6 +561,11 @@ async fn run_history_fixture() {
         if let Some(screen) = capture_pane(&server) {
             decline_initial_consent(&server, &screen, &mut declined);
             if resumed_tail_layout(&screen) {
+                assert!(
+                    !exit_path.exists(),
+                    "ready composer frame remained after product exit; {}",
+                    wrapper_exit_status(&exit_path)
+                );
                 break;
             }
         }
@@ -589,7 +594,13 @@ async fn run_history_fixture() {
         .trim()
         .parse::<u32>()
         .expect("pane PID");
-    let product_pid = super::product_child_of_executable(pane_pid, &executable);
+    let product_pid =
+        super::try_product_child_of_executable(pane_pid, &executable).unwrap_or_else(|| {
+            panic!(
+                "active product child not found; {}",
+                wrapper_exit_status(&exit_path)
+            )
+        });
     let product_guard = super::ProductGuard::for_executable(product_pid, state.clone(), executable);
     assert!(
         product_guard.is_owned_and_running(),
