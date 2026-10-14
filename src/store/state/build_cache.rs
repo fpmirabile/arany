@@ -529,6 +529,7 @@ pub(crate) fn restore_archive<R: Read>(
     archive.finish()
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) async fn restore_archive_async<R: tokio::io::AsyncRead + Unpin>(
     input: &mut R,
     destination: &Dir,
@@ -640,6 +641,7 @@ pub(crate) async fn restore_archive_async<R: tokio::io::AsyncRead + Unpin>(
     }
 }
 
+#[cfg(target_os = "macos")]
 async fn copy_async_to_file<R: tokio::io::AsyncRead + Unpin>(
     input: &mut R,
     output: &mut File,
@@ -656,6 +658,7 @@ async fn copy_async_to_file<R: tokio::io::AsyncRead + Unpin>(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 async fn discard_async<R: tokio::io::AsyncRead + Unpin>(
     input: &mut R,
     mut remaining: u64,
@@ -756,6 +759,7 @@ pub(crate) fn archive_size(
     total.checked_add(12).ok_or(StoreError::StorageFull)
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) async fn capture_archive_async<W: tokio::io::AsyncWrite + Unpin>(
     source: &Dir,
     identity: &BuildCacheIdentity,
@@ -1853,6 +1857,7 @@ fn read_u64<R: Read>(reader: &mut R) -> Result<u64, StoreError> {
     Ok(u64::from_le_bytes(value))
 }
 
+#[cfg(target_os = "macos")]
 async fn read_u8_async<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) -> Result<u8, StoreError> {
     use tokio::io::AsyncReadExt;
     let mut value = [0; 1];
@@ -1860,6 +1865,7 @@ async fn read_u8_async<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) -> Resul
     Ok(value[0])
 }
 
+#[cfg(target_os = "macos")]
 async fn read_u16_async<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut R,
 ) -> Result<u16, StoreError> {
@@ -1869,6 +1875,7 @@ async fn read_u16_async<R: tokio::io::AsyncRead + Unpin>(
     Ok(u16::from_le_bytes(value))
 }
 
+#[cfg(target_os = "macos")]
 async fn read_u64_async<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut R,
 ) -> Result<u64, StoreError> {
