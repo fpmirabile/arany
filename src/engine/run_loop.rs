@@ -420,14 +420,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                 .then(|| primary.begin_provider(AgentPhase::RootPlan, &root_request.model));
             let Some(first) = self.invoke_primary(root_request.clone(), deadline).await? else {
                 if let Some(first_trace) = first_trace {
-                    first_trace.finish(
-                        &primary,
-                        &root_request.model,
-                        false,
-                        ProviderTraceOutcome::Failed(TraceFailure::Rejected),
-                        None,
-                        None,
-                    );
+                    first_trace.finish_refused(&primary, &root_request.model);
                 }
                 if let Some(next_trace) = next_trace {
                     next_trace.finish_refused();

@@ -651,6 +651,18 @@ impl ProviderTrace {
 }
 
 impl FirstProviderCall {
+    /// Closes a first call the Goal budget refused before dispatch; no usage was observed.
+    pub(crate) fn finish_refused(self, agent: &AgentTrace, model: &str) {
+        self.finish(
+            agent,
+            model,
+            false,
+            ProviderTraceOutcome::Failed(TraceFailure::Rejected),
+            None,
+            None,
+        );
+    }
+
     pub(crate) fn finish(
         self,
         agent: &AgentTrace,
