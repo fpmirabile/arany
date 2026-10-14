@@ -184,7 +184,6 @@ pub(super) fn publish_cache_candidate(
     observation.cache_update = update;
     if !observation.valid() {
         observation.cache_update = CacheUpdate::Uncertain;
-        observation.disposition = ToolDisposition::Uncertain;
     }
 }
 
@@ -598,7 +597,9 @@ pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
     if length == 0 || length > crate::store::BUILD_CACHE_ARCHIVE_BYTES {
         return Err(ToolError::Limit);
     }
-    let mut file = lease.candidate_writer().map_err(map_cache_error)?;
+    // A host-side staging failure keeps the command result: stop staging but keep draining
+    // the archive so the protocol stays in sync with the worker's trailing marker.
+    let mut staged = lease.candidate_writer().ok();
     let mut buffer = [0; 32 * 1024];
     let mut remaining = length;
     while remaining > 0 {
@@ -607,11 +608,20 @@ pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
             .read_exact(&mut buffer[..wanted])
             .await
             .map_err(|_| ToolError::Operation)?;
-        file.write_all(&buffer[..wanted])
-            .map_err(|_| ToolError::Operation)?;
+        if staged
+            .as_mut()
+            .is_some_and(|file| file.write_all(&buffer[..wanted]).is_err())
+        {
+            staged = None;
+        }
         remaining -= wanted as u64;
     }
-    file.sync_all().map_err(|_| ToolError::Operation)?;
+    let Some(file) = staged else {
+        return Ok(CacheCandidate::Failed);
+    };
+    if file.sync_all().is_err() {
+        return Ok(CacheCandidate::Failed);
+    }
     Ok(CacheCandidate::Received)
 }
 
@@ -1273,5 +1283,119 @@ mod tests {
             Err(ToolError::ChangedInput)
         ));
         assert!(verify_intent_runtime_grants(&file, &config).is_ok());
+    }
+
+    fn cache_fixture(root: &Path) -> (crate::store::StateRoot, BuildCacheIdentity) {
+        use std::os::unix::fs::MetadataExt;
+
+        let workspace = root.join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let metadata = std::fs::metadata(&workspace).unwrap();
+        let identity = BuildCacheIdentity::new(&workspace, metadata.dev(), metadata.ino()).unwrap();
+        let state = crate::store::StateRoot::admit(&root.join("state")).unwrap();
+        (state, identity)
+    }
+
+    fn empty_archive(identity: &BuildCacheIdentity) -> Vec<u8> {
+        let mut bytes = b"ARANYCACHE\0\x01".to_vec();
+        bytes.extend((identity.path.len() as u16).to_le_bytes());
+        bytes.extend(identity.device.to_le_bytes());
+        bytes.extend(identity.inode.to_le_bytes());
+        bytes.extend(identity.path.as_bytes());
+        bytes.extend([0; 12]);
+        bytes
+    }
+
+    fn command_observation() -> ToolObservation {
+        let mut intent = intent(ToolCall::Command {
+            program: "cargo".into(),
+            args: vec!["build".into()],
+            cwd: ".".into(),
+        });
+        intent.policy_digest = [1; 32];
+        intent.enforcement_digest = [2; 32];
+        let guard = GuardReceipt {
+            contract_version: 1,
+            intent_digest: intent.digest(),
+            enforcement_digest: intent.enforcement_digest,
+            limits: intent.limits.clone(),
+        };
+        ToolObservation {
+            intent,
+            disposition: ToolDisposition::Succeeded,
+            output: r#"{"exit_code":0,"stdout":"built","stderr":"","changeset":{"files":[]}}"#
+                .into(),
+            guard: Some(guard),
+            cache_update: CacheUpdate::NotAttempted,
+        }
+    }
+
+    fn cache_session(
+        state: &crate::store::StateRoot,
+        identity: &BuildCacheIdentity,
+    ) -> BuildCacheSession {
+        BuildCacheSession {
+            lease: state.begin_build_cache(identity.clone()).unwrap(),
+            transfer: BuildCacheTransfer {
+                identity: identity.clone(),
+                exclusions: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn cache_publication_never_replaces_a_succeeded_command() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, identity) = cache_fixture(temp.path());
+
+        let mut session = cache_session(&state, &identity);
+        let mut corrupt = session.lease.candidate_writer().unwrap();
+        corrupt.write_all(b"not an archive").unwrap();
+        drop(corrupt);
+        let mut observation = command_observation();
+        publish_cache_candidate(
+            &mut observation,
+            CacheCandidate::Received,
+            Some(&mut session),
+        );
+        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+        assert_eq!(observation.cache_update, CacheUpdate::Failed);
+        drop(session);
+
+        let mut session = cache_session(&state, &identity);
+        let mut valid = session.lease.candidate_writer().unwrap();
+        valid.write_all(&empty_archive(&identity)).unwrap();
+        valid.sync_all().unwrap();
+        drop(valid);
+        let mut observation = command_observation();
+        publish_cache_candidate(
+            &mut observation,
+            CacheCandidate::Received,
+            Some(&mut session),
+        );
+        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+        assert_eq!(observation.cache_update, CacheUpdate::Published);
+        assert!(observation.valid());
+    }
+
+    #[tokio::test]
+    async fn candidate_staging_failure_drains_the_archive_and_keeps_the_command_result() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, identity) = cache_fixture(temp.path());
+        let lease = state.begin_build_cache(identity).unwrap();
+        // Occupies the candidate name, so the create_new staging step fails.
+        drop(lease.candidate_writer().unwrap());
+
+        let archive = b"ARCHIVE\nbytes";
+        let mut stream = b"CACHE_CANDIDATE\n".to_vec();
+        stream.extend((archive.len() as u64).to_le_bytes());
+        stream.extend(archive);
+        stream.extend(b"CACHE_DONE\n");
+        let mut reader = tokio::io::BufReader::new(stream.as_slice());
+        let candidate = receive_cache_candidate(&mut reader, &lease).await.unwrap();
+        assert!(matches!(candidate, CacheCandidate::Failed));
+        let mut trailer = String::new();
+        reader.read_line(&mut trailer).await.unwrap();
+        assert_eq!(trailer, "CACHE_DONE\n");
     }
 }

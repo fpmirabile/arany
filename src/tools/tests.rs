@@ -1308,9 +1308,6 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
     unattempted_error.cache_update = CacheUpdate::NotAttempted;
     assert!(unattempted_error.valid());
     assert!(unattempted_error.stops_run());
-    let mut unattempted_success = unattempted_error.clone();
-    unattempted_success.disposition = ToolDisposition::Succeeded;
-    assert!(!unattempted_success.valid());
     let mut widened = intent.clone();
     widened.limits.runtime_ms += 1;
     assert!(!widened.valid());

@@ -15,12 +15,13 @@ const CANDIDATE_PREFIX: &str = "candidate-";
 const IDENTITY_LOCK_PREFIX: &str = "identity-";
 const TRANSACTION_PREFIX: &str = "transaction-";
 const TRANSACTION_NEXT_PREFIX: &str = "transaction-next-";
+// First match wins when classifying names: TRANSACTION_NEXT_PREFIX must precede TRANSACTION_PREFIX.
 const IDENTITY_FILE_KINDS: [(&str, &str); 8] = [
     (ARCHIVE_PREFIX, ".arc"),
     (PREVIOUS_PREFIX, ".arc"),
-    (RESERVATION_PREFIX, ".reserve"),
     (STAGING_PREFIX, ".arc"),
     (CANDIDATE_PREFIX, ".arc"),
+    (RESERVATION_PREFIX, ".reserve"),
     (IDENTITY_LOCK_PREFIX, ".lock"),
     (TRANSACTION_NEXT_PREFIX, ".pending"),
     (TRANSACTION_PREFIX, ".pending"),
@@ -412,13 +413,11 @@ impl StateRoot {
         let (identity_lock, _) = open_lock_file(&dir, &lock_name)?;
         lock_exclusive(&identity_lock, true)?;
         let _aggregate = lock_file(&dir, AGGREGATE_LOCK, true)?;
-        remove_if_present(&dir, &archive_name(&token))?;
-        remove_if_present(&dir, &previous_name(&token))?;
-        remove_if_present(&dir, &stage_name(&token))?;
-        remove_if_present(&dir, &candidate_name(&token))?;
-        remove_if_present(&dir, &reservation_name(&token))?;
-        remove_if_present(&dir, &transaction_name(&token))?;
-        remove_if_present(&dir, &transaction_next_name(&token))?;
+        for name in identity_file_names(&token) {
+            if name != lock_name {
+                remove_if_present(&dir, &name)?;
+            }
+        }
         sync_directory(&dir)?;
         remove_if_present(&dir, &lock_name)?;
         Ok(())
@@ -571,7 +570,11 @@ pub(crate) async fn restore_archive_async<R: tokio::io::AsyncRead + Unpin>(
         check_path_len(path_len)?;
         let mut path_bytes = vec![0; path_len];
         input.read_exact(&mut path_bytes).await?;
-        let (path, directory, executable) = cursor.admit(path_bytes, kind, flags, size)?;
+        let AdmittedEntry {
+            path,
+            directory,
+            executable,
+        } = cursor.admit(path_bytes, kind, flags, size)?;
         if is_excluded(&path, exclusions) {
             discard_async(input, size).await?;
             continue;
@@ -827,6 +830,12 @@ struct ArchiveEntry<'a, R> {
     size: u64,
 }
 
+struct AdmittedEntry {
+    path: String,
+    directory: bool,
+    executable: bool,
+}
+
 struct ArchiveCursor {
     last: Option<String>,
     total: u64,
@@ -848,7 +857,7 @@ impl ArchiveCursor {
         kind: u8,
         flags: u8,
         size: u64,
-    ) -> Result<(String, bool, bool), StoreError> {
+    ) -> Result<AdmittedEntry, StoreError> {
         let path = String::from_utf8(path).map_err(|_| StoreError::InvalidBuildCache)?;
         validate_path(&path)?;
         let directory = match kind {
@@ -872,7 +881,11 @@ impl ArchiveCursor {
             return Err(StoreError::StorageFull);
         }
         self.total = account_entry(self.total, &path, size)?;
-        Ok((path, directory, flags == 1))
+        Ok(AdmittedEntry {
+            path,
+            directory,
+            executable: flags == 1,
+        })
     }
 
     fn terminate(&mut self, kind: u8, flags: u8, size: u64) -> Result<(), StoreError> {
@@ -943,12 +956,12 @@ impl<'a, R: Read> ArchiveReader<'a, R> {
         check_path_len(path_len)?;
         let mut path = vec![0; path_len];
         self.input.read_exact(&mut path)?;
-        let (path, directory, executable) = self.cursor.admit(path, kind, flags, size)?;
+        let admitted = self.cursor.admit(path, kind, flags, size)?;
         Ok(Some(ArchiveEntry {
             input: self.input,
-            path,
-            directory,
-            executable,
+            path: admitted.path,
+            directory: admitted.directory,
+            executable: admitted.executable,
             size,
         }))
     }
@@ -1394,25 +1407,25 @@ fn identity_count(dir: &Dir) -> Result<usize, StoreError> {
             .file_name()
             .into_string()
             .map_err(|_| StoreError::StateNotPrivate)?;
-        for (prefix, ending) in IDENTITY_FILE_KINDS {
-            if let Some(token) = suffix(&name, prefix, ending) {
-                validate_token(token)?;
-                identities.insert(token.to_owned());
-            }
+        if let Some(token) = IDENTITY_FILE_KINDS
+            .into_iter()
+            .find_map(|(prefix, ending)| suffix(&name, prefix, ending))
+        {
+            validate_token(token)?;
+            identities.insert(token.to_owned());
         }
     }
     Ok(identities.len())
 }
 
+fn identity_file_names(token: &str) -> impl Iterator<Item = String> + '_ {
+    IDENTITY_FILE_KINDS
+        .into_iter()
+        .map(move |(prefix, ending)| format!("{prefix}{token}{ending}"))
+}
+
 fn contains_cache_identity(dir: &Dir, token: &str) -> Result<bool, StoreError> {
-    Ok(dir.symlink_metadata(archive_name(token)).is_ok()
-        || dir.symlink_metadata(previous_name(token)).is_ok()
-        || dir.symlink_metadata(reservation_name(token)).is_ok()
-        || dir.symlink_metadata(stage_name(token)).is_ok()
-        || dir.symlink_metadata(candidate_name(token)).is_ok()
-        || dir.symlink_metadata(transaction_name(token)).is_ok()
-        || dir.symlink_metadata(transaction_next_name(token)).is_ok()
-        || dir.symlink_metadata(identity_lock_name(token)).is_ok())
+    Ok(identity_file_names(token).any(|name| dir.symlink_metadata(name).is_ok()))
 }
 
 fn remove_if_present(dir: &Dir, name: &str) -> Result<(), StoreError> {
@@ -1511,16 +1524,9 @@ fn file_exists(dir: &Dir, name: &str) -> Result<bool, StoreError> {
 }
 
 fn has_cache_files(dir: &Dir, token: &str) -> Result<bool, StoreError> {
-    for name in [
-        archive_name(token),
-        previous_name(token),
-        reservation_name(token),
-        stage_name(token),
-        candidate_name(token),
-        transaction_name(token),
-        transaction_next_name(token),
-    ] {
-        if file_exists(dir, &name)? {
+    let lock_name = identity_lock_name(token);
+    for name in identity_file_names(token) {
+        if name != lock_name && file_exists(dir, &name)? {
             return Ok(true);
         }
     }
@@ -2340,6 +2346,49 @@ mod tests {
         stored.read_to_end(&mut bytes).expect("archive bytes");
         assert_eq!(bytes, new);
         assert!(!file_exists(&dir, &previous_name(&token)).expect("backup check"));
+    }
+
+    #[test]
+    fn leftover_transaction_next_record_does_not_block_another_workspace() {
+        let temp = tempfile::tempdir().expect("fixture");
+        let state_path = temp.path().join("state");
+        let workspace = temp.path().join("workspace");
+        let other_workspace = temp.path().join("other-workspace");
+        let source = temp.path().join("source");
+        private_dir(&state_path);
+        private_dir(&workspace);
+        private_dir(&other_workspace);
+        std::fs::create_dir_all(source.join("target")).expect("cache source");
+        std::fs::write(source.join("target/marker"), b"archive").expect("cache data");
+        let state = StateRoot::admit(&state_path).expect("StateRoot");
+        let other = identity(&other_workspace);
+        let identity = identity(&workspace);
+        let bytes = archive(&identity, &source, &[]);
+        publish(&state, identity.clone(), &bytes, &[]);
+
+        let dir = cache_directory(&state, false).expect("cache directory");
+        let token = identity.token();
+        let mut lease = begin_released(&state, identity.clone()).expect("torn-record lease");
+        let mut pending =
+            create_private_file(&dir, &transaction_next_name(&token)).expect("pending record");
+        write!(
+            pending,
+            "{token}\n{}\n",
+            CacheTransaction::RollbackPrevious.record()
+        )
+        .expect("pending record bytes");
+        pending.sync_all().expect("pending record sync");
+        drop(pending);
+        lease.defer_recovery = true;
+        drop(lease);
+
+        drop(begin_released(&state, other).expect("other Workspace cache admission"));
+        let lease = begin_released(&state, identity).expect("original identity recovery");
+        let (mut stored, _) = lease.archive().expect("archive lookup").expect("archive");
+        let mut recovered = Vec::new();
+        stored.read_to_end(&mut recovered).expect("archive bytes");
+        assert_eq!(recovered, bytes);
+        assert!(!file_exists(&dir, &transaction_next_name(&token)).expect("pending check"));
     }
 
     #[test]

@@ -481,6 +481,18 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         matches!(clear_result, Err(arany::StoreError::BuildCacheBusy)),
         "Store clear result category: {clear_category}"
     );
+    let usage_at = transcript.len();
+    input
+        .write_all(b"/cache clear now\r")
+        .expect("malformed cache clear");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        usage_at,
+        b"Notice: Error: Usage: /cache clear [all]\r\n",
+    );
     let busy_at = transcript.len();
     input
         .write_all(b"/cache clear\r")
@@ -533,7 +545,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
     let text = String::from_utf8(transcript).expect("linear transcript UTF-8");
     assert!(text.contains("Run npx --yes skills@1.7.0 experimental_install in this project: .agents/skills is missing and skills-lock.json exists."));
     assert!(!text.contains('\u{1b}'));
-    assert_eq!(text.matches("Notice: Error:").count(), 5);
+    assert_eq!(text.matches("Notice: Error:").count(), 6);
     assert_eq!(
         super::active_terminal::transcript_field(&text, "TTY_BEFORE:"),
         super::active_terminal::transcript_field(&text, "TTY_AFTER:"),
