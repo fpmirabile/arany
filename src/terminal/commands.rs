@@ -369,6 +369,7 @@ pub(super) fn completion_suffix(draft: &str, choices: &CommandChoices) -> Option
         let argument = argument.trim_start_matches(' ');
         if spec.command == InteractiveCommand::Cache {
             return match argument {
+                "c" => Some("lear".to_owned()),
                 "clear" => Some(" ".to_owned()),
                 "clear " => Some("all".to_owned()),
                 "clear a" => Some("ll".to_owned()),
@@ -624,6 +625,11 @@ mod tests {
     #[test]
     fn closed_registry_aliases_completion_and_lifecycle_are_exact() {
         assert_eq!(COMMANDS.len(), 18);
+        assert_eq!(completion_suffix("/c", &CommandChoices::default()), None);
+        assert_eq!(
+            completion_suffix("/ca", &CommandChoices::default()),
+            Some("che ".into())
+        );
         for spec in COMMANDS {
             assert_eq!(
                 parse_submission(&format!("/{}", spec.name)),
