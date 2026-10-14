@@ -12,9 +12,54 @@ use std::{
 const CACHE_CANARY: &str = "EXPLICIT_CACHE_OUTPUT_CANARY";
 const PRIVATE_CACHE_CANARY: &str = "ARANY_PRIVATE_CACHE_PERSISTENCE_CANARY";
 
+fn cache_progress(stage: &str) {
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "cache-canary:{stage}").expect("cache fixture progress write");
+    stdout.flush().expect("cache fixture progress flush");
+}
+
+fn cache_run_return(result: &Result<arany::RunOutcome, arany::EngineError>) -> String {
+    match result {
+        Ok(outcome) => {
+            let receipts = outcome
+                .run
+                .tools
+                .iter()
+                .map(|tool| {
+                    tool.observation.as_ref().map(|observation| {
+                        (
+                            observation.disposition,
+                            observation.guard.is_some(),
+                            observation.cache_update,
+                            observation.output.len(),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            format!(
+                "Run status {:?}; tool receipts {receipts:?}",
+                outcome.run.status
+            )
+        }
+        Err(error) => {
+            let category = match error {
+                arany::EngineError::Store(_) => "store",
+                arany::EngineError::Tool(_) => "tool",
+                arany::EngineError::CoordinatorFailed => "coordinator",
+                arany::EngineError::CancellationDrainTimeout => "cancellation-drain",
+                arany::EngineError::CancelledBeforeStart => "cancelled",
+                arany::EngineError::InvalidHistory => "history",
+                _ => "request-or-state",
+            };
+            format!("EngineError category {category}")
+        }
+    }
+}
+
 struct CacheCanary {
     requests: std::sync::Arc<std::sync::Mutex<Vec<ProviderRequest>>>,
     calls: Vec<ToolCall>,
+    stage: &'static str,
 }
 
 impl Provider for CacheCanary {
@@ -37,6 +82,7 @@ impl Provider for CacheCanary {
             requests.push(request);
             step
         };
+        cache_progress(&format!("{}:provider-step-{step}", self.stage));
         if step > self.calls.len() {
             return Err(ProviderError::InvalidOutcome);
         }
@@ -156,6 +202,7 @@ async fn selected_cache_canary_helper() {
 }
 
 async fn selected_cache_canary_helper_inner() {
+    cache_progress("helper-start");
     let root = std::env::var_os("ARANY_TEST_CACHE_CANARY_ROOT").expect("private fixture root");
     let root = Path::new(&root);
     let workspace = root.join("workspace");
@@ -177,6 +224,7 @@ async fn selected_cache_canary_helper_inner() {
     permissions
         .remember_profiles(true, arany::ApprovalMode::AutoEdits, &[])
         .unwrap();
+    cache_progress("seed-admission-complete");
     let permissions = arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
 
     let state_path = root.join("state");
@@ -194,6 +242,7 @@ async fn selected_cache_canary_helper_inner() {
         CacheCanary {
             requests: seed_requests.clone(),
             calls: vec![seed_cache.clone()],
+            stage: "seed",
         },
     )
     .unwrap();
@@ -206,26 +255,36 @@ async fn selected_cache_canary_helper_inner() {
             seed_approvals,
         )
         .unwrap();
-    let seed_run = Box::pin(seed_engine.run(RunRequest {
-        session_id: None,
-        title: Some("Private cache seed".into()),
-        objective: "Seed a bounded private cache archive".into(),
-        images: Vec::new(),
-        workspace: workspace.clone(),
-        include_paths: Vec::new(),
-        policy: CollaborationPolicy::Single,
-        goal: arany::GoalRequest::default(),
-    }));
-    let approve_seed = async {
-        let approval = seed_inbox
-            .next()
-            .await
-            .expect("private cache seed approval");
+    let mut seed_run = Box::pin(async {
+        cache_progress("seed-run-start");
+        let outcome = seed_engine
+            .run(RunRequest {
+                session_id: None,
+                title: Some("Private cache seed".into()),
+                objective: "Seed a bounded private cache archive".into(),
+                images: Vec::new(),
+                workspace: workspace.clone(),
+                include_paths: Vec::new(),
+                policy: CollaborationPolicy::Single,
+                goal: arany::GoalRequest::default(),
+            })
+            .await;
+        cache_progress("seed-run-returned");
+        outcome
+    });
+    let seed_outcome = tokio::time::timeout(Duration::from_secs(90), async {
+        cache_progress("seed-approval-waiting");
+        let approval = tokio::select! {
+            result = &mut seed_run => panic!(
+                "cache seed Run returned before approval: {}",
+                cache_run_return(&result),
+            ),
+            approval = seed_inbox.next() => approval.expect("private cache seed approval"),
+        };
+        cache_progress("seed-approval-received");
         assert_eq!(approval.intent.call, seed_cache);
         approval.decide(true);
-    };
-    let (seed_outcome, ()) = tokio::time::timeout(Duration::from_secs(90), async {
-        tokio::join!(seed_run, approve_seed)
+        seed_run.await
     })
     .await
     .expect("bounded private cache seed");
@@ -264,6 +323,7 @@ async fn selected_cache_canary_helper_inner() {
     assert!(seed_observation.guard.is_some());
     let seed_result = seed_result.unwrap();
     assert_eq!(seed_result["exit_code"], 0);
+    cache_progress("seed-complete");
 
     let mut permissions =
         arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
@@ -318,6 +378,7 @@ async fn selected_cache_canary_helper_inner() {
         CacheCanary {
             requests: requests.clone(),
             calls: calls.clone(),
+            stage: "selected",
         },
     )
     .unwrap();
@@ -330,9 +391,10 @@ async fn selected_cache_canary_helper_inner() {
             approvals,
         )
         .unwrap();
-    let run =
-        Box::pin(
-            engine.run(RunRequest {
+    let mut run = Box::pin(async {
+        cache_progress("selected-run-start");
+        let outcome = engine
+            .run(RunRequest {
                 session_id: None,
                 title: Some("Selected cache canary".into()),
                 objective:
@@ -343,23 +405,29 @@ async fn selected_cache_canary_helper_inner() {
                 include_paths: Vec::new(),
                 policy: CollaborationPolicy::Single,
                 goal: arany::GoalRequest::default(),
-            }),
-        );
-    let approve = async {
-        for call in &calls {
-            let approval = inbox
-                .next()
-                .await
-                .expect("approval for a selected-cache command");
+            })
+            .await;
+        cache_progress("selected-run-returned");
+        outcome
+    });
+    let outcome = tokio::time::timeout(Duration::from_secs(90), async {
+        for (index, call) in calls.iter().enumerate() {
+            cache_progress(&format!("selected-approval-waiting-{index}"));
+            let approval = tokio::select! {
+                result = &mut run => panic!(
+                    "selected-cache Run returned before approval {index}: {}",
+                    cache_run_return(&result),
+                ),
+                approval = inbox.next() => approval.expect("approval for a selected-cache command"),
+            };
+            cache_progress(&format!("selected-approval-received-{index}"));
             assert!(
                 &approval.intent.call == call,
                 "selected-cache approval intent differs"
             );
             approval.decide(true);
         }
-    };
-    let (outcome, ()) = tokio::time::timeout(Duration::from_secs(90), async {
-        tokio::join!(run, approve)
+        run.await
     })
     .await
     .expect("bounded selected-cache approval journey");
@@ -372,6 +440,7 @@ async fn selected_cache_canary_helper_inner() {
         crate::safe_run_diagnostics(&outcome.run)
     );
     assert_eq!(outcome.run.tools.len(), 3);
+    cache_progress("cache-commands-complete");
     let mut observations = Vec::new();
     let mut command_results = Vec::new();
     for tool in &outcome.run.tools {
@@ -471,6 +540,7 @@ async fn selected_cache_canary_helper_inner() {
         );
     }
     let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+    cache_progress("closed-replay-start");
     let events = store.load_session(outcome.session_id).await.unwrap();
     store.close().await.unwrap();
     let replay = SessionView::replay(outcome.session_id, &events)
@@ -495,6 +565,7 @@ async fn selected_cache_canary_helper_inner() {
             && finished[2] == observations[2],
         "ToolFinished cache observations differ"
     );
+    cache_progress("closed-replay-complete");
 
     let mut permissions =
         arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
@@ -518,6 +589,7 @@ async fn selected_cache_canary_helper_inner() {
         CacheCanary {
             requests: verify_requests,
             calls: vec![verify_cache.clone()],
+            stage: "verify",
         },
     )
     .unwrap();
@@ -531,26 +603,39 @@ async fn selected_cache_canary_helper_inner() {
             verify_approvals,
         )
         .unwrap();
-    let verify_run = Box::pin(verify_engine.run(RunRequest {
-        session_id: None,
-        title: Some("Cache overflow recovery".into()),
-        objective: "Verify the previous private cache survived a rejected update".into(),
-        images: Vec::new(),
-        workspace,
-        include_paths: Vec::new(),
-        policy: CollaborationPolicy::Single,
-        goal: arany::GoalRequest::default(),
-    }));
-    let approve_verify = async {
-        let approval = verify_inbox.next().await.expect("cache recovery approval");
+    let mut verify_run = Box::pin(async {
+        cache_progress("verify-run-start");
+        let outcome = verify_engine
+            .run(RunRequest {
+                session_id: None,
+                title: Some("Cache overflow recovery".into()),
+                objective: "Verify the previous private cache survived a rejected update".into(),
+                images: Vec::new(),
+                workspace,
+                include_paths: Vec::new(),
+                policy: CollaborationPolicy::Single,
+                goal: arany::GoalRequest::default(),
+            })
+            .await;
+        cache_progress("verify-run-returned");
+        outcome
+    });
+    let verified = tokio::time::timeout(Duration::from_secs(90), async {
+        cache_progress("verify-approval-waiting");
+        let approval = tokio::select! {
+            result = &mut verify_run => panic!(
+                "cache recovery Run returned before approval: {}",
+                cache_run_return(&result),
+            ),
+            approval = verify_inbox.next() => approval.expect("cache recovery approval"),
+        };
+        cache_progress("verify-approval-received");
         assert!(
             approval.intent.call == verify_cache,
             "cache recovery approval intent differs"
         );
         approval.decide(true);
-    };
-    let (verified, ()) = tokio::time::timeout(Duration::from_secs(90), async {
-        tokio::join!(verify_run, approve_verify)
+        verify_run.await
     })
     .await
     .expect("bounded cache recovery journey");

@@ -1333,7 +1333,12 @@ impl SessionView {
                 let phase_allows_call = goal.phase == Some(GoalPhase::Implementation)
                     || intent.call.is_goal_plan_prelude();
                 let plan_allows_call = if let Some(contract) = &goal.plan_contract {
-                    !goal.awaiting_plan_contract && contract.allows_call(&intent.call)
+                    !goal.awaiting_plan_contract
+                        && (contract.allows_call(&intent.call)
+                            || matches!(
+                                &intent.call,
+                                crate::tools::ToolCall::ApplyChangeset { .. }
+                            ))
                 } else {
                     goal.awaiting_plan_contract && intent.call.is_goal_plan_prelude()
                 };
@@ -1394,11 +1399,25 @@ impl SessionView {
                 agent_run_id,
                 observation,
             } => {
-                current
+                let goal = current
                     .goals
                     .last()
                     .filter(|goal| goal.active_run == Some(*run_id))
                     .ok_or(ReplayError::InvalidTransition)?;
+                let out_of_plan_integration = matches!(
+                    &observation.intent.call,
+                    crate::tools::ToolCall::ApplyChangeset { .. }
+                ) && goal
+                    .plan_contract
+                    .as_ref()
+                    .is_some_and(|contract| !contract.allows_call(&observation.intent.call));
+                if out_of_plan_integration
+                    && (observation.disposition != crate::tools::ToolDisposition::Denied
+                        || observation.guard.is_some()
+                        || observation.cache_update != crate::tools::CacheUpdate::NotApplicable)
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
                 {
                     let run = active_run(current, *run_id)?;
                     if run.primary().is_none_or(|agent| {
