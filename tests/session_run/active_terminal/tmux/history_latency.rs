@@ -528,9 +528,6 @@ async fn run_history_fixture() {
         .arg(&wrapper)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    runtime_ready_sender
-        .send(())
-        .expect("arm runtime Provider request deadline");
     let resume_start = Instant::now();
     assert!(
         wait_product(start.spawn().expect("tmux server start"))
@@ -581,6 +578,9 @@ async fn run_history_fixture() {
             .status
             .success()
     );
+    runtime_ready_sender
+        .send(())
+        .expect("arm runtime Provider request deadline");
     let submit_start = Instant::now();
     assert!(
         server

@@ -85,13 +85,16 @@ fn decline_initial_consent(server: &TmuxServer, screen: &[u8], declined: &mut bo
         .chars()
         .filter(|character| !character.is_whitespace())
         .collect();
-    if visible.contains("Doyoutrust")
-        && (visible.contains("Ctrl+Cexit") || visible.contains("^Cexit"))
-    {
-        let dismissed = server.run(&["send-keys", "-t", "arany-test:0.0", "Escape"]);
-        assert!(dismissed.status.success(), "dismiss fixture folder consent");
-        *declined = true;
+    let consent_title_visible = visible.contains("Doyoutrustthisfolder?");
+    let consent_page_visible =
+        visible.contains("Page1/") && visible.contains("Enter/PgDncontinues");
+    let consent_exit_visible = visible.contains("Ctrl+Cexit") || visible.contains("^Cexit");
+    if !consent_title_visible || !(consent_page_visible || consent_exit_visible) {
+        return;
     }
+    let dismissed = server.run(&["send-keys", "-t", "arany-test:0.0", "Escape"]);
+    assert!(dismissed.status.success(), "dismiss fixture folder consent");
+    *declined = true;
 }
 
 fn capture_scrollback(server: &TmuxServer) -> Option<Vec<u8>> {
