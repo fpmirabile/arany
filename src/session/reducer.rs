@@ -79,6 +79,31 @@ impl GoalView {
         })
     }
 
+    /// Usage that decides whether an explicit resume admits another Run. Resume settles an unsettled
+    /// active-time reservation as spent and counts unobserved calls as unknown tokens; an unaccepted
+    /// trailing link is not a Run. Saturation fails admission closed.
+    pub(crate) fn resume_usage(&self, view: &SessionView) -> GoalUsage {
+        let unaccepted_link = self
+            .run_ids
+            .last()
+            .is_some_and(|run_id| !view.runs.iter().any(|run| run.id == *run_id));
+        let reserved_ms = self.active_time_reservation.map_or(0, |(_, ms)| ms);
+        GoalUsage {
+            runs: self.run_ids.len() - usize::from(unaccepted_link),
+            provider_calls: self.provider_calls,
+            active_ms: self.active_ms.saturating_add(reserved_ms),
+            known_tokens: self.known_tokens,
+            token_usage_unknown: self.token_usage_unknown
+                || !self.unobserved_provider_calls.is_empty(),
+        }
+    }
+
+    /// Whether explicit resume admits another Run; the Engine and `/goal` presentation both use this.
+    pub fn admits_resume(&self, view: &SessionView) -> bool {
+        self.effective_budget()
+            .admits_next_run(self.resume_usage(view))
+    }
+
     pub(crate) fn can_resume(&self, view: &SessionView) -> bool {
         if self.active_run.is_some() {
             return false;

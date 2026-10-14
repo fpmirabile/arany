@@ -394,7 +394,7 @@ impl SessionView {
             settled.unobserved_provider_calls.clear();
             settled.token_usage_unknown = true;
         }
-        if settled.admits_next_run() || active_ms != settled.active_ms {
+        if settled.admits_resume(self) || active_ms != settled.active_ms {
             return Err(ReplayError::InvalidTransition);
         }
         settled.status = GoalStatus::Failed;

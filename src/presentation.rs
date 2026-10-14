@@ -539,7 +539,7 @@ pub fn goal_status(view: &SessionView) -> String {
         goal_clock(budget.max_active_ms),
     );
     if goal.status == crate::session::GoalStatus::Interrupted {
-        text.push_str(if goal.admits_next_run() {
+        text.push_str(if goal.admits_resume(view) {
             " · Use /goal resume to continue"
         } else {
             " · out of budget"
@@ -549,7 +549,7 @@ pub fn goal_status(view: &SessionView) -> String {
         let short = paused.to_string().chars().take(8).collect::<String>();
         if view
             .goal(paused)
-            .is_some_and(|paused| paused.admits_next_run())
+            .is_some_and(|paused| paused.admits_resume(view))
         {
             text.push_str(&format!(
                 "\nPaused Goal {short} can be resumed with /goal resume"
@@ -1103,6 +1103,29 @@ mod goal_status_tests {
         assert!(!status.contains("/goal resume"), "{status}");
         assert!(status.contains("\nPaused Goal "), "{status}");
         assert!(status.ends_with(" is out of budget"), "{status}");
+    }
+
+    #[test]
+    fn goal_status_hint_matches_resume_admission_for_unaccepted_links_and_reservations() {
+        // A trailing GoalRunLinked without its accepted Run is not a Run, so the hint still offers resume.
+        let mut view = session_with_goal(true);
+        view.goals[0].status = GoalStatus::Interrupted;
+        view.goals[0].budget.max_runs = 1;
+        view.goals[0].run_ids = vec![crate::session::RunId::new()];
+        let linked = goal_status(&view);
+        assert!(
+            linked.ends_with(" · Use /goal resume to continue"),
+            "{linked}"
+        );
+
+        // An unsettled active-time reservation resume would settle as spent is counted, so no Run is admitted.
+        let mut view = session_with_goal(true);
+        view.goals[0].status = GoalStatus::Interrupted;
+        let limit = view.goals[0].effective_budget().max_active_ms;
+        view.goals[0].active_ms = limit - 1;
+        view.goals[0].active_time_reservation = Some((crate::session::RunId::new(), 1));
+        let reserved = goal_status(&view);
+        assert!(reserved.ends_with(" · out of budget"), "{reserved}");
     }
 
     #[test]

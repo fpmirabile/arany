@@ -105,7 +105,7 @@ pub(super) struct RunIdentity {
 pub(super) struct GoalRunBudget {
     autonomous: bool,
     pinned_budget: GoalBudget,
-    runs_used_before: u8,
+    runs_used_before: usize,
     calls_used: AtomicU32,
     calls_limit: AtomicU32,
     known_tokens: AtomicU64,
@@ -130,17 +130,17 @@ impl GoalRunBudget {
         Self {
             autonomous: goal.autonomous,
             pinned_budget: goal.budget.clone(),
-            runs_used_before: goal.runs_used,
-            calls_used: AtomicU32::new(goal.calls_used),
+            runs_used_before: goal.usage.runs,
+            calls_used: AtomicU32::new(goal.usage.provider_calls),
             calls_limit: AtomicU32::new(limits.max_provider_calls),
-            known_tokens: AtomicU64::new(goal.known_tokens),
-            token_usage_unknown: AtomicBool::new(goal.token_usage_unknown),
+            known_tokens: AtomicU64::new(goal.usage.known_tokens),
+            token_usage_unknown: AtomicBool::new(goal.usage.token_usage_unknown),
             token_limit: std::sync::Mutex::new(limits.max_tokens),
             plan_contract: std::sync::Mutex::new(goal.plan_contract.clone()),
             criterion_satisfied: AtomicBool::new(goal.success_criterion_satisfied),
             observations_before_run: goal.observations_before_run.clone(),
             active_started: std::sync::Mutex::new(active_started),
-            active_ms_before: AtomicU64::new(goal.active_ms),
+            active_ms_before: AtomicU64::new(goal.usage.active_ms),
             active_reserved_ms: AtomicU64::new(active_reserved_ms),
         }
     }
@@ -233,7 +233,7 @@ impl GoalRunBudget {
         drop(plan);
         budget.admits_next_run(GoalUsage {
             // This Run is linked, so it counts toward the Goal's Runs.
-            runs: usize::from(self.runs_used_before) + 1,
+            runs: self.runs_used_before + 1,
             provider_calls: self.calls_used.load(Ordering::Acquire),
             active_ms: self
                 .active_ms_before
@@ -267,7 +267,7 @@ impl GoalRunBudget {
 
     fn can_narrow(&self, contract: &crate::session::GoalPlanContract) -> bool {
         // This Run is already linked, so the plan must allow it along with the earlier Runs.
-        usize::from(contract.budget.max_runs) > usize::from(self.runs_used_before)
+        usize::from(contract.budget.max_runs) > self.runs_used_before
             && contract.budget.max_provider_calls > self.calls_used.load(Ordering::Acquire)
             && contract.budget.max_tokens.is_none_or(|limit| {
                 !self.token_usage_unknown.load(Ordering::Acquire)
@@ -1336,13 +1336,15 @@ mod goal_budget_tests {
             plan_contract: None,
             is_new: true,
             resume: false,
-            calls_used: 0,
-            known_tokens: 0,
-            token_usage_unknown: false,
+            usage: GoalUsage {
+                runs: 0,
+                provider_calls: 0,
+                active_ms: 0,
+                known_tokens: 0,
+                token_usage_unknown: false,
+            },
             success_criterion_satisfied: false,
             observations_before_run: Vec::new(),
-            active_ms: 0,
-            runs_used: 0,
         }
     }
 

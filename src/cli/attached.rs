@@ -1322,19 +1322,30 @@ async fn submit_idle_run(
 }
 
 const INTERRUPTED_GOAL_NOTICE: &str = "Goal paused; use /goal resume to continue.";
+const OUT_OF_BUDGET_GOAL_NOTICE: &str =
+    "Goal paused and out of budget; /goal resume will close it.";
 
-/// An interrupted Goal's resume hint follows the Run's feedback. Cancelled Run feedback only
-/// restates the cancellation that the hint already covers, so the hint replaces it.
+/// Wording for a paused Goal, chosen by whether an explicit resume still admits a Run.
+fn paused_goal_notice(resume_admitted: bool) -> &'static str {
+    if resume_admitted {
+        INTERRUPTED_GOAL_NOTICE
+    } else {
+        OUT_OF_BUDGET_GOAL_NOTICE
+    }
+}
+
+/// A paused Goal's notice follows the Run's feedback. Cancelled Run feedback only
+/// restates the cancellation that the notice already covers, so the notice replaces it.
 fn submission_notice(
-    interrupted_goal: Option<arany::GoalId>,
+    paused_goal: Option<&'static str>,
     run_status: RunStatus,
     run_feedback: Option<String>,
 ) -> Option<String> {
-    match interrupted_goal {
-        Some(_) if run_status == RunStatus::Cancelled => Some(INTERRUPTED_GOAL_NOTICE.to_owned()),
-        Some(_) => Some(match run_feedback {
-            Some(feedback) => format!("{feedback} {INTERRUPTED_GOAL_NOTICE}"),
-            None => INTERRUPTED_GOAL_NOTICE.to_owned(),
+    match paused_goal {
+        Some(notice) if run_status == RunStatus::Cancelled => Some(notice.to_owned()),
+        Some(notice) => Some(match run_feedback {
+            Some(feedback) => format!("{feedback} {notice}"),
+            None => notice.to_owned(),
         }),
         None => run_feedback,
     }
@@ -1358,12 +1369,11 @@ async fn finish_interrupted_submission(
     let started_goal_paused = view
         .interrupted_goal_id()
         .and_then(|id| view.goal(id))
-        .is_some_and(|goal| goal.started_sequence > starting_sequence);
-    let interrupted = if started_goal_paused {
-        INTERRUPTED_GOAL_NOTICE
-    } else {
-        "Submission interrupted before Run admission; no task was accepted. Account work already started may still complete."
-    };
+        .filter(|goal| goal.started_sequence > starting_sequence)
+        .map(|goal| paused_goal_notice(goal.admits_resume(view)));
+    let interrupted = started_goal_paused.unwrap_or(
+        "Submission interrupted before Run admission; no task was accepted. Account work already started may still complete.",
+    );
     let drawn = match &reload_error {
         Some(error) => format!("{interrupted}; {error}"),
         None => interrupted.to_owned(),
@@ -1444,7 +1454,7 @@ async fn finish_submission(
     let paused_goal = view
         .goal(outcome.goal_id)
         .filter(|goal| goal.status == arany::GoalStatus::Interrupted)
-        .map(|goal| goal.id);
+        .map(|goal| paused_goal_notice(goal.admits_resume(view)));
     let feedback = submission_notice(paused_goal, outcome.run.status, run_feedback);
     if let Some(feedback) = feedback {
         if composer.is_empty() {
@@ -2200,11 +2210,14 @@ mod tests {
 
     #[test]
     fn interrupted_goal_notice_replaces_only_cancelled_run_feedback() {
-        let goal = arany::GoalId::new();
         let cancelled =
             Some("Run cancelled. No answer was committed. You can submit a new task.".to_owned());
         assert_eq!(
-            submission_notice(Some(goal), RunStatus::Cancelled, cancelled.clone()),
+            submission_notice(
+                Some(INTERRUPTED_GOAL_NOTICE),
+                RunStatus::Cancelled,
+                cancelled.clone()
+            ),
             Some(INTERRUPTED_GOAL_NOTICE.to_owned())
         );
         assert_eq!(
@@ -2216,17 +2229,31 @@ mod tests {
 
     #[test]
     fn interrupted_goal_notice_keeps_feedback_from_a_finished_run() {
-        let goal = arany::GoalId::new();
         let cache = Some("Cache updated for the next Run.".to_owned());
         assert_eq!(
-            submission_notice(Some(goal), RunStatus::Finished, cache),
+            submission_notice(Some(INTERRUPTED_GOAL_NOTICE), RunStatus::Finished, cache),
             Some(format!(
                 "Cache updated for the next Run. {INTERRUPTED_GOAL_NOTICE}"
             ))
         );
         assert_eq!(
-            submission_notice(Some(goal), RunStatus::Finished, None),
+            submission_notice(Some(INTERRUPTED_GOAL_NOTICE), RunStatus::Finished, None),
             Some(INTERRUPTED_GOAL_NOTICE.to_owned())
+        );
+    }
+
+    #[test]
+    fn paused_goal_notice_offers_resume_only_while_a_run_is_admitted() {
+        assert_eq!(paused_goal_notice(true), INTERRUPTED_GOAL_NOTICE);
+        assert_eq!(paused_goal_notice(false), OUT_OF_BUDGET_GOAL_NOTICE);
+        assert!(!OUT_OF_BUDGET_GOAL_NOTICE.contains("use /goal resume to continue"));
+        assert_eq!(
+            submission_notice(
+                Some(paused_goal_notice(false)),
+                RunStatus::Cancelled,
+                Some("Run cancelled.".to_owned())
+            ),
+            Some(OUT_OF_BUDGET_GOAL_NOTICE.to_owned())
         );
     }
 

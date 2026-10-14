@@ -289,13 +289,9 @@ struct GoalAdmission {
     plan_contract: Option<GoalPlanContract>,
     is_new: bool,
     resume: bool,
-    calls_used: u32,
-    known_tokens: u64,
-    token_usage_unknown: bool,
+    usage: GoalUsage,
     success_criterion_satisfied: bool,
     observations_before_run: Vec<crate::tools::ToolObservation>,
-    active_ms: u64,
-    runs_used: u8,
 }
 
 fn goal_report(
@@ -1523,20 +1519,7 @@ fn resolve_goal_admission(
                 return Err(EngineError::GoalUnavailable);
             }
         };
-        let active_ms = goal
-            .active_ms
-            .checked_add(if goal.status == GoalStatus::Interrupted {
-                goal.active_time_reservation
-                    .map_or(0, |(_, reserved_ms)| reserved_ms)
-            } else {
-                0
-            })
-            .ok_or(EngineError::GoalBudgetExhausted)?;
-        let linked_run_is_unaccepted = history.is_some_and(|view| {
-            goal.run_ids
-                .last()
-                .is_some_and(|run_id| !view.runs.iter().any(|run| run.id == *run_id))
-        });
+        let view = history.ok_or(EngineError::GoalUnavailable)?;
         Ok(GoalAdmission {
             id,
             objective: goal.objective.clone(),
@@ -1546,30 +1529,15 @@ fn resolve_goal_admission(
             plan_contract: goal.plan_contract.clone(),
             is_new: false,
             resume,
-            calls_used: goal.provider_calls,
-            known_tokens: goal.known_tokens,
+            usage: goal.resume_usage(view),
             success_criterion_satisfied: goal.success_criterion_satisfied,
-            observations_before_run: history
-                .into_iter()
-                .flat_map(|view| view.runs.iter())
+            observations_before_run: view
+                .runs
+                .iter()
                 .filter(|run| goal.run_ids.contains(&run.id))
                 .flat_map(|run| run.tools.iter())
                 .filter_map(|tool| tool.observation.clone())
                 .collect(),
-            token_usage_unknown: goal.token_usage_unknown
-                || (goal
-                    .budget
-                    .effective(goal.plan_contract.as_ref())
-                    .max_tokens
-                    .is_some()
-                    && !goal.unobserved_provider_calls.is_empty()),
-            active_ms,
-            runs_used: u8::try_from(
-                goal.run_ids
-                    .len()
-                    .saturating_sub(usize::from(linked_run_is_unaccepted)),
-            )
-            .unwrap_or(u8::MAX),
         })
     } else {
         // A paused Goal does not block a new one; the Session lock serializes live Runs.
@@ -1586,13 +1554,15 @@ fn resolve_goal_admission(
             plan_contract: None,
             is_new: true,
             resume: false,
-            calls_used: 0,
-            known_tokens: 0,
-            token_usage_unknown: false,
+            usage: GoalUsage {
+                runs: 0,
+                provider_calls: 0,
+                active_ms: 0,
+                known_tokens: 0,
+                token_usage_unknown: false,
+            },
             success_criterion_satisfied: false,
             observations_before_run: Vec::new(),
-            active_ms: 0,
-            runs_used: 0,
         })
     }
 }
@@ -1737,7 +1707,7 @@ impl<P: Provider + 'static> Engine<P> {
             Event::GoalFinished {
                 goal_id: goal.id,
                 status: GoalStatus::Failed,
-                active_ms: goal.active_ms,
+                active_ms: goal.usage.active_ms,
                 report,
             },
         )
@@ -1948,13 +1918,7 @@ impl<P: Provider + 'static> Engine<P> {
             request.objective.clone()
         };
         let budget = goal.budget.effective(goal.plan_contract.as_ref());
-        if !budget.admits_next_run(GoalUsage {
-            runs: usize::from(goal.runs_used),
-            provider_calls: goal.calls_used,
-            active_ms: goal.active_ms,
-            known_tokens: goal.known_tokens,
-            token_usage_unknown: goal.token_usage_unknown,
-        }) {
+        if !budget.admits_next_run(goal.usage) {
             if goal.resume {
                 let view = history.as_ref().ok_or(EngineError::InvalidHistory)?;
                 self.close_exhausted_goal(session_id, view, &goal).await?;
@@ -1962,10 +1926,14 @@ impl<P: Provider + 'static> Engine<P> {
             return Err(EngineError::GoalBudgetExhausted);
         }
         let token_limit = budget.max_tokens;
-        let active_remaining_ms = budget.max_active_ms.saturating_sub(goal.active_ms);
+        let active_remaining_ms = budget.max_active_ms.saturating_sub(goal.usage.active_ms);
         let mut event_budget = goal.budget.clone();
-        event_budget.max_provider_calls = budget.max_provider_calls.saturating_sub(goal.calls_used);
-        event_budget.max_runs = budget.max_runs.saturating_sub(goal.runs_used);
+        event_budget.max_provider_calls = budget
+            .max_provider_calls
+            .saturating_sub(goal.usage.provider_calls);
+        event_budget.max_runs = budget
+            .max_runs
+            .saturating_sub(u8::try_from(goal.usage.runs).unwrap_or(u8::MAX));
         event_budget.max_active_ms = active_remaining_ms;
         event_budget.max_tokens = token_limit;
         let event_slots = event_budget
