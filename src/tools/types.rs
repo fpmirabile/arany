@@ -508,6 +508,7 @@ impl ToolObservation {
             self.disposition,
             ToolDisposition::Uncertain | ToolDisposition::Cancelled
         ) || (self.disposition == ToolDisposition::Failed && self.guard.is_none())
+            || self.cache_update == CacheUpdate::Uncertain
     }
 
     pub(crate) fn valid(&self) -> bool {
@@ -521,19 +522,11 @@ impl ToolObservation {
             && (self.disposition != ToolDisposition::Succeeded || self.guard.is_some())
             && match self.cache_update {
                 CacheUpdate::NotApplicable => true,
-                CacheUpdate::NotAttempted => self.intent.call.is_process() && self.guard.is_some(),
-                CacheUpdate::Published | CacheUpdate::Rejected => {
+                CacheUpdate::NotAttempted | CacheUpdate::Uncertain => self.intent.call.is_process(),
+                CacheUpdate::Published | CacheUpdate::Rejected | CacheUpdate::Failed => {
                     self.intent.call.is_process()
                         && self.guard.is_some()
                         && self.disposition == ToolDisposition::Succeeded
-                }
-                CacheUpdate::Failed => {
-                    self.intent.call.is_process()
-                        && self.guard.is_some()
-                        && self.disposition == ToolDisposition::Succeeded
-                }
-                CacheUpdate::Uncertain => {
-                    self.intent.call.is_process() && self.disposition == ToolDisposition::Uncertain
                 }
             }
     }

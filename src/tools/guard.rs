@@ -143,7 +143,7 @@ fn cache_exclusions(grants: &[RuntimeGrant]) -> Result<Vec<String>, ToolError> {
     Ok(exclusions)
 }
 
-fn map_cache_error(error: StoreError) -> ToolError {
+pub(super) fn map_cache_error(error: StoreError) -> ToolError {
     match error {
         StoreError::StorageFull => ToolError::Limit,
         StoreError::BuildCacheBusy => ToolError::QueueFull,
@@ -168,18 +168,12 @@ pub(super) fn publish_cache_candidate(
     let update = match candidate {
         CacheCandidate::Rejected => CacheUpdate::Rejected,
         CacheCandidate::Failed => CacheUpdate::Failed,
-        CacheCandidate::Received => match cache.lease.open_candidate() {
-            Ok(mut candidate) => match cache
+        CacheCandidate::Received => match cache.lease.open_candidate().and_then(|mut candidate| {
+            cache
                 .lease
                 .publish(&mut candidate, &cache.transfer.exclusions)
-            {
-                Ok(()) => CacheUpdate::Published,
-                Err(StoreError::StorageFull) if !cache.lease.publication_uncertain() => {
-                    CacheUpdate::Rejected
-                }
-                Err(_) if cache.lease.publication_uncertain() => CacheUpdate::Uncertain,
-                Err(_) => CacheUpdate::Failed,
-            },
+        }) {
+            Ok(()) => CacheUpdate::Published,
             Err(StoreError::StorageFull) if !cache.lease.publication_uncertain() => {
                 CacheUpdate::Rejected
             }
@@ -188,12 +182,6 @@ pub(super) fn publish_cache_candidate(
         },
     };
     observation.cache_update = update;
-    if matches!(
-        update,
-        CacheUpdate::Uncertain | CacheUpdate::NotApplicable | CacheUpdate::NotAttempted
-    ) {
-        observation.disposition = ToolDisposition::Uncertain;
-    }
     if !observation.valid() {
         observation.cache_update = CacheUpdate::Uncertain;
         observation.disposition = ToolDisposition::Uncertain;

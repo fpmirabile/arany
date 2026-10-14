@@ -285,7 +285,7 @@ impl ToolRuntime {
                 intent,
                 error,
                 if cache_selected {
-                    crate::tools::CacheUpdate::Uncertain
+                    crate::tools::CacheUpdate::NotAttempted
                 } else {
                     crate::tools::CacheUpdate::NotApplicable
                 },

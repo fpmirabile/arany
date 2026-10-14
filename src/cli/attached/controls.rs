@@ -666,17 +666,19 @@ pub(super) async fn handle_command(
         InteractiveCommand::Cache => {
             let root = StateRoot::open_existing(&admission.state_dir)
                 .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
-            let result = match argument {
-                Some("clear") => root.clear_workspace_build_cache(&admission.workspace),
-                Some("clear all") => root.clear_all_build_caches(),
+            let (result, cleared) = match argument {
+                Some("clear") => (
+                    root.clear_workspace_build_cache(&admission.workspace),
+                    "Cleared this Workspace's private build cache",
+                ),
+                Some("clear all") => (
+                    root.clear_all_build_caches(),
+                    "Cleared all private build caches",
+                ),
                 _ => return Ok("Usage: /cache clear [all]".into()),
             };
             match result {
-                Ok(()) => match argument {
-                    Some("clear") => "Cleared this Workspace's private build cache".into(),
-                    Some("clear all") => "Cleared all private build caches".into(),
-                    _ => unreachable!(),
-                },
+                Ok(()) => cleared.into(),
                 Err(arany::StoreError::BuildCacheBusy) => {
                     "Build cache is in use; retry after its command finishes".into()
                 }

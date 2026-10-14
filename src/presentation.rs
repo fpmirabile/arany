@@ -388,7 +388,7 @@ pub fn render_run_feedback(run: &RunView) -> Option<String> {
                         observation.disposition,
                         crate::tools::ToolDisposition::Uncertain
                             | crate::tools::ToolDisposition::Cancelled
-                    )
+                    ) || observation.cache_update == crate::tools::CacheUpdate::Uncertain
                 })
             {
                 return Some("Error: Tool completion is uncertain. Files or effects may have changed; inspect them before retrying. No answer was committed.".into());

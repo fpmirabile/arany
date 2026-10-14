@@ -968,7 +968,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                             &cache.exclusions,
                         )
                         .await
-                        .map_err(|_| ToolError::ProtectionUnavailable)?;
+                        .map_err(super::super::map_cache_error)?;
                         drop(archive);
                     }
                 }
@@ -1084,7 +1084,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                                     &mut output,
                                 )
                                 .await
-                                .map_err(|_| ToolError::Operation)?;
+                                .map_err(super::super::map_cache_error)?;
                                 if captured != size {
                                     return Err(ToolError::Operation);
                                 }
