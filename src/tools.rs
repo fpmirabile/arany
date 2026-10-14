@@ -65,7 +65,7 @@ pub fn list_workspace_entries(
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 pub use types::{
-    CommandChangeset, EffectIntent, FileChange, FileVersion, GuardReceipt, MAX_SKILLS,
+    CacheUpdate, CommandChangeset, EffectIntent, FileChange, FileVersion, GuardReceipt, MAX_SKILLS,
     NetworkGrant, ToolCall, ToolContext, ToolDisposition, ToolLimits, ToolObservation,
     ToolPolicyReceipt, ToolResourceProfile,
 };
@@ -280,11 +280,22 @@ impl ToolRuntime {
                 disposition: ToolDisposition::Denied,
                 output: "Tool operation is outside the pinned grant".into(),
                 guard: None,
+                cache_update: crate::tools::CacheUpdate::NotApplicable,
             };
         }
+        let cache_selected =
+            matches!(&intent.call, ToolCall::Command { .. }) && self.cache_state.is_some();
         match guard::execute(self, &intent, cancellation).await {
             Ok(observation) => observation,
-            Err(error) => uncertain_observation(intent, error),
+            Err(error) => uncertain_observation(
+                intent,
+                error,
+                if cache_selected {
+                    crate::tools::CacheUpdate::Uncertain
+                } else {
+                    crate::tools::CacheUpdate::NotApplicable
+                },
+            ),
         }
     }
 }
@@ -314,10 +325,15 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
             ),
         },
         guard: None,
+        cache_update: crate::tools::CacheUpdate::NotApplicable,
     }
 }
 
-fn uncertain_observation(intent: EffectIntent, error: ToolError) -> ToolObservation {
+fn uncertain_observation(
+    intent: EffectIntent,
+    error: ToolError,
+    cache_update: crate::tools::CacheUpdate,
+) -> ToolObservation {
     crate::diagnostics::guard_failure(&error);
     let stage = failure_stage(&error);
     ToolObservation {
@@ -327,6 +343,7 @@ fn uncertain_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
             "Guard {stage} unconfirmed; effects may have occurred. Do not retry automatically."
         ),
         guard: None,
+        cache_update,
     }
 }
 

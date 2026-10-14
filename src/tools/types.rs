@@ -110,6 +110,17 @@ pub struct CommandResult {
     pub changeset: CommandChangeset,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheUpdate {
+    NotApplicable,
+    NotAttempted,
+    Published,
+    Rejected,
+    Failed,
+    Uncertain,
+}
+
 impl CommandResult {
     pub(crate) fn valid(&self) -> bool {
         self.changeset.valid()
@@ -485,6 +496,7 @@ pub struct ToolObservation {
     pub disposition: ToolDisposition,
     pub output: String,
     pub guard: Option<GuardReceipt>,
+    pub cache_update: CacheUpdate,
 }
 
 impl ToolObservation {
@@ -507,6 +519,23 @@ impl ToolObservation {
                 .as_ref()
                 .is_none_or(|guard| guard.valid_for(&self.intent))
             && (self.disposition != ToolDisposition::Succeeded || self.guard.is_some())
+            && match self.cache_update {
+                CacheUpdate::NotApplicable => true,
+                CacheUpdate::NotAttempted => self.intent.call.is_process() && self.guard.is_some(),
+                CacheUpdate::Published | CacheUpdate::Rejected => {
+                    self.intent.call.is_process()
+                        && self.guard.is_some()
+                        && self.disposition == ToolDisposition::Succeeded
+                }
+                CacheUpdate::Failed => {
+                    self.intent.call.is_process()
+                        && self.guard.is_some()
+                        && self.disposition == ToolDisposition::Succeeded
+                }
+                CacheUpdate::Uncertain => {
+                    self.intent.call.is_process() && self.disposition == ToolDisposition::Uncertain
+                }
+            }
     }
 }
 
@@ -543,7 +572,7 @@ impl ToolContext {
                 if let ToolCall::ApplyChangeset { .. } = observation.intent.call {
                     call.as_object_mut().expect("typed call").remove("source_intent_digest");
                 }
-                json!({"call":call,"disposition":observation.disposition,"output":output,"workspace_effect":effect})
+                json!({"call":call,"disposition":observation.disposition,"output":output,"workspace_effect":effect,"cache_update":observation.cache_update})
             })
             .collect();
         json!({"catalog":catalog,"observations":observations})

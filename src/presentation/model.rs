@@ -507,12 +507,58 @@ mod tests {
         );
         assert!(tool_capacity_notice(&view, None).is_none());
         assert!(tool_capacity_notice(&view, Some(uuid::Uuid::now_v7())).is_none());
-        view.runs.last_mut().unwrap().tools[0].observation = Some(crate::tools::ToolObservation {
+        let run = view.runs.last_mut().unwrap();
+        let mut intent = intent;
+        intent.call = crate::tools::ToolCall::Command {
+            program: "cargo".into(),
+            args: vec!["check".into()],
+            cwd: ".".into(),
+        };
+        let guard = crate::tools::GuardReceipt {
+            contract_version: 1,
+            intent_digest: intent.digest(),
+            enforcement_digest: intent.enforcement_digest,
+            limits: intent.limits.clone(),
+        };
+        run.tools[0].intent = intent.clone();
+        run.tools[0].observation = Some(crate::tools::ToolObservation {
             intent,
             disposition: crate::tools::ToolDisposition::Succeeded,
             output: String::new(),
-            guard: None,
+            guard: Some(guard),
+            cache_update: crate::tools::CacheUpdate::NotApplicable,
         });
+        {
+            let run = view.runs.last_mut().unwrap();
+            run.tools[0].observation.as_mut().unwrap().cache_update =
+                crate::tools::CacheUpdate::Rejected;
+            assert!(
+                crate::presentation::tool_summary(&run.tools[0])
+                    .contains("succeeded · cache not saved (limit)")
+            );
+            assert_eq!(
+                crate::presentation::render_cache_update_feedback(run),
+                Some(
+                    "A build cache update was rejected by its size or quota limit; the previous cache was kept."
+                )
+            );
+            run.tools[0].observation.as_mut().unwrap().cache_update =
+                crate::tools::CacheUpdate::Failed;
+            assert_eq!(
+                crate::presentation::render_cache_update_feedback(run),
+                Some("A build cache update failed; inspect Tool history for details.")
+            );
+            let observation = run.tools[0].observation.as_mut().unwrap();
+            observation.disposition = crate::tools::ToolDisposition::Uncertain;
+            observation.cache_update = crate::tools::CacheUpdate::Uncertain;
+            assert_eq!(
+                crate::presentation::render_cache_update_feedback(run),
+                Some("Build cache outcome is uncertain; inspect Session history before retrying.")
+            );
+            let observation = run.tools[0].observation.as_mut().unwrap();
+            observation.disposition = crate::tools::ToolDisposition::Succeeded;
+            observation.cache_update = crate::tools::CacheUpdate::NotApplicable;
+        }
         assert!(tool_capacity_notice(&view, Some(id)).is_none());
         view.runs.last_mut().unwrap().tools[0].observation = None;
         view.runs.last_mut().unwrap().status = RunStatus::Finished;

@@ -430,6 +430,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                     enforcement_digest: intent.enforcement_digest,
                     limits: intent.limits.clone(),
                 }),
+                cache_update: crate::tools::CacheUpdate::NotApplicable,
             });
             if command {
                 let integration = runtime.intent(
@@ -450,6 +451,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                     intent: integration,
                     disposition: crate::tools::ToolDisposition::Succeeded,
                     output: String::new(),
+                    cache_update: crate::tools::CacheUpdate::NotApplicable,
                 });
             }
             let overhead = serde_json::to_vec(&reserved)
@@ -589,6 +591,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                 disposition: crate::tools::ToolDisposition::Denied,
                 output: "Approval was not granted; no operation was dispatched".into(),
                 guard: None,
+                cache_update: crate::tools::CacheUpdate::NotApplicable,
             }
         };
         if let Some(progress) = self.progress {

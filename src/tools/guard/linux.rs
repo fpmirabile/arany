@@ -755,7 +755,10 @@ pub(super) async fn execute_inner(
             let candidate = super::receive_cache_candidate(&mut stdout, &session.lease).await?;
             (observation, candidate)
         } else {
-            (read_observation(&mut stdout, intent).await?, false)
+            (
+                read_observation(&mut stdout, intent).await?,
+                super::CacheCandidate::Received,
+            )
         };
         if !child
             .wait()
@@ -817,15 +820,8 @@ pub(super) async fn execute_inner(
         return Err(ToolError::GuardRejected(stage));
     }
     result.map(|(observation, candidate)| {
-        if candidate
-            && observation.disposition == ToolDisposition::Succeeded
-            && let Some(session) = cache.as_mut()
-            && let Ok(mut candidate) = session.lease.open_candidate()
-        {
-            let _ = session
-                .lease
-                .publish(&mut candidate, &session.transfer.exclusions);
-        }
+        let mut observation = observation;
+        super::publish_cache_candidate(&mut observation, candidate, cache.as_mut());
         observation
     })
 }

@@ -826,7 +826,7 @@ pub(super) async fn execute(
         } else {
             super::super::read_observation(&mut stream, intent)
                 .await
-                .map(|observation| (observation, false))
+                .map(|observation| (observation, super::super::CacheCandidate::Received))
         }?;
         capture.complete();
         Ok(observation)
@@ -844,15 +844,8 @@ pub(super) async fn execute(
         .await
         .map_err(|_| ToolError::GuardRejected(GuardStage::ProcessCleanup))?;
     result.map(|(observation, candidate)| {
-        if candidate
-            && observation.disposition == ToolDisposition::Succeeded
-            && let Some(session) = cache.as_mut()
-            && let Ok(mut candidate) = session.lease.open_candidate()
-        {
-            let _ = session
-                .lease
-                .publish(&mut candidate, &session.transfer.exclusions);
-        }
+        let mut observation = observation;
+        super::super::publish_cache_candidate(&mut observation, candidate, cache.as_mut());
         observation
     })
 }
@@ -1012,6 +1005,11 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             let cleanup = scope.stop(Some(std::process::id())).await;
             capture.finish(cleanup.is_ok());
             let result = result.and_then(|mut observation| {
+                observation.cache_update = if cache.is_some() {
+                    crate::tools::CacheUpdate::NotAttempted
+                } else {
+                    crate::tools::CacheUpdate::NotApplicable
+                };
                 if cleanup.is_ok()
                     && let Some(before) = &command_before
                     && let Ok(mut command) =
@@ -1091,9 +1089,15 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                                     return Err(ToolError::Operation);
                                 }
                             }
-                            Err(_) => {
+                            Err(crate::store::StoreError::StorageFull) => {
                                 output
                                     .write_all(b"CACHE_REJECTED\n")
+                                    .await
+                                    .map_err(|_| ToolError::Operation)?;
+                            }
+                            Err(_) => {
+                                output
+                                    .write_all(b"CACHE_FAILED\n")
                                     .await
                                     .map_err(|_| ToolError::Operation)?;
                             }

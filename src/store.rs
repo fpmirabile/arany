@@ -26,7 +26,7 @@ pub(crate) use state::{capture_archive_async, restore_archive_async};
 const DATABASE_FILE: &str = "events.sqlite3";
 pub(crate) const MAX_EVENT_BYTES: usize = 64 * 1024;
 fn event_payload_limit(kind: &str, version: i64) -> usize {
-    if kind == "MessageAccepted" && version == 2 {
+    if kind == "MessageAccepted" && version == 3 {
         320 * 1024
     } else {
         MAX_EVENT_BYTES

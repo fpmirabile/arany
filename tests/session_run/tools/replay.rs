@@ -62,6 +62,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             enforcement_digest: intent.enforcement_digest,
             limits: intent.limits.clone(),
         }),
+        cache_update: arany::CacheUpdate::NotApplicable,
     };
     let record = |disposition| Event::ProviderCallRecorded {
         run_id: run,
@@ -380,6 +381,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 limits: intent.limits.clone(),
             }),
             intent,
+            cache_update: arany::CacheUpdate::NotApplicable,
         },
     };
     let command_result = serde_json::json!({
@@ -446,6 +448,58 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     let view = replay(unpublished).unwrap().unwrap();
     assert_eq!(view.runs[0].status, RunStatus::Failed);
     assert_eq!(view.runs[0].tools.len(), 1);
+    let mut unfinalized_cache = integrated[..7].to_vec();
+    if let Event::ToolFinished { observation, .. } = &mut unfinalized_cache[6] {
+        observation.disposition = ToolDisposition::Succeeded;
+        observation.output = serde_json::json!({
+            "exit_code": 0,
+            "stdout": "build complete",
+            "stderr": "",
+            "changeset": changeset,
+        })
+        .to_string();
+        observation.cache_update = arany::CacheUpdate::NotAttempted;
+    }
+    assert!(
+        replay(unfinalized_cache).is_err(),
+        "successful cache-backed command requires controller finalization before Event commit"
+    );
+    let mut uncertain_cache = integrated[..7].to_vec();
+    if let Event::ToolFinished { observation, .. } = &mut uncertain_cache[6] {
+        observation.disposition = ToolDisposition::Uncertain;
+        observation.output = serde_json::json!({
+            "exit_code": 0,
+            "stdout": "build complete",
+            "stderr": "",
+            "changeset": changeset,
+        })
+        .to_string();
+        observation.cache_update = arany::CacheUpdate::Uncertain;
+    }
+    uncertain_cache.extend([
+        Event::AgentFinished {
+            run_id: run,
+            agent_run_id: primary,
+            disposition: AgentDisposition::Failed,
+            summary: None,
+            result: None,
+        },
+        Event::RunFinished {
+            run_id: run,
+            disposition: RunDisposition::Failed,
+        },
+    ]);
+    let view = replay(uncertain_cache).unwrap().unwrap();
+    assert_eq!(view.runs[0].status, RunStatus::Failed);
+    assert_eq!(view.runs[0].tools.len(), 1);
+    assert_eq!(
+        view.runs[0].tools[0]
+            .observation
+            .as_ref()
+            .unwrap()
+            .cache_update,
+        arany::CacheUpdate::Uncertain
+    );
     for case in [
         "source",
         "content",

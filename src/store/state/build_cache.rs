@@ -273,7 +273,10 @@ impl BuildCacheLease {
             let recovery = recover_transaction(&self.dir, &self.token);
             return match recovery {
                 Ok(()) => Err(error),
-                Err(_) => Err(StoreError::StateNotPrivate),
+                Err(_) => {
+                    self.defer_recovery = true;
+                    Err(StoreError::StateNotPrivate)
+                }
             };
         }
         let _ = finish_committed(&self.dir, &self.token);
@@ -287,6 +290,10 @@ impl BuildCacheLease {
 
     pub(crate) fn open_candidate(&self) -> Result<File, StoreError> {
         open_regular(&self.dir, &candidate_name(&self.token), MAX_ARCHIVE_BYTES)
+    }
+
+    pub(crate) fn publication_uncertain(&self) -> bool {
+        self.defer_recovery
     }
 }
 
@@ -2030,6 +2037,10 @@ mod tests {
             .expect("selected cache dir");
         std::fs::create_dir_all(new_target.parent().expect("new target parent"))
             .expect("new target dir");
+        let second_source = other_workspace.join("initial");
+        std::fs::create_dir_all(&second_source).expect("second cache source");
+        std::fs::write(second_source.join("target-marker"), b"second identity")
+            .expect("second cache data");
         std::fs::write(&selected_host_path, b"must not be imported").expect("host cache marker");
         std::fs::write(&new_target, b"current output").expect("current target");
         let updated_bytes = archive(&first, &updated, &selected);
@@ -2061,7 +2072,8 @@ mod tests {
         assert!(!restored.join("cargo/registry/cache/host.crate").exists());
         drop(lease);
 
-        publish(&state, second.clone(), &first_bytes, &[]);
+        let second_bytes = archive(&second, &second_source, &[]);
+        publish(&state, second.clone(), &second_bytes, &[]);
         state
             .clear_workspace_build_cache(&workspace)
             .expect("clear current Workspace cache");

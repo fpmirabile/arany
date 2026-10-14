@@ -75,6 +75,12 @@ pub(super) struct BuildCacheTransfer {
     pub(super) exclusions: Vec<String>,
 }
 
+pub(super) enum CacheCandidate {
+    Received,
+    Rejected,
+    Failed,
+}
+
 impl BuildCacheTransfer {
     fn validate(&self, intent: &EffectIntent, config: &Config) -> Result<(), ToolError> {
         let expected = cache_exclusions(&config.runtime_grants)?;
@@ -143,6 +149,52 @@ fn map_cache_error(error: StoreError) -> ToolError {
             ToolError::ProtectionUnavailable
         }
         _ => ToolError::Operation,
+    }
+}
+
+pub(super) fn publish_cache_candidate(
+    observation: &mut ToolObservation,
+    candidate: CacheCandidate,
+    cache: Option<&mut BuildCacheSession>,
+) {
+    if observation.disposition != ToolDisposition::Succeeded {
+        return;
+    }
+    let Some(cache) = cache else {
+        return;
+    };
+    let update = match candidate {
+        CacheCandidate::Rejected => CacheUpdate::Rejected,
+        CacheCandidate::Failed => CacheUpdate::Failed,
+        CacheCandidate::Received => match cache.lease.open_candidate() {
+            Ok(mut candidate) => match cache
+                .lease
+                .publish(&mut candidate, &cache.transfer.exclusions)
+            {
+                Ok(()) => CacheUpdate::Published,
+                Err(StoreError::StorageFull) if !cache.lease.publication_uncertain() => {
+                    CacheUpdate::Rejected
+                }
+                Err(_) if cache.lease.publication_uncertain() => CacheUpdate::Uncertain,
+                Err(_) => CacheUpdate::Failed,
+            },
+            Err(StoreError::StorageFull) if !cache.lease.publication_uncertain() => {
+                CacheUpdate::Rejected
+            }
+            Err(_) if cache.lease.publication_uncertain() => CacheUpdate::Uncertain,
+            Err(_) => CacheUpdate::Failed,
+        },
+    };
+    observation.cache_update = update;
+    if matches!(
+        update,
+        CacheUpdate::Uncertain | CacheUpdate::NotApplicable | CacheUpdate::NotAttempted
+    ) {
+        observation.disposition = ToolDisposition::Uncertain;
+    }
+    if !observation.valid() {
+        observation.cache_update = CacheUpdate::Uncertain;
+        observation.disposition = ToolDisposition::Uncertain;
     }
 }
 
@@ -470,7 +522,10 @@ async fn read_observation<R: tokio::io::AsyncBufRead + Unpin>(
     let bytes = read_line_capped(reader, CAPTURE_BYTES).await?;
     let observation: ToolObservation =
         serde_json::from_slice(&bytes).map_err(|_| ToolError::Operation)?;
-    if !observation.attested_for(intent) || !read_capped(&mut *reader, 1).await?.is_empty() {
+    if observation.cache_update != CacheUpdate::NotApplicable
+        || !observation.attested_for(intent)
+        || !read_capped(&mut *reader, 1).await?.is_empty()
+    {
         return Err(ToolError::Operation);
     }
     Ok(observation)
@@ -483,7 +538,7 @@ pub(super) async fn read_observation_line<R: tokio::io::AsyncBufRead + Unpin>(
     let bytes = read_line_capped(reader, CAPTURE_BYTES).await?;
     let observation: ToolObservation =
         serde_json::from_slice(&bytes).map_err(|_| ToolError::Operation)?;
-    if !observation.attested_for(intent) {
+    if observation.cache_update != CacheUpdate::NotAttempted || !observation.attested_for(intent) {
         return Err(ToolError::Operation);
     }
     Ok(observation)
@@ -531,12 +586,15 @@ pub(super) async fn send_cache_archive<W: tokio::io::AsyncWrite + Unpin>(
 pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
     lease: &BuildCacheLease,
-) -> Result<bool, ToolError> {
+) -> Result<CacheCandidate, ToolError> {
     use tokio::io::AsyncReadExt;
 
     let marker = read_line_capped(reader, 32).await?;
     if marker == b"CACHE_REJECTED\n" {
-        return Ok(false);
+        return Ok(CacheCandidate::Rejected);
+    }
+    if marker == b"CACHE_FAILED\n" {
+        return Ok(CacheCandidate::Failed);
     }
     if marker != b"CACHE_CANDIDATE\n" {
         return Err(ToolError::Operation);
@@ -564,7 +622,7 @@ pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
         remaining -= wanted as u64;
     }
     file.sync_all().map_err(|_| ToolError::Operation)?;
-    Ok(true)
+    Ok(CacheCandidate::Received)
 }
 
 /// Reaps a child this process owns. On macOS it closes stdin first and polls `try_wait`
@@ -892,6 +950,11 @@ pub(super) fn helper_main() -> ExitCode {
             disposition,
             output,
             guard: Some(receipt),
+            cache_update: if task.cache.is_some() {
+                crate::tools::CacheUpdate::NotAttempted
+            } else {
+                crate::tools::CacheUpdate::NotApplicable
+            },
         };
         if !observation.valid() {
             observation.disposition = ToolDisposition::Limit;
@@ -935,9 +998,15 @@ pub(super) fn helper_main() -> ExitCode {
                         }
                         stdout.flush().map_err(|_| ToolError::Operation)?;
                     }
-                    Err(_) => {
+                    Err(StoreError::StorageFull) => {
                         stdout
                             .write_all(b"CACHE_REJECTED\n")
+                            .and_then(|()| stdout.flush())
+                            .map_err(|_| ToolError::Operation)?;
+                    }
+                    Err(_) => {
+                        stdout
+                            .write_all(b"CACHE_FAILED\n")
                             .and_then(|()| stdout.flush())
                             .map_err(|_| ToolError::Operation)?;
                     }

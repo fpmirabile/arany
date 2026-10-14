@@ -776,10 +776,14 @@ async fn native_runtime_mount_journey_helper() {
         .iter()
         .find(|option| option.label.starts_with("Node"))
         .expect("metadata-only Node candidate");
-    let token = node.token.clone();
+    let node_token = node.token.clone();
     let mut permissions = permissions;
     permissions
-        .remember_profiles(true, arany::ApprovalMode::AutoEdits, &[token])
+        .remember_profiles(
+            true,
+            arany::ApprovalMode::AutoEdits,
+            std::slice::from_ref(&node_token),
+        )
         .unwrap();
     let permissions = arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
 
@@ -881,6 +885,96 @@ async fn native_runtime_mount_journey_helper() {
     assert!(detached.status.success(), "hdiutil detach: {detached:?}");
     drop(mounted);
 
+    let host_cache = root.join("home/.cargo/registry/cache");
+    std::fs::create_dir_all(&host_cache).unwrap();
+    private_file(&host_cache.join("canary.crate"), b"MACOS_HOST_CACHE_CANARY");
+    let state_success = root.join("state-success");
+    let cache_seed = ToolCall::Command {
+        program: "sh".into(),
+        args: vec![
+            "-c".into(),
+            "set -eu; /usr/bin/mkdir -p \"$CARGO_HOME/registry/cache\"; /usr/bin/dd if=/dev/zero of=\"$CARGO_HOME/registry/cache/private-bulk.crate\" bs=1048576 count=50 2>/dev/null".into(),
+        ],
+        cwd: String::new(),
+    };
+    let seed_requests = Arc::new(Mutex::new(Vec::new()));
+    let mut seed_engine = Engine::open(
+        StateRoot::admit(&state_success).unwrap(),
+        RuntimeJourney {
+            requests: seed_requests,
+            calls: vec![cache_seed.clone()],
+        },
+    )
+    .unwrap();
+    let (seed_approvals, mut seed_inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+    seed_engine
+        .enable_trusted_workspace(
+            permissions.clone(),
+            &workspace,
+            env!("CARGO_BIN_EXE_arany").into(),
+            seed_approvals,
+        )
+        .unwrap();
+    let seed_run = seed_engine.run(RunRequest {
+        session_id: None,
+        title: Some("Private cache seed".into()),
+        objective: "Seed a bounded private cache archive".into(),
+        images: Vec::new(),
+        workspace: workspace.clone(),
+        include_paths: Vec::new(),
+        policy: CollaborationPolicy::Single,
+    });
+    let approve_seed = async {
+        let approval = seed_inbox
+            .next()
+            .await
+            .expect("private cache seed approval");
+        assert!(
+            approval.intent.call == cache_seed,
+            "private cache seed approval intent differs"
+        );
+        approval.decide(true);
+    };
+    let (seed_outcome, ()) = tokio::time::timeout(Duration::from_secs(90), async {
+        tokio::join!(seed_run, approve_seed)
+    })
+    .await
+    .expect("bounded private cache seed");
+    let seed_outcome = seed_outcome.unwrap();
+    seed_engine.close().await.unwrap();
+    assert_eq!(seed_outcome.run.status, RunStatus::Finished);
+    let seed_result: serde_json::Value = serde_json::from_str(
+        &seed_outcome.run.tools[0]
+            .observation
+            .as_ref()
+            .unwrap()
+            .output,
+    )
+    .unwrap();
+    assert_eq!(seed_result["exit_code"], 0);
+    assert_eq!(
+        seed_outcome.run.tools[0]
+            .observation
+            .as_ref()
+            .unwrap()
+            .cache_update,
+        arany::CacheUpdate::Published
+    );
+
+    let mut permissions =
+        arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
+    let cargo_cache = permissions
+        .runtime_profile_choices()
+        .into_iter()
+        .find(|option| option.label.starts_with("Cargo archive cache"))
+        .expect("metadata-only Cargo cache candidate");
+    assert!(!cargo_cache.selected);
+    let selected_tokens = vec![node_token.clone(), cargo_cache.token];
+    permissions
+        .remember_profiles(true, arany::ApprovalMode::AutoEdits, &selected_tokens)
+        .unwrap();
+    let permissions = arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
+
     let accepted_requests = Arc::new(Mutex::new(Vec::new()));
     let cache_write = ToolCall::Command {
         program: "sh".into(),
@@ -897,14 +991,22 @@ async fn native_runtime_mount_journey_helper() {
         args: vec![
             "-c".into(),
             format!(
-                "test \"$(cat \"$CARGO_TARGET_DIR/persistent-marker\")\" = '{RUNTIME_CACHE_CANARY}'; cat \"$CARGO_TARGET_DIR/persistent-marker\"; printf '\\n'; node"
+                "set -eu; test \"$(cat \"$CARGO_TARGET_DIR/persistent-marker\")\" = '{RUNTIME_CACHE_CANARY}'; cat \"$CARGO_TARGET_DIR/persistent-marker\"; printf '\\n'; test \"$(cat \"$CARGO_HOME/registry/cache/canary.crate\")\" = MACOS_HOST_CACHE_CANARY; cat \"$CARGO_HOME/registry/cache/canary.crate\"; printf '\\n'; node"
             ),
         ],
         cwd: String::new(),
     };
-    let accepted_calls = vec![cache_write, cache_read];
+    let cache_overflow = ToolCall::Command {
+        program: "sh".into(),
+        args: vec![
+            "-c".into(),
+            "set -eu; /usr/bin/mkdir -p \"$CARGO_TARGET_DIR\"; /usr/bin/dd if=/dev/zero of=\"$CARGO_TARGET_DIR/overflow-marker\" bs=1048576 count=16 2>/dev/null".into(),
+        ],
+        cwd: String::new(),
+    };
+    let accepted_calls = vec![cache_write, cache_read, cache_overflow];
     let mut engine = Engine::open(
-        StateRoot::admit(&root.join("state-success")).unwrap(),
+        StateRoot::open_existing(&state_success).unwrap(),
         RuntimeJourney {
             requests: accepted_requests.clone(),
             calls: accepted_calls.clone(),
@@ -926,7 +1028,7 @@ async fn native_runtime_mount_journey_helper() {
         objective: "Persist private build-cache data between commands using the selected runtime"
             .into(),
         images: Vec::new(),
-        workspace,
+        workspace: workspace.clone(),
         include_paths: Vec::new(),
         policy: CollaborationPolicy::Single,
     });
@@ -936,7 +1038,10 @@ async fn native_runtime_mount_journey_helper() {
                 .next()
                 .await
                 .expect("approval for a selected-runtime command");
-            assert_eq!(&approval.intent.call, call);
+            assert!(
+                &approval.intent.call == call,
+                "selected-runtime approval intent differs"
+            );
             approval.decide(true);
         }
     };
@@ -953,7 +1058,7 @@ async fn native_runtime_mount_journey_helper() {
         "selected runtime Run failed: {}",
         crate::safe_run_diagnostics(&accepted.run)
     );
-    assert_eq!(accepted.run.tools.len(), 2);
+    assert_eq!(accepted.run.tools.len(), 3);
     let accepted_observations = accepted
         .run
         .tools
@@ -970,14 +1075,31 @@ async fn native_runtime_mount_journey_helper() {
             .as_str()
             .is_some_and(str::is_empty)
     );
-    let expected_stdout = format!("{RUNTIME_CACHE_CANARY}\nruntime-profile-selected\n");
+    assert_eq!(accepted_observations[2]["exit_code"], 0);
     assert_eq!(
-        accepted_observations[1]["stdout"].as_str(),
-        Some(expected_stdout.as_str())
+        accepted.run.tools[2]
+            .observation
+            .as_ref()
+            .unwrap()
+            .cache_update,
+        arany::CacheUpdate::Rejected
+    );
+    assert!(accepted.run.tools[..2].iter().all(|tool| {
+        tool.observation
+            .as_ref()
+            .is_some_and(|observation| observation.cache_update == arany::CacheUpdate::Published)
+    }));
+    let expected_stdout =
+        format!("{RUNTIME_CACHE_CANARY}\nMACOS_HOST_CACHE_CANARY\nruntime-profile-selected\n");
+    assert!(
+        accepted_observations[1]["stdout"]
+            .as_str()
+            .is_some_and(|stdout| stdout == expected_stdout),
+        "selected runtime cache output differs"
     );
     {
         let accepted_requests = accepted_requests.lock().unwrap();
-        assert_eq!(accepted_requests.len(), 3);
+        assert_eq!(accepted_requests.len(), 4);
         assert!(
             accepted_requests[0]
                 .tools
@@ -989,7 +1111,15 @@ async fn native_runtime_mount_journey_helper() {
         let first_output = &accepted_requests[1].tools.as_ref().unwrap().observations[0].output;
         let first_command: serde_json::Value = serde_json::from_str(first_output).unwrap();
         assert!(first_command["stdout"].as_str().is_some_and(str::is_empty));
-        let provider_observation = accepted_requests[2]
+        let overflow_observation = &accepted_requests[3].tools.as_ref().unwrap().observations[2];
+        let overflow_output = &overflow_observation.output;
+        let overflow_result: serde_json::Value = serde_json::from_str(overflow_output).unwrap();
+        assert_eq!(overflow_result["exit_code"], 0);
+        assert_eq!(
+            overflow_observation.cache_update,
+            arany::CacheUpdate::Rejected
+        );
+        let provider_observation = accepted_requests[3]
             .tools
             .as_ref()
             .unwrap()
@@ -999,9 +1129,11 @@ async fn native_runtime_mount_journey_helper() {
         assert_eq!(provider_observation.disposition, ToolDisposition::Succeeded);
         let provider_output: serde_json::Value =
             serde_json::from_str(&provider_observation.output).unwrap();
-        assert_eq!(
-            provider_output["stdout"].as_str(),
-            Some(expected_stdout.as_str())
+        assert!(
+            provider_output["stdout"]
+                .as_str()
+                .is_some_and(|stdout| stdout == expected_stdout),
+            "explicit selected-cache output missing from later Provider request"
         );
     }
     let state = StateRoot::open_existing(&root.join("state-success")).unwrap();
@@ -1012,7 +1144,10 @@ async fn native_runtime_mount_journey_helper() {
         .unwrap()
         .unwrap();
     assert_eq!(replay.runs.len(), 1);
-    assert_eq!(replay.runs[0], accepted.run, "closed cache replay");
+    assert!(
+        replay.runs[0] == accepted.run,
+        "closed cache replay differs"
+    );
     let finished = events
         .iter()
         .filter_map(|event| match &event.event {
@@ -1020,9 +1155,98 @@ async fn native_runtime_mount_journey_helper() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(finished.len(), 2);
+    assert_eq!(finished.len(), 3);
     assert!(finished[0] == accepted.run.tools[0].observation.as_ref().unwrap());
     assert!(finished[1] == accepted.run.tools[1].observation.as_ref().unwrap());
+    assert!(finished[2] == accepted.run.tools[2].observation.as_ref().unwrap());
+
+    let mut permissions =
+        arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
+    permissions
+        .remember_profiles(
+            true,
+            arany::ApprovalMode::AutoEdits,
+            std::slice::from_ref(&node_token),
+        )
+        .unwrap();
+    let permissions = arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
+    let verify_cache = ToolCall::Command {
+        program: "sh".into(),
+        args: vec![
+            "-c".into(),
+            "set -eu; test \"$(/usr/bin/wc -c < \"$CARGO_HOME/registry/cache/private-bulk.crate\")\" -eq 52428800; test \"$(cat \"$CARGO_TARGET_DIR/persistent-marker\")\" = ARANY_RUNTIME_CACHE_PERSISTENCE_CANARY; test ! -e \"$CARGO_TARGET_DIR/overflow-marker\"; printf 'cache-prior-retained\\n'; node".into(),
+        ],
+        cwd: String::new(),
+    };
+    let verify_requests = Arc::new(Mutex::new(Vec::new()));
+    let mut verify_engine = Engine::open(
+        StateRoot::open_existing(&state_success).unwrap(),
+        RuntimeJourney {
+            requests: verify_requests,
+            calls: vec![verify_cache.clone()],
+        },
+    )
+    .unwrap();
+    let (verify_approvals, mut verify_inbox) =
+        arany::ToolApprovals::new(arany::ApprovalMode::Request);
+    verify_engine
+        .enable_trusted_workspace(
+            permissions,
+            &workspace,
+            env!("CARGO_BIN_EXE_arany").into(),
+            verify_approvals,
+        )
+        .unwrap();
+    let verify_run = verify_engine.run(RunRequest {
+        session_id: None,
+        title: Some("Cache overflow recovery".into()),
+        objective: "Verify the previous private cache survived a rejected update".into(),
+        images: Vec::new(),
+        workspace: workspace.clone(),
+        include_paths: Vec::new(),
+        policy: CollaborationPolicy::Single,
+    });
+    let approve_verify = async {
+        let approval = verify_inbox.next().await.expect("cache recovery approval");
+        assert!(
+            approval.intent.call == verify_cache,
+            "cache recovery approval intent differs"
+        );
+        approval.decide(true);
+    };
+    let (verified, ()) = tokio::time::timeout(Duration::from_secs(90), async {
+        tokio::join!(verify_run, approve_verify)
+    })
+    .await
+    .expect("bounded cache recovery journey");
+    let verified = verified.unwrap();
+    verify_engine.close().await.unwrap();
+    assert_eq!(verified.run.status, RunStatus::Finished);
+    let retained = verified.run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(retained.cache_update, arany::CacheUpdate::Published);
+    let retained_result: serde_json::Value = serde_json::from_str(&retained.output).unwrap();
+    assert_eq!(
+        retained_result["stdout"],
+        "cache-prior-retained\nruntime-profile-selected\n"
+    );
+    let store = Store::open_read_only(StateRoot::open_existing(&state_success).unwrap()).unwrap();
+    let events = store.load_session(verified.session_id).await.unwrap();
+    store.close().await.unwrap();
+    let replay = SessionView::replay(verified.session_id, &events)
+        .unwrap()
+        .unwrap();
+    assert!(
+        replay.runs.as_slice() == std::slice::from_ref(&verified.run),
+        "closed cache recovery replay differs"
+    );
+    let finished = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            arany::Event::ToolFinished { observation, .. } => Some(observation),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(finished.len() == 1 && finished[0] == retained);
 }
 
 async fn stopped_effects_survive_closed_replay(
