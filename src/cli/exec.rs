@@ -274,10 +274,15 @@ async fn run_with_provider<P: Provider + 'static>(
         .close()
         .await
         .map_err(|_| "store shutdown failed".to_owned())?;
-    let (outcome, stop) = match result {
-        Ok(outcome) => (outcome, None),
-        // The committed answer is still printed; the stop reason makes the exit nonzero.
-        Err(EngineError::StoppedAfterRun { run, reason }) => (*run, Some(reason)),
+    let stop = result
+        .as_ref()
+        .err()
+        .filter(|error| matches!(error, EngineError::StoppedAfterRun { .. }))
+        .map(ToString::to_string);
+    let outcome = match result {
+        Ok(outcome) => outcome,
+        // The committed answer is still printed; the stop error makes the exit nonzero.
+        Err(EngineError::StoppedAfterRun { run, .. }) => *run,
         Err(error) => return Err(error.to_string()),
     };
     let root = StateRoot::open_existing(&admission.state_dir)
@@ -341,7 +346,7 @@ async fn run_with_provider<P: Provider + 'static>(
         OutputArg::Jsonl => "error: Run failed\n".into(),
     };
     let stderr = match &stop {
-        Some(reason) => format!("{stderr}error: {reason}\n"),
+        Some(message) => format!("{stderr}error: {message}\n"),
         None => stderr,
     };
     Ok(CommandOutput {
