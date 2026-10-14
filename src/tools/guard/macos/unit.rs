@@ -762,6 +762,8 @@ pub(super) async fn execute(
         unit = Unit::admit(intent.id, intent.expires_at_ms, |queued| runtime.queue_changed(intent.id, queued)) => unit?,
     };
     crate::tools::fs::reject_overlap(&unit.root, &runtime.workspace)?;
+    let mut cache = super::super::build_cache_session(runtime, intent)?;
+    let cache_transfer = cache.as_ref().map(|session| session.transfer.clone());
     let execution = async {
         let capture = FixtureSpan::begin(FixtureStage::Connect);
         let mut stream = BufReader::new(
@@ -771,13 +773,18 @@ pub(super) async fn execute(
         );
         capture.complete();
         let capture = FixtureSpan::begin(FixtureStage::ControllerReady);
-        let task = super::super::encode_task(&Task::new(runtime, intent))?;
+        let task = super::super::encode_task(&Task::new(runtime, intent, cache_transfer))?;
         stream
             .get_mut()
             .write_all(&task)
             .await
             .map_err(|_| ToolError::Operation)?;
-        let bytes = read_line_capped(&mut stream, 2048).await?;
+        let mut bytes = read_line_capped(&mut stream, 2048).await?;
+        if bytes == b"CACHE_READY\n" {
+            let session = cache.as_ref().ok_or(ToolError::Operation)?;
+            super::super::send_cache_archive(stream.get_mut(), &session.lease).await?;
+            bytes = read_line_capped(&mut stream, 2048).await?;
+        }
         if let Ok(failure) = serde_json::from_slice::<BootstrapFailure>(&bytes) {
             return Err(ToolError::GuardBootstrap(failure));
         }
@@ -804,7 +811,23 @@ pub(super) async fn execute(
             .write_all(b"GO\n")
             .await
             .map_err(|_| ToolError::Operation)?;
-        let observation = super::super::read_observation(&mut stream, intent).await?;
+        let observation = if let Some(session) = cache.as_ref() {
+            let observation = super::super::read_observation_line(&mut stream, intent).await?;
+            let candidate =
+                super::super::receive_cache_candidate(&mut stream, &session.lease).await?;
+            match read_line_capped(&mut stream, 32).await?.as_slice() {
+                b"CACHE_DONE\n" => {}
+                b"CACHE_FAILED\n" => {
+                    return Err(ToolError::GuardRejected(GuardStage::StorageCleanup));
+                }
+                _ => return Err(ToolError::Operation),
+            }
+            Ok((observation, candidate))
+        } else {
+            super::super::read_observation(&mut stream, intent)
+                .await
+                .map(|observation| (observation, false))
+        }?;
         capture.complete();
         Ok(observation)
     };
@@ -820,7 +843,18 @@ pub(super) async fn execute(
     unit.stop()
         .await
         .map_err(|_| ToolError::GuardRejected(GuardStage::ProcessCleanup))?;
-    result
+    result.map(|(observation, candidate)| {
+        if candidate
+            && observation.disposition == ToolDisposition::Succeeded
+            && let Some(session) = cache.as_mut()
+            && let Ok(mut candidate) = session.lease.open_candidate()
+        {
+            let _ = session
+                .lease
+                .publish(&mut candidate, &session.transfer.exclusions);
+        }
+        observation
+    })
 }
 
 fn connect_control(path: &Path) -> Result<(PrivateDirectory, UnixStream), ToolError> {
@@ -874,13 +908,16 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             let mut reader = std::io::BufReader::new(&mut stream);
             super::super::read_task(&mut reader)?
         };
+        if let Some(cache) = &task.cache {
+            cache.validate(&task.intent, &task.config)?;
+        }
         stage = super::super::BootstrapStage::Capabilities;
         if task.guard_executable
             != std::env::current_exe().map_err(|_| ToolError::ProtectionUnavailable)?
         {
             return Err(ToolError::ProtectionUnavailable);
         }
-        let (runtime, intent) = task.into_runtime();
+        let (runtime, intent, cache) = task.into_runtime();
         stream
             .set_read_timeout(None)
             .map_err(|_| ToolError::Operation)?;
@@ -900,16 +937,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 tokio::net::UnixStream::from_std(stream).map_err(|_| ToolError::Operation)?;
             let (mut input, mut output) = stream.into_split();
             let cancellation = RunCancellation::new();
-            let watched = cancellation.clone();
-            let (go, receive_go) = tokio::sync::oneshot::channel();
-            let reader = tokio::spawn(async move {
-                let mut bytes = [0; 3];
-                if input.read_exact(&mut bytes).await.is_ok() && bytes == *b"GO\n" {
-                    let _ = go.send(());
-                    let _ = input.read(&mut [0; 1]).await;
-                }
-                watched.cancel();
-            });
+            let mut reader = None;
             let mut storage = None;
             let mut command_before = None;
             let result = async {
@@ -923,6 +951,43 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 } else {
                     None
                 };
+                if let Some(cache) = &cache {
+                    output
+                        .write_all(b"CACHE_READY\n")
+                        .await
+                        .map_err(|_| ToolError::Operation)?;
+                    let mut length = [0; 8];
+                    input
+                        .read_exact(&mut length)
+                        .await
+                        .map_err(|_| ToolError::Operation)?;
+                    let length = u64::from_le_bytes(length);
+                    if length > crate::store::BUILD_CACHE_ARCHIVE_BYTES {
+                        return Err(ToolError::Limit);
+                    }
+                    if length > 0 {
+                        let volumes = storage.as_ref().ok_or(ToolError::Operation)?;
+                        let mut archive = input.take(length);
+                        crate::store::restore_archive_async(
+                            &mut archive,
+                            &volumes[1],
+                            &cache.identity,
+                            &cache.exclusions,
+                        )
+                        .await
+                        .map_err(|_| ToolError::ProtectionUnavailable)?;
+                    }
+                }
+                let (go, receive_go) = tokio::sync::oneshot::channel();
+                let watched = cancellation.clone();
+                reader = Some(tokio::spawn(async move {
+                    let mut bytes = [0; 3];
+                    if input.read_exact(&mut bytes).await.is_ok() && bytes == *b"GO\n" {
+                        let _ = go.send(());
+                        let _ = input.read(&mut [0; 1]).await;
+                    }
+                    watched.cancel();
+                }));
                 if matches!(intent.call, crate::tools::ToolCall::Command { .. }) {
                     command_before = Some(crate::tools::fs::command_snapshot(
                         &path.parent().ok_or(ToolError::Path)?.join("workspace"),
@@ -983,6 +1048,66 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 }
                 Ok(observation)
             });
+            let mut response_sent = false;
+            let mut cache_transfer_failed = false;
+            if let (Some(cache), Some(volumes), Ok(observation)) = (&cache, &storage, &result) {
+                let transfer = async {
+                    let bytes =
+                        serde_json::to_vec(observation).map_err(|_| ToolError::Operation)?;
+                    output
+                        .write_all(&bytes)
+                        .await
+                        .map_err(|_| ToolError::Operation)?;
+                    output
+                        .write_all(b"\n")
+                        .await
+                        .map_err(|_| ToolError::Operation)?;
+                    response_sent = true;
+                    if cleanup.is_ok() && observation.disposition == ToolDisposition::Succeeded {
+                        match crate::store::archive_size(
+                            &volumes[1],
+                            &cache.identity,
+                            &cache.exclusions,
+                        ) {
+                            Ok(size) => {
+                                output
+                                    .write_all(b"CACHE_CANDIDATE\n")
+                                    .await
+                                    .map_err(|_| ToolError::Operation)?;
+                                output
+                                    .write_all(&size.to_le_bytes())
+                                    .await
+                                    .map_err(|_| ToolError::Operation)?;
+                                let captured = crate::store::capture_archive_async(
+                                    &volumes[1],
+                                    &cache.identity,
+                                    &cache.exclusions,
+                                    &mut output,
+                                )
+                                .await
+                                .map_err(|_| ToolError::Operation)?;
+                                if captured != size {
+                                    return Err(ToolError::Operation);
+                                }
+                            }
+                            Err(_) => {
+                                output
+                                    .write_all(b"CACHE_REJECTED\n")
+                                    .await
+                                    .map_err(|_| ToolError::Operation)?;
+                            }
+                        }
+                    } else {
+                        output
+                            .write_all(b"CACHE_REJECTED\n")
+                            .await
+                            .map_err(|_| ToolError::Operation)?;
+                    }
+                    Ok::<(), ToolError>(())
+                }
+                .await;
+                cache_transfer_failed = transfer.is_err();
+            }
             drop(storage);
             let storage_cleanup = if cleanup.is_ok() {
                 let capture = FixtureSpan::begin(FixtureStage::SupervisorDetach);
@@ -992,25 +1117,42 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             } else {
                 Err(ToolError::ProtectionUnavailable)
             };
-            reader.abort();
-            let _ = reader.await;
-            let result = cleanup.and(storage_cleanup).and(result);
-            let bytes = match &result {
-                Ok(observation) => serde_json::to_vec(observation),
-                Err(ToolError::GuardBootstrap(failure)) => serde_json::to_vec(failure),
-                Err(_) => serde_json::to_vec(&BootstrapFailure {
-                    stage: stage.clone(),
-                }),
+            if let Some(reader) = reader {
+                reader.abort();
+                let _ = reader.await;
             }
-            .map_err(|_| ToolError::Operation)?;
-            output
-                .write_all(&bytes)
-                .await
+            if cache_transfer_failed {
+                output.shutdown().await.map_err(|_| ToolError::Operation)?;
+                return Err(ToolError::Operation);
+            }
+            let result = cleanup.and(storage_cleanup).and(result);
+            if response_sent {
+                output
+                    .write_all(if result.is_ok() {
+                        b"CACHE_DONE\n"
+                    } else {
+                        b"CACHE_FAILED\n"
+                    })
+                    .await
+                    .map_err(|_| ToolError::Operation)?;
+            } else {
+                let bytes = match &result {
+                    Ok(observation) => serde_json::to_vec(observation),
+                    Err(ToolError::GuardBootstrap(failure)) => serde_json::to_vec(failure),
+                    Err(_) => serde_json::to_vec(&BootstrapFailure {
+                        stage: stage.clone(),
+                    }),
+                }
                 .map_err(|_| ToolError::Operation)?;
-            output
-                .write_all(b"\n")
-                .await
-                .map_err(|_| ToolError::Operation)?;
+                output
+                    .write_all(&bytes)
+                    .await
+                    .map_err(|_| ToolError::Operation)?;
+                output
+                    .write_all(b"\n")
+                    .await
+                    .map_err(|_| ToolError::Operation)?;
+            }
             output.shutdown().await.map_err(|_| ToolError::Operation)?;
             result.map(|_| ())
         })
@@ -1359,6 +1501,7 @@ done
         .unwrap();
         ToolRuntime {
             queue_progress: None,
+            cache_state: None,
             config: crate::tools::config::Config {
                 version: 1,
                 workspace_paths: vec!["selected".into(), "empty".into(), "script".into()],
@@ -2583,6 +2726,7 @@ done
                 std::env::set_current_dir(root).unwrap();
                 let task = Task {
                     config: runtime.config.clone(),
+                    cache: None,
                     intent: EffectIntent {
                         id: uuid::Uuid::now_v7(),
                         run_id: crate::session::RunId::default(),

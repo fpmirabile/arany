@@ -68,8 +68,11 @@ limits and compatibility.
   rejects publication after command execution and preserves the last committed
   cache. On macOS, read/capture the mounted scratch volume while its checked
   handle is live, then positively empty the coalition and detach storage before
-  Store publication. Uncertain command, storage, seed or unit cleanup never
-  commits cache bytes.
+  Store publication. An explicitly selected read-only host-cache subtree takes
+  precedence: exclude that exact relative root before private archive traversal,
+  never import host bytes, and preserve earlier private archive entries at that
+  root when other cache paths are published. Uncertain command, storage, seed
+  or unit cleanup never commits cache bytes.
 - Close inherited descriptors at the single-threaded worker entry before Rust
   opens persistent handles. Install shared descriptor/core limits at bootstrap;
   only the non-spawning file/Skill worker resets and unblocks SIGXCPU and installs

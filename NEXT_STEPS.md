@@ -14,10 +14,10 @@ history. Implementation status and verified support are separate claims.
   fetch, Git, a
   narrowing-only Supervisor, per-agent Provider routing and writable team
   workers. The [initiative plan](./planning/agentic-teams/README.md) is
-  self-contained and orders the slices; start at its next action (execution
-  step 2, persistent per-Workspace cache). A3's configurable maxima are approved at
-  4 GiB memory, 8 GiB cache, 1 GiB project storage and 256 tasks; its default
-  cache remains 64 MiB until A4 enables the build profile. Native build
+  self-contained and orders the slices; start at its next action (Goal core and
+  budgets, execution step 3). The approved A4 maxima are 4 GiB memory, 8 GiB
+  cache, 1 GiB project storage and 256 tasks; the current cache view remains
+  64 MiB until A4 enables the build profile. Native build
   evidence and named-host measurements still precede support claims. Goal
   budgets precede A4's flexible limits, and both precede dogfooding. Remote
   MCP/OAuth, interactive/background jobs and other network grants need their

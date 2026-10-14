@@ -108,6 +108,7 @@ pub(crate) struct ToolRuntime {
     enforcement_digest: [u8; 32],
     process_enforcement_digest: [u8; 32],
     queue_progress: Option<tokio::sync::watch::Sender<Option<uuid::Uuid>>>,
+    cache_state: Option<StateRoot>,
     #[cfg(target_os = "macos")]
     system_programs: Option<std::sync::Arc<guard::SystemPrograms>>,
 }
@@ -198,6 +199,11 @@ impl ToolRuntime {
         Ok(Self {
             config,
             queue_progress: None,
+            cache_state: Some(
+                state
+                    .try_clone()
+                    .map_err(|_| ToolError::ProtectionUnavailable)?,
+            ),
             workspace: workspace.to_owned(),
             workspace_identity,
             guard_executable,

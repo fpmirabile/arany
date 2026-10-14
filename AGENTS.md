@@ -20,6 +20,7 @@ Arany is a Rust-first, CLI-only agent harness. The product and executable are na
 | ChatGPT-plan OAuth, consent, tokens, weaker output bounds | [ChatGPT](./agents/chatgpt.md) |
 | Sessions, resume/fork/compaction, collaboration, topology, context | [Session](./agents/session.md) |
 | SQLite admission, Events, replay | [Store](./agents/store.md) |
+| Persistent Workspace build-cache identity, quota, archive and recovery | [Build cache](./agents/build-cache.md) |
 | Shared private-directory admission and native ACL checks | [Private filesystem](./agents/private-fs.md) |
 | Terminal behavior, output, accessibility, restoration, presentation | [Terminal](./agents/terminal.md) |
 | Ratatui backend, Inline cursor responses and scoped clearing | [Terminal backend](./agents/terminal-backend.md) |

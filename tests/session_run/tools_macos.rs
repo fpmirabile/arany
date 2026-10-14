@@ -645,8 +645,10 @@ int main(int argc, char **argv) {
 }
 struct RuntimeJourney {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
-    call: ToolCall,
+    calls: Vec<ToolCall>,
 }
+
+const RUNTIME_CACHE_CANARY: &str = "ARANY_RUNTIME_CACHE_PERSISTENCE_CANARY";
 
 impl Provider for RuntimeJourney {
     fn profile_name(&self) -> &str {
@@ -668,15 +670,15 @@ impl Provider for RuntimeJourney {
             requests.push(request);
             step
         };
-        if step > 1 {
+        if step > self.calls.len() {
             return Err(ProviderError::InvalidOutcome);
         }
-        let outcome = if step == 0 {
-            ProviderOutcome::Tool(self.call.clone())
+        let outcome = if step < self.calls.len() {
+            ProviderOutcome::Tool(self.calls[step].clone())
         } else {
             ProviderOutcome::Finish(Finish {
                 summary: "Runtime profile checked".into(),
-                result: "The selected runtime command completed under Guard.".into(),
+                result: "The selected runtime command completed under Guard, and its private build cache persisted between commands.".into(),
             })
         };
         Ok(ProviderResponse {
@@ -728,7 +730,10 @@ async fn native_runtime_mount_journey_helper() {
     let runtime = root.join("home/.nvm/versions/node/v22.3.0");
     std::fs::create_dir_all(runtime.join("bin")).unwrap();
     let node = runtime.join("bin/node");
-    private_file(&node, b"#!/bin/sh\nprintf runtime-profile-selected\\n\n");
+    private_file(
+        &node,
+        b"#!/bin/sh\nprintf '%s\\n' runtime-profile-selected\n",
+    );
     std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mountpoint = runtime.join("mounted-image");
     std::fs::create_dir(&mountpoint).unwrap();
@@ -796,7 +801,7 @@ async fn native_runtime_mount_journey_helper() {
         StateRoot::admit(&refused_state).unwrap(),
         RuntimeJourney {
             requests: refused_requests.clone(),
-            call: runtime_call.clone(),
+            calls: vec![runtime_call.clone()],
         },
     )
     .unwrap();
@@ -880,11 +885,32 @@ async fn native_runtime_mount_journey_helper() {
     drop(mounted);
 
     let accepted_requests = Arc::new(Mutex::new(Vec::new()));
+    let cache_write = ToolCall::Command {
+        program: "sh".into(),
+        args: vec![
+            "-c".into(),
+            format!(
+                "mkdir -p \"$CARGO_TARGET_DIR\"; printf '%s' '{RUNTIME_CACHE_CANARY}' > \"$CARGO_TARGET_DIR/persistent-marker\""
+            ),
+        ],
+        cwd: String::new(),
+    };
+    let cache_read = ToolCall::Command {
+        program: "sh".into(),
+        args: vec![
+            "-c".into(),
+            format!(
+                "test \"$(cat \"$CARGO_TARGET_DIR/persistent-marker\")\" = '{RUNTIME_CACHE_CANARY}'; cat \"$CARGO_TARGET_DIR/persistent-marker\"; printf '\\n'; node"
+            ),
+        ],
+        cwd: String::new(),
+    };
+    let accepted_calls = vec![cache_write, cache_read];
     let mut engine = Engine::open(
         StateRoot::admit(&root.join("state-success")).unwrap(),
         RuntimeJourney {
             requests: accepted_requests.clone(),
-            call: runtime_call.clone(),
+            calls: accepted_calls.clone(),
         },
     )
     .unwrap();
@@ -900,19 +926,22 @@ async fn native_runtime_mount_journey_helper() {
     let run = engine.run(RunRequest {
         session_id: None,
         title: Some("Selected runtime success".into()),
-        objective: "Run a command using the selected runtime".into(),
+        objective: "Persist private build-cache data between commands using the selected runtime"
+            .into(),
         images: Vec::new(),
         workspace,
         include_paths: Vec::new(),
         policy: CollaborationPolicy::Single,
     });
     let approve = async {
-        let approval = inbox
-            .next()
-            .await
-            .expect("one approval for the selected-runtime command");
-        assert_eq!(approval.intent.call, runtime_call);
-        approval.decide(true);
+        for call in &accepted_calls {
+            let approval = inbox
+                .next()
+                .await
+                .expect("approval for a selected-runtime command");
+            assert_eq!(&approval.intent.call, call);
+            approval.decide(true);
+        }
     };
     let (accepted, ()) = tokio::time::timeout(Duration::from_secs(90), async {
         tokio::join!(run, approve)
@@ -927,33 +956,76 @@ async fn native_runtime_mount_journey_helper() {
         "selected runtime Run failed: {}",
         crate::safe_run_diagnostics(&accepted.run)
     );
-    assert_eq!(accepted.run.tools.len(), 1);
-    let accepted_observation = accepted.run.tools[0].observation.as_ref().unwrap();
-    assert_eq!(accepted_observation.disposition, ToolDisposition::Succeeded);
-    let accepted_output: serde_json::Value =
-        serde_json::from_str(&accepted_observation.output).unwrap();
-    assert_eq!(accepted_output["stdout"], "selected-runtime-command");
-    let accepted_requests = accepted_requests.lock().unwrap();
-    assert_eq!(accepted_requests.len(), 2);
+    assert_eq!(accepted.run.tools.len(), 2);
+    let accepted_observations = accepted
+        .run
+        .tools
+        .iter()
+        .map(|tool| {
+            let observation = tool.observation.as_ref().unwrap();
+            assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+            assert_eq!(observation.intent, tool.intent);
+            serde_json::from_str::<serde_json::Value>(&observation.output).unwrap()
+        })
+        .collect::<Vec<_>>();
     assert!(
-        accepted_requests[0]
+        accepted_observations[0]["stdout"]
+            .as_str()
+            .is_some_and(str::is_empty)
+    );
+    let expected_stdout = format!("{RUNTIME_CACHE_CANARY}\nruntime-profile-selected\n");
+    assert_eq!(
+        accepted_observations[1]["stdout"].as_str(),
+        Some(expected_stdout.as_str())
+    );
+    {
+        let accepted_requests = accepted_requests.lock().unwrap();
+        assert_eq!(accepted_requests.len(), 3);
+        assert!(
+            accepted_requests[0]
+                .tools
+                .as_ref()
+                .unwrap()
+                .observations
+                .is_empty()
+        );
+        let first_output = &accepted_requests[1].tools.as_ref().unwrap().observations[0].output;
+        let first_command: serde_json::Value = serde_json::from_str(first_output).unwrap();
+        assert!(first_command["stdout"].as_str().is_some_and(str::is_empty));
+        let provider_observation = accepted_requests[2]
             .tools
             .as_ref()
             .unwrap()
             .observations
-            .is_empty()
-    );
-    let provider_observation = accepted_requests[1]
-        .tools
-        .as_ref()
+            .last()
+            .unwrap();
+        assert_eq!(provider_observation.disposition, ToolDisposition::Succeeded);
+        let provider_output: serde_json::Value =
+            serde_json::from_str(&provider_observation.output).unwrap();
+        assert_eq!(
+            provider_output["stdout"].as_str(),
+            Some(expected_stdout.as_str())
+        );
+    }
+    let state = StateRoot::open_existing(&root.join("state-success")).unwrap();
+    let store = Store::open_read_only(state).unwrap();
+    let events = store.load_session(accepted.session_id).await.unwrap();
+    store.close().await.unwrap();
+    let replay = SessionView::replay(accepted.session_id, &events)
         .unwrap()
-        .observations
-        .last()
         .unwrap();
-    assert_eq!(provider_observation.disposition, ToolDisposition::Succeeded);
-    let provider_output: serde_json::Value =
-        serde_json::from_str(&provider_observation.output).unwrap();
-    assert_eq!(provider_output["stdout"], "selected-runtime-command");
+    assert_eq!(replay.runs.len(), 1);
+    assert_eq!(replay.runs[0], accepted.run, "closed cache replay");
+    let finished = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            arany::Event::ToolFinished { observation, .. } => Some(observation),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(finished.len(), 2);
+    assert!(finished[0] == accepted.run.tools[0].observation.as_ref().unwrap());
+    assert!(finished[1] == accepted.run.tools[1].observation.as_ref().unwrap());
 }
 
 async fn stopped_effects_survive_closed_replay(

@@ -10,10 +10,11 @@ use std::{
 };
 
 const CACHE_CANARY: &str = "EXPLICIT_CACHE_OUTPUT_CANARY";
+const PRIVATE_CACHE_CANARY: &str = "ARANY_PRIVATE_CACHE_PERSISTENCE_CANARY";
 
 struct CacheCanary {
     requests: std::sync::Arc<std::sync::Mutex<Vec<ProviderRequest>>>,
-    call: ToolCall,
+    calls: Vec<ToolCall>,
 }
 
 impl Provider for CacheCanary {
@@ -36,16 +37,15 @@ impl Provider for CacheCanary {
             requests.push(request);
             step
         };
-        if step > 1 {
+        if step > self.calls.len() {
             return Err(ProviderError::InvalidOutcome);
         }
-        let outcome = if step == 0 {
-            ProviderOutcome::Tool(self.call.clone())
+        let outcome = if step < self.calls.len() {
+            ProviderOutcome::Tool(self.calls[step].clone())
         } else {
             ProviderOutcome::Finish(Finish {
                 summary: "Selected cache output was explicit".into(),
-                result: "The selected cache content appeared only after the command read it."
-                    .into(),
+                result: "The private build cache persisted between commands, and selected host-cache output appeared only after an explicit read.".into(),
             })
         };
         Ok(ProviderResponse {
@@ -141,20 +141,33 @@ async fn selected_cache_canary_helper() {
 
     let state_path = root.join("state");
     let state = StateRoot::admit(&state_path).unwrap();
-    let call = ToolCall::Command {
+    let write_cache = ToolCall::Command {
         program: "sh".into(),
         args: vec![
             "-c".into(),
-            "/bin/cat \"$CARGO_HOME/registry/cache/canary.crate\"".into(),
+            format!(
+                "/usr/bin/mkdir -p \"$CARGO_TARGET_DIR\"; printf '%s' '{PRIVATE_CACHE_CANARY}' > \"$CARGO_TARGET_DIR/persistent-marker\""
+            ),
         ],
         cwd: ".".into(),
     };
+    let read_caches = ToolCall::Command {
+        program: "sh".into(),
+        args: vec![
+            "-c".into(),
+            format!(
+                "test \"$(/usr/bin/cat \"$CARGO_TARGET_DIR/persistent-marker\")\" = '{PRIVATE_CACHE_CANARY}'; /usr/bin/cat \"$CARGO_TARGET_DIR/persistent-marker\"; printf '\\n'; /usr/bin/cat \"$CARGO_HOME/registry/cache/canary.crate\""
+            ),
+        ],
+        cwd: ".".into(),
+    };
+    let calls = vec![write_cache, read_caches];
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut engine = Engine::open(
         state,
         CacheCanary {
             requests: requests.clone(),
-            call: call.clone(),
+            calls: calls.clone(),
         },
     )
     .unwrap();
@@ -170,19 +183,22 @@ async fn selected_cache_canary_helper() {
     let run = engine.run(RunRequest {
         session_id: None,
         title: Some("Selected cache canary".into()),
-        objective: "Read the selected cache canary with the shell Tool".into(),
+        objective: "Persist private build-cache data, then explicitly read the selected host cache"
+            .into(),
         images: Vec::new(),
         workspace: workspace.clone(),
         include_paths: Vec::new(),
         policy: CollaborationPolicy::Single,
     });
     let approve = async {
-        let approval = inbox
-            .next()
-            .await
-            .expect("one approval for the selected-cache command");
-        assert_eq!(approval.intent.call, call);
-        approval.decide(true);
+        for call in &calls {
+            let approval = inbox
+                .next()
+                .await
+                .expect("approval for a selected-cache command");
+            assert_eq!(&approval.intent.call, call);
+            approval.decide(true);
+        }
     };
     let (outcome, ()) = tokio::time::timeout(Duration::from_secs(90), async {
         tokio::join!(run, approve)
@@ -197,39 +213,55 @@ async fn selected_cache_canary_helper() {
         "cache canary Run failed: {}",
         crate::safe_run_diagnostics(&outcome.run)
     );
-    assert_eq!(outcome.run.tools.len(), 1);
-    let observation = outcome.run.tools[0].observation.as_ref().unwrap();
-    assert_eq!(observation.disposition, ToolDisposition::Succeeded);
-    assert_eq!(observation.intent, outcome.run.tools[0].intent);
-    assert_eq!(observation.intent.call, call);
-    let receipt = observation
-        .guard
-        .as_ref()
-        .expect("successful cache command has a Guard receipt");
-    let expected_digest: [u8; 32] =
-        Sha256::digest(serde_json::to_vec(&observation.intent).unwrap()).into();
-    assert_eq!(receipt.contract_version, 1);
-    assert_eq!(receipt.intent_digest, expected_digest);
-    assert_eq!(
-        receipt.enforcement_digest,
-        observation.intent.enforcement_digest
-    );
-    assert_eq!(receipt.limits, observation.intent.limits);
-    let command: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
-    assert_eq!(command["exit_code"], 0);
+    assert_eq!(outcome.run.tools.len(), 2);
+    let mut observations = Vec::new();
+    let mut command_results = Vec::new();
+    for tool in &outcome.run.tools {
+        let observation = tool.observation.as_ref().unwrap();
+        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+        assert_eq!(observation.intent, tool.intent);
+        let receipt = observation
+            .guard
+            .as_ref()
+            .expect("successful cache command has a Guard receipt");
+        let expected_digest: [u8; 32] =
+            Sha256::digest(serde_json::to_vec(&observation.intent).unwrap()).into();
+        assert_eq!(receipt.contract_version, 1);
+        assert_eq!(receipt.intent_digest, expected_digest);
+        assert_eq!(
+            receipt.enforcement_digest,
+            observation.intent.enforcement_digest
+        );
+        assert_eq!(receipt.limits, observation.intent.limits);
+        command_results
+            .push(serde_json::from_str::<serde_json::Value>(&observation.output).unwrap());
+        observations.push(observation);
+    }
+    assert_eq!(command_results[0]["exit_code"], 0);
     assert!(
-        command["stderr"].as_str().is_some_and(str::is_empty),
-        "cache command stderr was not empty"
-    );
-    assert!(
-        command["stdout"]
+        command_results[0]["stderr"]
             .as_str()
-            .is_some_and(|stdout| stdout == CACHE_CANARY),
-        "explicit cache command stdout mismatch"
+            .is_some_and(str::is_empty)
+    );
+    assert!(
+        command_results[0]["stdout"]
+            .as_str()
+            .is_some_and(str::is_empty)
+    );
+    assert_eq!(command_results[1]["exit_code"], 0);
+    assert!(
+        command_results[1]["stderr"]
+            .as_str()
+            .is_some_and(str::is_empty)
+    );
+    let expected_stdout = format!("{PRIVATE_CACHE_CANARY}\n{CACHE_CANARY}");
+    assert_eq!(
+        command_results[1]["stdout"].as_str(),
+        Some(expected_stdout.as_str())
     );
     {
         let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 3);
         let _initial_tools = requests[0]
             .tools
             .as_ref()
@@ -239,10 +271,17 @@ async fn selected_cache_canary_helper() {
             !initial.contains(CACHE_CANARY),
             "cache canary was present in the initial Provider request"
         );
+        let first_output = &requests[1].tools.as_ref().unwrap().observations[0].output;
+        let first_command: serde_json::Value = serde_json::from_str(first_output).unwrap();
+        assert!(first_command["stdout"].as_str().is_some_and(str::is_empty));
+        assert!(!first_output.contains(PRIVATE_CACHE_CANARY));
         assert!(
-            requests[1].tools.as_ref().unwrap().observations[0]
+            requests[2].tools.as_ref().unwrap().observations[1]
                 .output
-                .contains(CACHE_CANARY),
+                .contains(PRIVATE_CACHE_CANARY)
+                && requests[2].tools.as_ref().unwrap().observations[1]
+                    .output
+                    .contains(CACHE_CANARY),
             "explicit cache output missing from the later Provider request"
         );
     }
@@ -264,10 +303,10 @@ async fn selected_cache_canary_helper() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(finished.len(), 1);
+    assert_eq!(finished.len(), 2);
     assert!(
-        finished[0] == observation,
-        "ToolFinished cache observation differs"
+        finished[0] == observations[0] && finished[1] == observations[1],
+        "ToolFinished cache observations differ"
     );
 }
 

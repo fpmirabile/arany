@@ -448,6 +448,9 @@ pub(super) fn validate_idle_command(
         {
             Err("invalid collaboration policy")
         }
+        InteractiveCommand::Cache if !matches!(argument, Some("clear" | "clear all")) => {
+            Err("Usage: /cache clear [all]")
+        }
         _ => Ok(()),
     }
 }
@@ -644,6 +647,26 @@ pub(super) async fn handle_command(
                 "Tools requested from private tools.json; native protection must be admitted before a Run. File mutation requires the write grant; command changes are discarded. Primary only; commands/MCP have no network, host home or account state. Arany requests: selected Provider; OS TLS checks may connect separately.".into()
             } else {
                 "Read-only Workspace; Arany requests: selected Provider; OS TLS checks may connect separately; no Tools or sandbox".into()
+            }
+        }
+        InteractiveCommand::Cache => {
+            let root = StateRoot::open_existing(&admission.state_dir)
+                .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+            let result = match argument {
+                Some("clear") => root.clear_workspace_build_cache(&admission.workspace),
+                Some("clear all") => root.clear_all_build_caches(),
+                _ => return Ok("Usage: /cache clear [all]".into()),
+            };
+            match result {
+                Ok(()) => match argument {
+                    Some("clear") => "Cleared this Workspace's private build cache".into(),
+                    Some("clear all") => "Cleared all private build caches".into(),
+                    _ => unreachable!(),
+                },
+                Err(arany::StoreError::BuildCacheBusy) => {
+                    "Build cache is in use; retry after its command finishes".into()
+                }
+                Err(_) => "Error: private build cache could not be cleared".into(),
             }
         }
         _ => "Command is not available in this build".into(),

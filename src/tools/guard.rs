@@ -3,6 +3,7 @@ use super::toolchains::{RuntimeGrant, validate_selection};
 use super::types::*;
 use super::{ToolError, ToolRuntime, now_ms};
 use crate::engine::RunCancellation;
+use crate::store::{BuildCacheIdentity, BuildCacheLease, StoreError};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -56,6 +57,7 @@ pub(super) fn native_system_program(path: &str) -> Result<bool, ToolError> {
 struct Task {
     config: Config,
     intent: EffectIntent,
+    cache: Option<BuildCacheTransfer>,
     #[cfg(target_os = "linux")]
     parent_namespaces: profile::Namespaces,
     #[cfg(target_os = "macos")]
@@ -64,6 +66,84 @@ struct Task {
     guard_executable: std::path::PathBuf,
     #[cfg(target_os = "macos")]
     system_programs: Option<SystemPrograms>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct BuildCacheTransfer {
+    pub(super) identity: BuildCacheIdentity,
+    pub(super) exclusions: Vec<String>,
+}
+
+impl BuildCacheTransfer {
+    fn validate(&self, intent: &EffectIntent, config: &Config) -> Result<(), ToolError> {
+        let expected = cache_exclusions(&config.runtime_grants)?;
+        if !matches!(intent.call, ToolCall::Command { .. })
+            || self.identity.device != intent.workspace_device
+            || self.identity.inode != intent.workspace_inode
+            || self.exclusions != expected
+        {
+            return Err(ToolError::Configuration);
+        }
+        Ok(())
+    }
+}
+
+pub(super) struct BuildCacheSession {
+    pub(super) lease: BuildCacheLease,
+    pub(super) transfer: BuildCacheTransfer,
+}
+
+pub(super) fn build_cache_session(
+    runtime: &ToolRuntime,
+    intent: &EffectIntent,
+) -> Result<Option<BuildCacheSession>, ToolError> {
+    if !matches!(intent.call, ToolCall::Command { .. }) {
+        return Ok(None);
+    }
+    let Some(state) = runtime.cache_state.as_ref() else {
+        return Ok(None);
+    };
+    let identity = BuildCacheIdentity::new(
+        &runtime.workspace,
+        intent.workspace_device,
+        intent.workspace_inode,
+    )
+    .map_err(map_cache_error)?;
+    let exclusions = cache_exclusions(&runtime.config.runtime_grants)?;
+    let lease = state
+        .begin_build_cache(identity.clone())
+        .map_err(map_cache_error)?;
+    Ok(Some(BuildCacheSession {
+        lease,
+        transfer: BuildCacheTransfer {
+            identity,
+            exclusions,
+        },
+    }))
+}
+
+fn cache_exclusions(grants: &[RuntimeGrant]) -> Result<Vec<String>, ToolError> {
+    let mut exclusions = Vec::new();
+    for grant in grants.iter().filter(|grant| grant.kind.is_cache()) {
+        grant.verify_host()?;
+        let path = grant.kind.cache_root().ok_or(ToolError::Configuration)?;
+        exclusions.push(path.to_owned());
+    }
+    exclusions.sort();
+    exclusions.dedup();
+    Ok(exclusions)
+}
+
+fn map_cache_error(error: StoreError) -> ToolError {
+    match error {
+        StoreError::StorageFull => ToolError::Limit,
+        StoreError::BuildCacheBusy => ToolError::QueueFull,
+        StoreError::StateNotPrivate | StoreError::InvalidBuildCache => {
+            ToolError::ProtectionUnavailable
+        }
+        _ => ToolError::Operation,
+    }
 }
 
 impl Task {
@@ -396,6 +476,97 @@ async fn read_observation<R: tokio::io::AsyncBufRead + Unpin>(
     Ok(observation)
 }
 
+pub(super) async fn read_observation_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    intent: &EffectIntent,
+) -> Result<ToolObservation, ToolError> {
+    let bytes = read_line_capped(reader, CAPTURE_BYTES).await?;
+    let observation: ToolObservation =
+        serde_json::from_slice(&bytes).map_err(|_| ToolError::Operation)?;
+    if !observation.attested_for(intent) {
+        return Err(ToolError::Operation);
+    }
+    Ok(observation)
+}
+
+pub(super) async fn send_cache_archive<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    lease: &BuildCacheLease,
+) -> Result<(), ToolError> {
+    use tokio::io::AsyncWriteExt;
+
+    let Some((mut file, size)) = lease.archive().map_err(map_cache_error)? else {
+        writer
+            .write_all(&0u64.to_le_bytes())
+            .await
+            .map_err(|_| ToolError::Operation)?;
+        return Ok(());
+    };
+    if size > crate::store::BUILD_CACHE_ARCHIVE_BYTES {
+        return Err(ToolError::Limit);
+    }
+    writer
+        .write_all(&size.to_le_bytes())
+        .await
+        .map_err(|_| ToolError::Operation)?;
+    let mut remaining = size;
+    let mut buffer = [0; 32 * 1024];
+    while remaining > 0 {
+        let wanted = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
+        let count = file
+            .read(&mut buffer[..wanted])
+            .map_err(|_| ToolError::Operation)?;
+        if count == 0 {
+            return Err(ToolError::Operation);
+        }
+        writer
+            .write_all(&buffer[..count])
+            .await
+            .map_err(|_| ToolError::Operation)?;
+        remaining -= count as u64;
+    }
+    Ok(())
+}
+
+pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    lease: &BuildCacheLease,
+) -> Result<bool, ToolError> {
+    use tokio::io::AsyncReadExt;
+
+    let marker = read_line_capped(reader, 32).await?;
+    if marker == b"CACHE_REJECTED\n" {
+        return Ok(false);
+    }
+    if marker != b"CACHE_CANDIDATE\n" {
+        return Err(ToolError::Operation);
+    }
+    let mut length = [0; 8];
+    reader
+        .read_exact(&mut length)
+        .await
+        .map_err(|_| ToolError::Operation)?;
+    let length = u64::from_le_bytes(length);
+    if length == 0 || length > crate::store::BUILD_CACHE_ARCHIVE_BYTES {
+        return Err(ToolError::Limit);
+    }
+    let mut file = lease.candidate_writer().map_err(map_cache_error)?;
+    let mut buffer = [0; 32 * 1024];
+    let mut remaining = length;
+    while remaining > 0 {
+        let wanted = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
+        reader
+            .read_exact(&mut buffer[..wanted])
+            .await
+            .map_err(|_| ToolError::Operation)?;
+        file.write_all(&buffer[..wanted])
+            .map_err(|_| ToolError::Operation)?;
+        remaining -= wanted as u64;
+    }
+    file.sync_all().map_err(|_| ToolError::Operation)?;
+    Ok(true)
+}
+
 /// Reaps a child this process owns. On macOS it closes stdin first and polls `try_wait`
 /// at the supervision interval, because Seatbelt blocks Tokio's signal wake socket;
 /// elsewhere it awaits exit.
@@ -510,6 +681,9 @@ pub(super) fn helper_main() -> ExitCode {
         let mut stdin = std::io::BufReader::new(std::io::stdin().lock());
         let task = read_task(&mut stdin)?;
         task.config.validate()?;
+        if let Some(cache) = &task.cache {
+            cache.validate(&task.intent, &task.config)?;
+        }
         verify_intent_runtime_grants(&task.intent, &task.config)?;
         if !task.intent.valid()
             || task.intent.policy_digest != task.config.digest()
@@ -522,6 +696,33 @@ pub(super) fn helper_main() -> ExitCode {
         }
         let (root, workspace) = bootstrap_locations(&task, &mut stage)?;
         attest_runtime_mounts(&task.intent.call, &task.config.runtime_grants, &mut stage)?;
+        #[cfg(target_os = "linux")]
+        if let Some(cache) = &task.cache {
+            let mut stdout = std::io::stdout().lock();
+            stdout
+                .write_all(b"CACHE_READY\n")
+                .and_then(|()| stdout.flush())
+                .map_err(|_| ToolError::Operation)?;
+            let mut length = [0; 8];
+            stdin
+                .read_exact(&mut length)
+                .map_err(|_| ToolError::Operation)?;
+            let length = u64::from_le_bytes(length);
+            if length > crate::store::BUILD_CACHE_ARCHIVE_BYTES {
+                return Err(ToolError::Limit);
+            }
+            if length > 0 {
+                let scratch = super::fs::open_directory(&root.join("scratch"))?;
+                let mut archive = Read::take(&mut stdin, length);
+                crate::store::restore_archive(
+                    &mut archive,
+                    &scratch,
+                    &cache.identity,
+                    &cache.exclusions,
+                )
+                .map_err(map_cache_error)?;
+            }
+        }
         let workspace = workspace.as_path();
         stage = BootstrapStage::Workspace;
         if (matches!(
@@ -704,6 +905,45 @@ pub(super) fn helper_main() -> ExitCode {
             .write_all(b"\n")
             .and_then(|()| stdout.flush())
             .map_err(|_| ToolError::Operation)?;
+        #[cfg(target_os = "linux")]
+        if let Some(cache) = &task.cache {
+            if observation.disposition != ToolDisposition::Succeeded {
+                stdout
+                    .write_all(b"CACHE_REJECTED\n")
+                    .and_then(|()| stdout.flush())
+                    .map_err(|_| ToolError::Operation)?;
+            } else {
+                let scratch = super::fs::open_directory(&root.join("scratch"))?;
+                match crate::store::archive_size(&scratch, &cache.identity, &cache.exclusions) {
+                    Ok(size) => {
+                        stdout
+                            .write_all(b"CACHE_CANDIDATE\n")
+                            .and_then(|()| stdout.flush())
+                            .map_err(|_| ToolError::Operation)?;
+                        stdout
+                            .write_all(&size.to_le_bytes())
+                            .map_err(|_| ToolError::Operation)?;
+                        let captured = crate::store::capture_archive(
+                            &scratch,
+                            &cache.identity,
+                            &cache.exclusions,
+                            &mut stdout,
+                        )
+                        .map_err(map_cache_error)?;
+                        if captured != size {
+                            return Err(ToolError::Operation);
+                        }
+                        stdout.flush().map_err(|_| ToolError::Operation)?;
+                    }
+                    Err(_) => {
+                        stdout
+                            .write_all(b"CACHE_REJECTED\n")
+                            .and_then(|()| stdout.flush())
+                            .map_err(|_| ToolError::Operation)?;
+                    }
+                }
+            }
+        }
         Ok(())
     })();
     if result.is_ok() {

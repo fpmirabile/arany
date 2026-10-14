@@ -4,7 +4,7 @@
 
 - Status: `In progress`
 - Owner: Fernando Mirabile
-- Last updated: 2026-10-13
+- Last updated: 2026-10-14
 
 ## Outcome
 
@@ -72,10 +72,11 @@ the user-owned checks in [next steps](../../NEXT_STEPS.md).
   [D-03](../../docs/research/next-step-decision-register.md#d-03--generic-bounded-agent-protocol)).
   This is a fan-out of advisors, not a coding team.
 - Commands return bounded changesets from a private offline snapshot; a separate
-  validated mutation publishes them to the Workspace. Scratch writes and build
-  outputs do not survive calls; explicitly selected host registry caches are
-  read-only inputs, not Arany's writable cache
-  ([Tools](../../docs/specs/tools.md#command-changesets)).
+  validated mutation publishes them to the Workspace. A private per-Workspace
+  StateRoot archive reuses bounded build outputs and dependency data inside each
+  command's quota-backed scratch view. Explicitly selected host registry caches
+  remain read-only and separate from Arany's archive
+  ([Tools](../../docs/specs/tools.md#persistent-workspace-build-cache)).
 - Folder trust pins the system `sh` and can explicitly select exact Rust, Node
   and Python runtime roots or known host-cache subtrees. Linux uses private
   mount propagation plus bounded namespace mount-table checks; macOS uses exact
@@ -109,14 +110,6 @@ unsupported enforcement fails closed. Child authority remains
 
 ### A. Coding foundation
 
-2. **Persistent build cache.** A private per-Workspace cache under
-   StateRoot, outside the Workspace, is mounted writable for build outputs and
-   dependency caches. It never carries credentials, is bounded by per-Workspace
-   and StateRoot-wide quotas, and the user can clear the current cache or all
-   caches to reclaim stale identities. A committed-cache admission overflow
-   rejects before GO; candidate-output overflow rejects publication after the
-   command and preserves the previous cache. Its contents are build data, never
-   authority.
 3. **Flexible limits.** Today's ceilings are compile-time constants
    (`MAX_TOOL_CALLS = 16` and a 64 KiB Tool context in
    [src/tools/types.rs](../../src/tools/types.rs), plus the 300-second Run).
@@ -450,8 +443,6 @@ execution contracts own the resulting behavior.
 
 ## OS impact
 
-- A3 needs bounded private writable storage on Linux and macOS, with explicit
-  ownership, cleanup and quota admission; its initial quota is 64 MiB.
 - A4 needs native Linux and macOS resource enforcement and evidence. The
   approved configurable ceilings do not establish build support.
 - A2's exact runtime roots, private Linux mount bootstrap, namespace topology
@@ -500,13 +491,6 @@ Each slice that crosses one of these boundaries runs the
 Each item is one PR with its own contract update, security pass where
 triggered and evidence under [testing rules](../../agents/testing.md).
 
-2. **A3 Persistent build cache.** Add the private per-Workspace writable cache
-   under StateRoot, with complete bounded streaming, isolation, quota and an
-   explicit clear operation. Its initial default quota is 64 MiB and its
-   approved configurable maximum is 8 GiB; A4 binds the selected quota to the
-   native build profile. A4's approved maxima are 4 GiB memory, 1 GiB writable
-   project storage and 256 tasks. These ceilings are policy choices, not
-   measured support claims.
 3. **Goal core and budgets.** E11 every task is a Goal, B1 plan contract,
    E1–E4 steering, context, Workspace lock and checkpoints, E8 compaction,
    E10 `exec` integration and bounded Goal budgets. Creates the
@@ -539,13 +523,14 @@ per-slice specification and evidence cost slows delivery.
 
 E13 telemetry spans land with the slice that introduces each span's subject.
 
-Next action: implement A3's persistent per-Workspace cache under the
-[Tools contract](../../docs/specs/tools.md), starting with the current 64 MiB
-quota and preserving the approved configurable maximum of 8 GiB. The approved
-build maxima are 4 GiB memory, 1 GiB writable project storage and 256 tasks;
-they remain finite policy ceilings, not support evidence. Goal core and budgets
-precede A4, which precedes dogfooding. Native build verification and named-host
-measurements remain required before support claims.
+Next action: implement Goal core and budgets, the cancellation/context owner
+required by A4. The per-Workspace cache currently uses a 64 MiB writable view
+and shares an 8 GiB StateRoot aggregate; A4 will bind a selected cache quota to
+the native build profile. Approved build maxima are 4 GiB memory, 8 GiB cache,
+1 GiB writable project storage and 256 tasks. These remain finite policy
+ceilings, not support evidence. A4 follows Goal core, then dogfooding. Native
+build verification and named-host measurements remain required before support
+claims.
 
 ## Open questions
 

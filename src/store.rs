@@ -14,8 +14,12 @@ mod state;
 use journal::{HotSession, append, fork_session, open_connection};
 use replay::{latest_session_id, list_session_items, load_session, resolve_view, session_for_run};
 pub use state::HistoryReset;
-pub(crate) use state::SessionRunLock;
 pub use state::StateRoot;
+pub(crate) use state::{
+    BUILD_CACHE_AGGREGATE_BYTES, BUILD_CACHE_ARCHIVE_BYTES, BuildCacheIdentity, BuildCacheLease,
+    SessionRunLock, archive_size, capture_archive, capture_archive_async, restore_archive,
+    restore_archive_async,
+};
 
 const DATABASE_FILE: &str = "events.sqlite3";
 pub(crate) const MAX_EVENT_BYTES: usize = 64 * 1024;
@@ -57,6 +61,10 @@ pub enum StoreError {
     SessionBusy,
     #[error("account replacement is already active")]
     AccountBusy,
+    #[error("Workspace build cache is in use by another Tool")]
+    BuildCacheBusy,
+    #[error("Workspace build cache is invalid or unsafe")]
+    InvalidBuildCache,
     #[error("history is in use by another Arany process; close it and retry")]
     HistoryBusy,
     #[error("saved history changed during recovery; retry before resetting")]
