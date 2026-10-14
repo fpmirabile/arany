@@ -6,7 +6,7 @@ This contract owns durable task-level Goal identity, Run linkage, budget admissi
 
 Optional OTLP records one Goal execution-segment span for each admitted Run. Its child Run span carries only canonical IDs and committed Run facts. The Goal span carries its ID, committed Goal lifecycle and reservation markers, terminal status, known usage, unknown-usage flag and active-time totals. A continuation or explicit resume begins another segment span; trace context is not persisted. Telemetry never carries the objective, plan contract, report, Workspace paths, Tool payloads or Provider content. [Telemetry rules](../../agents/telemetry.md) own export bounds and privacy.
 
-Every accepted task, including `exec`, has one durable Goal. There is no Run-without-Goal path. Foundation delivers Goal lifecycle, atomic Provider-call and active-time reservations, the initial plan contract and typed success receipt, bounded reports, and cross-StateRoot Workspace writer exclusion. Steering and pause UI, context reinjection, approved contract revision, checkpoint artifacts and rewind are follow-on Goal behavior; the Foundation slice must not claim those interactions are available.
+Every accepted task, including `exec`, has one durable Goal. There is no Run-without-Goal path. Foundation delivers Goal lifecycle, atomic Provider-call and active-time reservations, the initial plan contract and typed success receipt, bounded reports, and cross-StateRoot Workspace writer exclusion. Ctrl+C pause (any cancelled Goal stays Interrupted), coexistence with new prompts and `/goal resume` are delivered. Steering UI, context reinjection, approved contract revision, checkpoint artifacts and rewind are follow-on Goal behavior; this slice must not claim those interactions are available.
 
 ## Lifecycle, budgets and recovery
 
@@ -56,7 +56,7 @@ Goal Events are additive facts within the current SQLite schema 4 and Event payl
 
 ## Acceptance scenarios and evidence owners
 
-These rows define Foundation acceptance. Follow-on steering, pause, context reinjection, revision, checkpoint, artifact and rewind scenarios are intentionally deferred; they are not implementation claims for this slice.
+These rows define Foundation acceptance, including the delivered pause and resume rows. Follow-on steering, context reinjection, revision, checkpoint, artifact and rewind scenarios are intentionally deferred; they are not implementation claims for this slice.
 
 | Scenario | Required observation | Evidence owner |
 |---|---|---|
