@@ -88,6 +88,10 @@ fn private_file(path: &std::path::Path, bytes: &[u8]) {
 #[path = "session_run/custom.rs"]
 mod custom;
 
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+#[path = "session_run/exec_interrupt.rs"]
+mod exec_interrupt;
+
 #[cfg(unix)]
 #[path = "session_run/live.rs"]
 mod live;

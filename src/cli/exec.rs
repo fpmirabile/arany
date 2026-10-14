@@ -1,12 +1,13 @@
 use super::{CommandOutput, OutputArg, chatgpt, native_run_key_from_env};
 use arany::{
     AnthropicProvider, CollaborationPolicy, CustomProvider, Effort, Engine, EngineError,
-    GoalBudget, GoalPhase, GoalRequest, OpenAiProvider, Provider, RunRequest, RunStatus, SessionId,
-    StateRoot, Store, Telemetry, native_protection_supported, render_exec,
-    resolve_native_effort_for_run, validate_native_model_id,
+    GoalBudget, GoalId, GoalPhase, GoalRequest, GoalStatus, OpenAiProvider, Provider,
+    RunCancellation, RunOutcome, RunRequest, RunStatus, SessionId, StateRoot, Store, Telemetry,
+    native_protection_supported, render_exec, resolve_native_effort_for_run,
+    validate_native_model_id,
 };
 use clap::{Args, ValueEnum};
-use std::{path::PathBuf, str::FromStr};
+use std::{path::PathBuf, str::FromStr, time::Duration};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ProviderArg {
@@ -258,8 +259,9 @@ async fn run_with_provider<P: Provider + 'static>(
             )
             .map_err(|error| error.to_string())?;
     }
-    let result = engine
-        .run(RunRequest {
+    let end = run_signalled(
+        &mut engine,
+        RunRequest {
             session_id: admission.session_id,
             title: None,
             objective: admission.objective,
@@ -268,12 +270,18 @@ async fn run_with_provider<P: Provider + 'static>(
             include_paths: args.include_paths,
             policy: admission.policy,
             goal: admission.goal,
-        })
-        .await;
+        },
+    )
+    .await;
     engine
         .close()
         .await
         .map_err(|_| "store shutdown failed".to_owned())?;
+    let SignalledRun {
+        result,
+        interrupted,
+        forced,
+    } = end?;
     let stop = result
         .as_ref()
         .err()
@@ -283,6 +291,9 @@ async fn run_with_provider<P: Provider + 'static>(
         Ok(outcome) => outcome,
         // The committed answer is still printed; the stop error makes the exit nonzero.
         Err(EngineError::StoppedAfterRun { run, .. }) => *run,
+        Err(EngineError::CancelledBeforeStart) if interrupted => {
+            return Err("interrupted before a Run started; no Run was recorded".into());
+        }
         Err(error) => return Err(error.to_string()),
     };
     let root = StateRoot::open_existing(&admission.state_dir)
@@ -306,7 +317,11 @@ async fn run_with_provider<P: Provider + 'static>(
         .last()
         .filter(|run| **run == outcome.run)
         .ok_or("Run history unavailable or invalid")?;
-    let success = run.status == RunStatus::Finished;
+    let paused = interrupted
+        && view.goal(outcome.goal_id).is_some_and(|goal| {
+            matches!(goal.status, GoalStatus::Running | GoalStatus::Interrupted)
+        });
+    let success = run.status == RunStatus::Finished && !paused;
     if !matches!(
         run.status,
         RunStatus::Finished | RunStatus::Failed | RunStatus::Cancelled
@@ -345,6 +360,15 @@ async fn run_with_provider<P: Provider + 'static>(
         OutputArg::Jsonl if success => String::new(),
         OutputArg::Jsonl => "error: Run failed\n".into(),
     };
+    let stderr = if paused {
+        format!(
+            "{stderr}{}",
+            resume_hint(outcome.session_id, outcome.goal_id)
+        )
+    } else {
+        stderr
+    };
+    let stop = forced.map(str::to_owned).or(stop);
     let stderr = match &stop {
         Some(message) => format!("{stderr}error: {message}\n"),
         None => stderr,
@@ -354,6 +378,129 @@ async fn run_with_provider<P: Provider + 'static>(
         stderr,
         success: success && stop.is_none(),
     })
+}
+
+/// Grace for the Run's Cancelled receipt after a forced stop; matches the attached terminal.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StopSignal {
+    Interrupt,
+    Hangup,
+    Terminate,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StopStep {
+    /// The first Ctrl+C requests cancellation and keeps waiting for the receipt.
+    Cancel,
+    /// A second Ctrl+C or a termination signal stops waiting after the grace period.
+    Force(&'static str),
+}
+
+fn stop_step(cancelling: bool, signal: StopSignal) -> StopStep {
+    match (signal, cancelling) {
+        (StopSignal::Interrupt, false) => StopStep::Cancel,
+        (StopSignal::Interrupt, true) => StopStep::Force("forced shutdown after second Ctrl+C"),
+        (StopSignal::Hangup, _) => StopStep::Force("terminated by SIGHUP"),
+        (StopSignal::Terminate, _) => StopStep::Force("terminated by SIGTERM"),
+    }
+}
+
+/// Names the command that resumes a Goal left paused by interruption.
+fn resume_hint(session_id: SessionId, goal_id: GoalId) -> String {
+    format!(
+        "Goal paused; resume with arany exec --session-id {session_id} --resume-goal {goal_id}\n"
+    )
+}
+
+#[cfg(unix)]
+struct StopSignals {
+    interrupt: tokio::signal::unix::Signal,
+    hangup: tokio::signal::unix::Signal,
+    terminate: tokio::signal::unix::Signal,
+}
+
+#[cfg(unix)]
+impl StopSignals {
+    fn install() -> std::io::Result<Self> {
+        use tokio::signal::unix::{SignalKind, signal};
+        Ok(Self {
+            interrupt: signal(SignalKind::interrupt())?,
+            hangup: signal(SignalKind::hangup())?,
+            terminate: signal(SignalKind::terminate())?,
+        })
+    }
+
+    async fn next(&mut self) -> StopSignal {
+        tokio::select! {
+            _ = self.interrupt.recv() => StopSignal::Interrupt,
+            _ = self.hangup.recv() => StopSignal::Hangup,
+            _ = self.terminate.recv() => StopSignal::Terminate,
+        }
+    }
+}
+
+#[cfg(not(unix))]
+struct StopSignals;
+
+#[cfg(not(unix))]
+impl StopSignals {
+    fn install() -> std::io::Result<Self> {
+        Ok(Self)
+    }
+
+    async fn next(&mut self) -> StopSignal {
+        std::future::pending().await
+    }
+}
+
+struct SignalledRun {
+    result: Result<RunOutcome, EngineError>,
+    /// A stop signal requested cancellation before the Run's receipt.
+    interrupted: bool,
+    /// Set when a forced stop produced the receipt within the grace period.
+    forced: Option<&'static str>,
+}
+
+/// Drives one Run with stop signals installed only while it is in flight.
+async fn run_signalled<P: Provider + 'static>(
+    engine: &mut Engine<P>,
+    request: RunRequest,
+) -> Result<SignalledRun, String> {
+    let cancellation = RunCancellation::new();
+    let mut signals =
+        StopSignals::install().map_err(|_| "signal handling unavailable".to_owned())?;
+    let run = engine.run_with_cancel(request, cancellation.clone());
+    tokio::pin!(run);
+    let mut interrupted = false;
+    let forced = loop {
+        tokio::select! {
+            result = &mut run => {
+                return Ok(SignalledRun { result, interrupted, forced: None });
+            }
+            signal = signals.next() => match stop_step(interrupted, signal) {
+                StopStep::Cancel => {
+                    interrupted = true;
+                    cancellation.cancel();
+                }
+                StopStep::Force(reason) => {
+                    cancellation.cancel();
+                    break reason;
+                }
+            },
+        }
+    };
+    match tokio::time::timeout(SHUTDOWN_GRACE, &mut run).await {
+        Ok(result) => Ok(SignalledRun {
+            result,
+            interrupted: true,
+            forced: Some(forced),
+        }),
+        Err(_) => Err(format!(
+            "{forced}; Run may be interrupted; check Session history"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -424,6 +571,35 @@ mod tests {
             tools: false,
             prompt: Some(prompt.into()),
         }
+    }
+
+    #[test]
+    fn stop_signals_cancel_once_then_force() {
+        assert_eq!(stop_step(false, StopSignal::Interrupt), StopStep::Cancel);
+        assert_eq!(
+            stop_step(true, StopSignal::Interrupt),
+            StopStep::Force("forced shutdown after second Ctrl+C")
+        );
+        assert_eq!(
+            stop_step(false, StopSignal::Terminate),
+            StopStep::Force("terminated by SIGTERM")
+        );
+        assert_eq!(
+            stop_step(true, StopSignal::Hangup),
+            StopStep::Force("terminated by SIGHUP")
+        );
+    }
+
+    #[test]
+    fn resume_hint_names_the_session_and_goal() {
+        let session = SessionId::new();
+        let goal = GoalId::new();
+        assert_eq!(
+            resume_hint(session, goal),
+            format!(
+                "Goal paused; resume with arany exec --session-id {session} --resume-goal {goal}\n"
+            )
+        );
     }
 
     #[test]
