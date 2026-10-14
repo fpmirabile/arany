@@ -1141,6 +1141,8 @@ async fn native_runtime_mount_journey_helper() {
             .as_str()
             .is_some_and(str::is_empty)
     );
+    assert_eq!(accepted_observations[0]["exit_code"], 0);
+    assert_eq!(accepted_observations[1]["exit_code"], 0);
     assert_eq!(accepted_observations[2]["exit_code"], 0);
     assert_eq!(
         accepted.run.tools[2]
@@ -1185,13 +1187,14 @@ async fn native_runtime_mount_journey_helper() {
             overflow_observation.cache_update,
             arany::CacheUpdate::Rejected
         );
-        let provider_observation = accepted_requests[3]
+        let provider_observation = accepted_requests[2]
             .tools
             .as_ref()
             .unwrap()
             .observations
-            .last()
-            .unwrap();
+            .get(1)
+            .expect("Provider request after explicit selected-cache read");
+        assert_eq!(provider_observation.intent.call, accepted_calls[1]);
         assert_eq!(provider_observation.disposition, ToolDisposition::Succeeded);
         let provider_output: serde_json::Value =
             serde_json::from_str(&provider_observation.output).unwrap();

@@ -18,6 +18,55 @@ fn cache_progress(stage: &str) {
     stdout.flush().expect("cache fixture progress flush");
 }
 
+fn cache_public_failure_stage(output: &str) -> &'static str {
+    match output {
+        "Guard admission unavailable before dispatch; no operation was dispatched." => "admission",
+        "Guard pinned input unavailable before dispatch; no operation was dispatched." => {
+            "pinned-input"
+        }
+        "Guard native protection unavailable before dispatch; no operation was dispatched." => {
+            "native-protection"
+        }
+        "Guard resource limit unavailable before dispatch; no operation was dispatched." => {
+            "resource-limit"
+        }
+        "Guard execution unavailable before dispatch; no operation was dispatched." => "execution",
+        "Guard runtime mount topology unavailable before dispatch; no operation was dispatched." => {
+            "runtime-mounts"
+        }
+        "Guard handshake unavailable before dispatch; no operation was dispatched." => "handshake",
+        "Guard receipt unavailable before dispatch; no operation was dispatched." => "receipt",
+        "Guard resource attestation unavailable before dispatch; no operation was dispatched." => {
+            "resource-attestation"
+        }
+        "Guard process cleanup unavailable before dispatch; no operation was dispatched." => {
+            "process-cleanup"
+        }
+        "Guard storage cleanup unavailable before dispatch; no operation was dispatched." => {
+            "storage-cleanup"
+        }
+        "Guard launcher reap unavailable before dispatch; no operation was dispatched." => {
+            "launcher-reap"
+        }
+        "Guard output EOF unavailable before dispatch; no operation was dispatched." => {
+            "output-eof"
+        }
+        "Guard namespace bootstrap unavailable before dispatch; no operation was dispatched." => {
+            "namespace-bootstrap"
+        }
+        "Guard native manager unavailable before dispatch; no operation was dispatched." => {
+            "native-manager"
+        }
+        "Guard control protocol unavailable before dispatch; no operation was dispatched." => {
+            "control-protocol"
+        }
+        "Guard waiting queue is full; retry when capacity is available. No operation was dispatched." => {
+            "queue-full"
+        }
+        _ => "other",
+    }
+}
+
 fn cache_run_return(result: &Result<arany::RunOutcome, arany::EngineError>) -> String {
     match result {
         Ok(outcome) => {
@@ -31,6 +80,7 @@ fn cache_run_return(result: &Result<arany::RunOutcome, arany::EngineError>) -> S
                             observation.disposition,
                             observation.guard.is_some(),
                             observation.cache_update,
+                            cache_public_failure_stage(&observation.output),
                             observation.output.len(),
                         )
                     })
