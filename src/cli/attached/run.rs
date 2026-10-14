@@ -364,7 +364,8 @@ async fn compact_with_provider<P: Provider + 'static>(
     Ok(record)
 }
 
-#[cfg(all(test, unix))]
+// Linux release builds have no tests here: each one is debug-only or macOS-only.
+#[cfg(all(test, unix, any(debug_assertions, target_os = "macos")))]
 mod tests {
     use super::*;
     #[cfg(target_os = "macos")]
@@ -1470,27 +1471,29 @@ mod tests {
             );
             store.close().await.unwrap();
         }
-        let choice = match arany::WorkspacePermissions::open_for_profile_selection(&workspace) {
-            Ok(access) => tokio::time::timeout(
-                Duration::from_secs(3),
-                super::super::permissions::choose(&mut terminal, access, &mut composer, false),
-            )
-            .await
-            .unwrap(),
-            Err(error) => Err(super::super::setup::SetupError::Recoverable(format!(
-                "Could not prepare folder permission choices: {error}"
-            ))),
+        let choice = match arany::WorkspacePermissions::open(&workspace) {
+            Ok(access) => Some(
+                tokio::time::timeout(
+                    Duration::from_secs(3),
+                    super::super::permissions::choose(
+                        &mut terminal,
+                        access.prepare_profile_selection(),
+                        &mut composer,
+                        false,
+                    ),
+                )
+                .await
+                .unwrap(),
+            ),
+            Err(_) => None,
         };
         #[cfg(debug_assertions)]
         assert!(matches!(
             choice,
-            Ok(super::super::permissions::PermissionChoice::Exit)
+            Some(Ok(super::super::permissions::PermissionChoice::Exit))
         ));
         #[cfg(not(debug_assertions))]
-        assert!(matches!(
-            choice,
-            Err(super::super::setup::SetupError::Recoverable(_))
-        ));
+        assert!(choice.is_none(), "release rejects the test account root");
         assert_eq!(
             super::super::permissions::cycle(&mut composer),
             if permissions.is_some() {

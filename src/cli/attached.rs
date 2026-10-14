@@ -875,14 +875,13 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 .await?,
                             ));
                         } else if command == InteractiveCommand::Permissions {
-                            let permissions =
-                                arany::WorkspacePermissions::open(&admission.workspace)
-                                    .map_err(|error| error.to_string())?;
-                            let permissions = match permissions.prepare_profile_selection() {
-                                Ok(permissions) => permissions,
+                            let permissions = match arany::WorkspacePermissions::open(
+                                &admission.workspace,
+                            ) {
+                                Ok(permissions) => permissions.prepare_profile_selection(),
                                 Err(error) => {
                                     notice = Some(Feedback::History(format!(
-                                        "Error: Could not prepare folder permission choices: {error}; existing permissions unchanged"
+                                        "Error: Could not load folder trust: {error}; existing permissions unchanged"
                                     )));
                                     continue;
                                 }
@@ -899,6 +898,12 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 permissions::PermissionChoice::Closed(_) => {
                                     notice =
                                         Some(Feedback::History("Permissions unchanged".into()));
+                                    continue;
+                                }
+                                permissions::PermissionChoice::Rejected(_, error) => {
+                                    notice = Some(Feedback::History(format!(
+                                        "Error: {error}; existing permissions unchanged"
+                                    )));
                                     continue;
                                 }
                                 permissions::PermissionChoice::Exit => return Ok(()),
@@ -1458,10 +1463,20 @@ async fn admit_startup(
     setup_notice: &mut Option<String>,
 ) -> Result<ControlFlow<()>, String> {
     match permissions::admit(terminal, &admission.workspace, composer, admission.tools).await {
-        Ok(
-            permissions::PermissionChoice::Selected(access)
-            | permissions::PermissionChoice::Closed(access),
-        ) => {
+        Ok(permissions::PermissionChoice::Selected(access)) => {
+            for notice in access.stale_runtime_notices() {
+                append_notice(setup_notice, &notice);
+            }
+            admission.workspace_permissions = Some(access);
+        }
+        Ok(permissions::PermissionChoice::Closed(access)) => {
+            admission.workspace_permissions = Some(access);
+        }
+        Ok(permissions::PermissionChoice::Rejected(access, error)) => {
+            append_notice(
+                setup_notice,
+                &format!("Error: {error}; continuing read only"),
+            );
             admission.workspace_permissions = Some(access);
         }
         Ok(permissions::PermissionChoice::Exit) => return Ok(ControlFlow::Break(())),

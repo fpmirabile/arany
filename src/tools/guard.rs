@@ -6,7 +6,7 @@ use crate::engine::RunCancellation;
 use crate::store::{BuildCacheIdentity, BuildCacheLease, StoreError};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{ExitCode, Stdio};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
@@ -132,7 +132,10 @@ pub(super) fn build_cache_session(
 fn cache_exclusions(grants: &[RuntimeGrant]) -> Result<Vec<String>, ToolError> {
     let mut exclusions = Vec::new();
     for grant in grants.iter().filter(|grant| grant.kind.is_cache()) {
-        let path = grant.kind.cache_root().ok_or(ToolError::Configuration)?;
+        let path = grant
+            .kind
+            .sandbox_cache_path()
+            .ok_or(ToolError::Configuration)?;
         exclusions.push(path.to_owned());
     }
     exclusions.sort();
@@ -804,7 +807,6 @@ pub(super) fn helper_main() -> ExitCode {
         };
         #[cfg(target_os = "linux")]
         {
-            attest_runtime_mounts(&task.intent.call, &task.config.runtime_grants, &mut stage)?;
             stage = BootstrapStage::Capabilities;
             linux::harden()?;
         }
@@ -838,7 +840,6 @@ pub(super) fn helper_main() -> ExitCode {
         }
         verify_intent_runtime_grants(&task.intent, &task.config)?;
         attest_runtime_mounts(&task.intent.call, &task.config.runtime_grants, &mut stage)?;
-        stage = BootstrapStage::Handshake;
         drop(stdin);
         stage = BootstrapStage::Payload;
         #[cfg(not(target_os = "macos"))]
@@ -1069,6 +1070,20 @@ fn skill_text(name: &str, resource: Option<&str>, bytes: Vec<u8>) -> Result<Stri
     String::from_utf8(bytes).map_err(|_| ToolError::Operation)
 }
 
+/// Toolchain `bin` directories in grant order, then the system bins; both platforms mount toolchains at their host path.
+pub(super) fn runtime_path(runtime_grants: &[RuntimeGrant]) -> Result<String, ToolError> {
+    let mut paths = Vec::new();
+    for grant in runtime_grants
+        .iter()
+        .filter(|grant| grant.kind.is_toolchain())
+    {
+        let bin = grant.path.join("bin");
+        paths.push(bin.to_str().ok_or(ToolError::Path)?.to_owned());
+    }
+    paths.extend(["/usr/bin".into(), "/bin".into()]);
+    Ok(paths.join(":"))
+}
+
 pub(super) fn payload(
     program: &super::config::Program,
     args: &[String],
@@ -1095,17 +1110,7 @@ pub(super) fn payload(
     if hex_digest(&bytes) != program.sha256 {
         return Err(ToolError::ChangedInput);
     }
-    let mut path = vec!["/usr/bin".to_owned(), "/bin".to_owned()];
-    for grant in runtime_grants
-        .iter()
-        .filter(|grant| grant.kind.is_toolchain())
-    {
-        #[cfg(target_os = "linux")]
-        let runtime = grant.mounted_path()?;
-        #[cfg(target_os = "macos")]
-        let runtime = grant.path.clone();
-        path.insert(0, runtime.join("bin").to_string_lossy().into_owned());
-    }
+    let path = runtime_path(runtime_grants)?;
     let mut command = Command::new(executable);
     command
         .args(args.iter().map(|arg| {
@@ -1126,36 +1131,13 @@ pub(super) fn payload(
         }))
         .current_dir(workspace.join(cwd))
         .env_clear()
-        .env("PATH", path.join(":"))
+        .env("PATH", path)
         .env("HOME", &scratch)
         .env("TMPDIR", &scratch)
         .env("CARGO_HOME", scratch.join("cargo"))
         .env("CARGO_TARGET_DIR", scratch.join("target"))
-        .env(
-            "npm_config_cache",
-            cache_root(
-                runtime_grants,
-                super::toolchains::RuntimeKind::NpmCache,
-                &scratch,
-            )
-            .unwrap_or_else(|| scratch.join(".npm")),
-        )
-        .env(
-            "PIP_CACHE_DIR",
-            cache_root(
-                runtime_grants,
-                super::toolchains::RuntimeKind::PipHttpCache,
-                &scratch,
-            )
-            .or_else(|| {
-                cache_root(
-                    runtime_grants,
-                    super::toolchains::RuntimeKind::PipWheelCache,
-                    &scratch,
-                )
-            })
-            .unwrap_or_else(|| scratch.join(".cache/pip")),
-        )
+        .env("npm_config_cache", scratch.join(".npm"))
+        .env("PIP_CACHE_DIR", scratch.join(".cache/pip"))
         .env("ARANY_TOOL_WORKSPACE", &workspace)
         .env("ARANY_TOOL_INPUTS", resources.join("inputs"))
         .env("ARANY_TOOL_SKILLS", resources.join("skills"))
@@ -1165,22 +1147,6 @@ pub(super) fn payload(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     Ok(command)
-}
-
-fn cache_root(
-    runtime_grants: &[RuntimeGrant],
-    kind: super::toolchains::RuntimeKind,
-    scratch: &Path,
-) -> Option<PathBuf> {
-    if !runtime_grants.iter().any(|grant| grant.kind == kind) {
-        return None;
-    }
-    Some(match kind {
-        super::toolchains::RuntimeKind::NpmCache => scratch.join(".npm"),
-        super::toolchains::RuntimeKind::PipHttpCache
-        | super::toolchains::RuntimeKind::PipWheelCache => scratch.join(".cache/pip"),
-        _ => return None,
-    })
 }
 
 #[cfg(test)]
@@ -1272,43 +1238,52 @@ mod tests {
             cwd: ".".into(),
         });
         assert!(verify_intent_runtime_grants(&file, &config).is_ok());
-        assert!(verify_intent_runtime_grants(&process, &config).is_err());
+        assert!(matches!(
+            verify_intent_runtime_grants(&process, &config),
+            Err(ToolError::ChangedInput)
+        ));
     }
 
+    #[cfg(unix)]
     #[test]
-    fn package_manager_cache_paths_follow_private_scratch() {
-        let scratch = Path::new("/native-unit/scratch");
-        let npm = RuntimeGrant {
-            kind: super::super::toolchains::RuntimeKind::NpmCache,
-            manager: super::super::toolchains::RuntimeManager::HostCache,
-            version: None,
-            path: PathBuf::from("/home/user/.npm/_cacache"),
-            device: 1,
-            inode: 2,
-        };
-        let pip = RuntimeGrant {
-            kind: super::super::toolchains::RuntimeKind::PipHttpCache,
-            manager: super::super::toolchains::RuntimeManager::HostCache,
-            version: None,
-            path: PathBuf::from("/home/user/.cache/pip/http-v2"),
-            device: 1,
-            inode: 2,
-        };
-        assert_eq!(
-            cache_root(
-                std::slice::from_ref(&npm),
-                super::super::toolchains::RuntimeKind::NpmCache,
-                scratch,
-            ),
-            Some(scratch.join(".npm"))
-        );
-        assert_eq!(
-            cache_root(
-                std::slice::from_ref(&pip),
-                super::super::toolchains::RuntimeKind::PipHttpCache,
-                scratch,
-            ),
-            Some(scratch.join(".cache/pip"))
-        );
+    fn drifted_runtime_grant_rejects_commands_and_keeps_file_intents() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".nvm/versions/node/v22.3.0");
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let node = root.join("bin/node");
+        std::fs::write(&node, b"synthetic node executable").unwrap();
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (device, inode) =
+            crate::tools::fs::identity(&crate::tools::fs::open_directory(&root).unwrap()).unwrap();
+        let config = config(vec![RuntimeGrant {
+            kind: super::super::toolchains::RuntimeKind::Node,
+            manager: super::super::toolchains::RuntimeManager::Nvm,
+            version: Some("v22.3.0".into()),
+            path: root.clone(),
+            device,
+            inode,
+        }]);
+        let file = intent(ToolCall::Read {
+            path: "selected.txt".into(),
+            offset: 0,
+            limit: 32,
+        });
+        let process = intent(ToolCall::Command {
+            program: "node".into(),
+            args: Vec::new(),
+            cwd: ".".into(),
+        });
+        assert!(verify_intent_runtime_grants(&process, &config).is_ok());
+
+        // Keep the old directory alive while the path is recreated, so the new inode cannot be reused.
+        std::fs::rename(&root, temp.path().join("previous-node")).unwrap();
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        assert!(matches!(
+            verify_intent_runtime_grants(&process, &config),
+            Err(ToolError::ChangedInput)
+        ));
+        assert!(verify_intent_runtime_grants(&file, &config).is_ok());
     }
 }
