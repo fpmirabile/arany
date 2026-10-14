@@ -597,7 +597,7 @@ async fn run_history_fixture() {
     let product_pid =
         super::try_product_child_of_executable(pane_pid, &executable).unwrap_or_else(|| {
             panic!(
-                "active product child not found; {}",
+                "active product process not found under pane; {}",
                 wrapper_exit_status(&exit_path)
             )
         });
