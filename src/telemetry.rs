@@ -443,7 +443,7 @@ impl GoalTrace {
     pub(crate) fn finish(self, status: GoalStatus, run: TraceOutcome, goal: &GoalView) {
         if let Some(context) = &self.span.context {
             for attribute in [
-                KeyValue::new("arany.goal.status", goal_status_name(status)),
+                KeyValue::new("arany.goal.status", status.as_str()),
                 KeyValue::new("arany.goal.provider_calls", i64::from(goal.provider_calls)),
                 KeyValue::new(
                     "arany.goal.known_tokens",
@@ -913,13 +913,6 @@ impl TraceEventKind {
             Self::ContextCompacted => "ContextCompacted",
         }
     }
-}
-
-fn goal_status_name(status: GoalStatus) -> String {
-    serde_json::to_value(status)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .unwrap_or_default()
 }
 
 fn phase_name(phase: AgentPhase) -> &'static str {

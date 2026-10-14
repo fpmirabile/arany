@@ -1568,3 +1568,37 @@ fn goal_success_criterion_without_admitted_calls_omits_the_call_alternative() {
         assert_eq!(kinds, ["workspace_file_digest", "workspace_file_content"]);
     }
 }
+
+#[test]
+fn goal_without_pinned_budget_offers_only_the_plan_free_prelude() {
+    let context = ToolContext {
+        catalog: json!({
+            "write": true,
+            "commands": [{"name": "cargo"}],
+            "skills": [{"name": "review"}],
+            "mcp_servers": [{"name": "local"}]
+        })
+        .to_string(),
+        observations: Vec::new(),
+    };
+    let branches = context.outcome_branch_with_plan(true, None);
+    assert_eq!(branches.len(), 1);
+    let operations: Vec<&str> = branches[0]["properties"]["call"]["anyOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|call| call["properties"]["operation"]["enum"][0].as_str())
+        .collect();
+    assert!(operations.contains(&"list"));
+    assert!(operations.contains(&"read"));
+    assert!(
+        operations
+            .iter()
+            .all(|operation| ["list", "read", "search", "skill", "mcp_list"].contains(operation)),
+        "{operations:?}"
+    );
+    assert_eq!(
+        branches[0]["properties"]["plan_contract"],
+        json!({"type": "null"})
+    );
+}

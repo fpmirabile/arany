@@ -515,7 +515,7 @@ pub fn goal_status(view: &SessionView) -> String {
     let mut text = format!(
         "Goal {} · {} · {} · {} · Runs {}/{} · calls {}/{} · tokens {}/{}{} · active {}/{}",
         goal.id.to_string().chars().take(8).collect::<String>(),
-        goal_status_word(goal.status),
+        goal.status.as_str(),
         goal_phase_word(goal.phase),
         if goal.autonomous {
             "autonomous"
@@ -548,15 +548,6 @@ pub fn goal_status(view: &SessionView) -> String {
         ));
     }
     text
-}
-
-fn goal_status_word(status: crate::session::GoalStatus) -> &'static str {
-    match status {
-        crate::session::GoalStatus::Running => "running",
-        crate::session::GoalStatus::Interrupted => "interrupted",
-        crate::session::GoalStatus::Completed => "completed",
-        crate::session::GoalStatus::Failed => "failed",
-    }
 }
 
 fn goal_phase_word(phase: crate::session::GoalPhase) -> &'static str {

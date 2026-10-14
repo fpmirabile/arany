@@ -234,6 +234,18 @@ pub enum GoalStatus {
     Failed,
 }
 
+impl GoalStatus {
+    /// Stable name, identical to the serde snake_case representation.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Interrupted => "interrupted",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GoalPlanContract {
@@ -627,6 +639,207 @@ mod goal_success_tests {
         assert!(plan(0, 5 * 60 * 1000).validate().is_ok());
         assert!(plan(0, 5 * 60 * 1000 + 1).validate().is_err());
         assert!(plan(5 * 60 * 1000 + 1, 1).validate().is_err());
+    }
+
+    #[test]
+    fn plan_contract_bounds_are_enforced_without_provider_schema_keywords() {
+        let base = || GoalPlanContract {
+            mission: "Verify".into(),
+            paths: vec!["src".into()],
+            commands: Vec::new(),
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: GoalSuccessCriterion::WorkspaceFileContent {
+                path: "src/main.rs".into(),
+                content: "ok".into(),
+            },
+            budget: GoalBudget::default(),
+        };
+        let long = |byte: char, len: usize| byte.to_string().repeat(len);
+        let mut cases: Vec<(&str, GoalPlanContract, bool)> = vec![
+            (
+                "mission at limit",
+                GoalPlanContract {
+                    mission: long('m', 2048),
+                    ..base()
+                },
+                true,
+            ),
+            (
+                "mission over limit",
+                GoalPlanContract {
+                    mission: long('m', 2049),
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "empty mission",
+                GoalPlanContract {
+                    mission: String::new(),
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "path count at limit",
+                GoalPlanContract {
+                    paths: (0..63)
+                        .map(|i| format!("p{i:02}"))
+                        .chain(["src".into()])
+                        .collect(),
+                    ..base()
+                },
+                true,
+            ),
+            (
+                "path count over limit",
+                GoalPlanContract {
+                    paths: (0..64)
+                        .map(|i| format!("p{i:02}"))
+                        .chain(["src".into()])
+                        .collect(),
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "path length at limit",
+                GoalPlanContract {
+                    paths: vec![long('a', 512)],
+                    success_criterion: GoalSuccessCriterion::WorkspaceFileContent {
+                        path: long('a', 512),
+                        content: "ok".into(),
+                    },
+                    ..base()
+                },
+                true,
+            ),
+            (
+                "path length over limit",
+                GoalPlanContract {
+                    paths: vec![long('a', 513)],
+                    success_criterion: GoalSuccessCriterion::WorkspaceFileContent {
+                        path: long('a', 513),
+                        content: "ok".into(),
+                    },
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "command count over limit",
+                GoalPlanContract {
+                    commands: (0..9).map(|i| format!("c{i}")).collect(),
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "command length over limit",
+                GoalPlanContract {
+                    commands: vec![long('a', 65)],
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "skill count over limit",
+                GoalPlanContract {
+                    skills: (0..65)
+                        .map(|i| GoalSkillBinding {
+                            name: format!("s{i:02}"),
+                            resource: None,
+                        })
+                        .collect(),
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "skill name over limit",
+                GoalPlanContract {
+                    skills: vec![GoalSkillBinding {
+                        name: long('a', 65),
+                        resource: None,
+                    }],
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "skill resource over limit",
+                GoalPlanContract {
+                    skills: vec![GoalSkillBinding {
+                        name: "review".into(),
+                        resource: Some(long('r', 513)),
+                    }],
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "mcp count over limit",
+                GoalPlanContract {
+                    mcp_tools: (0..65)
+                        .map(|i| GoalMcpTool {
+                            server: format!("m{i:02}"),
+                            tool: "t".into(),
+                        })
+                        .collect(),
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "mcp server over limit",
+                GoalPlanContract {
+                    mcp_tools: vec![GoalMcpTool {
+                        server: long('a', 65),
+                        tool: "t".into(),
+                    }],
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "mcp tool over limit",
+                GoalPlanContract {
+                    mcp_tools: vec![GoalMcpTool {
+                        server: "local".into(),
+                        tool: long('a', 129),
+                    }],
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "content over limit",
+                GoalPlanContract {
+                    success_criterion: GoalSuccessCriterion::WorkspaceFileContent {
+                        path: "src/main.rs".into(),
+                        content: long('x', 8193),
+                    },
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "digest length mismatch",
+                GoalPlanContract {
+                    success_criterion: GoalSuccessCriterion::WorkspaceFileDigest {
+                        path: "src/main.rs".into(),
+                        sha256: "a".repeat(63),
+                    },
+                    ..base()
+                },
+                false,
+            ),
+        ];
+        cases.push(("base", base(), true));
+        for (name, contract, admitted) in cases {
+            assert_eq!(contract.validate().is_ok(), admitted, "{name}");
+        }
     }
 }
 

@@ -782,3 +782,58 @@ fn streamed_messages_require_closed_blocks_and_exclude_thinking_from_preview() {
         assert!(decoder.feed(wire.as_bytes()).is_err());
     }
 }
+
+const SCHEMA_BOUND_KEYWORDS: [&str; 6] = [
+    "minLength",
+    "maxLength",
+    "minItems",
+    "maxItems",
+    "minimum",
+    "maximum",
+];
+
+fn assert_no_schema_bounds(value: &Value, at: &str) {
+    match value {
+        Value::Object(map) => {
+            for keyword in SCHEMA_BOUND_KEYWORDS {
+                assert!(!map.contains_key(keyword), "{at} carries {keyword}");
+            }
+            for (key, child) in map {
+                assert_no_schema_bounds(child, &format!("{at}.{key}"));
+            }
+        }
+        Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                assert_no_schema_bounds(child, &format!("{at}[{index}]"));
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn provider_bound_schemas_carry_no_validation_keywords() {
+    let mut request = run_request();
+    request.collaboration = crate::session::CollaborationPolicy::Single;
+    assert_no_schema_bounds(&run_body(&request, Effort::Low), "read_only");
+    request.goal_budget = Some(crate::session::GoalBudget::default());
+    request.tools = Some(crate::tools::ToolContext {
+        catalog: json!({
+            "write": true,
+            "commands": [{"name":"bash"}],
+            "skills": [{"name":"sample"}],
+            "mcp_servers": [{"name":"local"}]
+        })
+        .to_string(),
+        observations: Vec::new(),
+    });
+    for (label, phase) in [
+        ("plan", AgentPhase::RootPlan),
+        ("synthesis", AgentPhase::RootSynthesis),
+    ] {
+        request.phase = phase;
+        assert_no_schema_bounds(&run_body(&request, Effort::Low), label);
+    }
+    request.goal_plan_contract = Some(goal_plan_contract());
+    assert_no_schema_bounds(&run_body(&request, Effort::Low), "continued");
+}
