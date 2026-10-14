@@ -249,6 +249,11 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
     };
     let mut start =
         crate::isolation::account_isolated_command(temp.path(), "/usr/bin/tmux", executable);
+    crate::isolation::remember_workspace_trust(
+        &temp.path().join("account-home/.local/state/arany"),
+        &workspace,
+        &workspace,
+    );
     start
         .env_clear()
         .env("TERM", "xterm")
@@ -1032,6 +1037,11 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     };
     let mut start =
         crate::isolation::account_isolated_command(temp.path(), "/usr/bin/tmux", &executable);
+    crate::isolation::remember_workspace_trust(
+        &temp.path().join("account-home/.local/state/arany"),
+        &workspace,
+        &workspace,
+    );
     start
         .env_clear()
         .env("TERM", "xterm")

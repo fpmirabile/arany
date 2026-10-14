@@ -3980,7 +3980,9 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                         engine.run_with_progress(run_request, cancellation, progress.clone()),
                     )
                     .await
-                    .expect("completion deadline")
+                    .unwrap_or_else(|_| {
+                        panic!("{phase:?}, {case}, cancellation {cancel}: completion deadline")
+                    })
                     .expect("committed Run");
                     engine.close().await.expect("Engine shutdown");
                     let expected_status = if cancel {

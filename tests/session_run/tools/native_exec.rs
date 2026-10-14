@@ -18,6 +18,42 @@ fn cache_progress(stage: &str) {
     stdout.flush().expect("cache fixture progress flush");
 }
 
+fn exec_failure_summary(output: &std::process::Output, provider_finished: bool) -> String {
+    let mut event_kinds = Vec::new();
+    let mut provider_calls = Vec::new();
+    for line in output.stdout.split(|byte| *byte == b'\n').take(128) {
+        if line.is_empty() || line.len() > 64 * 1024 {
+            continue;
+        }
+        let Ok(event) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        let Some(kind) = event["kind"].as_str() else {
+            continue;
+        };
+        if kind.len() <= 64
+            && kind
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            event_kinds.push(kind.to_owned());
+        }
+        if kind == "ProviderCallRecorded" && provider_calls.len() < 32 {
+            let payload = &event["payload"];
+            let phase = payload["phase"].as_str().unwrap_or("unknown");
+            let disposition = payload["disposition"].as_str().unwrap_or("unknown");
+            let failure = payload["failure_reason"].as_str().unwrap_or("none");
+            provider_calls.push(format!("{phase}:{disposition}:{failure}"));
+        }
+    }
+    format!(
+        "exit={:?}, stderr_present={}, provider_peer_completed={}, events={event_kinds:?}, provider_calls={provider_calls:?}",
+        output.status.code(),
+        !output.stderr.is_empty(),
+        provider_finished,
+    )
+}
+
 fn cache_public_failure_stage(output: &str) -> &'static str {
     match output {
         "Guard admission unavailable before dispatch; no operation was dispatched." => "admission",
@@ -1050,17 +1086,18 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
             .unwrap();
         server.child().kill().unwrap();
         server.child().wait().unwrap();
+        let response = responder.join();
         assert!(
             output.status.success(),
-            "native exec failed: stderr={} events={}",
-            String::from_utf8_lossy(&output.stderr),
-            String::from_utf8_lossy(&output.stdout)
-                .chars()
-                .take(4096)
-                .flat_map(char::escape_default)
-                .collect::<String>()
+            "native exec failed: {}",
+            exec_failure_summary(&output, response.is_ok())
         );
-        let contexts = responder.join().expect("strict native request semantics");
+        let contexts = response.unwrap_or_else(|_| {
+            panic!(
+                "strict native request semantics failed: {}",
+                exec_failure_summary(&output, false)
+            )
+        });
         assert!(output.stderr.is_empty());
         let lines: Vec<Value> = output
             .stdout
