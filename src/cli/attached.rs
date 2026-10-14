@@ -960,14 +960,26 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 .await?,
                             ));
                         } else if command == InteractiveCommand::Permissions {
-                            let access = permissions::choose(
+                            let permissions =
+                                arany::WorkspacePermissions::open(&admission.workspace)
+                                    .map_err(|error| error.to_string())?;
+                            let permissions = match permissions.prepare_profile_selection() {
+                                Ok(permissions) => permissions,
+                                Err(error) => {
+                                    notice = Some(Feedback::History(format!(
+                                        "Error: Could not prepare folder permission choices: {error}; existing permissions unchanged"
+                                    )));
+                                    continue;
+                                }
+                            };
+                            let choice = permissions::choose(
                                 &mut terminal,
-                                &admission.workspace,
+                                permissions,
                                 &mut composer,
                                 false,
                             )
                             .await?;
-                            let access = match access {
+                            let access = match choice {
                                 permissions::PermissionChoice::Selected(access) => access,
                                 permissions::PermissionChoice::Closed(_) => {
                                     notice =

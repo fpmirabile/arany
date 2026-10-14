@@ -123,6 +123,21 @@ fn first_effect_requires_a_plan_and_bounded_read_only_prelude_is_available() {
             );
             let skill = &contract["properties"]["skills"]["items"];
             assert_eq!(skill["required"], json!(["name", "resource"]));
+            let eligible_calls = contract["properties"]["success_criterion"]["anyOf"][0]
+                ["properties"]["call"]["anyOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|call| {
+                    call["properties"]["operation"]["enum"][0]
+                        .as_str()
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                eligible_calls,
+                vec!["mkdir", "write", "edit", "command", "skill", "mcp_call"]
+            );
         }
     }
     request.phase = AgentPhase::RootSynthesis;
@@ -724,6 +739,7 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
             disposition,
             output: output.to_string(),
             guard: Some(guard),
+            cache_update: crate::tools::CacheUpdate::NotApplicable,
         };
         let canonical = serde_json::to_value(&observation).unwrap();
         let catalog = json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]});
@@ -739,7 +755,7 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
             "catalog must be structured task data"
         );
         assert!(input["tools"].get("observations").is_none());
-        let projected = json!({"call":intent.call,"disposition":disposition,"output":output,"workspace_effect":effect});
+        let projected = json!({"call":intent.call,"disposition":disposition,"output":output,"workspace_effect":effect,"cache_update":"not_applicable"});
         let result: Value =
             serde_json::from_str(body["input"][2]["output"].as_str().unwrap()).unwrap();
         assert_eq!(

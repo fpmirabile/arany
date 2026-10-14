@@ -30,8 +30,10 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
             ]),
         }],
         mcp: Vec::new(),
+        runtime_grants: Vec::new(),
     };
     let runtime = ToolRuntime {
+        cache_state: None,
         config,
         workspace: PathBuf::new(),
         workspace_identity: (1, 2),
@@ -40,7 +42,6 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         queue_progress: None,
         #[cfg(target_os = "macos")]
         system_programs: None,
-        #[cfg(target_os = "macos")]
         process_enforcement_digest: [1; 32],
     };
     let contract_for = |name: &str, resource: Option<&str>| GoalPlanContract {
@@ -214,6 +215,7 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
         commands: vec![pinned, copied_program],
         skills: Vec::new(),
         mcp: Vec::new(),
+        runtime_grants: Vec::new(),
     };
     for (case, drift) in [("fresh", false), ("changed-input", true)] {
         let target = temp.path().join(case);
@@ -1154,6 +1156,41 @@ fn tool_admission_corpus_is_closed_and_restrict_only() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn host_runtime_roots_can_only_come_from_remembered_folder_trust() {
+    use crate::store::StateRoot;
+    use crate::tools::toolchains::{RuntimeKind, discover};
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let node = home.join(".nvm/versions/node/v22.3.0");
+    std::fs::create_dir_all(node.join("bin")).unwrap();
+    std::fs::write(node.join("bin/node"), b"synthetic executable").unwrap();
+    std::fs::set_permissions(
+        node.join("bin/node"),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let grant = discover(&home)
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.grant.kind == RuntimeKind::Node)
+        .unwrap()
+        .grant;
+    let mut value = config_value();
+    value["runtime_grants"] = json!([grant]);
+    let config: Config = serde_json::from_value(value.clone()).unwrap();
+    config.validate().unwrap();
+
+    let state = StateRoot::admit(&temp.path().join("state")).unwrap();
+    let path = state.path().join("tools.json");
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(Config::load(&state).is_err());
+}
+
 #[test]
 fn typed_tool_schema_and_receipts_have_exact_bounds() {
     let rows: Vec<Value> =
@@ -1262,6 +1299,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         disposition: ToolDisposition::Succeeded,
         output: "observed".into(),
         guard: Some(guard),
+        cache_update: crate::tools::CacheUpdate::NotApplicable,
     };
     assert!(observation.valid());
     let mut profile_mismatch = observation.clone();
@@ -1286,6 +1324,40 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
     let mut mismatched = observation.clone();
     mismatched.guard.as_mut().unwrap().limits.max_processes += 1;
     assert!(!mismatched.valid());
+    let mut command_intent = observation.intent.clone();
+    command_intent.call = ToolCall::Command {
+        program: "cargo".into(),
+        args: vec!["build".into()],
+        cwd: ".".into(),
+    };
+    let command_guard = GuardReceipt {
+        contract_version: 1,
+        intent_digest: command_intent.digest(),
+        enforcement_digest: command_intent.enforcement_digest,
+        limits: command_intent.limits.clone(),
+    };
+    let uncertain_cache = ToolObservation {
+        intent: command_intent,
+        disposition: ToolDisposition::Uncertain,
+        output: r#"{"exit_code":0,"stdout":"build complete","stderr":"","changeset":{"files":[]}}"#
+            .into(),
+        guard: Some(command_guard),
+        cache_update: CacheUpdate::Uncertain,
+    };
+    assert!(uncertain_cache.valid());
+    assert!(uncertain_cache.stops_run());
+    let mut worker_observation = uncertain_cache.clone();
+    worker_observation.disposition = ToolDisposition::Succeeded;
+    worker_observation.cache_update = CacheUpdate::NotAttempted;
+    assert!(worker_observation.valid());
+    worker_observation.cache_update = CacheUpdate::Failed;
+    assert!(worker_observation.valid());
+    let mut encoded = serde_json::to_value(&worker_observation).unwrap();
+    encoded.as_object_mut().unwrap().remove("cache_update");
+    assert!(serde_json::from_value::<ToolObservation>(encoded).is_err());
+    let mut false_cache_status = uncertain_cache.clone();
+    false_cache_status.disposition = ToolDisposition::Succeeded;
+    assert!(!false_cache_status.valid());
     let mut widened = intent.clone();
     widened.limits.runtime_ms += 1;
     assert!(!widened.valid());
@@ -1323,7 +1395,8 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         );
         let mut reserved = observation.intent.clone();
         reserved.limits.result_bytes = 128;
-        let receipt = super::uncertain_observation(reserved, error);
+        let receipt =
+            super::uncertain_observation(reserved, error, crate::tools::CacheUpdate::NotApplicable);
         assert_eq!(
             receipt.output,
             format!(
@@ -1335,7 +1408,8 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
     for error in errors {
         let mut reserved = observation.intent.clone();
         reserved.limits.result_bytes = 128;
-        let uncertain = super::uncertain_observation(reserved, error);
+        let uncertain =
+            super::uncertain_observation(reserved, error, crate::tools::CacheUpdate::NotApplicable);
         assert_eq!(uncertain.disposition, ToolDisposition::Uncertain);
         assert!(uncertain.guard.is_none());
         assert!(uncertain.valid(), "minimum-budget uncertainty receipt");

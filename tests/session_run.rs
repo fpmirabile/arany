@@ -7,6 +7,38 @@ use arany::{
 use process::BoundedOutput;
 use std::process::Command;
 
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+fn safe_run_diagnostics(run: &arany::RunView) -> String {
+    let agents = run
+        .agents
+        .iter()
+        .map(|agent| {
+            (
+                agent.status,
+                agent
+                    .provider_calls
+                    .iter()
+                    .map(|call| call.disposition)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let tools = run
+        .tools
+        .iter()
+        .map(|tool| {
+            tool.observation.as_ref().map(|observation| {
+                (
+                    observation.disposition,
+                    observation.guard.is_some(),
+                    observation.output.len(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    format!("agents={agents:?}; tools={tools:?}")
+}
+
 #[path = "common/process.rs"]
 pub mod process;
 
@@ -1209,8 +1241,8 @@ fn exact_resume_and_rename_survive_file_backed_reopen() {
         assert!(shown.status.success());
         assert_eq!(shown.stderr, b"");
         let expected = format!(
-            "{{\"sequence\":1,\"session_id\":\"{id}\",\"run_id\":null,\"agent_run_id\":null,\"kind\":\"SessionStarted\",\"event_version\":2,\"payload\":{{\"title\":\"New Session\",\"workspace_device\":{device},\"workspace_inode\":{inode}}},\"created_at_ms\":{}}}\n\
-             {{\"sequence\":2,\"session_id\":\"{id}\",\"run_id\":null,\"agent_run_id\":null,\"kind\":\"SessionRenamed\",\"event_version\":2,\"payload\":{{\"title\":\"Research thread\"}},\"created_at_ms\":{}}}\n",
+            "{{\"sequence\":1,\"session_id\":\"{id}\",\"run_id\":null,\"agent_run_id\":null,\"kind\":\"SessionStarted\",\"event_version\":3,\"payload\":{{\"title\":\"New Session\",\"workspace_device\":{device},\"workspace_inode\":{inode}}},\"created_at_ms\":{}}}\n\
+             {{\"sequence\":2,\"session_id\":\"{id}\",\"run_id\":null,\"agent_run_id\":null,\"kind\":\"SessionRenamed\",\"event_version\":3,\"payload\":{{\"title\":\"Research thread\"}},\"created_at_ms\":{}}}\n",
             events[0].created_at_ms, events[1].created_at_ms
         );
         assert_eq!(shown.stdout, expected.as_bytes());
@@ -1221,7 +1253,7 @@ fn exact_resume_and_rename_survive_file_backed_reopen() {
                 row.get(0)
             })
             .expect("start Event version");
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         connection
             .execute("UPDATE events SET event_version=1 WHERE sequence=1", [])
             .expect("version fault injection");
@@ -1462,6 +1494,30 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
         let store =
             Store::open(StateRoot::admit(&state_path).expect("state")).expect("writable reopen");
         let pending_run_id = RunId::new();
+        let pending_goal_id = arany::GoalId::new();
+        store
+            .append(
+                id,
+                Event::GoalStarted {
+                    goal_id: pending_goal_id,
+                    objective: "pending objective".into(),
+                    workspace_identity: (workspace_device, workspace_inode),
+                    budget: arany::GoalBudget::default(),
+                },
+            )
+            .await
+            .expect("pending Goal");
+        store
+            .append(
+                id,
+                Event::GoalRunLinked {
+                    goal_id: pending_goal_id,
+                    run_id: pending_run_id,
+                    phase: arany::GoalPhase::Research,
+                },
+            )
+            .await
+            .expect("pending Goal Run link");
         store
             .append(
                 id,
@@ -1678,7 +1734,7 @@ fn session_journal_survives_reopen_and_rejects_invalid_history() {
             assert_eq!(line["session_id"], id.to_string());
             assert!(line["run_id"].is_null());
             assert!(line["agent_run_id"].is_null());
-            assert_eq!(line["event_version"], 2);
+            assert_eq!(line["event_version"], 3);
             assert_eq!(line["created_at_ms"], event.created_at_ms);
         }
 
@@ -2065,6 +2121,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
         ] {
             let state_path = temp.path().join(format!("state-{prefix_len}-{cold}"));
             let session_id = SessionId::new();
+            let goal_id = arany::GoalId::new();
             let interrupted_run = RunId::new();
             let primary = AgentRunId::new();
             let config = RunConfig {
@@ -2096,6 +2153,17 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                     title: "New Session".into(),
                     workspace_identity: identity,
                 },
+                Event::GoalStarted {
+                    goal_id,
+                    objective: "Question".into(),
+                    workspace_identity: identity,
+                    budget: arany::GoalBudget::default(),
+                },
+                Event::GoalRunLinked {
+                    goal_id,
+                    run_id: interrupted_run,
+                    phase: arany::GoalPhase::Research,
+                },
                 Event::MessageAccepted {
                     run_id: interrupted_run,
                     text: "Question".into(),
@@ -2105,12 +2173,22 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                     run_id: interrupted_run,
                     config: config.clone(),
                 },
+                Event::GoalActiveTimeReserved {
+                    goal_id,
+                    run_id: interrupted_run,
+                    reserved_ms: 30_000,
+                },
                 Event::AgentSpawned {
                     run_id: interrupted_run,
                     agent_run_id: primary,
                     role: AgentRole::Primary,
                     ordinal: 0,
                     objective: None,
+                },
+                Event::GoalProviderCallReserved {
+                    goal_id,
+                    run_id: interrupted_run,
+                    agent_run_id: primary,
                 },
                 Event::ProviderCallRecorded {
                     run_id: interrupted_run,
@@ -2137,7 +2215,13 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                     text: "Observed answer".into(),
                 },
             ];
-            for event in &prefix[..prefix_len] {
+            let event_count = match prefix_len {
+                2 => 4,
+                5 => 9,
+                7 => prefix.len(),
+                _ => unreachable!("declared crash point"),
+            };
+            for event in &prefix[..event_count] {
                 store
                     .append(session_id, event.clone())
                     .await
@@ -2216,10 +2300,10 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                 .load_session(session_id)
                 .await
                 .expect("metadata prefix");
-            assert_eq!(&committed[..prefix_len], events.as_slice());
-            assert_eq!(committed.len(), prefix_len + 2);
+            assert_eq!(&committed[..event_count], events.as_slice());
+            assert_eq!(committed.len(), event_count + 2);
             assert!(
-                committed[prefix_len..]
+                committed[event_count..]
                     .iter()
                     .all(|event| event.run_id.is_none() && event.agent_run_id.is_none())
             );
@@ -2239,7 +2323,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                     run_id: interrupted_run,
                     config: config.clone(),
                 },
-                5 => prefix[5].clone(),
+                5 => prefix[event_count].clone(),
                 7 => Event::RunFinished {
                     run_id: interrupted_run,
                     disposition: arany::RunDisposition::Finished,
@@ -2258,6 +2342,21 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                 committed
             );
             let next_run = RunId::new();
+            store
+                .append(session_id, Event::GoalResumed { goal_id })
+                .await
+                .expect("explicitly resumed interrupted Goal");
+            store
+                .append(
+                    session_id,
+                    Event::GoalRunLinked {
+                        goal_id,
+                        run_id: next_run,
+                        phase: arany::GoalPhase::Research,
+                    },
+                )
+                .await
+                .expect("new Goal Run link");
             store
                 .append(
                     session_id,
@@ -2279,6 +2378,17 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                 )
                 .await
                 .expect("fresh Run starts");
+            store
+                .append(
+                    session_id,
+                    Event::GoalActiveTimeReserved {
+                        goal_id,
+                        run_id: next_run,
+                        reserved_ms: 30_000,
+                    },
+                )
+                .await
+                .expect("new Goal active-time reservation");
             store
                 .append(
                     session_id,
@@ -2486,7 +2596,7 @@ fn exec_process_rejects_a_busy_session_and_recovers_after_holder_death() {
             std::thread::yield_now();
         }
 
-        let contender = || {
+        let contender = |resume_goal: Option<arany::GoalId>| {
             let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
             command
                 .env_clear()
@@ -2497,11 +2607,14 @@ fn exec_process_rejects_a_busy_session_and_recovers_after_holder_death() {
                 .arg("--workspace")
                 .arg(&workspace)
                 .args(["--provider", "openai", "--model", "gpt-5.4"])
-                .args(["--session-id", &session_id.to_string()])
-                .args(["--include", "missing.txt", "prompt"]);
+                .args(["--session-id", &session_id.to_string()]);
+            if let Some(goal_id) = resume_goal {
+                command.arg("--resume-goal").arg(goal_id.to_string());
+            }
+            command.args(["--include", "missing.txt", "prompt"]);
             process_output_before_deadline(command)
         };
-        let busy = contender();
+        let busy = contender(None);
         assert!(!busy.status.success());
         assert_eq!(busy.stdout, b"");
         assert_eq!(busy.stderr, b"error: Session has an active operation\n");
@@ -2509,21 +2622,41 @@ fn exec_process_rejects_a_busy_session_and_recovers_after_holder_death() {
         holder.child().kill().expect("kill holder");
         let killed = holder.finish();
         assert!(!killed.status.success());
-        let released = contender();
+        let store =
+            Store::open_read_only(StateRoot::open_existing(&state_path).expect("read-only state"))
+                .expect("read-only Store after holder exit");
+        let interrupted_events = store
+            .load_session(session_id)
+            .await
+            .expect("durable interrupted Goal facts");
+        let view = SessionView::replay(session_id, &interrupted_events)
+            .expect("valid interrupted Goal history")
+            .expect("Session");
+        let interrupted_goal = view
+            .active_goal()
+            .filter(|goal| goal.status == arany::GoalStatus::Interrupted)
+            .expect("held Goal became interrupted");
+        let goal_id = interrupted_goal.id;
+        store.close().await.expect("close interrupted Store");
+
+        let released = contender(Some(goal_id));
         assert!(!released.status.success());
         assert_eq!(released.stdout, b"");
         assert_eq!(released.stderr, b"error: explicit include does not exist\n");
 
         let store =
             Store::open_read_only(StateRoot::open_existing(&state_path).expect("read-only state"))
-                .expect("read-only store");
+                .expect("read-only store after explicit resume preflight");
         let events = store
             .load_session(session_id)
             .await
-            .expect("unchanged Session");
-        assert_eq!(events.len(), 4);
+            .expect("unchanged interrupted Session");
+        assert_eq!(
+            events, interrupted_events,
+            "preflight failure does not resume"
+        );
         let view = SessionView::replay(session_id, &events)
-            .expect("valid interrupted prefix")
+            .expect("valid interrupted prefix after refusal")
             .expect("Session");
         assert_eq!(view.runs.len(), 1);
         assert_eq!(view.runs[0].status, RunStatus::Interrupted);

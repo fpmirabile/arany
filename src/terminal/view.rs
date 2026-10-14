@@ -20,25 +20,54 @@ use unicode_width::UnicodeWidthStr;
 
 const MAX_VISIBLE_DRAFT_ROWS: usize = 4;
 
+pub(super) struct PermissionFrameState<'a> {
+    pub choices: (&'a str, &'a str),
+    pub page: usize,
+    pub allow: bool,
+    pub profile_start: Option<usize>,
+    pub profile_count: usize,
+    pub focused_profile: Option<usize>,
+    pub profile_selection_enabled: Option<bool>,
+    pub footer: Option<&'a str>,
+    pub palette: Palette,
+}
+
+pub(super) struct PermissionFrameProgress {
+    pub more: bool,
+    pub page: usize,
+}
+
 pub(super) fn draw_permission_frame(
     frame: &mut Frame,
     lines: &[String],
-    choices: (&str, &str),
-    page: usize,
-    allow: bool,
-    footer: &str,
-    palette: Palette,
-) -> bool {
+    state: PermissionFrameState<'_>,
+) -> PermissionFrameProgress {
+    let PermissionFrameState {
+        choices,
+        page,
+        allow,
+        profile_start,
+        profile_count,
+        focused_profile,
+        profile_selection_enabled,
+        footer,
+        palette,
+    } = state;
     let full = frame.area();
     let width = full
         .width
         .saturating_sub(if full.width >= 40 { 4 } else { 0 })
         .min(76);
     if width == 0 || full.height < 8 {
-        return true;
+        return PermissionFrameProgress { more: true, page };
     }
     let mut rows = Vec::new();
+    let mut profile_rows = Vec::new();
     for (index, line) in lines.iter().enumerate() {
+        let row_start = rows.len();
+        let focused = profile_start
+            .zip(focused_profile)
+            .is_some_and(|(start, selected)| index == start + selected);
         let mut current = String::new();
         let mut cells = 0;
         for grapheme in line.graphemes(true) {
@@ -46,7 +75,7 @@ pub(super) fn draw_permission_frame(
             if cells + count > usize::from(width) && !current.is_empty() {
                 rows.push(Line::styled(
                     std::mem::take(&mut current),
-                    if index == 0 {
+                    if index == 0 || focused {
                         palette.selection()
                     } else {
                         Style::default()
@@ -59,12 +88,17 @@ pub(super) fn draw_permission_frame(
         }
         rows.push(Line::styled(
             current,
-            if index == 0 {
+            if index == 0 || focused {
                 palette.selection()
             } else {
                 Style::default()
             },
         ));
+        if let Some(start) = profile_start
+            && (start..start + profile_count).contains(&index)
+        {
+            profile_rows.push((index - start, row_start));
+        }
     }
     let height = full
         .height
@@ -78,7 +112,10 @@ pub(super) fn draw_permission_frame(
     );
     let body_height = usize::from(height - 5);
     let pages = rows.len().div_ceil(body_height).max(1);
-    let page = page.min(pages - 1);
+    let page = profile_rows
+        .iter()
+        .find(|(profile, _)| Some(*profile) == focused_profile)
+        .map_or(page.min(pages - 1), |(_, row)| row / body_height);
     let more = page + 1 < pages;
     let start = page * body_height;
     frame.render_widget(
@@ -110,11 +147,55 @@ pub(super) fn draw_permission_frame(
             );
         }
     }
+    let footer = match profile_selection_enabled {
+        Some(_) if focused_profile.is_some() => {
+            if width < 24 {
+                "↑↓ Space · Tab back · ^C"
+            } else if width < 50 {
+                "↑↓ profiles · Space · Tab back · Ctrl+C"
+            } else {
+                "↑↓ profiles · Space toggle · Tab back · Ctrl+C exit"
+            }
+        }
+        Some(enabled) if more && !enabled => {
+            if width < 50 {
+                "Enter/PgDn continues · Ctrl+C exits"
+            } else {
+                "Enter/PgDn continues; review all pages before profiles · Ctrl+C exits"
+            }
+        }
+        Some(_) if more => {
+            if width < 50 {
+                "Enter/PgDn · Tab profiles · Ctrl+C exit"
+            } else {
+                "Enter/PgDn continues · Tab profiles · Ctrl+C exit"
+            }
+        }
+        Some(_) if profile_count > 0 => {
+            if width < 24 {
+                "↑↓ Tab · Enter · ^C"
+            } else if width < 50 {
+                "↑↓ choose · Tab profiles · Space · Enter"
+            } else {
+                "↑↓ choose · Tab profiles · Space toggle · Enter confirm · Ctrl+C exit"
+            }
+        }
+        Some(_) => {
+            if width < 24 {
+                "↑↓ Tab · Enter · ^C"
+            } else if width < 50 {
+                "↑↓ choose · Tab next · Enter"
+            } else {
+                "↑↓ choose · Tab next · Enter confirm · Ctrl+C exit"
+            }
+        }
+        None => footer.unwrap_or_default(),
+    };
     frame.render_widget(
         Paragraph::new(safe_truncate(footer, usize::from(width))),
         Rect::new(area.x, area.bottom() - 1, width, 1),
     );
-    more
+    PermissionFrameProgress { more, page }
 }
 
 struct ComposerRows {

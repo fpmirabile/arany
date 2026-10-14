@@ -13,6 +13,12 @@ Guard share this internal filesystem boundary; it has no history or Tool policy.
   Select physical paths such as `/private/tmp`; never canonicalize an untrusted
   supplied path to bypass this admission rule. Native fixtures use a physical
   temporary root, and user-selected State/account paths follow the same rule.
+- Ordinary Workspace access uses a separate no-follow descriptor opener and
+  keeps the existing Workspace policy: absolute component traversal without
+  owner, mode, or ACL requirements on Workspace directories. Do not route an
+  ordinary Workspace through private State admission; callers that need an
+  exclusion check compare the opened Workspace identity against the admitted
+  private root's checked ancestors.
 - Opening a private directory creates no records, database or locks. Store owns
   those artifacts; Guard retains the admitted handle for its control-root lifetime.
 - On macOS, check ACLs through opened descriptors. Private objects reject every

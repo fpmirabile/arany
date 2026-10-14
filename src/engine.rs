@@ -269,18 +269,12 @@ fn goal_report(
             _ => "Goal did not reach a terminal Run boundary.",
         });
     let mut report = GoalReport {
-        summary: truncate_utf8(raw_summary, 1_800).to_owned(),
+        summary: String::new(),
         changes: Vec::new(),
         evidence: Vec::new(),
         unresolved: Vec::new(),
     };
-    if raw_summary.len() > report.summary.len() {
-        push_goal_report_item(
-            &mut report,
-            GoalReportSection::Unresolved,
-            "The primary summary was shortened to fit the durable Goal report.",
-        );
-    }
+    let mut omitted_facts = false;
     let uncertain_calls = goal.unobserved_provider_calls.len()
         + usize::try_from(goal.uncertain_compaction_calls).unwrap_or(usize::MAX)
         + usize::from(goal.compaction_call_reserved.is_some());
@@ -292,6 +286,7 @@ fn goal_report(
                 "{} reserved Provider call(s) have no committed outcome; their usage remains unknown and charged.",
                 uncertain_calls
             ),
+            &mut omitted_facts,
         );
     }
     if goal.token_usage_unknown {
@@ -299,6 +294,7 @@ fn goal_report(
             &mut report,
             GoalReportSection::Unresolved,
             "Provider token usage is incomplete.",
+            &mut omitted_facts,
         );
     }
     if goal.uncertain_active_ms > 0 {
@@ -309,8 +305,82 @@ fn goal_report(
                 "{} ms of active time were conservatively charged after interruption.",
                 goal.uncertain_active_ms
             ),
+            &mut omitted_facts,
         );
     }
+    let mut cache_rejected = false;
+    let mut cache_failed = false;
+    let mut cache_uncertain = false;
+    for task_run in view
+        .runs
+        .iter()
+        .filter(|task_run| goal.run_ids.contains(&task_run.id))
+    {
+        for tool in &task_run.tools {
+            if let Some(observation) = tool.observation.as_ref() {
+                match observation.cache_update {
+                    crate::tools::CacheUpdate::Rejected => cache_rejected = true,
+                    crate::tools::CacheUpdate::Failed => cache_failed = true,
+                    crate::tools::CacheUpdate::Uncertain => cache_uncertain = true,
+                    crate::tools::CacheUpdate::NotApplicable
+                    | crate::tools::CacheUpdate::NotAttempted
+                    | crate::tools::CacheUpdate::Published => {}
+                }
+            }
+        }
+    }
+    if cache_rejected {
+        push_goal_report_item(
+            &mut report,
+            GoalReportSection::Unresolved,
+            "One or more Commands completed, but the build cache update was rejected; the previous cache was kept.",
+            &mut omitted_facts,
+        );
+    }
+    if cache_failed {
+        push_goal_report_item(
+            &mut report,
+            GoalReportSection::Unresolved,
+            "One or more Commands completed, but the build cache update failed; the previous cache was kept.",
+            &mut omitted_facts,
+        );
+    }
+    if cache_uncertain {
+        push_goal_report_item(
+            &mut report,
+            GoalReportSection::Unresolved,
+            "One or more Commands have an uncertain build cache publication; inspect Session history before retrying.",
+            &mut omitted_facts,
+        );
+    }
+    let mut summary_bytes = raw_summary.len().min(1_800);
+    let mut summary_notice_added = summary_bytes < raw_summary.len();
+    if summary_notice_added {
+        push_goal_report_item(
+            &mut report,
+            GoalReportSection::Unresolved,
+            "The primary summary was shortened to fit the durable Goal report.",
+            &mut omitted_facts,
+        );
+    }
+    report.summary = truncate_utf8(raw_summary, summary_bytes).to_owned();
+    while !goal_report_fits_with_omission(&mut report) {
+        summary_bytes = summary_bytes.saturating_sub(128);
+        if summary_bytes < raw_summary.len() && !summary_notice_added {
+            let summary = std::mem::take(&mut report.summary);
+            push_goal_report_item(
+                &mut report,
+                GoalReportSection::Unresolved,
+                "The primary summary was shortened to fit the durable Goal report.",
+                &mut omitted_facts,
+            );
+            report.summary = summary;
+            summary_notice_added = true;
+        }
+        report.summary = truncate_utf8(raw_summary, summary_bytes).to_owned();
+        assert!(summary_bytes > 0 || goal_report_fits_with_omission(&mut report));
+    }
+    let protected_unresolved_count = report.unresolved.len();
     for task_run in view
         .runs
         .iter()
@@ -330,53 +400,14 @@ fn goal_report(
                         &mut report,
                         GoalReportSection::Unresolved,
                         &format!("{label} has no committed Tool outcome."),
+                        &mut omitted_facts,
                     );
                 }
                 continue;
             };
-            let attested = observation.attested_for(&tool.intent);
             match observation.disposition {
-                crate::tools::ToolDisposition::Succeeded if attested => {
-                    match call {
-                        crate::tools::ToolCall::Write { path, .. }
-                        | crate::tools::ToolCall::Edit { path, .. } => {
-                            push_goal_report_item(
-                                &mut report,
-                                GoalReportSection::Changes,
-                                &format!("{} {path}.", call.label()),
-                            );
-                        }
-                        crate::tools::ToolCall::Mkdir { path } => {
-                            push_goal_report_item(
-                                &mut report,
-                                GoalReportSection::Changes,
-                                &format!("Created directory {path}."),
-                            );
-                        }
-                        crate::tools::ToolCall::ApplyChangeset { changeset, .. } => {
-                            for change in &changeset.files {
-                                let action = if change.after.is_none() {
-                                    "removed"
-                                } else if change.before.is_none() {
-                                    "created"
-                                } else {
-                                    "updated"
-                                };
-                                push_goal_report_item(
-                                    &mut report,
-                                    GoalReportSection::Changes,
-                                    &format!("Command {action} {}.", change.path),
-                                );
-                            }
-                        }
-                        _ => {}
-                    }
-                    push_goal_report_item(
-                        &mut report,
-                        GoalReportSection::Evidence,
-                        &goal_report_evidence(call, &observation.output),
-                    );
-                }
+                crate::tools::ToolDisposition::Succeeded
+                    if observation.attested_for(&tool.intent) => {}
                 crate::tools::ToolDisposition::Denied
                 | crate::tools::ToolDisposition::Failed
                 | crate::tools::ToolDisposition::Conflict
@@ -384,30 +415,92 @@ fn goal_report(
                     &mut report,
                     GoalReportSection::Unresolved,
                     &format!("{label} failed; its effect was not recorded as successful."),
+                    &mut omitted_facts,
                 ),
                 crate::tools::ToolDisposition::Uncertain
-                | crate::tools::ToolDisposition::Cancelled => push_goal_report_item(
-                    &mut report,
-                    GoalReportSection::Unresolved,
-                    &format!(
-                        "{label} has an uncertain or cancelled outcome; inspect Workspace state before retrying."
-                    ),
-                ),
+                | crate::tools::ToolDisposition::Cancelled => {
+                    if observation.cache_update != crate::tools::CacheUpdate::Uncertain {
+                        push_goal_report_item(
+                            &mut report,
+                            GoalReportSection::Unresolved,
+                            &format!(
+                                "{label} has an uncertain or cancelled outcome; inspect Workspace state before retrying."
+                            ),
+                            &mut omitted_facts,
+                        );
+                    }
+                }
                 crate::tools::ToolDisposition::Succeeded => push_goal_report_item(
                     &mut report,
                     GoalReportSection::Unresolved,
                     &format!("{label} reported success without a valid Guard attestation."),
+                    &mut omitted_facts,
                 ),
             }
         }
     }
-    let mut summary_bytes = report.summary.len();
-    while serde_json::to_vec(&report).map_or(true, |bytes| {
-        bytes.len() > crate::session::MAX_GOAL_REPORT_BYTES
-    }) && summary_bytes > 0
+    for task_run in view
+        .runs
+        .iter()
+        .filter(|task_run| goal.run_ids.contains(&task_run.id))
     {
-        summary_bytes = summary_bytes.saturating_sub(128);
-        report.summary = truncate_utf8(&report.summary, summary_bytes).to_owned();
+        for tool in &task_run.tools {
+            let Some(observation) = tool.observation.as_ref() else {
+                continue;
+            };
+            if observation.disposition != crate::tools::ToolDisposition::Succeeded
+                || !observation.attested_for(&tool.intent)
+            {
+                continue;
+            }
+            let call = &tool.intent.call;
+            match call {
+                crate::tools::ToolCall::Write { path, .. }
+                | crate::tools::ToolCall::Edit { path, .. } => {
+                    push_goal_report_item(
+                        &mut report,
+                        GoalReportSection::Changes,
+                        &format!("{} {path}.", call.label()),
+                        &mut omitted_facts,
+                    );
+                }
+                crate::tools::ToolCall::Mkdir { path } => {
+                    push_goal_report_item(
+                        &mut report,
+                        GoalReportSection::Changes,
+                        &format!("Created directory {path}."),
+                        &mut omitted_facts,
+                    );
+                }
+                crate::tools::ToolCall::ApplyChangeset { changeset, .. } => {
+                    for change in &changeset.files {
+                        let action = if change.after.is_none() {
+                            "removed"
+                        } else if change.before.is_none() {
+                            "created"
+                        } else {
+                            "updated"
+                        };
+                        push_goal_report_item(
+                            &mut report,
+                            GoalReportSection::Changes,
+                            &format!("Command {action} {}.", change.path),
+                            &mut omitted_facts,
+                        );
+                    }
+                }
+                _ => {}
+            }
+            push_goal_report_item(
+                &mut report,
+                GoalReportSection::Evidence,
+                &goal_report_evidence(call, &observation.output),
+                &mut omitted_facts,
+            );
+        }
+    }
+    if omitted_facts {
+        append_goal_report_omission(&mut report, protected_unresolved_count);
     }
     report
 }
@@ -416,7 +509,9 @@ fn goal_report(
 mod goal_report_tests {
     use super::*;
     use crate::session::{AgentStatus, AgentView, GoalPhase, GoalView, RunStatus, ToolView};
-    use crate::tools::{EffectIntent, GuardReceipt, ToolCall, ToolDisposition, ToolLimits};
+    use crate::tools::{
+        CacheUpdate, EffectIntent, GuardReceipt, ToolCall, ToolDisposition, ToolLimits,
+    };
     use uuid::Uuid;
 
     #[test]
@@ -424,46 +519,85 @@ mod goal_report_tests {
         let session_id = SessionId::new();
         let goal_id = GoalId::new();
         let run_id = RunId::new();
-        let tools = (0..16)
-            .map(|index| {
-                let intent = EffectIntent {
-                    id: Uuid::now_v7(),
-                    run_id,
-                    agent_run_id: AgentRunId::new(),
-                    policy_digest: [1; 32],
-                    enforcement_digest: [2; 32],
-                    workspace_device: 1,
-                    workspace_inode: 2,
-                    call: ToolCall::Read {
-                        path: format!("src/{index}-{}", "x".repeat(480)),
-                        offset: 0,
-                        limit: 4096,
-                    },
-                    limits: ToolLimits::default(),
-                    expires_at_ms: 1,
-                    use_count: 1,
-                };
-                let observation = crate::tools::ToolObservation {
-                    guard: Some(GuardReceipt {
-                        contract_version: 1,
-                        intent_digest: intent.digest(),
-                        enforcement_digest: intent.enforcement_digest,
-                        limits: intent.limits.clone(),
-                    }),
-                    intent: intent.clone(),
-                    disposition: ToolDisposition::Succeeded,
-                    output: serde_json::json!({
-                        "sha256": crate::tools::types::hex_digest(b"evidence")
-                    })
-                    .to_string(),
-                };
-                ToolView {
-                    intent,
-                    observation: Some(observation),
-                    review_call_index: None,
-                }
+        let command_intent = EffectIntent {
+            id: Uuid::now_v7(),
+            run_id,
+            agent_run_id: AgentRunId::new(),
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call: ToolCall::Command {
+                program: "cargo".into(),
+                args: vec!["check".into()],
+                cwd: ".".into(),
+            },
+            limits: ToolLimits::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        };
+        let command_observation = crate::tools::ToolObservation {
+            guard: Some(GuardReceipt {
+                contract_version: 1,
+                intent_digest: command_intent.digest(),
+                enforcement_digest: command_intent.enforcement_digest,
+                limits: command_intent.limits.clone(),
+            }),
+            intent: command_intent.clone(),
+            disposition: ToolDisposition::Succeeded,
+            output: serde_json::json!({
+                "exit_code": 0,
+                "stdout": "",
+                "stderr": "",
+                "changeset": {"files": []}
             })
-            .collect();
+            .to_string(),
+            cache_update: CacheUpdate::Failed,
+        };
+        let mut tools = vec![ToolView {
+            intent: command_intent,
+            observation: Some(command_observation),
+            review_call_index: None,
+        }];
+        tools.extend((0..15).map(|index| {
+            let intent = EffectIntent {
+                id: Uuid::now_v7(),
+                run_id,
+                agent_run_id: AgentRunId::new(),
+                policy_digest: [1; 32],
+                enforcement_digest: [2; 32],
+                workspace_device: 1,
+                workspace_inode: 2,
+                call: ToolCall::Read {
+                    path: format!("src/{index}-{}", "x".repeat(480)),
+                    offset: 0,
+                    limit: 4096,
+                },
+                limits: ToolLimits::default(),
+                expires_at_ms: 1,
+                use_count: 1,
+            };
+            let observation = crate::tools::ToolObservation {
+                guard: Some(GuardReceipt {
+                    contract_version: 1,
+                    intent_digest: intent.digest(),
+                    enforcement_digest: intent.enforcement_digest,
+                    limits: intent.limits.clone(),
+                }),
+                intent: intent.clone(),
+                disposition: ToolDisposition::Succeeded,
+                output: serde_json::json!({
+                    "sha256": crate::tools::types::hex_digest(b"evidence")
+                })
+                .to_string(),
+                cache_update: crate::tools::CacheUpdate::NotApplicable,
+            };
+            ToolView {
+                intent,
+                observation: Some(observation),
+                review_call_index: None,
+            }
+        }));
         let run = RunView {
             id: run_id,
             objective: "Report bounded evidence".into(),
@@ -528,11 +662,21 @@ mod goal_report_tests {
         };
 
         let report = goal_report(&view, &run, &goal);
-        assert!(report.evidence.len() < 16, "report retains its byte bound");
+        assert!(report.evidence.len() < 17, "report retains its byte bound");
         assert!(
             report.evidence.len() > 1,
             "report keeps canonical tool evidence"
         );
+        assert!(
+            report
+                .evidence
+                .iter()
+                .any(|item| item == "Command cargo exited 0."),
+            "successful Command evidence survives a cache update failure"
+        );
+        assert!(report.unresolved.iter().any(|item| {
+            item.contains("build cache update failed") && item.contains("previous cache was kept")
+        }));
         assert!(
             report
                 .unresolved
@@ -541,6 +685,293 @@ mod goal_report_tests {
         );
         assert!(
             serde_json::to_vec(&report).unwrap().len() <= crate::session::MAX_GOAL_REPORT_BYTES
+        );
+
+        let mut late_run = run.clone();
+        let late_failed_command = late_run.tools.remove(0);
+        let failed_cache_observation = late_failed_command
+            .observation
+            .as_ref()
+            .expect("attested Command result");
+        assert!(failed_cache_observation.valid());
+        assert!(failed_cache_observation.attested_for(&late_failed_command.intent));
+        late_run.tools.truncate(10);
+        let mut late_rejected_command = late_failed_command.clone();
+        late_run.tools.push(late_failed_command);
+        late_rejected_command.intent.id = Uuid::now_v7();
+        let rejected_digest = late_rejected_command.intent.digest();
+        let rejected_observation = late_rejected_command
+            .observation
+            .as_mut()
+            .expect("attested Command result");
+        rejected_observation.intent = late_rejected_command.intent.clone();
+        rejected_observation
+            .guard
+            .as_mut()
+            .expect("Guard receipt")
+            .intent_digest = rejected_digest;
+        rejected_observation.cache_update = CacheUpdate::Rejected;
+        assert!(rejected_observation.valid());
+        assert!(rejected_observation.attested_for(&late_rejected_command.intent));
+        late_run.tools.push(late_rejected_command);
+        let uncertain_intent = EffectIntent {
+            id: Uuid::now_v7(),
+            run_id,
+            agent_run_id: late_run.agents[0].id,
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call: ToolCall::Command {
+                program: "cargo".into(),
+                args: vec!["test".into()],
+                cwd: ".".into(),
+            },
+            limits: ToolLimits::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        };
+        let uncertain_observation = crate::tools::ToolObservation {
+            guard: Some(GuardReceipt {
+                contract_version: 1,
+                intent_digest: uncertain_intent.digest(),
+                enforcement_digest: uncertain_intent.enforcement_digest,
+                limits: uncertain_intent.limits.clone(),
+            }),
+            intent: uncertain_intent.clone(),
+            disposition: ToolDisposition::Uncertain,
+            output: run.tools[0]
+                .observation
+                .as_ref()
+                .expect("valid Command result")
+                .output
+                .clone(),
+            cache_update: CacheUpdate::Uncertain,
+        };
+        assert!(uncertain_observation.valid());
+        assert!(uncertain_observation.attested_for(&uncertain_intent));
+        late_run.tools.push(ToolView {
+            intent: uncertain_intent.clone(),
+            observation: Some(uncertain_observation),
+            review_call_index: None,
+        });
+        assert_eq!(late_run.tools.len(), crate::tools::MAX_TOOL_CALLS - 3);
+        late_run.agents[0].summary = Some("\u{1}".repeat(2_048));
+        let mut late_view = view.clone();
+        late_view.runs = vec![late_run.clone()];
+        let late_report = goal_report(&late_view, &late_run, &goal);
+        let late_report_bytes = serde_json::to_vec(&late_report).unwrap();
+        assert!(
+            late_report_bytes.len() > crate::session::MAX_GOAL_REPORT_BYTES * 3 / 4,
+            "late cache outcomes exercise a near-capacity report"
+        );
+        assert!(late_report_bytes.len() <= crate::session::MAX_GOAL_REPORT_BYTES);
+        assert!(late_report.summary.len() <= 2_048);
+        assert!(
+            late_report.summary.len() < 1_800,
+            "JSON-escaped controls consume serialized report capacity"
+        );
+        assert!(
+            late_report
+                .summary
+                .chars()
+                .all(|character| character == '\u{1}')
+        );
+        late_report
+            .validate()
+            .expect("bounded report remains valid");
+        assert!(late_report.unresolved.iter().any(|item| {
+            item.contains("build cache update was rejected")
+                && item.contains("previous cache was kept")
+        }));
+        assert!(late_report.unresolved.iter().any(|item| {
+            item.contains("build cache update failed") && item.contains("previous cache was kept")
+        }));
+        assert!(late_report.unresolved.iter().any(|item| {
+            item.contains("uncertain build cache publication") && item.contains("Session history")
+        }));
+        assert!(
+            late_report
+                .unresolved
+                .iter()
+                .any(|item| item == GOAL_REPORT_OMISSION),
+            "omitted lower-priority facts remain visible: {late_report:?}"
+        );
+        assert!(
+            late_report
+                .unresolved
+                .iter()
+                .any(|item| { item.contains("primary summary was shortened") })
+        );
+
+        let mut byte_run = run.clone();
+        byte_run.tools.truncate(13);
+        let failed_intent = EffectIntent {
+            id: Uuid::now_v7(),
+            run_id,
+            agent_run_id: byte_run.agents[0].id,
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call: ToolCall::Read {
+                path: "src/report-failure".into(),
+                offset: 0,
+                limit: 4096,
+            },
+            limits: ToolLimits::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        };
+        let failed_observation = crate::tools::ToolObservation {
+            intent: failed_intent.clone(),
+            disposition: ToolDisposition::Denied,
+            output: String::new(),
+            guard: None,
+            cache_update: CacheUpdate::NotApplicable,
+        };
+        assert!(failed_observation.valid());
+        assert!(!failed_observation.attested_for(&failed_intent));
+        assert!(!failed_observation.stops_run());
+        byte_run.tools.push(ToolView {
+            observation: Some(failed_observation),
+            intent: failed_intent,
+            review_call_index: None,
+        });
+        assert_eq!(byte_run.tools.len(), crate::tools::MAX_TOOL_CALLS - 2);
+        byte_run.agents[0].summary = Some("x".repeat(1_800));
+        let mut byte_view = view.clone();
+        byte_view.runs = vec![byte_run.clone()];
+        let byte_report = goal_report(&byte_view, &byte_run, &goal);
+        byte_report
+            .validate()
+            .expect("byte-boundary Goal report remains valid");
+        assert!(byte_report.unresolved.len() < 32);
+        assert!(byte_report.unresolved.iter().any(|item| {
+            item.contains("read src/report-failure failed")
+                && item.contains("effect was not recorded as successful")
+        }));
+        assert!(
+            byte_report
+                .unresolved
+                .iter()
+                .any(|item| item == GOAL_REPORT_OMISSION)
+        );
+        assert!(byte_report.evidence.len() < 13);
+        assert!(
+            byte_report
+                .evidence
+                .iter()
+                .any(|item| item == "Command cargo exited 0.")
+        );
+        assert!(
+            serde_json::to_vec(&byte_report).unwrap().len()
+                <= crate::session::MAX_GOAL_REPORT_BYTES
+        );
+
+        let mut saturation_runs = Vec::with_capacity(3);
+        let mut saturation_run_ids = Vec::with_capacity(3);
+        for (run_index, denied_count) in [10, 11, 12].into_iter().enumerate() {
+            let run_id = RunId::new();
+            let agent_run_id = AgentRunId::new();
+            saturation_run_ids.push(run_id);
+            let mut tools = Vec::with_capacity(denied_count + usize::from(run_index == 0));
+            if run_index == 0 {
+                let mut command = run.tools[0].clone();
+                command.intent.id = Uuid::now_v7();
+                command.intent.run_id = run_id;
+                command.intent.agent_run_id = agent_run_id;
+                let digest = command.intent.digest();
+                let observation = command.observation.as_mut().expect("successful Command");
+                observation.intent = command.intent.clone();
+                observation
+                    .guard
+                    .as_mut()
+                    .expect("Command Guard receipt")
+                    .intent_digest = digest;
+                observation.cache_update = CacheUpdate::NotApplicable;
+                assert!(observation.valid());
+                assert!(observation.attested_for(&command.intent));
+                tools.push(command);
+            }
+            for failure_index in 0..denied_count {
+                let intent = EffectIntent {
+                    id: Uuid::now_v7(),
+                    run_id,
+                    agent_run_id,
+                    policy_digest: [1; 32],
+                    enforcement_digest: [2; 32],
+                    workspace_device: 1,
+                    workspace_inode: 2,
+                    call: ToolCall::Read {
+                        path: format!("src/{run_index}-{failure_index}"),
+                        offset: 0,
+                        limit: 4096,
+                    },
+                    limits: ToolLimits::default(),
+                    expires_at_ms: 1,
+                    use_count: 1,
+                };
+                let observation = crate::tools::ToolObservation {
+                    intent: intent.clone(),
+                    disposition: ToolDisposition::Denied,
+                    output: String::new(),
+                    guard: None,
+                    cache_update: CacheUpdate::NotApplicable,
+                };
+                assert!(observation.valid());
+                assert!(!observation.attested_for(&intent));
+                tools.push(ToolView {
+                    observation: Some(observation),
+                    intent,
+                    review_call_index: None,
+                });
+            }
+            assert!(tools.len() <= crate::tools::MAX_TOOL_CALLS);
+            let mut saturation_run = run.clone();
+            saturation_run.id = run_id;
+            saturation_run.agents[0].id = agent_run_id;
+            saturation_run.tools = tools;
+            saturation_runs.push(saturation_run);
+        }
+        let mut saturation_goal = goal.clone();
+        saturation_goal.run_ids = saturation_run_ids;
+        let mut saturation_view = view.clone();
+        saturation_view.runs = saturation_runs;
+        assert_eq!(
+            saturation_view
+                .runs
+                .iter()
+                .flat_map(|task_run| &task_run.tools)
+                .filter(|tool| {
+                    tool.observation.as_ref().is_some_and(|observation| {
+                        observation.disposition == ToolDisposition::Denied
+                    })
+                })
+                .count(),
+            33
+        );
+        let saturation_report =
+            goal_report(&saturation_view, &saturation_view.runs[0], &saturation_goal);
+        saturation_report
+            .validate()
+            .expect("item-boundary Goal report remains valid");
+        assert_eq!(saturation_report.unresolved.len(), 32);
+        assert!(
+            saturation_report
+                .unresolved
+                .iter()
+                .any(|item| item == GOAL_REPORT_OMISSION)
+        );
+        assert!(
+            saturation_report
+                .evidence
+                .iter()
+                .any(|item| item == "Command cargo exited 0.")
+        );
+        assert!(
+            serde_json::to_vec(&saturation_report).unwrap().len()
+                <= crate::session::MAX_GOAL_REPORT_BYTES
         );
     }
 }
@@ -658,13 +1089,22 @@ enum GoalReportSection {
     Unresolved,
 }
 
-fn push_goal_report_item(report: &mut GoalReport, section: GoalReportSection, text: &str) {
+const GOAL_REPORT_OMISSION: &str =
+    "Some lower-priority Goal facts were omitted to fit the report limits.";
+
+fn push_goal_report_item(
+    report: &mut GoalReport,
+    section: GoalReportSection,
+    text: &str,
+    omitted_facts: &mut bool,
+) {
     let count = match section {
         GoalReportSection::Changes => report.changes.len(),
         GoalReportSection::Evidence => report.evidence.len(),
         GoalReportSection::Unresolved => report.unresolved.len(),
     };
     if count >= 32 {
+        *omitted_facts = true;
         return;
     }
     let item = truncate_utf8(text, 512).to_owned();
@@ -681,7 +1121,42 @@ fn push_goal_report_item(report: &mut GoalReport, section: GoalReportSection, te
             GoalReportSection::Evidence => report.evidence.pop(),
             GoalReportSection::Unresolved => report.unresolved.pop(),
         };
+        *omitted_facts = true;
     }
+}
+
+fn append_goal_report_omission(report: &mut GoalReport, protected_unresolved_count: usize) {
+    while !goal_report_fits_with_omission(report) {
+        if report.unresolved.len() >= 32 && report.unresolved.len() > protected_unresolved_count {
+            report.unresolved.pop();
+            continue;
+        }
+        if report.evidence.pop().is_some() || report.changes.pop().is_some() {
+            continue;
+        }
+        if report.unresolved.len() > protected_unresolved_count {
+            report.unresolved.pop();
+            continue;
+        }
+        if !report.summary.is_empty() {
+            let summary_bytes = report.summary.len().saturating_sub(128);
+            report.summary = truncate_utf8(&report.summary, summary_bytes).to_owned();
+            continue;
+        }
+        unreachable!("priority Goal report facts and omission notice fit their bounds");
+    }
+    report.unresolved.push(GOAL_REPORT_OMISSION.to_owned());
+}
+
+fn goal_report_fits_with_omission(report: &mut GoalReport) -> bool {
+    if report.unresolved.len() >= 32 {
+        return false;
+    }
+    report.unresolved.push(GOAL_REPORT_OMISSION.to_owned());
+    let fits = serde_json::to_vec(report)
+        .is_ok_and(|bytes| bytes.len() <= crate::session::MAX_GOAL_REPORT_BYTES);
+    report.unresolved.pop();
+    fits
 }
 
 fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
@@ -960,10 +1435,10 @@ impl<P: Provider + 'static> Engine<P> {
         session_id: SessionId,
         progress: Option<&ProgressPublisher>,
         event: Event,
-    ) -> Result<(), EngineError> {
+    ) -> Result<u64, EngineError> {
         self.retain_goal_workspace(goal_id, workspace_identity, workspace_lock);
         match append_observed(&self.store, progress, None, session_id, event).await {
-            Ok(_) => Ok(()),
+            Ok(sequence) => Ok(sequence),
             Err(error) => match self.store.load_view(session_id).await {
                 Ok(Some(view)) if view.active_goal().is_some() => {
                     Err(EngineError::GoalAdmissionUncertain)
@@ -1285,6 +1760,9 @@ impl<P: Provider + 'static> Engine<P> {
             return Err(EngineError::CancelledBeforeStart);
         }
         let trace_provider = crate::telemetry::TraceProvider::from_profile(&config.provider);
+        let goal_trace = self
+            .telemetry
+            .begin_goal(session_id, goal.id, context_started);
         let publisher = if let Some(progress) = progress {
             let view = match history.take() {
                 Some(view) => view,
@@ -1302,37 +1780,41 @@ impl<P: Provider + 'static> Engine<P> {
             return Err(EngineError::CancelledBeforeStart);
         }
         if goal.is_new {
-            self.append_goal_lifecycle(
-                goal.id,
-                workspace_identity,
-                provisional_workspace_lock,
-                session_id,
-                publisher.as_ref(),
-                Event::GoalStarted {
-                    goal_id: goal.id,
-                    objective: request.objective.clone(),
+            let sequence = self
+                .append_goal_lifecycle(
+                    goal.id,
                     workspace_identity,
-                    budget: goal.budget.clone(),
-                },
-            )
-            .await?;
+                    provisional_workspace_lock,
+                    session_id,
+                    publisher.as_ref(),
+                    Event::GoalStarted {
+                        goal_id: goal.id,
+                        objective: request.objective.clone(),
+                        workspace_identity,
+                        budget: goal.budget.clone(),
+                    },
+                )
+                .await?;
+            goal_trace.event_committed(sequence, crate::telemetry::TraceEventKind::GoalStarted);
         } else if goal.resume {
-            self.append_goal_lifecycle(
-                goal.id,
-                workspace_identity,
-                provisional_workspace_lock,
-                session_id,
-                publisher.as_ref(),
-                Event::GoalResumed { goal_id: goal.id },
-            )
-            .await?;
+            let sequence = self
+                .append_goal_lifecycle(
+                    goal.id,
+                    workspace_identity,
+                    provisional_workspace_lock,
+                    session_id,
+                    publisher.as_ref(),
+                    Event::GoalResumed { goal_id: goal.id },
+                )
+                .await?;
+            goal_trace.event_committed(sequence, crate::telemetry::TraceEventKind::GoalResumed);
         } else {
             self.retain_goal_workspace(goal.id, workspace_identity, provisional_workspace_lock);
         }
         if cancellation.is_cancelled() {
             return Err(EngineError::CancelledBeforeStart);
         }
-        append_observed(
+        let linked_sequence = append_observed(
             &self.store,
             publisher.as_ref(),
             None,
@@ -1344,6 +1826,10 @@ impl<P: Provider + 'static> Engine<P> {
             },
         )
         .await?;
+        goal_trace.event_committed(
+            linked_sequence,
+            crate::telemetry::TraceEventKind::GoalRunLinked,
+        );
         if cancellation.is_cancelled() {
             return Err(EngineError::CancelledBeforeStart);
         }
@@ -1368,7 +1854,7 @@ impl<P: Provider + 'static> Engine<P> {
         )
         .await?;
         let active_segment_ms = active_remaining_ms.min(GOAL_RUN_ACTIVE_SEGMENT_MS);
-        append_observed(
+        let active_reserved_sequence = append_observed(
             &self.store,
             publisher.as_ref(),
             None,
@@ -1380,11 +1866,16 @@ impl<P: Provider + 'static> Engine<P> {
             },
         )
         .await?;
+        goal_trace.event_committed(
+            active_reserved_sequence,
+            crate::telemetry::TraceEventKind::GoalActiveTimeReserved,
+        );
         let active_started = tokio::time::Instant::now();
-        let trace = self.telemetry.begin_run(
+        let trace = self.telemetry.begin_goal_run(
             session_id,
             run_id,
             trace_provider,
+            &goal_trace,
             Some((context_started, context_ended)),
         );
         trace.event_committed(
@@ -1486,7 +1977,7 @@ impl<P: Provider + 'static> Engine<P> {
         append_observed(
             &self.store,
             None,
-            None,
+            Some(&trace),
             session_id,
             Event::GoalActiveTimeSettled {
                 goal_id: goal.id,
@@ -1501,13 +1992,15 @@ impl<P: Provider + 'static> Engine<P> {
             .await?
             .ok_or(EngineError::InvalidHistory)?;
         let goal_view = view.goal(goal.id).ok_or(EngineError::InvalidHistory)?;
+        let mut goal_status = GoalStatus::Running;
         match run.status {
             crate::session::RunStatus::Finished if request.goal.finish_after_run => {
                 let report = goal_report(&view, &run, goal_view);
+                goal_status = GoalStatus::Completed;
                 append_observed(
                     &self.store,
                     None,
-                    None,
+                    Some(&trace),
                     session_id,
                     Event::GoalFinished {
                         goal_id: goal.id,
@@ -1525,11 +2018,12 @@ impl<P: Provider + 'static> Engine<P> {
                 } else {
                     GoalStatus::Cancelled
                 };
+                goal_status = status;
                 let report = goal_report(&view, &run, goal_view);
                 append_observed(
                     &self.store,
                     None,
-                    None,
+                    Some(&trace),
                     session_id,
                     Event::GoalFinished {
                         goal_id: goal.id,
@@ -1550,6 +2044,14 @@ impl<P: Provider + 'static> Engine<P> {
             _ => return Err(EngineError::InvalidHistory),
         };
         trace.finish(trace_outcome);
+        goal_trace.finish(
+            goal_status,
+            goal_view.provider_calls,
+            goal_view.known_tokens,
+            goal_view.token_usage_unknown,
+            goal_view.active_ms,
+            goal_view.uncertain_active_ms,
+        );
         Ok(RunOutcome {
             session_id,
             goal_id: goal.id,

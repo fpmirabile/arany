@@ -376,7 +376,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 includes: root_request.includes.clone(),
                 history: Vec::new(),
                 context_summary: None,
-                goal_budget: None,
+                goal_budget: root_request.goal_budget.clone(),
                 goal_plan_contract: None,
                 child_results: Vec::new(),
                 max_output_tokens: OUTPUT_TOKEN_CAP,

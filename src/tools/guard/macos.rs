@@ -193,7 +193,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
         return Err(ToolError::ProtectionUnavailable);
     }
-    let mut bytes = b"arany-macos-guard-v10:shared-fifo-capacity;durable-observed-attachment;boot-bound-locked-root-recovery;persisted-supervisor-before-task;image-inode-device-mount-ownership;no-buffered-go-before-ready;typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;metadata-only-directory-ancestors;workspace-call-write;guard-read-only;file-cpu-default-unblocked-immutable;supervised-resources;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;strict-bounded-no-follow-command-changeset-after-coalition-emptiness-before-detach;bounded-go-receipt".to_vec();
+    let mut bytes = b"arany-macos-guard-v12:shared-fifo-capacity;durable-observed-attachment;boot-bound-locked-root-recovery;persisted-supervisor-before-task;image-inode-device-mount-ownership;no-buffered-go-before-ready;typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;metadata-only-directory-ancestors;workspace-call-write;guard-read-only;file-cpu-default-unblocked-immutable;supervised-resources;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;strict-bounded-no-follow-command-changeset-after-coalition-emptiness-before-detach;bounded-go-receipt;versioned-exact-ro-runtime-and-cache-grants;mount-table-no-descendant-under-selected-physical-runtime-before-seatbelt-and-before-go".to_vec();
     bytes.extend_from_slice(profile(PROFILE, FILE_DENIED_SYSCALLS).as_bytes());
     bytes.extend_from_slice(profile(COMMAND_PROFILE, COMMAND_DENIED_SYSCALLS).as_bytes());
     bytes.extend_from_slice(b"native-commands-mcp:checked-private-cwd;fixed-capacity-nosuid-project-scratch;fresh-selected-snapshot;read-only-pinned-runtime;bounded-positive-root-owned-non-setid-unentitled-system-exec;stamp-bound-process-signature-verdicts;admission-catalogue-bound-to-enforcement;per-worker-pinned-system-directories-no-follow-metadata-revalidation;exact-literal-union-profile;dynamic-coalition-persona-entitlement-fork-denial;null-bootstrap-registered-ports;child-only-signals;supervised-cpu;physical-footprint-memory");
@@ -276,9 +276,12 @@ fn ancestors(profile: &mut String, path: &Path) -> Result<(), ToolError> {
     Ok(())
 }
 
-pub(super) fn install(task: &Task) -> Result<PathBuf, ToolError> {
+pub(super) fn install(
+    task: &Task,
+    stage: &mut super::BootstrapStage,
+) -> Result<PathBuf, ToolError> {
     if task.intent.call.is_process() {
-        return install_command(task);
+        return install_command(task, stage);
     }
     configure_file_cpu()?;
     let mut profile = profile(PROFILE, FILE_DENIED_SYSCALLS);
@@ -402,7 +405,7 @@ fn system_file(is_file: bool, uid: u32, nlink: u64, mode: u32) -> bool {
     is_file && uid == 0 && nlink == 1 && mode & 0o6022 == 0
 }
 
-fn install_command(task: &Task) -> Result<PathBuf, ToolError> {
+fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<PathBuf, ToolError> {
     use std::os::unix::fs::MetadataExt;
 
     if rustix::process::geteuid().as_raw() == 0
@@ -433,6 +436,22 @@ fn install_command(task: &Task) -> Result<PathBuf, ToolError> {
             quoted(&path)?
         ));
     }
+    for grant in &task.config.runtime_grants {
+        grant.verify_host()?;
+        ancestors(&mut profile, &grant.path)?;
+        if grant.kind.is_toolchain() {
+            profile.push_str(&format!(
+                "(allow file-read* file-map-executable (subpath {}))\n(allow process-exec (subpath {}))\n",
+                quoted(&grant.path)?,
+                quoted(&grant.path.join("bin"))?
+            ));
+        } else {
+            profile.push_str(&format!(
+                "(allow file-read* (subpath {}))\n",
+                quoted(&grant.path)?
+            ));
+        }
+    }
     let resources = root.join("runtime");
     let metadata = std::fs::symlink_metadata(&resources).map_err(|_| ToolError::Path)?;
     if !metadata.is_dir()
@@ -453,6 +472,9 @@ fn install_command(task: &Task) -> Result<PathBuf, ToolError> {
     if !required_system_programs.is_empty() {
         return Err(ToolError::ProtectionUnavailable);
     }
+    *stage = super::BootstrapStage::RuntimeMounts;
+    verify_runtime_mounts(&task.config.runtime_grants)?;
+    *stage = super::BootstrapStage::Capabilities;
     profile.push_str(&format!(
         "(deny file-write* (literal {}))\n",
         quoted(&task.guard_executable)?
@@ -472,6 +494,34 @@ fn install_command(task: &Task) -> Result<PathBuf, ToolError> {
         COMMAND_DENIED_SYSCALLS,
     )?;
     Ok(root)
+}
+
+pub(super) fn verify_runtime_mounts(
+    grants: &[crate::tools::toolchains::RuntimeGrant],
+) -> Result<(), ToolError> {
+    let roots = grants
+        .iter()
+        .map(|grant| {
+            grant.verify_host()?;
+            std::fs::canonicalize(&grant.path).map_err(|_| ToolError::ProtectionUnavailable)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mounts = ffi::mounts()?;
+    if mounts.iter().any(|(_, target)| {
+        !target.is_absolute()
+            || target.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::CurDir | std::path::Component::ParentDir
+                )
+            })
+            || roots
+                .iter()
+                .any(|root| target != root && target.starts_with(root))
+    }) {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok(())
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -739,10 +789,15 @@ pub(super) async fn execute_inner(
 }
 
 impl Task {
-    fn new(runtime: &ToolRuntime, intent: &EffectIntent) -> Self {
+    fn new(
+        runtime: &ToolRuntime,
+        intent: &EffectIntent,
+        cache: Option<super::BuildCacheTransfer>,
+    ) -> Self {
         Self {
             config: runtime.config.clone(),
             intent: intent.clone(),
+            cache,
             workspace: runtime.workspace.clone(),
             guard_executable: runtime.guard_executable.clone(),
             system_programs: if intent.call.is_process() {
@@ -753,18 +808,20 @@ impl Task {
         }
     }
 
-    fn into_runtime(self) -> (ToolRuntime, EffectIntent) {
+    fn into_runtime(self) -> (ToolRuntime, EffectIntent, Option<super::BuildCacheTransfer>) {
+        let cache = self.cache;
         let runtime = ToolRuntime {
             queue_progress: None,
+            cache_state: None,
             config: self.config,
             workspace: self.workspace,
             workspace_identity: (self.intent.workspace_device, self.intent.workspace_inode),
             guard_executable: self.guard_executable,
             enforcement_digest: self.intent.enforcement_digest,
-            system_programs: self.system_programs.map(Arc::new),
             process_enforcement_digest: self.intent.enforcement_digest,
+            system_programs: self.system_programs.map(Arc::new),
         };
-        (runtime, self.intent)
+        (runtime, self.intent, cache)
     }
 }
 
@@ -778,7 +835,7 @@ async fn execute_worker(
     root: &Path,
 ) -> Result<ToolObservation, ToolError> {
     crate::tools::fs::validate_workspace(runtime)?;
-    let task = super::encode_task(&Task::new(runtime, intent))?;
+    let task = super::encode_task(&Task::new(runtime, intent, None))?;
     let mut child = Command::new(&runtime.guard_executable)
         .arg("--internal-tool-guard")
         .env_clear()
@@ -1066,13 +1123,15 @@ mod tests {
                 use_count: 1,
             },
             config,
+            cache: None,
             workspace,
             guard_executable: std::env::current_exe().unwrap(),
             system_programs: None,
         };
         assert!(Path::new("/usr/bin/true").is_file());
         configure_resources().unwrap();
-        install(&task).unwrap();
+        let mut stage = super::BootstrapStage::Workspace;
+        install(&task, &mut stage).unwrap();
         assert_eq!(
             ffi::process_arguments_errno(std::process::id() as i32),
             Some(libc::EPERM)

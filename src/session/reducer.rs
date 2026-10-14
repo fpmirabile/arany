@@ -132,6 +132,7 @@ mod goal_recovery_tests {
                     String::new()
                 },
                 guard: None,
+                cache_update: crate::tools::CacheUpdate::NotApplicable,
             }),
             review_call_index: None,
         };
@@ -390,6 +391,7 @@ impl RunView {
         let records: Vec<_> = self.tools.iter().map(|tool| serde_json::json!({
             "intent":tool.intent,
             "disposition":tool.observation.as_ref().map(|observation| observation.disposition),
+            "cache_update":tool.observation.as_ref().map(|observation| observation.cache_update),
             "output":tool.observation.as_ref().map(|observation| &observation.output),
             "execution":if tool.observation.is_none() { "uncertain; never replay" } else { "observed; never replay" },
         })).collect();

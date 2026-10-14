@@ -374,6 +374,7 @@ mod goal_success_tests {
             intent,
             disposition,
             output,
+            cache_update: crate::tools::CacheUpdate::NotApplicable,
         }
     }
 
@@ -479,6 +480,48 @@ mod goal_success_tests {
             call: Box::new(wrong_resource),
         };
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn success_criterion_rejects_inspection_and_internal_tools() {
+        let mut contract = GoalPlanContract {
+            mission: "Verify a declared result".into(),
+            paths: vec!["src".into()],
+            commands: vec!["shell".into()],
+            skills: Vec::new(),
+            mcp_tools: vec![GoalMcpTool {
+                server: "local".into(),
+                tool: "inspect".into(),
+            }],
+            success_criterion: GoalSuccessCriterion::ToolCallSucceeded {
+                call: Box::new(ToolCall::Command {
+                    program: "shell".into(),
+                    args: Vec::new(),
+                    cwd: String::new(),
+                }),
+            },
+            budget: GoalBudget::default(),
+        };
+        for call in [
+            ToolCall::List { path: "src".into() },
+            ToolCall::Read {
+                path: "src/main.rs".into(),
+                offset: 0,
+                limit: 1024,
+            },
+            ToolCall::Search {
+                path: "src".into(),
+                query: "main".into(),
+            },
+            ToolCall::McpList {
+                server: "local".into(),
+            },
+        ] {
+            contract.success_criterion = GoalSuccessCriterion::ToolCallSucceeded {
+                call: Box::new(call),
+            };
+            assert!(contract.validate().is_err());
+        }
     }
 
     #[test]
@@ -1429,12 +1472,23 @@ mod provider_call_tests {
             record: decoded,
         };
         let payload = event.payload().expect("current payload");
-        assert_eq!(event.version(), 2);
+        assert_eq!(event.version(), 3);
         assert_eq!(
-            Event::decode("ProviderCallRecorded", 2, &payload, run_id, agent_run_id).unwrap(),
+            Event::decode("ProviderCallRecorded", 3, &payload, run_id, agent_run_id).unwrap(),
             event
         );
-        assert!(Event::decode("ProviderCallRecorded", 1, &payload, run_id, agent_run_id).is_err());
+        for version in [0, 1, 2, 4] {
+            assert!(
+                Event::decode(
+                    "ProviderCallRecorded",
+                    version,
+                    &payload,
+                    run_id,
+                    agent_run_id
+                )
+                .is_err()
+            );
+        }
         for (reason, expected) in [
             (
                 ProviderFailureReason::AccountAccess,
@@ -1502,14 +1556,14 @@ mod provider_call_tests {
                     agent_run_id: agent,
                     record,
                 };
-                let payload = event.payload().expect("v2 payload");
-                assert_eq!(event.version(), 2);
+                let payload = event.payload().expect("v3 payload");
+                assert_eq!(event.version(), 3);
                 assert_eq!(
-                    Event::decode("ProviderCallRecorded", 2, &payload, run_id, agent_run_id)
-                        .expect("v2 replay"),
+                    Event::decode("ProviderCallRecorded", 3, &payload, run_id, agent_run_id)
+                        .expect("v3 replay"),
                     event
                 );
-                for version in [0, 1, 3] {
+                for version in [0, 1, 2, 4] {
                     assert!(
                         Event::decode(
                             "ProviderCallRecorded",
@@ -1524,17 +1578,17 @@ mod provider_call_tests {
                 }
                 for scope in [(None, agent_run_id), (run_id, None)] {
                     assert!(
-                        Event::decode("ProviderCallRecorded", 2, &payload, scope.0, scope.1)
+                        Event::decode("ProviderCallRecorded", 3, &payload, scope.0, scope.1)
                             .is_err()
                     );
                 }
                 let mut invalid: serde_json::Value =
-                    serde_json::from_str(&payload).expect("v2 JSON");
+                    serde_json::from_str(&payload).expect("v3 JSON");
                 invalid["failure_reason"] = "unknown_reason".into();
                 assert!(
                     Event::decode(
                         "ProviderCallRecorded",
-                        2,
+                        3,
                         &invalid.to_string(),
                         run_id,
                         agent_run_id
@@ -1545,7 +1599,7 @@ mod provider_call_tests {
                 assert!(
                     Event::decode(
                         "ProviderCallRecorded",
-                        2,
+                        3,
                         &invalid.to_string(),
                         run_id,
                         agent_run_id
@@ -1556,7 +1610,7 @@ mod provider_call_tests {
                 assert!(
                     Event::decode(
                         "ProviderCallRecorded",
-                        2,
+                        3,
                         &invalid.to_string(),
                         run_id,
                         agent_run_id
@@ -1876,7 +1930,7 @@ impl Event {
     }
 
     pub(crate) fn version(&self) -> i64 {
-        2
+        3
     }
 
     pub(crate) fn kind(&self) -> &'static str {
@@ -2098,7 +2152,7 @@ impl Event {
         run_id: Option<RunId>,
         agent_run_id: Option<AgentRunId>,
     ) -> Result<Self, ReplayError> {
-        if version != 2 {
+        if version != 3 {
             return Err(ReplayError::UnknownEvent);
         }
         let event = match kind {
@@ -2436,6 +2490,8 @@ impl Event {
                 observation,
             } => {
                 if observation.valid()
+                    && !(observation.cache_update == crate::tools::CacheUpdate::NotAttempted
+                        && observation.disposition == crate::tools::ToolDisposition::Succeeded)
                     && observation.intent.run_id == *run_id
                     && observation.intent.agent_run_id == *agent_run_id
                 {

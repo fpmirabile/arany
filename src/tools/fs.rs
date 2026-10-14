@@ -182,25 +182,7 @@ pub(super) fn command_changeset(
 }
 
 pub(crate) fn open_directory(path: &Path) -> Result<Dir, ToolError> {
-    if !path.is_absolute() {
-        return Err(ToolError::Path);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        macos_directory(path, rustix::fs::OFlags::RDONLY)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let mut dir = Dir::open_ambient_dir("/", cap_std::ambient_authority())
-            .map_err(|_| ToolError::Path)?;
-        for component in path.components().skip(1) {
-            let std::path::Component::Normal(name) = component else {
-                return Err(ToolError::Path);
-            };
-            dir = dir.open_dir_nofollow(name).map_err(|_| ToolError::Path)?;
-        }
-        Ok(dir)
-    }
+    crate::private_fs::open_workspace_directory(path).map_err(|_| ToolError::Path)
 }
 
 #[cfg(target_os = "macos")]

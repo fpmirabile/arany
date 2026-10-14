@@ -65,6 +65,117 @@ pub fn enter_account_isolated_test() -> bool {
 }
 
 #[cfg(target_os = "linux")]
+pub fn enter_native_account_isolated_test() -> bool {
+    const CHILD: &str = "ARANY_ACCOUNT_ISOLATED_TEST";
+
+    if std::env::var_os(CHILD).is_some() {
+        return true;
+    }
+    use crate::process::BoundedOutput;
+    use std::{os::unix::fs::DirBuilderExt, path::Path, time::Duration};
+
+    let _gate = crate::process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let test = std::thread::current()
+        .name()
+        .expect("named test thread")
+        .to_owned();
+    let executable = std::env::current_exe().expect("test executable");
+    let temp = tempfile::tempdir().expect("native account test root");
+    for name in ["account-home", "home", "state"] {
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(temp.path().join(name))
+            .expect("native fixture directory");
+    }
+    let guard = Path::new(env!("CARGO_BIN_EXE_arany"));
+    let mut command = native_account_isolated_test_command(temp.path(), &executable, guard);
+    command
+        .args(["--exact", &test, "--include-ignored", "--nocapture"])
+        .env_clear()
+        .current_dir(temp.path());
+    let temp_path = temp.path().to_path_buf();
+    let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let output = command
+            .bounded_output_for(Duration::from_secs(90), 32 * 1024 * 1024)
+            .expect("native account test process");
+        assert!(
+            output.status.success(),
+            "native account test failed: stdout={:?}; stderr={:?}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        crate::process::assert_single_test_completed(&output.stdout, &test);
+        assert!(output.stderr.is_empty(), "native test stderr is empty");
+    }));
+    if let Err(error) = checked {
+        let _ = temp.keep();
+        std::panic::resume_unwind(error);
+    }
+    drop(temp);
+    assert!(
+        !temp_path.exists(),
+        "successful native fixture is cleaned up"
+    );
+    false
+}
+
+#[cfg(target_os = "linux")]
+pub fn native_account_isolated_test_command(
+    root: &std::path::Path,
+    test_executable: &std::path::Path,
+    guard_executable: &std::path::Path,
+) -> Command {
+    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+    assert!(
+        test_executable.is_absolute() && test_executable.is_file(),
+        "isolated test executable must be an absolute file"
+    );
+    assert!(
+        guard_executable.is_absolute() && guard_executable.is_file(),
+        "isolated Guard executable must be an absolute file"
+    );
+    let user = nix::unistd::User::from_uid(nix::unistd::geteuid())
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        user.uid.as_raw(),
+        0,
+        "native fixture requires an ordinary user"
+    );
+    assert!(root.is_absolute() && root.join("account-home").is_dir());
+    let mut passwd = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(root.join("passwd"))
+        .expect("exclusive native fixture passwd file");
+    writeln!(
+        passwd,
+        "arany-fixture:x:{}:{}:Arany native fixture:{}:/usr/bin/sh",
+        user.uid.as_raw(),
+        user.gid.as_raw(),
+        root.join("account-home").display()
+    )
+    .expect("private native fixture passwd entry");
+    passwd.sync_all().expect("native fixture passwd sync");
+    let mut command = Command::new("/usr/bin/sudo");
+    command
+        .args([
+            "--non-interactive", "--", "/usr/bin/unshare", "--mount", "--net",
+            "--propagation", "private", "--", "/usr/bin/sh", "-eu", "-c",
+            "root=$1; uid=$2; gid=$3; shift 3; /usr/bin/mount --bind \"$root/passwd\" /etc/passwd; /usr/bin/mount --options remount,bind,ro /etc/passwd; exec /usr/bin/timeout --kill-after=2s 80s /usr/bin/setpriv --reuid \"$uid\" --regid \"$gid\" --clear-groups --no-new-privs /usr/bin/env -i HOME=\"$root/home\" XDG_STATE_HOME=\"$root/environment-state\" XDG_DATA_HOME=\"$root/environment-data\" PATH=/usr/bin:/bin ARANY_TEST_CACHE_CANARY_ROOT=\"$root\" ARANY_ACCOUNT_ISOLATED_TEST=1 \"$@\"",
+            "arany-native-account-fixture",
+        ])
+        .arg(root)
+        .arg(user.uid.as_raw().to_string())
+        .arg(user.gid.as_raw().to_string())
+        .arg(test_executable);
+    command
+}
+
+#[cfg(target_os = "linux")]
 fn account_command(
     root: &std::path::Path,
     isolate_network: bool,
@@ -138,8 +249,9 @@ pub fn remember_workspace_trust(
     let identity = std::fs::metadata(workspace).expect("fixture directory identity");
     let root = arany::StateRoot::admit(account).expect("private fixture account root");
     let bytes = serde_json::to_vec(&serde_json::json!({
-        "version": 1, "workspaces": [{ "path": admitted_path,
-            "device": identity.dev(), "inode": identity.ino(), "mode": "auto_edits" }]
+        "version": 2, "workspaces": [{ "path": admitted_path,
+            "device": identity.dev(), "inode": identity.ino(), "mode": "auto_edits",
+            "runtime_grants": [] }]
     }))
     .unwrap();
     let mut file = std::fs::OpenOptions::new()

@@ -249,7 +249,7 @@ The initial vocabulary is intentionally small:
 - `AgentSpawned`, `ProviderCallRecorded`, `AgentFinished`; and
 - `ToolStarted`, `ToolFinished`.
 
-All current Events use payload version 2. Tool Events correlate the exact Run, primary actor, one-use intent, pinned policy/enforcement digest, Workspace identity and finite effective limits. A successful observation requires a matching Guard receipt. Unknown, duplicated, unmatched, over-budget or mismatched transitions reject; uncertainty/cancellation cannot be followed by successful Agent completion. Public typed replay validates payloads as well as SQL loading. A started attempt without a terminal observation remains a past interrupted/uncertain fact, never an approval or retry instruction.
+All current Events use payload version 3. Tool Events correlate the exact Run, primary actor, one-use intent, pinned policy/enforcement digest, Workspace identity and finite effective limits. A successful observation requires a matching Guard receipt. Unknown, duplicated, unmatched, over-budget or mismatched transitions reject; uncertainty/cancellation cannot be followed by successful Agent completion. Public typed replay validates payloads as well as SQL loading. A started attempt without a terminal observation remains a past interrupted/uncertain fact, never an approval or retry instruction.
 
 `SessionStarted` pins the admitted Workspace device and inode atomically with the title, including for an empty Session. Replay rejects a later Run or fork whose identity disagrees with the pinned Session. The SQLite owner admits only schema version 4 and current Event payloads; unsupported formats and missing fields reject without conversion or deletion.
 

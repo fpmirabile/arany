@@ -89,6 +89,24 @@ fn trace_snapshot(root: &Path) -> serde_json::Value {
                         | "overflow"
                         | "mcp-version"
                         | "receipt-loss"
+                        | "runtime-mounts"
+                        | "nonzero"
+                        | "ai-approve"
+                        | "deny"
+                        | "drop"
+                        | "cancel"
+                        | "conflict"
+                        | "scope"
+                        | "partial"
+                        | "symlink"
+                        | "hardlink"
+                        | "fifo"
+                        | "setid"
+                        | "excluded"
+                        | "bytes-overflow"
+                        | "files-overflow"
+                        | "directory-conversion"
+                        | "budget"
                 ) {
                     return None;
                 }
@@ -109,7 +127,7 @@ fn trace_snapshot(root: &Path) -> serde_json::Value {
     json!({"stages":snapshot})
 }
 
-fn trace_case(root: &Path, case: &str) {
+pub(super) fn trace_case(root: &Path, case: &str) {
     let trace = root.join("account/guard-trace");
     for stage in TRACE_STAGES {
         let path = trace.join(format!("{stage}.json"));
@@ -123,6 +141,21 @@ fn trace_case(root: &Path, case: &str) {
         &trace.join("case.json"),
         &serde_json::to_vec(&json!({"case":case})).unwrap(),
     );
+}
+
+pub(super) fn reset_tool_trace_stages(root: &Path) {
+    let trace = root.join("account/guard-trace");
+    for stage in TRACE_STAGES {
+        if matches!(*stage, "tool_admission" | "catalogue") {
+            continue;
+        }
+        let path = trace.join(format!("{stage}.json"));
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("fixture trace reset: {error}"),
+        }
+    }
 }
 
 impl Provider for Journey {
@@ -163,6 +196,11 @@ impl Provider for Journey {
         {
             std::os::unix::fs::symlink(target, link).unwrap();
         }
+        if self.calls.get(step).is_some()
+            && let Some(root) = std::env::var_os("ARANY_TEST_FILE_JOURNEY_ROOT")
+        {
+            reset_tool_trace_stages(Path::new(&root));
+        }
         let outcome = self.calls.get(step).cloned().map_or_else(
             || {
                 ProviderOutcome::Finish(Finish {
@@ -173,85 +211,97 @@ impl Provider for Journey {
             |call| {
                 let plan_contract = (step == 0 && !matches!(call, ToolCall::McpList { .. }))
                     .then(|| {
-                        let mut paths: Vec<_> = catalog["workspace_paths"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|path| path.as_str().map(str::to_owned))
-                            .collect();
-                        paths.sort();
-                        paths.dedup();
-                        let mut commands: Vec<_> = self
+                        let success_call = self
                             .calls
                             .iter()
-                            .filter_map(|call| match call {
-                                ToolCall::Command { program, .. } => Some(program.clone()),
-                                _ => None,
+                            .find(|candidate| {
+                                matches!(
+                                    candidate,
+                                    ToolCall::Command { .. }
+                                        | ToolCall::Write { .. }
+                                        | ToolCall::Edit { .. }
+                                        | ToolCall::Mkdir { .. }
+                                        | ToolCall::Skill { .. }
+                                        | ToolCall::McpCall { .. }
+                                )
                             })
-                            .collect();
-                        commands.sort();
-                        commands.dedup();
-                        let mut mcp_tools: Vec<_> = self
-                            .calls
-                            .iter()
-                            .filter_map(|call| match call {
-                                ToolCall::McpCall { server, tool, .. } => {
-                                    Some(arany::GoalMcpTool {
-                                        server: server.clone(),
-                                        tool: tool.clone(),
-                                    })
-                                }
-                                _ => None,
-                            })
-                            .collect();
-                        mcp_tools.sort_by(|left, right| {
-                            (&left.server, &left.tool).cmp(&(&right.server, &right.tool))
-                        });
-                        mcp_tools.dedup();
-                        let mut skills: Vec<_> = self
-                            .calls
-                            .iter()
-                            .filter_map(|call| match call {
-                                ToolCall::Skill { name, resource } => {
-                                    Some(arany::GoalSkillBinding {
-                                        name: name.clone(),
-                                        resource: if resource.as_deref() == Some("SKILL.md") {
-                                            None
-                                        } else {
-                                            resource.clone()
-                                        },
-                                    })
-                                }
-                                _ => None,
-                            })
-                            .collect();
-                        skills.sort_by(|left, right| {
-                            (&left.name, left.resource.as_deref().unwrap_or("SKILL.md")).cmp(&(
-                                &right.name,
-                                right.resource.as_deref().unwrap_or("SKILL.md"),
-                            ))
-                        });
-                        skills.dedup();
-                        let success_criterion = if matches!(call, ToolCall::Read { .. }) {
-                            arany::GoalSuccessCriterion::WorkspaceFileContent {
-                                path: "src/main.txt".into(),
-                                content: "after\n".into(),
+                            .cloned();
+                        success_call.map(|success_call| {
+                            let mut paths: Vec<_> = catalog["workspace_paths"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|path| path.as_str().map(str::to_owned))
+                                .collect();
+                            paths.sort();
+                            paths.dedup();
+                            let mut commands: Vec<_> = self
+                                .calls
+                                .iter()
+                                .filter_map(|call| match call {
+                                    ToolCall::Command { program, .. } => Some(program.clone()),
+                                    _ => None,
+                                })
+                                .collect();
+                            commands.sort();
+                            commands.dedup();
+                            let mut mcp_tools: Vec<_> = self
+                                .calls
+                                .iter()
+                                .filter_map(|call| match call {
+                                    ToolCall::McpCall { server, tool, .. } => {
+                                        Some(arany::GoalMcpTool {
+                                            server: server.clone(),
+                                            tool: tool.clone(),
+                                        })
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            mcp_tools.sort_by(|left, right| {
+                                (&left.server, &left.tool).cmp(&(&right.server, &right.tool))
+                            });
+                            mcp_tools.dedup();
+                            let mut skills: Vec<_> = self
+                                .calls
+                                .iter()
+                                .filter_map(|call| match call {
+                                    ToolCall::Skill { name, resource } => {
+                                        Some(arany::GoalSkillBinding {
+                                            name: name.clone(),
+                                            resource: if resource.as_deref() == Some("SKILL.md") {
+                                                None
+                                            } else {
+                                                resource.clone()
+                                            },
+                                        })
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            skills.sort_by(|left, right| {
+                                (&left.name, left.resource.as_deref().unwrap_or("SKILL.md")).cmp(&(
+                                    &right.name,
+                                    right.resource.as_deref().unwrap_or("SKILL.md"),
+                                ))
+                            });
+                            skills.dedup();
+                            let success_criterion =
+                                arany::GoalSuccessCriterion::ToolCallSucceeded {
+                                    call: Box::new(success_call),
+                                };
+                            arany::GoalPlanContract {
+                                mission: "Complete the bounded native Tool journey".into(),
+                                paths,
+                                commands,
+                                skills,
+                                mcp_tools,
+                                success_criterion,
+                                budget: arany::GoalBudget::default(),
                             }
-                        } else {
-                            arany::GoalSuccessCriterion::ToolCallSucceeded {
-                                call: Box::new(call.clone()),
-                            }
-                        };
-                        arany::GoalPlanContract {
-                            mission: "Complete the bounded native Tool journey".into(),
-                            paths,
-                            commands,
-                            skills,
-                            mcp_tools,
-                            success_criterion,
-                            budget: arany::GoalBudget::default(),
-                        }
+                        })
                     })
+                    .flatten()
                     .map(Box::new);
                 ProviderOutcome::Tool {
                     call,
@@ -290,6 +340,15 @@ fn guarded_native_files_and_skills_survive_closed_replay() {
 )]
 fn guarded_command_changesets_survive_closed_replay() {
     native_journey("tools::native_command_changeset_helper");
+}
+
+#[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native macOS selected-runtime Guard command and mounted-image refusal"
+)]
+fn guarded_runtime_profile_checks_mount_topology_before_dispatch() {
+    native_journey("tools::native_runtime_mount_journey_helper");
 }
 
 fn native_journey(helper: &str) {
@@ -684,6 +743,7 @@ static int write_file(const char *path, const void *bytes, size_t size) {
     FILE *file = fopen(path, "wb");
     return !file || fwrite(bytes, 1, size, file) != size || fclose(file);
 }
+
 int main(int argc, char **argv) {
     const unsigned char bytes[] = {0, 255};
     if (argc != 2 || write_file("src/a-created", bytes, 2) || chmod("src/a-created", 0700)
@@ -720,6 +780,684 @@ int main(int argc, char **argv) {
         "skills":[],"mcp":[]
     });
     crate::tool_replay::native_command_changeset_corpus(root, &config, "shell").await;
+}
+struct RuntimeJourney {
+    requests: Arc<Mutex<Vec<ProviderRequest>>>,
+    calls: Vec<ToolCall>,
+}
+
+const RUNTIME_CACHE_CANARY: &str = "ARANY_RUNTIME_CACHE_PERSISTENCE_CANARY";
+
+impl Provider for RuntimeJourney {
+    fn profile_name(&self) -> &str {
+        "scripted"
+    }
+
+    fn model_name(&self) -> &str {
+        "runtime-profile-model"
+    }
+
+    fn max_concurrent_calls(&self) -> u8 {
+        1
+    }
+
+    async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        let step = {
+            let mut requests = self.requests.lock().unwrap();
+            let step = requests.len();
+            requests.push(request);
+            step
+        };
+        if step > self.calls.len() {
+            return Err(ProviderError::InvalidOutcome);
+        }
+        let outcome = if step < self.calls.len() {
+            let call = self.calls[step].clone();
+            if let Some(root) = std::env::var_os("ARANY_TEST_FILE_JOURNEY_ROOT") {
+                reset_tool_trace_stages(Path::new(&root));
+            }
+            let plan_contract = if step == 0 {
+                let program = match &call {
+                    ToolCall::Command { program, .. } => program.clone(),
+                    _ => return Err(ProviderError::InvalidOutcome),
+                };
+                let success_call = self
+                    .calls
+                    .last()
+                    .cloned()
+                    .ok_or(ProviderError::InvalidOutcome)?;
+                Some(Box::new(arany::GoalPlanContract {
+                    mission: "Run the selected runtime commands".into(),
+                    paths: Vec::new(),
+                    commands: vec![program],
+                    skills: Vec::new(),
+                    mcp_tools: Vec::new(),
+                    success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
+                        call: Box::new(success_call),
+                    },
+                    budget: arany::GoalBudget::default(),
+                }))
+            } else {
+                None
+            };
+            ProviderOutcome::Tool {
+                call,
+                plan_contract,
+            }
+        } else {
+            ProviderOutcome::Finish(Finish {
+                summary: "Runtime profile checked".into(),
+                result: "The selected runtime command completed under Guard, and its private build cache persisted between commands.".into(),
+            })
+        };
+        Ok(ProviderResponse {
+            outcome,
+            response_id: None,
+            input_tokens: None,
+            output_tokens: None,
+            wire_provenance: None,
+        })
+    }
+
+    async fn compact(&self, _: CompactionRequest) -> Result<CompactionResponse, ProviderError> {
+        Err(ProviderError::InvalidOutcome)
+    }
+}
+
+struct MountedRuntimeImage(std::path::PathBuf);
+
+impl Drop for MountedRuntimeImage {
+    fn drop(&mut self) {
+        use crate::process::BoundedOutput;
+
+        let _ = std::process::Command::new("/usr/bin/hdiutil")
+            .args(["detach", "-force", "-quiet"])
+            .arg(&self.0)
+            .env_clear()
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .bounded_output_for(Duration::from_secs(20), 4096);
+    }
+}
+
+#[tokio::test]
+#[ignore = "isolated helper owned by native macOS runtime profile journey"]
+async fn native_runtime_mount_journey_helper() {
+    use crate::process::BoundedOutput;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    let root = std::env::var_os("ARANY_TEST_FILE_JOURNEY_ROOT").expect("private fixture root");
+    let root = Path::new(&root);
+    trace_case(root, "runtime-mounts");
+    assert_eq!(StateRoot::account_path().unwrap(), root.join("account"));
+    let workspace = root.join("workspace");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&workspace)
+        .unwrap();
+    let runtime = root.join("home/.nvm/versions/node/v22.3.0");
+    std::fs::create_dir_all(runtime.join("bin")).unwrap();
+    let node = runtime.join("bin/node");
+    private_file(&node, b"#!/bin/sh\nprintf 'runtime-profile-selected\\n'\n");
+    std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mountpoint = runtime.join("mounted-image");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let image = root.join("runtime.sparseimage");
+    let created = std::process::Command::new("/usr/bin/hdiutil")
+        .args([
+            "create",
+            "-quiet",
+            "-size",
+            "8m",
+            "-fs",
+            "HFS+",
+            "-volname",
+            "AranyRuntimeFixture",
+            "-type",
+            "SPARSE",
+            "-ov",
+        ])
+        .arg(&image)
+        .env_clear()
+        .env("HOME", root.join("home"))
+        .env("TMPDIR", root)
+        .current_dir(root)
+        .bounded_output_for(Duration::from_secs(30), 4096)
+        .unwrap();
+    assert!(created.status.success(), "hdiutil create: {created:?}");
+    let attached = std::process::Command::new("/usr/bin/hdiutil")
+        .args(["attach", "-quiet", "-nobrowse", "-mountpoint"])
+        .arg(&mountpoint)
+        .arg(&image)
+        .env_clear()
+        .env("HOME", root.join("home"))
+        .env("TMPDIR", root)
+        .current_dir(root)
+        .bounded_output_for(Duration::from_secs(30), 4096)
+        .unwrap();
+    assert!(attached.status.success(), "hdiutil attach: {attached:?}");
+    let mounted = MountedRuntimeImage(mountpoint.clone());
+
+    let permissions = arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
+    let options = permissions.runtime_profile_choices();
+    let node = options
+        .iter()
+        .find(|option| option.label.starts_with("Node"))
+        .expect("metadata-only Node candidate");
+    let node_token = node.token.clone();
+    let mut permissions = permissions;
+    permissions
+        .remember_profiles(
+            true,
+            arany::ApprovalMode::AutoEdits,
+            std::slice::from_ref(&node_token),
+        )
+        .unwrap();
+    let permissions = arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
+
+    let runtime_call = ToolCall::Command {
+        program: "sh".into(),
+        args: vec![
+            "-c".into(),
+            "set -eu; test \"$(node)\" = runtime-profile-selected; printf selected-runtime-command"
+                .into(),
+        ],
+        cwd: String::new(),
+    };
+    let refused_requests = Arc::new(Mutex::new(Vec::new()));
+    let refused_state = root.join("state-mounted");
+    let mut engine = Engine::open(
+        StateRoot::admit(&refused_state).unwrap(),
+        RuntimeJourney {
+            requests: refused_requests.clone(),
+            calls: vec![runtime_call.clone()],
+        },
+    )
+    .unwrap();
+    let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+    engine
+        .enable_trusted_workspace(
+            permissions.clone(),
+            &workspace,
+            env!("CARGO_BIN_EXE_arany").into(),
+            approvals,
+        )
+        .unwrap();
+    let run = engine.run(RunRequest {
+        session_id: None,
+        title: Some("Mounted runtime refusal".into()),
+        objective: "Check runtime mount topology".into(),
+        images: Vec::new(),
+        workspace: workspace.clone(),
+        include_paths: Vec::new(),
+        policy: CollaborationPolicy::Single,
+        goal: arany::GoalRequest::new(
+            arany::GoalBudget::default(),
+            arany::GoalPhase::Implementation,
+        ),
+    });
+    let approve = async {
+        let approval = inbox
+            .next()
+            .await
+            .expect("one approval for the mounted-runtime command");
+        assert_eq!(approval.intent.call, runtime_call);
+        approval.decide(true);
+    };
+    let (refused, ()) = tokio::time::timeout(Duration::from_secs(90), async {
+        tokio::join!(run, approve)
+    })
+    .await
+    .expect("bounded mounted-runtime refusal journey");
+    let refused = refused.unwrap();
+    engine.close().await.unwrap();
+    assert_eq!(
+        refused.run.status,
+        RunStatus::Failed,
+        "runtime mount refusal Run failed: {}",
+        crate::safe_run_diagnostics(&refused.run)
+    );
+    assert_eq!(refused.run.tools.len(), 1);
+    assert_eq!(refused_requests.lock().unwrap().len(), 1);
+    let refused_observation = refused.run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(refused_observation.disposition, ToolDisposition::Failed);
+    assert!(refused_observation.guard.is_none());
+    assert!(
+        refused_observation
+            .output
+            .contains("runtime mount topology")
+    );
+    assert_eq!(
+        refused_requests.lock().unwrap()[0]
+            .tools
+            .as_ref()
+            .unwrap()
+            .observations
+            .len(),
+        0
+    );
+    let trace = trace_snapshot(root);
+    assert_eq!(trace["stages"]["worker_go"], "unknown");
+    let store = Store::open_read_only(StateRoot::open_existing(&refused_state).unwrap()).unwrap();
+    let events = store.load_session(refused.session_id).await.unwrap();
+    store.close().await.unwrap();
+    let replay = SessionView::replay(refused.session_id, &events)
+        .unwrap()
+        .unwrap();
+    assert_eq!(replay.runs.len(), 1);
+    assert_eq!(replay.runs[0], refused.run, "closed runtime refusal replay");
+    assert_eq!(replay.runs[0].status, RunStatus::Failed);
+    let detached = std::process::Command::new("/usr/bin/hdiutil")
+        .args(["detach", "-force", "-quiet"])
+        .arg(&mountpoint)
+        .env_clear()
+        .current_dir(root)
+        .bounded_output_for(Duration::from_secs(20), 4096)
+        .unwrap();
+    assert!(detached.status.success(), "hdiutil detach: {detached:?}");
+    drop(mounted);
+
+    let host_cache = root.join("home/.cargo/registry/cache");
+    std::fs::create_dir_all(&host_cache).unwrap();
+    private_file(&host_cache.join("canary.crate"), b"MACOS_HOST_CACHE_CANARY");
+    let state_success = root.join("state-success");
+    let cache_seed = ToolCall::Command {
+        program: "sh".into(),
+        args: vec![
+            "-c".into(),
+            "set -eu; /usr/bin/mkdir -p \"$CARGO_HOME/registry/cache\"; cache=\"$CARGO_HOME/registry/cache/private-bulk.crate\"; : > \"$cache\"; i=0; while test \"$i\" -lt 40; do printf '%1048576s' '' >> \"$cache\"; i=$((i + 1)); done".into(),
+        ],
+        cwd: String::new(),
+    };
+    let seed_requests = Arc::new(Mutex::new(Vec::new()));
+    let mut seed_engine = Engine::open(
+        StateRoot::admit(&state_success).unwrap(),
+        RuntimeJourney {
+            requests: seed_requests,
+            calls: vec![cache_seed.clone()],
+        },
+    )
+    .unwrap();
+    let (seed_approvals, mut seed_inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+    seed_engine
+        .enable_trusted_workspace(
+            permissions.clone(),
+            &workspace,
+            env!("CARGO_BIN_EXE_arany").into(),
+            seed_approvals,
+        )
+        .unwrap();
+    let seed_run = seed_engine.run(RunRequest {
+        session_id: None,
+        title: Some("Private cache seed".into()),
+        objective: "Seed a bounded private cache archive".into(),
+        images: Vec::new(),
+        workspace: workspace.clone(),
+        include_paths: Vec::new(),
+        policy: CollaborationPolicy::Single,
+        goal: arany::GoalRequest::default(),
+    });
+    let approve_seed = async {
+        let approval = seed_inbox
+            .next()
+            .await
+            .expect("private cache seed approval");
+        assert!(
+            approval.intent.call == cache_seed,
+            "private cache seed approval intent differs"
+        );
+        approval.decide(true);
+    };
+    let (seed_outcome, ()) = tokio::time::timeout(Duration::from_secs(90), async {
+        tokio::join!(seed_run, approve_seed)
+    })
+    .await
+    .expect("bounded private cache seed");
+    let seed_outcome = seed_outcome.unwrap();
+    seed_engine.close().await.unwrap();
+    assert_eq!(seed_outcome.run.status, RunStatus::Finished);
+    let seed_result: serde_json::Value = serde_json::from_str(
+        &seed_outcome.run.tools[0]
+            .observation
+            .as_ref()
+            .unwrap()
+            .output,
+    )
+    .unwrap();
+    let seed_observation = seed_outcome.run.tools[0].observation.as_ref().unwrap();
+    let seed_stderr = seed_result["stderr"].as_str().unwrap_or_default();
+    assert_eq!(
+        seed_result["exit_code"],
+        0,
+        "cache seed disposition {:?}; Guard receipt {}; cache update {:?}; stdout bytes {}; stderr bytes {}; no space {}; permission denied {}; operation denied {}; missing command {}",
+        seed_observation.disposition,
+        seed_observation.guard.is_some(),
+        seed_observation.cache_update,
+        seed_result["stdout"].as_str().map_or(0, str::len),
+        seed_stderr.len(),
+        seed_stderr.contains("No space left on device"),
+        seed_stderr.contains("Permission denied"),
+        seed_stderr.contains("Operation not permitted"),
+        seed_stderr.contains("not found"),
+    );
+    assert_eq!(
+        seed_outcome.run.tools[0]
+            .observation
+            .as_ref()
+            .unwrap()
+            .cache_update,
+        arany::CacheUpdate::Published
+    );
+
+    let mut permissions =
+        arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
+    let cargo_cache = permissions
+        .runtime_profile_choices()
+        .into_iter()
+        .find(|option| option.label.starts_with("Cargo archive cache"))
+        .expect("metadata-only Cargo cache candidate");
+    assert!(!cargo_cache.selected);
+    let selected_tokens = vec![node_token.clone(), cargo_cache.token];
+    permissions
+        .remember_profiles(true, arany::ApprovalMode::AutoEdits, &selected_tokens)
+        .unwrap();
+    let permissions = arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
+
+    let accepted_requests = Arc::new(Mutex::new(Vec::new()));
+    let cache_write = ToolCall::Command {
+        program: "sh".into(),
+        args: vec![
+            "-c".into(),
+            format!(
+                "mkdir -p \"$CARGO_TARGET_DIR\"; printf '%s' '{RUNTIME_CACHE_CANARY}' > \"$CARGO_TARGET_DIR/persistent-marker\""
+            ),
+        ],
+        cwd: String::new(),
+    };
+    let cache_read = ToolCall::Command {
+        program: "sh".into(),
+        args: vec![
+            "-c".into(),
+            format!(
+                "set -eu; test \"$(cat \"$CARGO_TARGET_DIR/persistent-marker\")\" = '{RUNTIME_CACHE_CANARY}'; cat \"$CARGO_TARGET_DIR/persistent-marker\"; printf '\\n'; test \"$(cat \"$CARGO_HOME/registry/cache/canary.crate\")\" = MACOS_HOST_CACHE_CANARY; cat \"$CARGO_HOME/registry/cache/canary.crate\"; printf '\\n'; node"
+            ),
+        ],
+        cwd: String::new(),
+    };
+    let cache_overflow = ToolCall::Command {
+        program: "sh".into(),
+        args: vec![
+            "-c".into(),
+            "set -eu; /usr/bin/mkdir -p \"$CARGO_TARGET_DIR\"; cache=\"$CARGO_TARGET_DIR/overflow-marker\"; : > \"$cache\"; i=0; while test \"$i\" -lt 32; do printf '%1048576s' '' >> \"$cache\"; i=$((i + 1)); done".into(),
+        ],
+        cwd: String::new(),
+    };
+    let accepted_calls = vec![cache_write, cache_read, cache_overflow];
+    let mut engine = Engine::open(
+        StateRoot::open_existing(&state_success).unwrap(),
+        RuntimeJourney {
+            requests: accepted_requests.clone(),
+            calls: accepted_calls.clone(),
+        },
+    )
+    .unwrap();
+    let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+    engine
+        .enable_trusted_workspace(
+            permissions,
+            &workspace,
+            env!("CARGO_BIN_EXE_arany").into(),
+            approvals,
+        )
+        .unwrap();
+    let run = engine.run(RunRequest {
+        session_id: None,
+        title: Some("Selected runtime success".into()),
+        objective: "Persist private build-cache data between commands using the selected runtime"
+            .into(),
+        images: Vec::new(),
+        workspace: workspace.clone(),
+        include_paths: Vec::new(),
+        policy: CollaborationPolicy::Single,
+        goal: arany::GoalRequest::new(
+            arany::GoalBudget::default(),
+            arany::GoalPhase::Implementation,
+        ),
+    });
+    let approve = async {
+        for call in &accepted_calls {
+            let approval = inbox
+                .next()
+                .await
+                .expect("approval for a selected-runtime command");
+            assert!(
+                &approval.intent.call == call,
+                "selected-runtime approval intent differs"
+            );
+            approval.decide(true);
+        }
+    };
+    let (accepted, ()) = tokio::time::timeout(Duration::from_secs(90), async {
+        tokio::join!(run, approve)
+    })
+    .await
+    .expect("bounded selected-runtime success journey");
+    let accepted = accepted.unwrap();
+    engine.close().await.unwrap();
+    assert_eq!(
+        accepted.run.status,
+        RunStatus::Finished,
+        "selected runtime Run failed: {}",
+        crate::safe_run_diagnostics(&accepted.run)
+    );
+    assert_eq!(accepted.run.tools.len(), 3);
+    let accepted_observations = accepted
+        .run
+        .tools
+        .iter()
+        .map(|tool| {
+            let observation = tool.observation.as_ref().unwrap();
+            assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+            assert_eq!(observation.intent, tool.intent);
+            serde_json::from_str::<serde_json::Value>(&observation.output).unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        accepted_observations[0]["stdout"]
+            .as_str()
+            .is_some_and(str::is_empty)
+    );
+    assert_eq!(accepted_observations[2]["exit_code"], 0);
+    assert_eq!(
+        accepted.run.tools[2]
+            .observation
+            .as_ref()
+            .unwrap()
+            .cache_update,
+        arany::CacheUpdate::Rejected
+    );
+    assert!(accepted.run.tools[..2].iter().all(|tool| {
+        tool.observation
+            .as_ref()
+            .is_some_and(|observation| observation.cache_update == arany::CacheUpdate::Published)
+    }));
+    let expected_stdout =
+        format!("{RUNTIME_CACHE_CANARY}\nMACOS_HOST_CACHE_CANARY\nruntime-profile-selected\n");
+    assert!(
+        accepted_observations[1]["stdout"]
+            .as_str()
+            .is_some_and(|stdout| stdout == expected_stdout),
+        "selected runtime cache output differs"
+    );
+    {
+        let accepted_requests = accepted_requests.lock().unwrap();
+        assert_eq!(accepted_requests.len(), 4);
+        assert!(
+            accepted_requests[0]
+                .tools
+                .as_ref()
+                .unwrap()
+                .observations
+                .is_empty()
+        );
+        let first_output = &accepted_requests[1].tools.as_ref().unwrap().observations[0].output;
+        let first_command: serde_json::Value = serde_json::from_str(first_output).unwrap();
+        assert!(first_command["stdout"].as_str().is_some_and(str::is_empty));
+        let overflow_observation = &accepted_requests[3].tools.as_ref().unwrap().observations[2];
+        let overflow_output = &overflow_observation.output;
+        let overflow_result: serde_json::Value = serde_json::from_str(overflow_output).unwrap();
+        assert_eq!(overflow_result["exit_code"], 0);
+        assert_eq!(
+            overflow_observation.cache_update,
+            arany::CacheUpdate::Rejected
+        );
+        let provider_observation = accepted_requests[3]
+            .tools
+            .as_ref()
+            .unwrap()
+            .observations
+            .last()
+            .unwrap();
+        assert_eq!(provider_observation.disposition, ToolDisposition::Succeeded);
+        let provider_output: serde_json::Value =
+            serde_json::from_str(&provider_observation.output).unwrap();
+        assert!(
+            provider_output["stdout"]
+                .as_str()
+                .is_some_and(|stdout| stdout == expected_stdout),
+            "explicit selected-cache output missing from later Provider request"
+        );
+    }
+    let state = StateRoot::open_existing(&root.join("state-success")).unwrap();
+    let store = Store::open_read_only(state).unwrap();
+    let events = store.load_session(accepted.session_id).await.unwrap();
+    store.close().await.unwrap();
+    let replay = SessionView::replay(accepted.session_id, &events)
+        .unwrap()
+        .unwrap();
+    assert_eq!(replay.runs.len(), 1);
+    assert!(
+        replay.runs[0] == accepted.run,
+        "closed cache replay differs"
+    );
+    let goal = replay.goals.first().expect("replayed Goal");
+    assert_eq!(goal.status, arany::GoalStatus::Completed);
+    let report = goal.report.as_ref().expect("durable Goal report");
+    assert!(
+        report
+            .evidence
+            .iter()
+            .any(|item| item == "Command sh exited 0."),
+        "successful Command evidence remains in the Goal report: {report:?}"
+    );
+    assert!(
+        report.unresolved.iter().any(|item| {
+            item.contains("build cache update was rejected")
+                && item.contains("previous cache was kept")
+        }),
+        "cache rejection is recorded as unresolved: {report:?}"
+    );
+    let finished = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            arany::Event::ToolFinished { observation, .. } => Some(observation),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(finished.len(), 3);
+    assert!(finished[0] == accepted.run.tools[0].observation.as_ref().unwrap());
+    assert!(finished[1] == accepted.run.tools[1].observation.as_ref().unwrap());
+    assert!(finished[2] == accepted.run.tools[2].observation.as_ref().unwrap());
+
+    let mut permissions =
+        arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
+    permissions
+        .remember_profiles(
+            true,
+            arany::ApprovalMode::AutoEdits,
+            std::slice::from_ref(&node_token),
+        )
+        .unwrap();
+    let permissions = arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
+    let verify_cache = ToolCall::Command {
+        program: "sh".into(),
+        args: vec![
+            "-c".into(),
+            "set -eu; test \"$(/usr/bin/wc -c < \"$CARGO_HOME/registry/cache/private-bulk.crate\")\" -eq 41943040; test \"$(cat \"$CARGO_TARGET_DIR/persistent-marker\")\" = ARANY_RUNTIME_CACHE_PERSISTENCE_CANARY; test ! -e \"$CARGO_TARGET_DIR/overflow-marker\"; printf 'cache-prior-retained\\n'; node".into(),
+        ],
+        cwd: String::new(),
+    };
+    let verify_requests = Arc::new(Mutex::new(Vec::new()));
+    let mut verify_engine = Engine::open(
+        StateRoot::open_existing(&state_success).unwrap(),
+        RuntimeJourney {
+            requests: verify_requests,
+            calls: vec![verify_cache.clone()],
+        },
+    )
+    .unwrap();
+    let (verify_approvals, mut verify_inbox) =
+        arany::ToolApprovals::new(arany::ApprovalMode::Request);
+    verify_engine
+        .enable_trusted_workspace(
+            permissions,
+            &workspace,
+            env!("CARGO_BIN_EXE_arany").into(),
+            verify_approvals,
+        )
+        .unwrap();
+    let verify_run = verify_engine.run(RunRequest {
+        session_id: None,
+        title: Some("Cache overflow recovery".into()),
+        objective: "Verify the previous private cache survived a rejected update".into(),
+        images: Vec::new(),
+        workspace: workspace.clone(),
+        include_paths: Vec::new(),
+        policy: CollaborationPolicy::Single,
+        goal: arany::GoalRequest::default(),
+    });
+    let approve_verify = async {
+        let approval = verify_inbox.next().await.expect("cache recovery approval");
+        assert!(
+            approval.intent.call == verify_cache,
+            "cache recovery approval intent differs"
+        );
+        approval.decide(true);
+    };
+    let (verified, ()) = tokio::time::timeout(Duration::from_secs(90), async {
+        tokio::join!(verify_run, approve_verify)
+    })
+    .await
+    .expect("bounded cache recovery journey");
+    let verified = verified.unwrap();
+    verify_engine.close().await.unwrap();
+    assert_eq!(verified.run.status, RunStatus::Finished);
+    let retained = verified.run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(retained.cache_update, arany::CacheUpdate::Published);
+    let retained_result: serde_json::Value = serde_json::from_str(&retained.output).unwrap();
+    assert_eq!(
+        retained_result["stdout"],
+        "cache-prior-retained\nruntime-profile-selected\n"
+    );
+    let store = Store::open_read_only(StateRoot::open_existing(&state_success).unwrap()).unwrap();
+    let events = store.load_session(verified.session_id).await.unwrap();
+    store.close().await.unwrap();
+    let replay = SessionView::replay(verified.session_id, &events)
+        .unwrap()
+        .unwrap();
+    assert!(
+        replay.runs.as_slice() == std::slice::from_ref(&verified.run),
+        "closed cache recovery replay differs"
+    );
+    let finished = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            arany::Event::ToolFinished { observation, .. } => Some(observation),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(finished.len() == 1 && finished[0] == retained);
 }
 
 async fn stopped_effects_survive_closed_replay(
@@ -922,19 +1660,21 @@ int main(void) {
             if attested { 2 } else { 1 },
             "no automatic retry: {case}"
         );
+        let expected_run_status = match case {
+            "cancelled" => RunStatus::Cancelled,
+            "mcp-version" => RunStatus::Finished,
+            _ => RunStatus::Failed,
+        };
         assert_eq!(
-            outcome.run.status,
-            if case == "cancelled" {
-                RunStatus::Cancelled
-            } else if attested {
-                RunStatus::Finished
-            } else {
-                RunStatus::Failed
-            },
+            outcome.run.status, expected_run_status,
             "{case}: {:?}",
             outcome.run.tools
         );
-        assert_eq!(outcome.run.assistant_message.is_some(), attested);
+        assert_eq!(
+            outcome.run.assistant_message.is_some(),
+            case == "mcp-version",
+            "{case} assistant answer"
+        );
         assert!(!workspace.join("src/approval-output.txt").exists());
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
         let events = store.load_session(outcome.session_id).await.unwrap();
@@ -943,6 +1683,74 @@ int main(void) {
             .unwrap()
             .unwrap();
         assert_eq!(replay.runs[0], outcome.run, "closed replay: {case}");
+        assert_eq!(
+            replay.goals[0].status,
+            match case {
+                "cancelled" => arany::GoalStatus::Cancelled,
+                "mcp-version" => arany::GoalStatus::Completed,
+                _ => arany::GoalStatus::Failed,
+            },
+            "closed Goal replay: {case}"
+        );
+        if case == "overflow" {
+            let contract = replay.goals[0]
+                .plan_contract
+                .as_ref()
+                .expect("overflow command has a plan");
+            assert!(matches!(
+                &contract.success_criterion,
+                arany::GoalSuccessCriterion::ToolCallSucceeded { call: planned }
+                    if **planned == call
+            ));
+            assert!(
+                replay.goals[0]
+                    .report
+                    .as_ref()
+                    .unwrap()
+                    .unresolved
+                    .iter()
+                    .any(|item| item.contains("Command shell failed"))
+            );
+        }
+        if case == "mcp-version" {
+            assert!(
+                replay.goals[0].plan_contract.is_none(),
+                "MCP catalog inspection stays in the planless prelude"
+            );
+            assert!(
+                replay.goals[0]
+                    .report
+                    .as_ref()
+                    .unwrap()
+                    .unresolved
+                    .iter()
+                    .any(|item| item.contains("MCP catalog synthetic failed"))
+            );
+        }
+        if case == "receipt-loss" {
+            assert_eq!(
+                replay.runs[0].tools[0]
+                    .observation
+                    .as_ref()
+                    .unwrap()
+                    .cache_update,
+                arany::CacheUpdate::Uncertain,
+                "selected cache update remains uncertain"
+            );
+            let unresolved = &replay.goals[0].report.as_ref().unwrap().unresolved;
+            assert!(
+                unresolved
+                    .iter()
+                    .any(|item| item.contains("uncertain build cache publication")),
+                "cache uncertainty is durable in the Goal report: {unresolved:?}"
+            );
+            assert!(
+                unresolved
+                    .iter()
+                    .all(|item| !item.contains("inspect Workspace state")),
+                "cache uncertainty does not misdirect recovery to Workspace state"
+            );
+        }
         let observation = replay.runs[0].tools[0].observation.as_ref().unwrap();
         assert_eq!(
             observation.disposition,

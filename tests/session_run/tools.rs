@@ -607,8 +607,12 @@ impl arany::Provider for ExactTokenTool {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native Linux account-isolated Goal token admission"
+)]
 async fn exact_goal_token_cap_fails_before_a_tool_request_is_journaled() {
-    if !super::isolation::enter_account_isolated_test() {
+    if !super::isolation::enter_native_account_isolated_test() {
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -702,8 +706,12 @@ impl Provider for GoalWorkspaceLease {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native Linux cross-StateRoot Goal Workspace lease"
+)]
 async fn unfinished_implementation_goal_holds_workspace_lease_across_runs() {
-    if !super::isolation::enter_account_isolated_test() {
+    if !super::isolation::enter_native_account_isolated_test() {
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -1237,6 +1245,7 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
                     );
                     assert_eq!(history["run_status"], "Failed");
                     assert_eq!(history["tool_records"][0]["disposition"], "failed");
+                    assert!(history["tool_records"][0]["cache_update"].is_string());
                     assert_eq!(request.objective, "Guard corpus");
                     assert_eq!(
                         request.tools.as_ref().unwrap().observations.len(),

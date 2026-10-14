@@ -10,12 +10,17 @@ history. Implementation status and verified support are separate claims.
 ## Next functional priority
 
 - **Agentic coding teams (Beta 1 scope, current implementation priority).**
-  RPI Goals, command changesets, toolchain/cache and flexible limits, registry
-  fetch, Git, a
+  RPI Goals, command changesets, toolchain profiles and a persistent cache,
+  flexible limits, registry fetch, Git, a
   narrowing-only Supervisor, per-agent Provider routing and writable team
   workers. The [initiative plan](./planning/agentic-teams/README.md) is
-  self-contained and orders the slices; start at its next action (execution
-  step 2, toolchain profiles, build cache and flexible limits). Remote
+  self-contained and orders the slices; start at Goal Foundation prerequisites
+  (lifecycle, cancellation, budgets, plan contract and Workspace lock;
+  execution step 3), then A4, dogfooding and the remaining Goal artifacts. The
+  approved A4 maxima are 4 GiB memory, 8 GiB
+  cache, 1 GiB project storage and 256 tasks; the current cache view remains
+  64 MiB until A4 enables the build profile. Native build
+  evidence and named-host measurements still precede support claims. Remote
   MCP/OAuth, interactive/background jobs and other network grants need their
   own Policy/Guard/protocol evidence; retain the existing
   [Tool scope](./docs/specs/tools.md) until each slice lands.
@@ -94,7 +99,9 @@ to the user's credential store or clipboard.
 
 | Pending gate | Completion condition and owner |
 | --- | --- |
-| Hosted CI and native Linux regression checks | Publish when authorized, verify the pull-request jobs on a hosted runner (format and Clippy, Linux and macOS debug/release tests with `--cfg arany_ci`), and run the native consent, terminal, setup, Session picker, pinned-Skill and Tool owners, including Linux command descendant termination before changeset capture and create/modify/delete publication, rejection, approval and cancellation with closed replay. Native Linux command changeset execution remains unverified on the current macOS host. [Workflow](./.github/workflows/ci.yml), [testing rules](./agents/testing.md) |
+| Hosted CI and native Linux regression checks | Publish when authorized, verify the pull-request jobs on a hosted runner (format and Clippy, Linux and macOS debug/release tests with `--cfg arany_ci`), and run the native consent, terminal, setup, Session picker, pinned-Skill and Tool owners, including the production private-mount bootstrap fixture (shared-source success, pre-existing nested-mount refusal and no late propagation), Linux command descendant termination before changeset capture and create/modify/delete publication, rejection, approval and cancellation with closed replay. This topology fixture is separate from the full systemd Guard journey; the latter is not activated by the ordinary `arany_ci` gate and remains a pending product-level native run. Native Linux command changeset execution remains unverified on the current macOS host. [Workflow](./.github/workflows/ci.yml), [testing rules](./agents/testing.md) |
+| macOS runtime mount topology | Run the native mounted-image refusal and selected-runtime command under Seatbelt on hosted macOS CI; the focused `getfsstat` topology fixture and existing guarded unit command cover adapter behavior, but a full product-level injected-mount Ready/GO journey remains unverified. Do not claim a lifetime mount-isolation guarantee. [Tools spec](./docs/specs/tools.md), [Guard rules](./agents/guard.md) |
+| Native build profile coverage | After A3/A4, run real offline Arany builds on named Linux and macOS hosts. On macOS specifically trace `cc`/`xcrun` delegation to `/Library/Developer/CommandLineTools` and the selected SDK; grant only measured, exact runtime roots if the actual build demonstrates that need. [Tools spec](./docs/specs/tools.md), [native evidence rules](./agents/references/testing-details.md#native-and-live-evidence) |
 | macOS optimized product/account isolation | On a disposable effective-user home, run the full optimized Engine/active-CLI and account setup/refresh/logout/cross-user gates. Changing HOME does not isolate account paths; debug fixtures and override refusal do not prove this gate. [Fixture rules](./agents/references/testing-details.md#host-and-account-isolation) |
 | Native TLS to compiled endpoints | Provide isolated resolution/routing and ordinary trust for a compiled-endpoint HTTPS journey. Generated-anchor chain/name rejection alone does not prove a public trusted chain or production-endpoint success. [Security rules](./agents/security.md) |
 | Native terminal faults and tmux | Run available native tmux and acquisition/output/input-loss owners, including optimized macOS and supported architectures; verify restoration on the exact distributed binary. [Terminal fixture rules](./agents/references/testing-details.md#terminal-process-fixtures), [PTY finding](./docs/security/findings/terminal-pty-hangup-spin.md) |

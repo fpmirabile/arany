@@ -76,38 +76,83 @@ pub(super) async fn admit(
         SetupError::Recoverable(format!("Could not load folder trust: {error}"))
     })?;
     if access.is_trusted() {
+        access.verify_runtime_grants().map_err(|error| {
+            SetupError::Recoverable(format!(
+                "Could not validate folder runtime profiles: {error}"
+            ))
+        })?;
         composer.set_approval_mode(native_protection_supported().then_some(access.mode()));
         Ok(PermissionChoice::Selected(access))
     } else {
-        choose(terminal, workspace, composer, configured).await
+        let access = access.prepare_profile_selection().map_err(|error| {
+            SetupError::Recoverable(format!(
+                "Could not prepare folder permission choices: {error}"
+            ))
+        })?;
+        choose(terminal, access, composer, configured).await
     }
 }
 
 pub(super) async fn choose(
     terminal: &mut AttachedTerminal,
-    workspace: &Path,
+    mut permissions: WorkspacePermissions,
     composer: &mut Composer,
     configured: bool,
 ) -> Result<PermissionChoice, SetupError> {
-    let mut permissions = WorkspacePermissions::open(workspace).map_err(|error| {
-        SetupError::Recoverable(format!("Could not load folder trust: {error}"))
-    })?;
     let mut selected = 0usize;
     let mut page = 0usize;
     let id = uuid::Uuid::now_v7();
     let mut answer = Composer::default();
+    let options = permissions.runtime_profile_choices();
+    let mut selected_profiles = options
+        .iter()
+        .map(|option| option.selected)
+        .collect::<Vec<_>>();
+    let mut focused_profile = None;
+    let mut explanation_pages_seen = false;
     loop {
-        let more =
-            terminal.draw_workspace_permissions(id, workspace, page, selected == 1, configured)?;
+        let (more, visible_page) = terminal.draw_workspace_permissions(
+            id,
+            &permissions,
+            (&selected_profiles, focused_profile, explanation_pages_seen),
+            page,
+            selected == 1,
+            configured,
+        )?;
+        page = visible_page;
+        if focused_profile.is_none() && !more {
+            explanation_pages_seen = true;
+        }
         match terminal.next_input().await? {
+            TerminalInput::Up if explanation_pages_seen && focused_profile.is_some() => {
+                focused_profile = focused_profile.and_then(|index| index.checked_sub(1));
+            }
+            TerminalInput::Down if explanation_pages_seen && focused_profile.is_some() => {
+                let index = focused_profile.expect("matched selected profile");
+                focused_profile = Some((index + 1).min(options.len().saturating_sub(1)));
+            }
             TerminalInput::Up if !more => selected = selected.saturating_sub(1),
             TerminalInput::Down if !more => selected = (selected + 1).min(1),
             TerminalInput::PageUp => {
                 page = page.saturating_sub(1);
                 selected = 0;
+                focused_profile = None;
             }
             TerminalInput::Down | TerminalInput::PageDown if more => page += 1,
-            TerminalInput::Tab if !more => selected = (selected + 1) % 2,
+            TerminalInput::Tab if !explanation_pages_seen => {}
+            TerminalInput::Tab if explanation_pages_seen && focused_profile.is_some() => {
+                focused_profile = None;
+            }
+            TerminalInput::Tab if explanation_pages_seen && !options.is_empty() => {
+                focused_profile = Some(0)
+            }
+            TerminalInput::Tab if explanation_pages_seen && !more => selected = (selected + 1) % 2,
+            TerminalInput::Character(' ') if !terminal.is_linear() => {
+                if let Some(index) = focused_profile {
+                    selected_profiles[index] = !selected_profiles[index];
+                    selected = 1;
+                }
+            }
             TerminalInput::Character(character) if terminal.is_linear() => {
                 answer.apply(TerminalInput::Character(character));
             }
@@ -117,22 +162,37 @@ pub(super) async fn choose(
             TerminalInput::Resize => {
                 page = 0;
                 selected = 0;
+                focused_profile = None;
+                explanation_pages_seen = false;
+            }
+            TerminalInput::Submit if explanation_pages_seen && focused_profile.is_some() => {
+                let index = focused_profile.expect("matched selected profile");
+                selected_profiles[index] = !selected_profiles[index];
+                selected = 1;
             }
             TerminalInput::Submit if more => page += 1,
             TerminalInput::Submit => {
-                let value = answer.text().trim().to_ascii_lowercase();
                 if terminal.is_linear() {
-                    selected = match value.as_str() {
-                        "" | "1" | "read only" | "no" | "config" | "use config" => 0,
-                        "2" | "trust" | "trust and remember" | "yes" => 1,
-                        _ => {
-                            answer.clear();
-                            continue;
-                        }
+                    let Some((choice, profiles)) =
+                        parse_linear_selection(answer.text(), &options, &selected_profiles)
+                    else {
+                        answer.clear();
+                        continue;
                     };
+                    selected = choice;
+                    selected_profiles = profiles;
                 }
+                if selected == 0 {
+                    selected_profiles.fill(false);
+                }
+                let selected_tokens = options
+                    .iter()
+                    .zip(selected_profiles.iter().copied())
+                    .filter(|(_, selected)| *selected)
+                    .map(|(option, _)| option.token.clone())
+                    .collect::<Vec<_>>();
                 permissions
-                    .remember(selected == 1, ApprovalMode::AutoEdits)
+                    .remember_profiles(selected == 1, ApprovalMode::AutoEdits, &selected_tokens)
                     .map_err(|error| {
                         SetupError::Recoverable(format!("Could not remember folder trust: {error}"))
                     })?;
@@ -154,12 +214,50 @@ pub(super) async fn choose(
                 terminal.suspend_and_resume(composer.text().len())?;
                 page = 0;
                 selected = 0;
+                focused_profile = None;
+                explanation_pages_seen = false;
             }
             TerminalInput::Shutdown(signal) => {
                 return Err(SetupError::Shutdown(signal));
             }
             _ => {}
         }
+    }
+}
+
+fn parse_linear_selection(
+    input: &str,
+    options: &[arany::RuntimeProfileOption],
+    current: &[bool],
+) -> Option<(usize, Vec<bool>)> {
+    let mut words = input.split_whitespace();
+    let choice = words.next().unwrap_or_default().to_ascii_lowercase();
+    let rest = words.collect::<Vec<_>>();
+    match choice.as_str() {
+        "read" if rest == ["only"] => Some((0, vec![false; options.len()])),
+        "" | "1" | "read" | "read-only" | "no" | "config" | "use-config" => {
+            rest.is_empty().then(|| (0, vec![false; options.len()]))
+        }
+        "2" | "trust" | "yes" => {
+            if rest.is_empty() {
+                return Some((1, current.to_vec()));
+            }
+            let mut selected = vec![false; options.len()];
+            if rest == ["none"] {
+                return Some((1, selected));
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            for word in rest {
+                let number = word.parse::<usize>().ok()?;
+                let index = number.checked_sub(3)?;
+                if index >= options.len() || !seen.insert(index) {
+                    return None;
+                }
+                selected[index] = true;
+            }
+            Some((1, selected))
+        }
+        _ => None,
     }
 }
 
@@ -176,5 +274,32 @@ pub(super) fn cycle(composer: &mut Composer) -> String {
         "Auto approval · the selected AI reviews actions; additional model usage may apply; uncertain actions ask you".into()
     } else {
         format!("{} · Shift+Tab changes mode", mode.label())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_linear_selection;
+
+    #[test]
+    fn linear_permission_read_only_phrase_is_exact_and_clears_profiles() {
+        let options = [arany::RuntimeProfileOption {
+            token: "rust-example".into(),
+            label: "Rust example".into(),
+            selected: false,
+        }];
+        let selected = [true];
+
+        assert_eq!(
+            parse_linear_selection("read only", &options, &selected),
+            Some((0, vec![false]))
+        );
+        for input in ["read only 3", "read only trust", "read only none"] {
+            assert_eq!(parse_linear_selection(input, &options, &selected), None);
+        }
+        assert_eq!(
+            parse_linear_selection("trust 3", &options, &selected),
+            Some((1, vec![true]))
+        );
     }
 }

@@ -283,7 +283,7 @@ fn failed_child_aborts_sibling_provider_span_as_cancelled() {
                 .force_flush()
                 .expect("span flush");
             let spans = exporter.get_finished_spans().expect("finished spans");
-            assert_eq!(spans.len(), 9);
+            assert_eq!(spans.len(), 10);
             for (index, expected, error_type) in [
                 (1, "cancelled", "cancelled"),
                 (2, "failed", failed_error_type),
@@ -388,7 +388,7 @@ fn timed_out_provider_call_exports_closed_error_type() {
             .force_flush()
             .expect("span flush");
         let spans = exporter.get_finished_spans().expect("finished spans");
-        assert_eq!(spans.len(), 4);
+        assert_eq!(spans.len(), 5);
         let provider = spans
             .iter()
             .find(|span| span.name == "chat arany.provider")

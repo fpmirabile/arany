@@ -457,10 +457,15 @@ fn observe_process(
             break status;
         }
         assert!(std::time::Instant::now() < deadline, "process deadline");
+        let stdout_bytes = stdout.metadata().expect("stdout size").len();
+        let stderr_bytes = stderr.metadata().expect("stderr size").len();
         assert!(
-            stdout.metadata().expect("stdout size").len() <= stdout_limit as u64
-                && stderr.metadata().expect("stderr size").len() <= 256 * 1024,
-            "process output bound"
+            stdout_bytes <= stdout_limit as u64,
+            "stdout output bound: {stdout_bytes} bytes exceeds {stdout_limit}"
+        );
+        assert!(
+            stderr_bytes <= 256 * 1024,
+            "stderr output bound: {stderr_bytes} bytes exceeds 262144"
         );
         std::thread::yield_now();
     };
@@ -483,7 +488,11 @@ fn observe_process(
         file.take(limit as u64 + 1)
             .read_to_end(bytes)
             .expect("bounded observation");
-        assert!(bytes.len() <= limit, "process observation bound");
+        assert!(
+            bytes.len() <= limit,
+            "process observation bound: {} bytes exceeds {limit}",
+            bytes.len()
+        );
     }
     output
 }
@@ -598,6 +607,8 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 assert!(call.objective == objective, "exact objective");
                 assert!(call.context_summary.is_none(), "no derived summary");
                 assert!(call.child_results.is_empty(), "no child context");
+                assert_eq!(call.goal_budget, Some(arany::GoalBudget::default()));
+                assert_eq!(call.goal_plan_contract, None);
                 assert_eq!(call.max_output_tokens, 4096);
                 assert_eq!(call.run_id, run.id);
                 assert_eq!(call.agent_run_id, run.agents[0].id);
@@ -793,7 +804,49 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         }
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
         let events = store.load_session(first.session_id).await.unwrap();
-        assert_eq!(events.len(), 41);
+        let goal_event_counts = [
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalStarted { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalRunLinked { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalActiveTimeReserved { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalProviderCallReserved { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalActiveTimeSettled { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalFinished { .. }))
+                .count(),
+        ];
+        assert_eq!(goal_event_counts, [5, 5, 5, 7, 5, 5]);
+        let non_goal_events = events
+            .iter()
+            .filter(|event| {
+                !matches!(
+                    event.event,
+                    Event::GoalStarted { .. }
+                        | Event::GoalRunLinked { .. }
+                        | Event::GoalActiveTimeReserved { .. }
+                        | Event::GoalProviderCallReserved { .. }
+                        | Event::GoalActiveTimeSettled { .. }
+                        | Event::GoalFinished { .. }
+                )
+            })
+            .count();
+        assert_eq!(non_goal_events, 41);
+        assert_eq!(events.len(), 73);
         let view = SessionView::replay(first.session_id, &events).unwrap().unwrap();
         for (run_id, phase) in [
             (first.run.id, AgentPhase::RootPlan),
@@ -813,13 +866,21 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         assert_eq!(view.runs[2].objective, "", "image-only objective is not invented text");
         assert_eq!(view.compactions[0].record, compacted);
         for output in ["text", "jsonl"] {
+            let expected = arany::render_session(
+                &view,
+                &events,
+                if output == "text" {
+                    arany::Output::Text
+                } else {
+                    arany::Output::Jsonl
+                },
+            );
             let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_arany"));
             command.env_clear().current_dir(temp.path()).args(["show", "--output", output, "--state-dir"])
                 .arg(&state_path).arg(first.session_id.to_string());
-            let observed = observe_process(&mut command, temp.path(), 512 * 1024);
+            let observed = observe_process(&mut command, temp.path(), expected.len());
             assert!(observed.status.success(), "image show {output} exit");
             assert!(observed.stderr.is_empty(), "image show {output} error channel");
-            let expected = arany::render_session(&view, &events, if output == "text" { arany::Output::Text } else { arany::Output::Jsonl });
             assert!(observed.stdout == expected.as_bytes(), "image show {output} bytes differ");
             if output == "text" {
                 let text = String::from_utf8(observed.stdout).unwrap();
@@ -830,14 +891,14 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 assert_eq!(lines.len(), events.len());
                 let accepted = lines.iter().filter(|line| line["kind"] == "MessageAccepted").collect::<Vec<_>>();
                 assert_eq!(accepted.len(), 5);
-                assert_eq!(accepted[0]["event_version"], 2);
+                assert_eq!(accepted[0]["event_version"], 3);
                 assert_eq!(accepted[0]["payload"]["images"][0]["media_type"], "image/png");
                 assert_eq!(accepted[0]["payload"]["images"][0]["data"], view.runs[0].images[0].base64());
                 assert_eq!(accepted[2]["payload"]["text"], "");
                 assert!(accepted[3]["payload"]["text"].as_str() == Some(maximal_objective.as_str()));
                 let image_payload_bytes = accepted[3]["payload"].to_string().len();
                 assert!((300 * 1024..=320 * 1024).contains(&image_payload_bytes), "maximally escaped image input fits its Event");
-                assert_eq!(accepted[4]["event_version"], 2);
+                assert_eq!(accepted[4]["event_version"], 3);
                 assert!(accepted[4]["payload"]["text"].as_str() == Some(maximal_objective.as_str()));
                 assert_eq!(accepted[4]["payload"].to_string().len(), 6 * 8 * 1024 + 23, "maximally escaped text-only input fits its Event");
                 assert_eq!(accepted[4]["payload"]["images"], serde_json::json!([]), "text-only input retains the current Message shape");
@@ -858,11 +919,11 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         let original: serde_json::Value = serde_json::from_str(&payload).unwrap();
         for fault in ["unsupported version", "unknown version", "missing images", "empty Message", "five images", "aggregate bytes", "non-PNG", "corrupted image", "URL", "extra field", "text overflow", "payload overflow", "agent scope"] {
             let mut invalid = original.clone();
-            let mut version = 2;
+            let mut version = 3;
             let mut agent_scope = None;
             match fault {
                 "unsupported version" => version = 1,
-                "unknown version" => version = 3,
+                "unknown version" => version = 4,
                 "missing images" => { invalid.as_object_mut().unwrap().remove("images"); }
                 "empty Message" => { invalid["text"] = "".into(); invalid["images"] = serde_json::json!([]); },
                 "five images" => invalid["images"] = serde_json::to_value(vec![second_image.clone(); 5]).unwrap(),
@@ -882,7 +943,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             assert!(matches!(store.load_view(first.session_id).await, Err(arany::StoreError::InvalidHistory)), "image replay fault: {fault}");
             store.close().await.unwrap();
         }
-        connection.execute("UPDATE events SET event_version=2, payload=?1, agent_run_id=NULL WHERE sequence=?2", rusqlite::params![payload, sequence]).unwrap();
+        connection.execute("UPDATE events SET event_version=3, payload=?1, agent_run_id=NULL WHERE sequence=?2", rusqlite::params![payload, sequence]).unwrap();
         drop(connection);
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
         assert_eq!(store.load_view(first.session_id).await.unwrap().unwrap(), view);
@@ -2199,7 +2260,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
                 })
                 .unwrap();
             for sequence in first_padding_sequence..=i64::from(prefix) {
-                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',2,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string()]).unwrap();
+                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',3,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string()]).unwrap();
             }
             transaction.commit().unwrap();
             drop(connection);
@@ -2287,7 +2348,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
                 .unwrap();
             if let Some(prefix) = prefix {
                 for sequence in first_padding_sequence..=prefix {
-                    transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',2,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, root.to_string()]).unwrap();
+                    transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',3,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, root.to_string()]).unwrap();
                 }
             }
             let event_count_before_forks = prefix.unwrap_or(first_padding_sequence - 1);
@@ -2510,7 +2571,50 @@ fn database_capacity_is_admitted_before_provider_usage() {
             assert_eq!(requests[0].max_output_tokens, 1024);
         }
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
-        assert_eq!(store.load_session(id).await.unwrap().len(), 16);
+        let events = store.load_session(id).await.unwrap();
+        let goal_event_counts = [
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalStarted { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalRunLinked { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalActiveTimeReserved { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalProviderCallReserved { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalActiveTimeSettled { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalFinished { .. }))
+                .count(),
+        ];
+        assert_eq!(goal_event_counts, [2; 6]);
+        let non_goal_events = events
+            .iter()
+            .filter(|event| {
+                !matches!(
+                    event.event,
+                    Event::GoalStarted { .. }
+                        | Event::GoalRunLinked { .. }
+                        | Event::GoalActiveTimeReserved { .. }
+                        | Event::GoalProviderCallReserved { .. }
+                        | Event::GoalActiveTimeSettled { .. }
+                        | Event::GoalFinished { .. }
+                )
+            })
+            .count();
+        assert_eq!(non_goal_events, 16);
+        assert_eq!(events.len(), 28);
         let view = store.load_view(id).await.unwrap().unwrap();
         assert_eq!(view.runs.len(), 2);
         assert!(view.runs.iter().all(|run| run.status == RunStatus::Finished));
@@ -2842,6 +2946,58 @@ fn one_child_team_finishes_only_after_child_result_is_committed() {
             interrupted.runs[0].agents[0].provider_calls[0].disposition,
             ProviderCallDisposition::Delegated
         );
+        let child_id = outcome.run.agents[1].id;
+        let primary_id = outcome.run.agents[0].id;
+        let child_call = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    &event.event,
+                    Event::ProviderCallRecorded { agent_run_id, record, .. }
+                        if *agent_run_id == child_id && record.phase == AgentPhase::ChildWork
+                )
+            })
+            .expect("committed child call");
+        let synthesis_call = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    &event.event,
+                    Event::ProviderCallRecorded { agent_run_id, record, .. }
+                        if *agent_run_id == primary_id && record.phase == AgentPhase::RootSynthesis
+                )
+            })
+            .expect("committed primary synthesis call");
+        let child_finished = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    &event.event,
+                    Event::AgentFinished {
+                        agent_run_id,
+                        disposition: arany::AgentDisposition::Finished,
+                        ..
+                    } if *agent_run_id == child_id
+                )
+            })
+            .expect("committed child result");
+        let primary_finished = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    &event.event,
+                    Event::AgentFinished {
+                        agent_run_id,
+                        disposition: arany::AgentDisposition::Finished,
+                        ..
+                    } if *agent_run_id == primary_id
+                )
+            })
+            .expect("committed primary result");
+        assert!(delegated_call < child_call);
+        assert!(child_call < child_finished);
+        assert!(child_finished < synthesis_call);
+        assert!(synthesis_call < primary_finished);
         let calls = events
             .iter()
             .filter_map(|event| match &event.event {
@@ -2858,15 +3014,17 @@ fn one_child_team_finishes_only_after_child_result_is_committed() {
             ]
         );
         let mut invalid_phase = events.clone();
-        if let Event::ProviderCallRecorded { record, .. } = &mut invalid_phase[4].event {
+        if let Event::ProviderCallRecorded { record, .. } = &mut invalid_phase[delegated_call].event
+        {
             record.phase = AgentPhase::RootSynthesis;
         } else {
-            panic!("expected primary planning call");
+            panic!("expected committed primary delegation");
         }
         assert!(SessionView::replay(outcome.session_id, &invalid_phase).is_err());
         let mut duplicate_call = events.clone();
-        duplicate_call[5].event = events[4].event.clone();
-        duplicate_call[5].agent_run_id = events[4].agent_run_id;
+        duplicate_call[child_call].event = events[delegated_call].event.clone();
+        duplicate_call[child_call].run_id = events[delegated_call].run_id;
+        duplicate_call[child_call].agent_run_id = events[delegated_call].agent_run_id;
         assert!(SessionView::replay(outcome.session_id, &duplicate_call).is_err());
         let missing_calls: Vec<_> = events
             .iter()
@@ -2874,14 +3032,6 @@ fn one_child_team_finishes_only_after_child_result_is_committed() {
             .cloned()
             .collect();
         assert!(SessionView::replay(outcome.session_id, &missing_calls).is_err());
-        assert!(matches!(
-            events[7].event,
-            arany::Event::AgentFinished { .. }
-        ));
-        assert!(matches!(
-            events[9].event,
-            arany::Event::AgentFinished { .. }
-        ));
         store.close().await.expect("store shutdown");
     });
 }
@@ -3920,15 +4070,21 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                             .finished_sequence
                             .expect("Run terminal sequence")
                     );
+                    let expected_goal_status = match outcome.run.status {
+                        RunStatus::Finished => arany::GoalStatus::Completed,
+                        RunStatus::Failed => arany::GoalStatus::Failed,
+                        RunStatus::Cancelled => arany::GoalStatus::Cancelled,
+                        status => panic!("expected a terminal Run, got {status:?}"),
+                    };
                     assert!(events.last().is_some_and(|event| {
                         event.sequence > terminal.sequence
                             && matches!(
                                 event.event,
                                 Event::GoalFinished {
                                     goal_id,
-                                    status: arany::GoalStatus::Cancelled,
+                                    status,
                                     ..
-                                } if goal_id == outcome.goal_id
+                                } if goal_id == outcome.goal_id && status == expected_goal_status
                             )
                     }));
                     assert_eq!(replay.runs.len(), 1);
@@ -3939,7 +4095,7 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                         if let Event::ProviderCallRecorded { record, .. } = &envelope.event {
                             let document: serde_json::Value =
                                 serde_json::from_str(line).expect("canonical JSONL");
-                            assert_eq!(document["event_version"], 2);
+                            assert_eq!(document["event_version"], 3);
                             assert_eq!(document["payload"], serde_json::to_value(record).unwrap());
                         }
                     }
