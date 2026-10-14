@@ -1,5 +1,5 @@
 use super::commands::{Submission, help_entry, help_len, parse_submission};
-use super::history::{HistoryRow, MAX_ROW_CELLS, MessageKind};
+use super::history::{HistoryRow, MAX_ROW_CELLS, MessageKind, native_marker};
 use super::{Composer, TerminalMode, backend::TerminalBackend, input::CursorQuery};
 use crate::presentation::{
     AgentInspectorModel, DraftAction, PresentationModel, model_id_preview, safe_truncate,
@@ -1015,11 +1015,10 @@ pub(super) fn draw_frame_with_history(
 }
 
 pub(super) fn native_line(row: &HistoryRow, width: u16, palette: Palette) -> Line<'static> {
-    let marker = match (row.speaker, row.heading) {
-        (MessageKind::User, true) => "› ",
-        (MessageKind::Assistant, true) => "● ",
-        (MessageKind::User, false) if !row.text.is_empty() => "│ ",
-        _ => "",
+    let marker = if row.speaker == MessageKind::User && !row.heading && row.text.is_empty() {
+        ""
+    } else {
+        native_marker(row.speaker, row.heading)
     };
     let text = if row.speaker == MessageKind::User && !row.heading {
         row.text.strip_prefix("  ").unwrap_or(&row.text)

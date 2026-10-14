@@ -107,23 +107,13 @@ impl Drop for AlternateScreen {
 #[derive(Default)]
 struct NativeTranscript {
     session: Option<crate::session::SessionId>,
-    initial_sequence_cutoff: Option<u64>,
-    first_projected_sequence: Option<u64>,
+    initial_run_count: Option<usize>,
+    first_projected_run_index: Option<usize>,
     omitted_history: bool,
     objectives: HashSet<crate::session::RunId>,
     answers: HashSet<crate::session::RunId>,
     tools: HashSet<(crate::session::RunId, usize)>,
     last_notice: Option<(u64, String)>,
-}
-
-impl NativeTranscript {
-    fn skips_initial_run(&self, run: &crate::session::RunView) -> bool {
-        self.initial_sequence_cutoff
-            .is_some_and(|cutoff| run.accepted_sequence <= cutoff)
-            && self
-                .first_projected_sequence
-                .is_none_or(|first| run.accepted_sequence < first)
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -202,6 +192,20 @@ fn model_catalog_status(item: &ModelEntry, exact_custom: bool) -> String {
         format!("selectable; effort {efforts}")
     } else {
         "availability only; compatibility unknown".to_owned()
+    }
+}
+
+fn classic_history_status(width: u16, omitted_history: bool, pinned: bool) -> &'static str {
+    if omitted_history {
+        if width < 32 {
+            "Ctrl+T history"
+        } else {
+            "More history · Ctrl+T history"
+        }
+    } else if pinned {
+        "Classic (--classic) · Ctrl+T details"
+    } else {
+        "Classic · Ctrl+T details · /settings"
     }
 }
 
@@ -795,14 +799,22 @@ impl AttachedTerminal {
             let projection = history::classic_projection(session, width);
             self.native = NativeTranscript {
                 session: Some(session.id),
-                initial_sequence_cutoff: Some(session.last_sequence),
-                first_projected_sequence: projection.first_run_sequence,
+                initial_run_count: Some(session.runs.len()),
+                first_projected_run_index: projection.first_run_index,
                 omitted_history: projection.omitted_history,
                 ..NativeTranscript::default()
             };
         }
-        for run in &session.runs {
-            if self.native.skips_initial_run(run) {
+        for (index, run) in session.runs.iter().enumerate() {
+            if self
+                .native
+                .initial_run_count
+                .is_some_and(|count| index < count)
+                && self
+                    .native
+                    .first_projected_run_index
+                    .is_none_or(|first| index < first)
+            {
                 continue;
             }
             if !self.native.objectives.contains(&run.id) {
@@ -1265,13 +1277,11 @@ impl AttachedTerminal {
             if self.mode == TerminalMode::Classic && !self.transcript_open && !view.runs.is_empty()
             {
                 Some(
-                    if self.native.omitted_history {
-                        "More history · Ctrl+T full"
-                    } else if self.classic_pinned {
-                        "Classic (--classic) · Ctrl+T details"
-                    } else {
-                        "Classic · Ctrl+T details · /settings"
-                    }
+                    classic_history_status(
+                        area.width,
+                        self.native.omitted_history,
+                        self.classic_pinned,
+                    )
                     .to_owned(),
                 )
             } else {

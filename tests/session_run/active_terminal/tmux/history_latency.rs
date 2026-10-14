@@ -41,9 +41,10 @@ fn resumed_tail_layout(screen: &[u8]) -> bool {
         && rows
             .get(rows.len().saturating_sub(2))
             .is_some_and(|row| row.contains("Enter sends") && row.contains("Ctrl+O newline"))
-        && rows
-            .last()
-            .is_some_and(|row| row.starts_with("ready · custom:local/model-1"))
+        && rows.last().is_some_and(|row| {
+            row.trim()
+                .starts_with("More history · Ctrl+T history · ready · custom:local/model-1")
+        })
 }
 
 fn process_memory_kib(pid: Pid) -> (usize, usize) {
@@ -557,7 +558,7 @@ async fn run_history_fixture() {
     );
     let screen = capture_pane(&server).expect("resumed Classic pane");
     assert!(
-        String::from_utf8_lossy(&screen).contains("More history · Ctrl+T full"),
+        String::from_utf8_lossy(&screen).contains("More history · Ctrl+T history"),
         "bounded Classic projection advertises full history access"
     );
     assert!(
@@ -618,6 +619,25 @@ async fn run_history_fixture() {
         );
         thread::yield_now();
     }
+    let native_history = server.run(&["capture-pane", "-p", "-S", "-", "-t", "arany-test:0.0"]);
+    assert!(native_history.status.success(), "native scrollback capture");
+    assert!(
+        native_history.stdout.len() <= 64 * 1024,
+        "bounded projected scrollback"
+    );
+    let native_history = String::from_utf8_lossy(&native_history.stdout);
+    assert!(
+        native_history.contains("objective 0799"),
+        "recent Run is projected"
+    );
+    assert!(
+        native_history.contains("answer 0799"),
+        "recent answer is projected"
+    );
+    assert!(
+        !native_history.contains("objective 0000"),
+        "old prefix is omitted"
+    );
     let pane_pid = server.run(&[
         "display-message",
         "-p",
