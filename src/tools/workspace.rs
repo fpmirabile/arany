@@ -221,8 +221,12 @@ impl WorkspacePermissions {
     }
 
     /// Discovery failure keeps the saved profiles listed and is reported with the chooser.
-    pub fn prepare_profile_selection(mut self) -> Self {
-        match discover_home_candidates() {
+    pub fn prepare_profile_selection(self) -> Self {
+        self.with_candidates(discover_home_candidates())
+    }
+
+    fn with_candidates(mut self, discovered: Result<Vec<Candidate>, ToolError>) -> Self {
+        match discovered {
             Ok(candidates) => self.candidates = candidates,
             Err(error) => self.discovery_error = Some(error.to_string()),
         }
@@ -258,16 +262,26 @@ impl WorkspacePermissions {
         mode: ApprovalMode,
         tokens: &[String],
     ) -> Result<(), ToolError> {
+        let account = StateRoot::account_path().map_err(|_| ToolError::Configuration)?;
+        let root = StateRoot::admit(&account).map_err(|_| ToolError::Configuration)?;
+        self.remember_with(&root, trusted, mode, tokens)
+    }
+
+    fn remember_with(
+        &mut self,
+        root: &StateRoot,
+        trusted: bool,
+        mode: ApprovalMode,
+        tokens: &[String],
+    ) -> Result<(), ToolError> {
         if !trusted && !tokens.is_empty() {
             return Err(ToolError::Configuration);
         }
         let runtime_grants = self.selected_grants(tokens)?;
-        let account = StateRoot::account_path().map_err(|_| ToolError::Configuration)?;
-        let root = StateRoot::admit(&account).map_err(|_| ToolError::Configuration)?;
         for grant in &runtime_grants {
-            grant.reject_overlap(&[self.path.as_path(), root.path(), account.as_path()])?;
+            grant.reject_overlap(&[self.path.as_path(), root.path()])?;
         }
-        self.save(&root, trusted, mode, runtime_grants)
+        self.save(root, trusted, mode, runtime_grants)
     }
 
     /// Fresh candidates are verified now; a saved grant keeps its pin and rejects dispatch on drift.
@@ -713,6 +727,150 @@ mod tests {
             Err(ToolError::ChangedInput)
         ));
         assert_ne!(grant_at(&cache).token().unwrap(), original_token);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_failure_stays_local_to_the_chooser_and_keeps_saved_profiles() {
+        use super::super::toolchains::{RuntimeKind, RuntimeManager};
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = StateRoot::admit(&temp.path().join("state")).unwrap();
+        let path = temp.path().join("project");
+        std::fs::create_dir(&path).unwrap();
+        let home = temp.path().join("home");
+        let cache = home.join(".cargo/registry/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        for index in 0..129 {
+            std::fs::create_dir_all(home.join(format!(".nvm/versions/node/v1.0.{index}"))).unwrap();
+        }
+        let discovered = discover(&home);
+        assert!(matches!(discovered, Err(ToolError::Limit)));
+        let (device, inode) = fs::identity(&fs::open_directory(&cache).unwrap()).unwrap();
+        let mut access = WorkspacePermissions::load(&path, &root).unwrap();
+        access
+            .save(
+                &root,
+                true,
+                ApprovalMode::AutoEdits,
+                vec![RuntimeGrant {
+                    kind: RuntimeKind::CargoCache,
+                    manager: RuntimeManager::HostCache,
+                    version: None,
+                    path: cache,
+                    device,
+                    inode,
+                }],
+            )
+            .unwrap();
+
+        let access = WorkspacePermissions::load(&path, &root)
+            .unwrap()
+            .with_candidates(discovered);
+        assert!(access.is_trusted());
+        assert!(access.discovery_error().is_some());
+        let choices = access.runtime_profile_choices();
+        assert_eq!(choices.len(), 1);
+        assert!(choices[0].selected);
+        assert!(!choices[0].label.contains("no longer detected"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confirming_unchanged_trust_keeps_a_stale_pin_without_reverifying() {
+        use super::super::toolchains::{RuntimeKind, RuntimeManager};
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = StateRoot::admit(&temp.path().join("state")).unwrap();
+        let path = temp.path().join("project");
+        std::fs::create_dir(&path).unwrap();
+        let cargo = temp.path().join("home/.cargo");
+        let cache = cargo.join("registry/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let (device, inode) = fs::identity(&fs::open_directory(&cache).unwrap()).unwrap();
+        let grant = RuntimeGrant {
+            kind: RuntimeKind::CargoCache,
+            manager: RuntimeManager::HostCache,
+            version: None,
+            path: cache.clone(),
+            device,
+            inode,
+        };
+        let token = grant.token().unwrap();
+        let mut access = WorkspacePermissions::load(&path, &root).unwrap();
+        access
+            .save(&root, true, ApprovalMode::AutoEdits, vec![grant])
+            .unwrap();
+
+        // Keep the old directory alive so the recreated cache gets a new inode.
+        std::fs::rename(&cargo, temp.path().join("previous-cargo")).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        let mut access = WorkspacePermissions::load(&path, &root).unwrap();
+        assert_eq!(access.stale_runtime_profiles(), ["Cargo archive cache"]);
+
+        access
+            .remember_with(&root, true, ApprovalMode::AutoEdits, &[token])
+            .unwrap();
+        let restored = WorkspacePermissions::load(&path, &root).unwrap();
+        assert_eq!(restored.runtime_grants.len(), 1);
+        assert_eq!(
+            (
+                restored.runtime_grants[0].device,
+                restored.runtime_grants[0].inode
+            ),
+            (device, inode),
+            "the saved pin keeps the original identity"
+        );
+        assert_eq!(restored.stale_runtime_profiles(), ["Cargo archive cache"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remembering_a_grant_inside_the_workspace_is_rejected_and_keeps_the_record() {
+        use super::super::toolchains::{RuntimeKind, RuntimeManager};
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = StateRoot::admit(&temp.path().join("state")).unwrap();
+        // The workspace is the parent of the cache, so saving the grant would overlap it.
+        let workspace = temp.path().join("home");
+        let cache = workspace.join(".cargo/registry/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let (device, inode) = fs::identity(&fs::open_directory(&cache).unwrap()).unwrap();
+        let grant = RuntimeGrant {
+            kind: RuntimeKind::CargoCache,
+            manager: RuntimeManager::HostCache,
+            version: None,
+            path: cache,
+            device,
+            inode,
+        };
+        let token = grant.token().unwrap();
+        let mut access = WorkspacePermissions::load(&workspace, &root).unwrap();
+        access
+            .save(&root, true, ApprovalMode::AutoEdits, Vec::new())
+            .unwrap();
+        let before = root.read_workspace_permissions().unwrap();
+        assert!(
+            before.is_some(),
+            "the untouched record exists before the attempt"
+        );
+        access.candidates = vec![Candidate {
+            token: token.clone(),
+            label: grant.profile_label(),
+            grant,
+        }];
+
+        let error = access
+            .remember_with(&root, true, ApprovalMode::Request, &[token])
+            .unwrap_err();
+        assert!(matches!(error, ToolError::Path), "{error:?}");
+        assert_eq!(root.read_workspace_permissions().unwrap(), before);
+        assert!(
+            WorkspacePermissions::load(&workspace, &root)
+                .unwrap()
+                .runtime_grants
+                .is_empty()
+        );
     }
 
     #[test]

@@ -15,6 +15,12 @@ pub(super) enum PermissionChoice {
 pub(super) const UNAVAILABLE_NOTICE: &str =
     "Native Tool protection is unavailable on this OS; chat is read only.";
 
+pub(super) fn stale_profile_notice(label: &str) -> String {
+    format!(
+        "Runtime profile {label} no longer matches; commands using it are rejected until you remove it in /permissions"
+    )
+}
+
 pub(super) fn refresh_files(workspace: &Path, composer: &mut Composer) -> Option<String> {
     if !composer.file_query_changed() {
         return None;
@@ -308,7 +314,107 @@ pub(super) fn cycle(composer: &mut Composer) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_linear_selection, toggle_profile};
+    use super::{
+        PermissionChoice, choose, parse_linear_selection, stale_profile_notice, toggle_profile,
+    };
+    use arany::{AttachedTerminal, Composer, TerminalMode, WorkspacePermissions};
+
+    #[test]
+    fn stale_pin_notice_names_the_profile_and_the_remedy() {
+        assert_eq!(
+            stale_profile_notice("Cargo archive cache"),
+            "Runtime profile Cargo archive cache no longer matches; commands using it are rejected until you remove it in /permissions"
+        );
+    }
+
+    #[cfg(all(unix, debug_assertions))]
+    #[test]
+    fn rejected_save_keeps_the_trust_record_and_reports_the_error() {
+        use std::io::Write;
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+        use std::time::Duration;
+
+        const FIXTURE: &str = "ARANY_TEST_PERMISSION_REJECTION_ROOT";
+        const TEST: &str = "cli::attached::permissions::tests::rejected_save_keeps_the_trust_record_and_reports_the_error";
+        let Some(root) = std::env::var_os(FIXTURE) else {
+            let temp = tempfile::tempdir().unwrap();
+            // The only candidate is the cache under HOME, which is also the workspace: saving it overlaps.
+            std::fs::create_dir_all(temp.path().join("home/.cargo/registry/cache")).unwrap();
+            let (master, slave) = crate::test_process::cloexec_pty(None);
+            let mut input = master.try_clone().unwrap();
+            let mut answered = false;
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .env_clear()
+                .env(FIXTURE, temp.path())
+                .env("HOME", temp.path().join("home"))
+                .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account"))
+                .env("TERM", "dumb")
+                .current_dir(temp.path())
+                .args(["--exact", TEST, "--nocapture"])
+                .process_group(0)
+                .stdin(Stdio::from(slave.try_clone().unwrap()))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::from(slave));
+            let mut child = command.spawn().unwrap();
+            drop(command);
+            let output = crate::test_process::capture_terminal(
+                &mut child,
+                master,
+                Duration::from_secs(30),
+                64 * 1024,
+                |bytes| {
+                    if !answered
+                        && String::from_utf8_lossy(bytes)
+                            .replace("\r\n", "\n")
+                            .contains(crate::test_process::READ_ONLY_CONSENT_PROMPT)
+                    {
+                        input.write_all(b"trust 3\r").unwrap();
+                        answered = true;
+                    }
+                },
+            );
+            assert!(
+                output.status.success(),
+                "rejected save child: {:?}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            assert!(answered, "linear consent prompt was not shown");
+            crate::test_process::assert_single_test_completed(&output.stdout, "rejected save");
+            return;
+        };
+        let root = std::path::PathBuf::from(root);
+        let workspace = root.join("home");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut terminal =
+                AttachedTerminal::acquire_with_mode(true, TerminalMode::default()).unwrap();
+            let mut composer = Composer::default();
+            let access = WorkspacePermissions::open(&workspace)
+                .unwrap()
+                .prepare_profile_selection();
+            let choice = match choose(&mut terminal, access, &mut composer, false).await {
+                Ok(choice) => choice,
+                Err(_) => panic!("a failed save must not abort the chooser"),
+            };
+            let PermissionChoice::Rejected(permissions, message) = choice else {
+                panic!("a failed save must return Rejected");
+            };
+            assert!(
+                message.contains("Could not remember folder trust"),
+                "{message}"
+            );
+            assert!(!permissions.is_trusted());
+            assert!(
+                !root.join("account/workspace-permissions.json").exists(),
+                "a rejected save must not write the trust record"
+            );
+        });
+    }
 
     fn option(token: &str, group: &'static str) -> arany::RuntimeProfileOption {
         arany::RuntimeProfileOption {

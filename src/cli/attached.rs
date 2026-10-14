@@ -1458,12 +1458,7 @@ async fn admit_startup(
     match permissions::admit(terminal, &admission.workspace, composer, admission.tools).await {
         Ok(permissions::PermissionChoice::Selected(access)) => {
             for profile in access.stale_runtime_profiles() {
-                append_notice(
-                    setup_notice,
-                    &format!(
-                        "Runtime profile {profile} no longer matches; commands using it are rejected until you remove it in /permissions"
-                    ),
-                );
+                append_notice(setup_notice, &permissions::stale_profile_notice(profile));
             }
             admission.workspace_permissions = Some(access);
         }
