@@ -1672,51 +1672,15 @@ mod tests {
                 let binary_metadata = std::fs::metadata(&binary).expect("test binary metadata");
                 assert!(binary_metadata.is_file());
                 let mut command = Command::new(BWRAP_BOOTSTRAP[0]);
-                command
-                    .args(&BWRAP_BOOTSTRAP[1..])
-                    .args([
-                        "--unshare-all",
-                        "--unshare-user",
-                        "--disable-userns",
-                        "--assert-userns-disabled",
-                        "--new-session",
-                        "--die-with-parent",
-                        "--cap-drop",
-                        "ALL",
-                        "--clearenv",
-                        "--setenv",
-                        "PATH",
-                    ])
-                    .arg(format!(
-                        "{}/bin:/usr/bin:/bin",
-                        Path::new(&target).display()
-                    ))
-                    .args([
-                        "--setenv",
-                        "HOME",
-                        "/scratch",
-                        "--setenv",
-                        "TMPDIR",
-                        "/scratch",
-                        "--setenv",
-                        "CARGO_TARGET_DIR",
-                        "/scratch/target",
-                        "--ro-bind",
-                        "/usr",
-                        "/usr",
-                        "--symlink",
-                        "usr/lib",
-                        "/lib",
-                        "--symlink",
-                        "usr/lib64",
-                        "/lib64",
-                        "--proc",
-                        "/proc",
-                        "--dev",
-                        "/dev",
-                        "--tmpfs",
-                        "/scratch",
-                    ]);
+                command.args(&BWRAP_BOOTSTRAP[1..]);
+                profile_arguments(
+                    &mut command,
+                    &format!("{}/bin:/usr/bin:/bin", Path::new(&target).display()),
+                    Path::new(&fixture),
+                    &[],
+                    None,
+                    Path::new(&binary),
+                );
                 for directory in mount_directories(Path::new(&target), Path::new("/")) {
                     command.args(["--dir"]).arg(directory);
                 }

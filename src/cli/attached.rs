@@ -875,10 +875,17 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 .await?,
                             ));
                         } else if command == InteractiveCommand::Permissions {
-                            let permissions =
-                                arany::WorkspacePermissions::open(&admission.workspace)
-                                    .map_err(|error| error.to_string())?;
-                            let permissions = permissions.prepare_profile_selection();
+                            let permissions = match arany::WorkspacePermissions::open(
+                                &admission.workspace,
+                            ) {
+                                Ok(permissions) => permissions.prepare_profile_selection(),
+                                Err(error) => {
+                                    notice = Some(Feedback::History(format!(
+                                        "Error: Could not load folder trust: {error}; existing permissions unchanged"
+                                    )));
+                                    continue;
+                                }
+                            };
                             let choice = permissions::choose(
                                 &mut terminal,
                                 permissions,
@@ -1457,8 +1464,8 @@ async fn admit_startup(
 ) -> Result<ControlFlow<()>, String> {
     match permissions::admit(terminal, &admission.workspace, composer, admission.tools).await {
         Ok(permissions::PermissionChoice::Selected(access)) => {
-            for profile in access.stale_runtime_profiles() {
-                append_notice(setup_notice, &permissions::stale_profile_notice(profile));
+            for notice in access.stale_runtime_notices() {
+                append_notice(setup_notice, &notice);
             }
             admission.workspace_permissions = Some(access);
         }

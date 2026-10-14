@@ -556,7 +556,7 @@ data-dependent questions remain:
 
 ## Contract owners
 
-- `docs/specs/goals.md` (created in execution step 4): Goal lifecycle, RPI, steering, checkpoints, budgets and Goal view facts.
+- `docs/specs/goals.md` (created in execution step 3): Goal lifecycle, RPI, steering, checkpoints, budgets and Goal view facts.
 - [Execution](../../docs/specs/execution.md): Run admission, coordination, teams and recovery.
 - [Tools](../../docs/specs/tools.md): grants, effects, changesets, Guard and native differences.
 - [Terminal](../../docs/specs/terminal.md): interaction, Supervisor prompts and accessibility.

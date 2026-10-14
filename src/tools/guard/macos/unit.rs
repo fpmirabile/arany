@@ -1338,7 +1338,7 @@ done
         let npm_cache_path = home.join(".npm/_cacache");
         std::fs::create_dir_all(&npm_cache_path).unwrap();
         std::fs::write(npm_cache_path.join("index.marker"), b"private npm metadata").unwrap();
-        let pip_cache_path = home.join(".cache/pip/http-v2");
+        let pip_cache_path = home.join("Library/Caches/pip/http-v2");
         std::fs::create_dir_all(&pip_cache_path).unwrap();
         std::fs::write(pip_cache_path.join("index.marker"), b"private pip metadata").unwrap();
         let identity = |path: &Path| {

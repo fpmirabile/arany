@@ -15,12 +15,6 @@ pub(super) enum PermissionChoice {
 pub(super) const UNAVAILABLE_NOTICE: &str =
     "Native Tool protection is unavailable on this OS; chat is read only.";
 
-pub(super) fn stale_profile_notice(label: &str) -> String {
-    format!(
-        "Runtime profile {label} no longer matches; commands using it are rejected until you remove it in /permissions"
-    )
-}
-
 pub(super) fn refresh_files(workspace: &Path, composer: &mut Composer) -> Option<String> {
     if !composer.file_query_changed() {
         return None;
@@ -314,22 +308,13 @@ pub(super) fn cycle(composer: &mut Composer) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        PermissionChoice, choose, parse_linear_selection, stale_profile_notice, toggle_profile,
-    };
-    use arany::{AttachedTerminal, Composer, TerminalMode, WorkspacePermissions};
-
-    #[test]
-    fn stale_pin_notice_names_the_profile_and_the_remedy() {
-        assert_eq!(
-            stale_profile_notice("Cargo archive cache"),
-            "Runtime profile Cargo archive cache no longer matches; commands using it are rejected until you remove it in /permissions"
-        );
-    }
+    use super::{parse_linear_selection, toggle_profile};
 
     #[cfg(all(unix, debug_assertions))]
     #[test]
     fn rejected_save_keeps_the_trust_record_and_reports_the_error() {
+        use super::{PermissionChoice, choose};
+        use arany::{AttachedTerminal, Composer, TerminalMode, WorkspacePermissions};
         use std::io::Write;
         use std::os::unix::process::CommandExt;
         use std::process::{Command, Stdio};

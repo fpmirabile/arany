@@ -5,6 +5,15 @@ use std::path::{Path, PathBuf};
 pub(crate) const MAX_RUNTIME_GRANTS: usize = 9;
 const MAX_CANDIDATES: usize = 64;
 const MAX_DIRECTORY_ENTRIES: usize = 128;
+// pip follows the platform cache directory.
+#[cfg(target_os = "macos")]
+const PIP_HOST_HTTP_CACHE: &str = "Library/Caches/pip/http-v2";
+#[cfg(target_os = "macos")]
+const PIP_HOST_WHEEL_CACHE: &str = "Library/Caches/pip/wheels";
+#[cfg(not(target_os = "macos"))]
+const PIP_HOST_HTTP_CACHE: &str = ".cache/pip/http-v2";
+#[cfg(not(target_os = "macos"))]
+const PIP_HOST_WHEEL_CACHE: &str = ".cache/pip/wheels";
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -64,8 +73,8 @@ impl RuntimeKind {
             Self::CargoSource => Some((".cargo/registry/src", "cargo/registry/src")),
             Self::CargoIndex => Some((".cargo/registry/index", "cargo/registry/index")),
             Self::NpmCache => Some((".npm/_cacache", ".npm/_cacache")),
-            Self::PipHttpCache => Some((".cache/pip/http-v2", ".cache/pip/http-v2")),
-            Self::PipWheelCache => Some((".cache/pip/wheels", ".cache/pip/wheels")),
+            Self::PipHttpCache => Some((PIP_HOST_HTTP_CACHE, ".cache/pip/http-v2")),
+            Self::PipWheelCache => Some((PIP_HOST_WHEEL_CACHE, ".cache/pip/wheels")),
             _ => None,
         }
     }

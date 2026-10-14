@@ -184,12 +184,17 @@ impl WorkspacePermissions {
             .collect()
     }
 
-    /// Saved grants that no longer verify; they stay pinned, so commands using them are rejected.
-    pub fn stale_runtime_profiles(&self) -> Vec<&'static str> {
+    /// Startup notices for saved grants that no longer verify; they stay pinned, so commands using them are rejected.
+    pub fn stale_runtime_notices(&self) -> Vec<String> {
         self.runtime_grants
             .iter()
             .filter(|grant| grant.verify_host().is_err())
-            .map(|grant| grant.kind.label())
+            .map(|grant| {
+                format!(
+                    "Runtime profile {} no longer matches; commands using it are rejected until you remove it in /permissions",
+                    grant.kind.label()
+                )
+            })
             .collect()
     }
 
@@ -419,6 +424,8 @@ fn discover_home_candidates() -> Result<Vec<Candidate>, ToolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const STALE_CARGO_NOTICE: &str = "Runtime profile Cargo archive cache no longer matches; commands using it are rejected until you remove it in /permissions";
 
     #[cfg(unix)]
     #[test]
@@ -688,7 +695,7 @@ mod tests {
         std::fs::remove_dir_all(temp.path().join(".cargo")).unwrap();
         let restored = WorkspacePermissions::load(&path, &root).unwrap();
         assert!(restored.is_trusted());
-        assert_eq!(restored.stale_runtime_profiles(), ["Cargo archive cache"]);
+        assert_eq!(restored.stale_runtime_notices(), [STALE_CARGO_NOTICE]);
         assert_eq!(restored.config(&path).unwrap().runtime_grants.len(), 1);
         let choices = restored.runtime_profile_choices();
         assert_eq!(choices.len(), 1);
@@ -806,7 +813,7 @@ mod tests {
         std::fs::rename(&cargo, temp.path().join("previous-cargo")).unwrap();
         std::fs::create_dir_all(&cache).unwrap();
         let mut access = WorkspacePermissions::load(&path, &root).unwrap();
-        assert_eq!(access.stale_runtime_profiles(), ["Cargo archive cache"]);
+        assert_eq!(access.stale_runtime_notices(), [STALE_CARGO_NOTICE]);
 
         access
             .remember_with(&root, true, ApprovalMode::AutoEdits, &[token])
@@ -821,7 +828,7 @@ mod tests {
             (device, inode),
             "the saved pin keeps the original identity"
         );
-        assert_eq!(restored.stale_runtime_profiles(), ["Cargo archive cache"]);
+        assert_eq!(restored.stale_runtime_notices(), [STALE_CARGO_NOTICE]);
     }
 
     #[cfg(unix)]
