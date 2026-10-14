@@ -181,64 +181,6 @@ pub(super) fn try_product_child_of_executable(shell_pid: u32, product: &Path) ->
     }
 }
 
-pub(super) fn try_product_child_of_executable(shell_pid: u32, product: &Path) -> Option<Pid> {
-    const MAX_DESCENDANT_DEPTH: usize = 8;
-    const MAX_DESCENDANTS: usize = 64;
-    const MAX_CHILDREN_BYTES: usize = 1024;
-
-    let root_pid = i32::try_from(shell_pid).ok()?;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let mut pending = VecDeque::new();
-        pending.push_back((root_pid, 0));
-        let mut seen = vec![root_pid];
-        let mut visited = 0;
-        while let Some((parent_pid, depth)) = pending.pop_front() {
-            if depth >= MAX_DESCENDANT_DEPTH {
-                continue;
-            }
-            let children_path = format!("/proc/{parent_pid}/task/{parent_pid}/children");
-            let mut children = String::new();
-            let Ok(bytes_read) = File::open(children_path).and_then(|file| {
-                file.take(u64::try_from(MAX_CHILDREN_BYTES + 1).expect("bounded child list limit"))
-                    .read_to_string(&mut children)
-            }) else {
-                continue;
-            };
-            if bytes_read <= MAX_CHILDREN_BYTES {
-                for raw in children.split_ascii_whitespace() {
-                    if visited >= MAX_DESCENDANTS {
-                        break;
-                    }
-                    let Ok(raw_pid) = raw.parse::<i32>() else {
-                        continue;
-                    };
-                    if raw_pid <= 0 || seen.contains(&raw_pid) {
-                        continue;
-                    }
-                    visited += 1;
-                    seen.push(raw_pid);
-                    if std::fs::read_link(format!("/proc/{raw_pid}/exe"))
-                        .ok()
-                        .as_deref()
-                        == Some(product)
-                    {
-                        return Some(Pid::from_raw(raw_pid).expect("positive product PID"));
-                    }
-                    pending.push_back((raw_pid, depth + 1));
-                }
-            }
-            if visited >= MAX_DESCENDANTS {
-                break;
-            }
-        }
-        if Instant::now() >= deadline {
-            return None;
-        }
-        thread::yield_now();
-    }
-}
-
 pub(super) fn transcript_field<'a>(text: &'a str, label: &str) -> &'a str {
     text.lines()
         .filter_map(|line| line.trim_end_matches('\r').strip_prefix(label))
