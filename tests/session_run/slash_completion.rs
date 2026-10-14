@@ -465,14 +465,21 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         rustix::fs::FlockOperation::NonBlockingLockExclusive,
     )
     .expect("hold current cache lease");
+    let clear_result = StateRoot::open_existing(&state)
+        .expect("State")
+        .clear_workspace_build_cache(&workspace);
+    let clear_category = match &clear_result {
+        Ok(()) => "cleared".to_owned(),
+        Err(arany::StoreError::BuildCacheBusy) => "BuildCacheBusy".to_owned(),
+        Err(arany::StoreError::StateNotPrivate) => "StateNotPrivate".to_owned(),
+        Err(arany::StoreError::InvalidStateDirectory) => "InvalidStateDirectory".to_owned(),
+        Err(arany::StoreError::StorageFull) => "StorageFull".to_owned(),
+        Err(arany::StoreError::Io(error)) => format!("Io({:?})", error.kind()),
+        Err(_) => "other".to_owned(),
+    };
     assert!(
-        matches!(
-            StateRoot::open_existing(&state)
-                .expect("State")
-                .clear_workspace_build_cache(&workspace),
-            Err(arany::StoreError::BuildCacheBusy)
-        ),
-        "Store clear must classify the held identity lease as busy"
+        matches!(clear_result, Err(arany::StoreError::BuildCacheBusy)),
+        "Store clear result category: {clear_category}"
     );
     let busy_at = transcript.len();
     input
