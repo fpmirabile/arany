@@ -171,10 +171,11 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                     objective: goal_objective.clone(),
                     workspace_identity: (metadata.dev(), metadata.ino()),
                     budget: GoalBudget {
-                        max_provider_calls: GOAL_RUNS as u32,
+                        max_provider_calls: Some(GOAL_RUNS as u32),
                         max_runs: GOAL_RUNS as u8,
                         ..GoalBudget::default()
                     },
+                    resource_settings: arany::ToolResourceSettings::default(),
                 },
             )
             .await
@@ -227,17 +228,17 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                         tool_policy: None,
                     },
                 },
-                Event::GoalActiveTimeReserved {
-                    goal_id,
-                    run_id,
-                    reserved_ms: 1,
-                },
                 Event::AgentSpawned {
                     run_id,
                     agent_run_id,
                     role: AgentRole::Primary,
                     ordinal: 0,
                     objective: None,
+                },
+                Event::GoalActiveTimeReserved {
+                    goal_id,
+                    run_id,
+                    reserved_ms: 1,
                 },
                 Event::GoalProviderCallReserved {
                     goal_id,
@@ -257,6 +258,11 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                         failure_reason: None,
                     },
                 },
+                Event::GoalActiveTimeSettled {
+                    goal_id,
+                    run_id,
+                    active_ms: 1,
+                },
                 Event::AgentFinished {
                     run_id,
                     agent_run_id,
@@ -271,11 +277,6 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                 Event::RunFinished {
                     run_id,
                     disposition: RunDisposition::Finished,
-                },
-                Event::GoalActiveTimeSettled {
-                    goal_id,
-                    run_id,
-                    active_ms: 1,
                 },
             ] {
                 store.append(session_id, event).await.expect("valid Event");
