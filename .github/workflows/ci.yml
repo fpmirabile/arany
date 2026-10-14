@@ -106,8 +106,9 @@ jobs:
         if: needs.changes.outputs.markdown-only != 'true'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes bubblewrap util-linux
+          sudo apt-get install --yes bubblewrap iproute2 util-linux
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          test -x /usr/sbin/ip
           bwrap --unshare-user --unshare-net --ro-bind / / -- true
       - if: needs.changes.outputs.markdown-only != 'true'
         run: cargo fetch --locked
@@ -140,8 +141,9 @@ jobs:
       - name: Prepare isolated Linux terminal fixtures
         run: |
           sudo apt-get update
-          sudo apt-get install --yes bubblewrap util-linux
+          sudo apt-get install --yes bubblewrap iproute2 util-linux
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          test -x /usr/sbin/ip
           bwrap --unshare-user --unshare-net --ro-bind / / -- true
       - name: Fetch locked Rust dependencies
         run: cargo fetch --locked
@@ -183,9 +185,10 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --yes bubblewrap tmux util-linux
+          sudo apt-get install --yes bubblewrap iproute2 tmux util-linux
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           test -x /usr/bin/tmux
+          test -x /usr/sbin/ip
           bwrap --unshare-user --unshare-net --ro-bind / / -- true
       - name: Fetch locked Rust dependencies
         run: cargo fetch --locked
@@ -197,7 +200,23 @@ jobs:
 
           run_exact_parent() {
             local parent="$1"
-            if ! cargo test --release --locked --offline --test session_run "$parent" -- --ignored --exact >"$log" 2>&1; then
+            if ! cargo test --release --locked --offline --test session_run "$parent" -- --ignored --exact 2>&1 | python3 -c '
+          import sys
+
+          limit = int(sys.argv[2])
+          captured = 0
+          with open(sys.argv[1], "wb") as output:
+              while chunk := sys.stdin.buffer.read(65536):
+                  remaining = limit + 1 - captured
+                  if remaining > 0:
+                      kept = chunk[:remaining]
+                      output.write(kept)
+                      captured += len(kept)
+
+          if captured > limit:
+              print("native parent output exceeded the 1 MiB capture limit", file=sys.stderr)
+              sys.exit(1)
+          ' "$log" 1048576; then
               cat "$log"
               return 1
             fi

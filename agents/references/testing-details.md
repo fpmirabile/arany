@@ -71,17 +71,19 @@ Repeat with `--release` for the optimized profile. To run one ignored gate, use 
 - Account tests using `ARANY_TEST_ACCOUNT_ROOT` are debug-only: optimized Arany intentionally rejects that override. Isolate environment-selected Session/preference state too with explicit absolute synthetic `HOME`, `XDG_STATE_HOME` and `XDG_DATA_HOME` beneath the fixture account root's parent; [Store admission](../store.md) rejects an ambient default root when that override is set. Clearing those variables can otherwise fall back to the real passwd home for Session/preference state. Verify both roots stay fixture-owned before state access. Test optimized account behavior with a private passwd home and no-network mount namespace, and first prove the no-leaf control reaches the intended boundary; otherwise an early account-root rejection can make a failure test pass without exercising its fixture.
 - Native Linux Guard account fixtures retain the host user-manager socket,
   cgroup hierarchy and host-visible `/tmp` seed paths. Their private mount/network
-  namespace uses passwordless `sudo` only for namespace and synthetic passwd-file
-  mount setup,
-  then drops to the original UID/GID with cleared groups, environment and
-  privileges before a deadline-supervised helper. A user namespace around the
-  controller changes root-owned ancestor identities and hides the manager's seed
-  paths; the ordinary offline account wrapper does not prove native execution.
+  namespace uses passwordless `sudo` only for namespace creation, synthetic
+  passwd-file mounting and the fixed `/usr/sbin/ip` command that raises loopback
+  inside that namespace. It then drops to the original UID/GID with cleared
+  groups, environment and privileges before a deadline-supervised helper.
+  `iproute2` is an explicit CI prerequisite; missing setup fails closed. A user
+  namespace around the controller changes root-owned ancestor identities and
+  hides the manager's seed paths; the ordinary offline account wrapper does not
+  prove native execution.
   Serialize the native parent with `NATIVE_GATE` and retain its private fixture
   after any failed capture or receipt check; reaping `sudo` alone does not prove
   that its descendant helper has exited.
 - To prove the no-account composer without a live keyring lookup, use a private default user StateRoot and an admitted test-owned unavailable local credential-bus address. This can prove local rejection and setup cancellation, not saved-account write/reuse or native keyring behavior.
-- Every attached PTY now reaches OS-user folder trust before account/Session work, including with explicit Provider/`--tools` flags. Isolate the account and environment-selected state roots and explicitly answer or dismiss the initial consent; a private Session directory and Provider flag do not isolate trust metadata. Linux fixtures use the private passwd-home command owner, retaining host loopback only for synthetic peers. Tests outside the consent owner use its bounded response pump; the consent owner keeps manual input. Continue selecting an explicit Provider/model with a synthetic cleared-environment credential when setup is not under test, since bare account selection can reach the fixed OS credential slot.
+- Every attached PTY now reaches OS-user folder trust before account/Session work, including with explicit Provider/`--tools` flags. Isolate the account and environment-selected state roots and explicitly answer or dismiss the initial consent; a private Session directory and Provider flag do not isolate trust metadata. Ordinary Linux PTY fixtures use the private passwd-home command owner while retaining host loopback only for synthetic peers; native Guard fixtures raise loopback only in their private network namespace. Tests outside the consent owner use its bounded response pump; the consent owner keeps manual input. Continue selecting an explicit Provider/model with a synthetic cleared-environment credential when setup is not under test, since bare account selection can reach the fixed OS credential slot.
 - Command snapshot-refusal fixtures must use admitted executable identities and
   assert the actual capture disposition. A denied system executable or missing
   interpreter runtime proves no snapshot rejection. macOS OS hard links can

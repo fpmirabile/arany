@@ -165,7 +165,7 @@ pub fn native_account_isolated_test_command(
         .args([
             "--non-interactive", "--", "/usr/bin/unshare", "--mount", "--net",
             "--propagation", "private", "--", "/usr/bin/sh", "-eu", "-c",
-            "root=$1; uid=$2; gid=$3; shift 3; /usr/bin/mount --bind \"$root/passwd\" /etc/passwd; /usr/bin/mount --options remount,bind,ro /etc/passwd; exec /usr/bin/timeout --kill-after=2s 80s /usr/bin/setpriv --reuid \"$uid\" --regid \"$gid\" --clear-groups --no-new-privs /usr/bin/env -i HOME=\"$root/home\" XDG_STATE_HOME=\"$root/environment-state\" XDG_DATA_HOME=\"$root/environment-data\" PATH=/usr/bin:/bin ARANY_TEST_CACHE_CANARY_ROOT=\"$root\" ARANY_ACCOUNT_ISOLATED_TEST=1 \"$@\"",
+            "root=$1; uid=$2; gid=$3; shift 3; /usr/bin/mount --bind \"$root/passwd\" /etc/passwd; /usr/bin/mount --options remount,bind,ro /etc/passwd; /usr/sbin/ip link set lo up; exec /usr/bin/timeout --kill-after=2s 80s /usr/bin/setpriv --reuid \"$uid\" --regid \"$gid\" --clear-groups --no-new-privs /usr/bin/env -i HOME=\"$root/home\" XDG_STATE_HOME=\"$root/environment-state\" XDG_DATA_HOME=\"$root/environment-data\" PATH=/usr/bin:/bin ARANY_TEST_CACHE_CANARY_ROOT=\"$root\" ARANY_ACCOUNT_ISOLATED_TEST=1 \"$@\"",
             "arany-native-account-fixture",
         ])
         .arg(root)
