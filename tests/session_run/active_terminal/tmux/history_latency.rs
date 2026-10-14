@@ -7,6 +7,7 @@ use arany::{
     GoalId, GoalPhase, GoalReport, GoalStatus, ProviderCallDisposition, ProviderCallRecord,
     RunConfig, RunDisposition, RunId, RunStatus, SessionId, StateRoot, Store, resume_session,
 };
+use rustix::process::Pid;
 use std::{
     io::Read,
     net::{TcpListener, TcpStream},
@@ -45,9 +46,9 @@ fn resumed_tail_layout(screen: &[u8]) -> bool {
             .is_some_and(|row| row.starts_with("ready · custom:local/model-1"))
 }
 
-fn process_memory_kib(pid: u32) -> (usize, usize) {
-    let status =
-        std::fs::read_to_string(format!("/proc/{pid}/status")).expect("product process memory");
+fn process_memory_kib(pid: Pid) -> (usize, usize) {
+    let status = std::fs::read_to_string(format!("/proc/{}/status", pid.as_raw_pid()))
+        .expect("product process memory");
     let field = |name| {
         status
             .lines()
