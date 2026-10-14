@@ -1,6 +1,6 @@
 use super::events::{
     AgentDisposition, AgentRole, AgentRunId, CompactionRecord, Event, EventEnvelope, ForkLineage,
-    GoalBudget, GoalId, GoalPhase, GoalPlanContract, GoalReport, GoalStatus,
+    GoalBudget, GoalId, GoalPhase, GoalPlanContract, GoalReport, GoalStatus, GoalUsage,
     ProviderCallDisposition, ProviderCallRecord, ReplayError, RunConfig, RunDisposition, RunId,
     SessionDefaults, SessionId,
 };
@@ -70,6 +70,17 @@ impl GoalView {
 
     pub(crate) fn effective_budget(&self) -> GoalBudget {
         self.budget.effective(self.plan_contract.as_ref())
+    }
+
+    /// Whether the settled usage of this Goal admits another Run under its effective budget.
+    pub(crate) fn admits_next_run(&self) -> bool {
+        self.effective_budget().admits_next_run(GoalUsage {
+            runs: self.run_ids.len(),
+            provider_calls: self.provider_calls,
+            active_ms: self.active_ms,
+            known_tokens: self.known_tokens,
+            token_usage_unknown: self.token_usage_unknown,
+        })
     }
 
     pub(crate) fn can_resume(&self, view: &SessionView) -> bool {

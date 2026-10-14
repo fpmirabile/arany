@@ -127,6 +127,16 @@ impl Default for GoalBudget {
     }
 }
 
+/// Goal usage that decides whether another Run is admissible; `runs` counts linked Runs.
+#[derive(Clone, Copy)]
+pub(crate) struct GoalUsage {
+    pub(crate) runs: usize,
+    pub(crate) provider_calls: u32,
+    pub(crate) active_ms: u64,
+    pub(crate) known_tokens: u64,
+    pub(crate) token_usage_unknown: bool,
+}
+
 impl GoalBudget {
     pub(crate) fn validate(&self) -> Result<(), ReplayError> {
         if self.max_provider_calls == 0
@@ -151,6 +161,16 @@ impl GoalBudget {
                 ..plan.budget.clone()
             },
         )
+    }
+
+    /// The one admission rule for another Run: every finite dimension must have headroom.
+    pub(crate) fn admits_next_run(&self, usage: GoalUsage) -> bool {
+        usize::from(self.max_runs) > usage.runs
+            && self.max_provider_calls > usage.provider_calls
+            && self.max_active_ms > usage.active_ms
+            && self
+                .max_tokens
+                .is_none_or(|limit| !usage.token_usage_unknown && usage.known_tokens < limit)
     }
 
     pub(crate) fn is_within(&self, pinned: &Self) -> bool {

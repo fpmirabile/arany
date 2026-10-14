@@ -2,7 +2,7 @@ use crate::provider::{AgentPhase, ImageAttachment, Provider, ProviderRequest};
 use crate::session::input::{InputError, WorkspaceInputs};
 use crate::session::{
     AgentRole, AgentRunId, CollaborationPolicy, CompiledContext, Event, GoalBudget, GoalId,
-    GoalPhase, GoalPlanContract, GoalReport, GoalStatus,
+    GoalPhase, GoalPlanContract, GoalReport, GoalStatus, GoalUsage,
     MAX_USER_MESSAGE_BYTES as MAX_OBJECTIVE_BYTES, RunConfig, RunId, RunView, SessionId,
 };
 use crate::store::{SessionRunLock, StateRoot, Store, StoreError, WorkspaceRunLock};
@@ -207,7 +207,7 @@ struct RunTurn {
 }
 
 impl RunTurn {
-    /// The Finished Run's Goal failed because its settled active time left no admissible next Run.
+    /// Settlement failed the Goal over this Finished Run, which leaves no admissible next Run.
     fn exhausted(&self) -> bool {
         self.goal_status == GoalStatus::Failed
             && self.outcome.run.status == crate::session::RunStatus::Finished
@@ -1594,11 +1594,7 @@ impl<P: Provider + 'static> Engine<P> {
         let mut turn = self
             .run_turn(request, cancellation.clone(), progress.clone(), false)
             .await?;
-        while turn.continues() {
-            // The committed Run stands; the Goal stays open and resumes explicitly.
-            if cancellation.is_cancelled() {
-                return Ok(turn.outcome);
-            }
+        while turn.continues() && !cancellation.is_cancelled() {
             let next = RunRequest {
                 session_id: Some(turn.outcome.session_id),
                 title: None,
@@ -1614,13 +1610,8 @@ impl<P: Provider + 'static> Engine<P> {
                 .await
             {
                 Ok(turn) => turn,
-                // Settlement decides exhaustion for a Finished Run; this keeps the receipt if admission still refuses.
-                Err(EngineError::GoalBudgetExhausted) => {
-                    self.fail_exhausted_goal(&turn.outcome).await?;
-                    return Err(EngineError::GoalBudgetExhausted);
-                }
-                // Cancellation before MessageAccepted admits no Run; the Finished Run keeps its outcome.
-                Err(EngineError::CancelledBeforeStart) => return Ok(turn.outcome),
+                // Cancellation before MessageAccepted admits no Run; the committed Finished Run keeps its outcome.
+                Err(EngineError::CancelledBeforeStart) => break,
                 Err(error) => return Err(error),
             };
         }
@@ -1628,39 +1619,6 @@ impl<P: Provider + 'static> Engine<P> {
             return Err(EngineError::GoalBudgetExhausted);
         }
         Ok(turn.outcome)
-    }
-
-    /// Finishes an open autonomous Goal as Failed after its next Run was refused for budget.
-    async fn fail_exhausted_goal(&mut self, previous: &RunOutcome) -> Result<(), EngineError> {
-        let session_id = previous.session_id;
-        let _session_lock = self.lock_session(session_id)?;
-        let view = self
-            .store
-            .load_view(session_id)
-            .await?
-            .ok_or(EngineError::InvalidHistory)?;
-        let goal = view
-            .goal(previous.goal_id)
-            .ok_or(EngineError::InvalidHistory)?;
-        if !goal.is_active() || goal.active_run.is_some() {
-            return Err(EngineError::InvalidHistory);
-        }
-        let report = goal_report(&view, &previous.run, goal);
-        append_observed(
-            &self.store,
-            None,
-            None,
-            session_id,
-            Event::GoalFinished {
-                goal_id: goal.id,
-                status: GoalStatus::Failed,
-                active_ms: goal.active_ms,
-                report,
-            },
-        )
-        .await?;
-        self.release_goal_workspace(goal.id, goal.workspace_identity);
-        Ok(())
     }
 
     async fn run_turn(
@@ -1711,24 +1669,20 @@ impl<P: Provider + 'static> Engine<P> {
             request.objective.clone()
         };
         let budget = goal.budget.effective(goal.plan_contract.as_ref());
-        let call_limit = budget.max_provider_calls;
-        let run_limit = budget.max_runs;
-        let active_limit = budget.max_active_ms;
-        let token_limit = budget.max_tokens;
-        let calls_remaining = call_limit.saturating_sub(goal.calls_used);
-        let runs_remaining = run_limit.saturating_sub(goal.runs_used);
-        let active_remaining_ms = active_limit.saturating_sub(goal.active_ms);
-        if calls_remaining == 0
-            || runs_remaining == 0
-            || active_remaining_ms == 0
-            || token_limit
-                .is_some_and(|limit| goal.token_usage_unknown || goal.known_tokens >= limit)
-        {
+        if !budget.admits_next_run(GoalUsage {
+            runs: usize::from(goal.runs_used),
+            provider_calls: goal.calls_used,
+            active_ms: goal.active_ms,
+            known_tokens: goal.known_tokens,
+            token_usage_unknown: goal.token_usage_unknown,
+        }) {
             return Err(EngineError::GoalBudgetExhausted);
         }
+        let token_limit = budget.max_tokens;
+        let active_remaining_ms = budget.max_active_ms.saturating_sub(goal.active_ms);
         let mut event_budget = goal.budget.clone();
-        event_budget.max_provider_calls = calls_remaining;
-        event_budget.max_runs = runs_remaining;
+        event_budget.max_provider_calls = budget.max_provider_calls.saturating_sub(goal.calls_used);
+        event_budget.max_runs = budget.max_runs.saturating_sub(goal.runs_used);
         event_budget.max_active_ms = active_remaining_ms;
         event_budget.max_tokens = token_limit;
         let event_slots = event_budget
@@ -2093,19 +2047,19 @@ impl<P: Provider + 'static> Engine<P> {
             },
         )
         .await?;
-        let view = self
-            .store
-            .load_view(session_id)
-            .await?
-            .ok_or(EngineError::InvalidHistory)?;
-        let goal_view = view.goal(goal.id).ok_or(EngineError::InvalidHistory)?;
+        // Settlement only moves the reservation into active time, so the settled Goal needs no second replay.
+        let mut goal_view = view
+            .goal(goal.id)
+            .ok_or(EngineError::InvalidHistory)?
+            .clone();
+        goal_view.active_ms += active_ms;
         // An autonomous Goal ends only at its own stop conditions; a cancelled Run leaves it open to resume.
         let terminal = match run.status {
             crate::session::RunStatus::Finished if goal.autonomous => {
                 if goal_view.plan_contract.is_none() || goal_view.success_criterion_satisfied {
                     Some(GoalStatus::Completed)
-                } else if goal_view.active_ms >= goal_view.effective_budget().max_active_ms {
-                    // The next admission would refuse on settled active time; decide it before this segment closes.
+                } else if !goal_view.admits_next_run() {
+                    // Decide the exhaustion before this segment closes, so the next admission cannot find it open.
                     Some(GoalStatus::Failed)
                 } else {
                     None
@@ -2123,7 +2077,7 @@ impl<P: Provider + 'static> Engine<P> {
         };
         let mut goal_status = GoalStatus::Running;
         if let Some(status) = terminal {
-            let report = goal_report(&view, &run, goal_view);
+            let report = goal_report(&view, &run, &goal_view);
             append_observed(
                 &self.store,
                 None,

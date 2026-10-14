@@ -273,7 +273,12 @@ pub(super) async fn submit_objective(
                     }
                     user_recorded = true;
                 }
-                view.goals = update.goals;
+                if let Some(goal) = update.goal {
+                    match view.goals.iter_mut().find(|known| known.id == goal.id) {
+                        Some(known) => *known = goal,
+                        None => view.goals.push(goal),
+                    }
+                }
                 if let Some(last) = view.runs.last_mut()
                     && last.id == update.run.id
                 {

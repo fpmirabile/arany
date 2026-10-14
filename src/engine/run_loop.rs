@@ -6,7 +6,7 @@ use crate::provider::{
 };
 use crate::session::{
     AgentDisposition, AgentRunId, CollaborationPolicy, DisplayCategory, DisplayChunk, Event,
-    GoalBudget, GoalPhase, MAX_ASSISTANT_MESSAGE_BYTES as MAX_PRIMARY_RESULT_BYTES,
+    GoalBudget, GoalPhase, GoalUsage, MAX_ASSISTANT_MESSAGE_BYTES as MAX_PRIMARY_RESULT_BYTES,
     MAX_DISPLAY_CHUNK_BYTES, MAX_DISPLAY_CHUNKS, MAX_DISPLAY_COMMENTARY_ITEMS,
     MAX_DISPLAY_TEXT_BYTES, ProviderCallDisposition, ProviderCallRecord, RunDisposition, RunId,
     SessionId,
@@ -231,17 +231,17 @@ impl GoalRunBudget {
         };
         let budget = self.pinned_budget.effective(plan.as_ref());
         drop(plan);
-        let active_used = self
-            .active_ms_before
-            .load(Ordering::Acquire)
-            .saturating_add(self.elapsed_active_ms());
-        u32::from(self.runs_used_before) + 2 <= u32::from(budget.max_runs)
-            && self.calls_used.load(Ordering::Acquire) < budget.max_provider_calls
-            && active_used < budget.max_active_ms
-            && budget.max_tokens.is_none_or(|limit| {
-                !self.token_usage_unknown.load(Ordering::Acquire)
-                    && self.known_tokens.load(Ordering::Acquire) < limit
-            })
+        budget.admits_next_run(GoalUsage {
+            // This Run is linked, so it counts toward the Goal's Runs.
+            runs: usize::from(self.runs_used_before) + 1,
+            provider_calls: self.calls_used.load(Ordering::Acquire),
+            active_ms: self
+                .active_ms_before
+                .load(Ordering::Acquire)
+                .saturating_add(self.elapsed_active_ms()),
+            known_tokens: self.known_tokens.load(Ordering::Acquire),
+            token_usage_unknown: self.token_usage_unknown.load(Ordering::Acquire),
+        })
     }
 
     fn success_criterion_satisfied(&self) -> bool {

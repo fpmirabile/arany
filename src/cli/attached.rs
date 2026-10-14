@@ -1307,11 +1307,18 @@ const INTERRUPTED_GOAL_NOTICE: &str =
 /// describe a cancelled Run as a fresh task.
 fn submission_notice(
     interrupted_goal: Option<arany::GoalId>,
+    run_status: RunStatus,
     run_feedback: Option<String>,
 ) -> Option<String> {
-    interrupted_goal
-        .map(|_| INTERRUPTED_GOAL_NOTICE.to_owned())
-        .or(run_feedback)
+    match interrupted_goal {
+        // A cancelled Run's feedback only restates the cancellation that the resume hint already covers.
+        Some(_) if run_status == RunStatus::Cancelled => Some(INTERRUPTED_GOAL_NOTICE.to_owned()),
+        Some(_) => Some(match run_feedback {
+            Some(feedback) => format!("{feedback}; {INTERRUPTED_GOAL_NOTICE}"),
+            None => INTERRUPTED_GOAL_NOTICE.to_owned(),
+        }),
+        None => run_feedback,
+    }
 }
 
 async fn finish_interrupted_submission(
@@ -1401,6 +1408,7 @@ async fn finish_submission(
     // A cancelled autonomous loop keeps its Goal open; the reloaded view says how to continue it.
     let feedback = submission_notice(
         view.interrupted_goal_id(),
+        outcome.run.status,
         render_run_feedback(&outcome.run),
     );
     if let Some(feedback) = feedback {
@@ -2156,16 +2164,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn interrupted_goal_notice_precedes_cancelled_run_feedback() {
+    fn interrupted_goal_notice_replaces_only_cancelled_run_feedback() {
         let goal = arany::GoalId::new();
         let cancelled =
             Some("Run cancelled. No answer was committed. You can submit a new task.".to_owned());
         assert_eq!(
-            submission_notice(Some(goal), cancelled.clone()),
+            submission_notice(Some(goal), RunStatus::Cancelled, cancelled.clone()),
             Some(INTERRUPTED_GOAL_NOTICE.to_owned())
         );
-        assert_eq!(submission_notice(None, cancelled.clone()), cancelled);
-        assert_eq!(submission_notice(None, None), None);
+        assert_eq!(
+            submission_notice(None, RunStatus::Cancelled, cancelled.clone()),
+            cancelled
+        );
+        assert_eq!(submission_notice(None, RunStatus::Finished, None), None);
+    }
+
+    #[test]
+    fn interrupted_goal_notice_keeps_feedback_from_a_finished_run() {
+        let goal = arany::GoalId::new();
+        let cache = Some("Cache updated for the next Run.".to_owned());
+        assert_eq!(
+            submission_notice(Some(goal), RunStatus::Finished, cache),
+            Some(format!(
+                "Cache updated for the next Run.; {INTERRUPTED_GOAL_NOTICE}"
+            ))
+        );
+        assert_eq!(
+            submission_notice(Some(goal), RunStatus::Finished, None),
+            Some(INTERRUPTED_GOAL_NOTICE.to_owned())
+        );
     }
 
     #[test]

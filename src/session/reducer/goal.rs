@@ -64,11 +64,10 @@ impl SessionView {
             return Err(ReplayError::InvalidTransition);
         }
         let goal = current_goal_mut(self, *goal_id)?;
-        let run_limit = goal.effective_budget().max_runs;
         if goal.status != GoalStatus::Running
             || goal.active_run.is_some()
             || goal.active_time_reservation.is_some()
-            || goal.run_ids.len() >= usize::from(run_limit)
+            || !goal.admits_next_run()
         {
             return Err(ReplayError::InvalidTransition);
         }
@@ -324,13 +323,13 @@ impl SessionView {
         let run_status = current_run(self, run_id)?.status;
         let goal = current_goal_mut(self, *goal_id)?;
         let active_limit = goal.effective_budget().max_active_ms;
-        // An unsatisfied planned Goal's Finished Run can be exhausted by its settled active time before
-        // the next Run is admitted; a planless or satisfied Goal completes instead.
+        // Settlement fails an unsatisfied planned Goal whose Finished Run admits no next Run; a planless or
+        // satisfied Goal completes instead.
         let exhausted_after_finish = goal.autonomous
             && run_status == RunStatus::Finished
-            && goal.active_ms == active_limit
             && goal.plan_contract.is_some()
-            && !goal.success_criterion_satisfied;
+            && !goal.success_criterion_satisfied
+            && !goal.admits_next_run();
         let disposition_matches = matches!(
             (*status, run_status),
             (GoalStatus::Completed, RunStatus::Finished)

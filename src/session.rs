@@ -16,7 +16,6 @@ pub(crate) use compaction::{
     validate_compaction_references,
 };
 pub(crate) use context::CompiledContext;
-pub(crate) use events::ReplayError;
 pub use events::{
     AgentDisposition, AgentRole, AgentRunId, CollaborationPolicy, CompactionFailure,
     CompactionRecord, CompactionStatus, ContextUsage, DISPLAY_LIMIT_TEXT, DisplayCategory,
@@ -28,6 +27,7 @@ pub use events::{
     ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition, RunId, SessionDefaults,
     SessionId,
 };
+pub(crate) use events::{GoalUsage, ReplayError};
 pub(crate) use lineage::prefix_digest;
 pub use reducer::{
     AgentStatus, AgentView, CompactionView, GoalView, RunStatus, RunView, SessionView, ToolView,

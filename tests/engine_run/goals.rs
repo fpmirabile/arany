@@ -869,20 +869,20 @@ fn write_facts(workspace: &Path, text: &'static str) -> impl Fn() + Send + Sync 
 }
 
 /// Opens the Engine with Guard-backed Read access to `notes/facts.txt`.
-fn facts_engine(
+fn facts_engine<P: Provider + 'static>(
     state: StateRoot,
     state_path: &Path,
-    provider: ScriptedProvider,
-) -> Engine<ScriptedProvider> {
+    provider: P,
+) -> Engine<P> {
     facts_engine_with_telemetry(state, state_path, provider, arany::Telemetry::disabled())
 }
 
-fn facts_engine_with_telemetry(
+fn facts_engine_with_telemetry<P: Provider + 'static>(
     state: StateRoot,
     state_path: &Path,
-    provider: ScriptedProvider,
+    provider: P,
     telemetry: arany::Telemetry,
-) -> Engine<ScriptedProvider> {
+) -> Engine<P> {
     use std::os::unix::fs::PermissionsExt;
     let mut engine = Engine::open_with_telemetry(state, provider, telemetry).expect("engine");
     let config = state_path.join("tools.json");
@@ -1047,6 +1047,133 @@ async fn autonomous_goal_stops_at_its_run_budget_and_fails_with_a_report() {
     let goal = view.goal(outcome.goal_id).expect("Goal");
     assert_eq!(goal.status, arany::GoalStatus::Failed);
     assert_eq!(goal.run_ids.len(), 2);
+    assert!(goal.report.is_some(), "exhausted Goal keeps its report");
+}
+
+#[tokio::test]
+async fn autonomous_goal_call_cap_at_its_boundary_fails_the_goal_with_a_report() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let budget = arany::GoalBudget {
+        max_provider_calls: 3,
+        ..arany::GoalBudget::default()
+    };
+    let mut plan = facts_plan(facts_digest("v2"));
+    plan.budget = budget.clone();
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Tool {
+            call: facts_read(),
+            plan_contract: Some(Box::new(plan)),
+        },
+        finish_with("first pass"),
+        finish_with("second pass"),
+        finish_with("never requested"),
+    ]);
+    let requests = Arc::clone(&provider.requests);
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    let mut input = autonomous_input(&workspace);
+    input.goal = arany::GoalRequest::autonomous(budget, arany::GoalPhase::Implementation);
+    // The second Run's Finish is the third and last admissible call.
+    let outcome = engine.run(input).await.expect("terminal Run");
+    assert_eq!(outcome.run.status, RunStatus::Failed);
+    assert_eq!(
+        requests.lock().expect("Provider requests").len(),
+        3,
+        "the call cap admits no fourth Provider call"
+    );
+    engine.close().await.expect("engine shutdown");
+
+    let (_, view) = replayed(&state_path, outcome.session_id).await;
+    let goal = view.goal(outcome.goal_id).expect("Goal");
+    assert_eq!(goal.status, arany::GoalStatus::Failed);
+    assert_eq!(goal.provider_calls, 3);
+    assert!(goal.report.is_some(), "exhausted Goal keeps its report");
+}
+
+/// Reports the same input-token count for every call, so a token cap can land on an exact boundary.
+struct MeteredProvider {
+    tokens: u32,
+    responses: std::sync::Mutex<VecDeque<ProviderOutcome>>,
+}
+
+impl Provider for MeteredProvider {
+    fn profile_name(&self) -> &str {
+        "scripted"
+    }
+
+    fn model_name(&self) -> &str {
+        "metered-model"
+    }
+
+    fn max_concurrent_calls(&self) -> u8 {
+        1
+    }
+
+    async fn invoke(&self, _request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        let outcome = self
+            .responses
+            .lock()
+            .expect("responses lock")
+            .pop_front()
+            .ok_or(ProviderError::InvalidOutcome)?;
+        Ok(ProviderResponse {
+            outcome,
+            response_id: None,
+            input_tokens: Some(self.tokens),
+            output_tokens: Some(0),
+            wire_provenance: None,
+        })
+    }
+
+    async fn compact(&self, _: CompactionRequest) -> Result<CompactionResponse, ProviderError> {
+        Err(ProviderError::InvalidOutcome)
+    }
+}
+
+#[tokio::test]
+async fn autonomous_goal_token_cap_at_its_boundary_fails_the_goal_with_a_report() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let budget = arany::GoalBudget {
+        max_tokens: Some(10),
+        ..arany::GoalBudget::default()
+    };
+    let mut plan = facts_plan(facts_digest("v2"));
+    plan.budget = budget.clone();
+    // Five input tokens per call: the Read and the Finish reach the 10-token cap exactly.
+    let provider = MeteredProvider {
+        tokens: 5,
+        responses: std::sync::Mutex::new(VecDeque::from([
+            ProviderOutcome::Tool {
+                call: facts_read(),
+                plan_contract: Some(Box::new(plan)),
+            },
+            finish_with("first pass"),
+            finish_with("never requested"),
+        ])),
+    };
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    let mut input = autonomous_input(&workspace);
+    input.goal = arany::GoalRequest::autonomous(budget, arany::GoalPhase::Implementation);
+    let outcome = engine.run(input).await.expect("terminal Run");
+    assert_eq!(outcome.run.status, RunStatus::Failed);
+    engine.close().await.expect("engine shutdown");
+
+    let (_, view) = replayed(&state_path, outcome.session_id).await;
+    let goal = view.goal(outcome.goal_id).expect("Goal");
+    assert_eq!(goal.status, arany::GoalStatus::Failed);
+    assert_eq!(goal.provider_calls, 2, "no third Provider call is reserved");
+    assert_eq!(goal.known_tokens, 10);
     assert!(goal.report.is_some(), "exhausted Goal keeps its report");
 }
 
@@ -1506,7 +1633,7 @@ async fn progress_snapshots_carry_the_goal_through_each_iteration() {
         loop {
             tokio::select! {
                 update = observer.changed() => {
-                    observed_runs.push(update.goals.last().map(|goal| goal.run_ids.len()));
+                    observed_runs.push(update.goal.as_ref().map(|goal| goal.run_ids.len()));
                 }
                 result = &mut run => break result.expect("autonomous Goal"),
             }

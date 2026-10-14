@@ -44,12 +44,12 @@ impl RunPreview {
     }
 }
 
-/// An acknowledged Event sequence, the Run state and the Session's Goals reduced through it.
+/// An acknowledged Event sequence, the Run state and the Goal that owns the Run, reduced through it.
 #[derive(Clone)]
 pub struct RunUpdate {
     pub sequence: u64,
     pub run: RunView,
-    pub goals: Vec<GoalView>,
+    pub goal: Option<GoalView>,
 }
 
 impl RunProgress {
@@ -214,15 +214,18 @@ impl ProgressPublisher {
                 .map_err(|_| EngineError::CoordinatorFailed)?;
             view.apply_committed(envelope)
                 .map_err(|_| EngineError::InvalidHistory)?;
-            let goals = view.goals.clone();
             view.runs
                 .last()
                 .filter(|run| run.id == self.run_id)
                 .cloned()
                 .map(|run| RunUpdate {
                     sequence: envelope.sequence,
+                    goal: view
+                        .goals
+                        .iter()
+                        .find(|goal| goal.run_ids.contains(&self.run_id))
+                        .cloned(),
                     run,
-                    goals,
                 })
         };
         if let Some(update) = update {
