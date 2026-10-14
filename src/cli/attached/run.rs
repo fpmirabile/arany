@@ -26,6 +26,11 @@ enum SelectedProvider {
 pub(super) enum RunAttemptError {
     /// Cancelled before the next Run was admitted; an interrupted Goal stays resumable.
     InterruptedBeforeRun,
+    /// A committed Run whose autonomous Goal stopped before its next Run, for `reason`.
+    Stopped {
+        outcome: Box<arany::RunOutcome>,
+        reason: String,
+    },
     Failed(String),
 }
 
@@ -292,6 +297,10 @@ async fn native_key(selection: Selection<'_>) -> Result<NativeApiCredentials, St
 fn classify_run_error(error: arany::EngineError) -> RunAttemptError {
     match error {
         arany::EngineError::CancelledBeforeStart => RunAttemptError::InterruptedBeforeRun,
+        arany::EngineError::StoppedAfterRun { run, reason } => RunAttemptError::Stopped {
+            outcome: run,
+            reason: reason.to_string(),
+        },
         error => RunAttemptError::Failed(error.to_string()),
     }
 }
@@ -1472,8 +1481,7 @@ mod tests {
                 },
             )
             .await
-            .err()
-            .expect("explicit Tool admission must reject before inference");
+            .expect_err("explicit Tool admission must reject before inference");
             #[cfg(debug_assertions)]
             assert_eq!(
                 error,

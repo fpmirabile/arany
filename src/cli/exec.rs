@@ -1,9 +1,9 @@
 use super::{CommandOutput, OutputArg, chatgpt, native_run_key_from_env};
 use arany::{
-    AnthropicProvider, CollaborationPolicy, CustomProvider, Effort, Engine, GoalBudget, GoalPhase,
-    GoalRequest, OpenAiProvider, Provider, RunRequest, RunStatus, SessionId, StateRoot, Store,
-    Telemetry, native_protection_supported, render_exec, resolve_native_effort_for_run,
-    validate_native_model_id,
+    AnthropicProvider, CollaborationPolicy, CustomProvider, Effort, Engine, EngineError,
+    GoalBudget, GoalPhase, GoalRequest, OpenAiProvider, Provider, RunRequest, RunStatus, SessionId,
+    StateRoot, Store, Telemetry, native_protection_supported, render_exec,
+    resolve_native_effort_for_run, validate_native_model_id,
 };
 use clap::{Args, ValueEnum};
 use std::{path::PathBuf, str::FromStr};
@@ -274,7 +274,12 @@ async fn run_with_provider<P: Provider + 'static>(
         .close()
         .await
         .map_err(|_| "store shutdown failed".to_owned())?;
-    let outcome = result.map_err(|error| error.to_string())?;
+    let (outcome, stop) = match result {
+        Ok(outcome) => (outcome, None),
+        // The committed answer is still printed; the stop reason makes the exit nonzero.
+        Err(EngineError::StoppedAfterRun { run, reason }) => (*run, Some(reason)),
+        Err(error) => return Err(error.to_string()),
+    };
     let root = StateRoot::open_existing(&admission.state_dir)
         .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
     let store = Store::open_read_only(root).map_err(|_| "state store unavailable".to_owned())?;
@@ -335,10 +340,14 @@ async fn run_with_provider<P: Provider + 'static>(
         OutputArg::Jsonl if success => String::new(),
         OutputArg::Jsonl => "error: Run failed\n".into(),
     };
+    let stderr = match &stop {
+        Some(reason) => format!("{stderr}error: {reason}\n"),
+        None => stderr,
+    };
     Ok(CommandOutput {
         stdout,
         stderr,
-        success,
+        success: success && stop.is_none(),
     })
 }
 

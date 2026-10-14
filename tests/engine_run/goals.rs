@@ -1381,6 +1381,15 @@ async fn autonomous_goal_cancelled_after_a_finished_run_keeps_that_outcome_and_s
     );
 }
 
+/// The Finished Run stays committed and the stop names the exhausted Goal budget.
+fn stopped_by_budget(result: &Result<arany::RunOutcome, EngineError>) -> bool {
+    matches!(
+        result,
+        Err(EngineError::StoppedAfterRun { reason, .. })
+            if matches!(**reason, EngineError::GoalBudgetExhausted)
+    )
+}
+
 #[tokio::test(start_paused = true)]
 async fn autonomous_goal_active_time_spent_after_a_finish_fails_the_goal_with_its_report() {
     let temp = tempfile::tempdir().expect("temporary root");
@@ -1416,7 +1425,7 @@ async fn autonomous_goal_active_time_spent_after_a_finish_fails_the_goal_with_it
     )
     .await;
     assert!(
-        matches!(result, Err(EngineError::GoalBudgetExhausted)),
+        stopped_by_budget(&result),
         "the refused continuation reports the Goal failure: {:?}",
         result.as_ref().map(|outcome| outcome.run.status)
     );
@@ -1511,8 +1520,8 @@ fn read_trace_body(stream: &mut std::net::TcpStream) -> Vec<u8> {
     }
 }
 
-/// The `arany.goal.status` of every exported Goal segment span.
-fn goal_segment_statuses(bodies: &[Vec<u8>]) -> Vec<String> {
+/// The string value of `key` on every exported Goal segment span, in export order.
+fn goal_segment_attribute(bodies: &[Vec<u8>], key: &str) -> Vec<String> {
     use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
     use opentelemetry_proto::tonic::common::v1::any_value::Value;
     use prost::Message;
@@ -1529,7 +1538,7 @@ fn goal_segment_statuses(bodies: &[Vec<u8>]) -> Vec<String> {
         .filter_map(|span| {
             span.attributes
                 .into_iter()
-                .find(|attribute| attribute.key == "arany.goal.status")
+                .find(|attribute| attribute.key == key)
                 .and_then(|attribute| attribute.value)
                 .and_then(|value| match value.value {
                     Some(Value::StringValue(status)) => Some(status),
@@ -1582,7 +1591,7 @@ async fn exhausted_autonomous_segment_exports_its_failed_status() {
     )
     .await;
     assert!(
-        matches!(result, Err(EngineError::GoalBudgetExhausted)),
+        stopped_by_budget(&result),
         "the exhausted Goal reports its refusal: {:?}",
         result.as_ref().map(|outcome| outcome.run.status)
     );
@@ -1591,7 +1600,7 @@ async fn exhausted_autonomous_segment_exports_its_failed_status() {
     done.store(true, std::sync::atomic::Ordering::Release);
     let bodies = collector.join().expect("Collector thread");
     assert_eq!(
-        goal_segment_statuses(&bodies),
+        goal_segment_attribute(&bodies, "arany.goal.status"),
         vec!["failed".to_owned()],
         "the segment that decided exhaustion carries the Failed terminal status"
     );
@@ -1650,4 +1659,156 @@ async fn progress_snapshots_carry_the_goal_through_each_iteration() {
         "the final snapshot counts both iterations, not the first: {observed_runs:?}"
     );
     engine.close().await.expect("engine shutdown");
+}
+
+#[tokio::test]
+async fn plan_with_fewer_runs_than_linked_is_refused_as_an_invalid_plan() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    // The first Run is cancelled before any plan, so the Goal stays open with one linked Run.
+    let cancellation = RunCancellation::new();
+    let cancel = cancellation.clone();
+    let provider = ScriptedProvider::new(vec![finish_with("never requested")])
+        .with_before_call(0, move || assert!(cancel.cancel(), "first cancellation"));
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    let cancelled = engine
+        .run_with_cancel(autonomous_input(&workspace), cancellation)
+        .await
+        .expect("cancelled Run");
+    assert_eq!(cancelled.run.status, RunStatus::Cancelled);
+    engine.close().await.expect("engine shutdown");
+
+    // Resuming links a second Run, so a plan allowing one Run is invalid for this Goal.
+    let mut plan = facts_plan(facts_digest("v2"));
+    plan.budget.max_runs = 1;
+    let provider = ScriptedProvider::new(vec![ProviderOutcome::Tool {
+        call: facts_read(),
+        plan_contract: Some(Box::new(plan)),
+    }]);
+    let mut engine = facts_engine(
+        StateRoot::open_existing(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    let mut input = request(&workspace, "");
+    input.session_id = Some(cancelled.session_id);
+    input.title = None;
+    input.include_paths.clear();
+    input.goal = arany::GoalRequest::resume(cancelled.goal_id, true);
+    let outcome = engine
+        .run(input)
+        .await
+        .expect("an invalid plan is a model-visible Run failure, not a Store error");
+    assert_eq!(outcome.run.status, RunStatus::Failed);
+    engine.close().await.expect("engine shutdown");
+
+    let (_, view) = replayed(&state_path, cancelled.session_id).await;
+    let goal = view.goal(cancelled.goal_id).expect("Goal");
+    assert_eq!(goal.run_ids.len(), 2);
+    assert!(
+        goal.plan_contract.is_none(),
+        "the refused plan is not recorded"
+    );
+}
+
+#[tokio::test]
+async fn cancelled_autonomous_segment_exports_its_run_outcome() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let cancellation = RunCancellation::new();
+    let cancel = cancellation.clone();
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Tool {
+            call: facts_read(),
+            plan_contract: Some(Box::new(facts_plan(facts_digest("v2")))),
+        },
+        finish_with("first pass"),
+        finish_with("cancelled pass"),
+    ])
+    .with_before_call(2, move || assert!(cancel.cancel(), "first cancellation"));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Collector listener");
+    let endpoint = format!(
+        "http://{}",
+        listener.local_addr().expect("Collector address")
+    );
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let collector = collect_trace_bodies(listener, Arc::clone(&done));
+    let telemetry = arany::Telemetry::from_process(Some(&endpoint)).expect("loopback telemetry");
+    let mut engine = facts_engine_with_telemetry(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+        telemetry.clone(),
+    );
+    let outcome = engine
+        .run_with_cancel(autonomous_input(&workspace), cancellation)
+        .await
+        .expect("cancelled Run");
+    assert_eq!(outcome.run.status, RunStatus::Cancelled);
+    engine.close().await.expect("engine shutdown");
+    telemetry.shutdown();
+    done.store(true, std::sync::atomic::Ordering::Release);
+    let bodies = collector.join().expect("Collector thread");
+    assert_eq!(
+        goal_segment_attribute(&bodies, "arany.outcome"),
+        vec!["finished".to_owned(), "cancelled".to_owned()],
+        "a cancelled segment of an open Goal exports the Run's cancelled outcome"
+    );
+    assert_eq!(
+        goal_segment_attribute(&bodies, "arany.goal.status"),
+        vec!["running".to_owned(), "running".to_owned()],
+        "the open Goal keeps its Running status"
+    );
+}
+
+#[tokio::test]
+async fn autonomous_goal_stopped_by_a_failed_admission_returns_the_committed_run() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    // Removing the Workspace after the first Run finishes makes the next admission fail.
+    let removed = workspace.clone();
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Tool {
+            call: facts_read(),
+            plan_contract: Some(Box::new(facts_plan(facts_digest("v2")))),
+        },
+        finish_with("first pass"),
+    ])
+    .with_before_call(1, move || {
+        std::fs::remove_dir_all(&removed).expect("Workspace removed")
+    });
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    let (committed, reason) = match engine.run(autonomous_input(&workspace)).await {
+        Err(EngineError::StoppedAfterRun { run, reason }) => (run, reason),
+        Err(error) => panic!("the committed Run must be returned with its stop reason: {error}"),
+        Ok(_) => panic!("a failed continuation admission must stop the loop"),
+    };
+    assert_eq!(committed.run.status, RunStatus::Finished);
+    assert_eq!(
+        committed.run.assistant_message.as_deref(),
+        Some("first pass"),
+        "the committed answer is the first Run's"
+    );
+    assert!(!matches!(*reason, EngineError::GoalBudgetExhausted));
+    engine.close().await.expect("engine shutdown");
+
+    let (_, view) = replayed(&state_path, committed.session_id).await;
+    assert_eq!(view.runs.last().map(|run| run.id), Some(committed.run.id));
+    let goal = view.goal(committed.goal_id).expect("Goal");
+    assert_eq!(
+        goal.status,
+        arany::GoalStatus::Interrupted,
+        "a non-budget stop leaves the Goal open for explicit resume"
+    );
 }

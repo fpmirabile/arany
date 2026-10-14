@@ -514,8 +514,8 @@ pub fn goal_status(view: &SessionView) -> String {
     let mut text = format!(
         "Goal {} · {} · {} · {} · Runs {}/{} · calls {}/{} · tokens {}/{}{} · active {}/{}",
         goal.id.to_string().chars().take(8).collect::<String>(),
-        format!("{:?}", goal.status).to_ascii_lowercase(),
-        format!("{:?}", goal.phase).to_ascii_lowercase(),
+        goal_status_word(goal.status),
+        goal_phase_word(goal.phase),
         if goal.autonomous {
             "autonomous"
         } else {
@@ -541,6 +541,24 @@ pub fn goal_status(view: &SessionView) -> String {
         text.push_str(" · Use /goal resume to continue");
     }
     text
+}
+
+fn goal_status_word(status: crate::session::GoalStatus) -> &'static str {
+    match status {
+        crate::session::GoalStatus::Running => "running",
+        crate::session::GoalStatus::Interrupted => "interrupted",
+        crate::session::GoalStatus::Completed => "completed",
+        crate::session::GoalStatus::Failed => "failed",
+        crate::session::GoalStatus::Cancelled => "cancelled",
+    }
+}
+
+fn goal_phase_word(phase: crate::session::GoalPhase) -> &'static str {
+    match phase {
+        crate::session::GoalPhase::Research => "research",
+        crate::session::GoalPhase::Plan => "plan",
+        crate::session::GoalPhase::Implementation => "implementation",
+    }
 }
 
 fn goal_clock(ms: u64) -> String {

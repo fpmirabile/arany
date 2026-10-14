@@ -144,6 +144,7 @@ enum Request {
     #[cfg(test)]
     GateGoalAppendAcknowledgment {
         session_id: SessionId,
+        admits: fn(&Event) -> bool,
         entered: oneshot::Sender<()>,
         release: std::sync::mpsc::Receiver<()>,
         reply: oneshot::Sender<Result<(), StoreError>>,
@@ -249,6 +250,7 @@ impl Store {
                 #[cfg(test)]
                 let mut goal_append_ack_gate = None::<(
                     SessionId,
+                    fn(&Event) -> bool,
                     oneshot::Sender<()>,
                     std::sync::mpsc::Receiver<()>,
                 )>;
@@ -271,11 +273,6 @@ impl Store {
                             event,
                             reply,
                         } => {
-                            #[cfg(test)]
-                            let is_goal_lifecycle = matches!(
-                                event.as_ref(),
-                                Event::GoalStarted { .. } | Event::GoalResumed { .. }
-                            );
                             let result = if read_only {
                                 Err(StoreError::ReadOnly)
                             } else if matches!(event.as_ref(), Event::SessionForked { .. }) {
@@ -284,27 +281,39 @@ impl Store {
                                 append(&mut connection, &mut hot_session, session_id, *event)
                             };
                             #[cfg(test)]
-                            if result.is_ok()
-                                && is_goal_lifecycle
-                                && goal_append_ack_gate.as_ref().is_some_and(
-                                    |(gated_session, _, _)| *gated_session == session_id,
-                                )
-                            {
-                                let (_, entered, release) =
-                                    goal_append_ack_gate.take().expect("matching append gate");
-                                let _ = entered.send(());
-                                let _ = release.recv();
-                            }
+                            let result = {
+                                let held = goal_append_ack_gate.as_ref().is_some_and(
+                                    |(gated_session, admits, _, _)| {
+                                        *gated_session == session_id
+                                            && result
+                                                .as_ref()
+                                                .is_ok_and(|envelope| admits(&envelope.event))
+                                    },
+                                );
+                                if held {
+                                    let (_, _, entered, release) =
+                                        goal_append_ack_gate.take().expect("matching append gate");
+                                    let _ = entered.send(());
+                                    // A dropped release means the commit was never acknowledged.
+                                    match release.recv() {
+                                        Ok(()) => result,
+                                        Err(_) => Err(StoreError::Closed),
+                                    }
+                                } else {
+                                    result
+                                }
+                            };
                             let _ = reply.send(result);
                         }
                         #[cfg(test)]
                         Request::GateGoalAppendAcknowledgment {
                             session_id,
+                            admits,
                             entered,
                             release,
                             reply,
                         } => {
-                            goal_append_ack_gate = Some((session_id, entered, release));
+                            goal_append_ack_gate = Some((session_id, admits, entered, release));
                             let _ = reply.send(Ok(()));
                         }
                         Request::Load { session_id, reply } => {
@@ -427,15 +436,19 @@ impl Store {
         .await
     }
 
+    /// Holds the acknowledgment of the next committed Event that `admits` accepts. Dropping the
+    /// release sender fails that acknowledgment after the commit.
     #[cfg(test)]
     pub(crate) async fn gate_goal_append_acknowledgment(
         &self,
         session_id: SessionId,
+        admits: fn(&Event) -> bool,
     ) -> Result<(oneshot::Receiver<()>, std::sync::mpsc::Sender<()>), StoreError> {
         let (entered, wait_entered) = oneshot::channel();
         let (release, wait_release) = std::sync::mpsc::channel();
         self.call(|reply| Request::GateGoalAppendAcknowledgment {
             session_id,
+            admits,
             entered,
             release: wait_release,
             reply,

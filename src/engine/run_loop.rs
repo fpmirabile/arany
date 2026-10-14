@@ -266,7 +266,9 @@ impl GoalRunBudget {
     }
 
     fn can_narrow(&self, contract: &crate::session::GoalPlanContract) -> bool {
-        contract.budget.max_provider_calls > self.calls_used.load(Ordering::Acquire)
+        // This Run is already linked, so the plan must allow it along with the earlier Runs.
+        usize::from(contract.budget.max_runs) > usize::from(self.runs_used_before)
+            && contract.budget.max_provider_calls > self.calls_used.load(Ordering::Acquire)
             && contract.budget.max_tokens.is_none_or(|limit| {
                 !self.token_usage_unknown.load(Ordering::Acquire)
                     && self.known_tokens.load(Ordering::Acquire) < limit

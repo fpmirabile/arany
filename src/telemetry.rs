@@ -1,5 +1,5 @@
 use crate::provider::{AgentPhase, MAX_REPORTED_INPUT_TOKENS};
-use crate::session::{AgentRunId, GoalId, GoalStatus, RunId, SessionId};
+use crate::session::{AgentRunId, GoalId, GoalStatus, GoalView, RunId, SessionId};
 use opentelemetry::{
     Context, KeyValue,
     trace::{SpanKind, Status, TraceContextExt, Tracer, TracerProvider},
@@ -99,7 +99,6 @@ pub(crate) enum TraceOutcome {
     Finished,
     Failed,
     Cancelled,
-    Interrupted,
 }
 
 #[derive(Clone, Copy)]
@@ -440,44 +439,36 @@ impl GoalTrace {
         self.span.event_committed(sequence, kind);
     }
 
-    pub(crate) fn finish(
-        self,
-        status: GoalStatus,
-        provider_calls: u32,
-        known_tokens: u64,
-        token_usage_unknown: bool,
-        active_ms: u64,
-        uncertain_active_ms: u64,
-    ) {
+    /// `run` is the segment's Run outcome, which decides the segment unless the Goal is terminal.
+    pub(crate) fn finish(self, status: GoalStatus, run: TraceOutcome, goal: &GoalView) {
         if let Some(context) = &self.span.context {
             for attribute in [
                 KeyValue::new("arany.goal.status", goal_status_name(status)),
-                KeyValue::new("arany.goal.provider_calls", i64::from(provider_calls)),
+                KeyValue::new("arany.goal.provider_calls", i64::from(goal.provider_calls)),
                 KeyValue::new(
                     "arany.goal.known_tokens",
-                    known_tokens.min(i64::MAX as u64) as i64,
+                    goal.known_tokens.min(i64::MAX as u64) as i64,
                 ),
-                KeyValue::new("arany.goal.token_usage_unknown", token_usage_unknown),
+                KeyValue::new("arany.goal.token_usage_unknown", goal.token_usage_unknown),
                 KeyValue::new(
                     "arany.goal.active_ms",
-                    active_ms.min(i64::MAX as u64) as i64,
+                    goal.active_ms.min(i64::MAX as u64) as i64,
                 ),
                 KeyValue::new(
                     "arany.goal.uncertain_active_ms",
-                    uncertain_active_ms.min(i64::MAX as u64) as i64,
+                    goal.uncertain_active_ms.min(i64::MAX as u64) as i64,
                 ),
             ] {
                 context.span().set_attribute(attribute);
             }
         }
-        // A segment ends with its Run. A Goal still Running stays open for a later segment,
-        // so only the Goal's own terminal status maps to a terminal outcome.
+        // A segment ends with its Run. A Goal still open stays open for a later segment,
+        // so only the Goal's own terminal status overrides the Run outcome.
         let outcome = match status {
             GoalStatus::Completed => TraceOutcome::Finished,
             GoalStatus::Failed => TraceOutcome::Failed,
             GoalStatus::Cancelled => TraceOutcome::Cancelled,
-            GoalStatus::Running => TraceOutcome::Finished,
-            GoalStatus::Interrupted => TraceOutcome::Interrupted,
+            GoalStatus::Running | GoalStatus::Interrupted => run,
         };
         self.span.finish(outcome);
     }
@@ -820,7 +811,6 @@ impl TraceOutcome {
             Self::Finished => "finished",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
-            Self::Interrupted => "interrupted",
         }
     }
 }

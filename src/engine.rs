@@ -61,6 +61,12 @@ pub enum EngineError {
     GoalAdmissionUncertain,
     #[error("Goal budget is exhausted")]
     GoalBudgetExhausted,
+    /// An autonomous Goal stopped after `run` committed; `reason` says why no further Run was admitted.
+    #[error("Goal stopped after a committed Run: {reason}")]
+    StoppedAfterRun {
+        run: Box<RunOutcome>,
+        reason: Box<EngineError>,
+    },
     #[error("Session is not idle")]
     SessionNotIdle,
     #[error("Session has no committed Run boundary to fork")]
@@ -193,6 +199,7 @@ impl Default for GoalRequest {
     }
 }
 
+#[derive(Debug, PartialEq)]
 pub struct RunOutcome {
     pub session_id: SessionId,
     pub goal_id: crate::session::GoalId,
@@ -1059,7 +1066,9 @@ mod goal_workspace_lease_tests {
             .expect("provisional Workspace lock");
         let (acknowledgment_entered, release_acknowledgment) = engine
             .store
-            .gate_goal_append_acknowledgment(session_id)
+            .gate_goal_append_acknowledgment(session_id, |event| {
+                matches!(event, Event::GoalStarted { .. } | Event::GoalResumed { .. })
+            })
             .await
             .expect("install acknowledgment gate");
         let mut admission = Box::pin(engine.append_goal_lifecycle(
@@ -1107,6 +1116,62 @@ mod goal_workspace_lease_tests {
             .await
             .expect("canonical Events");
         assert_eq!(events.len(), 2, "no Run or effect was admitted");
+        engine.close().await.expect("close Engine");
+    }
+
+    #[tokio::test]
+    async fn lost_run_link_acknowledgment_is_admission_uncertain() {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let state_path = temp.path().join("state");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let state = StateRoot::admit(&state_path).expect("private State root");
+        let mut engine = Engine::open(state, NeverProvider).expect("Engine");
+        let session_id = SessionId::new();
+        let workspace_identity = crate::tools::workspace_identity(&workspace).expect("identity");
+        engine
+            .store
+            .append(
+                session_id,
+                Event::SessionStarted {
+                    title: "Lost link acknowledgment".into(),
+                    workspace_identity,
+                },
+            )
+            .await
+            .expect("Session start");
+        let (link_entered, release_link) = engine
+            .store
+            .gate_goal_append_acknowledgment(session_id, |event| {
+                matches!(event, Event::GoalRunLinked { .. })
+            })
+            .await
+            .expect("install acknowledgment gate");
+        let request = RunRequest {
+            session_id: Some(session_id),
+            title: None,
+            objective: "Link the Run before its acknowledgment is lost".into(),
+            images: Vec::new(),
+            workspace: workspace.clone(),
+            include_paths: Vec::new(),
+            policy: CollaborationPolicy::Single,
+            goal: GoalRequest::default(),
+        };
+        let mut run = Box::pin(engine.run(request));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                result = &mut run => panic!("Run returned before its link was held: {}", result.is_ok()),
+                result = link_entered => result.expect("link reached the acknowledgment gate"),
+            }
+        })
+        .await
+        .expect("link acknowledgment gate");
+        drop(release_link);
+        match run.await {
+            Err(EngineError::GoalAdmissionUncertain) => {}
+            Err(error) => panic!("a possibly committed link must be uncertain, not {error}"),
+            Ok(_) => panic!("Run completed without an acknowledged link"),
+        }
         engine.close().await.expect("close Engine");
     }
 }
@@ -1613,11 +1678,20 @@ impl<P: Provider + 'static> Engine<P> {
                 Ok(turn) => turn,
                 // Cancellation before MessageAccepted admits no Run; the committed Finished Run keeps its outcome.
                 Err(EngineError::CancelledBeforeStart) => break,
-                Err(error) => return Err(error),
+                // The earlier Finished Run stays committed; the caller gets it with the reason the loop stopped.
+                Err(error) => {
+                    return Err(EngineError::StoppedAfterRun {
+                        run: Box::new(turn.outcome),
+                        reason: Box::new(error),
+                    });
+                }
             };
         }
         if turn.exhausted() {
-            return Err(EngineError::GoalBudgetExhausted);
+            return Err(EngineError::StoppedAfterRun {
+                run: Box::new(turn.outcome),
+                reason: Box::new(EngineError::GoalBudgetExhausted),
+            });
         }
         Ok(turn.outcome)
     }
@@ -1879,18 +1953,21 @@ impl<P: Provider + 'static> Engine<P> {
         if cancellation.is_cancelled() {
             return Err(EngineError::CancelledBeforeStart);
         }
-        let linked_sequence = append_observed(
-            &self.store,
-            publisher.as_ref(),
-            None,
-            session_id,
-            Event::GoalRunLinked {
-                goal_id: goal.id,
-                run_id,
-                phase: goal.phase,
-            },
-        )
-        .await?;
+        // A link is an admission acknowledgment: a lost acknowledgment may still have committed it.
+        let linked_sequence = self
+            .append_goal_lifecycle(
+                goal.id,
+                workspace_identity,
+                None,
+                session_id,
+                publisher.as_ref(),
+                Event::GoalRunLinked {
+                    goal_id: goal.id,
+                    run_id,
+                    phase: goal.phase,
+                },
+            )
+            .await?;
         goal_trace.event_committed(
             linked_sequence,
             crate::telemetry::TraceEventKind::GoalRunLinked,
@@ -2105,14 +2182,7 @@ impl<P: Provider + 'static> Engine<P> {
             _ => return Err(EngineError::InvalidHistory),
         };
         trace.finish(trace_outcome);
-        goal_trace.finish(
-            goal_status,
-            goal_view.provider_calls,
-            goal_view.known_tokens,
-            goal_view.token_usage_unknown,
-            goal_view.active_ms,
-            goal_view.uncertain_active_ms,
-        );
+        goal_trace.finish(goal_status, trace_outcome, &goal_view);
         Ok(RunTurn {
             outcome: RunOutcome {
                 session_id,

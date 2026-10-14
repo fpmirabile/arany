@@ -12,7 +12,8 @@ use std::time::Duration;
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 
 pub(super) enum RunSubmission {
-    Completed(Box<RunOutcome>, bool),
+    /// The bool records a preview already printed; the optional reason says why the autonomous Goal stopped.
+    Completed(Box<RunOutcome>, bool, Option<String>),
     InterruptedBeforeRun,
     Shutdown(String),
 }
@@ -252,7 +253,10 @@ pub(super) async fn submit_objective(
                     return Ok(RunSubmission::Shutdown("terminal input cleanup failed".into()));
                 }
                 return match result {
-                    Ok(outcome) => Ok(RunSubmission::Completed(Box::new(outcome), user_recorded)),
+                    Ok(outcome) => Ok(RunSubmission::Completed(Box::new(outcome), user_recorded, None)),
+                    Err(run::RunAttemptError::Stopped { outcome, reason }) => {
+                        Ok(RunSubmission::Completed(outcome, user_recorded, Some(reason)))
+                    }
                     Err(run::RunAttemptError::InterruptedBeforeRun) => Ok(RunSubmission::InterruptedBeforeRun),
                     Err(run::RunAttemptError::Failed(error)) => Err(error),
                 };

@@ -582,7 +582,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         )
         .await?
         {
-            RunSubmission::Completed(outcome, user_recorded) => {
+            RunSubmission::Completed(outcome, user_recorded, stop) => {
                 notice = finish_submission(
                     &mut terminal,
                     &admission,
@@ -590,6 +590,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                     &mut view,
                     &outcome,
                     user_recorded,
+                    stop.as_deref(),
                 )
                 .await?;
             }
@@ -1273,8 +1274,17 @@ async fn submit_idle_run(
 ) -> Result<Option<Feedback>, String> {
     materialize_session(admission, session_id, view).await?;
     match submit_objective(terminal, admission, start, view, composer, objective).await {
-        Ok(RunSubmission::Completed(outcome, user_recorded)) => {
-            finish_submission(terminal, admission, composer, view, &outcome, user_recorded).await
+        Ok(RunSubmission::Completed(outcome, user_recorded, stop)) => {
+            finish_submission(
+                terminal,
+                admission,
+                composer,
+                view,
+                &outcome,
+                user_recorded,
+                stop.as_deref(),
+            )
+            .await
         }
         Ok(RunSubmission::InterruptedBeforeRun) => {
             finish_interrupted_submission(terminal, admission, composer, view, *session_id).await
@@ -1362,6 +1372,7 @@ async fn finish_submission(
     view: &mut SessionView,
     outcome: &RunOutcome,
     user_recorded: bool,
+    stop: Option<&str>,
 ) -> Result<Option<Feedback>, String> {
     let automatic =
         outcome.run.config.as_ref().filter(|config| {
@@ -1405,11 +1416,15 @@ async fn finish_submission(
         .map_err(|error| error.to_string())?;
     let mut notice = retained_draft_notice(composer);
     // A cancelled autonomous loop keeps its Goal open; the reloaded view says how to continue it.
-    let feedback = submission_notice(
-        view.interrupted_goal_id(),
-        outcome.run.status,
-        render_run_feedback(&outcome.run),
-    );
+    let run_feedback = render_run_feedback(&outcome.run);
+    let run_feedback = match stop {
+        Some(reason) => Some(match run_feedback {
+            Some(feedback) => format!("Error: Goal stopped after this Run: {reason}. {feedback}"),
+            None => format!("Error: Goal stopped after this Run: {reason}."),
+        }),
+        None => run_feedback,
+    };
+    let feedback = submission_notice(view.interrupted_goal_id(), outcome.run.status, run_feedback);
     if let Some(feedback) = feedback {
         if composer.is_empty() {
             notice = Some(Feedback::History(feedback));
