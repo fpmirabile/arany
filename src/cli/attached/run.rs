@@ -398,6 +398,15 @@ mod tests {
         ProviderRequest, ProviderResponse, RunStatus,
     };
     use arany::{SessionView, Store};
+    #[cfg(target_os = "macos")]
+    use std::sync::{Arc, Mutex};
+    use std::{
+        io::Write,
+        os::unix::fs::{MetadataExt, PermissionsExt},
+        os::unix::process::CommandExt,
+        process::{Child, Command, Stdio},
+        time::Duration,
+    };
 
     #[test]
     fn engine_cancellation_before_admission_is_an_interrupted_attempt() {
@@ -410,15 +419,6 @@ mod tests {
             RunAttemptError::Failed(_)
         ));
     }
-    #[cfg(target_os = "macos")]
-    use std::sync::{Arc, Mutex};
-    use std::{
-        io::Write,
-        os::unix::fs::{MetadataExt, PermissionsExt},
-        os::unix::process::CommandExt,
-        process::{Child, Command, Stdio},
-        time::Duration,
-    };
 
     struct OwnedChild(Child);
 

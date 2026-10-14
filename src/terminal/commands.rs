@@ -566,10 +566,7 @@ fn command_parts(draft: &str) -> Option<(&str, Option<&str>)> {
 }
 
 fn valid_command_prefix(name: &str) -> bool {
-    name.len() <= MAX_COMMAND_NAME_BYTES
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte == b'-')
+    name.len() <= MAX_COMMAND_NAME_BYTES && name.bytes().all(|byte| byte.is_ascii_lowercase())
 }
 
 fn unique_value<'a>(values: impl Iterator<Item = &'a str>, prefix: &str) -> Option<&'a str> {
@@ -817,10 +814,6 @@ mod tests {
             Err(CommandParseError::Unknown {
                 suggestion: Some("model"),
             })
-        );
-        assert_eq!(
-            parse_submission("/resume-goa"),
-            Err(CommandParseError::Unknown { suggestion: None })
         );
         assert!(command_completions("/sessions").is_empty());
         assert_eq!(
