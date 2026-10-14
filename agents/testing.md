@@ -69,6 +69,15 @@ consistency, not measured agent quality or runtime/platform support.
 
 ## Failure and maintenance discipline
 
+- After a hosted CI failure, consolidate the confirmed failures and review
+  findings from that exact head before making corrections. Use a focused
+  `workflow_dispatch` lane only after diagnosis identifies the relevant OS and
+  profile; a passing focused lane is diagnostic evidence, not full
+  verification. Before marking a change ready, require the complete workflow
+  on the exact final head, including Linux format/Clippy and Linux and macOS
+  debug/release tests. Automatic PR/push runs always use the full matrix; when
+  no automatic run covers that head, a manual `workflow_dispatch` run with
+  `lane=full` qualifies. Focused lanes never qualify.
 - Focused Cargo and test-binary invocations must report their intended nonzero test count. A self-spawned helper filtered with `--exact` must assert exactly one completed test and have a bounded parent wait/output plus kill/reap cleanup. Helper-only tests are explicitly ignored by default and require their parent's private fixture when activated; returning early without assertions is not a default passing test. Zero-test or ignored-child success provides no evidence.
 - Failure output names the scenario and case, expected and observed exit, bounded escaped stdout/stderr, semantic Event difference, and safe fixture identifier. It never dumps secrets, raw hostile controls, provider bodies, or database payloads.
 - Every test runs independently and owns its directories, files, ports, runtime, database, and processes. Do not mutate shared process environment from parallel tests.
