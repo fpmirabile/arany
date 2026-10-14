@@ -4,11 +4,51 @@ Load the section named by [testing rules](../testing.md) when its task applies. 
 
 ## Local verification and CI
 
-Use the standard checks in [the development guide](../../docs/development.md#verification). The [CI workflow](../../.github/workflows/ci.yml) runs on pull requests and pushes to `main`: formatting and Clippy on Linux, Clippy on macOS, and debug and release default tests on Linux and macOS. Markdown-only pull requests skip these steps after a bounded change-detection job; the five required checks still complete so branch protection permits merging. Detection failure, any non-`.md` path (including the old path of a rename), pushes to `main` and manual dispatch retain the full checks.
+Manual `workflow_dispatch` runs have one closed `lane` choice: `full`
+(default), `linux-debug`, `linux-release`, `macos-debug`, or
+`macos-release`. A focused choice runs exactly one existing OS/profile test
+lane and is diagnostic only; it does not satisfy required pull-request checks
+or final release evidence. The workflow rejects unknown values and accepts no
+test-name, command, or argument input. Use a focused lane only after a failure
+has been diagnosed. After the correction, require a full workflow on the exact
+final head before marking the change ready. Automatic PR/push runs always use
+the full matrix; when no automatic run covers that head, a manual
+`workflow_dispatch` run with `lane=full` qualifies. Focused lanes never
+qualify.
 
-Manual dispatch also offers the optional `linux_arm64` boolean (default `false`). Enabling it runs the native Linux ARM64 debug and release test matrix. The workflow verifies both the `aarch64` host and Rust target, then runs the same Bubblewrap and user/network namespace prerequisites before the `--cfg arany_ci` workspace suite. The lane is opt-in and does not change pull-request checks. GitHub documents `ubuntu-24.04-arm` for both public and private repositories; private runner use consumes the account's included Actions minutes and is billed after that allotment ([runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)). The existing CI workflow file must be on the default branch to enable manual dispatch; select the ref containing the ARM64 input and job changes ([manual workflow runs](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)). If GitHub cannot provide the runner or a native prerequisite fails, the lane remains pending evidence; do not substitute emulation, skip gates or claim ARM64 support.
+Use the standard checks in [the development guide](../../docs/development.md#verification).
+The [CI workflow](../../.github/workflows/ci.yml) runs formatting and Clippy
+on Linux, Clippy on macOS, and debug/release tests on both OSes. Pull-request
+and push runs always select the full matrix. Markdown-only pull requests skip
+these steps after bounded change detection; the five required checks still
+complete for branch protection. Detection failure, any non-`.md` path
+(including the old path of a rename), and pushes to `main` run the full matrix.
+CodeQL default setup is managed separately by GitHub. CI provisions prerequisites
+on disposable hosted runners. Linux terminal fixtures need Bubblewrap and
+util-linux `script`, with user and network namespaces enabled. For macOS
+temporary-root and account isolation, read [host and account
+isolation](#host-and-account-isolation).
 
-CodeQL default setup is managed separately by GitHub and is not controlled by this workflow. CI provisions prerequisites on disposable GitHub-hosted runners. Linux terminal fixtures need Bubblewrap and util-linux `script`, with user and network namespaces enabled. For macOS temporary-root and account-isolation requirements, read [host and account isolation](#host-and-account-isolation).
+Manual dispatch also offers the optional `linux_arm64` boolean (default `false`).
+Enabling it runs the native Linux ARM64 debug and release test matrix. The
+workflow verifies both the `aarch64` host and Rust target, then runs the same
+Bubblewrap and user/network namespace prerequisites before the `--cfg arany_ci`
+workspace suite. This opt-in lane does not change pull-request checks. GitHub
+documents `ubuntu-24.04-arm` for both public and private repositories; private
+runner use consumes the account's included Actions minutes and is billed after
+that allotment ([runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)).
+The workflow file must be on the default branch to enable manual dispatch;
+select the ref containing the relevant input and job changes ([manual workflow
+runs](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)).
+If GitHub cannot provide the runner or a native prerequisite fails, ARM64
+evidence remains pending; do not substitute emulation, skip gates or claim
+support.
+
+Manual CI dispatch with `history_benchmark: true` additionally runs the exact
+ignored long-history tmux owner in the Linux release job and requires one
+completed test. It reports that runner's workload, timings and resource
+metrics; the ordinary suite leaves this benchmark ignored, and its measurements
+do not establish other-host performance or cold-disk behavior.
 
 Default suites exercise only the scenarios enabled for their native OS. The heavy native Guard, clipboard, credential-helper and database-capacity gates use the activation rules in [testing rules](../testing.md#evidence-lanes). To reproduce CI locally, set `RUSTFLAGS=--cfg arany_ci` for the test invocation; in a POSIX shell:
 
@@ -17,12 +57,6 @@ RUSTFLAGS='--cfg arany_ci' cargo test --workspace --locked --offline
 ```
 
 Repeat with `--release` for the optimized profile. To run one ignored gate, use `cargo test <path> -- --exact --ignored`. The isolated macOS Keychain gate also needs `ARANY_TEST_EXE` set to a built debug `arany`. Other ignored native, manual, performance and live Provider gates remain separate; CI uses no account credentials or paid calls. Passing compilation or an OS-specific subset does not prove platform parity.
-
-Manual CI dispatch with `history_benchmark: true` additionally runs the exact
-ignored long-history tmux owner in the Linux release job and requires one
-completed test. It reports that runner's workload, timings and resource metrics;
-the ordinary suite leaves this benchmark ignored, and its measurements do not
-establish other-host performance or cold-disk behavior.
 
 ## Beta continuation and deferred evidence
 
