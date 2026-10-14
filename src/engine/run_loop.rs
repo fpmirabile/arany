@@ -166,6 +166,15 @@ impl GoalRunBudget {
         }
     }
 
+    fn allows_tool(&self, call: &crate::tools::ToolCall) -> bool {
+        self.plan_contract.lock().is_ok_and(|plan| {
+            plan.as_ref().map_or_else(
+                || call.is_goal_plan_prelude(),
+                |contract| contract.allows_call(call),
+            )
+        })
+    }
+
     fn observe_tools(&self, observations: &[crate::tools::ToolObservation]) {
         if let Ok(plan) = self.plan_contract.lock()
             && let Some(contract) = plan.as_ref()
@@ -829,7 +838,9 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         primary: &AgentTrace,
     ) -> Result<(crate::tools::ToolObservation, bool), EngineError> {
         let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
-        let review_will_run = runtime.allows(&intent.call)
+        let goal_allows = self.controls.goal_budget.allows_tool(&intent.call);
+        let review_will_run = goal_allows
+            && runtime.allows(&intent.call)
             && self.controls.approvals.is_some_and(|approvals| {
                 approvals.mode() == crate::tools::ApprovalMode::Auto
                     && approvals.mode().asks(&intent.call)
@@ -877,7 +888,16 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                 };
             }
         }
-        let observation = if approved && !self.controls.goal_budget.can_start_provider_call() {
+        let observation = if !goal_allows {
+            crate::tools::ToolObservation {
+                intent,
+                disposition: crate::tools::ToolDisposition::Denied,
+                output: "The effect is outside the active Goal plan; no operation was dispatched"
+                    .into(),
+                guard: None,
+                cache_update: crate::tools::CacheUpdate::NotApplicable,
+            }
+        } else if approved && !self.controls.goal_budget.can_start_provider_call() {
             crate::tools::ToolObservation {
                 intent,
                 disposition: crate::tools::ToolDisposition::Limit,

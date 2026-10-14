@@ -1116,7 +1116,12 @@ async fn native_runtime_mount_journey_helper() {
     .expect("bounded private cache seed");
     let seed_outcome = seed_outcome.unwrap();
     seed_engine.close().await.unwrap();
-    assert_eq!(seed_outcome.run.status, RunStatus::Finished);
+    assert_eq!(
+        seed_outcome.run.status,
+        RunStatus::Finished,
+        "cache seed Run failed: {}",
+        crate::safe_run_diagnostics(&seed_outcome.run)
+    );
     let seed_result: serde_json::Value = serde_json::from_str(
         &seed_outcome.run.tools[0]
             .observation

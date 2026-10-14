@@ -777,31 +777,6 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     }
     for pairs in [8, 9] {
         let mut rows = prefix[..AGENT_SPAWNED + 1].to_vec();
-        rows.extend([
-            Event::GoalProviderCallReserved {
-                goal_id: goal,
-                run_id: run,
-                agent_run_id: primary,
-            },
-            record(ProviderCallDisposition::ToolRequested),
-            Event::GoalPlanContractRecorded {
-                goal_id: goal,
-                run_id: run,
-                contract: arany::GoalPlanContract {
-                    mission: "Admit the synthetic command changeset".into(),
-                    paths: vec!["src".into()],
-                    commands: vec!["shell".into()],
-                    skills: Vec::new(),
-                    mcp_tools: Vec::new(),
-                    success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
-                        call: Box::new(command_intent.call.clone()),
-                    },
-                    budget: arany::GoalBudget::default(),
-                },
-                active_ms: 0,
-                reserved_ms: 30_000,
-            },
-        ]);
         for pair in 0..pairs {
             let mut command = command_intent.clone();
             command.id = uuid::Uuid::now_v7();
@@ -815,16 +790,30 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 unreachable!()
             };
             *source_intent_digest = Sha256::digest(serde_json::to_vec(&command).unwrap()).into();
-            rows.extend([
-                Event::GoalProviderCallReserved {
+            rows.push(Event::GoalProviderCallReserved {
+                goal_id: goal,
+                run_id: run,
+                agent_run_id: primary,
+            });
+            rows.push(record(ProviderCallDisposition::ToolRequested));
+            if pair == 0 {
+                rows.push(Event::GoalPlanContractRecorded {
                     goal_id: goal,
                     run_id: run,
-                    agent_run_id: primary,
-                },
-                record(ProviderCallDisposition::ToolRequested),
-            ]);
-            if pair == 0 {
-                rows.push(prefix[TOOL_STARTED - 1].clone());
+                    contract: arany::GoalPlanContract {
+                        mission: "Admit the synthetic command changeset".into(),
+                        paths: vec!["src".into()],
+                        commands: vec!["shell".into()],
+                        skills: Vec::new(),
+                        mcp_tools: Vec::new(),
+                        success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
+                            call: Box::new(command_intent.call.clone()),
+                        },
+                        budget: arany::GoalBudget::default(),
+                    },
+                    active_ms: 0,
+                    reserved_ms: 30_000,
+                });
             }
             rows.extend([
                 Event::ToolStarted {
@@ -852,6 +841,87 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             "integration consumes an effect slot: {pairs}"
         );
     }
+    let mut out_of_plan_integration = integrated.clone();
+    if let Event::ToolFinished { observation, .. } = &mut out_of_plan_integration[COMMAND_FINISHED]
+    {
+        let mut result: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
+        result["changeset"]["files"][0]["path"] = "unselected/new.txt".into();
+        observation.output = result.to_string();
+    }
+    let mut out_of_plan_intent = match &out_of_plan_integration[INTEGRATION_STARTED] {
+        Event::ToolStarted { intent, .. } => intent.clone(),
+        _ => unreachable!(),
+    };
+    let ToolCall::ApplyChangeset { changeset, .. } = &mut out_of_plan_intent.call else {
+        unreachable!()
+    };
+    changeset.files[0].path = "unselected/new.txt".into();
+    if let Event::ToolStarted { intent, .. } = &mut out_of_plan_integration[INTEGRATION_STARTED] {
+        *intent = out_of_plan_intent.clone();
+    }
+    if let Event::ToolFinished { observation, .. } =
+        &mut out_of_plan_integration[INTEGRATION_FINISHED]
+    {
+        observation.intent = out_of_plan_intent.clone();
+        observation.disposition = ToolDisposition::Denied;
+        observation.output = "The effect is outside the active Goal plan".into();
+        observation.guard = None;
+        observation.cache_update = arany::CacheUpdate::NotApplicable;
+    }
+    out_of_plan_integration.truncate(INTEGRATION_FINISHED + 1);
+    out_of_plan_integration.extend([
+        Event::GoalProviderCallReserved {
+            goal_id: goal,
+            run_id: run,
+            agent_run_id: primary,
+        },
+        record(ProviderCallDisposition::Finished),
+        Event::AgentFinished {
+            run_id: run,
+            agent_run_id: primary,
+            disposition: AgentDisposition::Failed,
+            summary: None,
+            result: None,
+        },
+        Event::RunFinished {
+            run_id: run,
+            disposition: RunDisposition::Failed,
+        },
+        Event::GoalActiveTimeSettled {
+            goal_id: goal,
+            run_id: run,
+            active_ms: 1_000,
+        },
+    ]);
+    let view = replay(out_of_plan_integration.clone()).unwrap().unwrap();
+    assert_eq!(view.runs[0].status, RunStatus::Failed);
+    let denied = view.runs[0].tools[1].observation.as_ref().unwrap();
+    assert_eq!(denied.disposition, ToolDisposition::Denied);
+    assert!(denied.guard.is_none());
+    assert_eq!(denied.cache_update, arany::CacheUpdate::NotApplicable);
+
+    let mut forged_out_of_plan_publication = out_of_plan_integration;
+    let Event::ToolStarted { intent, .. } = &forged_out_of_plan_publication[INTEGRATION_STARTED]
+    else {
+        unreachable!()
+    };
+    let intent = intent.clone();
+    if let Event::ToolFinished { observation, .. } =
+        &mut forged_out_of_plan_publication[INTEGRATION_FINISHED]
+    {
+        observation.disposition = ToolDisposition::Succeeded;
+        observation.output = "{\"applied\":1}".into();
+        observation.guard = Some(arany::GuardReceipt {
+            contract_version: 1,
+            intent_digest: Sha256::digest(serde_json::to_vec(&intent).unwrap()).into(),
+            enforcement_digest: intent.enforcement_digest,
+            limits: intent.limits.clone(),
+        });
+    }
+    assert!(
+        replay(forged_out_of_plan_publication).is_err(),
+        "an out-of-plan integration cannot carry a dispatched or successful receipt"
+    );
     for (count, output, accepted) in [
         (16, "", true),
         (17, "", false),
