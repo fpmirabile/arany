@@ -777,31 +777,6 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     }
     for pairs in [8, 9] {
         let mut rows = prefix[..AGENT_SPAWNED + 1].to_vec();
-        rows.extend([
-            Event::GoalProviderCallReserved {
-                goal_id: goal,
-                run_id: run,
-                agent_run_id: primary,
-            },
-            record(ProviderCallDisposition::ToolRequested),
-            Event::GoalPlanContractRecorded {
-                goal_id: goal,
-                run_id: run,
-                contract: arany::GoalPlanContract {
-                    mission: "Admit the synthetic command changeset".into(),
-                    paths: vec!["src".into()],
-                    commands: vec!["shell".into()],
-                    skills: Vec::new(),
-                    mcp_tools: Vec::new(),
-                    success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
-                        call: Box::new(command_intent.call.clone()),
-                    },
-                    budget: arany::GoalBudget::default(),
-                },
-                active_ms: 0,
-                reserved_ms: 30_000,
-            },
-        ]);
         for pair in 0..pairs {
             let mut command = command_intent.clone();
             command.id = uuid::Uuid::now_v7();
@@ -815,16 +790,30 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 unreachable!()
             };
             *source_intent_digest = Sha256::digest(serde_json::to_vec(&command).unwrap()).into();
-            rows.extend([
-                Event::GoalProviderCallReserved {
+            rows.push(Event::GoalProviderCallReserved {
+                goal_id: goal,
+                run_id: run,
+                agent_run_id: primary,
+            });
+            rows.push(record(ProviderCallDisposition::ToolRequested));
+            if pair == 0 {
+                rows.push(Event::GoalPlanContractRecorded {
                     goal_id: goal,
                     run_id: run,
-                    agent_run_id: primary,
-                },
-                record(ProviderCallDisposition::ToolRequested),
-            ]);
-            if pair == 0 {
-                rows.push(prefix[TOOL_STARTED - 1].clone());
+                    contract: arany::GoalPlanContract {
+                        mission: "Admit the synthetic command changeset".into(),
+                        paths: vec!["src".into()],
+                        commands: vec!["shell".into()],
+                        skills: Vec::new(),
+                        mcp_tools: Vec::new(),
+                        success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
+                            call: Box::new(command_intent.call.clone()),
+                        },
+                        budget: arany::GoalBudget::default(),
+                    },
+                    active_ms: 0,
+                    reserved_ms: 30_000,
+                });
             }
             rows.extend([
                 Event::ToolStarted {
@@ -852,6 +841,87 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             "integration consumes an effect slot: {pairs}"
         );
     }
+    let mut out_of_plan_integration = integrated.clone();
+    if let Event::ToolFinished { observation, .. } = &mut out_of_plan_integration[COMMAND_FINISHED]
+    {
+        let mut result: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
+        result["changeset"]["files"][0]["path"] = "unselected/new.txt".into();
+        observation.output = result.to_string();
+    }
+    let mut out_of_plan_intent = match &out_of_plan_integration[INTEGRATION_STARTED] {
+        Event::ToolStarted { intent, .. } => intent.clone(),
+        _ => unreachable!(),
+    };
+    let ToolCall::ApplyChangeset { changeset, .. } = &mut out_of_plan_intent.call else {
+        unreachable!()
+    };
+    changeset.files[0].path = "unselected/new.txt".into();
+    if let Event::ToolStarted { intent, .. } = &mut out_of_plan_integration[INTEGRATION_STARTED] {
+        *intent = out_of_plan_intent.clone();
+    }
+    if let Event::ToolFinished { observation, .. } =
+        &mut out_of_plan_integration[INTEGRATION_FINISHED]
+    {
+        observation.intent = out_of_plan_intent.clone();
+        observation.disposition = ToolDisposition::Denied;
+        observation.output = "The effect is outside the active Goal plan".into();
+        observation.guard = None;
+        observation.cache_update = arany::CacheUpdate::NotApplicable;
+    }
+    out_of_plan_integration.truncate(INTEGRATION_FINISHED + 1);
+    out_of_plan_integration.extend([
+        Event::GoalProviderCallReserved {
+            goal_id: goal,
+            run_id: run,
+            agent_run_id: primary,
+        },
+        record(ProviderCallDisposition::Finished),
+        Event::AgentFinished {
+            run_id: run,
+            agent_run_id: primary,
+            disposition: AgentDisposition::Failed,
+            summary: None,
+            result: None,
+        },
+        Event::RunFinished {
+            run_id: run,
+            disposition: RunDisposition::Failed,
+        },
+        Event::GoalActiveTimeSettled {
+            goal_id: goal,
+            run_id: run,
+            active_ms: 1_000,
+        },
+    ]);
+    let view = replay(out_of_plan_integration.clone()).unwrap().unwrap();
+    assert_eq!(view.runs[0].status, RunStatus::Failed);
+    let denied = view.runs[0].tools[1].observation.as_ref().unwrap();
+    assert_eq!(denied.disposition, ToolDisposition::Denied);
+    assert!(denied.guard.is_none());
+    assert_eq!(denied.cache_update, arany::CacheUpdate::NotApplicable);
+
+    let mut forged_out_of_plan_publication = out_of_plan_integration;
+    let Event::ToolStarted { intent, .. } = &forged_out_of_plan_publication[INTEGRATION_STARTED]
+    else {
+        unreachable!()
+    };
+    let intent = intent.clone();
+    if let Event::ToolFinished { observation, .. } =
+        &mut forged_out_of_plan_publication[INTEGRATION_FINISHED]
+    {
+        observation.disposition = ToolDisposition::Succeeded;
+        observation.output = "{\"applied\":1}".into();
+        observation.guard = Some(arany::GuardReceipt {
+            contract_version: 1,
+            intent_digest: Sha256::digest(serde_json::to_vec(&intent).unwrap()).into(),
+            enforcement_digest: intent.enforcement_digest,
+            limits: intent.limits.clone(),
+        });
+    }
+    assert!(
+        replay(forged_out_of_plan_publication).is_err(),
+        "an out-of-plan integration cannot carry a dispatched or successful receipt"
+    );
     for (count, output, accepted) in [
         (16, "", true),
         (17, "", false),
@@ -914,6 +984,7 @@ pub(super) async fn native_command_changeset_corpus(
         calls: Vec<ToolCall>,
         requests: Arc<Mutex<Vec<ProviderRequest>>>,
         review: bool,
+        goal_paths: Option<Vec<String>>,
         #[cfg(target_os = "macos")]
         trace_root: std::path::PathBuf,
     }
@@ -962,13 +1033,18 @@ pub(super) async fn native_command_changeset_corpus(
                     |call| {
                         let plan_contract = (step == 0)
                             .then(|| {
-                                let mut paths: Vec<_> = catalog
-                                    .as_ref()
-                                    .and_then(|catalog| catalog["workspace_paths"].as_array())
-                                    .into_iter()
-                                    .flatten()
-                                    .filter_map(|path| path.as_str().map(str::to_owned))
-                                    .collect();
+                                let mut paths: Vec<_> =
+                                    self.goal_paths.clone().unwrap_or_else(|| {
+                                        catalog
+                                            .as_ref()
+                                            .and_then(|catalog| {
+                                                catalog["workspace_paths"].as_array()
+                                            })
+                                            .into_iter()
+                                            .flatten()
+                                            .filter_map(|path| path.as_str().map(str::to_owned))
+                                            .collect()
+                                    });
                                 paths.sort();
                                 paths.dedup();
                                 let mut commands: Vec<_> = self
@@ -1027,6 +1103,7 @@ pub(super) async fn native_command_changeset_corpus(
         ("cancel", "", None),
         ("conflict", "", None),
         ("scope", "printf forbidden > unselected", None),
+        ("scope-auto", "printf forbidden > unselected", None),
         ("partial", "", None),
         (
             "symlink",
@@ -1083,7 +1160,11 @@ pub(super) async fn native_command_changeset_corpus(
         let state_path = case_root.join("state");
         let state = StateRoot::admit(&state_path).unwrap();
         let mut config = config.clone();
-        config["workspace_paths"] = json!(["src"]);
+        config["workspace_paths"] = json!(if matches!(case, "scope" | "scope-auto") {
+            ["."]
+        } else {
+            ["src"]
+        });
         config["skills"] = json!([]);
         config["mcp"] = json!([]);
         crate::private_file(
@@ -1157,7 +1238,8 @@ pub(super) async fn native_command_changeset_corpus(
             CommandJourney {
                 calls,
                 requests: requests.clone(),
-                review: case == "ai-approve",
+                review: matches!(case, "ai-approve" | "scope-auto"),
+                goal_paths: matches!(case, "scope" | "scope-auto").then(|| vec!["src".into()]),
                 #[cfg(target_os = "macos")]
                 trace_root: root.to_path_buf(),
             },
@@ -1169,17 +1251,32 @@ pub(super) async fn native_command_changeset_corpus(
             .enable_tools(env!("CARGO_BIN_EXE_arany").into())
             .unwrap();
         let interactive = matches!(case, "deny" | "drop" | "cancel" | "conflict");
-        let (approvals, mut inbox) = ToolApprovals::new(if case == "ai-approve" {
-            ApprovalMode::Auto
-        } else {
-            ApprovalMode::Request
-        });
-        if interactive || case == "ai-approve" {
+        let (approvals, mut inbox) =
+            ToolApprovals::new(if matches!(case, "ai-approve" | "scope-auto") {
+                ApprovalMode::Auto
+            } else {
+                ApprovalMode::Request
+            });
+        if interactive || matches!(case, "ai-approve" | "scope" | "scope-auto") {
             engine.set_tool_approvals(approvals);
         }
         let cancellation = RunCancellation::new();
         let pending = cancellation.clone();
+        let (run_done, run_done_rx) = tokio::sync::oneshot::channel();
         let decision = async {
+            if case == "scope" {
+                let command = inbox.next().await.expect("in-scope command approval");
+                assert_eq!(command.intent.call, call, "scope: command intent");
+                command.decide(true);
+            }
+            if matches!(case, "scope" | "scope-auto") {
+                tokio::select! {
+                    biased;
+                    approval = inbox.next() => panic!("{case}: unexpected out-of-plan integration approval ({})", approval.is_some()),
+                    _ = run_done_rx => {}
+                }
+                return;
+            }
             if !interactive {
                 return;
             }
@@ -1234,20 +1331,26 @@ pub(super) async fn native_command_changeset_corpus(
         let timeout = Duration::from_secs(120);
         let (outcome, ()) = tokio::time::timeout(timeout, async {
             tokio::join!(
-                engine.run_with_progress(
-                    RunRequest {
-                        session_id: None,
-                        title: Some(format!("Changeset {case}")),
-                        objective: "Exercise native changeset integration".into(),
-                        images: Vec::new(),
-                        workspace: workspace.clone(),
-                        include_paths: Vec::new(),
-                        policy: CollaborationPolicy::Single,
-                        goal: arany::GoalRequest::default(),
-                    },
-                    cancellation,
-                    RunProgress::new()
-                ),
+                async {
+                    let outcome = engine
+                        .run_with_progress(
+                            RunRequest {
+                                session_id: None,
+                                title: Some(format!("Changeset {case}")),
+                                objective: "Exercise native changeset integration".into(),
+                                images: Vec::new(),
+                                workspace: workspace.clone(),
+                                include_paths: Vec::new(),
+                                policy: CollaborationPolicy::Single,
+                                goal: arany::GoalRequest::default(),
+                            },
+                            cancellation,
+                            RunProgress::new(),
+                        )
+                        .await;
+                    let _ = run_done.send(());
+                    outcome
+                },
                 decision
             )
         })
@@ -1263,6 +1366,7 @@ pub(super) async fn native_command_changeset_corpus(
             case,
             "conflict"
                 | "scope"
+                | "scope-auto"
                 | "symlink"
                 | "hardlink"
                 | "fifo"
@@ -1285,6 +1389,14 @@ pub(super) async fn native_command_changeset_corpus(
             outcome.run.tools
         );
         let requests = requests.lock().unwrap().clone();
+        if case == "scope" {
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| request.phase != AgentPhase::ToolReview),
+                "{case}: Request mode must not invoke the AI judge"
+            );
+        }
         assert_eq!(
             requests.len(),
             if stopped {
@@ -1293,6 +1405,8 @@ pub(super) async fn native_command_changeset_corpus(
                 3
             } else if case == "ai-approve" {
                 4
+            } else if case == "scope-auto" {
+                3
             } else {
                 2
             },
@@ -1344,6 +1458,35 @@ pub(super) async fn native_command_changeset_corpus(
                     && request.agent_run_id == view.runs[0].agents[0].id)
         );
         let tools = &view.runs[0].tools;
+        if matches!(case, "scope" | "scope-auto") {
+            let goal = view
+                .goals
+                .iter()
+                .find(|goal| goal.id == outcome.goal_id)
+                .expect("out-of-plan Goal replay");
+            assert_eq!(
+                goal.status,
+                arany::GoalStatus::Failed,
+                "{case}: Goal status"
+            );
+            assert_eq!(
+                goal.plan_contract.as_ref().unwrap().paths,
+                ["src".to_owned()]
+            );
+            assert!(
+                goal.report
+                    .as_ref()
+                    .unwrap()
+                    .unresolved
+                    .iter()
+                    .any(|fact| { fact.contains("Command changeset publication failed") }),
+                "{case}: durable denial report: {:?}",
+                goal.report
+            );
+            let catalog: serde_json::Value =
+                serde_json::from_str(&requests[0].tools.as_ref().unwrap().catalog).unwrap();
+            assert_eq!(catalog["workspace_paths"], json!(["."]));
+        }
         if case == "ai-approve" {
             let reviews = requests
                 .iter()
@@ -1366,6 +1509,19 @@ pub(super) async fn native_command_changeset_corpus(
             assert!(reviews.iter().all(|call| call.input_tokens == Some(3)
                 && call.output_tokens == Some(1)
                 && call.disposition == arany::ProviderCallDisposition::Finished));
+        }
+        if case == "scope-auto" {
+            let reviews = requests
+                .iter()
+                .filter(|request| request.phase == AgentPhase::ToolReview)
+                .collect::<Vec<_>>();
+            assert_eq!(reviews.len(), 1, "in-scope command gets one AI review");
+            let payload: serde_json::Value = serde_json::from_str(&reviews[0].objective).unwrap();
+            assert_eq!(
+                payload["proposed_action"]["call"],
+                serde_json::to_value(&call).unwrap(),
+                "out-of-plan integration never reaches the AI judge"
+            );
         }
         if case == "budget" {
             assert_eq!(
@@ -1454,7 +1610,7 @@ pub(super) async fn native_command_changeset_corpus(
                 integration.disposition,
                 if case == "partial" {
                     ToolDisposition::Uncertain
-                } else if human_denied || case == "scope" {
+                } else if human_denied || matches!(case, "scope" | "scope-auto") {
                     ToolDisposition::Denied
                 } else if case == "conflict" {
                     ToolDisposition::Conflict
@@ -1465,7 +1621,7 @@ pub(super) async fn native_command_changeset_corpus(
             );
             assert_eq!(
                 integration.guard.is_some(),
-                !human_denied && case != "scope"
+                !human_denied && !matches!(case, "scope" | "scope-auto")
             );
         }
         if native_setid {

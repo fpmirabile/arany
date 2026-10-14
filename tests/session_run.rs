@@ -28,9 +28,18 @@ fn safe_run_diagnostics(run: &arany::RunView) -> String {
         .iter()
         .map(|tool| {
             tool.observation.as_ref().map(|observation| {
+                let result = serde_json::from_str::<serde_json::Value>(&observation.output).ok();
                 (
                     observation.disposition,
                     observation.guard.is_some(),
+                    observation.cache_update,
+                    result
+                        .as_ref()
+                        .and_then(|result| result["exit_code"].as_i64()),
+                    result
+                        .as_ref()
+                        .and_then(|result| result["changeset"]["files"].as_array())
+                        .map(Vec::len),
                     observation.output.len(),
                 )
             })
