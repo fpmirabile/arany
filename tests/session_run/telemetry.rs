@@ -1,5 +1,5 @@
 use super::loopback::{check_profile, read_request, send_response, wait_product, write_profile};
-use arany::{RunStatus, SessionId, StateRoot, Store};
+use arany::{GoalStatus, RunStatus, SessionId, StateRoot, Store};
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::any_value::Value;
 use opentelemetry_proto::tonic::trace::v1::Span;
@@ -138,6 +138,30 @@ fn string_attribute<'a>(span: &'a Span, key: &str) -> Option<&'a str> {
         .and_then(|value| value.value.as_ref())
         .and_then(|value| match value {
             Value::StringValue(value) => Some(value.as_str()),
+            _ => None,
+        })
+}
+
+fn int_attribute(span: &Span, key: &str) -> Option<i64> {
+    span.attributes
+        .iter()
+        .find(|attribute| attribute.key == key)
+        .and_then(|attribute| attribute.value.as_ref())
+        .and_then(|value| value.value.as_ref())
+        .and_then(|value| match value {
+            Value::IntValue(value) => Some(*value),
+            _ => None,
+        })
+}
+
+fn bool_attribute(span: &Span, key: &str) -> Option<bool> {
+    span.attributes
+        .iter()
+        .find(|attribute| attribute.key == key)
+        .and_then(|attribute| attribute.value.as_ref())
+        .and_then(|value| value.value.as_ref())
+        .and_then(|value| match value {
+            Value::BoolValue(value) => Some(*value),
             _ => None,
         })
 }
@@ -301,6 +325,14 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
         .find(|span| span.name == "compile_context arany.run")
         .expect("context compilation span");
     assert_eq!(compilation.parent_span_id, root.span_id);
+    assert!(
+        goal.start_time_unix_nano <= root.start_time_unix_nano,
+        "Goal starts no later than its Run child"
+    );
+    assert!(
+        goal.start_time_unix_nano <= compilation.start_time_unix_nano,
+        "Goal starts no later than context compilation"
+    );
 
     let lines = String::from_utf8(result.stdout)
         .expect("JSONL output")
@@ -348,6 +380,34 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
         .expect("Session");
     assert_eq!(view.runs.len(), 1);
     assert_eq!(view.runs[0].status, RunStatus::Finished);
+    assert_eq!(view.goals.len(), 1);
+    let replayed_goal = &view.goals[0];
+    assert_eq!(replayed_goal.status, GoalStatus::Completed);
+    let replayed_goal_id = replayed_goal.id.to_string();
+    assert_eq!(
+        string_attribute(goal, "arany.goal.id"),
+        Some(replayed_goal_id.as_str())
+    );
+    assert_eq!(
+        int_attribute(goal, "arany.goal.provider_calls"),
+        Some(i64::from(replayed_goal.provider_calls))
+    );
+    assert_eq!(
+        int_attribute(goal, "arany.goal.known_tokens"),
+        Some(i64::try_from(replayed_goal.known_tokens).expect("bounded known token total"))
+    );
+    assert_eq!(
+        bool_attribute(goal, "arany.goal.token_usage_unknown"),
+        Some(replayed_goal.token_usage_unknown)
+    );
+    assert_eq!(
+        int_attribute(goal, "arany.goal.active_ms"),
+        Some(i64::try_from(replayed_goal.active_ms).expect("bounded active time"))
+    );
+    assert_eq!(
+        int_attribute(goal, "arany.goal.uncertain_active_ms"),
+        Some(i64::try_from(replayed_goal.uncertain_active_ms).expect("bounded uncertain time"))
+    );
     let run_id = view.runs[0].id.to_string();
     assert!(bodies.iter().any(|body| {
         body.windows(run_id.len())

@@ -607,6 +607,10 @@ impl arany::Provider for ExactTokenTool {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native Linux account-isolated Goal token admission"
+)]
 async fn exact_goal_token_cap_fails_before_a_tool_request_is_journaled() {
     if !super::isolation::enter_native_account_isolated_test() {
         return;
@@ -702,6 +706,10 @@ impl Provider for GoalWorkspaceLease {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native Linux cross-StateRoot Goal Workspace lease"
+)]
 async fn unfinished_implementation_goal_holds_workspace_lease_across_runs() {
     if !super::isolation::enter_native_account_isolated_test() {
         return;

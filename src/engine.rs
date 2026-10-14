@@ -1285,7 +1285,9 @@ impl<P: Provider + 'static> Engine<P> {
             return Err(EngineError::CancelledBeforeStart);
         }
         let trace_provider = crate::telemetry::TraceProvider::from_profile(&config.provider);
-        let goal_trace = self.telemetry.begin_goal(session_id, goal.id);
+        let goal_trace = self
+            .telemetry
+            .begin_goal(session_id, goal.id, context_started);
         let publisher = if let Some(progress) = progress {
             let view = match history.take() {
                 Some(view) => view,

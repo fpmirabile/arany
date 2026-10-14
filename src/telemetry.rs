@@ -266,12 +266,17 @@ impl Telemetry {
         trace
     }
 
-    pub(crate) fn begin_goal(&self, session_id: SessionId, goal_id: GoalId) -> GoalTrace {
+    pub(crate) fn begin_goal(
+        &self,
+        session_id: SessionId,
+        goal_id: GoalId,
+        started: SystemTime,
+    ) -> GoalTrace {
         let span = self
             .inner
             .as_ref()
             .map_or_else(TraceSpan::disabled, |inner| {
-                TraceSpan::root(
+                TraceSpan::root_at(
                     &inner.tracer,
                     "invoke_workflow arany.goal",
                     SpanKind::Internal,
@@ -281,6 +286,7 @@ impl Telemetry {
                         KeyValue::new("arany.session.id", session_id.to_string()),
                         KeyValue::new("arany.goal.id", goal_id.to_string()),
                     ],
+                    Some(started),
                 )
             });
         GoalTrace { span, goal_id }
