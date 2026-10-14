@@ -689,6 +689,12 @@ mod goal_report_tests {
 
         let mut late_run = run.clone();
         let late_failed_command = late_run.tools.remove(0);
+        let failed_cache_observation = late_failed_command
+            .observation
+            .as_ref()
+            .expect("attested Command result");
+        assert!(failed_cache_observation.valid());
+        assert!(failed_cache_observation.attested_for(&late_failed_command.intent));
         late_run.tools.truncate(10);
         let mut late_rejected_command = late_failed_command.clone();
         late_run.tools.push(late_failed_command);
@@ -705,6 +711,8 @@ mod goal_report_tests {
             .expect("Guard receipt")
             .intent_digest = rejected_digest;
         rejected_observation.cache_update = CacheUpdate::Rejected;
+        assert!(rejected_observation.valid());
+        assert!(rejected_observation.attested_for(&late_rejected_command.intent));
         late_run.tools.push(late_rejected_command);
         let uncertain_intent = EffectIntent {
             id: Uuid::now_v7(),
@@ -723,20 +731,28 @@ mod goal_report_tests {
             expires_at_ms: 1,
             use_count: 1,
         };
+        let uncertain_observation = crate::tools::ToolObservation {
+            guard: Some(GuardReceipt {
+                contract_version: 1,
+                intent_digest: uncertain_intent.digest(),
+                enforcement_digest: uncertain_intent.enforcement_digest,
+                limits: uncertain_intent.limits.clone(),
+            }),
+            intent: uncertain_intent.clone(),
+            disposition: ToolDisposition::Uncertain,
+            output: run.tools[0]
+                .observation
+                .as_ref()
+                .expect("valid Command result")
+                .output
+                .clone(),
+            cache_update: CacheUpdate::Uncertain,
+        };
+        assert!(uncertain_observation.valid());
+        assert!(uncertain_observation.attested_for(&uncertain_intent));
         late_run.tools.push(ToolView {
             intent: uncertain_intent.clone(),
-            observation: Some(crate::tools::ToolObservation {
-                guard: Some(GuardReceipt {
-                    contract_version: 1,
-                    intent_digest: uncertain_intent.digest(),
-                    enforcement_digest: uncertain_intent.enforcement_digest,
-                    limits: uncertain_intent.limits.clone(),
-                }),
-                intent: uncertain_intent,
-                disposition: ToolDisposition::Uncertain,
-                output: "{}".into(),
-                cache_update: CacheUpdate::Uncertain,
-            }),
+            observation: Some(uncertain_observation),
             review_call_index: None,
         });
         assert_eq!(late_run.tools.len(), crate::tools::MAX_TOOL_CALLS - 3);
@@ -807,14 +823,18 @@ mod goal_report_tests {
             expires_at_ms: 1,
             use_count: 1,
         };
+        let failed_observation = crate::tools::ToolObservation {
+            intent: failed_intent.clone(),
+            disposition: ToolDisposition::Denied,
+            output: String::new(),
+            guard: None,
+            cache_update: CacheUpdate::NotApplicable,
+        };
+        assert!(failed_observation.valid());
+        assert!(!failed_observation.attested_for(&failed_intent));
+        assert!(!failed_observation.stops_run());
         byte_run.tools.push(ToolView {
-            observation: Some(crate::tools::ToolObservation {
-                intent: failed_intent.clone(),
-                disposition: ToolDisposition::Failed,
-                output: String::new(),
-                guard: None,
-                cache_update: CacheUpdate::NotAttempted,
-            }),
+            observation: Some(failed_observation),
             intent: failed_intent,
             review_call_index: None,
         });
@@ -870,6 +890,8 @@ mod goal_report_tests {
                     .expect("Command Guard receipt")
                     .intent_digest = digest;
                 observation.cache_update = CacheUpdate::NotApplicable;
+                assert!(observation.valid());
+                assert!(observation.attested_for(&command.intent));
                 tools.push(command);
             }
             for failure_index in 0..denied_count {
@@ -890,14 +912,17 @@ mod goal_report_tests {
                     expires_at_ms: 1,
                     use_count: 1,
                 };
+                let observation = crate::tools::ToolObservation {
+                    intent: intent.clone(),
+                    disposition: ToolDisposition::Denied,
+                    output: String::new(),
+                    guard: None,
+                    cache_update: CacheUpdate::NotApplicable,
+                };
+                assert!(observation.valid());
+                assert!(!observation.attested_for(&intent));
                 tools.push(ToolView {
-                    observation: Some(crate::tools::ToolObservation {
-                        intent: intent.clone(),
-                        disposition: ToolDisposition::Denied,
-                        output: String::new(),
-                        guard: None,
-                        cache_update: CacheUpdate::NotAttempted,
-                    }),
+                    observation: Some(observation),
                     intent,
                     review_call_index: None,
                 });
