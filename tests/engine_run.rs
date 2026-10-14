@@ -598,6 +598,8 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 assert!(call.objective == objective, "exact objective");
                 assert!(call.context_summary.is_none(), "no derived summary");
                 assert!(call.child_results.is_empty(), "no child context");
+                assert_eq!(call.goal_budget, Some(arany::GoalBudget::default()));
+                assert_eq!(call.goal_plan_contract, None);
                 assert_eq!(call.max_output_tokens, 4096);
                 assert_eq!(call.run_id, run.id);
                 assert_eq!(call.agent_run_id, run.agents[0].id);
@@ -793,7 +795,49 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         }
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
         let events = store.load_session(first.session_id).await.unwrap();
-        assert_eq!(events.len(), 41);
+        let goal_event_counts = [
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalStarted { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalRunLinked { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalActiveTimeReserved { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalProviderCallReserved { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalActiveTimeSettled { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalFinished { .. }))
+                .count(),
+        ];
+        assert_eq!(goal_event_counts, [5, 5, 5, 7, 5, 5]);
+        let non_goal_events = events
+            .iter()
+            .filter(|event| {
+                !matches!(
+                    event.event,
+                    Event::GoalStarted { .. }
+                        | Event::GoalRunLinked { .. }
+                        | Event::GoalActiveTimeReserved { .. }
+                        | Event::GoalProviderCallReserved { .. }
+                        | Event::GoalActiveTimeSettled { .. }
+                        | Event::GoalFinished { .. }
+                )
+            })
+            .count();
+        assert_eq!(non_goal_events, 41);
+        assert_eq!(events.len(), 73);
         let view = SessionView::replay(first.session_id, &events).unwrap().unwrap();
         for (run_id, phase) in [
             (first.run.id, AgentPhase::RootPlan),
