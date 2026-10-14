@@ -505,7 +505,11 @@ triggered and evidence under [testing rules](../../agents/testing.md).
    exclusion. Creates the `docs/specs/goals.md` domain spec and supplies the
    lifecycle, cancellation, context and budget owner required by A4. The
    follow-on steering, checkpoint, rewind and RPI workflows remain in Goal
-   completion.
+   completion. Delivered in this slice: the autonomous `/goal OBJECTIVE` loop,
+   owned by the Engine, which starts Runs until the success criterion is met or
+   the budget, a failure or cancellation stops it. A cancelled loop leaves the
+   Goal Interrupted for `/goal resume`. Prompts typed during a loop are retained
+   as drafts; steering stays deferred. See [the Goal spec](../../docs/specs/goals.md).
 4. **A4 Flexible limits.** Replace the Run's fixed tool/model/context ceilings
    with Finish, compaction, cancellation and Goal-budget bounds; add the
    agreed command timeout and finite build resource profile settings. Guard

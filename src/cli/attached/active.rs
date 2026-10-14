@@ -89,6 +89,15 @@ pub(super) fn goal_request(
     })
 }
 
+/// Names what a draft typed during an admitted Run waits for.
+fn draft_retained_notice(autonomous: bool) -> &'static str {
+    if autonomous {
+        "Draft retained; press Enter after this Goal to submit"
+    } else {
+        "Draft retained; press Enter after this Run to submit"
+    }
+}
+
 /// Checks an idle run before any Session or Goal state is created. Returns the notice to show.
 pub(super) fn preflight_idle_run(
     admission: &Admission,
@@ -115,6 +124,7 @@ pub(super) fn preflight_idle_run(
             },
         );
     };
+    goal_request(view, start).map_err(|error| format!("Error: {error}"))?;
     if start == GoalStart::Resume && has_images {
         return Err("Error: /goal resume takes no image attachments; clear them first".into());
     }
@@ -160,6 +170,9 @@ pub(super) async fn submit_objective(
         .clone()
         .ok_or("select /model before submitting")?;
     let starting_sequence = view.last_sequence;
+    let autonomous = view
+        .active_goal()
+        .map_or(goal == GoalStart::Autonomous, |active| active.autonomous);
     let cancellation = RunCancellation::new();
     let mut progress = if terminal.is_linear() {
         RunProgress::new()
@@ -175,6 +188,7 @@ pub(super) async fn submit_objective(
     let mut approval_allow = false;
     let mut approval_answer = Composer::default();
     let include_paths = objective_includes(admission, &objective)?;
+    let goal = goal_request(view, goal)?;
     let request = RunRequest {
         session_id: Some(view.id),
         title: None,
@@ -183,7 +197,7 @@ pub(super) async fn submit_objective(
         workspace: admission.workspace.clone(),
         include_paths,
         policy: view.defaults.policy,
-        goal: goal_request(view, goal)?,
+        goal,
     };
     draw_active_snapshot(terminal, view, composer, false, false, None)
         .map_err(|error| error.to_string())?;
@@ -440,7 +454,7 @@ pub(super) async fn submit_objective(
                                 if terminal.restore_draft_input(composer.text().len()).is_err() {
                                     break "terminal input failed".to_owned();
                                 }
-                                Some(Feedback::Transient("Draft retained; press Enter after this Run to submit".into()))
+                                Some(Feedback::Transient(draft_retained_notice(autonomous).into()))
                             }
                             ActiveSubmission::Rejected(notice) => {
                                 if terminal.is_linear() {
@@ -502,7 +516,7 @@ pub(super) async fn submit_objective(
                         None
                     }
                     TerminalInput::EndOfInput if !composer.is_empty() => {
-                        Some(Feedback::Transient("Draft retained; press Enter after this Run to submit".into()))
+                        Some(Feedback::Transient(draft_retained_notice(autonomous).into()))
                     }
                     _ => None,
                 };
@@ -821,6 +835,8 @@ mod tests {
 #[cfg(test)]
 mod goal_request_tests {
     use super::*;
+    use crate::cli::attached::{Admission, EntryMode};
+    use arany::SessionDefaults;
 
     fn session_with_goal(autonomous: bool) -> SessionView {
         let session_id = arany::SessionId::new();
@@ -883,5 +899,56 @@ mod goal_request_tests {
             let message = goal_request(&view, start).expect_err("new objective waits for resume");
             assert!(message.contains("/goal resume"), "{message}");
         }
+    }
+
+    #[test]
+    fn idle_goal_refusal_precedes_draft_images_and_session_state() {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let mut view = session_with_goal(true);
+        view.goals[0].status = arany::GoalStatus::Interrupted;
+        view.defaults.provider = Some("openai".into());
+        view.defaults.model = Some("gpt-5.4".into());
+        let admission = Admission {
+            telemetry: arany::Telemetry::disabled(),
+            state_dir: temp.path().join("state"),
+            explicit_state_dir: false,
+            workspace: temp.path().join("workspace"),
+            include_paths: Vec::new(),
+            tools: false,
+            workspace_permissions: None,
+            defaults: SessionDefaults::default(),
+            screen_reader: false,
+            classic: false,
+            no_color: false,
+            setup_requested: false,
+            entry: EntryMode::New,
+            prompt: None,
+            resume_goal: None,
+        };
+        for start in [GoalStart::Plain, GoalStart::Autonomous] {
+            let message = preflight_idle_run(&admission, &view, start, "draft", true, false)
+                .expect_err("an interrupted Goal refuses a new objective");
+            assert!(message.contains("/goal resume"), "{message}");
+        }
+        view.goals.clear();
+        let message = preflight_idle_run(&admission, &view, GoalStart::Resume, "", false, false)
+            .expect_err("no interrupted Goal to resume");
+        assert_eq!(message, "Error: No interrupted Goal is available to resume");
+        assert!(
+            !admission.state_dir.exists(),
+            "refused submissions create no State"
+        );
+    }
+
+    #[test]
+    fn retained_draft_names_the_autonomous_goal_boundary() {
+        assert_eq!(
+            draft_retained_notice(true),
+            "Draft retained; press Enter after this Goal to submit"
+        );
+        assert_eq!(
+            draft_retained_notice(false),
+            "Draft retained; press Enter after this Run to submit"
+        );
     }
 }

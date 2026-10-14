@@ -1159,3 +1159,156 @@ async fn plain_prompt_is_one_run_even_when_its_criterion_is_unsatisfied() {
     assert_eq!(goal.status, arany::GoalStatus::Failed);
     assert_eq!(goal.run_ids, [outcome.run.id]);
 }
+
+/// Action taken once a Run's Finish is committed and observed through progress.
+enum AfterFinish {
+    Cancel(RunCancellation),
+    AdvanceClock(Duration),
+}
+
+/// Drives an admitted Run and applies `after` as soon as its Finished Run becomes visible.
+async fn run_observing_finish(
+    engine: &mut Engine<ScriptedProvider>,
+    input: RunRequest,
+    after: AfterFinish,
+) -> Result<arany::RunOutcome, EngineError> {
+    let cancellation = match &after {
+        AfterFinish::Cancel(cancellation) => cancellation.clone(),
+        AfterFinish::AdvanceClock(_) => RunCancellation::new(),
+    };
+    let progress = RunProgress::new();
+    let mut observer = progress.clone();
+    let run = engine.run_with_progress(input, cancellation, progress);
+    tokio::pin!(run);
+    let mut after = Some(after);
+    loop {
+        tokio::select! {
+            result = &mut run => return result,
+            update = observer.changed() => {
+                if update.run.status == RunStatus::Finished && let Some(action) = after.take() {
+                    match action {
+                        AfterFinish::Cancel(cancellation) => {
+                            cancellation.cancel();
+                        }
+                        AfterFinish::AdvanceClock(duration) => tokio::time::advance(duration).await,
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn autonomous_goal_cancelled_after_a_finished_run_keeps_that_outcome_and_stays_open() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Tool {
+            call: facts_read(),
+            plan_contract: Some(Box::new(facts_plan(facts_digest("v2")))),
+        },
+        finish_with("first pass"),
+        finish_with("never requested"),
+    ]);
+    let requests = Arc::clone(&provider.requests);
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    let outcome = run_observing_finish(
+        &mut engine,
+        autonomous_input(&workspace),
+        AfterFinish::Cancel(RunCancellation::new()),
+    )
+    .await
+    .expect("the committed Finished Run is returned");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    assert_eq!(
+        requests.lock().expect("Provider requests").len(),
+        2,
+        "cancellation after the first Finish starts no second Run"
+    );
+    engine.close().await.expect("engine shutdown");
+
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    let goal = view.goal(outcome.goal_id).expect("Goal");
+    assert_eq!(goal.status, arany::GoalStatus::Interrupted);
+    assert_eq!(goal.run_ids.len(), 1);
+    assert!(goal.report.is_none());
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(&event.event, Event::GoalFinished { .. })),
+        "the Goal stays open for explicit resume"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn autonomous_goal_active_time_spent_after_a_finish_fails_the_goal_with_its_report() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let budget = arany::GoalBudget {
+        max_active_ms: 60_000,
+        ..arany::GoalBudget::default()
+    };
+    let mut plan = facts_plan(facts_digest("v2"));
+    plan.budget = budget.clone();
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Tool {
+            call: facts_read(),
+            plan_contract: Some(Box::new(plan)),
+        },
+        finish_with("first pass"),
+        finish_with("never requested"),
+    ]);
+    let requests = Arc::clone(&provider.requests);
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    let mut input = autonomous_input(&workspace);
+    input.goal = arany::GoalRequest::autonomous(budget, arany::GoalPhase::Implementation);
+    // Terminal-fact recording after the Finish check spends the whole active budget.
+    let result = run_observing_finish(
+        &mut engine,
+        input,
+        AfterFinish::AdvanceClock(Duration::from_secs(60)),
+    )
+    .await;
+    assert!(
+        matches!(result, Err(EngineError::GoalBudgetExhausted)),
+        "the refused continuation reports the Goal failure: {:?}",
+        result.as_ref().map(|outcome| outcome.run.status)
+    );
+    assert_eq!(
+        requests.lock().expect("Provider requests").len(),
+        2,
+        "no third Provider call is dispatched"
+    );
+    engine.close().await.expect("engine shutdown");
+
+    let session_id = arany::list_sessions(
+        StateRoot::open_existing(&state_path).expect("state"),
+        workspace.clone(),
+    )
+    .await
+    .expect("Sessions")
+    .first()
+    .expect("Session")
+    .id;
+    let (events, view) = replayed(&state_path, session_id).await;
+    let goal = view.goals.last().expect("Goal");
+    assert_eq!(goal.status, arany::GoalStatus::Failed);
+    assert!(goal.report.is_some());
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(&event.event, Event::GoalFinished { .. }))
+            .count(),
+        1
+    );
+}

@@ -346,6 +346,16 @@ pub fn parse_submission(line: &str) -> Result<Submission<'_>, CommandParseError>
         if spec.argument.is_none() && argument.is_some() {
             return Err(CommandParseError::UnexpectedArgument { command: spec.name });
         }
+        // `/goal Resume` is the same explicit resume; only the exact word is normalized.
+        let argument = match argument {
+            Some(word)
+                if spec.command == InteractiveCommand::Goal
+                    && word.eq_ignore_ascii_case("resume") =>
+            {
+                Some("resume")
+            }
+            other => other,
+        };
         return Ok(Submission::Command {
             command: spec.command,
             argument,
@@ -758,6 +768,20 @@ mod tests {
             Ok(Submission::Command {
                 command: InteractiveCommand::Goal,
                 argument: Some("resume"),
+            })
+        );
+        assert_eq!(
+            parse_submission("/goal  Resume "),
+            Ok(Submission::Command {
+                command: InteractiveCommand::Goal,
+                argument: Some("resume"),
+            })
+        );
+        assert_eq!(
+            parse_submission("/goal resume now"),
+            Ok(Submission::Command {
+                command: InteractiveCommand::Goal,
+                argument: Some("resume now"),
             })
         );
         assert_eq!(

@@ -1300,6 +1300,9 @@ async fn submit_idle_run(
     }
 }
 
+const INTERRUPTED_GOAL_NOTICE: &str =
+    "Goal interrupted before the next Run; use /goal resume to continue";
+
 async fn finish_interrupted_submission(
     terminal: &mut AttachedTerminal,
     admission: &Admission,
@@ -1314,7 +1317,7 @@ async fn finish_interrupted_submission(
         None,
     );
     let interrupted = if view.interrupted_goal_id().is_some() {
-        "Goal interrupted before the next Run; use /goal resume to continue"
+        INTERRUPTED_GOAL_NOTICE
     } else {
         "Submission interrupted before Run admission; no task was accepted. Account work already started may still complete."
     };
@@ -1384,7 +1387,11 @@ async fn finish_submission(
         .restore_draft_input(composer.text().len())
         .map_err(|error| error.to_string())?;
     let mut notice = retained_draft_notice(composer);
-    let feedback = render_run_feedback(&outcome.run);
+    // A cancelled autonomous loop keeps its Goal open; the reloaded view says how to continue it.
+    let feedback = render_run_feedback(&outcome.run).or_else(|| {
+        view.interrupted_goal_id()
+            .map(|_| INTERRUPTED_GOAL_NOTICE.to_owned())
+    });
     if let Some(feedback) = feedback {
         if composer.is_empty() {
             notice = Some(Feedback::History(feedback));

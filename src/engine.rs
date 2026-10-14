@@ -1589,8 +1589,9 @@ impl<P: Provider + 'static> Engine<P> {
             .run_turn(request, cancellation.clone(), progress.clone(), false)
             .await?;
         while turn.continues() {
+            // The committed Run stands; the Goal stays open and resumes explicitly.
             if cancellation.is_cancelled() {
-                return Err(EngineError::CancelledBeforeStart);
+                return Ok(turn.outcome);
             }
             let next = RunRequest {
                 session_id: Some(turn.outcome.session_id),
@@ -1602,11 +1603,53 @@ impl<P: Provider + 'static> Engine<P> {
                 policy,
                 goal: GoalRequest::resume(turn.outcome.goal_id, false),
             };
-            turn = self
+            turn = match self
                 .run_turn(next, cancellation.clone(), progress.clone(), true)
-                .await?;
+                .await
+            {
+                Ok(turn) => turn,
+                // Active time can run out after the Finish check; the Goal then fails with its report.
+                Err(EngineError::GoalBudgetExhausted) => {
+                    self.fail_exhausted_goal(&turn.outcome).await?;
+                    return Err(EngineError::GoalBudgetExhausted);
+                }
+                Err(error) => return Err(error),
+            };
         }
         Ok(turn.outcome)
+    }
+
+    /// Finishes an open autonomous Goal as Failed after its next Run was refused for budget.
+    async fn fail_exhausted_goal(&mut self, previous: &RunOutcome) -> Result<(), EngineError> {
+        let session_id = previous.session_id;
+        let _session_lock = self.lock_session(session_id)?;
+        let view = self
+            .store
+            .load_view(session_id)
+            .await?
+            .ok_or(EngineError::InvalidHistory)?;
+        let goal = view
+            .goal(previous.goal_id)
+            .ok_or(EngineError::InvalidHistory)?;
+        if !goal.is_active() || goal.active_run.is_some() {
+            return Err(EngineError::InvalidHistory);
+        }
+        let report = goal_report(&view, &previous.run, goal);
+        append_observed(
+            &self.store,
+            None,
+            None,
+            session_id,
+            Event::GoalFinished {
+                goal_id: goal.id,
+                status: GoalStatus::Failed,
+                active_ms: goal.active_ms,
+                report,
+            },
+        )
+        .await?;
+        self.release_goal_workspace(goal.id, goal.workspace_identity);
+        Ok(())
     }
 
     async fn run_turn(

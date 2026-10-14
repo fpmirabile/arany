@@ -438,11 +438,6 @@ pub(super) fn validate_idle_command(
         {
             Err("Usage: /resume SESSION_ID")
         }
-        InteractiveCommand::Goal
-            if argument == Some("resume") && view.interrupted_goal_id().is_none() =>
-        {
-            Err("No interrupted Goal is available to resume")
-        }
         InteractiveCommand::Fork if argument.is_some_and(|id| SessionId::from_str(id).is_err()) => {
             Err("Usage: /fork [SESSION_ID]")
         }
@@ -1168,11 +1163,6 @@ mod tests {
         let oversized_title = "x".repeat(129);
         let oversized_unicode_title = "é".repeat(65);
         for (command, argument, expected) in [
-            (
-                InteractiveCommand::Goal,
-                "resume",
-                "No interrupted Goal is available to resume",
-            ),
             (
                 InteractiveCommand::Provider,
                 "other",

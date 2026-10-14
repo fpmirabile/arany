@@ -1538,6 +1538,95 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn finished_run_fails_its_autonomous_goal_only_at_the_active_limit() {
+        let limit = 1000;
+        for (settled, accepted) in [(limit, true), (limit - 1, false)] {
+            let session_id = SessionId::new();
+            let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+            let budget = GoalBudget {
+                max_active_ms: limit,
+                ..GoalBudget::default()
+            };
+            let mut events = vec![
+                Event::SessionStarted {
+                    title: "Goal".into(),
+                    workspace_identity: (1, 2),
+                },
+                Event::GoalStarted {
+                    goal_id,
+                    objective: GOAL_OBJECTIVE.into(),
+                    workspace_identity: (1, 2),
+                    budget,
+                    phase: GoalPhase::Implementation,
+                    autonomous: true,
+                },
+            ];
+            events.extend(start_run(
+                goal_id,
+                run_id,
+                agent_run_id,
+                config(CollaborationPolicy::Single, false),
+            ));
+            events.push(Event::GoalActiveTimeReserved {
+                goal_id,
+                run_id,
+                reserved_ms: limit,
+            });
+            events.push(Event::GoalProviderCallReserved {
+                goal_id,
+                run_id,
+                agent_run_id,
+            });
+            events.push(Event::ProviderCallRecorded {
+                run_id,
+                agent_run_id,
+                record: record(
+                    AgentPhase::RootPlan,
+                    ProviderCallDisposition::Finished,
+                    None,
+                ),
+            });
+            events.push(Event::AgentFinished {
+                run_id,
+                agent_run_id,
+                disposition: AgentDisposition::Finished,
+                summary: Some("done".into()),
+                result: Some("done".into()),
+            });
+            events.push(Event::MessageCommitted {
+                run_id,
+                text: "done".into(),
+            });
+            events.push(Event::RunFinished {
+                run_id,
+                disposition: RunDisposition::Finished,
+            });
+            events.push(Event::GoalActiveTimeSettled {
+                goal_id,
+                run_id,
+                active_ms: settled,
+            });
+            events.push(Event::GoalFinished {
+                goal_id,
+                status: GoalStatus::Failed,
+                active_ms: settled,
+                report: GoalReport {
+                    summary: "budget".into(),
+                    changes: Vec::new(),
+                    evidence: Vec::new(),
+                    unresolved: Vec::new(),
+                },
+            });
+            let replayed = SessionView::replay_open(session_id, &journal(session_id, events));
+            assert_eq!(
+                replayed.is_ok(),
+                accepted,
+                "a Failed Goal over a Finished Run needs its active budget spent ({settled} of {limit})"
+            );
+        }
+    }
+
+    #[test]
     fn plan_wait_does_not_block_a_terminal_failure_before_tool_start() {
         let session_id = SessionId::new();
         let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());

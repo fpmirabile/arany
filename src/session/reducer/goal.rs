@@ -322,14 +322,17 @@ impl SessionView {
             .copied()
             .ok_or(ReplayError::InvalidTransition)?;
         let run_status = current_run(self, run_id)?.status;
+        let goal = current_goal_mut(self, *goal_id)?;
+        let active_limit = goal.effective_budget().max_active_ms;
+        // A Finished Run's settled active time can exhaust an autonomous Goal before its next Run is admitted.
+        let exhausted_after_finish =
+            goal.autonomous && run_status == RunStatus::Finished && goal.active_ms == active_limit;
         let disposition_matches = matches!(
             (*status, run_status),
             (GoalStatus::Completed, RunStatus::Finished)
                 | (GoalStatus::Failed, RunStatus::Failed)
                 | (GoalStatus::Cancelled, RunStatus::Cancelled)
-        );
-        let goal = current_goal_mut(self, *goal_id)?;
-        let active_limit = goal.effective_budget().max_active_ms;
+        ) || (*status == GoalStatus::Failed && exhausted_after_finish);
         if goal.status != GoalStatus::Running
             || goal.active_run.is_some()
             || !disposition_matches

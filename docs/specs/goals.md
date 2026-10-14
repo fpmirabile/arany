@@ -33,11 +33,11 @@ A Run that Finishes without the plan's success criterion is a Run boundary while
 - A Finished Run whose success criterion is satisfied, or whose Goal has no plan contract, completes the Goal.
 - A Finished Run whose criterion is unsatisfied and whose budget admits no further Run fails the Run, and the Goal fails with its report.
 - A Failed Run fails the Goal, as for any Run.
-- Cancellation stops the current Run and starts no further Run. The Goal records no terminal receipt and stays open, so reopening it projects it as Interrupted for explicit resume.
+- Cancellation stops the current Run and starts no further Run. A Run that already Finished keeps its committed outcome, which the call returns. The Goal records no terminal receipt and stays open, so reopening it projects it as Interrupted for explicit resume.
 
 Attached `/goal OBJECTIVE` starts an autonomous Goal, and `/goal resume` continues an interrupted one; `/goal` shows its read-only status. The [terminal spec](./terminal.md) owns those commands and their notices.
 
-Active time for the next Run is judged at the Run's finish, so time spent recording its terminal facts can still make the next admission refuse with `GoalBudgetExhausted`; the Goal then stays open like any other refused admission.
+Active time for the next Run is judged at the Run's finish, so time spent recording its terminal facts can still make the next admission refuse with `GoalBudgetExhausted`. The Finished Run stays committed, and the autonomous Goal then finishes as Failed with its bounded report; the call returns `GoalBudgetExhausted`, so `exec` exits nonzero and attached submission shows the error. Replay accepts this Failed receipt over a Finished Run only when the Goal's settled active time equals its pinned limit; any other Failed receipt needs a Failed Run.
 
 ## Initial plan contract and success receipt
 

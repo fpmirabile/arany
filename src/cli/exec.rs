@@ -165,7 +165,11 @@ impl ExecArgs {
             (None, Some(prompt), None) => (prompt.clone(), GoalRequest::default()),
             (None, Some(prompt), Some(id)) => (prompt.clone(), GoalRequest::resume(id, true)),
             (None, None, Some(id)) => (String::new(), GoalRequest::resume(id, true)),
-            _ => return Err("pass exactly one of a prompt, --goal, or --resume-goal"),
+            _ => {
+                return Err(
+                    "pass --goal alone, a prompt alone, or --resume-goal with an optional prompt",
+                );
+            }
         };
         if !resumes_without_text && (objective.trim().is_empty() || objective.len() > 8 * 1024) {
             return Err("invalid objective");
@@ -484,6 +488,21 @@ mod tests {
             Some(arany::GoalId::from_str(&goal_id).expect("Goal ID"))
         );
 
+        let admission = parse(&[
+            "--session-id",
+            &session,
+            "--resume-goal",
+            &goal_id,
+            "Keep going",
+        ])
+        .expect("resume accepts a prompt as its text")
+        .admit()
+        .expect("prompt with resume");
+        assert_eq!(admission.objective, "Keep going");
+        assert_eq!(
+            parse(&[]).expect("parses").admit().err(),
+            Some("pass --goal alone, a prompt alone, or --resume-goal with an optional prompt")
+        );
         assert_eq!(
             parse(&["--goal", " "]).expect("parses").admit().err(),
             Some("invalid objective")
