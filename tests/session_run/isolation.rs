@@ -65,6 +65,63 @@ pub fn enter_account_isolated_test() -> bool {
 }
 
 #[cfg(target_os = "linux")]
+pub fn enter_native_account_isolated_test() -> bool {
+    const CHILD: &str = "ARANY_ACCOUNT_ISOLATED_TEST";
+
+    if std::env::var_os(CHILD).is_some() {
+        return true;
+    }
+    use crate::process::BoundedOutput;
+    use std::{os::unix::fs::DirBuilderExt, path::Path, time::Duration};
+
+    let _gate = crate::process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let test = std::thread::current()
+        .name()
+        .expect("named test thread")
+        .to_owned();
+    let executable = std::env::current_exe().expect("test executable");
+    let temp = tempfile::tempdir().expect("native account test root");
+    for name in ["account-home", "home", "state"] {
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(temp.path().join(name))
+            .expect("native fixture directory");
+    }
+    let guard = Path::new(env!("CARGO_BIN_EXE_arany"));
+    let mut command = native_account_isolated_test_command(temp.path(), &executable, guard);
+    command
+        .args(["--exact", &test, "--include-ignored", "--nocapture"])
+        .env_clear()
+        .current_dir(temp.path());
+    let temp_path = temp.path().to_path_buf();
+    let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let output = command
+            .bounded_output_for(Duration::from_secs(90), 32 * 1024 * 1024)
+            .expect("native account test process");
+        assert!(
+            output.status.success(),
+            "native account test failed: stdout={:?}; stderr={:?}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        crate::process::assert_single_test_completed(&output.stdout, &test);
+        assert!(output.stderr.is_empty(), "native test stderr is empty");
+    }));
+    if let Err(error) = checked {
+        let _ = temp.keep();
+        std::panic::resume_unwind(error);
+    }
+    drop(temp);
+    assert!(
+        !temp_path.exists(),
+        "successful native fixture is cleaned up"
+    );
+    false
+}
+
+#[cfg(target_os = "linux")]
 pub fn native_account_isolated_test_command(
     root: &std::path::Path,
     test_executable: &std::path::Path,
@@ -108,7 +165,7 @@ pub fn native_account_isolated_test_command(
         .args([
             "--non-interactive", "--", "/usr/bin/unshare", "--mount", "--net",
             "--propagation", "private", "--", "/usr/bin/sh", "-eu", "-c",
-            "root=$1; uid=$2; gid=$3; shift 3; /usr/bin/mount --bind \"$root/passwd\" /etc/passwd; /usr/bin/mount --options remount,bind,ro /etc/passwd; exec /usr/bin/timeout --kill-after=2s 80s /usr/bin/setpriv --reuid \"$uid\" --regid \"$gid\" --clear-groups --no-new-privs /usr/bin/env -i HOME=\"$root/home\" XDG_STATE_HOME=\"$root/environment-state\" XDG_DATA_HOME=\"$root/environment-data\" PATH=/usr/bin:/bin ARANY_TEST_CACHE_CANARY_ROOT=\"$root\" \"$@\"",
+            "root=$1; uid=$2; gid=$3; shift 3; /usr/bin/mount --bind \"$root/passwd\" /etc/passwd; /usr/bin/mount --options remount,bind,ro /etc/passwd; exec /usr/bin/timeout --kill-after=2s 80s /usr/bin/setpriv --reuid \"$uid\" --regid \"$gid\" --clear-groups --no-new-privs /usr/bin/env -i HOME=\"$root/home\" XDG_STATE_HOME=\"$root/environment-state\" XDG_DATA_HOME=\"$root/environment-data\" PATH=/usr/bin:/bin ARANY_TEST_CACHE_CANARY_ROOT=\"$root\" ARANY_ACCOUNT_ISOLATED_TEST=1 \"$@\"",
             "arany-native-account-fixture",
         ])
         .arg(root)

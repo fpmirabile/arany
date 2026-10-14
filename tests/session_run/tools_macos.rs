@@ -233,15 +233,13 @@ impl Provider for Journey {
                             ))
                         });
                         skills.dedup();
-                        let success_criterion = if matches!(call, ToolCall::Read { .. }) {
-                            arany::GoalSuccessCriterion::WorkspaceFileContent {
-                                path: "src/main.txt".into(),
-                                content: "after\n".into(),
-                            }
-                        } else {
-                            arany::GoalSuccessCriterion::ToolCallSucceeded {
-                                call: Box::new(call.clone()),
-                            }
+                        let success_call = self
+                            .calls
+                            .iter()
+                            .find(|candidate| matches!(candidate, ToolCall::Search { .. }))
+                            .unwrap_or(&call);
+                        let success_criterion = arany::GoalSuccessCriterion::ToolCallSucceeded {
+                            call: Box::new(success_call.clone()),
                         };
                         arany::GoalPlanContract {
                             mission: "Complete the bounded native Tool journey".into(),
@@ -761,7 +759,24 @@ impl Provider for RuntimeJourney {
             return Err(ProviderError::InvalidOutcome);
         }
         let outcome = if step == 0 {
-            ProviderOutcome::Tool(self.call.clone())
+            let plan_contract = match &self.call {
+                ToolCall::Command { program, .. } => Some(Box::new(arany::GoalPlanContract {
+                    mission: "Run the selected runtime command".into(),
+                    paths: Vec::new(),
+                    commands: vec![program.clone()],
+                    skills: Vec::new(),
+                    mcp_tools: Vec::new(),
+                    success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
+                        call: Box::new(self.call.clone()),
+                    },
+                    budget: arany::GoalBudget::default(),
+                })),
+                _ => return Err(ProviderError::InvalidOutcome),
+            };
+            ProviderOutcome::Tool {
+                call: self.call.clone(),
+                plan_contract,
+            }
         } else {
             ProviderOutcome::Finish(Finish {
                 summary: "Runtime profile checked".into(),
@@ -906,6 +921,10 @@ async fn native_runtime_mount_journey_helper() {
         workspace: workspace.clone(),
         include_paths: Vec::new(),
         policy: CollaborationPolicy::Single,
+        goal: arany::GoalRequest::new(
+            arany::GoalBudget::default(),
+            arany::GoalPhase::Implementation,
+        ),
     });
     let approve = async {
         let approval = inbox
@@ -994,6 +1013,10 @@ async fn native_runtime_mount_journey_helper() {
         workspace,
         include_paths: Vec::new(),
         policy: CollaborationPolicy::Single,
+        goal: arany::GoalRequest::new(
+            arany::GoalBudget::default(),
+            arany::GoalPhase::Implementation,
+        ),
     });
     let approve = async {
         let approval = inbox

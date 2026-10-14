@@ -30,6 +30,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
             ]),
         }],
         mcp: Vec::new(),
+        runtime_grants: Vec::new(),
     };
     let runtime = ToolRuntime {
         config,

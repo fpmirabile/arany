@@ -960,10 +960,10 @@ impl<P: Provider + 'static> Engine<P> {
         session_id: SessionId,
         progress: Option<&ProgressPublisher>,
         event: Event,
-    ) -> Result<(), EngineError> {
+    ) -> Result<u64, EngineError> {
         self.retain_goal_workspace(goal_id, workspace_identity, workspace_lock);
         match append_observed(&self.store, progress, None, session_id, event).await {
-            Ok(_) => Ok(()),
+            Ok(sequence) => Ok(sequence),
             Err(error) => match self.store.load_view(session_id).await {
                 Ok(Some(view)) if view.active_goal().is_some() => {
                     Err(EngineError::GoalAdmissionUncertain)
@@ -1285,6 +1285,7 @@ impl<P: Provider + 'static> Engine<P> {
             return Err(EngineError::CancelledBeforeStart);
         }
         let trace_provider = crate::telemetry::TraceProvider::from_profile(&config.provider);
+        let goal_trace = self.telemetry.begin_goal(session_id, goal.id);
         let publisher = if let Some(progress) = progress {
             let view = match history.take() {
                 Some(view) => view,
@@ -1302,37 +1303,41 @@ impl<P: Provider + 'static> Engine<P> {
             return Err(EngineError::CancelledBeforeStart);
         }
         if goal.is_new {
-            self.append_goal_lifecycle(
-                goal.id,
-                workspace_identity,
-                provisional_workspace_lock,
-                session_id,
-                publisher.as_ref(),
-                Event::GoalStarted {
-                    goal_id: goal.id,
-                    objective: request.objective.clone(),
+            let sequence = self
+                .append_goal_lifecycle(
+                    goal.id,
                     workspace_identity,
-                    budget: goal.budget.clone(),
-                },
-            )
-            .await?;
+                    provisional_workspace_lock,
+                    session_id,
+                    publisher.as_ref(),
+                    Event::GoalStarted {
+                        goal_id: goal.id,
+                        objective: request.objective.clone(),
+                        workspace_identity,
+                        budget: goal.budget.clone(),
+                    },
+                )
+                .await?;
+            goal_trace.event_committed(sequence, crate::telemetry::TraceEventKind::GoalStarted);
         } else if goal.resume {
-            self.append_goal_lifecycle(
-                goal.id,
-                workspace_identity,
-                provisional_workspace_lock,
-                session_id,
-                publisher.as_ref(),
-                Event::GoalResumed { goal_id: goal.id },
-            )
-            .await?;
+            let sequence = self
+                .append_goal_lifecycle(
+                    goal.id,
+                    workspace_identity,
+                    provisional_workspace_lock,
+                    session_id,
+                    publisher.as_ref(),
+                    Event::GoalResumed { goal_id: goal.id },
+                )
+                .await?;
+            goal_trace.event_committed(sequence, crate::telemetry::TraceEventKind::GoalResumed);
         } else {
             self.retain_goal_workspace(goal.id, workspace_identity, provisional_workspace_lock);
         }
         if cancellation.is_cancelled() {
             return Err(EngineError::CancelledBeforeStart);
         }
-        append_observed(
+        let linked_sequence = append_observed(
             &self.store,
             publisher.as_ref(),
             None,
@@ -1344,6 +1349,10 @@ impl<P: Provider + 'static> Engine<P> {
             },
         )
         .await?;
+        goal_trace.event_committed(
+            linked_sequence,
+            crate::telemetry::TraceEventKind::GoalRunLinked,
+        );
         if cancellation.is_cancelled() {
             return Err(EngineError::CancelledBeforeStart);
         }
@@ -1368,7 +1377,7 @@ impl<P: Provider + 'static> Engine<P> {
         )
         .await?;
         let active_segment_ms = active_remaining_ms.min(GOAL_RUN_ACTIVE_SEGMENT_MS);
-        append_observed(
+        let active_reserved_sequence = append_observed(
             &self.store,
             publisher.as_ref(),
             None,
@@ -1380,11 +1389,16 @@ impl<P: Provider + 'static> Engine<P> {
             },
         )
         .await?;
+        goal_trace.event_committed(
+            active_reserved_sequence,
+            crate::telemetry::TraceEventKind::GoalActiveTimeReserved,
+        );
         let active_started = tokio::time::Instant::now();
-        let trace = self.telemetry.begin_run(
+        let trace = self.telemetry.begin_goal_run(
             session_id,
             run_id,
             trace_provider,
+            &goal_trace,
             Some((context_started, context_ended)),
         );
         trace.event_committed(
@@ -1486,7 +1500,7 @@ impl<P: Provider + 'static> Engine<P> {
         append_observed(
             &self.store,
             None,
-            None,
+            Some(&trace),
             session_id,
             Event::GoalActiveTimeSettled {
                 goal_id: goal.id,
@@ -1501,13 +1515,15 @@ impl<P: Provider + 'static> Engine<P> {
             .await?
             .ok_or(EngineError::InvalidHistory)?;
         let goal_view = view.goal(goal.id).ok_or(EngineError::InvalidHistory)?;
+        let mut goal_status = GoalStatus::Running;
         match run.status {
             crate::session::RunStatus::Finished if request.goal.finish_after_run => {
                 let report = goal_report(&view, &run, goal_view);
+                goal_status = GoalStatus::Completed;
                 append_observed(
                     &self.store,
                     None,
-                    None,
+                    Some(&trace),
                     session_id,
                     Event::GoalFinished {
                         goal_id: goal.id,
@@ -1525,11 +1541,12 @@ impl<P: Provider + 'static> Engine<P> {
                 } else {
                     GoalStatus::Cancelled
                 };
+                goal_status = status;
                 let report = goal_report(&view, &run, goal_view);
                 append_observed(
                     &self.store,
                     None,
-                    None,
+                    Some(&trace),
                     session_id,
                     Event::GoalFinished {
                         goal_id: goal.id,
@@ -1550,6 +1567,14 @@ impl<P: Provider + 'static> Engine<P> {
             _ => return Err(EngineError::InvalidHistory),
         };
         trace.finish(trace_outcome);
+        goal_trace.finish(
+            goal_status,
+            goal_view.provider_calls,
+            goal_view.known_tokens,
+            goal_view.token_usage_unknown,
+            goal_view.active_ms,
+            goal_view.uncertain_active_ms,
+        );
         Ok(RunOutcome {
             session_id,
             goal_id: goal.id,

@@ -608,7 +608,7 @@ impl arany::Provider for ExactTokenTool {
 
 #[tokio::test]
 async fn exact_goal_token_cap_fails_before_a_tool_request_is_journaled() {
-    if !super::isolation::enter_account_isolated_test() {
+    if !super::isolation::enter_native_account_isolated_test() {
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -703,7 +703,7 @@ impl Provider for GoalWorkspaceLease {
 
 #[tokio::test]
 async fn unfinished_implementation_goal_holds_workspace_lease_across_runs() {
-    if !super::isolation::enter_account_isolated_test() {
+    if !super::isolation::enter_native_account_isolated_test() {
         return;
     }
     let temp = tempfile::tempdir().unwrap();

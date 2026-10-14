@@ -8,8 +8,19 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition, RunId, SessionId,
     };
     let session = SessionId::new();
+    let goal = arany::GoalId::new();
     let run = RunId::new();
     let primary = AgentRunId::new();
+    const AGENT_SPAWNED: usize = 6;
+    const TOOL_STARTED: usize = 9;
+    const TOOL_FINISHED: usize = 10;
+    const NEXT_CALL_RESERVED: usize = 11;
+    const NEXT_CALL_RECORDED: usize = 12;
+    const COMMAND_STARTED: usize = TOOL_STARTED + 1;
+    const COMMAND_FINISHED: usize = TOOL_STARTED + 2;
+    const INTEGRATION_STARTED: usize = TOOL_STARTED + 3;
+    const INTEGRATION_FINISHED: usize = TOOL_STARTED + 4;
+    const INTEGRATED_NEXT_CALL_RESERVED: usize = TOOL_STARTED + 5;
     let policy = arany::ToolPolicyReceipt {
         contract_version: 1,
         config_digest: [1; 32],
@@ -81,6 +92,17 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             title: "Historical tool facts".into(),
             workspace_identity: (1, 2),
         },
+        Event::GoalStarted {
+            goal_id: goal,
+            objective: "Past work".into(),
+            workspace_identity: (1, 2),
+            budget: arany::GoalBudget::default(),
+        },
+        Event::GoalRunLinked {
+            goal_id: goal,
+            run_id: run,
+            phase: arany::GoalPhase::Implementation,
+        },
         Event::MessageAccepted {
             run_id: run,
             text: "Past work".into(),
@@ -90,12 +112,22 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             run_id: run,
             config,
         },
+        Event::GoalActiveTimeReserved {
+            goal_id: goal,
+            run_id: run,
+            reserved_ms: 30_000,
+        },
         Event::AgentSpawned {
             run_id: run,
             agent_run_id: primary,
             role: AgentRole::Primary,
             ordinal: 0,
             objective: None,
+        },
+        Event::GoalProviderCallReserved {
+            goal_id: goal,
+            run_id: run,
+            agent_run_id: primary,
         },
         record(ProviderCallDisposition::ToolRequested),
         Event::ToolStarted {
@@ -110,6 +142,11 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         },
     ];
     let suffix = vec![
+        Event::GoalProviderCallReserved {
+            goal_id: goal,
+            run_id: run,
+            agent_run_id: primary,
+        },
         record(ProviderCallDisposition::Finished),
         Event::AgentFinished {
             run_id: run,
@@ -126,6 +163,11 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             run_id: run,
             disposition: RunDisposition::Finished,
         },
+        Event::GoalActiveTimeSettled {
+            goal_id: goal,
+            run_id: run,
+            active_ms: 1_000,
+        },
     ];
     let replay = |events: Vec<Event>| {
         let envelopes: Vec<_> = events
@@ -133,7 +175,15 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             .enumerate()
             .map(|(index, event)| {
                 let scope = match &event {
-                    Event::SessionStarted { .. } => (None, None),
+                    Event::SessionStarted { .. }
+                    | Event::GoalStarted { .. }
+                    | Event::GoalResumed { .. }
+                    | Event::GoalFinished { .. } => (None, None),
+                    Event::GoalRunLinked { run_id, .. }
+                    | Event::GoalActiveTimeReserved { run_id, .. }
+                    | Event::GoalActiveTimeSettled { run_id, .. }
+                    | Event::GoalPlanContractRecorded { run_id, .. }
+                    | Event::GoalCompactionCallReserved { run_id, .. } => (Some(*run_id), None),
                     Event::MessageAccepted { run_id, .. }
                     | Event::RunStarted { run_id, .. }
                     | Event::MessageCommitted { run_id, .. }
@@ -144,6 +194,11 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                         ..
                     }
                     | Event::ProviderCallRecorded {
+                        run_id,
+                        agent_run_id,
+                        ..
+                    }
+                    | Event::GoalProviderCallReserved {
                         run_id,
                         agent_run_id,
                         ..
@@ -189,7 +244,17 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         record.output_tokens = Some(1);
     }
     let mut reviewed = all.clone();
-    reviewed.insert(6, review.clone());
+    reviewed.splice(
+        TOOL_FINISHED..TOOL_FINISHED,
+        [
+            Event::GoalProviderCallReserved {
+                goal_id: goal,
+                run_id: run,
+                agent_run_id: primary,
+            },
+            review.clone(),
+        ],
+    );
     let view = replay(reviewed.clone()).unwrap().unwrap();
     assert_eq!(view.runs[0].status, RunStatus::Finished);
     assert_eq!(
@@ -200,19 +265,41 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         let mut row = reviewed.clone();
         match case {
             0 => {
-                row.remove(6);
-                row.insert(5, review.clone());
+                row.drain(TOOL_FINISHED..TOOL_FINISHED + 2);
+                row.insert(TOOL_STARTED, review.clone());
             }
             1 => {
-                row.remove(6);
-                row.insert(7, review.clone());
+                row.drain(TOOL_FINISHED..TOOL_FINISHED + 2);
+                drop(row.splice(
+                    TOOL_FINISHED + 1..TOOL_FINISHED + 1,
+                    [
+                        Event::GoalProviderCallReserved {
+                            goal_id: goal,
+                            run_id: run,
+                            agent_run_id: primary,
+                        },
+                        review.clone(),
+                    ],
+                ));
             }
-            2 => row.insert(7, review.clone()),
+            2 => {
+                drop(row.splice(
+                    TOOL_FINISHED + 3..TOOL_FINISHED + 3,
+                    [
+                        Event::GoalProviderCallReserved {
+                            goal_id: goal,
+                            run_id: run,
+                            agent_run_id: primary,
+                        },
+                        review.clone(),
+                    ],
+                ));
+            }
             3 => {
-                row.remove(8);
+                row.remove(NEXT_CALL_RECORDED + 2);
             }
             4 | 5 => {
-                if let Event::ProviderCallRecorded { record, .. } = &mut row[6] {
+                if let Event::ProviderCallRecorded { record, .. } = &mut row[TOOL_FINISHED + 1] {
                     record.disposition = if case == 4 {
                         ProviderCallDisposition::ToolRequested
                     } else {
@@ -224,43 +311,45 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         }
         assert!(replay(row).is_err(), "invalid review transition {case}");
     }
-    let interrupted = replay(prefix[..6].to_vec()).unwrap().unwrap();
+    let interrupted = replay(prefix[..TOOL_STARTED + 1].to_vec())
+        .unwrap()
+        .unwrap();
     assert_eq!(interrupted.runs[0].status, RunStatus::Interrupted);
     assert!(interrupted.runs[0].tools[0].observation.is_none());
     for case in 0..11 {
         let mut row = all.clone();
         match case {
             0 => {
-                row.remove(5);
+                row.remove(TOOL_STARTED);
             }
-            1 => row.insert(7, row[6].clone()),
+            1 => row.insert(NEXT_CALL_RESERVED, row[TOOL_FINISHED].clone()),
             2 => {
-                if let Event::ToolStarted { intent, .. } = &mut row[5] {
+                if let Event::ToolStarted { intent, .. } = &mut row[TOOL_STARTED] {
                     intent.policy_digest = [9; 32];
                 }
             }
             3 => {
-                if let Event::ToolStarted { intent, .. } = &mut row[5] {
+                if let Event::ToolStarted { intent, .. } = &mut row[TOOL_STARTED] {
                     intent.workspace_inode += 1;
                 }
             }
             4 => {
-                if let Event::ToolStarted { intent, .. } = &mut row[5] {
+                if let Event::ToolStarted { intent, .. } = &mut row[TOOL_STARTED] {
                     intent.use_count = 2;
                 }
             }
             5 => {
-                if let Event::ToolFinished { observation, .. } = &mut row[6] {
+                if let Event::ToolFinished { observation, .. } = &mut row[TOOL_FINISHED] {
                     observation.guard.as_mut().unwrap().intent_digest = [9; 32];
                 }
             }
             6 => {
-                if let Event::ToolFinished { observation, .. } = &mut row[6] {
+                if let Event::ToolFinished { observation, .. } = &mut row[TOOL_FINISHED] {
                     observation.disposition = ToolDisposition::Uncertain;
                 }
             }
             7 => {
-                if let Event::ToolFinished { observation, .. } = &mut row[6] {
+                if let Event::ToolFinished { observation, .. } = &mut row[TOOL_FINISHED] {
                     observation.disposition = ToolDisposition::Cancelled;
                 }
             }
@@ -269,19 +358,19 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                     agent_run_id,
                     intent,
                     ..
-                } = &mut row[5]
+                } = &mut row[TOOL_STARTED]
                 {
                     *agent_run_id = AgentRunId::new();
                     intent.agent_run_id = *agent_run_id;
                 }
             }
             9 => {
-                if let Event::RunStarted { config, .. } = &mut row[2] {
+                if let Event::RunStarted { config, .. } = &mut row[4] {
                     config.tool_policy = None;
                 }
             }
             10 => {
-                if let Event::ToolFinished { observation, .. } = &mut row[6] {
+                if let Event::ToolFinished { observation, .. } = &mut row[TOOL_FINISHED] {
                     observation.disposition = ToolDisposition::Failed;
                     observation.guard = None;
                 }
@@ -292,7 +381,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     }
     for (guarded, later_failure) in [(true, true), (false, true), (false, false)] {
         let mut denied = prefix.to_vec();
-        if let Event::ToolFinished { observation, .. } = &mut denied[6] {
+        if let Event::ToolFinished { observation, .. } = &mut denied[TOOL_FINISHED] {
             observation.disposition = ToolDisposition::Denied;
             observation.output = "UNTRUSTED_TOOL_ERROR_CANARY".into();
             if !guarded {
@@ -304,6 +393,11 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             if let Event::ProviderCallRecorded { record, .. } = &mut failure {
                 record.failure_reason = Some(arany::ProviderFailureReason::OutcomeContract);
             }
+            denied.push(Event::GoalProviderCallReserved {
+                goal_id: goal,
+                run_id: run,
+                agent_run_id: primary,
+            });
             denied.push(failure);
         }
         denied.extend([
@@ -317,6 +411,11 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             Event::RunFinished {
                 run_id: run,
                 disposition: RunDisposition::Failed,
+            },
+            Event::GoalActiveTimeSettled {
+                goal_id: goal,
+                run_id: run,
+                active_ms: 1_000,
             },
         ]);
         let view = replay(denied).unwrap().unwrap();
@@ -333,7 +432,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         assert!(!feedback.contains("CANARY"));
     }
     let mut observed_failure = all.clone();
-    if let Event::ToolFinished { observation, .. } = &mut observed_failure[6] {
+    if let Event::ToolFinished { observation, .. } = &mut observed_failure[TOOL_FINISHED] {
         observation.disposition = ToolDisposition::Failed;
     }
     assert!(
@@ -351,7 +450,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             }),
         }],
     };
-    let mut command_intent = match &prefix[5] {
+    let mut command_intent = match &prefix[TOOL_STARTED] {
         Event::ToolStarted { intent, .. } => intent.clone(),
         _ => unreachable!(),
     };
@@ -386,7 +485,24 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         "exit_code":7,"stdout":"","stderr":"","changeset":changeset
     })
     .to_string();
-    let mut integrated = prefix[..5].to_vec();
+    let mut integrated = prefix[..TOOL_STARTED].to_vec();
+    integrated.push(Event::GoalPlanContractRecorded {
+        goal_id: goal,
+        run_id: run,
+        contract: arany::GoalPlanContract {
+            mission: "Record the synthetic changeset".into(),
+            paths: vec!["src".into()],
+            commands: vec!["shell".into()],
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
+                call: Box::new(command_intent.call.clone()),
+            },
+            budget: arany::GoalBudget::default(),
+        },
+        active_ms: 0,
+        reserved_ms: 30_000,
+    });
     integrated.extend([
         Event::ToolStarted {
             run_id: run,
@@ -415,21 +531,59 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     assert_eq!(view.runs[0].tools.len(), 2);
     assert_eq!(view.runs[0].agents[0].provider_calls.len(), 2);
     let mut reviewed_integration = integrated.clone();
-    reviewed_integration.insert(6, review.clone());
-    reviewed_integration.insert(9, review.clone());
+    reviewed_integration.splice(
+        COMMAND_FINISHED..COMMAND_FINISHED,
+        [
+            Event::GoalProviderCallReserved {
+                goal_id: goal,
+                run_id: run,
+                agent_run_id: primary,
+            },
+            review.clone(),
+        ],
+    );
+    reviewed_integration.splice(
+        INTEGRATION_FINISHED + 3..INTEGRATION_FINISHED + 3,
+        [
+            Event::GoalProviderCallReserved {
+                goal_id: goal,
+                run_id: run,
+                agent_run_id: primary,
+            },
+            review.clone(),
+        ],
+    );
     let view = replay(reviewed_integration).unwrap().unwrap();
     assert_eq!(view.runs[0].status, RunStatus::Finished);
     assert_eq!(view.runs[0].agents[0].provider_calls.len(), 4);
     let mut duplicate_review = integrated.clone();
-    duplicate_review.splice(8..8, [review.clone(), review.clone()]);
+    duplicate_review.splice(
+        INTEGRATION_STARTED + 1..INTEGRATION_STARTED + 1,
+        [
+            Event::GoalProviderCallReserved {
+                goal_id: goal,
+                run_id: run,
+                agent_run_id: primary,
+            },
+            review.clone(),
+            Event::GoalProviderCallReserved {
+                goal_id: goal,
+                run_id: run,
+                agent_run_id: primary,
+            },
+            review.clone(),
+        ],
+    );
     assert!(
         replay(duplicate_review).is_err(),
         "integration admits one review even when its command had none"
     );
-    let interrupted = replay(integrated[..8].to_vec()).unwrap().unwrap();
+    let interrupted = replay(integrated[..INTEGRATION_FINISHED].to_vec())
+        .unwrap()
+        .unwrap();
     assert_eq!(interrupted.runs[0].status, RunStatus::Interrupted);
     assert!(interrupted.runs[0].tools[1].observation.is_none());
-    let mut unpublished = integrated[..7].to_vec();
+    let mut unpublished = integrated[..COMMAND_FINISHED + 1].to_vec();
     unpublished.extend([
         Event::AgentFinished {
             run_id: run,
@@ -441,6 +595,11 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         Event::RunFinished {
             run_id: run,
             disposition: RunDisposition::Failed,
+        },
+        Event::GoalActiveTimeSettled {
+            goal_id: goal,
+            run_id: run,
+            active_ms: 1_000,
         },
     ]);
     let view = replay(unpublished).unwrap().unwrap();
@@ -460,7 +619,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         let mut row = integrated.clone();
         match case {
             "source" | "content" => {
-                let Event::ToolStarted { intent, .. } = &mut row[7] else {
+                let Event::ToolStarted { intent, .. } = &mut row[INTEGRATION_STARTED] else {
                     unreachable!()
                 };
                 let ToolCall::ApplyChangeset {
@@ -476,7 +635,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                     changeset.files[0].after.as_mut().unwrap().executable = true;
                 }
                 let altered = intent.clone();
-                let Event::ToolFinished { observation, .. } = &mut row[8] else {
+                let Event::ToolFinished { observation, .. } = &mut row[INTEGRATION_FINISHED] else {
                     unreachable!()
                 };
                 observation.intent = altered;
@@ -484,10 +643,10 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                     Sha256::digest(serde_json::to_vec(&observation.intent).unwrap()).into();
             }
             "missing-command" => {
-                row.drain(5..7);
+                row.drain(COMMAND_STARTED..COMMAND_FINISHED + 1);
             }
             "unattested" | "denied" => {
-                let Event::ToolFinished { observation, .. } = &mut row[6] else {
+                let Event::ToolFinished { observation, .. } = &mut row[COMMAND_FINISHED] else {
                     unreachable!()
                 };
                 if case == "unattested" {
@@ -497,7 +656,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 }
             }
             "reused" => {
-                let mut reuse = integrated[7..9].to_vec();
+                let mut reuse = integrated[INTEGRATION_STARTED..INTEGRATION_FINISHED + 1].to_vec();
                 let Event::ToolStarted { intent, .. } = &mut reuse[0] else {
                     unreachable!()
                 };
@@ -509,14 +668,39 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 observation.intent = altered;
                 observation.guard.as_mut().unwrap().intent_digest =
                     Sha256::digest(serde_json::to_vec(&observation.intent).unwrap()).into();
-                row.splice(9..9, reuse);
+                row.splice(
+                    INTEGRATED_NEXT_CALL_RESERVED..INTEGRATED_NEXT_CALL_RESERVED,
+                    reuse,
+                );
             }
             "model-request" => {
-                row.insert(7, record(ProviderCallDisposition::ToolRequested));
+                row.splice(
+                    INTEGRATION_STARTED..INTEGRATION_STARTED,
+                    [
+                        Event::GoalProviderCallReserved {
+                            goal_id: goal,
+                            run_id: run,
+                            agent_run_id: primary,
+                        },
+                        record(ProviderCallDisposition::ToolRequested),
+                    ],
+                );
             }
-            "new-inference" => row.insert(7, record(ProviderCallDisposition::Finished)),
+            "new-inference" => {
+                drop(row.splice(
+                    INTEGRATION_STARTED..INTEGRATION_STARTED,
+                    [
+                        Event::GoalProviderCallReserved {
+                            goal_id: goal,
+                            run_id: run,
+                            agent_run_id: primary,
+                        },
+                        record(ProviderCallDisposition::Finished),
+                    ],
+                ));
+            }
             "omitted-integration" => {
-                row.drain(7..9);
+                row.drain(INTEGRATION_STARTED..INTEGRATION_FINISHED + 1);
             }
             _ => unreachable!(),
         }
@@ -526,7 +710,32 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         );
     }
     for pairs in [8, 9] {
-        let mut rows = prefix[..4].to_vec();
+        let mut rows = prefix[..AGENT_SPAWNED + 1].to_vec();
+        rows.extend([
+            Event::GoalProviderCallReserved {
+                goal_id: goal,
+                run_id: run,
+                agent_run_id: primary,
+            },
+            record(ProviderCallDisposition::ToolRequested),
+            Event::GoalPlanContractRecorded {
+                goal_id: goal,
+                run_id: run,
+                contract: arany::GoalPlanContract {
+                    mission: "Admit the synthetic command changeset".into(),
+                    paths: vec!["src".into()],
+                    commands: vec!["shell".into()],
+                    skills: Vec::new(),
+                    mcp_tools: Vec::new(),
+                    success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
+                        call: Box::new(command_intent.call.clone()),
+                    },
+                    budget: arany::GoalBudget::default(),
+                },
+                active_ms: 0,
+                reserved_ms: 30_000,
+            },
+        ]);
         for _ in 0..pairs {
             let mut command = command_intent.clone();
             command.id = uuid::Uuid::now_v7();
@@ -541,6 +750,11 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             };
             *source_intent_digest = Sha256::digest(serde_json::to_vec(&command).unwrap()).into();
             rows.extend([
+                Event::GoalProviderCallReserved {
+                    goal_id: goal,
+                    run_id: run,
+                    agent_run_id: primary,
+                },
                 record(ProviderCallDisposition::ToolRequested),
                 Event::ToolStarted {
                     run_id: run,
@@ -572,14 +786,14 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         (17, "", false),
         (16, &"x".repeat(8192), false),
     ] {
-        let mut rows = prefix[..4].to_vec();
+        let mut rows = prefix[..AGENT_SPAWNED + 1].to_vec();
         for _ in 0..count {
-            let mut start = prefix[5].clone();
+            let mut start = prefix[TOOL_STARTED].clone();
             let Event::ToolStarted { intent, .. } = &mut start else {
                 unreachable!()
             };
             intent.id = uuid::Uuid::now_v7();
-            let mut result = prefix[6].clone();
+            let mut result = prefix[TOOL_FINISHED].clone();
             let Event::ToolFinished { observation, .. } = &mut result else {
                 unreachable!()
             };
@@ -588,6 +802,11 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             observation.guard.as_mut().unwrap().intent_digest =
                 Sha256::digest(serde_json::to_vec(intent).unwrap()).into();
             rows.extend([
+                Event::GoalProviderCallReserved {
+                    goal_id: goal,
+                    run_id: run,
+                    agent_run_id: primary,
+                },
                 record(ProviderCallDisposition::ToolRequested),
                 start,
                 result,

@@ -1,5 +1,5 @@
 use crate::provider::{AgentPhase, MAX_REPORTED_INPUT_TOKENS};
-use crate::session::{AgentRunId, RunId, SessionId};
+use crate::session::{AgentRunId, GoalId, GoalStatus, RunId, SessionId};
 use opentelemetry::{
     Context, KeyValue,
     trace::{SpanKind, Status, TraceContextExt, Tracer, TracerProvider},
@@ -55,9 +55,15 @@ struct TraceSpan {
 
 pub(crate) struct RunTrace {
     span: TraceSpan,
+    goal_context: Option<Context>,
     session_id: SessionId,
     run_id: RunId,
     provider: TraceProvider,
+}
+
+pub(crate) struct GoalTrace {
+    span: TraceSpan,
+    goal_id: GoalId,
 }
 
 pub(crate) struct AgentTrace {
@@ -114,6 +120,15 @@ pub(crate) enum TraceFailure {
 
 #[derive(Clone, Copy)]
 pub(crate) enum TraceEventKind {
+    GoalStarted,
+    GoalRunLinked,
+    GoalResumed,
+    GoalActiveTimeReserved,
+    GoalActiveTimeSettled,
+    GoalPlanContractRecorded,
+    GoalFinished,
+    GoalProviderCallReserved,
+    GoalCompactionCallReserved,
     MessageAccepted,
     RunStarted,
     AgentSpawned,
@@ -180,6 +195,7 @@ impl Telemetry {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn begin_run(
         &self,
         session_id: SessionId,
@@ -206,6 +222,7 @@ impl Telemetry {
             });
         let trace = RunTrace {
             span,
+            goal_context: None,
             session_id,
             run_id,
             provider,
@@ -214,6 +231,59 @@ impl Telemetry {
             trace.context_compiled(started, ended);
         }
         trace
+    }
+
+    pub(crate) fn begin_goal_run(
+        &self,
+        session_id: SessionId,
+        run_id: RunId,
+        provider: TraceProvider,
+        goal: &GoalTrace,
+        context_timing: Option<(SystemTime, SystemTime)>,
+    ) -> RunTrace {
+        let span = goal.span.child(
+            "invoke_workflow arany.run",
+            SpanKind::Internal,
+            vec![
+                KeyValue::new("gen_ai.operation.name", "invoke_workflow"),
+                KeyValue::new("gen_ai.workflow.name", "arany.run"),
+                KeyValue::new("arany.session.id", session_id.to_string()),
+                KeyValue::new("arany.run.id", run_id.to_string()),
+                KeyValue::new("arany.goal.id", goal.goal_id.to_string()),
+            ],
+            context_timing.map(|(started, _)| started),
+        );
+        let trace = RunTrace {
+            span,
+            goal_context: goal.span.context.clone(),
+            session_id,
+            run_id,
+            provider,
+        };
+        if let Some((started, ended)) = context_timing {
+            trace.context_compiled(started, ended);
+        }
+        trace
+    }
+
+    pub(crate) fn begin_goal(&self, session_id: SessionId, goal_id: GoalId) -> GoalTrace {
+        let span = self
+            .inner
+            .as_ref()
+            .map_or_else(TraceSpan::disabled, |inner| {
+                TraceSpan::root(
+                    &inner.tracer,
+                    "invoke_workflow arany.goal",
+                    SpanKind::Internal,
+                    vec![
+                        KeyValue::new("gen_ai.operation.name", "invoke_workflow"),
+                        KeyValue::new("gen_ai.workflow.name", "arany.goal"),
+                        KeyValue::new("arany.session.id", session_id.to_string()),
+                        KeyValue::new("arany.goal.id", goal_id.to_string()),
+                    ],
+                )
+            });
+        GoalTrace { span, goal_id }
     }
 
     pub(crate) fn begin_compaction(
@@ -345,10 +415,61 @@ impl RunTrace {
     }
 
     pub(crate) fn event_committed(&self, sequence: u64, kind: TraceEventKind) {
-        self.span.event_committed(sequence, kind);
+        if kind.is_goal_event() {
+            if let Some(context) = &self.goal_context {
+                TraceSpan::event_committed_in(context, sequence, kind);
+            }
+        } else {
+            self.span.event_committed(sequence, kind);
+        }
     }
 
     pub(crate) fn finish(self, outcome: TraceOutcome) {
+        self.span.finish(outcome);
+    }
+}
+
+impl GoalTrace {
+    pub(crate) fn event_committed(&self, sequence: u64, kind: TraceEventKind) {
+        self.span.event_committed(sequence, kind);
+    }
+
+    pub(crate) fn finish(
+        self,
+        status: GoalStatus,
+        provider_calls: u32,
+        known_tokens: u64,
+        token_usage_unknown: bool,
+        active_ms: u64,
+        uncertain_active_ms: u64,
+    ) {
+        if let Some(context) = &self.span.context {
+            for attribute in [
+                KeyValue::new("arany.goal.status", goal_status_name(status)),
+                KeyValue::new("arany.goal.provider_calls", i64::from(provider_calls)),
+                KeyValue::new(
+                    "arany.goal.known_tokens",
+                    known_tokens.min(i64::MAX as u64) as i64,
+                ),
+                KeyValue::new("arany.goal.token_usage_unknown", token_usage_unknown),
+                KeyValue::new(
+                    "arany.goal.active_ms",
+                    active_ms.min(i64::MAX as u64) as i64,
+                ),
+                KeyValue::new(
+                    "arany.goal.uncertain_active_ms",
+                    uncertain_active_ms.min(i64::MAX as u64) as i64,
+                ),
+            ] {
+                context.span().set_attribute(attribute);
+            }
+        }
+        let outcome = match status {
+            GoalStatus::Completed => TraceOutcome::Finished,
+            GoalStatus::Failed => TraceOutcome::Failed,
+            GoalStatus::Cancelled => TraceOutcome::Cancelled,
+            GoalStatus::Running | GoalStatus::Interrupted => TraceOutcome::Finished,
+        };
         self.span.finish(outcome);
     }
 }
@@ -642,14 +763,18 @@ impl TraceSpan {
 
     fn event_committed(&self, sequence: u64, kind: TraceEventKind) {
         if let Some(context) = &self.context {
-            context.span().add_event(
-                "arany.event.committed",
-                vec![
-                    KeyValue::new("arany.event.sequence", sequence as i64),
-                    KeyValue::new("arany.event.kind", kind.name()),
-                ],
-            );
+            Self::event_committed_in(context, sequence, kind);
         }
+    }
+
+    fn event_committed_in(context: &Context, sequence: u64, kind: TraceEventKind) {
+        context.span().add_event(
+            "arany.event.committed",
+            vec![
+                KeyValue::new("arany.event.sequence", sequence as i64),
+                KeyValue::new("arany.event.kind", kind.name()),
+            ],
+        );
     }
 
     fn finish(self, outcome: TraceOutcome) {
@@ -722,8 +847,32 @@ impl TraceFailure {
 }
 
 impl TraceEventKind {
+    fn is_goal_event(self) -> bool {
+        matches!(
+            self,
+            Self::GoalStarted
+                | Self::GoalRunLinked
+                | Self::GoalResumed
+                | Self::GoalActiveTimeReserved
+                | Self::GoalActiveTimeSettled
+                | Self::GoalPlanContractRecorded
+                | Self::GoalFinished
+                | Self::GoalProviderCallReserved
+                | Self::GoalCompactionCallReserved
+        )
+    }
+
     fn name(self) -> &'static str {
         match self {
+            Self::GoalStarted => "GoalStarted",
+            Self::GoalRunLinked => "GoalRunLinked",
+            Self::GoalResumed => "GoalResumed",
+            Self::GoalActiveTimeReserved => "GoalActiveTimeReserved",
+            Self::GoalActiveTimeSettled => "GoalActiveTimeSettled",
+            Self::GoalPlanContractRecorded => "GoalPlanContractRecorded",
+            Self::GoalFinished => "GoalFinished",
+            Self::GoalProviderCallReserved => "GoalProviderCallReserved",
+            Self::GoalCompactionCallReserved => "GoalCompactionCallReserved",
             Self::MessageAccepted => "MessageAccepted",
             Self::RunStarted => "RunStarted",
             Self::AgentSpawned => "AgentSpawned",
@@ -735,6 +884,16 @@ impl TraceEventKind {
             Self::RunFinished => "RunFinished",
             Self::ContextCompacted => "ContextCompacted",
         }
+    }
+}
+
+fn goal_status_name(status: GoalStatus) -> &'static str {
+    match status {
+        GoalStatus::Running => "running",
+        GoalStatus::Interrupted => "interrupted",
+        GoalStatus::Completed => "completed",
+        GoalStatus::Failed => "failed",
+        GoalStatus::Cancelled => "cancelled",
     }
 }
 
