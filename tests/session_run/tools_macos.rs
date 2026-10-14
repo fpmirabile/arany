@@ -1250,6 +1250,28 @@ async fn native_runtime_mount_journey_helper() {
             approvals,
         )
         .unwrap();
+    for (project_bytes, cache_bytes) in [
+        (128 * 1024 * 1024 + 1, 64 * 1024 * 1024),
+        (128 * 1024 * 1024, 64 * 1024 * 1024 + 1),
+    ] {
+        let mut goal = build_goal_request();
+        goal.resource_settings.build_project_bytes = project_bytes;
+        goal.resource_settings.build_cache_bytes = cache_bytes;
+        let invalid = engine
+            .run(RunRequest {
+                session_id: None,
+                title: Some("Rejected native storage granularity".into()),
+                objective: "The unsupported resource values must not be dispatched".into(),
+                images: Vec::new(),
+                workspace: workspace.clone(),
+                include_paths: Vec::new(),
+                policy: CollaborationPolicy::Single,
+                goal,
+            })
+            .await;
+        assert!(matches!(invalid, Err(arany::EngineError::InvalidRequest)));
+        assert!(accepted_requests.lock().unwrap().is_empty());
+    }
     let run = engine.run(RunRequest {
         session_id: None,
         title: Some("Selected runtime success".into()),

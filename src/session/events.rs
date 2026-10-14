@@ -98,6 +98,7 @@ impl FromStr for GoalId {
 
 pub const MAX_GOAL_PROVIDER_CALLS: u32 = 64;
 pub const MAX_GOAL_ACTIVE_MS: u64 = 30 * 60 * 1000;
+pub(crate) const MAX_GOAL_ACTION_ACTIVE_MS: u64 = 31 * 60 * 1000;
 pub const MAX_GOAL_RUNS: u8 = 16;
 pub const MAX_GOAL_PLAN_PATHS: usize = 64;
 pub const MAX_GOAL_PLAN_COMMANDS: usize = 8;
@@ -465,6 +466,25 @@ mod goal_success_tests {
             success_criterion: criterion,
             budget: GoalBudget::default(),
         }
+    }
+
+    #[test]
+    fn bounded_macos_build_reservation_fits_the_action_ceiling() {
+        let goal_id = GoalId::new();
+        let run_id = RunId::new();
+        let reserve = Event::GoalActiveTimeReserved {
+            goal_id,
+            run_id,
+            reserved_ms: 1_850_000,
+        };
+        let settle = Event::GoalActiveTimeSettled {
+            goal_id,
+            run_id,
+            active_ms: 1_850_000,
+        };
+        assert!(reserve.validate().is_ok());
+        assert!(settle.validate().is_ok());
+        assert!(GoalBudget::default().validate().is_ok());
     }
 
     #[test]
@@ -2520,13 +2540,13 @@ impl Event {
             }
             Self::GoalRunLinked { .. } | Self::GoalResumed { .. } => Ok(()),
             Self::GoalActiveTimeReserved { reserved_ms, .. } => {
-                if *reserved_ms == 0 || *reserved_ms > MAX_GOAL_ACTIVE_MS {
+                if *reserved_ms == 0 || *reserved_ms > MAX_GOAL_ACTION_ACTIVE_MS {
                     return Err(ReplayError::InvalidPayload);
                 }
                 Ok(())
             }
             Self::GoalActiveTimeSettled { active_ms, .. } => {
-                if *active_ms > MAX_GOAL_ACTIVE_MS {
+                if *active_ms > MAX_GOAL_ACTION_ACTIVE_MS {
                     return Err(ReplayError::InvalidPayload);
                 }
                 Ok(())

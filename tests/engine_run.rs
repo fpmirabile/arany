@@ -2242,7 +2242,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(workspace.join("notes")).unwrap();
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").unwrap();
-        // Finite one-Run budgets reserve 77/83/82/141 Events for single/team/Tools/previews.
+        // Finite one-Run budgets reserve 77/83/82/205 Events for single/team/Tools/previews.
         for (index, (prefix, policy, admitted, tools, branch, previews)) in [
             (9924, CollaborationPolicy::Single, false, false, false, false),
             (9923, CollaborationPolicy::Single, true, false, false, false),
@@ -2252,8 +2252,8 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             (9918, CollaborationPolicy::Single, true, true, false, false),
             (9923, CollaborationPolicy::Single, false, false, true, false),
             (9922, CollaborationPolicy::Single, true, false, true, false),
-            (9860, CollaborationPolicy::Single, false, false, false, true),
-            (9859, CollaborationPolicy::Single, true, false, false, true),
+            (9796, CollaborationPolicy::Single, false, false, false, true),
+            (9795, CollaborationPolicy::Single, true, false, false, true),
         ].into_iter().enumerate() {
             let path = temp.path().join(format!("state-{index}"));
             let finish = || ProviderOutcome::Finish(Finish { summary: "done".into(), result: "answer".into() });

@@ -264,6 +264,9 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         if abort_reason.is_none() && self.controls.cancellation.is_cancelled() {
             abort_reason = Some(AbortReason::Cancelled);
         }
+        if abort_reason.is_none() && self.controls.goal_budget.active_time_exhausted() {
+            abort_reason = Some(AbortReason::Failed);
+        }
         if abort_reason.is_none() && !queue.pending.is_empty() {
             abort_reason = Some(AbortReason::Failed);
         }
@@ -283,6 +286,9 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                     .finish(TraceOutcome::Cancelled);
             }
             return match reason {
+                AbortReason::Failed if self.controls.goal_budget.active_time_exhausted() => {
+                    self.fail_known_budget_exhaustion(primary).await
+                }
                 AbortReason::Failed => self.fail_primary(primary).await,
                 AbortReason::Cancelled => self.cancel_primary(primary).await,
             };
@@ -298,7 +304,14 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         loop {
             let synthesis_trace =
                 primary.begin_provider(AgentPhase::RootSynthesis, &root_request.model);
-            let (synthesis, active_segment) = self.invoke_primary(root_request.clone()).await?;
+            let (synthesis, active_segment) = match self.invoke_primary(root_request.clone()).await
+            {
+                Ok(result) => result,
+                Err(EngineError::GoalBudgetExhausted) => {
+                    return self.fail_known_budget_exhaustion(primary).await;
+                }
+                Err(error) => return Err(error),
+            };
             let (input_tokens, output_tokens) = call_trace_usage(&synthesis);
             let valid_response = self.controls.goal_budget.tokens_within_limit()
                 && (matches!(
@@ -320,6 +333,9 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
             })
             .await?;
             self.settle_active_segment(active_segment).await?;
+            if self.controls.goal_budget.active_time_exhausted() {
+                return self.fail_known_budget_exhaustion(primary).await;
+            }
             match synthesis {
                 CallResult::Response(ProviderResponse {
                     outcome: ProviderOutcome::Finish(finish),
@@ -359,11 +375,16 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                         root_request.goal_budget = Some(contract.budget);
                         root_request.goal_plan_contract = Some(contract);
                     }
-                    if !self
-                        .execute_tool(root_request, call, false, &primary)
-                        .await?
-                    {
-                        return self.fail_primary(primary).await;
+                    match self.execute_tool(root_request, call, false, &primary).await {
+                        Ok(true) => {}
+                        Ok(false) if self.controls.goal_budget.active_time_exhausted() => {
+                            return self.fail_known_budget_exhaustion(primary).await;
+                        }
+                        Ok(false) => return self.fail_primary(primary).await,
+                        Err(EngineError::GoalBudgetExhausted) => {
+                            return self.fail_known_budget_exhaustion(primary).await;
+                        }
+                        Err(error) => return Err(error),
                     }
                 }
                 CallResult::Cancelled => return self.cancel_primary(primary).await,

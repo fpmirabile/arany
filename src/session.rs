@@ -26,7 +26,9 @@ pub use events::{
     MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS, ProviderCallDisposition,
     ProviderCallRecord, RunConfig, RunDisposition, RunId, SessionDefaults, SessionId,
 };
-pub(crate) use events::{GoalSuccessState, MAX_GOAL_PLAN_CONTRACT_BYTES};
+pub(crate) use events::{
+    GoalSuccessState, MAX_GOAL_ACTION_ACTIVE_MS, MAX_GOAL_PLAN_CONTRACT_BYTES,
+};
 pub(crate) use lineage::prefix_digest;
 pub use reducer::{
     AgentStatus, AgentView, CompactionView, GoalView, RunStatus, RunView, SessionView, ToolView,

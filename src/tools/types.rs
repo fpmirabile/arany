@@ -24,6 +24,7 @@ pub const MAX_BUILD_PROJECT_BYTES: u64 = 1024 * 1024 * 1024;
 pub const MAX_BUILD_CACHE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub const MAX_BUILD_PROCESSES_OR_THREADS: u32 = 256;
 pub const MAX_COMMAND_TIMEOUT_MS: u32 = 600_000;
+const BYTES_PER_MEBIBYTE: u64 = 1024 * 1024;
 pub(crate) const MAX_CHANGESET_FILES: usize = 64;
 pub(crate) const MAX_CHANGESET_BYTES: usize = 8 * 1024;
 
@@ -480,8 +481,11 @@ impl ToolResourceSettings {
             && (1_000..=MAX_COMMAND_TIMEOUT_MS).contains(&self.max_command_timeout_ms)
             && (1..=MAX_BUILD_MEMORY_BYTES).contains(&self.build_memory_bytes)
             && (1..=MAX_BUILD_PROCESSES_OR_THREADS).contains(&self.build_processes)
-            && (1..=MAX_BUILD_PROJECT_BYTES).contains(&self.build_project_bytes)
+            && (BYTES_PER_MEBIBYTE..=MAX_BUILD_PROJECT_BYTES).contains(&self.build_project_bytes)
+            && self.build_project_bytes.is_multiple_of(BYTES_PER_MEBIBYTE)
             && self.build_cache_bytes <= MAX_BUILD_CACHE_BYTES
+            && (self.build_cache_bytes == 0
+                || self.build_cache_bytes.is_multiple_of(BYTES_PER_MEBIBYTE))
     }
 }
 
@@ -536,6 +540,9 @@ impl ToolLimits {
                         && self.cache_bytes <= crate::store::BUILD_CACHE_ARCHIVE_BYTES
                         && self.cache_bytes <= self.cache_requested_bytes
                         && self.cache_candidate_bytes <= self.cache_bytes
+                        && self
+                            .cache_candidate_bytes
+                            .is_multiple_of(BYTES_PER_MEBIBYTE)
                         && (self.cache_transfer_ms == 0
                             || self.cache_transfer_ms == self.runtime_ms)
                         && (self.cache_bytes != 0 || self.cache_transfer_ms == 0)
@@ -543,11 +550,22 @@ impl ToolLimits {
                 ToolResourceClass::Build => {
                     (1..=MAX_BUILD_MEMORY_BYTES).contains(&self.memory_bytes)
                         && (1..=MAX_BUILD_PROCESSES_OR_THREADS).contains(&self.max_processes)
-                        && (1..=MAX_BUILD_PROJECT_BYTES).contains(&self.project_bytes)
+                        && (BYTES_PER_MEBIBYTE..=MAX_BUILD_PROJECT_BYTES)
+                            .contains(&self.project_bytes)
+                        && self.project_bytes.is_multiple_of(BYTES_PER_MEBIBYTE)
                         && self.cache_requested_bytes <= MAX_BUILD_CACHE_BYTES
+                        && (self.cache_requested_bytes == 0
+                            || self
+                                .cache_requested_bytes
+                                .is_multiple_of(BYTES_PER_MEBIBYTE))
                         && self.cache_bytes <= MAX_BUILD_CACHE_BYTES
                         && self.cache_bytes <= self.cache_requested_bytes
                         && self.cache_candidate_bytes <= self.cache_bytes
+                        && (self.cache_bytes == 0
+                            || self.cache_bytes.is_multiple_of(BYTES_PER_MEBIBYTE))
+                        && self
+                            .cache_candidate_bytes
+                            .is_multiple_of(BYTES_PER_MEBIBYTE)
                         && self.cache_transfer_ms
                             == if self.cache_bytes == 0 {
                                 0

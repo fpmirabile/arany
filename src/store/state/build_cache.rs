@@ -18,6 +18,7 @@ const TRANSACTION_NEXT_PREFIX: &str = "transaction-next-";
 const NAMESPACE_LOCK: &str = "namespace.lock";
 const AGGREGATE_LOCK: &str = "aggregate.lock";
 const MAX_IDENTITIES: usize = 128;
+const MEBIBYTE_BYTES: u64 = 1024 * 1024;
 pub(crate) const MAX_ARCHIVE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub(crate) const DEFAULT_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
 #[cfg(test)]
@@ -374,6 +375,7 @@ impl StateRoot {
         requested: u64,
     ) -> Result<(u64, u64), StoreError> {
         if requested > MAX_ARCHIVE_BYTES
+            || requested != 0 && !requested.is_multiple_of(MEBIBYTE_BYTES)
             || !valid_identity_path(Path::new(&identity.path))
             || identity.inode == 0
         {
@@ -393,11 +395,7 @@ impl StateRoot {
         let _aggregate = lock_file(&dir, AGGREGATE_LOCK, true)?;
         let token = identity.token();
         let archive_size = match open_regular(&dir, &archive_name(&token), MAX_ARCHIVE_BYTES) {
-            Ok(file) => {
-                let mut validation = file.try_clone()?;
-                ArchiveReader::new(&mut validation, identity)?.validate_all()?;
-                file.metadata()?.len()
-            }
+            Ok(file) => file.metadata()?.len(),
             Err(error) if io_kind(&error) == Some(io::ErrorKind::NotFound) => 0,
             Err(error) => return Err(error),
         };
@@ -412,7 +410,7 @@ impl StateRoot {
         if archive_size > requested {
             return Ok((0, 0));
         }
-        let candidate = requested.min(available / 2);
+        let candidate = effective_candidate_capacity(requested, available);
         Ok((
             requested,
             if archive_size > candidate {
@@ -464,11 +462,7 @@ impl StateRoot {
             remove_stale_candidates(&dir)?;
             let archive_name = archive_name(&token);
             let archive = match open_regular(&dir, &archive_name, archive_limit) {
-                Ok(file) => {
-                    let mut validation_file = file.try_clone()?;
-                    ArchiveReader::new(&mut validation_file, &identity)?.validate_all()?;
-                    Some(file)
-                }
+                Ok(file) => Some(file),
                 Err(error) if io_kind(&error) == Some(io::ErrorKind::NotFound) => None,
                 Err(error) => return Err(error),
             };
@@ -620,6 +614,10 @@ impl StateRoot {
         drop(held);
         Ok(())
     }
+}
+
+fn effective_candidate_capacity(requested: u64, available: u64) -> u64 {
+    requested.min(available / 2) / MEBIBYTE_BYTES * MEBIBYTE_BYTES
 }
 
 #[cfg(test)]
@@ -2340,6 +2338,14 @@ mod tests {
     }
 
     #[test]
+    fn candidate_capacity_rounds_derived_headroom_down_to_mebibytes() {
+        assert_eq!(
+            effective_candidate_capacity(DEFAULT_ARCHIVE_BYTES, DEFAULT_ARCHIVE_BYTES + 3),
+            DEFAULT_ARCHIVE_BYTES / 2
+        );
+    }
+
+    #[test]
     fn old_archive_is_restored_read_only_when_aggregate_headroom_cannot_stage_candidate() {
         let temp = tempfile::tempdir().expect("fixture");
         let state_path = temp.path().join("state");
@@ -2376,7 +2382,7 @@ mod tests {
         let (view_bytes, candidate_bytes) = state
             .effective_build_cache_bytes(&identity, DEFAULT_ARCHIVE_BYTES)
             .expect("bounded cache capacity");
-        assert_eq!(view_bytes, old.len() as u64);
+        assert_eq!(view_bytes, DEFAULT_ARCHIVE_BYTES);
         assert_eq!(candidate_bytes, 0);
         let lease = state
             .begin_build_cache_with_limits(identity.clone(), view_bytes, candidate_bytes)

@@ -343,6 +343,41 @@ fn setup_choices_remain_visible_at_narrow_widths_without_color() {
 }
 
 #[test]
+fn dense_settings_choices_keep_the_change_keys_visible() {
+    let choices = [
+        (1, "Slash menu"),
+        (2, "Chat view"),
+        (3, "Goal provider calls"),
+        (4, "Goal tokens"),
+        (5, "Goal active milliseconds"),
+        (6, "Default command timeout"),
+        (7, "Maximum command timeout"),
+        (8, "Build memory"),
+        (9, "Build processes/threads"),
+        (10, "Build writable project"),
+        (11, "Build cache"),
+    ];
+    let mut terminal = Terminal::new(TestBackend::new(40, 12)).expect("settings terminal");
+    terminal
+        .draw(|frame| {
+            draw_setup_choices_frame(
+                frame,
+                "Settings",
+                "↑↓ selects a setting; ←→ changes it; Enter saves",
+                &choices,
+                0,
+                None,
+                Palette { color: false },
+            )
+        })
+        .expect("dense Settings frame");
+    let rows = (0..12)
+        .map(|y| buffer_row(terminal.backend().buffer(), y))
+        .collect::<Vec<_>>();
+    assert!(rows.iter().any(|row| row.contains("↑↓ ←→ Enter Esc")));
+}
+
+#[test]
 fn setup_warning_pages_every_line_before_showing_acceptance_actions() {
     let warning = "abcdefghijklmnop".repeat(20);
     for (width, height) in [(16, 8), (40, 12), (80, 24)] {

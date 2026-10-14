@@ -142,6 +142,32 @@ fn setting_rows(preferences: Preferences) -> Vec<String> {
     ]
 }
 
+fn linear_settings_instruction(preferences: Preferences) -> String {
+    format!(
+        "Current: menu={} view={} calls={} tokens={} active-ms={} timeout-ms={}/{} memory={}B processes={} project={}B cache={}B. Set name=value; Enter saves; q cancels.",
+        preferences.completion.label(),
+        preferences.view.label(),
+        preferences
+            .goal_budget
+            .max_provider_calls
+            .map_or_else(|| "unlimited".into(), |value| value.to_string()),
+        preferences
+            .goal_budget
+            .max_tokens
+            .map_or_else(|| "unlimited".into(), |value| value.to_string()),
+        preferences
+            .goal_budget
+            .max_active_ms
+            .map_or_else(|| "unlimited".into(), |value| value.to_string()),
+        preferences.resources.default_command_timeout_ms,
+        preferences.resources.max_command_timeout_ms,
+        preferences.resources.build_memory_bytes,
+        preferences.resources.build_processes,
+        preferences.resources.build_project_bytes,
+        preferences.resources.build_cache_bytes,
+    )
+}
+
 fn cycle_setting(preferences: &mut Preferences, row: usize, forward: bool) {
     fn step<T: Copy + Eq>(current: T, values: &[T], forward: bool) -> T {
         let index = values
@@ -320,9 +346,10 @@ async fn choose_settings(
     loop {
         let rows = setting_rows(chosen);
         if linear {
+            let instruction = linear_settings_instruction(chosen);
             terminal.draw_setup_text_input(
                 "Settings",
-                "Type calls=<n|unlimited>, tokens=<n|unlimited>, active-ms=<ms|unlimited>, default-timeout-ms=<ms>, max-timeout-ms=<ms>, build-memory-bytes=<n>, build-processes=<n>, build-project-bytes=<n>, build-cache-bytes=<n>; empty Enter saves, q cancels",
+                &instruction,
                 &answer,
                 invalid.then_some("Type a valid setting and value; q cancels"),
             )
@@ -1313,7 +1340,11 @@ mod tests {
             "build-memory-bytes=0",
             "build-processes=257",
             "build-project-bytes=1073741825",
+            "build-project-bytes=1",
+            "build-project-bytes=1073741823",
             "build-cache-bytes=8589934593",
+            "build-cache-bytes=1",
+            "build-cache-bytes=8589934591",
         ] {
             assert!(!apply_setting(&mut preferences, value), "{value}");
             assert_eq!(

@@ -509,6 +509,51 @@ async fn goal_call_budget_blocks_a_later_run_before_provider_dispatch() {
     store.close().await.expect("Store shutdown");
 }
 
+#[tokio::test]
+async fn known_active_time_exhaustion_closes_without_provider_dispatch() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let state_path = temp.path().join("state");
+    let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
+        summary: "must not run".into(),
+        result: "must not run".into(),
+    })]);
+    let requests = Arc::clone(&provider.requests);
+    let mut engine =
+        Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+    let mut input = request(&workspace, "Exhaust the tiny active-time budget");
+    input.include_paths.clear();
+    input.goal = arany::GoalRequest::new(
+        arany::GoalBudget {
+            max_active_ms: Some(1),
+            ..arany::GoalBudget::default()
+        },
+        arany::GoalPhase::Implementation,
+    );
+
+    let outcome = engine
+        .run(input)
+        .await
+        .expect("known active-time exhaustion has a durable terminal result");
+    assert_eq!(outcome.run.status, RunStatus::Failed);
+    assert!(requests.lock().expect("Provider requests").is_empty());
+    engine.close().await.expect("engine shutdown");
+
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
+        .expect("read-only Store");
+    let view = store
+        .load_view(outcome.session_id)
+        .await
+        .expect("replayed Session")
+        .expect("Session");
+    assert_eq!(view.goals[0].status, arany::GoalStatus::Failed);
+    assert_eq!(view.goals[0].active_ms, 0);
+    assert_eq!(view.goals[0].uncertain_active_ms, 0);
+    assert!(view.goals[0].reserved_active_ms.is_none());
+    store.close().await.expect("Store shutdown");
+}
+
 struct FiniteTokenTeam {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
 }

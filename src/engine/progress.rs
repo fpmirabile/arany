@@ -128,6 +128,10 @@ pub(super) struct ProgressPublisher {
 }
 
 impl ProgressPublisher {
+    pub(super) fn previews_enabled(&self) -> bool {
+        self.progress.previews_enabled
+    }
+
     pub(super) fn tool_queue(&self) -> watch::Sender<Option<uuid::Uuid>> {
         self.progress.waiting_sender.clone()
     }

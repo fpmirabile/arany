@@ -240,7 +240,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         &mut transcript,
         &mut answered,
         settings_at,
-        b"Type calls=<n|unlimited>, tokens=<n|unlimited>, active-ms=<ms|unlimited>, default-timeout-ms=<ms>, max-timeout-ms=<ms>, build-memory-bytes=<n>, build-processes=<n>, build-project-bytes=<n>, build-cache-bytes=<n>; empty Enter saves, q cancels\r\nInput:\r\n",
+        b"Current: menu=combined view=fullscreen calls=64 tokens=unlimited active-ms=1800000 timeout-ms=120000/600000 memory=4294967296B processes=256 project=1073741824B cache=8589934592B. Set name=value; Enter saves; q cancels.\r\nInput:\r\n",
     );
     let invalid_at = transcript.len();
     input

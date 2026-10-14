@@ -543,8 +543,10 @@ pub(super) fn draw_setup_choices_frame(
         5
     };
     let dense = choices.len() > usize::from(area.height.saturating_sub(supporting_rows));
-    let header = if dense || compact {
+    let header = if compact {
         "↑↓ Enter Esc"
+    } else if dense {
+        "↑↓ ←→ Enter Esc"
     } else {
         "Arany"
     };

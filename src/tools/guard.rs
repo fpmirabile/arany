@@ -202,6 +202,9 @@ pub(super) async fn publish_cache_candidate(
         (CacheCandidate::Uncertain, _) => CacheUpdate::Uncertain,
         (CacheCandidate::Rejected, _) => CacheUpdate::Rejected,
         (CacheCandidate::Failed, _) => CacheUpdate::Failed,
+        (CacheCandidate::Received, None) if !observation.intent.call.is_process() => {
+            CacheUpdate::NotApplicable
+        }
         (CacheCandidate::Received, None) if observation.intent.limits.cache_requested_bytes > 0 => {
             CacheUpdate::Rejected
         }
