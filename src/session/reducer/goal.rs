@@ -304,12 +304,17 @@ impl SessionView {
         report: &GoalReport,
         prior: u64,
     ) -> Result<(), ReplayError> {
-        let run_id = self
+        // An unaccepted trailing link is not a Run, so the last accepted Run decides the disposition.
+        let run_status = self
             .goal(*goal_id)
-            .and_then(|goal| goal.run_ids.last())
-            .copied()
+            .and_then(|goal| {
+                goal.run_ids
+                    .iter()
+                    .rev()
+                    .find_map(|run_id| self.runs.iter().find(|run| run.id == *run_id))
+            })
+            .map(|run| run.status)
             .ok_or(ReplayError::InvalidTransition)?;
-        let run_status = current_run(self, run_id)?.status;
         let goal = current_goal_mut(self, *goal_id)?;
         let active_limit = goal.effective_budget().max_active_ms;
         // Settlement fails an unsatisfied planned Goal whose Finished Run admits no next Run; a planless or
@@ -323,22 +328,80 @@ impl SessionView {
             (*status, run_status),
             (GoalStatus::Completed, RunStatus::Finished) | (GoalStatus::Failed, RunStatus::Failed)
         ) || (*status == GoalStatus::Failed && exhausted_after_finish);
-        if goal.status != GoalStatus::Running
-            || goal.active_run.is_some()
-            || !disposition_matches
-            || goal.active_time_reservation.is_some()
-            || *active_ms != goal.active_ms
-            || *active_ms > active_limit
-            || *status == GoalStatus::Completed
+        let terminal = goal.status == GoalStatus::Running
+            && goal.active_run.is_none()
+            && disposition_matches
+            && goal.active_time_reservation.is_none()
+            && *active_ms == goal.active_ms
+            && *active_ms <= active_limit
+            && !(*status == GoalStatus::Completed
                 && goal.plan_contract.is_some()
-                && !goal.success_criterion_satisfied
-        {
-            return Err(ReplayError::InvalidTransition);
+                && !goal.success_criterion_satisfied);
+        if !terminal {
+            return self
+                .close_exhausted_goal(goal_id, *status, run_status, *active_ms, report, prior);
         }
+        let goal = current_goal_mut(self, *goal_id)?;
         goal.active_ms = *active_ms;
         goal.status = *status;
         goal.report = Some(report.clone());
         goal.finished_sequence = Some(prior);
+        Ok(())
+    }
+
+    /// Closes a paused Goal that admits no next Run, as explicit resume finds it. Settles the same
+    /// unfinished facts resume would, so the close is refused whenever a Run is still admissible.
+    fn close_exhausted_goal(
+        &mut self,
+        goal_id: &GoalId,
+        status: GoalStatus,
+        run_status: RunStatus,
+        active_ms: u64,
+        report: &GoalReport,
+        prior: u64,
+    ) -> Result<(), ReplayError> {
+        let goal = self.goal(*goal_id).ok_or(ReplayError::InvalidTransition)?;
+        // A paused Goal is one whose last Run was cancelled, or whose non-autonomous Run finished without
+        // finishing the Goal; an autonomous Finished Run is settled by its own rules.
+        let paused = run_status == RunStatus::Cancelled
+            || (run_status == RunStatus::Finished && !goal.autonomous);
+        if status != GoalStatus::Failed
+            || !paused
+            || !matches!(goal.status, GoalStatus::Running | GoalStatus::Interrupted)
+            || goal.active_run.is_some()
+        {
+            return Err(ReplayError::InvalidTransition);
+        }
+        let mut settled = goal.clone();
+        let has_unaccepted_run = settled
+            .run_ids
+            .last()
+            .is_some_and(|run_id| !self.runs.iter().any(|run| run.id == *run_id));
+        if has_unaccepted_run {
+            settled.run_ids.pop();
+        }
+        if let Some((_, reserved_ms)) = settled.active_time_reservation.take() {
+            settled.active_ms = settled
+                .active_ms
+                .checked_add(reserved_ms)
+                .ok_or(ReplayError::InvalidTransition)?;
+            settled.uncertain_active_ms = settled
+                .uncertain_active_ms
+                .checked_add(reserved_ms)
+                .ok_or(ReplayError::InvalidTransition)?;
+        }
+        if !settled.unobserved_provider_calls.is_empty() {
+            settled.unobserved_provider_calls.clear();
+            settled.token_usage_unknown = true;
+        }
+        if settled.admits_next_run() || active_ms != settled.active_ms {
+            return Err(ReplayError::InvalidTransition);
+        }
+        settled.status = GoalStatus::Failed;
+        settled.awaiting_plan_contract = false;
+        settled.report = Some(report.clone());
+        settled.finished_sequence = Some(prior);
+        *current_goal_mut(self, *goal_id)? = settled;
         Ok(())
     }
 }

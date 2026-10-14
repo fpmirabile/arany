@@ -358,7 +358,12 @@ async fn run_with_provider<P: Provider + 'static>(
             receipt
         }
         OutputArg::Jsonl if success => String::new(),
-        OutputArg::Jsonl => "error: Run failed\n".into(),
+        OutputArg::Jsonl => match run.status {
+            RunStatus::Cancelled => "error: Run cancelled\n".into(),
+            RunStatus::Failed => "error: Run failed\n".into(),
+            // A finished Run that is not a success keeps its Goal paused.
+            _ => "error: Goal paused before completion\n".into(),
+        },
     };
     let stderr = if paused {
         format!(
@@ -723,6 +728,81 @@ mod tests {
             answers: Arc::new(Mutex::new(VecDeque::from([answer]))),
             observed: Arc::clone(observed),
         }
+    }
+
+    #[tokio::test]
+    async fn exec_resume_of_an_exhausted_goal_closes_it_and_names_the_reason() {
+        let temp = tempfile::tempdir().expect("private test root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let state_dir = temp.path().join("state");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let mut engine = Engine::open(
+            StateRoot::admit(&state_dir).expect("state"),
+            scripted(
+                Ok(Finish {
+                    summary: "first summary".into(),
+                    result: "first".into(),
+                }),
+                &observed,
+            ),
+        )
+        .expect("engine");
+        let mut goal = GoalRequest::new(
+            GoalBudget {
+                max_provider_calls: 1,
+                ..GoalBudget::default()
+            },
+            GoalPhase::Implementation,
+        );
+        goal.finish_after_run = false;
+        let paused = engine
+            .run(RunRequest {
+                session_id: None,
+                title: Some("Exhausted".into()),
+                objective: "Use the only Provider call".into(),
+                images: Vec::new(),
+                workspace: workspace.clone(),
+                include_paths: Vec::new(),
+                policy: CollaborationPolicy::Single,
+                goal,
+            })
+            .await
+            .expect("paused Goal Run");
+        engine.close().await.expect("engine shutdown");
+
+        let mut resume = args(state_dir.clone(), workspace.clone(), "unused");
+        resume.prompt = None;
+        resume.session_id = Some(paused.session_id.to_string());
+        resume.resume_goal = Some(paused.goal_id.to_string());
+        let admission = resume.admit().expect("valid resume");
+        let error = run_with_provider(
+            resume,
+            admission,
+            scripted(Err(ProviderError::Unavailable), &observed),
+            Telemetry::disabled(),
+        )
+        .await
+        .err()
+        .expect("an exhausted resume exits unsuccessfully with its reason");
+        assert_eq!(error, "Goal budget is exhausted");
+        assert_eq!(observed.lock().expect("observations").len(), 1);
+
+        let mut again = args(state_dir.clone(), workspace.clone(), "unused");
+        again.prompt = None;
+        again.session_id = Some(paused.session_id.to_string());
+        again.resume_goal = Some(paused.goal_id.to_string());
+        let admission = again.admit().expect("valid resume");
+        let error = run_with_provider(
+            again,
+            admission,
+            scripted(Err(ProviderError::Unavailable), &observed),
+            Telemetry::disabled(),
+        )
+        .await
+        .err()
+        .expect("a closed Goal is not resumable");
+        assert_eq!(error, "Goal is not available for explicit resume");
     }
 
     #[tokio::test]

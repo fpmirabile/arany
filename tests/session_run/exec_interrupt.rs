@@ -6,15 +6,25 @@ use std::{
 
 #[test]
 fn sigint_cancels_exec_run_and_leaves_its_goal_resumable() {
-    interrupted_exec_leaves_its_goal_resumable("-INT", None);
+    interrupted_exec_leaves_its_goal_resumable("-INT", None, "text");
+}
+
+#[test]
+fn sigint_jsonl_names_the_cancelled_run_and_leaves_its_goal_resumable() {
+    interrupted_exec_leaves_its_goal_resumable("-INT", None, "jsonl");
 }
 
 #[test]
 fn sigterm_stops_exec_run_with_a_bounded_error_and_leaves_its_goal_resumable() {
-    interrupted_exec_leaves_its_goal_resumable("-TERM", Some("terminated by SIGTERM"));
+    interrupted_exec_leaves_its_goal_resumable("-TERM", Some("terminated by SIGTERM"), "text");
 }
 
-fn interrupted_exec_leaves_its_goal_resumable(signal: &str, stop_error: Option<&str>) {
+fn interrupted_exec_leaves_its_goal_resumable(
+    signal: &str,
+    stop_error: Option<&str>,
+    format: &str,
+) {
+    let jsonl = format == "jsonl";
     let temp = tempfile::tempdir().expect("private test root");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
@@ -70,6 +80,8 @@ fn interrupted_exec_leaves_its_goal_resumable(signal: &str, stop_error: Option<&
             "model-1",
             "--collaboration",
             "single",
+            "--output",
+            format,
             "answer",
         ])
         .stdin(Stdio::null())
@@ -91,14 +103,27 @@ fn interrupted_exec_leaves_its_goal_resumable(signal: &str, stop_error: Option<&
 
     let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
     assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
-    assert!(output.stdout.is_empty());
-    assert!(stderr.contains("Status: cancelled\n"), "stderr: {stderr}");
+    if jsonl {
+        assert!(!output.stdout.is_empty());
+        assert!(
+            stderr.contains("error: Run cancelled\n"),
+            "stderr: {stderr}"
+        );
+        assert!(!stderr.contains("Status:"), "stderr: {stderr}");
+    } else {
+        assert!(output.stdout.is_empty());
+        assert!(stderr.contains("Status: cancelled\n"), "stderr: {stderr}");
+    }
     match stop_error {
         Some(message) => assert!(
             stderr.ends_with(&format!("error: {message}\n")),
             "stderr: {stderr}"
         ),
-        None => assert!(!stderr.contains("error:"), "stderr: {stderr}"),
+        None => assert_eq!(
+            stderr.matches("error:").count(),
+            usize::from(jsonl),
+            "stderr: {stderr}"
+        ),
     }
     let pause = stderr
         .lines()
@@ -122,7 +147,9 @@ fn interrupted_exec_leaves_its_goal_resumable(signal: &str, stop_error: Option<&
         .expect("Session");
     assert_eq!(view.runs.len(), 1);
     assert_eq!(view.runs[0].status, RunStatus::Cancelled);
-    assert!(stderr.contains(&format!("Run: {}\n", view.runs[0].id)));
+    if !jsonl {
+        assert!(stderr.contains(&format!("Run: {}\n", view.runs[0].id)));
+    }
     assert_eq!(
         view.goal(goal_id).expect("paused Goal").status,
         GoalStatus::Interrupted

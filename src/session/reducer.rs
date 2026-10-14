@@ -1700,6 +1700,58 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn interrupted_goal_without_admissible_run_closes_as_failed() {
+        let goal = GoalId::new();
+        let (run, agent) = (RunId::new(), AgentRunId::new());
+        let budget = GoalBudget {
+            max_runs: 1,
+            ..GoalBudget::default()
+        };
+        let close = Event::GoalFinished {
+            goal_id: goal,
+            status: GoalStatus::Failed,
+            active_ms: 0,
+            report: GoalReport {
+                summary: "Out of budget.".into(),
+                changes: Vec::new(),
+                evidence: Vec::new(),
+                unresolved: Vec::new(),
+            },
+        };
+        let mut events = vec![goal_started(goal, budget)];
+        events.extend(start_run(
+            goal,
+            run,
+            agent,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.extend(cancel_run(run, agent));
+        let session = SessionId::new();
+        let mut closing = events.clone();
+        closing.push(close.clone());
+        let view = SessionView::replay_open(session, &session_with(session, closing))
+            .expect("an exhausted paused Goal closes as Failed")
+            .expect("Session exists");
+        assert_eq!(view.goal(goal).unwrap().status, GoalStatus::Failed);
+        assert_eq!(view.interrupted_goal_id(), None);
+
+        let session = SessionId::new();
+        let mut admissible = vec![goal_started(goal, GoalBudget::default())];
+        admissible.extend(start_run(
+            goal,
+            run,
+            agent,
+            config(CollaborationPolicy::Single, false),
+        ));
+        admissible.extend(cancel_run(run, agent));
+        admissible.push(close);
+        assert!(
+            SessionView::replay_open(session, &session_with(session, admissible)).is_err(),
+            "a paused Goal that still admits a Run cannot close as Failed"
+        );
+    }
+
+    #[test]
     fn resumed_orphaned_provider_reservation_settles_as_uncertain() {
         let session_id = SessionId::new();
         let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());

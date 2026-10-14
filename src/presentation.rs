@@ -539,13 +539,24 @@ pub fn goal_status(view: &SessionView) -> String {
         goal_clock(budget.max_active_ms),
     );
     if goal.status == crate::session::GoalStatus::Interrupted {
-        text.push_str(" · Use /goal resume to continue");
+        text.push_str(if goal.admits_next_run() {
+            " · Use /goal resume to continue"
+        } else {
+            " · out of budget"
+        });
     }
     if let Some(paused) = view.interrupted_goal_id().filter(|id| *id != goal.id) {
-        text.push_str(&format!(
-            "\nPaused Goal {} can be resumed with /goal resume",
-            paused.to_string().chars().take(8).collect::<String>()
-        ));
+        let short = paused.to_string().chars().take(8).collect::<String>();
+        if view
+            .goal(paused)
+            .is_some_and(|paused| paused.admits_next_run())
+        {
+            text.push_str(&format!(
+                "\nPaused Goal {short} can be resumed with /goal resume"
+            ));
+        } else {
+            text.push_str(&format!("\nPaused Goal {short} is out of budget"));
+        }
     }
     text
 }
@@ -1073,6 +1084,25 @@ mod goal_status_tests {
         view.goals[1].status = GoalStatus::Interrupted;
         let last_paused = goal_status(&view);
         assert!(!last_paused.contains("Paused Goal"), "{last_paused}");
+    }
+
+    #[test]
+    fn goal_status_shows_out_of_budget_instead_of_a_resume_hint() {
+        let mut view = session_with_goal(true);
+        view.goals[0].status = GoalStatus::Interrupted;
+        view.goals[0].provider_calls = view.goals[0].effective_budget().max_provider_calls;
+        let exhausted = goal_status(&view);
+        assert!(exhausted.ends_with(" · out of budget"), "{exhausted}");
+        assert!(!exhausted.contains("/goal resume"), "{exhausted}");
+
+        let mut newer = view.goals[0].clone();
+        newer.id = crate::session::GoalId::new();
+        newer.status = GoalStatus::Completed;
+        view.goals.push(newer);
+        let status = goal_status(&view);
+        assert!(!status.contains("/goal resume"), "{status}");
+        assert!(status.contains("\nPaused Goal "), "{status}");
+        assert!(status.ends_with(" is out of budget"), "{status}");
     }
 
     #[test]

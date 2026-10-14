@@ -1715,6 +1715,36 @@ impl<P: Provider + 'static> Engine<P> {
         }
     }
 
+    /// Closes a paused Goal that explicit resume finds out of budget, so it is no longer resumable. It
+    /// runs under the Session lock and acquires no Workspace lease; no Goal span exists yet to close.
+    async fn close_exhausted_goal(
+        &mut self,
+        session_id: SessionId,
+        view: &crate::session::SessionView,
+        goal: &GoalAdmission,
+    ) -> Result<(), EngineError> {
+        let goal_view = view.goal(goal.id).ok_or(EngineError::InvalidHistory)?;
+        let run = goal_view
+            .run_ids
+            .iter()
+            .rev()
+            .find_map(|run_id| view.runs.iter().find(|run| run.id == *run_id))
+            .ok_or(EngineError::InvalidHistory)?;
+        let report = goal_report(view, run, goal_view);
+        self.append_goal_lifecycle(
+            session_id,
+            None,
+            Event::GoalFinished {
+                goal_id: goal.id,
+                status: GoalStatus::Failed,
+                active_ms: goal.active_ms,
+                report,
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
     pub fn open(state: StateRoot, provider: P) -> Result<Self, EngineError> {
         Self::open_with_telemetry(state, provider, Telemetry::disabled())
     }
@@ -1925,6 +1955,10 @@ impl<P: Provider + 'static> Engine<P> {
             known_tokens: goal.known_tokens,
             token_usage_unknown: goal.token_usage_unknown,
         }) {
+            if goal.resume {
+                let view = history.as_ref().ok_or(EngineError::InvalidHistory)?;
+                self.close_exhausted_goal(session_id, view, &goal).await?;
+            }
             return Err(EngineError::GoalBudgetExhausted);
         }
         let token_limit = budget.max_tokens;
