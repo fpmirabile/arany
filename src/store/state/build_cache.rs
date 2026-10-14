@@ -110,6 +110,25 @@ fn valid_identity_path(path: &Path) -> bool {
     normalized == value
 }
 
+#[cfg(test)]
+thread_local! {
+    static COMMIT_MARKER_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Makes the next committed-marker write on this thread fail once.
+#[cfg(test)]
+pub(crate) fn fail_next_commit_marker() {
+    COMMIT_MARKER_FAULT.with(|fault| fault.set(true));
+}
+
+#[cfg(test)]
+fn commit_marker_fault() -> io::Result<()> {
+    if COMMIT_MARKER_FAULT.with(|fault| fault.replace(false)) {
+        return Err(io::Error::other("injected commit marker failure"));
+    }
+    Ok(())
+}
+
 pub(crate) struct BuildCacheLease {
     dir: Dir,
     _identity_lock: File,
@@ -256,6 +275,8 @@ impl BuildCacheLease {
             set_reservation(&self.dir, &self.token, MAX_ARCHIVE_BYTES)?;
             sync_directory(&self.dir)?;
             commit_marker_attempted = true;
+            #[cfg(test)]
+            commit_marker_fault()?;
             write_transaction(
                 &self.dir,
                 &self.token,

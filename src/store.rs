@@ -15,11 +15,15 @@ use journal::{HotSession, append, fork_session, open_connection};
 use replay::{latest_session_id, list_session_items, load_session, resolve_view, session_for_run};
 pub use state::HistoryReset;
 pub use state::StateRoot;
+#[cfg(any(target_os = "linux", test))]
+pub(crate) use state::capture_archive;
+#[cfg(test)]
+pub(crate) use state::fail_next_commit_marker;
+#[cfg(target_os = "linux")]
+pub(crate) use state::restore_archive;
 pub(crate) use state::{
     BUILD_CACHE_ARCHIVE_BYTES, BuildCacheIdentity, BuildCacheLease, SessionRunLock, archive_size,
 };
-#[cfg(target_os = "linux")]
-pub(crate) use state::{capture_archive, restore_archive};
 #[cfg(target_os = "macos")]
 pub(crate) use state::{capture_archive_async, restore_archive_async};
 

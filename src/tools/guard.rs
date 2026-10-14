@@ -570,6 +570,17 @@ pub(super) async fn send_cache_archive<W: tokio::io::AsyncWrite + Unpin>(
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    static CANDIDATE_SYNC_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Makes the next candidate sync on this thread fail once.
+#[cfg(test)]
+fn fail_next_candidate_sync() {
+    CANDIDATE_SYNC_FAULT.with(|fault| fault.set(true));
+}
+
 pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
     lease: &BuildCacheLease,
@@ -601,7 +612,15 @@ pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
     let Some(file) = staged else {
         return Ok(CacheCandidate::Failed);
     };
-    if file.sync_all().is_err() {
+    #[cfg(test)]
+    let synced = if CANDIDATE_SYNC_FAULT.with(|fault| fault.replace(false)) {
+        Err(std::io::Error::other("injected candidate sync failure"))
+    } else {
+        file.sync_all()
+    };
+    #[cfg(not(test))]
+    let synced = file.sync_all();
+    if synced.is_err() {
         return Ok(CacheCandidate::Failed);
     }
     Ok(CacheCandidate::Received)
@@ -1386,6 +1405,105 @@ mod tests {
         assert_eq!(observation.disposition, ToolDisposition::Succeeded);
         assert_eq!(observation.cache_update, CacheUpdate::Published);
         assert!(observation.valid());
+    }
+
+    fn captured_archive(root: &Path, identity: &BuildCacheIdentity, marker: &[u8]) -> Vec<u8> {
+        let source = root.join(format!("source-{}", marker.len()));
+        std::fs::create_dir_all(source.join("target")).unwrap();
+        std::fs::write(source.join("target/marker"), marker).unwrap();
+        let source =
+            cap_std::fs::Dir::open_ambient_dir(&source, cap_std::ambient_authority()).unwrap();
+        let mut bytes = Vec::new();
+        crate::store::capture_archive(&source, identity, &[], &mut bytes).unwrap();
+        bytes
+    }
+
+    fn publish_archive(
+        state: &crate::store::StateRoot,
+        identity: &BuildCacheIdentity,
+        bytes: &[u8],
+    ) {
+        let mut session = cache_session(state, identity);
+        let mut candidate = session.lease.candidate_writer().unwrap();
+        candidate.write_all(bytes).unwrap();
+        candidate.sync_all().unwrap();
+        drop(candidate);
+        let mut observation = command_observation();
+        publish_cache_candidate(
+            &mut observation,
+            CacheCandidate::Received,
+            Some(&mut session),
+        );
+        assert_eq!(observation.cache_update, CacheUpdate::Published);
+    }
+
+    fn committed_archive(
+        state: &crate::store::StateRoot,
+        identity: &BuildCacheIdentity,
+    ) -> Vec<u8> {
+        let lease = state.begin_build_cache(identity.clone()).unwrap();
+        let (mut file, length) = lease.archive().unwrap().unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(length, bytes.len() as u64);
+        bytes
+    }
+
+    #[test]
+    fn uncertain_commit_marker_keeps_the_command_and_recovers_the_prior_archive() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, identity) = cache_fixture(temp.path());
+        let prior = captured_archive(temp.path(), &identity, b"prior");
+        let candidate = captured_archive(temp.path(), &identity, b"candidate");
+        assert_ne!(prior, candidate);
+        publish_archive(&state, &identity, &prior);
+
+        let mut session = cache_session(&state, &identity);
+        let mut valid = session.lease.candidate_writer().unwrap();
+        valid.write_all(&candidate).unwrap();
+        valid.sync_all().unwrap();
+        drop(valid);
+        crate::store::fail_next_commit_marker();
+        let mut observation = command_observation();
+        publish_cache_candidate(
+            &mut observation,
+            CacheCandidate::Received,
+            Some(&mut session),
+        );
+        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+        assert_eq!(observation.cache_update, CacheUpdate::Uncertain);
+        assert!(observation.valid());
+        assert!(observation.stops_run());
+        assert!(session.lease.publication_uncertain());
+        drop(session);
+
+        // The commit marker never reached disk, so recovery rolls back to the prior archive.
+        assert_eq!(committed_archive(&state, &identity), prior);
+    }
+
+    #[tokio::test]
+    async fn candidate_sync_failure_drains_the_archive_and_keeps_the_prior_archive() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, identity) = cache_fixture(temp.path());
+        let prior = captured_archive(temp.path(), &identity, b"prior");
+        let candidate = captured_archive(temp.path(), &identity, b"candidate");
+        publish_archive(&state, &identity, &prior);
+
+        let lease = state.begin_build_cache(identity.clone()).unwrap();
+        let mut stream = b"CACHE_CANDIDATE\n".to_vec();
+        stream.extend((candidate.len() as u64).to_le_bytes());
+        stream.extend(&candidate);
+        stream.extend(b"CACHE_DONE\n");
+        let mut reader = tokio::io::BufReader::new(stream.as_slice());
+        fail_next_candidate_sync();
+        let outcome = receive_cache_candidate(&mut reader, &lease).await.unwrap();
+        assert!(matches!(outcome, CacheCandidate::Failed));
+        let mut trailer = String::new();
+        reader.read_line(&mut trailer).await.unwrap();
+        assert_eq!(trailer, "CACHE_DONE\n");
+        drop(lease);
+
+        assert_eq!(committed_archive(&state, &identity), prior);
     }
 
     /// Accepts `remaining` bytes, then reports zero-length writes so `write_all` fails.

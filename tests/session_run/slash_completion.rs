@@ -536,6 +536,22 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         b"Notice: Cleared all private build caches\r\nInput:\r\n",
     );
     assert!(!other_cache.exists());
+    let (planted_cache, planted_lock) = seed_empty_build_cache(&state, &workspace);
+    std::fs::set_permissions(&planted_lock, std::fs::Permissions::from_mode(0o644))
+        .expect("non-private cache identity lock");
+    let failed_clear_at = transcript.len();
+    input
+        .write_all(b"/cache clear\r")
+        .expect("cache clear over non-private storage");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        failed_clear_at,
+        b"Notice: Error: private build cache could not be cleared\r\nInput:\r\n",
+    );
+    assert!(planted_cache.exists());
     input.write_all(b"/exit\r").expect("exit");
     let result = super::loopback::wait_product(child.take());
     pump(&mut output, &mut input, &mut transcript, &mut answered);
@@ -545,7 +561,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
     let text = String::from_utf8(transcript).expect("linear transcript UTF-8");
     assert!(text.contains("Run npx --yes skills@1.7.0 experimental_install in this project: .agents/skills is missing and skills-lock.json exists."));
     assert!(!text.contains('\u{1b}'));
-    assert_eq!(text.matches("Notice: Error:").count(), 6);
+    assert_eq!(text.matches("Notice: Error:").count(), 7);
     assert_eq!(
         super::active_terminal::transcript_field(&text, "TTY_BEFORE:"),
         super::active_terminal::transcript_field(&text, "TTY_AFTER:"),
