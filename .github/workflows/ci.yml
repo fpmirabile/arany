@@ -6,6 +6,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      history_benchmark:
+        description: Run the ignored native Linux long-history measurement
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -102,6 +107,21 @@ jobs:
         run: cargo fetch --locked
       - if: needs.changes.outputs.markdown-only != 'true'
         run: cargo test --workspace --locked --offline ${{ matrix.profile == 'release' && '--release' || '' }}
+      - name: Measure native long-history behavior
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.history_benchmark && matrix.profile == 'release' }}
+        shell: bash
+        run: |
+          sudo apt-get install --yes tmux
+          cargo test --locked --offline --release --test session_run active_terminal::tmux::history_latency::active_keyboard_stays_visible_with_near_cap_history -- --exact --ignored --nocapture | tee "$RUNNER_TEMP/arany-history-measurement.log"
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          output = (pathlib.Path(os.environ["RUNNER_TEMP"]) / "arany-history-measurement.log").read_text()
+          if not re.search(r"test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; \d+ filtered out", output):
+              raise SystemExit("The history measurement must complete exactly one test")
+          PY
 
   macos-tests:
     name: macOS tests (${{ matrix.profile }})

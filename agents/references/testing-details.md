@@ -14,6 +14,12 @@ RUSTFLAGS='--cfg arany_ci' cargo test --workspace --locked --offline
 
 Repeat with `--release` for the optimized profile. To run one ignored gate, use `cargo test <path> -- --exact --ignored`. The isolated macOS Keychain gate also needs `ARANY_TEST_EXE` set to a built debug `arany`. Other ignored native, manual, performance and live Provider gates remain separate; CI uses no account credentials or paid calls. Passing compilation or an OS-specific subset does not prove platform parity.
 
+Manual CI dispatch with `history_benchmark: true` additionally runs the exact
+ignored long-history tmux owner in the Linux release job and requires one
+completed test. It reports that runner's workload, timings and resource metrics;
+the ordinary suite leaves this benchmark ignored, and its measurements do not
+establish other-host performance or cold-disk behavior.
+
 ## Beta continuation and deferred evidence
 
 - Beta 1 delivery order is functional implementation, consolidated local verification, then final user-owned testing. At each continuation, select the next implementable functional item before reviewing verification debt. While functionality remains, run only focused local/synthetic checks needed for a changed invariant or known failure; collect remaining checks for implementation closeout rather than starting another verification-only cycle.
