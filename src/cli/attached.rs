@@ -835,15 +835,23 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                             }
                             Ok(RunSubmission::Shutdown(reason)) => return Err(reason),
                             Err(error) => {
-                                notice = Some(Feedback::History(if composer.is_empty() {
+                                let text = if composer.is_empty() {
                                     format!("Error: {error}")
                                 } else {
                                     format!(
                                         "Error: {error}; draft retained ({} characters)",
                                         composer.character_count()
                                     )
-                                }));
-                                view = load_view(&admission.state_dir, session_id).await?;
+                                };
+                                notice = Some(Feedback::History(
+                                    reload_view_or_keep(
+                                        &admission.state_dir,
+                                        session_id,
+                                        &mut view,
+                                        text,
+                                    )
+                                    .await,
+                                ));
                             }
                         }
                     }
@@ -984,12 +992,19 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                     return Err(format!("terminated by {}", signal.name()));
                                 }
                             };
-                            notice =
-                                Some(Feedback::History(match retained_draft_notice(&composer) {
-                                    Some(draft) => format!("{maintenance}; {draft}"),
-                                    None => maintenance,
-                                }));
-                            view = load_view(&admission.state_dir, session_id).await?;
+                            let text = match retained_draft_notice(&composer) {
+                                Some(draft) => format!("{maintenance}; {draft}"),
+                                None => maintenance,
+                            };
+                            notice = Some(Feedback::History(
+                                reload_view_or_keep(
+                                    &admission.state_dir,
+                                    session_id,
+                                    &mut view,
+                                    text,
+                                )
+                                .await,
+                            ));
                         } else if argument.is_none()
                             && matches!(
                                 command,
@@ -1904,6 +1919,24 @@ async fn load_view(state_dir: &Path, session_id: SessionId) -> Result<SessionVie
     let view = view?;
     closed.map_err(|_| "store shutdown failed".to_owned())?;
     Ok(view)
+}
+
+// Events are already committed when this runs, so a failed reload keeps the displayed history.
+async fn reload_view_or_keep(
+    state_dir: &Path,
+    session_id: SessionId,
+    view: &mut SessionView,
+    notice: String,
+) -> String {
+    match load_view(state_dir, session_id).await {
+        Ok(reloaded) => {
+            *view = reloaded;
+            notice
+        }
+        Err(error) => format!(
+            "{notice}; Error: history could not be reloaded: {error}; use /resume to reload it"
+        ),
+    }
 }
 
 #[cfg(test)]
