@@ -18,6 +18,44 @@ fn cache_progress(stage: &str) {
     stdout.flush().expect("cache fixture progress flush");
 }
 
+fn cache_run_return(result: &Result<arany::RunOutcome, arany::EngineError>) -> String {
+    match result {
+        Ok(outcome) => {
+            let receipts = outcome
+                .run
+                .tools
+                .iter()
+                .map(|tool| {
+                    tool.observation.as_ref().map(|observation| {
+                        (
+                            observation.disposition,
+                            observation.guard.is_some(),
+                            observation.cache_update,
+                            observation.output.len(),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            format!(
+                "Run status {:?}; tool receipts {receipts:?}",
+                outcome.run.status
+            )
+        }
+        Err(error) => {
+            let category = match error {
+                arany::EngineError::Store(_) => "store",
+                arany::EngineError::Tool(_) => "tool",
+                arany::EngineError::CoordinatorFailed => "coordinator",
+                arany::EngineError::CancellationDrainTimeout => "cancellation-drain",
+                arany::EngineError::CancelledBeforeStart => "cancelled",
+                arany::EngineError::InvalidHistory => "history",
+                _ => "request-or-state",
+            };
+            format!("EngineError category {category}")
+        }
+    }
+}
+
 struct CacheCanary {
     requests: std::sync::Arc<std::sync::Mutex<Vec<ProviderRequest>>>,
     calls: Vec<ToolCall>,
@@ -189,7 +227,7 @@ async fn selected_cache_canary_helper_inner() {
             seed_approvals,
         )
         .unwrap();
-    let seed_run = Box::pin(async {
+    let mut seed_run = Box::pin(async {
         cache_progress("seed-run-start");
         let outcome = seed_engine
             .run(RunRequest {
@@ -205,18 +243,19 @@ async fn selected_cache_canary_helper_inner() {
         cache_progress("seed-run-returned");
         outcome
     });
-    let approve_seed = async {
+    let seed_outcome = tokio::time::timeout(Duration::from_secs(90), async {
         cache_progress("seed-approval-waiting");
-        let approval = seed_inbox
-            .next()
-            .await
-            .expect("private cache seed approval");
+        let approval = tokio::select! {
+            result = &mut seed_run => panic!(
+                "cache seed Run returned before approval: {}",
+                cache_run_return(&result),
+            ),
+            approval = seed_inbox.next() => approval.expect("private cache seed approval"),
+        };
         cache_progress("seed-approval-received");
         assert_eq!(approval.intent.call, seed_cache);
         approval.decide(true);
-    };
-    let (seed_outcome, ()) = tokio::time::timeout(Duration::from_secs(90), async {
-        tokio::join!(seed_run, approve_seed)
+        seed_run.await
     })
     .await
     .expect("bounded private cache seed");
@@ -323,7 +362,7 @@ async fn selected_cache_canary_helper_inner() {
             approvals,
         )
         .unwrap();
-    let run = Box::pin(async {
+    let mut run = Box::pin(async {
         cache_progress("selected-run-start");
         let outcome = engine
             .run(RunRequest {
@@ -341,13 +380,16 @@ async fn selected_cache_canary_helper_inner() {
         cache_progress("selected-run-returned");
         outcome
     });
-    let approve = async {
+    let outcome = tokio::time::timeout(Duration::from_secs(90), async {
         for (index, call) in calls.iter().enumerate() {
             cache_progress(&format!("selected-approval-waiting-{index}"));
-            let approval = inbox
-                .next()
-                .await
-                .expect("approval for a selected-cache command");
+            let approval = tokio::select! {
+                result = &mut run => panic!(
+                    "selected-cache Run returned before approval {index}: {}",
+                    cache_run_return(&result),
+                ),
+                approval = inbox.next() => approval.expect("approval for a selected-cache command"),
+            };
             cache_progress(&format!("selected-approval-received-{index}"));
             assert!(
                 &approval.intent.call == call,
@@ -355,9 +397,7 @@ async fn selected_cache_canary_helper_inner() {
             );
             approval.decide(true);
         }
-    };
-    let (outcome, ()) = tokio::time::timeout(Duration::from_secs(90), async {
-        tokio::join!(run, approve)
+        run.await
     })
     .await
     .expect("bounded selected-cache approval journey");
@@ -533,7 +573,7 @@ async fn selected_cache_canary_helper_inner() {
             verify_approvals,
         )
         .unwrap();
-    let verify_run = Box::pin(async {
+    let mut verify_run = Box::pin(async {
         cache_progress("verify-run-start");
         let outcome = verify_engine
             .run(RunRequest {
@@ -549,18 +589,22 @@ async fn selected_cache_canary_helper_inner() {
         cache_progress("verify-run-returned");
         outcome
     });
-    let approve_verify = async {
+    let verified = tokio::time::timeout(Duration::from_secs(90), async {
         cache_progress("verify-approval-waiting");
-        let approval = verify_inbox.next().await.expect("cache recovery approval");
+        let approval = tokio::select! {
+            result = &mut verify_run => panic!(
+                "cache recovery Run returned before approval: {}",
+                cache_run_return(&result),
+            ),
+            approval = verify_inbox.next() => approval.expect("cache recovery approval"),
+        };
         cache_progress("verify-approval-received");
         assert!(
             approval.intent.call == verify_cache,
             "cache recovery approval intent differs"
         );
         approval.decide(true);
-    };
-    let (verified, ()) = tokio::time::timeout(Duration::from_secs(90), async {
-        tokio::join!(verify_run, approve_verify)
+        verify_run.await
     })
     .await
     .expect("bounded cache recovery journey");
