@@ -41,7 +41,6 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         queue_progress: None,
         #[cfg(target_os = "macos")]
         system_programs: None,
-        #[cfg(target_os = "macos")]
         process_enforcement_digest: [1; 32],
     };
     let contract_for = |name: &str, resource: Option<&str>| GoalPlanContract {
