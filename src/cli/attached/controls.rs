@@ -144,7 +144,7 @@ fn setting_rows(preferences: Preferences) -> Vec<String> {
 
 fn linear_settings_instruction(preferences: Preferences) -> String {
     format!(
-        "Current: menu={} view={} calls={} tokens={} active-ms={} timeout-ms={}/{} memory={}B processes={} project={}B cache={}B. Set name=value; Enter saves; q cancels.",
+        "Current menu: {} (tabs|combined); view: {} (fullscreen|classic).\nSettings: calls={} tokens={} active-ms={} default-timeout-ms={} max-timeout-ms={} build-memory-bytes={} build-processes={} build-project-bytes={} build-cache-bytes={}.\nSet a listed key=value or exact menu/view choice; Enter saves; q cancels.",
         preferences.completion.label(),
         preferences.view.label(),
         preferences

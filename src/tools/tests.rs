@@ -1355,6 +1355,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
     worker_observation.disposition = ToolDisposition::Succeeded;
     worker_observation.cache_update = CacheUpdate::NotAttempted;
     assert!(worker_observation.valid());
+    assert!(!worker_observation.stops_run());
     worker_observation.cache_update = CacheUpdate::Failed;
     assert!(worker_observation.valid());
     let mut encoded = serde_json::to_value(&worker_observation).unwrap();
@@ -1423,4 +1424,109 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
     let mut oversized = observation;
     oversized.output = "x".repeat(MAX_TOOL_RESULT_BYTES + 1);
     assert!(!oversized.valid());
+}
+
+#[tokio::test]
+async fn cache_receipt_states_preserve_success_without_publication_uncertainty() {
+    fn make_observation(call: ToolCall, cache_requested_bytes: u64) -> ToolObservation {
+        let mut intent = EffectIntent {
+            id: uuid::Uuid::now_v7(),
+            run_id: crate::session::RunId::new(),
+            agent_run_id: crate::session::AgentRunId::new(),
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call,
+            limits: ToolLimits::default(),
+            expires_at_ms: u64::MAX,
+            use_count: 1,
+        };
+        intent.limits.cache_requested_bytes = cache_requested_bytes;
+        let guard = GuardReceipt {
+            contract_version: 1,
+            intent_digest: intent.digest(),
+            enforcement_digest: intent.enforcement_digest,
+            limits: intent.limits.clone(),
+        };
+        ToolObservation {
+            intent,
+            disposition: ToolDisposition::Succeeded,
+            output: "{}".into(),
+            guard: Some(guard),
+            cache_update: CacheUpdate::NotAttempted,
+        }
+    }
+
+    let read = ToolCall::Read {
+        path: "src/main.rs".into(),
+        offset: 0,
+        limit: 1024,
+    };
+    let mut observation = make_observation(read, 0);
+    super::guard::publish_cache_candidate(
+        &mut observation,
+        super::guard::CacheCandidate::Received,
+        None,
+        tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+    )
+    .await;
+    assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+    assert_eq!(observation.cache_update, CacheUpdate::NotApplicable);
+    assert!(observation.valid());
+    assert!(!observation.stops_run());
+
+    for (candidate, requested, expected_update, expected_disposition) in [
+        (
+            super::guard::CacheCandidate::Received,
+            0,
+            CacheUpdate::NotApplicable,
+            ToolDisposition::Succeeded,
+        ),
+        (
+            super::guard::CacheCandidate::Received,
+            1,
+            CacheUpdate::Rejected,
+            ToolDisposition::Succeeded,
+        ),
+        (
+            super::guard::CacheCandidate::Rejected,
+            1,
+            CacheUpdate::Rejected,
+            ToolDisposition::Succeeded,
+        ),
+        (
+            super::guard::CacheCandidate::Failed,
+            1,
+            CacheUpdate::Failed,
+            ToolDisposition::Succeeded,
+        ),
+        (
+            super::guard::CacheCandidate::Uncertain,
+            1,
+            CacheUpdate::Uncertain,
+            ToolDisposition::Uncertain,
+        ),
+    ] {
+        let call = ToolCall::Command {
+            program: "cargo".into(),
+            args: vec!["check".into()],
+            cwd: ".".into(),
+        };
+        let mut observation = make_observation(call, requested);
+        super::guard::publish_cache_candidate(
+            &mut observation,
+            candidate,
+            None,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(observation.cache_update, expected_update);
+        assert_eq!(observation.disposition, expected_disposition);
+        assert!(observation.valid());
+        assert_eq!(
+            observation.stops_run(),
+            expected_disposition == ToolDisposition::Uncertain
+        );
+    }
 }

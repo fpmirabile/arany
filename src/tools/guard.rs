@@ -239,10 +239,7 @@ pub(super) async fn publish_cache_candidate(
         }
     };
     observation.cache_update = update;
-    if matches!(
-        update,
-        CacheUpdate::Uncertain | CacheUpdate::NotApplicable | CacheUpdate::NotAttempted
-    ) {
+    if update == CacheUpdate::Uncertain {
         observation.disposition = ToolDisposition::Uncertain;
     }
     if !observation.valid() {

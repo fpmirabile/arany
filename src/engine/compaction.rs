@@ -300,11 +300,11 @@ impl<P: Provider + 'static> Engine<P> {
             .await?;
         crate::diagnostics::event_failure(&committed.event);
         trace.event_committed(committed.sequence);
-        if let (Some(goal_id), Some(started), Some(reserved_ms)) =
+        if let (Some(goal_id), Some(started), Some(_reserved_ms)) =
             (goal_id, active_started, active_reservation_ms)
         {
             let active_ms = duration_ms(started.elapsed());
-            if active_ms > reserved_ms {
+            if active_ms > crate::session::MAX_GOAL_ACTION_ACTIVE_MS {
                 return Err(EngineError::GoalBudgetExhausted);
             }
             let settled = self

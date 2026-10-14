@@ -365,6 +365,26 @@ impl GoalRunBudget {
         Ok((started, reservation))
     }
 
+    fn needs_carried_time_checkpoint(&self, action_ms: u64) -> Result<bool, EngineError> {
+        if action_ms == 0 {
+            return Ok(false);
+        }
+        let Some(started) = *self
+            .active_origin
+            .lock()
+            .map_err(|_| EngineError::CoordinatorFailed)?
+        else {
+            return Ok(false);
+        };
+        let carried_ms = duration_ms(Instant::now().saturating_duration_since(started));
+        let action_with_store = action_ms.saturating_add(duration_ms(STORE_ACTION_OVERHEAD));
+        Ok(
+            action_with_store <= crate::session::MAX_GOAL_ACTION_ACTIVE_MS
+                && action_with_store.saturating_add(carried_ms)
+                    > crate::session::MAX_GOAL_ACTION_ACTIVE_MS,
+        )
+    }
+
     fn active_segment_reserved(&self, reserved_ms: u64) -> Result<(), EngineError> {
         self.reserved_active_ms
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |reserved| {
@@ -596,9 +616,6 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
     }
 
     async fn fail_known_budget_exhaustion(&self, primary: AgentTrace) -> Result<(), EngineError> {
-        if !self.controls.goal_budget.active_time_exhausted() {
-            return Err(EngineError::GoalBudgetExhausted);
-        }
         let view = self
             .store
             .load_view(self.session_id)
@@ -616,7 +633,25 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         let other_agents_closed = run.agents.iter().all(|agent| {
             agent.id == self.primary_id || agent.status != crate::session::AgentStatus::Active
         });
-        let actions_acknowledged = run.tools.iter().all(|tool| tool.observation.is_some());
+        let has_uncertain_tool = run.tools.iter().any(|tool| {
+            tool.observation.as_ref().is_some_and(|observation| {
+                observation.disposition == crate::tools::ToolDisposition::Uncertain
+            })
+        });
+        let action_cancelled = run.tools.iter().any(|tool| {
+            tool.observation.as_ref().is_some_and(|observation| {
+                observation.disposition == crate::tools::ToolDisposition::Cancelled
+            })
+        });
+        let actions_acknowledged = run.tools.iter().all(|tool| {
+            tool.observation.as_ref().is_some_and(|observation| {
+                !observation.stops_run()
+                    || observation.disposition == crate::tools::ToolDisposition::Cancelled
+            })
+        });
+        if has_uncertain_tool {
+            return Err(crate::tools::ToolError::Uncertain.into());
+        }
         if goal.status != crate::session::GoalStatus::Running
             || goal.active_run != Some(self.run_id)
             || goal.reserved_active_run.is_some()
@@ -626,30 +661,43 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             || run.status != crate::session::RunStatus::Active
             || !primary_active
             || !other_agents_closed
-            || !actions_acknowledged
         {
             return Err(EngineError::GoalBudgetExhausted);
         }
-        if let Some((started, reserved_ms)) =
-            self.controls.goal_budget.pending_active_reservation()?
-        {
-            self.store.admit_operation(self.session_id, 5).await?;
-            self.append(Event::GoalActiveTimeReserved {
-                goal_id: self.goal_id,
-                run_id: self.run_id,
-                reserved_ms,
-            })
-            .await?;
-            self.controls
-                .goal_budget
-                .active_segment_reserved(reserved_ms)?;
-            self.settle_active_segment(ActiveSegment {
-                started,
-                reserved_ms,
-            })
-            .await?;
+        if self.controls.cancellation.is_cancelled() || action_cancelled {
+            self.checkpoint_pending_active_time(5).await?;
+            return self.cancel_primary(primary).await;
         }
+        if !actions_acknowledged {
+            return Err(EngineError::GoalBudgetExhausted);
+        }
+        self.checkpoint_pending_active_time(5).await?;
         self.fail_primary(primary).await
+    }
+
+    async fn checkpoint_pending_active_time(&self, event_tail: usize) -> Result<(), EngineError> {
+        let Some((started, reserved_ms)) =
+            self.controls.goal_budget.pending_active_reservation()?
+        else {
+            return Ok(());
+        };
+        self.store
+            .admit_operation(self.session_id, event_tail)
+            .await?;
+        self.append(Event::GoalActiveTimeReserved {
+            goal_id: self.goal_id,
+            run_id: self.run_id,
+            reserved_ms,
+        })
+        .await?;
+        self.controls
+            .goal_budget
+            .active_segment_reserved(reserved_ms)?;
+        self.settle_active_segment(ActiveSegment {
+            started,
+            reserved_ms,
+        })
+        .await
     }
 
     async fn reserve_active_segment(
@@ -664,10 +712,16 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         action_bound: Duration,
         event_tail: usize,
     ) -> Result<ActiveSegment, EngineError> {
-        let (started, reserved_ms) = self
+        let action_ms = duration_ms(action_bound);
+        if self
             .controls
             .goal_budget
-            .active_reservation(duration_ms(action_bound))?;
+            .needs_carried_time_checkpoint(action_ms)?
+        {
+            self.checkpoint_pending_active_time(event_tail.saturating_add(2))
+                .await?;
+        }
+        let (started, reserved_ms) = self.controls.goal_budget.active_reservation(action_ms)?;
         self.store
             .admit_operation(self.session_id, event_tail)
             .await?;
@@ -862,6 +916,12 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             })
             .await?;
             self.settle_active_segment(active_segment).await?;
+            if self.controls.cancellation.is_cancelled() {
+                return self.fail_known_budget_exhaustion(primary).await;
+            }
+            if matches!(&first, CallResult::Cancelled) {
+                return self.cancel_primary(primary).await;
+            }
             if self.controls.goal_budget.active_time_exhausted() {
                 return self.fail_known_budget_exhaustion(primary).await;
             }
@@ -926,10 +986,18 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                         .await;
                     match continuation {
                         Ok(true) => {}
+                        Ok(false) if self.controls.cancellation.is_cancelled() => {
+                            return self.fail_known_budget_exhaustion(primary).await;
+                        }
                         Ok(false) if self.controls.goal_budget.active_time_exhausted() => {
                             return self.fail_known_budget_exhaustion(primary).await;
                         }
                         Ok(false) => return self.fail_primary(primary).await,
+                        Err(EngineError::GoalBudgetExhausted)
+                            if self.controls.cancellation.is_cancelled() =>
+                        {
+                            return self.fail_known_budget_exhaustion(primary).await;
+                        }
                         Err(EngineError::GoalBudgetExhausted) => {
                             return self.fail_known_budget_exhaustion(primary).await;
                         }
@@ -1337,6 +1405,9 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             tools.observations.push(observation);
             let changeset = changeset.filter(|changeset| !changeset.files.is_empty());
             self.compact_tool_context_if_needed(request, 1).await?;
+            if self.controls.cancellation.is_cancelled() {
+                return Ok(false);
+            }
             let Some(tools) = request.tools.as_ref() else {
                 return Ok(false);
             };
@@ -1748,16 +1819,20 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         })
         .await?;
         if let Some((requested, maximum)) = timeout_limit {
-            return Ok((
-                crate::tools::ToolObservation {
-                    intent,
-                    disposition: crate::tools::ToolDisposition::Limit,
-                    output: crate::tools::types::command_timeout_limit_message(requested, maximum),
-                    guard: None,
-                    cache_update: crate::tools::CacheUpdate::NotApplicable,
-                },
-                true,
-            ));
+            let observation = crate::tools::ToolObservation {
+                intent,
+                disposition: crate::tools::ToolDisposition::Limit,
+                output: crate::tools::types::command_timeout_limit_message(requested, maximum),
+                guard: None,
+                cache_update: crate::tools::CacheUpdate::NotApplicable,
+            };
+            self.append(Event::ToolFinished {
+                run_id: self.run_id,
+                agent_run_id: self.primary_id,
+                observation: observation.clone(),
+            })
+            .await?;
+            return Ok((observation, true));
         }
         let mut approved = true;
         let mut active_time_exhausted = false;
@@ -1856,7 +1931,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             let execution = runtime.execute(intent.clone(), worker_cancellation.clone());
             tokio::pin!(execution);
             let mut active_segment = None;
-            let observation = loop {
+            let mut observation = loop {
                 tokio::select! {
                     biased;
                     () = run_cancellation.cancelled() => {
@@ -1918,6 +1993,10 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                                         .ok_or(crate::tools::ToolError::Limit);
                                     let _ = reply.send(result);
                                 }
+                                Err(EngineError::GoalBudgetExhausted) => {
+                                    active_time_exhausted = true;
+                                    let _ = reply.send(Err(crate::tools::ToolError::Limit));
+                                }
                                 Err(_) => {
                                     let _ = reply.send(Err(crate::tools::ToolError::Limit));
                                 }
@@ -1929,6 +2008,11 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             };
             if let Some(pause) = queue_pause.take() {
                 self.settle_active_pause(pause, None).await?;
+            }
+            if active_time_exhausted
+                && observation.disposition != crate::tools::ToolDisposition::Limit
+            {
+                observation = active_time_limit_observation(observation.intent);
             }
             (observation, active_segment)
         } else {
@@ -1955,8 +2039,8 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         if let Some(segment) = active_segment {
             self.settle_active_segment(segment).await?;
         }
-        if self.controls.goal_budget.active_time_exhausted() {
-            approved = false;
+        if active_time_exhausted || self.controls.goal_budget.active_time_exhausted() {
+            return Err(EngineError::GoalBudgetExhausted);
         }
         Ok((observation, approved))
     }
@@ -2316,6 +2400,30 @@ mod goal_budget_tests {
             .active_reservation(1_845_000)
             .expect("maximum macOS Build action plus Store tail");
         assert_eq!(reserved_ms, 1_850_000);
+    }
+
+    #[test]
+    fn unlimited_goal_checkpoints_carried_time_before_a_maximum_build_action() {
+        let mut goal = admission();
+        goal.budget.max_active_ms = None;
+        let budget = GoalRunBudget::new(&goal, Some(64), None);
+        *budget.active_origin.lock().unwrap() = Some(Instant::now() - Duration::from_secs(11));
+        assert!(budget.needs_carried_time_checkpoint(1_845_000).unwrap());
+
+        let (_, carried_ms) = budget
+            .pending_active_reservation()
+            .unwrap()
+            .expect("carried active time before the Build action");
+        budget.active_segment_reserved(carried_ms).unwrap();
+        budget
+            .record_active_ms(carried_ms, carried_ms, None)
+            .unwrap();
+
+        assert!(!budget.needs_carried_time_checkpoint(1_845_000).unwrap());
+        let (_, build_reservation) = budget
+            .active_reservation(1_845_000)
+            .expect("maximum Build interval after the carried checkpoint");
+        assert_eq!(build_reservation, 1_850_000);
     }
 
     #[test]
