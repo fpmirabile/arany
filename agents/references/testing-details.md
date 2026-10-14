@@ -6,15 +6,17 @@ Load the section named by [testing rules](../testing.md) when its task applies. 
 
 Manual `workflow_dispatch` runs have one closed `lane` choice: `full`
 (default), `linux-debug`, `linux-release`, `macos-debug`, or
-`macos-release`. A focused choice runs exactly one existing OS/profile test
-lane and is diagnostic only; it does not satisfy required pull-request checks
-or final release evidence. The workflow rejects unknown values and accepts no
-test-name, command, or argument input. Use a focused lane only after a failure
-has been diagnosed. After the correction, require a full workflow on the exact
-final head before marking the change ready. Automatic PR/push runs always use
-the full matrix; when no automatic run covers that head, a manual
-`workflow_dispatch` run with `lane=full` qualifies. Focused lanes never
-qualify.
+`macos-release`. A focused choice selects exactly one standard OS/profile
+test lane and is diagnostic only; it does not satisfy required pull-request
+checks or final release evidence. The optional ARM64 matrix and history
+benchmark are independent additions when selected: ARM64 adds its debug and
+release jobs, while the benchmark runs inside the Linux release job. The
+workflow rejects unknown values and accepts no test-name, command, or argument
+input. Use a focused lane only after a failure has been diagnosed. After the
+correction, require a full workflow on the exact final head before marking the
+change ready. Automatic PR/push runs always use the full matrix; when no
+automatic run covers that head, a manual `workflow_dispatch` run with
+`lane=full` qualifies. Focused lanes never qualify.
 
 Use the standard checks in [the development guide](../../docs/development.md#verification).
 The [CI workflow](../../.github/workflows/ci.yml) runs formatting and Clippy
@@ -48,7 +50,9 @@ Manual CI dispatch with `history_benchmark: true` additionally runs the exact
 ignored long-history tmux owner in the Linux release job and requires one
 completed test. It reports that runner's workload, timings and resource
 metrics; the ordinary suite leaves this benchmark ignored, and its measurements
-do not establish other-host performance or cold-disk behavior.
+do not establish other-host performance or cold-disk behavior. The workflow
+accepts this option only with `lane=full` or `lane=linux-release`, so a
+requested benchmark cannot be silently skipped by a focused non-release lane.
 
 Default suites exercise only the scenarios enabled for their native OS. The heavy native Guard, clipboard, credential-helper and database-capacity gates use the activation rules in [testing rules](../testing.md#evidence-lanes). To reproduce CI locally, set `RUSTFLAGS=--cfg arany_ci` for the test invocation; in a POSIX shell:
 

@@ -56,7 +56,18 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           SELECTED_LANE: ${{ inputs.lane }}
+          HISTORY_BENCHMARK: ${{ inputs.history_benchmark }}
         run: |
+          if [[ "$EVENT_NAME" == workflow_dispatch && "$HISTORY_BENCHMARK" == true ]]; then
+            case "$SELECTED_LANE" in
+              full|linux-release) ;;
+              *)
+                echo "history_benchmark requires lane=full or lane=linux-release" >&2
+                exit 2
+                ;;
+            esac
+          fi
+
           case "$EVENT_NAME:$SELECTED_LANE" in
             pull_request:*|push:*|workflow_dispatch:full)
               run_lint=true
