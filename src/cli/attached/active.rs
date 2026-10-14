@@ -273,6 +273,7 @@ pub(super) async fn submit_objective(
                     }
                     user_recorded = true;
                 }
+                view.goals = update.goals;
                 if let Some(last) = view.runs.last_mut()
                     && last.id == update.run.id
                 {

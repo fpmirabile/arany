@@ -1538,9 +1538,15 @@ mod goal_replay_tests {
     }
 
     #[test]
-    fn finished_run_fails_its_autonomous_goal_only_at_the_active_limit() {
+    fn finished_run_fails_only_an_unsatisfied_planned_goal_at_its_active_limit() {
         let limit = 1000;
-        for (settled, accepted) in [(limit, true), (limit - 1, false)] {
+        // (plan contract, its criterion satisfied, settled active time, Failed accepted)
+        for (planned, satisfied, settled, accepted) in [
+            (true, false, limit, true),
+            (true, false, limit - 1, false),
+            (false, false, limit, false),
+            (true, true, limit, false),
+        ] {
             let session_id = SessionId::new();
             let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
             let budget = GoalBudget {
@@ -1606,22 +1612,39 @@ mod goal_replay_tests {
                 run_id,
                 active_ms: settled,
             });
-            events.push(Event::GoalFinished {
-                goal_id,
-                status: GoalStatus::Failed,
-                active_ms: settled,
-                report: GoalReport {
-                    summary: "budget".into(),
-                    changes: Vec::new(),
-                    evidence: Vec::new(),
-                    unresolved: Vec::new(),
-                },
-            });
-            let replayed = SessionView::replay_open(session_id, &journal(session_id, events));
+            let mut view = SessionView::replay_open(session_id, &journal(session_id, events))
+                .expect("Finished Run before the Goal receipt")
+                .expect("Session");
+            if planned {
+                let goal = view.goals.last_mut().expect("Goal");
+                goal.plan_contract = Some(GoalPlanContract {
+                    mission: GOAL_OBJECTIVE.into(),
+                    paths: Vec::new(),
+                    commands: Vec::new(),
+                    skills: Vec::new(),
+                    mcp_tools: Vec::new(),
+                    success_criterion: GoalSuccessCriterion::WorkspaceFileDigest {
+                        path: "src/lib.rs".into(),
+                        sha256: crate::tools::types::hex_digest(b"done"),
+                    },
+                    budget: GoalBudget {
+                        max_active_ms: limit,
+                        ..GoalBudget::default()
+                    },
+                });
+                goal.success_criterion_satisfied = satisfied;
+            }
+            let report = GoalReport {
+                summary: "budget".into(),
+                changes: Vec::new(),
+                evidence: Vec::new(),
+                unresolved: Vec::new(),
+            };
+            let receipt = view.finish_goal(&goal_id, &GoalStatus::Failed, &settled, &report, 0);
             assert_eq!(
-                replayed.is_ok(),
+                receipt.is_ok(),
                 accepted,
-                "a Failed Goal over a Finished Run needs its active budget spent ({settled} of {limit})"
+                "a Failed receipt over a Finished Run needs an unsatisfied plan and spent active time (planned {planned}, satisfied {satisfied}, {settled} of {limit})"
             );
         }
     }

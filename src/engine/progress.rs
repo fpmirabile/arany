@@ -1,6 +1,8 @@
 use super::EngineError;
 use crate::provider::PreviewText;
-use crate::session::{AgentRunId, Event, EventEnvelope, RunId, RunView, SessionId, SessionView};
+use crate::session::{
+    AgentRunId, Event, EventEnvelope, GoalView, RunId, RunView, SessionId, SessionView,
+};
 use crate::store::Store;
 use crate::telemetry::{RunTrace, TraceEventKind};
 use std::sync::Arc;
@@ -42,11 +44,12 @@ impl RunPreview {
     }
 }
 
-/// An acknowledged Event sequence and the Run state reduced through it.
+/// An acknowledged Event sequence, the Run state and the Session's Goals reduced through it.
 #[derive(Clone)]
 pub struct RunUpdate {
     pub sequence: u64,
     pub run: RunView,
+    pub goals: Vec<GoalView>,
 }
 
 impl RunProgress {
@@ -211,6 +214,7 @@ impl ProgressPublisher {
                 .map_err(|_| EngineError::CoordinatorFailed)?;
             view.apply_committed(envelope)
                 .map_err(|_| EngineError::InvalidHistory)?;
+            let goals = view.goals.clone();
             view.runs
                 .last()
                 .filter(|run| run.id == self.run_id)
@@ -218,6 +222,7 @@ impl ProgressPublisher {
                 .map(|run| RunUpdate {
                     sequence: envelope.sequence,
                     run,
+                    goals,
                 })
         };
         if let Some(update) = update {

@@ -324,9 +324,13 @@ impl SessionView {
         let run_status = current_run(self, run_id)?.status;
         let goal = current_goal_mut(self, *goal_id)?;
         let active_limit = goal.effective_budget().max_active_ms;
-        // A Finished Run's settled active time can exhaust an autonomous Goal before its next Run is admitted.
-        let exhausted_after_finish =
-            goal.autonomous && run_status == RunStatus::Finished && goal.active_ms == active_limit;
+        // An unsatisfied planned Goal's Finished Run can be exhausted by its settled active time before
+        // the next Run is admitted; a planless or satisfied Goal completes instead.
+        let exhausted_after_finish = goal.autonomous
+            && run_status == RunStatus::Finished
+            && goal.active_ms == active_limit
+            && goal.plan_contract.is_some()
+            && !goal.success_criterion_satisfied;
         let disposition_matches = matches!(
             (*status, run_status),
             (GoalStatus::Completed, RunStatus::Finished)

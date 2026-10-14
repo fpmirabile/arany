@@ -269,7 +269,9 @@ a research note verifies its API from primary sources.
        (changes, evidence, unresolved items) is committed; otherwise it ends
        Failed or Cancelled with the same report.
      - After a crash or restart, an unfinished Goal resumes at its last phase
-       or Run boundary only after the user confirms.
+       or Run boundary only through an explicit user action: `/goal resume` or
+       `--resume-goal`, with no further confirmation prompt in the Foundation
+       contract. An RPI flow may add its own confirmation step.
    - **Ask** asks before every effect.
    - **Accept edits** integrates typed edits and in-scope changesets without
      prompts; commands and MCP calls ask.
@@ -581,7 +583,7 @@ data-dependent questions remain:
   (edit, format, build, test, integrate) on Linux and macOS with closed replay.
 - An RPI Goal runs Research → Plan (with grilling) → approved multi-Run
   Implementation to Completed, and to Failed/Cancelled with a final report;
-  restart resumes only after confirmation.
+  restart resumes only through the explicit user action in the Goal contract.
 - One Goal mixes at least two Providers across roles; an unadmittable or
   failing profile names itself, pauses its agents or switches to the enabled
   fallback, without re-dispatching uncertain effects.

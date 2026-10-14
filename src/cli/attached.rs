@@ -1303,6 +1303,17 @@ async fn submit_idle_run(
 const INTERRUPTED_GOAL_NOTICE: &str =
     "Goal interrupted before the next Run; use /goal resume to continue";
 
+/// An interrupted Goal's resume hint precedes the Run's own feedback, which would otherwise
+/// describe a cancelled Run as a fresh task.
+fn submission_notice(
+    interrupted_goal: Option<arany::GoalId>,
+    run_feedback: Option<String>,
+) -> Option<String> {
+    interrupted_goal
+        .map(|_| INTERRUPTED_GOAL_NOTICE.to_owned())
+        .or(run_feedback)
+}
+
 async fn finish_interrupted_submission(
     terminal: &mut AttachedTerminal,
     admission: &Admission,
@@ -1388,10 +1399,10 @@ async fn finish_submission(
         .map_err(|error| error.to_string())?;
     let mut notice = retained_draft_notice(composer);
     // A cancelled autonomous loop keeps its Goal open; the reloaded view says how to continue it.
-    let feedback = render_run_feedback(&outcome.run).or_else(|| {
-        view.interrupted_goal_id()
-            .map(|_| INTERRUPTED_GOAL_NOTICE.to_owned())
-    });
+    let feedback = submission_notice(
+        view.interrupted_goal_id(),
+        render_run_feedback(&outcome.run),
+    );
     if let Some(feedback) = feedback {
         if composer.is_empty() {
             notice = Some(Feedback::History(feedback));
@@ -2143,6 +2154,19 @@ fn print_run_answer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interrupted_goal_notice_precedes_cancelled_run_feedback() {
+        let goal = arany::GoalId::new();
+        let cancelled =
+            Some("Run cancelled. No answer was committed. You can submit a new task.".to_owned());
+        assert_eq!(
+            submission_notice(Some(goal), cancelled.clone()),
+            Some(INTERRUPTED_GOAL_NOTICE.to_owned())
+        );
+        assert_eq!(submission_notice(None, cancelled.clone()), cancelled);
+        assert_eq!(submission_notice(None, None), None);
+    }
 
     #[test]
     fn linear_hidden_answer_guidance_repeats_only_an_explicit_state_dir() {

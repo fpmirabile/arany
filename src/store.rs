@@ -12,7 +12,10 @@ mod journal;
 mod replay;
 mod state;
 use journal::{HotSession, append, fork_session, open_connection};
-use replay::{latest_session_id, list_session_items, load_session, resolve_view, session_for_run};
+use replay::{
+    latest_session_id, list_session_items, load_session, resolve_open_view, resolve_view,
+    session_for_run,
+};
 pub use state::HistoryReset;
 pub use state::StateRoot;
 #[cfg(any(target_os = "linux", test))]
@@ -154,6 +157,10 @@ enum Request {
         reply: oneshot::Sender<Result<Option<SessionId>, StoreError>>,
     },
     LoadView {
+        session_id: SessionId,
+        reply: oneshot::Sender<Result<Option<SessionView>, StoreError>>,
+    },
+    LoadOpenView {
         session_id: SessionId,
         reply: oneshot::Sender<Result<Option<SessionView>, StoreError>>,
     },
@@ -309,6 +316,12 @@ impl Store {
                         Request::LoadView { session_id, reply } => {
                             let _ = reply.send(
                                 resolve_view(&connection, session_id, 0, &mut 0)
+                                    .map(|(_, view)| view),
+                            );
+                        }
+                        Request::LoadOpenView { session_id, reply } => {
+                            let _ = reply.send(
+                                resolve_open_view(&connection, session_id, &mut 0)
                                     .map(|(_, view)| view),
                             );
                         }
@@ -506,6 +519,15 @@ impl Store {
         session_id: SessionId,
     ) -> Result<Option<SessionView>, StoreError> {
         self.call(|reply| Request::LoadView { session_id, reply })
+            .await
+    }
+
+    /// The Session as the append path validates it: an open Run or Goal is not projected as interrupted.
+    pub(crate) async fn load_open_view(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Option<SessionView>, StoreError> {
+        self.call(|reply| Request::LoadOpenView { session_id, reply })
             .await
     }
 

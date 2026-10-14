@@ -874,8 +874,17 @@ fn facts_engine(
     state_path: &Path,
     provider: ScriptedProvider,
 ) -> Engine<ScriptedProvider> {
+    facts_engine_with_telemetry(state, state_path, provider, arany::Telemetry::disabled())
+}
+
+fn facts_engine_with_telemetry(
+    state: StateRoot,
+    state_path: &Path,
+    provider: ScriptedProvider,
+    telemetry: arany::Telemetry,
+) -> Engine<ScriptedProvider> {
     use std::os::unix::fs::PermissionsExt;
-    let mut engine = Engine::open(state, provider).expect("engine");
+    let mut engine = Engine::open_with_telemetry(state, provider, telemetry).expect("engine");
     let config = state_path.join("tools.json");
     std::fs::write(
         &config,
@@ -1311,4 +1320,207 @@ async fn autonomous_goal_active_time_spent_after_a_finish_fails_the_goal_with_it
             .count(),
         1
     );
+}
+
+/// Accepts OTLP trace POSTs on a loopback listener until `done` is set after the final flush.
+fn collect_trace_bodies(
+    listener: std::net::TcpListener,
+    done: Arc<std::sync::atomic::AtomicBool>,
+) -> std::thread::JoinHandle<Vec<Vec<u8>>> {
+    std::thread::spawn(move || {
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking Collector");
+        let mut bodies = Vec::new();
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => bodies.push(read_trace_body(&mut stream)),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if done.load(std::sync::atomic::Ordering::Acquire) {
+                        return bodies;
+                    }
+                    std::thread::yield_now();
+                }
+                Err(error) => panic!("Collector accept failed: {error}"),
+            }
+        }
+    })
+}
+
+fn read_trace_body(stream: &mut std::net::TcpStream) -> Vec<u8> {
+    use std::io::{Read, Write};
+    stream
+        .set_nonblocking(false)
+        .expect("blocking Collector stream");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("Collector deadline");
+    let mut request = Vec::new();
+    loop {
+        let mut chunk = [0; 4096];
+        let count = stream.read(&mut chunk).expect("trace request bytes");
+        assert!(count > 0, "trace request ended before its body");
+        request.extend_from_slice(&chunk[..count]);
+        let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") else {
+            continue;
+        };
+        let header_end = end + 4;
+        let header = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
+        let body_len = header
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("content-length: ")?
+                    .trim()
+                    .parse::<usize>()
+                    .ok()
+            })
+            .expect("trace Content-Length");
+        if request.len() >= header_end + body_len {
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .expect("Collector acknowledgment");
+            return request[header_end..header_end + body_len].to_vec();
+        }
+    }
+}
+
+/// The `arany.goal.status` of every exported Goal segment span.
+fn goal_segment_statuses(bodies: &[Vec<u8>]) -> Vec<String> {
+    use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+    use opentelemetry_proto::tonic::common::v1::any_value::Value;
+    use prost::Message;
+    bodies
+        .iter()
+        .flat_map(|body| {
+            ExportTraceServiceRequest::decode(body.as_slice())
+                .expect("OTLP protobuf")
+                .resource_spans
+        })
+        .flat_map(|resource| resource.scope_spans)
+        .flat_map(|scope| scope.spans)
+        .filter(|span| span.name == "invoke_workflow arany.goal")
+        .filter_map(|span| {
+            span.attributes
+                .into_iter()
+                .find(|attribute| attribute.key == "arany.goal.status")
+                .and_then(|attribute| attribute.value)
+                .and_then(|value| match value.value {
+                    Some(Value::StringValue(status)) => Some(status),
+                    _ => None,
+                })
+        })
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn exhausted_autonomous_segment_exports_its_failed_status() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let budget = arany::GoalBudget {
+        max_active_ms: 60_000,
+        ..arany::GoalBudget::default()
+    };
+    let mut plan = facts_plan(facts_digest("v2"));
+    plan.budget = budget.clone();
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Tool {
+            call: facts_read(),
+            plan_contract: Some(Box::new(plan)),
+        },
+        finish_with("first pass"),
+        finish_with("never requested"),
+    ]);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Collector listener");
+    let endpoint = format!(
+        "http://{}",
+        listener.local_addr().expect("Collector address")
+    );
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let collector = collect_trace_bodies(listener, Arc::clone(&done));
+    let telemetry = arany::Telemetry::from_process(Some(&endpoint)).expect("loopback telemetry");
+    let mut engine = facts_engine_with_telemetry(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+        telemetry.clone(),
+    );
+    let mut input = autonomous_input(&workspace);
+    input.goal = arany::GoalRequest::autonomous(budget, arany::GoalPhase::Implementation);
+    // Active time spent after the Finish exhausts the Goal before its segment span closes.
+    let result = run_observing_finish(
+        &mut engine,
+        input,
+        AfterFinish::AdvanceClock(Duration::from_secs(60)),
+    )
+    .await;
+    assert!(
+        matches!(result, Err(EngineError::GoalBudgetExhausted)),
+        "the exhausted Goal reports its refusal: {:?}",
+        result.as_ref().map(|outcome| outcome.run.status)
+    );
+    engine.close().await.expect("engine shutdown");
+    telemetry.shutdown();
+    done.store(true, std::sync::atomic::Ordering::Release);
+    let bodies = collector.join().expect("Collector thread");
+    assert_eq!(
+        goal_segment_statuses(&bodies),
+        vec!["failed".to_owned()],
+        "the segment that decided exhaustion carries the Failed terminal status"
+    );
+}
+
+#[tokio::test]
+async fn progress_snapshots_carry_the_goal_through_each_iteration() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Tool {
+            call: facts_read(),
+            plan_contract: Some(Box::new(facts_plan(facts_digest("v2")))),
+        },
+        finish_with("first pass"),
+        ProviderOutcome::Tool {
+            call: facts_read(),
+            plan_contract: None,
+        },
+        finish_with("verified"),
+    ])
+    .with_before_call(2, write_facts(&workspace, "v2"));
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    let progress = RunProgress::new();
+    let mut observer = progress.clone();
+    let mut observed_runs = Vec::new();
+    let outcome = {
+        let run = engine.run_with_progress(
+            autonomous_input(&workspace),
+            RunCancellation::new(),
+            progress,
+        );
+        tokio::pin!(run);
+        loop {
+            tokio::select! {
+                update = observer.changed() => {
+                    observed_runs.push(update.goals.last().map(|goal| goal.run_ids.len()));
+                }
+                result = &mut run => break result.expect("autonomous Goal"),
+            }
+        }
+    };
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    assert!(
+        observed_runs.contains(&Some(1)),
+        "the first iteration's snapshots name one Run: {observed_runs:?}"
+    );
+    assert_eq!(
+        observed_runs.last(),
+        Some(&Some(2)),
+        "the final snapshot counts both iterations, not the first: {observed_runs:?}"
+    );
+    engine.close().await.expect("engine shutdown");
 }

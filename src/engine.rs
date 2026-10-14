@@ -207,6 +207,12 @@ struct RunTurn {
 }
 
 impl RunTurn {
+    /// The Finished Run's Goal failed because its settled active time left no admissible next Run.
+    fn exhausted(&self) -> bool {
+        self.goal_status == GoalStatus::Failed
+            && self.outcome.run.status == crate::session::RunStatus::Finished
+    }
+
     /// An autonomous Goal continues after an unsatisfied Run that it did not finish.
     fn continues(&self) -> bool {
         self.autonomous
@@ -1608,13 +1614,18 @@ impl<P: Provider + 'static> Engine<P> {
                 .await
             {
                 Ok(turn) => turn,
-                // Active time can run out after the Finish check; the Goal then fails with its report.
+                // Settlement decides exhaustion for a Finished Run; this keeps the receipt if admission still refuses.
                 Err(EngineError::GoalBudgetExhausted) => {
                     self.fail_exhausted_goal(&turn.outcome).await?;
                     return Err(EngineError::GoalBudgetExhausted);
                 }
+                // Cancellation before MessageAccepted admits no Run; the Finished Run keeps its outcome.
+                Err(EngineError::CancelledBeforeStart) => return Ok(turn.outcome),
                 Err(error) => return Err(error),
             };
+        }
+        if turn.exhausted() {
+            return Err(EngineError::GoalBudgetExhausted);
         }
         Ok(turn.outcome)
     }
@@ -1673,7 +1684,7 @@ impl<P: Provider + 'static> Engine<P> {
         let workspace_identity = crate::tools::workspace_identity(&request.workspace)?;
         let session_id = request.session_id.unwrap_or_default();
         let mut session_lock = self.lock_session(session_id)?;
-        let mut history = if request.session_id.is_some() {
+        let history = if request.session_id.is_some() {
             Some(
                 self.store
                     .load_view(session_id)
@@ -1863,14 +1874,12 @@ impl<P: Provider + 'static> Engine<P> {
             .telemetry
             .begin_goal(session_id, goal.id, context_started);
         let publisher = if let Some(progress) = progress {
-            let view = match history.take() {
-                Some(view) => view,
-                None => self
-                    .store
-                    .load_view(session_id)
-                    .await?
-                    .ok_or(EngineError::InvalidHistory)?,
-            };
+            // Reduces the open state that appends validate; the closed view would reject this Run's links.
+            let view = self
+                .store
+                .load_open_view(session_id)
+                .await?
+                .ok_or(EngineError::InvalidHistory)?;
             Some(ProgressPublisher::new(view, progress, run_id))
         } else {
             None
@@ -2093,8 +2102,14 @@ impl<P: Provider + 'static> Engine<P> {
         // An autonomous Goal ends only at its own stop conditions; a cancelled Run leaves it open to resume.
         let terminal = match run.status {
             crate::session::RunStatus::Finished if goal.autonomous => {
-                (goal_view.plan_contract.is_none() || goal_view.success_criterion_satisfied)
-                    .then_some(GoalStatus::Completed)
+                if goal_view.plan_contract.is_none() || goal_view.success_criterion_satisfied {
+                    Some(GoalStatus::Completed)
+                } else if goal_view.active_ms >= goal_view.effective_budget().max_active_ms {
+                    // The next admission would refuse on settled active time; decide it before this segment closes.
+                    Some(GoalStatus::Failed)
+                } else {
+                    None
+                }
             }
             crate::session::RunStatus::Finished => request
                 .goal
