@@ -75,6 +75,7 @@ pub struct WorkspacePermissions {
 pub struct RuntimeProfileOption {
     pub token: String,
     pub label: String,
+    pub group: &'static str,
     pub selected: bool,
 }
 
@@ -139,13 +140,6 @@ impl WorkspacePermissions {
         &self.candidates
     }
 
-    pub fn runtime_profile_options(&self) -> Vec<(String, String)> {
-        self.runtime_profile_choices()
-            .into_iter()
-            .map(|option| (option.token, option.label))
-            .collect()
-    }
-
     pub fn runtime_profile_choices(&self) -> Vec<RuntimeProfileOption> {
         let selected = self
             .runtime_grants
@@ -158,6 +152,7 @@ impl WorkspacePermissions {
             .map(|candidate| RuntimeProfileOption {
                 token: candidate.token.clone(),
                 label: candidate.label.clone(),
+                group: candidate.grant.kind.label(),
                 selected: selected.contains(&candidate.token),
             })
             .collect::<Vec<_>>();
@@ -177,6 +172,7 @@ impl WorkspacePermissions {
                     version,
                     grant.path.display()
                 ),
+                group: grant.kind.label(),
                 selected: true,
             });
         }
@@ -184,19 +180,17 @@ impl WorkspacePermissions {
         options
     }
 
-    pub fn profile_tokens_valid(&self, tokens: &[String]) -> bool {
-        self.selected_grants(tokens).is_ok()
+    /// Saved runtime grants that no longer match the host; they are kept for removal but never mounted.
+    pub fn stale_runtime_profiles(&self) -> Vec<&'static str> {
+        self.runtime_grants
+            .iter()
+            .filter(|grant| grant.verify_host().is_err())
+            .map(|grant| grant.kind.label())
+            .collect()
     }
 
     pub(crate) fn matches_identity(&self, identity: (u64, u64)) -> bool {
         self.identity == identity
-    }
-
-    pub fn verify_runtime_grants(&self) -> Result<(), ToolError> {
-        for grant in &self.runtime_grants {
-            grant.verify_host()?;
-        }
-        Ok(())
     }
 
     pub fn open(path: &Path) -> Result<Self, ToolError> {
@@ -377,7 +371,12 @@ impl WorkspacePermissions {
             commands,
             skills: Vec::new(),
             mcp: Vec::new(),
-            runtime_grants: self.runtime_grants.clone(),
+            runtime_grants: self
+                .runtime_grants
+                .iter()
+                .filter(|grant| grant.verify_host().is_ok())
+                .cloned()
+                .collect(),
         };
         config.validate()?;
         Ok(config)
@@ -635,6 +634,43 @@ mod tests {
                 assert!(fs::workspace_entries(&workspace, folder, "").is_err());
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_runtime_grant_is_kept_for_removal_but_not_mounted() {
+        use super::super::toolchains::{RuntimeKind, RuntimeManager};
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = StateRoot::admit(&temp.path().join("state")).unwrap();
+        let path = temp.path().join("project");
+        std::fs::create_dir(&path).unwrap();
+        let cache = temp.path().join(".cargo/registry/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let (device, inode) = fs::identity(&fs::open_directory(&cache).unwrap()).unwrap();
+        let grant = RuntimeGrant {
+            kind: RuntimeKind::CargoCache,
+            manager: RuntimeManager::HostCache,
+            version: None,
+            path: cache,
+            device,
+            inode,
+        };
+        let mut access = WorkspacePermissions::load(&path, &root).unwrap();
+        access
+            .save(&root, true, ApprovalMode::AutoEdits, vec![grant])
+            .unwrap();
+        assert_eq!(access.config(&path).unwrap().runtime_grants.len(), 1);
+
+        std::fs::remove_dir_all(temp.path().join(".cargo")).unwrap();
+        let restored = WorkspacePermissions::load(&path, &root).unwrap();
+        assert!(restored.is_trusted());
+        assert_eq!(restored.stale_runtime_profiles(), ["Cargo archive cache"]);
+        assert!(restored.config(&path).unwrap().runtime_grants.is_empty());
+        let choices = restored.runtime_profile_choices();
+        assert_eq!(choices.len(), 1);
+        assert!(choices[0].selected);
+        assert!(choices[0].label.ends_with("(no longer detected)"));
     }
 
     #[test]

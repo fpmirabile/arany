@@ -974,7 +974,7 @@ fn decode_mount_field(bytes: &[u8]) -> Result<Vec<u8>, ToolError> {
         let escape = bytes
             .get(index + 1..index + 4)
             .ok_or(ToolError::ProtectionUnavailable)?;
-        if !escape.iter().all(|byte| (b'0'..=b'7').contains(byte)) {
+        if !escape.iter().all(|byte| (b'0'..=b'7').contains(byte)) || escape[0] > b'3' {
             return Err(ToolError::ProtectionUnavailable);
         }
         let value = (escape[0] - b'0') * 64 + (escape[1] - b'0') * 8 + escape[2] - b'0';
@@ -1006,6 +1006,15 @@ fn decode_mount_path(bytes: &[u8]) -> Result<Vec<u8>, ToolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mountinfo_escapes_decode_only_separator_bytes() {
+        assert_eq!(decode_mount_field(br"a\040b").unwrap(), b"a b");
+        assert_eq!(decode_mount_field(br"\134").unwrap(), b"\\");
+        for field in [&br"\400"[..], &br"\777"[..], &br"\101"[..], &br"\04"[..]] {
+            assert!(decode_mount_field(field).is_err());
+        }
+    }
 
     fn mountinfo_with_runtime(optional: &str, descendants: &[&str]) -> Vec<u8> {
         let mut bytes = format!(

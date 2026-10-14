@@ -901,6 +901,12 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                         Some(Feedback::History("Permissions unchanged".into()));
                                     continue;
                                 }
+                                permissions::PermissionChoice::Rejected(_, error) => {
+                                    notice = Some(Feedback::History(format!(
+                                        "Error: {error}; existing permissions unchanged"
+                                    )));
+                                    continue;
+                                }
                                 permissions::PermissionChoice::Exit => return Ok(()),
                             };
                             notice = Some(Feedback::History(if !native_protection_supported() {
@@ -1458,10 +1464,25 @@ async fn admit_startup(
     setup_notice: &mut Option<String>,
 ) -> Result<ControlFlow<()>, String> {
     match permissions::admit(terminal, &admission.workspace, composer, admission.tools).await {
-        Ok(
-            permissions::PermissionChoice::Selected(access)
-            | permissions::PermissionChoice::Closed(access),
-        ) => {
+        Ok(permissions::PermissionChoice::Selected(access)) => {
+            for profile in access.stale_runtime_profiles() {
+                append_notice(
+                    setup_notice,
+                    &format!(
+                        "Runtime profile {profile} no longer matches; use /permissions to remove or reselect it"
+                    ),
+                );
+            }
+            admission.workspace_permissions = Some(access);
+        }
+        Ok(permissions::PermissionChoice::Closed(access)) => {
+            admission.workspace_permissions = Some(access);
+        }
+        Ok(permissions::PermissionChoice::Rejected(access, error)) => {
+            append_notice(
+                setup_notice,
+                &format!("Error: {error}; continuing read only"),
+            );
             admission.workspace_permissions = Some(access);
         }
         Ok(permissions::PermissionChoice::Exit) => return Ok(ControlFlow::Break(())),

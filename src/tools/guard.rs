@@ -5,7 +5,7 @@ use super::{ToolError, ToolRuntime, now_ms};
 use crate::engine::RunCancellation;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{ExitCode, Stdio};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
@@ -823,31 +823,8 @@ pub(super) fn payload(
         .env("TMPDIR", &scratch)
         .env("CARGO_HOME", scratch.join("cargo"))
         .env("CARGO_TARGET_DIR", scratch.join("target"))
-        .env(
-            "npm_config_cache",
-            cache_root(
-                runtime_grants,
-                super::toolchains::RuntimeKind::NpmCache,
-                &scratch,
-            )
-            .unwrap_or_else(|| scratch.join(".npm")),
-        )
-        .env(
-            "PIP_CACHE_DIR",
-            cache_root(
-                runtime_grants,
-                super::toolchains::RuntimeKind::PipHttpCache,
-                &scratch,
-            )
-            .or_else(|| {
-                cache_root(
-                    runtime_grants,
-                    super::toolchains::RuntimeKind::PipWheelCache,
-                    &scratch,
-                )
-            })
-            .unwrap_or_else(|| scratch.join(".cache/pip")),
-        )
+        .env("npm_config_cache", scratch.join(".npm"))
+        .env("PIP_CACHE_DIR", scratch.join(".cache/pip"))
         .env("ARANY_TOOL_WORKSPACE", &workspace)
         .env("ARANY_TOOL_INPUTS", resources.join("inputs"))
         .env("ARANY_TOOL_SKILLS", resources.join("skills"))
@@ -857,22 +834,6 @@ pub(super) fn payload(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     Ok(command)
-}
-
-fn cache_root(
-    runtime_grants: &[RuntimeGrant],
-    kind: super::toolchains::RuntimeKind,
-    scratch: &Path,
-) -> Option<PathBuf> {
-    if !runtime_grants.iter().any(|grant| grant.kind == kind) {
-        return None;
-    }
-    Some(match kind {
-        super::toolchains::RuntimeKind::NpmCache => scratch.join(".npm"),
-        super::toolchains::RuntimeKind::PipHttpCache
-        | super::toolchains::RuntimeKind::PipWheelCache => scratch.join(".cache/pip"),
-        _ => return None,
-    })
 }
 
 #[cfg(test)]
@@ -965,42 +926,5 @@ mod tests {
         });
         assert!(verify_intent_runtime_grants(&file, &config).is_ok());
         assert!(verify_intent_runtime_grants(&process, &config).is_err());
-    }
-
-    #[test]
-    fn package_manager_cache_paths_follow_private_scratch() {
-        let scratch = Path::new("/native-unit/scratch");
-        let npm = RuntimeGrant {
-            kind: super::super::toolchains::RuntimeKind::NpmCache,
-            manager: super::super::toolchains::RuntimeManager::HostCache,
-            version: None,
-            path: PathBuf::from("/home/user/.npm/_cacache"),
-            device: 1,
-            inode: 2,
-        };
-        let pip = RuntimeGrant {
-            kind: super::super::toolchains::RuntimeKind::PipHttpCache,
-            manager: super::super::toolchains::RuntimeManager::HostCache,
-            version: None,
-            path: PathBuf::from("/home/user/.cache/pip/http-v2"),
-            device: 1,
-            inode: 2,
-        };
-        assert_eq!(
-            cache_root(
-                std::slice::from_ref(&npm),
-                super::super::toolchains::RuntimeKind::NpmCache,
-                scratch,
-            ),
-            Some(scratch.join(".npm"))
-        );
-        assert_eq!(
-            cache_root(
-                std::slice::from_ref(&pip),
-                super::super::toolchains::RuntimeKind::PipHttpCache,
-                scratch,
-            ),
-            Some(scratch.join(".cache/pip"))
-        );
     }
 }

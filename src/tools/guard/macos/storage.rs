@@ -3,7 +3,7 @@
 use super::super::CAPTURE_BYTES;
 use super::system_program;
 use crate::private_fs::open_directory;
-use crate::tools::toolchains::{RuntimeGrant, RuntimeKind};
+use crate::tools::toolchains::RuntimeGrant;
 use crate::tools::{ToolError, ToolRuntime};
 use cap_std::fs::MetadataExt as _;
 use core_foundation::{base::CFType, dictionary::CFDictionary, string::CFString};
@@ -275,20 +275,16 @@ fn prepare_cache_links(
     for grant in grants.iter().filter(|grant| grant.kind.is_cache()) {
         grant.verify_host()?;
         crate::tools::fs::reject_overlap(&grant.path, root)?;
-        let relative = match grant.kind {
-            RuntimeKind::CargoCache => "cargo/registry/cache",
-            RuntimeKind::CargoSource => "cargo/registry/src",
-            RuntimeKind::CargoIndex => "cargo/registry/index",
-            RuntimeKind::NpmCache => ".npm/_cacache",
-            RuntimeKind::PipHttpCache => ".cache/pip/http-v2",
-            RuntimeKind::PipWheelCache => ".cache/pip/wheels",
-            _ => return Err(ToolError::Configuration),
-        };
+        let relative = grant
+            .kind
+            .sandbox_cache_path()
+            .ok_or(ToolError::Configuration)?;
         let destination = scratch_path.join(relative);
         if std::fs::symlink_metadata(&destination).is_ok() {
             return Err(ToolError::ChangedInput);
         }
         let parent = Path::new(relative).parent().ok_or(ToolError::Path)?;
+        let leaf = Path::new(relative).file_name().ok_or(ToolError::Path)?;
         let mut current = scratch.try_clone().map_err(|_| ToolError::Path)?;
         for component in parent.components() {
             let std::path::Component::Normal(name) = component else {
@@ -305,7 +301,7 @@ fn prepare_cache_links(
                 .open_dir_nofollow(name)
                 .map_err(|_| ToolError::Path)?;
         }
-        std::os::unix::fs::symlink(&grant.path, &destination).map_err(|_| ToolError::Operation)?;
+        DirExt::symlink(&current, &grant.path, leaf).map_err(|_| ToolError::Operation)?;
     }
     Ok(())
 }

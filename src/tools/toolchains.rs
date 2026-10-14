@@ -67,6 +67,19 @@ impl RuntimeKind {
         }
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn sandbox_cache_path(self) -> Option<&'static str> {
+        match self {
+            Self::CargoCache => Some("cargo/registry/cache"),
+            Self::CargoSource => Some("cargo/registry/src"),
+            Self::CargoIndex => Some("cargo/registry/index"),
+            Self::NpmCache => Some(".npm/_cacache"),
+            Self::PipHttpCache => Some(".cache/pip/http-v2"),
+            Self::PipWheelCache => Some(".cache/pip/wheels"),
+            _ => None,
+        }
+    }
+
     fn toolchain_token(self, grant: &RuntimeGrant) -> Result<String, ToolError> {
         let prefix = match self {
             Self::Rust => "rust",
@@ -141,26 +154,28 @@ impl RuntimeGrant {
         if fs::identity(&directory)? != (self.device, self.inode) {
             return Err(ToolError::ChangedInput);
         }
-        if self.kind.is_toolchain() {
-            match self.kind {
-                RuntimeKind::Rust => {
-                    if !executable(&path.join("bin/cargo")) || !executable(&path.join("bin/rustc"))
-                    {
-                        return Err(ToolError::ChangedInput);
-                    }
+        match self.kind {
+            RuntimeKind::Rust => {
+                if !executable(&path.join("bin/cargo")) || !executable(&path.join("bin/rustc")) {
+                    return Err(ToolError::ChangedInput);
                 }
-                RuntimeKind::Node => {
-                    if !executable(&path.join("bin/node")) {
-                        return Err(ToolError::ChangedInput);
-                    }
-                }
-                RuntimeKind::Python => {
-                    if !has_python_executable(path) {
-                        return Err(ToolError::ChangedInput);
-                    }
-                }
-                _ => unreachable!(),
             }
+            RuntimeKind::Node => {
+                if !executable(&path.join("bin/node")) {
+                    return Err(ToolError::ChangedInput);
+                }
+            }
+            RuntimeKind::Python => {
+                if !has_python_executable(path) {
+                    return Err(ToolError::ChangedInput);
+                }
+            }
+            RuntimeKind::CargoCache
+            | RuntimeKind::CargoSource
+            | RuntimeKind::CargoIndex
+            | RuntimeKind::NpmCache
+            | RuntimeKind::PipHttpCache
+            | RuntimeKind::PipWheelCache => {}
         }
         Ok(())
     }
@@ -170,15 +185,10 @@ impl RuntimeGrant {
         if self.kind.is_toolchain() {
             Ok(PathBuf::from("/runtime/toolchains").join(self.token()?))
         } else {
-            let relative = match self.kind {
-                RuntimeKind::CargoCache => "cargo/registry/cache",
-                RuntimeKind::CargoSource => "cargo/registry/src",
-                RuntimeKind::CargoIndex => "cargo/registry/index",
-                RuntimeKind::NpmCache => ".npm/_cacache",
-                RuntimeKind::PipHttpCache => ".cache/pip/http-v2",
-                RuntimeKind::PipWheelCache => ".cache/pip/wheels",
-                _ => return Err(ToolError::Configuration),
-            };
+            let relative = self
+                .kind
+                .sandbox_cache_path()
+                .ok_or(ToolError::Configuration)?;
             Ok(Path::new("/scratch").join(relative))
         }
     }
@@ -299,15 +309,15 @@ pub(crate) fn discover(home: &Path) -> Result<Vec<Candidate>, ToolError> {
         }
     }
 
-    for (kind, suffix) in [
-        (RuntimeKind::CargoCache, ".cargo/registry/cache"),
-        (RuntimeKind::CargoSource, ".cargo/registry/src"),
-        (RuntimeKind::CargoIndex, ".cargo/registry/index"),
-        (RuntimeKind::NpmCache, ".npm/_cacache"),
-        (RuntimeKind::PipHttpCache, ".cache/pip/http-v2"),
-        (RuntimeKind::PipWheelCache, ".cache/pip/wheels"),
+    for kind in [
+        RuntimeKind::CargoCache,
+        RuntimeKind::CargoSource,
+        RuntimeKind::CargoIndex,
+        RuntimeKind::NpmCache,
+        RuntimeKind::PipHttpCache,
+        RuntimeKind::PipWheelCache,
     ] {
-        let path = home.join(suffix);
+        let path = home.join(kind.cache_suffix().ok_or(ToolError::Configuration)?);
         if let Some(grant) = admit_directory(kind, RuntimeManager::HostCache, None, path)? {
             push_candidate(&mut candidates, grant)?;
         }

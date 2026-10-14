@@ -155,8 +155,11 @@ impl ToolRuntime {
                 fs::reject_overlap(Path::new(runtime), protected)?;
             }
         }
+        // A grant that went stale mid-session is dropped for this Run; /permissions owns removal.
+        config
+            .runtime_grants
+            .retain(|grant| grant.verify_host().is_ok());
         for grant in &config.runtime_grants {
-            grant.verify_host()?;
             for protected in [workspace, state.path(), account.as_path()] {
                 fs::reject_overlap(&grant.path, protected)?;
             }

@@ -387,23 +387,28 @@ impl AttachedTerminal {
     pub fn draw_workspace_permissions(
         &mut self,
         id: uuid::Uuid,
-        permissions: &crate::tools::WorkspacePermissions,
-        profile_selection: (&[bool], Option<usize>, bool),
+        workspace: &std::path::Path,
+        profile_selection: (
+            &[crate::tools::RuntimeProfileOption],
+            &[bool],
+            Option<usize>,
+            bool,
+        ),
         page: usize,
         trust: bool,
         configured: bool,
     ) -> Result<(bool, usize), TerminalError> {
-        let (selected_profiles, focused_profile, profile_selection_enabled) = profile_selection;
+        let (options, selected_profiles, focused_profile, profile_selection_enabled) =
+            profile_selection;
         self.cancel_clipboard_paste();
-        let mut lines = crate::presentation::workspace_permission_lines(permissions.path());
+        let mut lines = crate::presentation::workspace_permission_lines(workspace);
         if configured {
             lines.push(
                 "--tools is selected. Continue with its private configuration or remember folder trust; the explicit configuration keeps precedence.".into(),
             );
         }
-        let candidates = permissions.runtime_profile_choices();
         let profile_start;
-        if candidates.is_empty() {
+        if options.is_empty() {
             lines.push("No supported runtime profiles were detected.".into());
             profile_start = None;
         } else {
@@ -412,7 +417,7 @@ impl AttachedTerminal {
                 "Separate package-manager configuration and credential files stay excluded.".into(),
             );
             profile_start = Some(lines.len());
-            lines.extend(candidates.iter().enumerate().map(|(index, option)| {
+            lines.extend(options.iter().enumerate().map(|(index, option)| {
                 let marker = if focused_profile == Some(index) {
                     "›"
                 } else {
@@ -467,7 +472,7 @@ impl AttachedTerminal {
                             page,
                             allow: trust,
                             profile_start,
-                            profile_count: candidates.len(),
+                            profile_count: options.len(),
                             focused_profile,
                             profile_selection_enabled: Some(profile_selection_enabled),
                             footer: None,
