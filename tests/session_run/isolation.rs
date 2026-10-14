@@ -100,11 +100,13 @@ pub fn enter_native_account_isolated_test() -> bool {
         let output = command
             .bounded_output_for(Duration::from_secs(90), 32 * 1024 * 1024)
             .expect("native account test process");
+        if !output.status.success() {
+            crate::process::relay_native_fixture_annotation(&output.stdout, &output.stderr);
+        }
         assert!(
             output.status.success(),
-            "native account test failed: stdout={:?}; stderr={:?}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            "native account test failed; exit={:?}",
+            output.status.code()
         );
         crate::process::assert_single_test_completed(&output.stdout, &test);
         assert!(output.stderr.is_empty(), "native test stderr is empty");

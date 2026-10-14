@@ -46,6 +46,49 @@ pub fn annotate_native_fixture(message: &str) {
     let _ = io::stderr().lock().write_all(annotation.as_bytes());
 }
 
+pub fn relay_native_fixture_annotation(stdout: &[u8], stderr: &[u8]) {
+    const PREFIX: &[u8] = b"::error title=Arany native fixture::";
+    const MAX_LINE_BYTES: usize = 2048;
+    for captured in [stdout, stderr] {
+        for line in captured.split(|byte| *byte == b'\n') {
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            let Some(message) = line.strip_prefix(PREFIX) else {
+                continue;
+            };
+            if line.len() > MAX_LINE_BYTES
+                || !message.is_ascii()
+                || !(message.starts_with(b"fixture=shipped_exec;")
+                    || message.starts_with(b"fixture=direct_cancellation;"))
+                || !message.iter().all(|byte| {
+                    byte.is_ascii_alphanumeric()
+                        || matches!(
+                            byte,
+                            b' ' | b'_'
+                                | b'='
+                                | b';'
+                                | b':'
+                                | b','
+                                | b'.'
+                                | b'?'
+                                | b'['
+                                | b']'
+                                | b'"'
+                                | b'('
+                                | b')'
+                                | b'-'
+                        )
+                })
+            {
+                continue;
+            }
+            let mut output = io::stderr().lock();
+            let _ = output.write_all(line);
+            let _ = output.write_all(b"\n");
+            return;
+        }
+    }
+}
+
 pub trait BoundedOutput {
     fn bounded_output(&mut self) -> io::Result<Output>;
     fn bounded_output_for(&mut self, duration: Duration, cap: usize) -> io::Result<Output>;
