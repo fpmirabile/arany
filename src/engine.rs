@@ -269,18 +269,12 @@ fn goal_report(
             _ => "Goal did not reach a terminal Run boundary.",
         });
     let mut report = GoalReport {
-        summary: truncate_utf8(raw_summary, 1_800).to_owned(),
+        summary: String::new(),
         changes: Vec::new(),
         evidence: Vec::new(),
         unresolved: Vec::new(),
     };
-    if raw_summary.len() > report.summary.len() {
-        push_goal_report_item(
-            &mut report,
-            GoalReportSection::Unresolved,
-            "The primary summary was shortened to fit the durable Goal report.",
-        );
-    }
+    let mut omitted_facts = false;
     let uncertain_calls = goal.unobserved_provider_calls.len()
         + usize::try_from(goal.uncertain_compaction_calls).unwrap_or(usize::MAX)
         + usize::from(goal.compaction_call_reserved.is_some());
@@ -292,6 +286,7 @@ fn goal_report(
                 "{} reserved Provider call(s) have no committed outcome; their usage remains unknown and charged.",
                 uncertain_calls
             ),
+            &mut omitted_facts,
         );
     }
     if goal.token_usage_unknown {
@@ -299,6 +294,7 @@ fn goal_report(
             &mut report,
             GoalReportSection::Unresolved,
             "Provider token usage is incomplete.",
+            &mut omitted_facts,
         );
     }
     if goal.uncertain_active_ms > 0 {
@@ -309,8 +305,82 @@ fn goal_report(
                 "{} ms of active time were conservatively charged after interruption.",
                 goal.uncertain_active_ms
             ),
+            &mut omitted_facts,
         );
     }
+    let mut cache_rejected = false;
+    let mut cache_failed = false;
+    let mut cache_uncertain = false;
+    for task_run in view
+        .runs
+        .iter()
+        .filter(|task_run| goal.run_ids.contains(&task_run.id))
+    {
+        for tool in &task_run.tools {
+            if let Some(observation) = tool.observation.as_ref() {
+                match observation.cache_update {
+                    crate::tools::CacheUpdate::Rejected => cache_rejected = true,
+                    crate::tools::CacheUpdate::Failed => cache_failed = true,
+                    crate::tools::CacheUpdate::Uncertain => cache_uncertain = true,
+                    crate::tools::CacheUpdate::NotApplicable
+                    | crate::tools::CacheUpdate::NotAttempted
+                    | crate::tools::CacheUpdate::Published => {}
+                }
+            }
+        }
+    }
+    if cache_rejected {
+        push_goal_report_item(
+            &mut report,
+            GoalReportSection::Unresolved,
+            "One or more Commands completed, but the build cache update was rejected; the previous cache was kept.",
+            &mut omitted_facts,
+        );
+    }
+    if cache_failed {
+        push_goal_report_item(
+            &mut report,
+            GoalReportSection::Unresolved,
+            "One or more Commands completed, but the build cache update failed; the previous cache was kept.",
+            &mut omitted_facts,
+        );
+    }
+    if cache_uncertain {
+        push_goal_report_item(
+            &mut report,
+            GoalReportSection::Unresolved,
+            "One or more Commands have an uncertain build cache publication; inspect Session history before retrying.",
+            &mut omitted_facts,
+        );
+    }
+    let mut summary_bytes = raw_summary.len().min(1_800);
+    let mut summary_notice_added = summary_bytes < raw_summary.len();
+    if summary_notice_added {
+        push_goal_report_item(
+            &mut report,
+            GoalReportSection::Unresolved,
+            "The primary summary was shortened to fit the durable Goal report.",
+            &mut omitted_facts,
+        );
+    }
+    report.summary = truncate_utf8(raw_summary, summary_bytes).to_owned();
+    while !goal_report_fits_with_omission(&mut report) {
+        summary_bytes = summary_bytes.saturating_sub(128);
+        if summary_bytes < raw_summary.len() && !summary_notice_added {
+            let summary = std::mem::take(&mut report.summary);
+            push_goal_report_item(
+                &mut report,
+                GoalReportSection::Unresolved,
+                "The primary summary was shortened to fit the durable Goal report.",
+                &mut omitted_facts,
+            );
+            report.summary = summary;
+            summary_notice_added = true;
+        }
+        report.summary = truncate_utf8(raw_summary, summary_bytes).to_owned();
+        assert!(summary_bytes > 0 || goal_report_fits_with_omission(&mut report));
+    }
+    let protected_unresolved_count = report.unresolved.len();
     for task_run in view
         .runs
         .iter()
@@ -330,53 +400,14 @@ fn goal_report(
                         &mut report,
                         GoalReportSection::Unresolved,
                         &format!("{label} has no committed Tool outcome."),
+                        &mut omitted_facts,
                     );
                 }
                 continue;
             };
-            let attested = observation.attested_for(&tool.intent);
             match observation.disposition {
-                crate::tools::ToolDisposition::Succeeded if attested => {
-                    match call {
-                        crate::tools::ToolCall::Write { path, .. }
-                        | crate::tools::ToolCall::Edit { path, .. } => {
-                            push_goal_report_item(
-                                &mut report,
-                                GoalReportSection::Changes,
-                                &format!("{} {path}.", call.label()),
-                            );
-                        }
-                        crate::tools::ToolCall::Mkdir { path } => {
-                            push_goal_report_item(
-                                &mut report,
-                                GoalReportSection::Changes,
-                                &format!("Created directory {path}."),
-                            );
-                        }
-                        crate::tools::ToolCall::ApplyChangeset { changeset, .. } => {
-                            for change in &changeset.files {
-                                let action = if change.after.is_none() {
-                                    "removed"
-                                } else if change.before.is_none() {
-                                    "created"
-                                } else {
-                                    "updated"
-                                };
-                                push_goal_report_item(
-                                    &mut report,
-                                    GoalReportSection::Changes,
-                                    &format!("Command {action} {}.", change.path),
-                                );
-                            }
-                        }
-                        _ => {}
-                    }
-                    push_goal_report_item(
-                        &mut report,
-                        GoalReportSection::Evidence,
-                        &goal_report_evidence(call, &observation.output),
-                    );
-                }
+                crate::tools::ToolDisposition::Succeeded
+                    if observation.attested_for(&tool.intent) => {}
                 crate::tools::ToolDisposition::Denied
                 | crate::tools::ToolDisposition::Failed
                 | crate::tools::ToolDisposition::Conflict
@@ -384,57 +415,92 @@ fn goal_report(
                     &mut report,
                     GoalReportSection::Unresolved,
                     &format!("{label} failed; its effect was not recorded as successful."),
+                    &mut omitted_facts,
                 ),
                 crate::tools::ToolDisposition::Uncertain
                 | crate::tools::ToolDisposition::Cancelled => {
-                    let unresolved = if observation.cache_update
-                        == crate::tools::CacheUpdate::Uncertain
-                    {
-                        format!(
-                            "{label} has an uncertain build cache publication; inspect Session history before retrying."
-                        )
-                    } else {
-                        format!(
-                            "{label} has an uncertain or cancelled outcome; inspect Workspace state before retrying."
-                        )
-                    };
-                    push_goal_report_item(&mut report, GoalReportSection::Unresolved, &unresolved);
+                    if observation.cache_update != crate::tools::CacheUpdate::Uncertain {
+                        push_goal_report_item(
+                            &mut report,
+                            GoalReportSection::Unresolved,
+                            &format!(
+                                "{label} has an uncertain or cancelled outcome; inspect Workspace state before retrying."
+                            ),
+                            &mut omitted_facts,
+                        );
+                    }
                 }
                 crate::tools::ToolDisposition::Succeeded => push_goal_report_item(
                     &mut report,
                     GoalReportSection::Unresolved,
                     &format!("{label} reported success without a valid Guard attestation."),
+                    &mut omitted_facts,
                 ),
-            }
-            match observation.cache_update {
-                crate::tools::CacheUpdate::Rejected => push_goal_report_item(
-                    &mut report,
-                    GoalReportSection::Unresolved,
-                    &format!(
-                        "{label} completed, but the build cache update was rejected; the previous cache was kept."
-                    ),
-                ),
-                crate::tools::CacheUpdate::Failed => push_goal_report_item(
-                    &mut report,
-                    GoalReportSection::Unresolved,
-                    &format!(
-                        "{label} completed, but the build cache update failed; the previous cache was kept."
-                    ),
-                ),
-                crate::tools::CacheUpdate::NotApplicable
-                | crate::tools::CacheUpdate::NotAttempted
-                | crate::tools::CacheUpdate::Published
-                | crate::tools::CacheUpdate::Uncertain => {}
             }
         }
     }
-    let mut summary_bytes = report.summary.len();
-    while serde_json::to_vec(&report).map_or(true, |bytes| {
-        bytes.len() > crate::session::MAX_GOAL_REPORT_BYTES
-    }) && summary_bytes > 0
+    for task_run in view
+        .runs
+        .iter()
+        .filter(|task_run| goal.run_ids.contains(&task_run.id))
     {
-        summary_bytes = summary_bytes.saturating_sub(128);
-        report.summary = truncate_utf8(&report.summary, summary_bytes).to_owned();
+        for tool in &task_run.tools {
+            let Some(observation) = tool.observation.as_ref() else {
+                continue;
+            };
+            if observation.disposition != crate::tools::ToolDisposition::Succeeded
+                || !observation.attested_for(&tool.intent)
+            {
+                continue;
+            }
+            let call = &tool.intent.call;
+            match call {
+                crate::tools::ToolCall::Write { path, .. }
+                | crate::tools::ToolCall::Edit { path, .. } => {
+                    push_goal_report_item(
+                        &mut report,
+                        GoalReportSection::Changes,
+                        &format!("{} {path}.", call.label()),
+                        &mut omitted_facts,
+                    );
+                }
+                crate::tools::ToolCall::Mkdir { path } => {
+                    push_goal_report_item(
+                        &mut report,
+                        GoalReportSection::Changes,
+                        &format!("Created directory {path}."),
+                        &mut omitted_facts,
+                    );
+                }
+                crate::tools::ToolCall::ApplyChangeset { changeset, .. } => {
+                    for change in &changeset.files {
+                        let action = if change.after.is_none() {
+                            "removed"
+                        } else if change.before.is_none() {
+                            "created"
+                        } else {
+                            "updated"
+                        };
+                        push_goal_report_item(
+                            &mut report,
+                            GoalReportSection::Changes,
+                            &format!("Command {action} {}.", change.path),
+                            &mut omitted_facts,
+                        );
+                    }
+                }
+                _ => {}
+            }
+            push_goal_report_item(
+                &mut report,
+                GoalReportSection::Evidence,
+                &goal_report_evidence(call, &observation.output),
+                &mut omitted_facts,
+            );
+        }
+    }
+    if omitted_facts {
+        append_goal_report_omission(&mut report, protected_unresolved_count);
     }
     report
 }
@@ -620,6 +686,105 @@ mod goal_report_tests {
         assert!(
             serde_json::to_vec(&report).unwrap().len() <= crate::session::MAX_GOAL_REPORT_BYTES
         );
+
+        let mut late_run = run.clone();
+        let late_failed_command = late_run.tools.remove(0);
+        let mut late_rejected_command = late_failed_command.clone();
+        late_run.tools.push(late_failed_command);
+        late_rejected_command.intent.id = Uuid::now_v7();
+        let rejected_digest = late_rejected_command.intent.digest();
+        let rejected_observation = late_rejected_command
+            .observation
+            .as_mut()
+            .expect("attested Command result");
+        rejected_observation.intent = late_rejected_command.intent.clone();
+        rejected_observation
+            .guard
+            .as_mut()
+            .expect("Guard receipt")
+            .intent_digest = rejected_digest;
+        rejected_observation.cache_update = CacheUpdate::Rejected;
+        late_run.tools.push(late_rejected_command);
+        let uncertain_intent = EffectIntent {
+            id: Uuid::now_v7(),
+            run_id,
+            agent_run_id: AgentRunId::new(),
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call: ToolCall::Command {
+                program: "cargo".into(),
+                args: vec!["test".into()],
+                cwd: ".".into(),
+            },
+            limits: ToolLimits::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        };
+        late_run.tools.push(ToolView {
+            intent: uncertain_intent.clone(),
+            observation: Some(crate::tools::ToolObservation {
+                guard: Some(GuardReceipt {
+                    contract_version: 1,
+                    intent_digest: uncertain_intent.digest(),
+                    enforcement_digest: uncertain_intent.enforcement_digest,
+                    limits: uncertain_intent.limits.clone(),
+                }),
+                intent: uncertain_intent,
+                disposition: ToolDisposition::Uncertain,
+                output: "{}".into(),
+                cache_update: CacheUpdate::Uncertain,
+            }),
+            review_call_index: None,
+        });
+        late_run.agents[0].summary = Some("\u{1}".repeat(2_048));
+        let mut late_view = view.clone();
+        late_view.runs = vec![late_run.clone()];
+        let late_report = goal_report(&late_view, &late_run, &goal);
+        let late_report_bytes = serde_json::to_vec(&late_report).unwrap();
+        assert!(
+            late_report_bytes.len() > crate::session::MAX_GOAL_REPORT_BYTES * 3 / 4,
+            "late cache outcomes exercise a near-capacity report"
+        );
+        assert!(late_report_bytes.len() <= crate::session::MAX_GOAL_REPORT_BYTES);
+        assert!(late_report.summary.len() <= 2_048);
+        assert!(
+            late_report.summary.len() < 1_800,
+            "JSON-escaped controls consume serialized report capacity"
+        );
+        assert!(
+            late_report
+                .summary
+                .chars()
+                .all(|character| character == '\u{1}')
+        );
+        late_report
+            .validate()
+            .expect("bounded report remains valid");
+        assert!(late_report.unresolved.iter().any(|item| {
+            item.contains("build cache update was rejected")
+                && item.contains("previous cache was kept")
+        }));
+        assert!(late_report.unresolved.iter().any(|item| {
+            item.contains("build cache update failed") && item.contains("previous cache was kept")
+        }));
+        assert!(late_report.unresolved.iter().any(|item| {
+            item.contains("uncertain build cache publication") && item.contains("Session history")
+        }));
+        assert!(
+            late_report
+                .unresolved
+                .iter()
+                .any(|item| item == GOAL_REPORT_OMISSION),
+            "omitted lower-priority facts remain visible: {late_report:?}"
+        );
+        assert!(
+            late_report
+                .unresolved
+                .iter()
+                .any(|item| { item.contains("primary summary was shortened") })
+        );
     }
 }
 
@@ -736,13 +901,22 @@ enum GoalReportSection {
     Unresolved,
 }
 
-fn push_goal_report_item(report: &mut GoalReport, section: GoalReportSection, text: &str) {
+const GOAL_REPORT_OMISSION: &str =
+    "Some lower-priority Goal facts were omitted to fit the report limits.";
+
+fn push_goal_report_item(
+    report: &mut GoalReport,
+    section: GoalReportSection,
+    text: &str,
+    omitted_facts: &mut bool,
+) {
     let count = match section {
         GoalReportSection::Changes => report.changes.len(),
         GoalReportSection::Evidence => report.evidence.len(),
         GoalReportSection::Unresolved => report.unresolved.len(),
     };
     if count >= 32 {
+        *omitted_facts = true;
         return;
     }
     let item = truncate_utf8(text, 512).to_owned();
@@ -759,7 +933,38 @@ fn push_goal_report_item(report: &mut GoalReport, section: GoalReportSection, te
             GoalReportSection::Evidence => report.evidence.pop(),
             GoalReportSection::Unresolved => report.unresolved.pop(),
         };
+        *omitted_facts = true;
     }
+}
+
+fn append_goal_report_omission(report: &mut GoalReport, protected_unresolved_count: usize) {
+    while !goal_report_fits_with_omission(report) {
+        if report.evidence.pop().is_some() || report.changes.pop().is_some() {
+            continue;
+        }
+        if report.unresolved.len() > protected_unresolved_count {
+            report.unresolved.pop();
+            continue;
+        }
+        if !report.summary.is_empty() {
+            let summary_bytes = report.summary.len().saturating_sub(128);
+            report.summary = truncate_utf8(&report.summary, summary_bytes).to_owned();
+            continue;
+        }
+        unreachable!("priority Goal report facts and omission notice fit their bounds");
+    }
+    report.unresolved.push(GOAL_REPORT_OMISSION.to_owned());
+}
+
+fn goal_report_fits_with_omission(report: &mut GoalReport) -> bool {
+    if report.unresolved.len() >= 32 {
+        return false;
+    }
+    report.unresolved.push(GOAL_REPORT_OMISSION.to_owned());
+    let fits = serde_json::to_vec(report)
+        .is_ok_and(|bytes| bytes.len() <= crate::session::MAX_GOAL_REPORT_BYTES);
+    report.unresolved.pop();
+    fits
 }
 
 fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
