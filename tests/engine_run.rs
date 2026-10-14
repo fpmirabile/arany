@@ -4089,23 +4089,34 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                             .finished_sequence
                             .expect("Run terminal sequence")
                     );
+                    // A cancelled Run pauses its Goal: it records no terminal receipt and stays resumable.
                     let expected_goal_status = match outcome.run.status {
-                        RunStatus::Finished => arany::GoalStatus::Completed,
-                        RunStatus::Failed => arany::GoalStatus::Failed,
-                        RunStatus::Cancelled => arany::GoalStatus::Cancelled,
+                        RunStatus::Finished => Some(arany::GoalStatus::Completed),
+                        RunStatus::Failed => Some(arany::GoalStatus::Failed),
+                        RunStatus::Cancelled => None,
                         status => panic!("expected a terminal Run, got {status:?}"),
                     };
-                    assert!(events.last().is_some_and(|event| {
-                        event.sequence > terminal.sequence
-                            && matches!(
-                                event.event,
-                                Event::GoalFinished {
-                                    goal_id,
-                                    status,
-                                    ..
-                                } if goal_id == outcome.goal_id && status == expected_goal_status
-                            )
-                    }));
+                    if let Some(expected_goal_status) = expected_goal_status {
+                        assert!(events.last().is_some_and(|event| {
+                            event.sequence > terminal.sequence
+                                && matches!(
+                                    event.event,
+                                    Event::GoalFinished {
+                                        goal_id,
+                                        status,
+                                        ..
+                                    } if goal_id == outcome.goal_id && status == expected_goal_status
+                                )
+                        }));
+                    } else {
+                        assert!(
+                            !events
+                                .iter()
+                                .any(|event| matches!(event.event, Event::GoalFinished { .. })),
+                            "cancelled Run records no Goal receipt"
+                        );
+                        assert_eq!(replay.goals[0].status, arany::GoalStatus::Interrupted);
+                    }
                     assert_eq!(replay.runs.len(), 1);
                     assert_eq!(replay.runs[0], outcome.run);
                     let jsonl = arany::render_session(&replay, &events, arany::Output::Jsonl);

@@ -556,7 +556,6 @@ fn goal_status_word(status: crate::session::GoalStatus) -> &'static str {
         crate::session::GoalStatus::Interrupted => "interrupted",
         crate::session::GoalStatus::Completed => "completed",
         crate::session::GoalStatus::Failed => "failed",
-        crate::session::GoalStatus::Cancelled => "cancelled",
     }
 }
 

@@ -232,7 +232,6 @@ pub enum GoalStatus {
     Interrupted,
     Completed,
     Failed,
-    Cancelled,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -2509,10 +2508,8 @@ impl Event {
                 report,
                 ..
             } => {
-                if !matches!(
-                    status,
-                    GoalStatus::Completed | GoalStatus::Failed | GoalStatus::Cancelled
-                ) || *active_ms > MAX_GOAL_ACTIVE_MS
+                if !matches!(status, GoalStatus::Completed | GoalStatus::Failed)
+                    || *active_ms > MAX_GOAL_ACTIVE_MS
                 {
                     return Err(ReplayError::InvalidPayload);
                 }

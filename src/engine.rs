@@ -310,7 +310,6 @@ fn goal_report(
         .unwrap_or(match run.status {
             crate::session::RunStatus::Finished => "Goal completed.",
             crate::session::RunStatus::Failed => "Goal failed before completion.",
-            crate::session::RunStatus::Cancelled => "Goal was cancelled.",
             _ => "Goal did not reach a terminal Run boundary.",
         });
     let mut report = GoalReport {
@@ -1369,7 +1368,7 @@ fn resolve_goal_admission(
         let resume = match goal.status {
             GoalStatus::Running => false,
             GoalStatus::Interrupted => !continuation,
-            GoalStatus::Completed | GoalStatus::Failed | GoalStatus::Cancelled => {
+            GoalStatus::Completed | GoalStatus::Failed => {
                 return Err(EngineError::GoalUnavailable);
             }
         };
@@ -2153,7 +2152,7 @@ impl<P: Provider + 'static> Engine<P> {
             .active_ms
             .checked_add(active_ms)
             .ok_or(EngineError::InvalidHistory)?;
-        // An autonomous Goal ends only at its own stop conditions; a cancelled Run leaves it open to resume.
+        // Only Run failure or a satisfied/exhausted Goal settles it; a cancelled Run leaves its Goal open to resume.
         let terminal = match run.status {
             crate::session::RunStatus::Finished if goal.autonomous => {
                 if goal_view.plan_contract.is_none() || goal_view.success_criterion_satisfied {
@@ -2170,9 +2169,6 @@ impl<P: Provider + 'static> Engine<P> {
                 .finish_after_run
                 .then_some(GoalStatus::Completed),
             crate::session::RunStatus::Failed => Some(GoalStatus::Failed),
-            crate::session::RunStatus::Cancelled => {
-                (!goal.autonomous).then_some(GoalStatus::Cancelled)
-            }
             _ => None,
         };
         let mut goal_status = GoalStatus::Running;

@@ -467,7 +467,6 @@ impl GoalTrace {
         let outcome = match status {
             GoalStatus::Completed => TraceOutcome::Finished,
             GoalStatus::Failed => TraceOutcome::Failed,
-            GoalStatus::Cancelled => TraceOutcome::Cancelled,
             GoalStatus::Running | GoalStatus::Interrupted => run,
         };
         self.span.finish(outcome);

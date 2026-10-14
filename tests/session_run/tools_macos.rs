@@ -1715,7 +1715,7 @@ int main(void) {
         assert_eq!(
             replay.goals[0].status,
             match case {
-                "cancelled" => arany::GoalStatus::Cancelled,
+                "cancelled" => arany::GoalStatus::Interrupted,
                 "mcp-version" => arany::GoalStatus::Completed,
                 _ => arany::GoalStatus::Failed,
             },

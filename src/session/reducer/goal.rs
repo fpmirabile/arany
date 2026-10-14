@@ -321,9 +321,7 @@ impl SessionView {
             && !goal.admits_next_run();
         let disposition_matches = matches!(
             (*status, run_status),
-            (GoalStatus::Completed, RunStatus::Finished)
-                | (GoalStatus::Failed, RunStatus::Failed)
-                | (GoalStatus::Cancelled, RunStatus::Cancelled)
+            (GoalStatus::Completed, RunStatus::Finished) | (GoalStatus::Failed, RunStatus::Failed)
         ) || (*status == GoalStatus::Failed && exhausted_after_finish);
         if goal.status != GoalStatus::Running
             || goal.active_run.is_some()

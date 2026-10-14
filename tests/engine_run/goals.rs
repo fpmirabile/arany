@@ -108,63 +108,33 @@ async fn summary_within_the_serialized_report_budget_is_kept_whole() {
 }
 
 #[tokio::test]
-async fn goal_failure_and_cancellation_have_distinct_terminal_receipts() {
-    for cancel in [false, true] {
-        let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir(&workspace).expect("workspace");
-        let state_path = temp.path().join("state");
-        let cancellation = RunCancellation::new();
-        let mut provider = if cancel {
-            ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-                summary: "done".into(),
-                result: "answer".into(),
-            })])
-        } else {
-            ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-                summary: String::new(),
-                result: "invalid finish".into(),
-            })])
-        };
-        if cancel {
-            provider.cancel_at_completion = Some((AgentPhase::RootPlan, cancellation.clone()));
-        }
-        let mut engine =
-            Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
-        let mut input = request(&workspace, "Finish or cancel");
-        input.include_paths.clear();
-        let outcome = engine
-            .run_with_cancel(input, cancellation)
-            .await
-            .expect("terminal Run");
-        assert_eq!(
-            outcome.run.status,
-            if cancel {
-                RunStatus::Cancelled
-            } else {
-                RunStatus::Failed
-            }
-        );
-        engine.close().await.expect("engine shutdown");
+async fn goal_failure_has_a_terminal_receipt() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let state_path = temp.path().join("state");
+    let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
+        summary: String::new(),
+        result: "invalid finish".into(),
+    })]);
+    let mut engine =
+        Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+    let mut input = request(&workspace, "Finish invalidly");
+    input.include_paths.clear();
+    let outcome = engine.run(input).await.expect("terminal Run");
+    assert_eq!(outcome.run.status, RunStatus::Failed);
+    engine.close().await.expect("engine shutdown");
 
-        let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
-            .expect("read-only Store");
-        let view = store
-            .load_view(outcome.session_id)
-            .await
-            .expect("replayed Session")
-            .expect("Session");
-        assert_eq!(
-            view.goals[0].status,
-            if cancel {
-                arany::GoalStatus::Cancelled
-            } else {
-                arany::GoalStatus::Failed
-            }
-        );
-        assert!(view.goals[0].report.is_some());
-        store.close().await.expect("Store shutdown");
-    }
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
+        .expect("read-only Store");
+    let view = store
+        .load_view(outcome.session_id)
+        .await
+        .expect("replayed Session")
+        .expect("Session");
+    assert_eq!(view.goals[0].status, arany::GoalStatus::Failed);
+    assert!(view.goals[0].report.is_some());
+    store.close().await.expect("Store shutdown");
 }
 
 #[tokio::test]
@@ -1830,13 +1800,9 @@ async fn paused_goal_coexists_with_a_new_goal_and_resumes_with_its_pinned_object
         paused_provider,
     )
     .expect("engine");
-    // Only an autonomous Goal pauses on cancellation; a one-Run Goal records its terminal Cancelled receipt.
+    // A cancelled plain Run pauses its one-Run Goal like an autonomous one: no terminal receipt, resumable.
     let mut paused = request(&workspace, "Pinned objective of the paused Goal");
     paused.include_paths.clear();
-    paused.goal = arany::GoalRequest::autonomous(
-        arany::GoalBudget::default(),
-        arany::GoalPhase::Implementation,
-    );
     let cancelled = engine
         .run_with_cancel(paused, cancellation)
         .await
@@ -1844,6 +1810,19 @@ async fn paused_goal_coexists_with_a_new_goal_and_resumes_with_its_pinned_object
     assert_eq!(cancelled.run.status, RunStatus::Cancelled);
     let session_id = cancelled.session_id;
     engine.close().await.expect("first engine shutdown");
+    {
+        let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
+            .expect("read-only Store");
+        let view = store
+            .load_view(session_id)
+            .await
+            .expect("replayed Session")
+            .expect("Session");
+        let paused_goal = view.goal(cancelled.goal_id).expect("paused Goal");
+        assert_eq!(paused_goal.status, arany::GoalStatus::Interrupted);
+        assert!(paused_goal.report.is_none());
+        store.close().await.expect("Store shutdown");
+    }
 
     let provider = ScriptedProvider::new(vec![
         ProviderOutcome::Finish(Finish {
