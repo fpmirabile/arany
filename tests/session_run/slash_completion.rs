@@ -465,6 +465,15 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         rustix::fs::FlockOperation::NonBlockingLockExclusive,
     )
     .expect("hold current cache lease");
+    assert!(
+        matches!(
+            StateRoot::open_existing(&state)
+                .expect("State")
+                .clear_workspace_build_cache(&workspace),
+            Err(arany::StoreError::BuildCacheBusy)
+        ),
+        "Store clear must classify the held identity lease as busy"
+    );
     let busy_at = transcript.len();
     input
         .write_all(b"/cache clear\r")

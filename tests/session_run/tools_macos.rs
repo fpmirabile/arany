@@ -90,6 +90,23 @@ fn trace_snapshot(root: &Path) -> serde_json::Value {
                         | "mcp-version"
                         | "receipt-loss"
                         | "runtime-mounts"
+                        | "nonzero"
+                        | "ai-approve"
+                        | "deny"
+                        | "drop"
+                        | "cancel"
+                        | "conflict"
+                        | "scope"
+                        | "partial"
+                        | "symlink"
+                        | "hardlink"
+                        | "fifo"
+                        | "setid"
+                        | "excluded"
+                        | "bytes-overflow"
+                        | "files-overflow"
+                        | "directory-conversion"
+                        | "budget"
                 ) {
                     return None;
                 }
@@ -110,7 +127,7 @@ fn trace_snapshot(root: &Path) -> serde_json::Value {
     json!({"stages":snapshot})
 }
 
-fn trace_case(root: &Path, case: &str) {
+pub(super) fn trace_case(root: &Path, case: &str) {
     let trace = root.join("account/guard-trace");
     for stage in TRACE_STAGES {
         let path = trace.join(format!("{stage}.json"));
@@ -124,6 +141,21 @@ fn trace_case(root: &Path, case: &str) {
         &trace.join("case.json"),
         &serde_json::to_vec(&json!({"case":case})).unwrap(),
     );
+}
+
+pub(super) fn reset_tool_trace_stages(root: &Path) {
+    let trace = root.join("account/guard-trace");
+    for stage in TRACE_STAGES {
+        if matches!(*stage, "tool_admission" | "catalogue") {
+            continue;
+        }
+        let path = trace.join(format!("{stage}.json"));
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("fixture trace reset: {error}"),
+        }
+    }
 }
 
 impl Provider for Journey {
@@ -163,6 +195,11 @@ impl Provider for Journey {
             && let Some((target, link)) = &self.linked_file
         {
             std::os::unix::fs::symlink(target, link).unwrap();
+        }
+        if self.calls.get(step).is_some()
+            && let Some(root) = std::env::var_os("ARANY_TEST_FILE_JOURNEY_ROOT")
+        {
+            reset_tool_trace_stages(Path::new(&root));
         }
         let outcome = self.calls.get(step).cloned().map_or_else(
             || {
@@ -674,6 +711,9 @@ impl Provider for RuntimeJourney {
             return Err(ProviderError::InvalidOutcome);
         }
         let outcome = if step < self.calls.len() {
+            if let Some(root) = std::env::var_os("ARANY_TEST_FILE_JOURNEY_ROOT") {
+                reset_tool_trace_stages(Path::new(&root));
+            }
             ProviderOutcome::Tool(self.calls[step].clone())
         } else {
             ProviderOutcome::Finish(Finish {
@@ -893,7 +933,7 @@ async fn native_runtime_mount_journey_helper() {
         program: "sh".into(),
         args: vec![
             "-c".into(),
-            "set -eu; /usr/bin/mkdir -p \"$CARGO_HOME/registry/cache\"; /usr/bin/dd if=/dev/zero of=\"$CARGO_HOME/registry/cache/private-bulk.crate\" bs=1048576 count=50 2>/dev/null".into(),
+            "set -eu; /usr/bin/mkdir -p \"$CARGO_HOME/registry/cache\"; /usr/bin/dd if=/dev/zero of=\"$CARGO_HOME/registry/cache/private-bulk.crate\" bs=1048576 count=40 2>/dev/null".into(),
         ],
         cwd: String::new(),
     };
@@ -951,7 +991,22 @@ async fn native_runtime_mount_journey_helper() {
             .output,
     )
     .unwrap();
-    assert_eq!(seed_result["exit_code"], 0);
+    let seed_observation = seed_outcome.run.tools[0].observation.as_ref().unwrap();
+    let seed_stderr = seed_result["stderr"].as_str().unwrap_or_default();
+    assert_eq!(
+        seed_result["exit_code"],
+        0,
+        "cache seed disposition {:?}; Guard receipt {}; cache update {:?}; stdout bytes {}; stderr bytes {}; no space {}; permission denied {}; operation denied {}; missing command {}",
+        seed_observation.disposition,
+        seed_observation.guard.is_some(),
+        seed_observation.cache_update,
+        seed_result["stdout"].as_str().map_or(0, str::len),
+        seed_stderr.len(),
+        seed_stderr.contains("No space left on device"),
+        seed_stderr.contains("Permission denied"),
+        seed_stderr.contains("Operation not permitted"),
+        seed_stderr.contains("not found"),
+    );
     assert_eq!(
         seed_outcome.run.tools[0]
             .observation
@@ -1000,7 +1055,7 @@ async fn native_runtime_mount_journey_helper() {
         program: "sh".into(),
         args: vec![
             "-c".into(),
-            "set -eu; /usr/bin/mkdir -p \"$CARGO_TARGET_DIR\"; /usr/bin/dd if=/dev/zero of=\"$CARGO_TARGET_DIR/overflow-marker\" bs=1048576 count=16 2>/dev/null".into(),
+            "set -eu; /usr/bin/mkdir -p \"$CARGO_TARGET_DIR\"; /usr/bin/dd if=/dev/zero of=\"$CARGO_TARGET_DIR/overflow-marker\" bs=1048576 count=32 2>/dev/null".into(),
         ],
         cwd: String::new(),
     };
@@ -1174,7 +1229,7 @@ async fn native_runtime_mount_journey_helper() {
         program: "sh".into(),
         args: vec![
             "-c".into(),
-            "set -eu; test \"$(/usr/bin/wc -c < \"$CARGO_HOME/registry/cache/private-bulk.crate\")\" -eq 52428800; test \"$(cat \"$CARGO_TARGET_DIR/persistent-marker\")\" = ARANY_RUNTIME_CACHE_PERSISTENCE_CANARY; test ! -e \"$CARGO_TARGET_DIR/overflow-marker\"; printf 'cache-prior-retained\\n'; node".into(),
+            "set -eu; test \"$(/usr/bin/wc -c < \"$CARGO_HOME/registry/cache/private-bulk.crate\")\" -eq 41943040; test \"$(cat \"$CARGO_TARGET_DIR/persistent-marker\")\" = ARANY_RUNTIME_CACHE_PERSISTENCE_CANARY; test ! -e \"$CARGO_TARGET_DIR/overflow-marker\"; printf 'cache-prior-retained\\n'; node".into(),
         ],
         cwd: String::new(),
     };
