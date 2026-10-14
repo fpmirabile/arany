@@ -152,6 +152,10 @@ fn selected_cache_is_disclosed_only_after_explicit_command_output() {
 #[tokio::test]
 #[ignore = "isolated helper owned by selected-cache canary integration"]
 async fn selected_cache_canary_helper() {
+    Box::pin(selected_cache_canary_helper_inner()).await;
+}
+
+async fn selected_cache_canary_helper_inner() {
     let root = std::env::var_os("ARANY_TEST_CACHE_CANARY_ROOT").expect("private fixture root");
     let root = Path::new(&root);
     let workspace = root.join("workspace");
@@ -180,7 +184,7 @@ async fn selected_cache_canary_helper() {
         program: "sh".into(),
         args: vec![
             "-c".into(),
-            "set -eu; /usr/bin/mkdir -p \"$CARGO_HOME/registry/cache\"; /usr/bin/dd if=/dev/zero of=\"$CARGO_HOME/registry/cache/private-bulk.crate\" bs=1048576 count=50 2>/dev/null".into(),
+            "set -eu; /usr/bin/mkdir -p \"$CARGO_HOME/registry/cache\"; /usr/bin/dd if=/dev/zero of=\"$CARGO_HOME/registry/cache/private-bulk.crate\" bs=1048576 count=40 2>/dev/null".into(),
         ],
         cwd: ".".into(),
     };
@@ -202,7 +206,7 @@ async fn selected_cache_canary_helper() {
             seed_approvals,
         )
         .unwrap();
-    let seed_run = seed_engine.run(RunRequest {
+    let seed_run = Box::pin(seed_engine.run(RunRequest {
         session_id: None,
         title: Some("Private cache seed".into()),
         objective: "Seed a bounded private cache archive".into(),
@@ -211,7 +215,7 @@ async fn selected_cache_canary_helper() {
         include_paths: Vec::new(),
         policy: CollaborationPolicy::Single,
         goal: arany::GoalRequest::default(),
-    });
+    }));
     let approve_seed = async {
         let approval = seed_inbox
             .next()
@@ -227,11 +231,38 @@ async fn selected_cache_canary_helper() {
     .expect("bounded private cache seed");
     let seed_outcome = seed_outcome.unwrap();
     seed_engine.close().await.unwrap();
-    assert_eq!(seed_outcome.run.status, RunStatus::Finished);
-    let seed_observation = seed_outcome.run.tools[0].observation.as_ref().unwrap();
+    let seed_observation = seed_outcome
+        .run
+        .tools
+        .first()
+        .and_then(|tool| tool.observation.as_ref());
+    let seed_result = seed_observation.and_then(|observation| {
+        serde_json::from_str::<serde_json::Value>(&observation.output).ok()
+    });
+    assert_eq!(
+        seed_outcome.run.status,
+        RunStatus::Finished,
+        "cache seed status {:?}; tool disposition {:?}; guard receipt {}; cache update {:?}; exit {:?}; stdout bytes {}; stderr bytes {}",
+        seed_outcome.run.status,
+        seed_observation.map(|observation| observation.disposition),
+        seed_observation.is_some_and(|observation| observation.guard.is_some()),
+        seed_observation.map(|observation| observation.cache_update),
+        seed_result
+            .as_ref()
+            .and_then(|result| result["exit_code"].as_i64()),
+        seed_result
+            .as_ref()
+            .and_then(|result| result["stdout"].as_str())
+            .map_or(0, str::len),
+        seed_result
+            .as_ref()
+            .and_then(|result| result["stderr"].as_str())
+            .map_or(0, str::len),
+    );
+    let seed_observation = seed_observation.unwrap();
     assert_eq!(seed_observation.disposition, ToolDisposition::Succeeded);
     assert!(seed_observation.guard.is_some());
-    let seed_result: serde_json::Value = serde_json::from_str(&seed_observation.output).unwrap();
+    let seed_result = seed_result.unwrap();
     assert_eq!(seed_result["exit_code"], 0);
 
     let mut permissions =
@@ -276,7 +307,7 @@ async fn selected_cache_canary_helper() {
         program: "sh".into(),
         args: vec![
             "-c".into(),
-            "set -eu; /usr/bin/mkdir -p \"$CARGO_TARGET_DIR\"; /usr/bin/dd if=/dev/zero of=\"$CARGO_TARGET_DIR/overflow-marker\" bs=1048576 count=16 2>/dev/null".into(),
+            "set -eu; /usr/bin/mkdir -p \"$CARGO_TARGET_DIR\"; /usr/bin/dd if=/dev/zero of=\"$CARGO_TARGET_DIR/overflow-marker\" bs=1048576 count=32 2>/dev/null".into(),
         ],
         cwd: ".".into(),
     };
@@ -299,17 +330,21 @@ async fn selected_cache_canary_helper() {
             approvals,
         )
         .unwrap();
-    let run = engine.run(RunRequest {
-        session_id: None,
-        title: Some("Selected cache canary".into()),
-        objective: "Persist private build-cache data, then explicitly read the selected host cache"
-            .into(),
-        images: Vec::new(),
-        workspace: workspace.clone(),
-        include_paths: Vec::new(),
-        policy: CollaborationPolicy::Single,
-        goal: arany::GoalRequest::default(),
-    });
+    let run =
+        Box::pin(
+            engine.run(RunRequest {
+                session_id: None,
+                title: Some("Selected cache canary".into()),
+                objective:
+                    "Persist private build-cache data, then explicitly read the selected host cache"
+                        .into(),
+                images: Vec::new(),
+                workspace: workspace.clone(),
+                include_paths: Vec::new(),
+                policy: CollaborationPolicy::Single,
+                goal: arany::GoalRequest::default(),
+            }),
+        );
     let approve = async {
         for call in &calls {
             let approval = inbox
@@ -472,7 +507,7 @@ async fn selected_cache_canary_helper() {
         args: vec![
             "-c".into(),
             format!(
-                "set -eu; test \"$(/usr/bin/wc -c < \"$CARGO_HOME/registry/cache/private-bulk.crate\")\" -eq 52428800; test \"$(/usr/bin/cat \"$CARGO_TARGET_DIR/persistent-marker\")\" = '{PRIVATE_CACHE_CANARY}'; test ! -e \"$CARGO_TARGET_DIR/overflow-marker\"; printf cache-prior-retained"
+                "set -eu; test \"$(/usr/bin/wc -c < \"$CARGO_HOME/registry/cache/private-bulk.crate\")\" -eq 41943040; test \"$(/usr/bin/cat \"$CARGO_TARGET_DIR/persistent-marker\")\" = '{PRIVATE_CACHE_CANARY}'; test ! -e \"$CARGO_TARGET_DIR/overflow-marker\"; printf cache-prior-retained"
             ),
         ],
         cwd: ".".into(),
@@ -496,7 +531,7 @@ async fn selected_cache_canary_helper() {
             verify_approvals,
         )
         .unwrap();
-    let verify_run = verify_engine.run(RunRequest {
+    let verify_run = Box::pin(verify_engine.run(RunRequest {
         session_id: None,
         title: Some("Cache overflow recovery".into()),
         objective: "Verify the previous private cache survived a rejected update".into(),
@@ -505,7 +540,7 @@ async fn selected_cache_canary_helper() {
         include_paths: Vec::new(),
         policy: CollaborationPolicy::Single,
         goal: arany::GoalRequest::default(),
-    });
+    }));
     let approve_verify = async {
         let approval = verify_inbox.next().await.expect("cache recovery approval");
         assert!(

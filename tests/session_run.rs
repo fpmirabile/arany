@@ -1253,7 +1253,7 @@ fn exact_resume_and_rename_survive_file_backed_reopen() {
                 row.get(0)
             })
             .expect("start Event version");
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         connection
             .execute("UPDATE events SET event_version=1 WHERE sequence=1", [])
             .expect("version fault injection");

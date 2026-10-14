@@ -559,7 +559,7 @@ mod goal_report_tests {
             observation: Some(command_observation),
             review_call_index: None,
         }];
-        tools.extend((0..16).map(|index| {
+        tools.extend((0..15).map(|index| {
             let intent = EffectIntent {
                 id: Uuid::now_v7(),
                 run_id,
@@ -689,6 +689,7 @@ mod goal_report_tests {
 
         let mut late_run = run.clone();
         let late_failed_command = late_run.tools.remove(0);
+        late_run.tools.truncate(10);
         let mut late_rejected_command = late_failed_command.clone();
         late_run.tools.push(late_failed_command);
         late_rejected_command.intent.id = Uuid::now_v7();
@@ -708,7 +709,7 @@ mod goal_report_tests {
         let uncertain_intent = EffectIntent {
             id: Uuid::now_v7(),
             run_id,
-            agent_run_id: AgentRunId::new(),
+            agent_run_id: late_run.agents[0].id,
             policy_digest: [1; 32],
             enforcement_digest: [2; 32],
             workspace_device: 1,
@@ -738,6 +739,7 @@ mod goal_report_tests {
             }),
             review_call_index: None,
         });
+        assert_eq!(late_run.tools.len(), crate::tools::MAX_TOOL_CALLS - 3);
         late_run.agents[0].summary = Some("\u{1}".repeat(2_048));
         let mut late_view = view.clone();
         late_view.runs = vec![late_run.clone()];
@@ -784,6 +786,167 @@ mod goal_report_tests {
                 .unresolved
                 .iter()
                 .any(|item| { item.contains("primary summary was shortened") })
+        );
+
+        let mut byte_run = run.clone();
+        byte_run.tools.truncate(13);
+        let failed_intent = EffectIntent {
+            id: Uuid::now_v7(),
+            run_id,
+            agent_run_id: byte_run.agents[0].id,
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call: ToolCall::Read {
+                path: "src/report-failure".into(),
+                offset: 0,
+                limit: 4096,
+            },
+            limits: ToolLimits::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        };
+        byte_run.tools.push(ToolView {
+            observation: Some(crate::tools::ToolObservation {
+                intent: failed_intent.clone(),
+                disposition: ToolDisposition::Failed,
+                output: String::new(),
+                guard: None,
+                cache_update: CacheUpdate::NotAttempted,
+            }),
+            intent: failed_intent,
+            review_call_index: None,
+        });
+        assert_eq!(byte_run.tools.len(), crate::tools::MAX_TOOL_CALLS - 2);
+        byte_run.agents[0].summary = Some("x".repeat(1_800));
+        let mut byte_view = view.clone();
+        byte_view.runs = vec![byte_run.clone()];
+        let byte_report = goal_report(&byte_view, &byte_run, &goal);
+        byte_report
+            .validate()
+            .expect("byte-boundary Goal report remains valid");
+        assert!(byte_report.unresolved.len() < 32);
+        assert!(byte_report.unresolved.iter().any(|item| {
+            item.contains("Read src/report-failure failed")
+                && item.contains("effect was not recorded as successful")
+        }));
+        assert!(
+            byte_report
+                .unresolved
+                .iter()
+                .any(|item| item == GOAL_REPORT_OMISSION)
+        );
+        assert!(byte_report.evidence.len() < 13);
+        assert!(
+            byte_report
+                .evidence
+                .iter()
+                .any(|item| item == "Command cargo exited 0.")
+        );
+        assert!(
+            serde_json::to_vec(&byte_report).unwrap().len()
+                <= crate::session::MAX_GOAL_REPORT_BYTES
+        );
+
+        let mut saturation_runs = Vec::with_capacity(3);
+        let mut saturation_run_ids = Vec::with_capacity(3);
+        for (run_index, denied_count) in [10, 11, 12].into_iter().enumerate() {
+            let run_id = RunId::new();
+            let agent_run_id = AgentRunId::new();
+            saturation_run_ids.push(run_id);
+            let mut tools = Vec::with_capacity(denied_count + usize::from(run_index == 0));
+            if run_index == 0 {
+                let mut command = run.tools[0].clone();
+                command.intent.id = Uuid::now_v7();
+                command.intent.run_id = run_id;
+                command.intent.agent_run_id = agent_run_id;
+                let digest = command.intent.digest();
+                let observation = command.observation.as_mut().expect("successful Command");
+                observation.intent = command.intent.clone();
+                observation
+                    .guard
+                    .as_mut()
+                    .expect("Command Guard receipt")
+                    .intent_digest = digest;
+                observation.cache_update = CacheUpdate::NotApplicable;
+                tools.push(command);
+            }
+            for failure_index in 0..denied_count {
+                let intent = EffectIntent {
+                    id: Uuid::now_v7(),
+                    run_id,
+                    agent_run_id,
+                    policy_digest: [1; 32],
+                    enforcement_digest: [2; 32],
+                    workspace_device: 1,
+                    workspace_inode: 2,
+                    call: ToolCall::Read {
+                        path: format!("src/{run_index}-{failure_index}"),
+                        offset: 0,
+                        limit: 4096,
+                    },
+                    limits: ToolLimits::default(),
+                    expires_at_ms: 1,
+                    use_count: 1,
+                };
+                tools.push(ToolView {
+                    observation: Some(crate::tools::ToolObservation {
+                        intent: intent.clone(),
+                        disposition: ToolDisposition::Denied,
+                        output: String::new(),
+                        guard: None,
+                        cache_update: CacheUpdate::NotAttempted,
+                    }),
+                    intent,
+                    review_call_index: None,
+                });
+            }
+            assert!(tools.len() <= crate::tools::MAX_TOOL_CALLS);
+            let mut saturation_run = run.clone();
+            saturation_run.id = run_id;
+            saturation_run.agents[0].id = agent_run_id;
+            saturation_run.tools = tools;
+            saturation_runs.push(saturation_run);
+        }
+        let mut saturation_goal = goal.clone();
+        saturation_goal.run_ids = saturation_run_ids;
+        let mut saturation_view = view.clone();
+        saturation_view.runs = saturation_runs;
+        assert_eq!(
+            saturation_view
+                .runs
+                .iter()
+                .flat_map(|task_run| &task_run.tools)
+                .filter(|tool| {
+                    tool.observation.as_ref().is_some_and(|observation| {
+                        observation.disposition == ToolDisposition::Denied
+                    })
+                })
+                .count(),
+            33
+        );
+        let saturation_report =
+            goal_report(&saturation_view, &saturation_view.runs[0], &saturation_goal);
+        saturation_report
+            .validate()
+            .expect("item-boundary Goal report remains valid");
+        assert_eq!(saturation_report.unresolved.len(), 32);
+        assert!(
+            saturation_report
+                .unresolved
+                .iter()
+                .any(|item| item == GOAL_REPORT_OMISSION)
+        );
+        assert!(
+            saturation_report
+                .evidence
+                .iter()
+                .any(|item| item == "Command cargo exited 0.")
+        );
+        assert!(
+            serde_json::to_vec(&saturation_report).unwrap().len()
+                <= crate::session::MAX_GOAL_REPORT_BYTES
         );
     }
 }
@@ -939,6 +1102,10 @@ fn push_goal_report_item(
 
 fn append_goal_report_omission(report: &mut GoalReport, protected_unresolved_count: usize) {
     while !goal_report_fits_with_omission(report) {
+        if report.unresolved.len() >= 32 && report.unresolved.len() > protected_unresolved_count {
+            report.unresolved.pop();
+            continue;
+        }
         if report.evidence.pop().is_some() || report.changes.pop().is_some() {
             continue;
         }

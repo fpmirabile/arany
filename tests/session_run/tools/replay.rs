@@ -914,6 +914,8 @@ pub(super) async fn native_command_changeset_corpus(
         calls: Vec<ToolCall>,
         requests: Arc<Mutex<Vec<ProviderRequest>>>,
         review: bool,
+        #[cfg(target_os = "macos")]
+        trace_root: std::path::PathBuf,
     }
     impl Provider for CommandJourney {
         fn profile_name(&self) -> &str {
@@ -1003,6 +1005,10 @@ pub(super) async fn native_command_changeset_corpus(
                     },
                 )
             };
+            #[cfg(target_os = "macos")]
+            if !review && self.calls.get(step).is_some() {
+                crate::tools::reset_tool_trace_stages(&self.trace_root);
+            }
             requests.push(request);
             Ok(ProviderResponse {
                 outcome,
@@ -1152,9 +1158,13 @@ pub(super) async fn native_command_changeset_corpus(
                 calls,
                 requests: requests.clone(),
                 review: case == "ai-approve",
+                #[cfg(target_os = "macos")]
+                trace_root: root.to_path_buf(),
             },
         )
         .unwrap();
+        #[cfg(target_os = "macos")]
+        crate::tools::trace_case(root, case);
         engine
             .enable_tools(env!("CARGO_BIN_EXE_arany").into())
             .unwrap();
