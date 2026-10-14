@@ -889,6 +889,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                     &mut view,
                                     load_view(&admission.state_dir, session_id).await,
                                     Some(text),
+                                    false,
                                 )
                                 .map(Feedback::History);
                             }
@@ -1039,6 +1040,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 &mut view,
                                 load_view(&admission.state_dir, session_id).await,
                                 Some(text),
+                                false,
                             )
                             .map(Feedback::History);
                         } else if argument.is_none()
@@ -1282,15 +1284,28 @@ async fn finish_interrupted_submission(
     view: &mut SessionView,
     session_id: SessionId,
 ) -> Result<Option<Feedback>, String> {
-    let notice = reload_view_or_keep(
+    let reload_error = reload_view_or_keep(
         view,
         load_view(&admission.state_dir, session_id).await,
-        Some("Submission interrupted before Run admission; no task was accepted. Account work already started may still complete.".into()),
+        None,
+        false,
     );
+    let interrupted = "Submission interrupted before Run admission; no task was accepted. Account work already started may still complete.";
+    let drawn = match &reload_error {
+        Some(error) => format!("{interrupted}; {error}"),
+        None => interrupted.to_owned(),
+    };
     terminal
-        .draw(view, composer, notice.as_deref())
+        .draw(view, composer, Some(drawn.as_str()))
         .map_err(|error| error.to_string())?;
-    Ok(retained_draft_notice(composer))
+    let draft = retained_draft_notice(composer);
+    Ok(match reload_error {
+        Some(error) => Some(Feedback::History(match draft {
+            Some(draft) => format!("{draft}; {error}"),
+            None => error,
+        })),
+        None => draft,
+    })
 }
 
 async fn finish_submission(
@@ -1307,7 +1322,10 @@ async fn finish_submission(
         });
     let linear = terminal.is_linear();
     let preview_already_printed = user_recorded && linear;
-    let reloaded = load_confirmed_outcome(&admission.state_dir, outcome).await;
+    let reloaded = load_view(&admission.state_dir, outcome.session_id).await;
+    if let Ok(confirmed) = &reloaded {
+        confirm_outcome(confirmed, outcome)?;
+    }
     if linear {
         terminal.restore().map_err(|error| error.to_string())?;
         let emitted = match &reloaded {
@@ -1319,13 +1337,13 @@ async fn finish_submission(
             .map_err(|error| error.to_string())?;
         emitted?;
     } else {
-        if !std::io::stdout().is_terminal() {
+        if reloaded.is_ok() && !std::io::stdout().is_terminal() {
             AttachedTerminal::print_assistant_run(&outcome.run)
                 .map_err(|_| "output failed".to_owned())?;
         }
         terminal.finish_run_display();
     }
-    let reload_error = reload_view_or_keep(view, reloaded, None);
+    let mut reload_error = reload_view_or_keep(view, reloaded, None, true);
     if automatic.is_some() {
         terminal
             .draw(
@@ -1374,15 +1392,22 @@ async fn finish_submission(
             Some(draft) => format!("{compaction_notice}; {draft}"),
             None => compaction_notice,
         };
+        // The compaction reload supersedes an earlier failed reload, which is reported at most once here.
+        let answer_hidden = reload_error.is_some();
+        reload_error = None;
         notice = reload_view_or_keep(
             view,
             load_view(&admission.state_dir, outcome.session_id).await,
             Some(text),
+            answer_hidden,
         )
         .map(Feedback::History);
     }
     if let Some(error) = reload_error {
-        append_notice(&mut notice, &error);
+        notice = Some(Feedback::History(match notice.as_deref() {
+            Some(previous) => format!("{previous}; {error}"),
+            None => error,
+        }));
     }
     Ok(notice)
 }
@@ -1722,10 +1747,14 @@ async fn update_defaults(
         view.defaults = defaults;
         return Ok(());
     }
-    persist_defaults(admission, session_id, defaults).await?;
-    *view = load_view(&admission.state_dir, session_id)
-        .await
-        .map_err(DefaultsError::Reload)?;
+    persist_defaults(admission, session_id, defaults.clone()).await?;
+    match load_view(&admission.state_dir, session_id).await {
+        Ok(reloaded) => *view = reloaded,
+        Err(error) => {
+            view.defaults = defaults;
+            return Err(DefaultsError::Reload(error));
+        }
+    }
     Ok(())
 }
 
@@ -1843,6 +1872,12 @@ async fn load_confirmed_outcome(
     outcome: &RunOutcome,
 ) -> Result<SessionView, String> {
     let view = load_view(state_dir, outcome.session_id).await?;
+    confirm_outcome(&view, outcome)?;
+    Ok(view)
+}
+
+/// A mismatch means the committed Run is not in the loaded history; it is an integrity failure, not a reload failure.
+fn confirm_outcome(view: &SessionView, outcome: &RunOutcome) -> Result<(), String> {
     if !view.runs.iter().any(|run| {
         run.id == outcome.run.id
             && run == &outcome.run
@@ -1853,7 +1888,7 @@ async fn load_confirmed_outcome(
     }) {
         return Err("Run history unavailable or invalid".into());
     }
-    Ok(view)
+    Ok(())
 }
 
 fn emit_outcome(
@@ -1965,26 +2000,36 @@ async fn load_view(state_dir: &Path, session_id: SessionId) -> Result<SessionVie
 }
 
 /// Events are already committed when this runs, so a failed reload keeps the displayed history
-/// and returns the notice with the reload failure.
+/// and returns the notice with the reload failure appended.
 fn reload_view_or_keep(
     view: &mut SessionView,
     reloaded: Result<SessionView, String>,
     notice: Option<String>,
+    answer_hidden: bool,
 ) -> Option<String> {
     match reloaded {
         Ok(reloaded) => {
             *view = reloaded;
             notice
         }
-        Err(error) => Some(match notice {
-            Some(notice) => format!(
-                "{notice}; Error: history could not be reloaded: {error}; use /resume to reload it"
-            ),
-            None => {
-                format!("Error: history could not be reloaded: {error}; use /resume to reload it")
-            }
-        }),
+        Err(error) => {
+            let failure = reload_failure(&error, answer_hidden);
+            Some(match notice {
+                Some(notice) => format!("{notice}; {failure}"),
+                None => failure,
+            })
+        }
     }
+}
+
+/// `answer_hidden` says a committed Run answer was not shown, so `/resume` is the way to read it.
+fn reload_failure(error: &str, answer_hidden: bool) -> String {
+    let hidden = if answer_hidden {
+        "the committed answer was not shown; "
+    } else {
+        ""
+    };
+    format!("Error: history could not be reloaded: {error}; {hidden}use /resume to reload it")
 }
 
 #[cfg(test)]
