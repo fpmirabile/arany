@@ -107,10 +107,23 @@ impl Drop for AlternateScreen {
 #[derive(Default)]
 struct NativeTranscript {
     session: Option<crate::session::SessionId>,
+    initial_sequence_cutoff: Option<u64>,
+    first_projected_sequence: Option<u64>,
+    omitted_history: bool,
     objectives: HashSet<crate::session::RunId>,
     answers: HashSet<crate::session::RunId>,
     tools: HashSet<(crate::session::RunId, usize)>,
     last_notice: Option<(u64, String)>,
+}
+
+impl NativeTranscript {
+    fn skips_initial_run(&self, run: &crate::session::RunView) -> bool {
+        self.initial_sequence_cutoff
+            .is_some_and(|cutoff| run.accepted_sequence <= cutoff)
+            && self
+                .first_projected_sequence
+                .is_none_or(|first| run.accepted_sequence < first)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -771,12 +784,27 @@ impl AttachedTerminal {
             return Ok(());
         }
         if self.native.session != Some(session.id) {
+            let width = usize::from(
+                self.terminal
+                    .as_mut()
+                    .expect("owned terminal")
+                    .get_frame()
+                    .area()
+                    .width,
+            );
+            let projection = history::classic_projection(session, width);
             self.native = NativeTranscript {
                 session: Some(session.id),
+                initial_sequence_cutoff: Some(session.last_sequence),
+                first_projected_sequence: projection.first_run_sequence,
+                omitted_history: projection.omitted_history,
                 ..NativeTranscript::default()
             };
         }
         for run in &session.runs {
+            if self.native.skips_initial_run(run) {
+                continue;
+            }
             if !self.native.objectives.contains(&run.id) {
                 self.insert_native(
                     history::MessageKind::User,
@@ -818,8 +846,14 @@ impl AttachedTerminal {
         self.cancel_clipboard_paste();
         if self.is_linear() {
             writeln!(io::stderr(), "Transcript details:")?;
-            let mut remaining = 64 * 1024;
-            for run in view.runs.iter().rev().take(16).rev() {
+            let mut remaining = history::MAX_CLASSIC_HISTORY_BYTES;
+            for run in view
+                .runs
+                .iter()
+                .rev()
+                .take(history::MAX_CLASSIC_HISTORY_RUNS)
+                .rev()
+            {
                 let mut parts = Vec::new();
                 if run.assistant_message.is_none()
                     && let Some(answer) = crate::presentation::display_answer(run)
@@ -1231,7 +1265,9 @@ impl AttachedTerminal {
             if self.mode == TerminalMode::Classic && !self.transcript_open && !view.runs.is_empty()
             {
                 Some(
-                    if self.classic_pinned {
+                    if self.native.omitted_history {
+                        "More history · Ctrl+T full"
+                    } else if self.classic_pinned {
                         "Classic (--classic) · Ctrl+T details"
                     } else {
                         "Classic · Ctrl+T details · /settings"

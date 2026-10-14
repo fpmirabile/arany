@@ -555,6 +555,69 @@ async fn run_history_fixture() {
         "history_process_resume_ready_ms={}",
         resume_to_ready.as_millis()
     );
+    let screen = capture_pane(&server).expect("resumed Classic pane");
+    assert!(
+        String::from_utf8_lossy(&screen).contains("More history · Ctrl+T full"),
+        "bounded Classic projection advertises full history access"
+    );
+    assert!(
+        server
+            .run(&["send-keys", "-t", "arany-test:0.0", "C-f"])
+            .status
+            .success()
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if capture_pane(&server)
+            .is_some_and(|screen| String::from_utf8_lossy(&screen).contains("Find:"))
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "full-history find did not open");
+        thread::yield_now();
+    }
+    assert!(
+        server
+            .run(&["send-keys", "-l", "-t", "arany-test:0.0", "objective 0000",])
+            .status
+            .success()
+    );
+    assert!(
+        server
+            .run(&["send-keys", "-t", "arany-test:0.0", "Enter"])
+            .status
+            .success()
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if capture_pane(&server)
+            .is_some_and(|screen| String::from_utf8_lossy(&screen).contains("objective 0000"))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "full-history find missed omitted Run"
+        );
+        thread::yield_now();
+    }
+    assert!(
+        server
+            .run(&["send-keys", "-t", "arany-test:0.0", "Escape"])
+            .status
+            .success()
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if capture_pane(&server).is_some_and(|screen| resumed_tail_layout(&screen)) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Classic composer did not return from find"
+        );
+        thread::yield_now();
+    }
     let pane_pid = server.run(&[
         "display-message",
         "-p",

@@ -212,10 +212,18 @@ are not cold-disk evidence. Store replay timing and interactive terminal
 history/input timing are separate observations, with the latter including
 terminal work after the SessionView has been reduced.
 
-This updated fixture has not run, so lifecycle replay and all measured values
-remain unverified. Its workload does not establish the exact 10,000-Event
-boundary, the 128 MiB HotSession limit, 256 MiB shared-Store quota, near-quota
-fallback, or prior 65.5 MB text volume. The separate named-host
+The hosted run strictly replayed all 8,901 Events and sampled 100 fresh
+read-only `load_view` calls. It did not reach the resumed composer within the
+unchanged 30-second readiness gate, so the run supplies workload-scoped Store
+replay timing only; it produced no complete resume/input latency or RSS
+evidence. The old
+Classic path synchronously inserted every historical Run before drawing the
+composer. The bounded whole-Run projection now has assertions for its status
+cue and a full-history find into the omitted prefix, but the repaired hosted
+path still needs a rerun. Fresh Store instances do not clear the OS page cache,
+so these timings are not cold-disk evidence. This workload does not establish
+the exact 10,000-Event boundary, the 128 MiB HotSession limit, 256 MiB
+shared-Store quota, near-quota fallback, or prior 65.5 MB text volume. The separate named-host
 `show_replay_latency_on_named_host` gate in
 [`tests/session_run/performance.rs`](../../tests/session_run/performance.rs)
 uses a 100-Event Session. A different ignored
