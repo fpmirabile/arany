@@ -1470,19 +1470,29 @@ mod tests {
             );
             store.close().await.unwrap();
         }
-        let access = arany::WorkspacePermissions::open(&workspace)
-            .unwrap()
-            .prepare_profile_selection();
-        let choice = tokio::time::timeout(
-            Duration::from_secs(3),
-            super::super::permissions::choose(&mut terminal, access, &mut composer, false),
-        )
-        .await
-        .unwrap();
+        let choice = match arany::WorkspacePermissions::open(&workspace) {
+            Ok(access) => Some(
+                tokio::time::timeout(
+                    Duration::from_secs(3),
+                    super::super::permissions::choose(
+                        &mut terminal,
+                        access.prepare_profile_selection(),
+                        &mut composer,
+                        false,
+                    ),
+                )
+                .await
+                .unwrap(),
+            ),
+            Err(_) => None,
+        };
+        #[cfg(debug_assertions)]
         assert!(matches!(
             choice,
-            Ok(super::super::permissions::PermissionChoice::Exit)
+            Some(Ok(super::super::permissions::PermissionChoice::Exit))
         ));
+        #[cfg(not(debug_assertions))]
+        assert!(choice.is_none(), "release rejects the test account root");
         assert_eq!(
             super::super::permissions::cycle(&mut composer),
             if permissions.is_some() {

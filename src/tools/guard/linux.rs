@@ -1242,7 +1242,7 @@ mod tests {
             .iter()
             .find(|candidate| candidate.grant.kind == RuntimeKind::CargoCache)
             .unwrap();
-        let command_path = runtime_path(std::slice::from_ref(&node.grant)).unwrap();
+        let command_path = super::super::runtime_path(std::slice::from_ref(&node.grant)).unwrap();
         assert_eq!(
             command_path,
             format!(

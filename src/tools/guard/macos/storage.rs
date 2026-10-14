@@ -302,7 +302,8 @@ fn prepare_cache_links(
                 .open_dir_nofollow(name)
                 .map_err(|_| ToolError::Path)?;
         }
-        std::os::unix::fs::symlink(&grant.path, &destination).map_err(|_| ToolError::Operation)?;
+        let leaf = Path::new(relative).file_name().ok_or(ToolError::Path)?;
+        rustix::fs::symlinkat(&grant.path, &current, leaf).map_err(|_| ToolError::Operation)?;
     }
     Ok(())
 }

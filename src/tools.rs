@@ -156,12 +156,7 @@ impl ToolRuntime {
             }
         }
         for grant in &config.runtime_grants {
-            for protected in [workspace, state.path(), account.as_path()] {
-                fs::reject_overlap(&grant.path, protected)?;
-            }
-            for runtime in guard::runtime_roots() {
-                fs::reject_overlap(&grant.path, Path::new(runtime))?;
-            }
+            grant.reject_overlap(&[workspace, state.path(), account.as_path()])?;
         }
         let workspace_identity = fs::identity(&root)?;
         config.discover_skills(workspace)?;

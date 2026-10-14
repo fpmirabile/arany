@@ -140,6 +140,17 @@ impl RuntimeGrant {
         Ok(())
     }
 
+    /// Rejects a grant overlapping protected Arany roots or the Guard's system runtime.
+    pub(crate) fn reject_overlap(&self, protected: &[&Path]) -> Result<(), ToolError> {
+        for path in protected {
+            fs::reject_overlap(&self.path, path)?;
+        }
+        for runtime in super::guard::runtime_roots() {
+            fs::reject_overlap(&self.path, Path::new(runtime))?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn verify_host(&self) -> Result<(), ToolError> {
         self.validate_shape()?;
         self.verify_at(&self.path)

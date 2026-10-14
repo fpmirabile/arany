@@ -4,7 +4,7 @@ use super::toolchains::{
     Candidate, MAX_RUNTIME_GRANTS, RuntimeGrant, discover, validate_selection,
 };
 use super::types::{MAX_SNAPSHOT_BYTES, hex_digest};
-use super::{ToolError, fs, guard};
+use super::{ToolError, fs};
 use crate::store::{StateRoot, StoreError};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -265,12 +265,7 @@ impl WorkspacePermissions {
         let account = StateRoot::account_path().map_err(|_| ToolError::Configuration)?;
         let root = StateRoot::admit(&account).map_err(|_| ToolError::Configuration)?;
         for grant in &runtime_grants {
-            for protected in [self.path.as_path(), root.path(), account.as_path()] {
-                fs::reject_overlap(&grant.path, protected)?;
-            }
-            for runtime in guard::runtime_roots() {
-                fs::reject_overlap(&grant.path, Path::new(runtime))?;
-            }
+            grant.reject_overlap(&[self.path.as_path(), root.path(), account.as_path()])?;
         }
         self.save(&root, trusted, mode, runtime_grants)
     }
