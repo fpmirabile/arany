@@ -1,6 +1,6 @@
 use super::acquisition::ProductGuard;
 use super::{
-    product_child_of_executable, redacted_tail, transcript_field, tty_settings, wait_stopped,
+    redacted_tail, transcript_field, try_product_child_of_executable, tty_settings, wait_stopped,
 };
 use crate::loopback::{
     ChildGuard, check_profile_with_binary, read_request, send_response, wait_product, write_profile,
@@ -299,7 +299,8 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
         .trim()
         .parse::<u32>()
         .expect("pane PID");
-    let product_pid = product_child_of_executable(shell_pid, executable);
+    let product_pid = try_product_child_of_executable(shell_pid, executable)
+        .expect("active Arany process beneath tmux pane");
     let product_guard =
         ProductGuard::for_executable(product_pid, state.clone(), executable.to_path_buf());
     assert!(product_guard.is_owned_and_running(), "private Arany child");
@@ -1074,7 +1075,8 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
         .trim()
         .parse::<u32>()
         .expect("pane PID");
-    let product_pid = product_child_of_executable(pane_pid, &executable);
+    let product_pid = try_product_child_of_executable(pane_pid, &executable)
+        .expect("active Arany process beneath tmux pane");
     let product_guard =
         ProductGuard::for_executable(product_pid, state.clone(), executable.clone());
     assert!(product_guard.is_owned_and_running(), "private Arany child");
