@@ -10,7 +10,7 @@ use std::str::FromStr;
 
 const CACHE_USAGE: &str = "Usage: /cache clear [all]";
 const CACHE_CLEAR_FAILED: &str = "Error: private build cache could not be cleared";
-const STATE_UNAVAILABLE: &str = "state directory unavailable or unsafe";
+pub(super) const STATE_UNAVAILABLE: &str = "state directory unavailable or unsafe";
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -537,7 +537,11 @@ pub(super) async fn handle_command(
                     .await
                     {
                         Ok(forked) => forked,
-                        Err(error) => return Ok(format!("Error: {error}")),
+                        Err(error) => {
+                            return Ok(format!(
+                                "Error: Forked Session {id}, but it could not be opened: {error}"
+                            ));
+                        }
                     };
                     *session_id = id;
                     *view = forked;

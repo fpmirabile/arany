@@ -1106,8 +1106,12 @@ async fn run_selector(
             let choice = pick_session(terminal, admission, Some(&view.defaults)).await?;
             match choice {
                 PickerChoice::Selected(id) => {
-                    let root = StateRoot::open_existing(&admission.state_dir)
-                        .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+                    let Ok(root) = StateRoot::open_existing(&admission.state_dir) else {
+                        return Ok(Feedback::History(format!(
+                            "Error: {}",
+                            controls::STATE_UNAVAILABLE
+                        )));
+                    };
                     match resume_session(root, admission.workspace.clone(), id).await {
                         Ok(selected) => {
                             let selected =
