@@ -1286,6 +1286,28 @@ done
             .unwrap()
     }
 
+    #[test]
+    fn drifted_runtime_grant_is_rejected_before_command_storage() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("project");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("script"), b"#!/bin/sh\n").unwrap();
+        let runtime = snapshot_runtime(&workspace);
+        let node_path = temp.path().join("profile-home/.nvm/versions/node/v22.3.0");
+        // Keep the previous directory alive so the recreated root cannot reuse its inode.
+        std::fs::rename(&node_path, temp.path().join("previous-node")).unwrap();
+        std::fs::create_dir_all(node_path.join("bin")).unwrap();
+        let root = temp.path().join("command-root");
+        std::fs::create_dir(&root).unwrap();
+        let reactor = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let storage = reactor.block_on(prepare_command_storage(&root, &runtime));
+        assert!(matches!(storage, Err(ToolError::ChangedInput)));
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+    }
+
     fn snapshot_runtime(workspace: &Path) -> ToolRuntime {
         let directory = crate::tools::fs::open_directory(workspace).unwrap();
         let shell = "/bin/sh";
@@ -1296,6 +1318,14 @@ done
         let node = node_path.join("bin/node");
         std::fs::write(&node, b"#!/bin/sh\nprintf runtime-profile-selected\n").unwrap();
         std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Like nvm/fnm/Volta shims: a `bin` symlink whose resolved target lives outside `bin`.
+        std::fs::create_dir_all(node_path.join("lib")).unwrap();
+        let tool = node_path.join("lib/tool.sh");
+        std::fs::write(&tool, b"#!/bin/sh\nprintf runtime-tool-ran\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let tool_link = node_path.join("bin/tool");
+        let _ = std::fs::remove_file(&tool_link);
+        std::os::unix::fs::symlink("../lib/tool.sh", &tool_link).unwrap();
         let cache_path = home.join(".cargo/registry/cache");
         std::fs::create_dir_all(&cache_path).unwrap();
         std::fs::write(
@@ -2737,6 +2767,7 @@ set -eu
 /usr/bin/true
 test "$(/bin/cat "$ARANY_TOOL_INPUTS/shell/fixture.txt")" = 'pinned synthetic input'
 test "$(node)" = runtime-profile-selected
+test "$(tool)" = runtime-tool-ran
 test -r "$CARGO_HOME/registry/cache/index.marker"
 test "$npm_config_cache" = "$TMPDIR/.npm"
 test -r "$npm_config_cache/_cacache/index.marker"

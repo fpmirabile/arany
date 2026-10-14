@@ -1470,26 +1470,18 @@ mod tests {
             );
             store.close().await.unwrap();
         }
-        let choice = match arany::WorkspacePermissions::open_for_profile_selection(&workspace) {
-            Ok(access) => tokio::time::timeout(
-                Duration::from_secs(3),
-                super::super::permissions::choose(&mut terminal, access, &mut composer, false),
-            )
-            .await
-            .unwrap(),
-            Err(error) => Err(super::super::setup::SetupError::Recoverable(format!(
-                "Could not prepare folder permission choices: {error}"
-            ))),
-        };
-        #[cfg(debug_assertions)]
+        let access = arany::WorkspacePermissions::open(&workspace)
+            .unwrap()
+            .prepare_profile_selection();
+        let choice = tokio::time::timeout(
+            Duration::from_secs(3),
+            super::super::permissions::choose(&mut terminal, access, &mut composer, false),
+        )
+        .await
+        .unwrap();
         assert!(matches!(
             choice,
             Ok(super::super::permissions::PermissionChoice::Exit)
-        ));
-        #[cfg(not(debug_assertions))]
-        assert!(matches!(
-            choice,
-            Err(super::super::setup::SetupError::Recoverable(_))
         ));
         assert_eq!(
             super::super::permissions::cycle(&mut composer),

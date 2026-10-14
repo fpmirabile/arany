@@ -759,6 +759,20 @@ fn skill_text(name: &str, resource: Option<&str>, bytes: Vec<u8>) -> Result<Stri
     String::from_utf8(bytes).map_err(|_| ToolError::Operation)
 }
 
+/// Toolchain `bin` directories in grant order, then the system bins; both platforms mount toolchains at their host path.
+pub(super) fn runtime_path(runtime_grants: &[RuntimeGrant]) -> Result<String, ToolError> {
+    let mut paths = Vec::new();
+    for grant in runtime_grants
+        .iter()
+        .filter(|grant| grant.kind.is_toolchain())
+    {
+        let bin = grant.path.join("bin");
+        paths.push(bin.to_str().ok_or(ToolError::Path)?.to_owned());
+    }
+    paths.extend(["/usr/bin".into(), "/bin".into()]);
+    Ok(paths.join(":"))
+}
+
 pub(super) fn payload(
     program: &super::config::Program,
     args: &[String],
@@ -785,17 +799,7 @@ pub(super) fn payload(
     if hex_digest(&bytes) != program.sha256 {
         return Err(ToolError::ChangedInput);
     }
-    let mut path = vec!["/usr/bin".to_owned(), "/bin".to_owned()];
-    for grant in runtime_grants
-        .iter()
-        .filter(|grant| grant.kind.is_toolchain())
-    {
-        #[cfg(target_os = "linux")]
-        let runtime = grant.mounted_path()?;
-        #[cfg(target_os = "macos")]
-        let runtime = grant.path.clone();
-        path.insert(0, runtime.join("bin").to_string_lossy().into_owned());
-    }
+    let path = runtime_path(runtime_grants)?;
     let mut command = Command::new(executable);
     command
         .args(args.iter().map(|arg| {
@@ -816,7 +820,7 @@ pub(super) fn payload(
         }))
         .current_dir(workspace.join(cwd))
         .env_clear()
-        .env("PATH", path.join(":"))
+        .env("PATH", path)
         .env("HOME", &scratch)
         .env("TMPDIR", &scratch)
         .env("CARGO_HOME", scratch.join("cargo"))
@@ -923,6 +927,52 @@ mod tests {
             cwd: ".".into(),
         });
         assert!(verify_intent_runtime_grants(&file, &config).is_ok());
-        assert!(verify_intent_runtime_grants(&process, &config).is_err());
+        assert!(matches!(
+            verify_intent_runtime_grants(&process, &config),
+            Err(ToolError::ChangedInput)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drifted_runtime_grant_rejects_commands_and_keeps_file_intents() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".nvm/versions/node/v22.3.0");
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let node = root.join("bin/node");
+        std::fs::write(&node, b"synthetic node executable").unwrap();
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (device, inode) =
+            crate::tools::fs::identity(&crate::tools::fs::open_directory(&root).unwrap()).unwrap();
+        let config = config(vec![RuntimeGrant {
+            kind: super::super::toolchains::RuntimeKind::Node,
+            manager: super::super::toolchains::RuntimeManager::Nvm,
+            version: Some("v22.3.0".into()),
+            path: root.clone(),
+            device,
+            inode,
+        }]);
+        let file = intent(ToolCall::Read {
+            path: "selected.txt".into(),
+            offset: 0,
+            limit: 32,
+        });
+        let process = intent(ToolCall::Command {
+            program: "node".into(),
+            args: Vec::new(),
+            cwd: ".".into(),
+        });
+        assert!(verify_intent_runtime_grants(&process, &config).is_ok());
+
+        // Keep the old directory alive while the path is recreated, so the new inode cannot be reused.
+        std::fs::rename(&root, temp.path().join("previous-node")).unwrap();
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        assert!(matches!(
+            verify_intent_runtime_grants(&process, &config),
+            Err(ToolError::ChangedInput)
+        ));
+        assert!(verify_intent_runtime_grants(&file, &config).is_ok());
     }
 }

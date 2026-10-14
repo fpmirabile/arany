@@ -57,29 +57,26 @@ impl RuntimeKind {
         }
     }
 
-    fn cache_suffix(self) -> Option<&'static str> {
+    /// Host subtree and its path under the sandbox; Cargo's sandbox path follows the payload's `CARGO_HOME`.
+    fn cache_layout(self) -> Option<(&'static str, &'static str)> {
         match self {
-            Self::CargoCache => Some(".cargo/registry/cache"),
-            Self::CargoSource => Some(".cargo/registry/src"),
-            Self::CargoIndex => Some(".cargo/registry/index"),
-            Self::NpmCache => Some(".npm/_cacache"),
-            Self::PipHttpCache => Some(".cache/pip/http-v2"),
-            Self::PipWheelCache => Some(".cache/pip/wheels"),
+            Self::CargoCache => Some((".cargo/registry/cache", "cargo/registry/cache")),
+            Self::CargoSource => Some((".cargo/registry/src", "cargo/registry/src")),
+            Self::CargoIndex => Some((".cargo/registry/index", "cargo/registry/index")),
+            Self::NpmCache => Some((".npm/_cacache", ".npm/_cacache")),
+            Self::PipHttpCache => Some((".cache/pip/http-v2", ".cache/pip/http-v2")),
+            Self::PipWheelCache => Some((".cache/pip/wheels", ".cache/pip/wheels")),
             _ => None,
         }
     }
 
+    fn cache_suffix(self) -> Option<&'static str> {
+        self.cache_layout().map(|(host, _)| host)
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn sandbox_cache_path(self) -> Option<&'static str> {
-        match self {
-            Self::CargoCache => Some("cargo/registry/cache"),
-            Self::CargoSource => Some("cargo/registry/src"),
-            Self::CargoIndex => Some("cargo/registry/index"),
-            Self::NpmCache => Some(".npm/_cacache"),
-            Self::PipHttpCache => Some(".cache/pip/http-v2"),
-            Self::PipWheelCache => Some(".cache/pip/wheels"),
-            _ => None,
-        }
+        self.cache_layout().map(|(_, sandbox)| sandbox)
     }
 }
 

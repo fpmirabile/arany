@@ -558,7 +558,7 @@ pub(super) async fn execute_inner(
         &[]
     };
     let (runtime_directories, mounts) = runtime_mounts(runtime_grants)?;
-    let runtime_path = runtime_path(runtime_grants)?;
+    let runtime_path = super::runtime_path(runtime_grants)?;
     let workspace = crate::tools::fs::open_directory(&runtime.workspace)?;
     let (seed_path, seed_dir) =
         permit.prepare_seed(&workspace, &runtime.config, intent.call.is_process())?;
@@ -600,63 +600,7 @@ pub(super) async fn execute_inner(
             "--property=RuntimeMaxSec={}ms",
             intent.limits.runtime_ms
         ))
-        .args(BWRAP_BOOTSTRAP)
-        .args([
-            "--unshare-all",
-            "--unshare-user",
-            "--disable-userns",
-            "--assert-userns-disabled",
-            "--new-session",
-            "--die-with-parent",
-            "--cap-drop",
-            "ALL",
-            "--clearenv",
-            "--setenv",
-            "PATH",
-            &runtime_path,
-            "--setenv",
-            "HOME",
-            "/scratch",
-            "--setenv",
-            "TMPDIR",
-            "/scratch",
-            "--setenv",
-            "CARGO_TARGET_DIR",
-            "/scratch/target",
-            "--ro-bind",
-            RUNTIME_ROOT,
-            RUNTIME_ROOT,
-            "--symlink",
-            "usr/lib",
-            "/lib",
-            "--symlink",
-            "usr/lib64",
-            "/lib64",
-            "--proc",
-            "/proc",
-            "--dev",
-            "/dev",
-            "--size",
-            "67108864",
-            "--tmpfs",
-            "/scratch",
-            "--ro-bind",
-        ]);
-    command.arg(&seed_path).arg("/seed");
-    for directory in runtime_directories {
-        command.args(["--dir"]).arg(directory);
-    }
-    for (source, target) in mounts {
-        command.args(["--ro-bind"]).arg(source).arg(target);
-    }
-    for folder in ["programs", "inputs", "skills"] {
-        if seed_dir.symlink_metadata(folder).is_ok() {
-            command
-                .args(["--ro-bind"])
-                .arg(seed_path.join(folder))
-                .arg(format!("/{folder}"));
-        }
-    }
+        .args(BWRAP_BOOTSTRAP);
     let native = matches!(
         intent.call,
         ToolCall::List { .. }
@@ -667,23 +611,26 @@ pub(super) async fn execute_inner(
             | ToolCall::Mkdir { .. }
             | ToolCall::ApplyChangeset { .. }
     );
-    if native {
-        command
-            .arg(if intent.call.mutates() {
-                "--bind"
-            } else {
-                "--ro-bind"
-            })
-            .arg(&runtime.workspace)
-            .arg("/workspace");
-    } else {
-        command.args(["--size", "67108864", "--tmpfs", "/workspace"]);
+    let folders = ["programs", "inputs", "skills"]
+        .into_iter()
+        .filter(|folder| seed_dir.symlink_metadata(folder).is_ok())
+        .collect::<Vec<_>>();
+    let workspace_mount = native.then(|| (runtime.workspace.as_path(), intent.call.mutates()));
+    profile_arguments(
+        &mut command,
+        &runtime_path,
+        &seed_path,
+        &folders,
+        workspace_mount,
+        &runtime.guard_executable,
+    );
+    for directory in runtime_directories {
+        command.args(["--dir"]).arg(directory);
     }
-    command
-        .arg("--ro-bind")
-        .arg(&runtime.guard_executable)
-        .arg("/arany")
-        .args(["--chdir", "/", "/arany", "--internal-tool-guard"]);
+    for (source, target) in mounts {
+        command.args(["--ro-bind"]).arg(source).arg(target);
+    }
+    command.args(["--chdir", "/", "/arany", "--internal-tool-guard"]);
     command.stdin(Stdio::piped());
     let parent_namespaces = profile::Namespaces::read()?;
     permit.launching()?;
@@ -785,12 +732,11 @@ pub(super) async fn execute_inner(
     result
 }
 
-/// Paths the Linux profile mounts or creates itself; a toolchain may not overlap them.
-const PROFILE_MOUNT_TARGETS: [&str; 13] = [
-    "/usr",
+/// Destinations that `profile_arguments` mounts or creates; a toolchain may not overlap them.
+const PROFILE_MOUNT_TARGETS: [&str; 12] = [
+    RUNTIME_ROOT,
     "/lib",
     "/lib64",
-    "/bin",
     "/proc",
     "/dev",
     "/scratch",
@@ -847,21 +793,74 @@ fn runtime_mounts(
     Ok((directories, mounts))
 }
 
-fn runtime_path(grants: &[super::super::toolchains::RuntimeGrant]) -> Result<String, ToolError> {
-    let mut paths = grants
-        .iter()
-        .filter(|grant| grant.kind.is_toolchain())
-        .map(|grant| {
-            Ok(grant
-                .mounted_path()?
-                .join("bin")
-                .to_str()
-                .ok_or(ToolError::Path)?
-                .to_owned())
-        })
-        .collect::<Result<Vec<_>, ToolError>>()?;
-    paths.extend(["/usr/bin".into(), "/bin".into()]);
-    Ok(paths.join(":"))
+/// The fixed bwrap profile; every destination it mounts must lie under `PROFILE_MOUNT_TARGETS`.
+fn profile_arguments(
+    command: &mut Command,
+    runtime_path: &str,
+    seed_path: &Path,
+    folders: &[&str],
+    workspace: Option<(&Path, bool)>,
+    guard: &Path,
+) {
+    command.args([
+        "--unshare-all",
+        "--unshare-user",
+        "--disable-userns",
+        "--assert-userns-disabled",
+        "--new-session",
+        "--die-with-parent",
+        "--cap-drop",
+        "ALL",
+        "--clearenv",
+        "--setenv",
+        "PATH",
+        runtime_path,
+        "--setenv",
+        "HOME",
+        "/scratch",
+        "--setenv",
+        "TMPDIR",
+        "/scratch",
+        "--setenv",
+        "CARGO_TARGET_DIR",
+        "/scratch/target",
+        "--ro-bind",
+        RUNTIME_ROOT,
+        RUNTIME_ROOT,
+        "--symlink",
+        "usr/lib",
+        "/lib",
+        "--symlink",
+        "usr/lib64",
+        "/lib64",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--size",
+        "67108864",
+        "--tmpfs",
+        "/scratch",
+    ]);
+    command.args(["--ro-bind"]).arg(seed_path).arg("/seed");
+    for folder in folders {
+        command
+            .args(["--ro-bind"])
+            .arg(seed_path.join(folder))
+            .arg(format!("/{folder}"));
+    }
+    match workspace {
+        Some((path, true)) => {
+            command.args(["--bind"]).arg(path).arg("/workspace");
+        }
+        Some((path, false)) => {
+            command.args(["--ro-bind"]).arg(path).arg("/workspace");
+        }
+        None => {
+            command.args(["--size", "67108864", "--tmpfs", "/workspace"]);
+        }
+    }
+    command.args(["--ro-bind"]).arg(guard).arg("/arany");
 }
 
 pub(super) fn verify_runtime_mounts(
@@ -1097,6 +1096,54 @@ mod tests {
                 reject_profile_overlap(Path::new(target)).is_err(),
                 "{target}"
             );
+        }
+    }
+
+    fn mount_destinations(arguments: &[String]) -> Vec<String> {
+        arguments
+            .iter()
+            .enumerate()
+            .filter_map(|(index, argument)| match argument.as_str() {
+                "--ro-bind" | "--bind" | "--symlink" => arguments.get(index + 2).cloned(),
+                "--tmpfs" | "--dir" | "--proc" | "--dev" => arguments.get(index + 1).cloned(),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn profile_mount_destinations_match_reserved_targets() {
+        let folders = ["programs", "inputs", "skills"];
+        let workspace = Path::new("/host/workspace");
+        for mount in [Some((workspace, true)), Some((workspace, false)), None] {
+            let mut command = Command::new("/usr/bin/bwrap");
+            profile_arguments(
+                &mut command,
+                "/usr/bin:/bin",
+                Path::new("/host/seed"),
+                &folders,
+                mount,
+                Path::new("/host/guard"),
+            );
+            let arguments = command
+                .as_std()
+                .get_args()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            let destinations = mount_destinations(&arguments);
+            assert_eq!(
+                destinations.len(),
+                PROFILE_MOUNT_TARGETS.len(),
+                "{destinations:?}"
+            );
+            for destination in destinations {
+                assert!(
+                    PROFILE_MOUNT_TARGETS
+                        .iter()
+                        .any(|fixed| Path::new(&destination).starts_with(fixed)),
+                    "{destination}"
+                );
+            }
         }
     }
 

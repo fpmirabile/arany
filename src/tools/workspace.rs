@@ -220,10 +220,6 @@ impl WorkspacePermissions {
         }
     }
 
-    pub fn open_for_profile_selection(path: &Path) -> Result<Self, ToolError> {
-        Ok(Self::open(path)?.prepare_profile_selection())
-    }
-
     /// Discovery failure keeps the saved profiles listed and is reported with the chooser.
     pub fn prepare_profile_selection(mut self) -> Self {
         match discover_home_candidates() {

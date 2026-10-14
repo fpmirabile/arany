@@ -248,6 +248,9 @@ pub(super) async fn prepare_command_storage(
     if crate::tools::fs::identity(&workspace)? != runtime.workspace_identity {
         return Err(ToolError::ChangedInput);
     }
+    for grant in &runtime.config.runtime_grants {
+        grant.verify_host()?;
+    }
     crate::tools::fs::reject_overlap(root, &runtime.workspace)?;
     let volumes = prepare_storage(root).await?;
     prepare_cache_links(root, &volumes[1], &runtime.config.runtime_grants)?;
@@ -273,7 +276,6 @@ fn prepare_cache_links(
 
     let scratch_path = root.join("scratch");
     for grant in grants.iter().filter(|grant| grant.kind.is_cache()) {
-        grant.verify_host()?;
         crate::tools::fs::reject_overlap(&grant.path, root)?;
         let relative = grant
             .kind
@@ -284,7 +286,6 @@ fn prepare_cache_links(
             return Err(ToolError::ChangedInput);
         }
         let parent = Path::new(relative).parent().ok_or(ToolError::Path)?;
-        let leaf = Path::new(relative).file_name().ok_or(ToolError::Path)?;
         let mut current = scratch.try_clone().map_err(|_| ToolError::Path)?;
         for component in parent.components() {
             let std::path::Component::Normal(name) = component else {
@@ -301,7 +302,7 @@ fn prepare_cache_links(
                 .open_dir_nofollow(name)
                 .map_err(|_| ToolError::Path)?;
         }
-        DirExt::symlink(&current, &grant.path, leaf).map_err(|_| ToolError::Operation)?;
+        std::os::unix::fs::symlink(&grant.path, &destination).map_err(|_| ToolError::Operation)?;
     }
     Ok(())
 }

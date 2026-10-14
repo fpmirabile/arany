@@ -133,8 +133,9 @@ async fn selected_cache_canary_helper() {
     assert_eq!(user.dir, root.join("account-home"), "private passwd home");
     let account = user.dir.join(".local/state/arany");
     assert_eq!(StateRoot::account_path().unwrap(), account);
-    let mut permissions =
-        arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
+    let mut permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
     let options = permissions.runtime_profile_choices();
     let cache = options
         .iter()
@@ -148,7 +149,9 @@ async fn selected_cache_canary_helper() {
             std::slice::from_ref(&cache.token),
         )
         .unwrap();
-    let permissions = arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
+    let permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
     assert!(
         permissions
             .runtime_profile_choices()

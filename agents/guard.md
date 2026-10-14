@@ -13,8 +13,9 @@ limits and compatibility.
 - Revalidate selected runtime path/version/directory identities before Ready
   and GO for process intents. File/Skill intents carry no runtime grants in
   their enforcement fingerprint or native profile and skip runtime rechecks.
-  Linux mounts exact runtime and cache roots read-only; macOS grants exact
-  toolchain read/execute scopes and read-only cache scopes. Do not grant parent
+  Linux mounts exact runtime and cache roots read-only; macOS grants each
+  selected toolchain's whole subtree read and execute, so `bin` symlinks whose
+  targets live elsewhere resolve, and read-only cache scopes. Do not grant parent
   cache/configuration paths. Candidate identity and consent rules live in
   [runtime profile rules](./toolchains.md).
 - Linux `ro-bind` imports source submounts recursively. Start the unchanged
