@@ -386,18 +386,45 @@ fn goal_report(
                     &format!("{label} failed; its effect was not recorded as successful."),
                 ),
                 crate::tools::ToolDisposition::Uncertain
-                | crate::tools::ToolDisposition::Cancelled => push_goal_report_item(
-                    &mut report,
-                    GoalReportSection::Unresolved,
-                    &format!(
-                        "{label} has an uncertain or cancelled outcome; inspect Workspace state before retrying."
-                    ),
-                ),
+                | crate::tools::ToolDisposition::Cancelled => {
+                    let unresolved = if observation.cache_update
+                        == crate::tools::CacheUpdate::Uncertain
+                    {
+                        format!(
+                            "{label} has an uncertain build cache publication; inspect Session history before retrying."
+                        )
+                    } else {
+                        format!(
+                            "{label} has an uncertain or cancelled outcome; inspect Workspace state before retrying."
+                        )
+                    };
+                    push_goal_report_item(&mut report, GoalReportSection::Unresolved, &unresolved);
+                }
                 crate::tools::ToolDisposition::Succeeded => push_goal_report_item(
                     &mut report,
                     GoalReportSection::Unresolved,
                     &format!("{label} reported success without a valid Guard attestation."),
                 ),
+            }
+            match observation.cache_update {
+                crate::tools::CacheUpdate::Rejected => push_goal_report_item(
+                    &mut report,
+                    GoalReportSection::Unresolved,
+                    &format!(
+                        "{label} completed, but the build cache update was rejected; the previous cache was kept."
+                    ),
+                ),
+                crate::tools::CacheUpdate::Failed => push_goal_report_item(
+                    &mut report,
+                    GoalReportSection::Unresolved,
+                    &format!(
+                        "{label} completed, but the build cache update failed; the previous cache was kept."
+                    ),
+                ),
+                crate::tools::CacheUpdate::NotApplicable
+                | crate::tools::CacheUpdate::NotAttempted
+                | crate::tools::CacheUpdate::Published
+                | crate::tools::CacheUpdate::Uncertain => {}
             }
         }
     }
@@ -416,7 +443,9 @@ fn goal_report(
 mod goal_report_tests {
     use super::*;
     use crate::session::{AgentStatus, AgentView, GoalPhase, GoalView, RunStatus, ToolView};
-    use crate::tools::{EffectIntent, GuardReceipt, ToolCall, ToolDisposition, ToolLimits};
+    use crate::tools::{
+        CacheUpdate, EffectIntent, GuardReceipt, ToolCall, ToolDisposition, ToolLimits,
+    };
     use uuid::Uuid;
 
     #[test]
@@ -424,47 +453,85 @@ mod goal_report_tests {
         let session_id = SessionId::new();
         let goal_id = GoalId::new();
         let run_id = RunId::new();
-        let tools = (0..16)
-            .map(|index| {
-                let intent = EffectIntent {
-                    id: Uuid::now_v7(),
-                    run_id,
-                    agent_run_id: AgentRunId::new(),
-                    policy_digest: [1; 32],
-                    enforcement_digest: [2; 32],
-                    workspace_device: 1,
-                    workspace_inode: 2,
-                    call: ToolCall::Read {
-                        path: format!("src/{index}-{}", "x".repeat(480)),
-                        offset: 0,
-                        limit: 4096,
-                    },
-                    limits: ToolLimits::default(),
-                    expires_at_ms: 1,
-                    use_count: 1,
-                };
-                let observation = crate::tools::ToolObservation {
-                    guard: Some(GuardReceipt {
-                        contract_version: 1,
-                        intent_digest: intent.digest(),
-                        enforcement_digest: intent.enforcement_digest,
-                        limits: intent.limits.clone(),
-                    }),
-                    intent: intent.clone(),
-                    disposition: ToolDisposition::Succeeded,
-                    output: serde_json::json!({
-                        "sha256": crate::tools::types::hex_digest(b"evidence")
-                    })
-                    .to_string(),
-                    cache_update: crate::tools::CacheUpdate::NotApplicable,
-                };
-                ToolView {
-                    intent,
-                    observation: Some(observation),
-                    review_call_index: None,
-                }
+        let command_intent = EffectIntent {
+            id: Uuid::now_v7(),
+            run_id,
+            agent_run_id: AgentRunId::new(),
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call: ToolCall::Command {
+                program: "cargo".into(),
+                args: vec!["check".into()],
+                cwd: ".".into(),
+            },
+            limits: ToolLimits::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        };
+        let command_observation = crate::tools::ToolObservation {
+            guard: Some(GuardReceipt {
+                contract_version: 1,
+                intent_digest: command_intent.digest(),
+                enforcement_digest: command_intent.enforcement_digest,
+                limits: command_intent.limits.clone(),
+            }),
+            intent: command_intent.clone(),
+            disposition: ToolDisposition::Succeeded,
+            output: serde_json::json!({
+                "exit_code": 0,
+                "stdout": "",
+                "stderr": "",
+                "changeset": {"files": []}
             })
-            .collect();
+            .to_string(),
+            cache_update: CacheUpdate::Failed,
+        };
+        let mut tools = vec![ToolView {
+            intent: command_intent,
+            observation: Some(command_observation),
+            review_call_index: None,
+        }];
+        tools.extend((0..16).map(|index| {
+            let intent = EffectIntent {
+                id: Uuid::now_v7(),
+                run_id,
+                agent_run_id: AgentRunId::new(),
+                policy_digest: [1; 32],
+                enforcement_digest: [2; 32],
+                workspace_device: 1,
+                workspace_inode: 2,
+                call: ToolCall::Read {
+                    path: format!("src/{index}-{}", "x".repeat(480)),
+                    offset: 0,
+                    limit: 4096,
+                },
+                limits: ToolLimits::default(),
+                expires_at_ms: 1,
+                use_count: 1,
+            };
+            let observation = crate::tools::ToolObservation {
+                guard: Some(GuardReceipt {
+                    contract_version: 1,
+                    intent_digest: intent.digest(),
+                    enforcement_digest: intent.enforcement_digest,
+                    limits: intent.limits.clone(),
+                }),
+                intent: intent.clone(),
+                disposition: ToolDisposition::Succeeded,
+                output: serde_json::json!({
+                    "sha256": crate::tools::types::hex_digest(b"evidence")
+                })
+                .to_string(),
+                cache_update: crate::tools::CacheUpdate::NotApplicable,
+            };
+            ToolView {
+                intent,
+                observation: Some(observation),
+                review_call_index: None,
+            }
+        }));
         let run = RunView {
             id: run_id,
             objective: "Report bounded evidence".into(),
@@ -529,11 +596,21 @@ mod goal_report_tests {
         };
 
         let report = goal_report(&view, &run, &goal);
-        assert!(report.evidence.len() < 16, "report retains its byte bound");
+        assert!(report.evidence.len() < 17, "report retains its byte bound");
         assert!(
             report.evidence.len() > 1,
             "report keeps canonical tool evidence"
         );
+        assert!(
+            report
+                .evidence
+                .iter()
+                .any(|item| item == "Command cargo exited 0."),
+            "successful Command evidence survives a cache update failure"
+        );
+        assert!(report.unresolved.iter().any(|item| {
+            item.contains("build cache update failed") && item.contains("previous cache was kept")
+        }));
         assert!(
             report
                 .unresolved

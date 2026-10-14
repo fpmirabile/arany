@@ -174,89 +174,97 @@ impl Provider for Journey {
             |call| {
                 let plan_contract = (step == 0 && !matches!(call, ToolCall::McpList { .. }))
                     .then(|| {
-                        let mut paths: Vec<_> = catalog["workspace_paths"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|path| path.as_str().map(str::to_owned))
-                            .collect();
-                        paths.sort();
-                        paths.dedup();
-                        let mut commands: Vec<_> = self
-                            .calls
-                            .iter()
-                            .filter_map(|call| match call {
-                                ToolCall::Command { program, .. } => Some(program.clone()),
-                                _ => None,
-                            })
-                            .collect();
-                        commands.sort();
-                        commands.dedup();
-                        let mut mcp_tools: Vec<_> = self
-                            .calls
-                            .iter()
-                            .filter_map(|call| match call {
-                                ToolCall::McpCall { server, tool, .. } => {
-                                    Some(arany::GoalMcpTool {
-                                        server: server.clone(),
-                                        tool: tool.clone(),
-                                    })
-                                }
-                                _ => None,
-                            })
-                            .collect();
-                        mcp_tools.sort_by(|left, right| {
-                            (&left.server, &left.tool).cmp(&(&right.server, &right.tool))
-                        });
-                        mcp_tools.dedup();
-                        let mut skills: Vec<_> = self
-                            .calls
-                            .iter()
-                            .filter_map(|call| match call {
-                                ToolCall::Skill { name, resource } => {
-                                    Some(arany::GoalSkillBinding {
-                                        name: name.clone(),
-                                        resource: if resource.as_deref() == Some("SKILL.md") {
-                                            None
-                                        } else {
-                                            resource.clone()
-                                        },
-                                    })
-                                }
-                                _ => None,
-                            })
-                            .collect();
-                        skills.sort_by(|left, right| {
-                            (&left.name, left.resource.as_deref().unwrap_or("SKILL.md")).cmp(&(
-                                &right.name,
-                                right.resource.as_deref().unwrap_or("SKILL.md"),
-                            ))
-                        });
-                        skills.dedup();
                         let success_call = self
                             .calls
                             .iter()
                             .find(|candidate| {
                                 matches!(
                                     candidate,
-                                    ToolCall::Skill { name, resource: None }
-                                        if name.as_str() == "synthetic"
+                                    ToolCall::Command { .. }
+                                        | ToolCall::Write { .. }
+                                        | ToolCall::Edit { .. }
+                                        | ToolCall::Mkdir { .. }
+                                        | ToolCall::Skill { .. }
+                                        | ToolCall::McpCall { .. }
                                 )
                             })
-                            .expect("journey declares its exact synthetic Skill receipt");
-                        let success_criterion = arany::GoalSuccessCriterion::ToolCallSucceeded {
-                            call: Box::new(success_call.clone()),
-                        };
-                        arany::GoalPlanContract {
-                            mission: "Complete the bounded native Tool journey".into(),
-                            paths,
-                            commands,
-                            skills,
-                            mcp_tools,
-                            success_criterion,
-                            budget: arany::GoalBudget::default(),
-                        }
+                            .cloned();
+                        success_call.map(|success_call| {
+                            let mut paths: Vec<_> = catalog["workspace_paths"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|path| path.as_str().map(str::to_owned))
+                                .collect();
+                            paths.sort();
+                            paths.dedup();
+                            let mut commands: Vec<_> = self
+                                .calls
+                                .iter()
+                                .filter_map(|call| match call {
+                                    ToolCall::Command { program, .. } => Some(program.clone()),
+                                    _ => None,
+                                })
+                                .collect();
+                            commands.sort();
+                            commands.dedup();
+                            let mut mcp_tools: Vec<_> = self
+                                .calls
+                                .iter()
+                                .filter_map(|call| match call {
+                                    ToolCall::McpCall { server, tool, .. } => {
+                                        Some(arany::GoalMcpTool {
+                                            server: server.clone(),
+                                            tool: tool.clone(),
+                                        })
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            mcp_tools.sort_by(|left, right| {
+                                (&left.server, &left.tool).cmp(&(&right.server, &right.tool))
+                            });
+                            mcp_tools.dedup();
+                            let mut skills: Vec<_> = self
+                                .calls
+                                .iter()
+                                .filter_map(|call| match call {
+                                    ToolCall::Skill { name, resource } => {
+                                        Some(arany::GoalSkillBinding {
+                                            name: name.clone(),
+                                            resource: if resource.as_deref() == Some("SKILL.md") {
+                                                None
+                                            } else {
+                                                resource.clone()
+                                            },
+                                        })
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            skills.sort_by(|left, right| {
+                                (&left.name, left.resource.as_deref().unwrap_or("SKILL.md")).cmp(&(
+                                    &right.name,
+                                    right.resource.as_deref().unwrap_or("SKILL.md"),
+                                ))
+                            });
+                            skills.dedup();
+                            let success_criterion =
+                                arany::GoalSuccessCriterion::ToolCallSucceeded {
+                                    call: Box::new(success_call),
+                                };
+                            arany::GoalPlanContract {
+                                mission: "Complete the bounded native Tool journey".into(),
+                                paths,
+                                commands,
+                                skills,
+                                mcp_tools,
+                                success_criterion,
+                                budget: arany::GoalBudget::default(),
+                            }
+                        })
                     })
+                    .flatten()
                     .map(Box::new);
                 ProviderOutcome::Tool {
                     call,
@@ -1278,6 +1286,23 @@ async fn native_runtime_mount_journey_helper() {
         replay.runs[0] == accepted.run,
         "closed cache replay differs"
     );
+    let goal = replay.goals.first().expect("replayed Goal");
+    assert_eq!(goal.status, arany::GoalStatus::Completed);
+    let report = goal.report.as_ref().expect("durable Goal report");
+    assert!(
+        report
+            .evidence
+            .iter()
+            .any(|item| item == "Command sh exited 0."),
+        "successful Command evidence remains in the Goal report: {report:?}"
+    );
+    assert!(
+        report.unresolved.iter().any(|item| {
+            item.contains("build cache update was rejected")
+                && item.contains("previous cache was kept")
+        }),
+        "cache rejection is recorded as unresolved: {report:?}"
+    );
     let finished = events
         .iter()
         .filter_map(|event| match &event.event {
@@ -1580,19 +1605,21 @@ int main(void) {
             if attested { 2 } else { 1 },
             "no automatic retry: {case}"
         );
+        let expected_run_status = match case {
+            "cancelled" => RunStatus::Cancelled,
+            "mcp-version" => RunStatus::Finished,
+            _ => RunStatus::Failed,
+        };
         assert_eq!(
-            outcome.run.status,
-            if case == "cancelled" {
-                RunStatus::Cancelled
-            } else if attested {
-                RunStatus::Finished
-            } else {
-                RunStatus::Failed
-            },
+            outcome.run.status, expected_run_status,
             "{case}: {:?}",
             outcome.run.tools
         );
-        assert_eq!(outcome.run.assistant_message.is_some(), attested);
+        assert_eq!(
+            outcome.run.assistant_message.is_some(),
+            case == "mcp-version",
+            "{case} assistant answer"
+        );
         assert!(!workspace.join("src/approval-output.txt").exists());
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
         let events = store.load_session(outcome.session_id).await.unwrap();
@@ -1601,6 +1628,74 @@ int main(void) {
             .unwrap()
             .unwrap();
         assert_eq!(replay.runs[0], outcome.run, "closed replay: {case}");
+        assert_eq!(
+            replay.goals[0].status,
+            match case {
+                "cancelled" => arany::GoalStatus::Cancelled,
+                "mcp-version" => arany::GoalStatus::Completed,
+                _ => arany::GoalStatus::Failed,
+            },
+            "closed Goal replay: {case}"
+        );
+        if case == "overflow" {
+            let contract = replay.goals[0]
+                .plan_contract
+                .as_ref()
+                .expect("overflow command has a plan");
+            assert!(matches!(
+                &contract.success_criterion,
+                arany::GoalSuccessCriterion::ToolCallSucceeded { call: planned }
+                    if **planned == call
+            ));
+            assert!(
+                replay.goals[0]
+                    .report
+                    .as_ref()
+                    .unwrap()
+                    .unresolved
+                    .iter()
+                    .any(|item| item.contains("Command shell failed"))
+            );
+        }
+        if case == "mcp-version" {
+            assert!(
+                replay.goals[0].plan_contract.is_none(),
+                "MCP catalog inspection stays in the planless prelude"
+            );
+            assert!(
+                replay.goals[0]
+                    .report
+                    .as_ref()
+                    .unwrap()
+                    .unresolved
+                    .iter()
+                    .any(|item| item.contains("MCP catalog synthetic failed"))
+            );
+        }
+        if case == "receipt-loss" {
+            assert_eq!(
+                replay.runs[0].tools[0]
+                    .observation
+                    .as_ref()
+                    .unwrap()
+                    .cache_update,
+                arany::CacheUpdate::Uncertain,
+                "selected cache update remains uncertain"
+            );
+            let unresolved = &replay.goals[0].report.as_ref().unwrap().unresolved;
+            assert!(
+                unresolved
+                    .iter()
+                    .any(|item| item.contains("uncertain build cache publication")),
+                "cache uncertainty is durable in the Goal report: {unresolved:?}"
+            );
+            assert!(
+                unresolved
+                    .iter()
+                    .all(|item| !item.contains("inspect Workspace state")),
+                "cache uncertainty does not misdirect recovery to Workspace state"
+            );
+        }
         let observation = replay.runs[0].tools[0].observation.as_ref().unwrap();
         assert_eq!(
             observation.disposition,
