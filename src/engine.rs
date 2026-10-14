@@ -1078,7 +1078,6 @@ mod goal_workspace_lease_tests {
             Some(workspace_lock),
         );
         let mut admission = Box::pin(engine.append_goal_lifecycle(
-            goal_id,
             session_id,
             None,
             Event::GoalStarted {
@@ -1181,6 +1180,158 @@ mod goal_workspace_lease_tests {
             Err(EngineError::GoalAdmissionUncertain) => {}
             Err(error) => panic!("a possibly committed link must be uncertain, not {error}"),
             Ok(_) => panic!("Run completed without an acknowledged link"),
+        }
+        engine.close().await.expect("close Engine");
+    }
+
+    const RESUMABLE_OBJECTIVE: &str = "Resume the paused Goal after a failed append";
+
+    async fn paused_goal_session(
+        engine: &mut Engine<NeverProvider>,
+        workspace: &std::path::Path,
+    ) -> (SessionId, GoalId) {
+        let session_id = SessionId::new();
+        let goal_id = GoalId::new();
+        let workspace_identity = crate::tools::workspace_identity(workspace).expect("identity");
+        engine
+            .store
+            .append(
+                session_id,
+                Event::SessionStarted {
+                    title: "Resumable Goal".into(),
+                    workspace_identity,
+                },
+            )
+            .await
+            .expect("Session start");
+        engine
+            .store
+            .append(
+                session_id,
+                Event::GoalStarted {
+                    goal_id,
+                    objective: RESUMABLE_OBJECTIVE.into(),
+                    workspace_identity,
+                    budget: GoalBudget::default(),
+                    phase: GoalPhase::Implementation,
+                    autonomous: false,
+                },
+            )
+            .await
+            .expect("Goal start");
+        (session_id, goal_id)
+    }
+
+    fn resume_request(
+        session_id: SessionId,
+        goal_id: GoalId,
+        workspace: &std::path::Path,
+    ) -> RunRequest {
+        RunRequest {
+            session_id: Some(session_id),
+            title: None,
+            objective: RESUMABLE_OBJECTIVE.into(),
+            images: Vec::new(),
+            workspace: workspace.to_path_buf(),
+            include_paths: Vec::new(),
+            policy: CollaborationPolicy::Single,
+            goal: GoalRequest {
+                id: Some(goal_id),
+                phase: None,
+                budget: None,
+                finish_after_run: true,
+                autonomous: false,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn goal_resume_failure_before_commit_is_store_error() {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let state = StateRoot::admit(&temp.path().join("state")).expect("private State root");
+        let mut engine = Engine::open(state, NeverProvider).expect("Engine");
+        let (session_id, goal_id) = paused_goal_session(&mut engine, &workspace).await;
+        engine
+            .store
+            .fail_next_goal_append(session_id, |event| {
+                matches!(event, Event::GoalResumed { .. })
+            })
+            .await
+            .expect("install append failure");
+        match engine
+            .run(resume_request(session_id, goal_id, &workspace))
+            .await
+        {
+            Err(EngineError::Store(_)) => {}
+            Err(error) => panic!("an uncommitted resume must report its Store error, not {error}"),
+            Ok(_) => panic!("Run resumed without a committed GoalResumed"),
+        }
+        let events = engine
+            .store
+            .load_session(session_id)
+            .await
+            .expect("canonical Events");
+        assert_eq!(events.len(), 2, "GoalResumed did not commit");
+        engine.close().await.expect("close Engine");
+    }
+
+    #[tokio::test]
+    async fn lost_goal_resume_acknowledgment_is_admission_uncertain() {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let state = StateRoot::admit(&temp.path().join("state")).expect("private State root");
+        let mut engine = Engine::open(state, NeverProvider).expect("Engine");
+        let (session_id, goal_id) = paused_goal_session(&mut engine, &workspace).await;
+        let (resume_entered, release_resume) = engine
+            .store
+            .gate_goal_append_acknowledgment(session_id, |event| {
+                matches!(event, Event::GoalResumed { .. })
+            })
+            .await
+            .expect("install acknowledgment gate");
+        let mut run = Box::pin(engine.run(resume_request(session_id, goal_id, &workspace)));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                result = &mut run => panic!("Run returned before its resume was held: {}", result.is_ok()),
+                result = resume_entered => result.expect("resume reached the acknowledgment gate"),
+            }
+        })
+        .await
+        .expect("resume acknowledgment gate");
+        drop(release_resume);
+        match run.await {
+            Err(EngineError::GoalAdmissionUncertain) => {}
+            Err(error) => panic!("a possibly committed resume must be uncertain, not {error}"),
+            Ok(_) => panic!("Run completed without an acknowledged resume"),
+        }
+        engine.close().await.expect("close Engine");
+    }
+
+    #[tokio::test]
+    async fn goal_run_link_failure_before_commit_is_store_error() {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let state = StateRoot::admit(&temp.path().join("state")).expect("private State root");
+        let mut engine = Engine::open(state, NeverProvider).expect("Engine");
+        let (session_id, goal_id) = paused_goal_session(&mut engine, &workspace).await;
+        engine
+            .store
+            .fail_next_goal_append(session_id, |event| {
+                matches!(event, Event::GoalRunLinked { .. })
+            })
+            .await
+            .expect("install append failure");
+        match engine
+            .run(resume_request(session_id, goal_id, &workspace))
+            .await
+        {
+            Err(EngineError::Store(_)) => {}
+            Err(error) => panic!("an uncommitted link must report its Store error, not {error}"),
+            Ok(_) => panic!("Run completed without a committed link"),
         }
         engine.close().await.expect("close Engine");
     }
@@ -1543,16 +1694,19 @@ impl<P: Provider + 'static> Engine<P> {
 
     async fn append_goal_lifecycle(
         &mut self,
-        goal_id: GoalId,
         session_id: SessionId,
         progress: Option<&ProgressPublisher>,
         event: Event,
     ) -> Result<u64, EngineError> {
-        match append_observed(&self.store, progress, None, session_id, event).await {
+        match append_observed(&self.store, progress, None, session_id, event.clone()).await {
             Ok(sequence) => Ok(sequence),
-            // A committed Goal is paused from here on; the failed call drops its lease either way.
-            Err(error) => match self.store.load_view(session_id).await {
-                Ok(Some(view)) if view.goal(goal_id).is_some() => {
+            // The Session lock is held, so a commit that lost its acknowledgment is the last Event.
+            Err(error) => match self.store.load_session(session_id).await {
+                Ok(events)
+                    if events
+                        .last()
+                        .is_some_and(|envelope| envelope.event == event) =>
+                {
                     Err(EngineError::GoalAdmissionUncertain)
                 }
                 Ok(_) => Err(error),
@@ -1945,7 +2099,6 @@ impl<P: Provider + 'static> Engine<P> {
         if goal.is_new {
             let sequence = self
                 .append_goal_lifecycle(
-                    goal.id,
                     session_id,
                     publisher.as_ref(),
                     Event::GoalStarted {
@@ -1962,7 +2115,6 @@ impl<P: Provider + 'static> Engine<P> {
         } else if goal.resume {
             let sequence = self
                 .append_goal_lifecycle(
-                    goal.id,
                     session_id,
                     publisher.as_ref(),
                     Event::GoalResumed { goal_id: goal.id },
@@ -1976,7 +2128,6 @@ impl<P: Provider + 'static> Engine<P> {
         // A link is an admission acknowledgment: a lost acknowledgment may still have committed it.
         let linked_sequence = self
             .append_goal_lifecycle(
-                goal.id,
                 session_id,
                 publisher.as_ref(),
                 Event::GoalRunLinked {

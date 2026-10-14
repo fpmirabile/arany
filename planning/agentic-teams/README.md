@@ -37,7 +37,8 @@ the user-owned checks in [next steps](../../NEXT_STEPS.md).
 ## Terms
 
 - **Goal.** A durable, Engine-owned unit of user intent that spans one or more
-  Runs and ends Completed, Failed or Cancelled with a final report (E11).
+  Runs and ends Completed or Failed with a final report (E11). Cancellation
+  (Ctrl+C) pauses it as Interrupted until `/goal resume`.
 - **RPI.** Research → Plan → Implementation, the default mode (B6).
 - **Plan contract.** An agent's declared scope (paths, command names), success
   criterion and budget; the anchor for every Supervisor signal (B1).
@@ -267,7 +268,8 @@ a research note verifies its API from primary sources.
        recommendation; answers are journaled Goal facts.
      - A Goal ends Completed when the Finish gate passes and a final report
        (changes, evidence, unresolved items) is committed; otherwise it ends
-       Failed or Cancelled with the same report.
+       Failed with the same report. Cancellation (Ctrl+C) pauses it as
+       Interrupted until `/goal resume`.
      - After a crash or restart, an unfinished Goal resumes at its last phase
        or Run boundary only through an explicit user action: `/goal resume` or
        `--resume-goal`, with no further confirmation prompt in the Foundation
@@ -582,8 +584,9 @@ data-dependent questions remain:
 - A team of a primary and writable workers completes a scripted coding task
   (edit, format, build, test, integrate) on Linux and macOS with closed replay.
 - An RPI Goal runs Research → Plan (with grilling) → approved multi-Run
-  Implementation to Completed, and to Failed/Cancelled with a final report;
-  restart resumes only through the explicit user action in the Goal contract.
+  Implementation to Completed, and to Failed with a final report; Ctrl+C
+  pauses it until `/goal resume`, and restart resumes only through the
+  explicit user action in the Goal contract.
 - One Goal mixes at least two Providers across roles; an unadmittable or
   failing profile names itself, pauses its agents or switches to the enabled
   fallback, without re-dispatching uncertain effects.

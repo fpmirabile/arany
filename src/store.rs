@@ -149,6 +149,12 @@ enum Request {
         release: std::sync::mpsc::Receiver<()>,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
+    #[cfg(test)]
+    FailGoalAppend {
+        session_id: SessionId,
+        admits: fn(&Event) -> bool,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
     Load {
         session_id: SessionId,
         reply: oneshot::Sender<Result<Vec<EventEnvelope>, StoreError>>,
@@ -254,6 +260,8 @@ impl Store {
                     oneshot::Sender<()>,
                     std::sync::mpsc::Receiver<()>,
                 )>;
+                #[cfg(test)]
+                let mut goal_append_failure = None::<(SessionId, fn(&Event) -> bool)>;
                 while let Some(request) = receiver.blocking_recv() {
                     match request {
                         Request::AdmitOperation {
@@ -273,6 +281,17 @@ impl Store {
                             event,
                             reply,
                         } => {
+                            #[cfg(test)]
+                            if goal_append_failure
+                                .as_ref()
+                                .is_some_and(|(failing, admits)| {
+                                    *failing == session_id && admits(event.as_ref())
+                                })
+                            {
+                                goal_append_failure = None;
+                                let _ = reply.send(Err(StoreError::Closed));
+                                continue;
+                            }
                             let result = if read_only {
                                 Err(StoreError::ReadOnly)
                             } else if matches!(event.as_ref(), Event::SessionForked { .. }) {
@@ -314,6 +333,15 @@ impl Store {
                             reply,
                         } => {
                             goal_append_ack_gate = Some((session_id, admits, entered, release));
+                            let _ = reply.send(Ok(()));
+                        }
+                        #[cfg(test)]
+                        Request::FailGoalAppend {
+                            session_id,
+                            admits,
+                            reply,
+                        } => {
+                            goal_append_failure = Some((session_id, admits));
                             let _ = reply.send(Ok(()));
                         }
                         Request::Load { session_id, reply } => {
@@ -431,6 +459,21 @@ impl Store {
         self.call(|reply| Request::Append {
             session_id,
             event: Box::new(event),
+            reply,
+        })
+        .await
+    }
+
+    /// Fails the next Event that `admits` accepts before it commits.
+    #[cfg(test)]
+    pub(crate) async fn fail_next_goal_append(
+        &self,
+        session_id: SessionId,
+        admits: fn(&Event) -> bool,
+    ) -> Result<(), StoreError> {
+        self.call(|reply| Request::FailGoalAppend {
+            session_id,
+            admits,
             reply,
         })
         .await
