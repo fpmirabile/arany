@@ -1498,7 +1498,6 @@ async fn plain_prompt_is_one_run_even_when_its_criterion_is_unsatisfied() {
 /// Action taken once a Run's Finish is committed and observed through progress.
 enum AfterFinish {
     Cancel(RunCancellation),
-    AdvanceClock(Duration),
 }
 
 /// Drives an admitted Run and applies `after` as soon as its Finished Run becomes visible.
@@ -1509,7 +1508,6 @@ async fn run_observing_finish(
 ) -> Result<arany::RunOutcome, EngineError> {
     let cancellation = match &after {
         AfterFinish::Cancel(cancellation) => cancellation.clone(),
-        AfterFinish::AdvanceClock(_) => RunCancellation::new(),
     };
     let progress = RunProgress::new();
     let mut observer = progress.clone();
@@ -1525,7 +1523,6 @@ async fn run_observing_finish(
                         AfterFinish::Cancel(cancellation) => {
                             cancellation.cancel();
                         }
-                        AfterFinish::AdvanceClock(duration) => tokio::time::advance(duration).await,
                     }
                 }
             }
@@ -1580,17 +1577,9 @@ async fn autonomous_goal_cancelled_after_a_finished_run_keeps_that_outcome_and_s
     );
 }
 
-/// The Finished Run stays committed and the stop names the exhausted Goal budget.
-fn stopped_by_budget(result: &Result<arany::RunOutcome, EngineError>) -> bool {
-    matches!(
-        result,
-        Err(EngineError::StoppedAfterRun { reason, .. })
-            if matches!(**reason, EngineError::GoalBudgetExhausted)
-    )
-}
-
+/// A Finish whose call spends the Goal's active budget is refused; its Run fails and the Goal closes with a report.
 #[tokio::test]
-async fn autonomous_goal_active_time_spent_after_a_finish_fails_the_goal_with_its_report() {
+async fn autonomous_goal_active_time_spent_by_a_finish_fails_the_goal_with_its_report() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
@@ -1608,8 +1597,8 @@ async fn autonomous_goal_active_time_spent_after_a_finish_fails_the_goal_with_it
         finish_with("first pass"),
         finish_with("never requested"),
     ])
-    // Paused before the Finish, not before the Read Tool: Guard I/O under a paused clock auto-advances its timeouts.
-    .with_before_call(1, || tokio::time::pause());
+    // Advanced in the Finish call, after the Read Tool's Guard I/O (a paused clock would auto-advance that I/O's timeouts).
+    .with_clock_advance_before_call(1, Duration::from_secs(60));
     let requests = Arc::clone(&provider.requests);
     let mut engine = facts_engine(
         StateRoot::admit(&state_path).expect("state"),
@@ -1618,16 +1607,10 @@ async fn autonomous_goal_active_time_spent_after_a_finish_fails_the_goal_with_it
     );
     let mut input = autonomous_input(&workspace);
     input.goal = arany::GoalRequest::autonomous(budget, arany::GoalPhase::Implementation);
-    // Terminal-fact recording after the Finish check spends the whole active budget.
-    let result = run_observing_finish(
-        &mut engine,
-        input,
-        AfterFinish::AdvanceClock(Duration::from_secs(60)),
-    )
-    .await;
+    let result = engine.run_with_cancel(input, RunCancellation::new()).await;
     assert!(
-        stopped_by_budget(&result),
-        "the refused continuation reports the Goal failure: {:?}",
+        matches!(&result, Ok(outcome) if outcome.run.status == RunStatus::Failed),
+        "the exhausted Finish fails its Run: {:?}",
         result.as_ref().map(|outcome| outcome.run.status)
     );
     assert_eq!(
@@ -1768,8 +1751,8 @@ async fn exhausted_autonomous_segment_exports_its_failed_status() {
         finish_with("first pass"),
         finish_with("never requested"),
     ])
-    // Paused before the Finish, not before the Read Tool: Guard I/O under a paused clock auto-advances its timeouts.
-    .with_before_call(1, || tokio::time::pause());
+    // Advanced in the Finish call, after the Read Tool's Guard I/O (a paused clock would auto-advance that I/O's timeouts).
+    .with_clock_advance_before_call(1, Duration::from_secs(60));
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Collector listener");
     let endpoint = format!(
         "http://{}",
@@ -1786,16 +1769,10 @@ async fn exhausted_autonomous_segment_exports_its_failed_status() {
     );
     let mut input = autonomous_input(&workspace);
     input.goal = arany::GoalRequest::autonomous(budget, arany::GoalPhase::Implementation);
-    // Active time spent after the Finish exhausts the Goal before its segment span closes.
-    let result = run_observing_finish(
-        &mut engine,
-        input,
-        AfterFinish::AdvanceClock(Duration::from_secs(60)),
-    )
-    .await;
+    let result = engine.run_with_cancel(input, RunCancellation::new()).await;
     assert!(
-        stopped_by_budget(&result),
-        "the exhausted Goal reports its refusal: {:?}",
+        matches!(&result, Ok(outcome) if outcome.run.status == RunStatus::Failed),
+        "the exhausted Finish fails its Run: {:?}",
         result.as_ref().map(|outcome| outcome.run.status)
     );
     engine.close().await.expect("engine shutdown");

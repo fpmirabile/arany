@@ -386,7 +386,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
                 arany::Event::GoalRunLinked {
                     goal_id,
                     run_id,
-                    phase: arany::GoalPhase::Research,
+                    phase: arany::GoalPhase::Implementation,
                 },
             )
             .await

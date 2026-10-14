@@ -43,6 +43,7 @@ struct ScriptedProvider {
     responses: Mutex<VecDeque<Result<ProviderOutcome, ProviderError>>>,
     cancel_at_completion: Option<(AgentPhase, RunCancellation)>,
     before_call: Option<(usize, Box<dyn Fn() + Send + Sync>)>,
+    clock_advance: Option<(usize, Duration)>,
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
     compact_responses: Mutex<VecDeque<Result<CompactionResponse, ProviderError>>>,
     compact_requests: Arc<Mutex<Vec<CompactionRequest>>>,
@@ -61,6 +62,7 @@ impl ScriptedProvider {
             responses: Mutex::new(responses.into_iter().map(Ok).collect()),
             cancel_at_completion: None,
             before_call: None,
+            clock_advance: None,
             requests: Arc::new(Mutex::new(Vec::new())),
             compact_responses: Mutex::new(VecDeque::new()),
             compact_requests: Arc::new(Mutex::new(Vec::new())),
@@ -70,6 +72,12 @@ impl ScriptedProvider {
     /// Runs `hook` when the zero-based provider call `index` is invoked, before its response is returned.
     fn with_before_call(mut self, index: usize, hook: impl Fn() + Send + Sync + 'static) -> Self {
         self.before_call = Some((index, Box::new(hook)));
+        self
+    }
+
+    /// Pauses Tokio time and advances it by `duration` while the zero-based provider call `index` is still in flight.
+    fn with_clock_advance_before_call(mut self, index: usize, duration: Duration) -> Self {
+        self.clock_advance = Some((index, duration));
         self
     }
 
@@ -152,6 +160,12 @@ impl Provider for ScriptedProvider {
             && *target == index
         {
             hook();
+        }
+        if let Some((target, duration)) = &self.clock_advance
+            && *target == index
+        {
+            tokio::time::pause();
+            tokio::time::advance(*duration).await;
         }
         let outcome = self
             .responses
