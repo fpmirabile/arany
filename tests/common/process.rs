@@ -1,5 +1,5 @@
 use std::{
-    io::{self, Read},
+    io::{self, Read, Write},
     os::fd::AsFd,
     process::{Child, Command, Output, Stdio},
     sync::Mutex,
@@ -18,6 +18,33 @@ pub const CONFIG_CONSENT_PROMPT: &str = concat!(
     "Type trust [profile numbers], trust none, or config; bare trust ",
     "preserves selected profiles. Ctrl+C exits:"
 );
+
+pub fn annotate_native_fixture(message: &str) {
+    const PREFIX: &str = "::error title=Arany native fixture::";
+    const MAX_LINE_BYTES: usize = 2048;
+    let mut annotation = String::from(PREFIX);
+    for character in message.chars() {
+        let escaped = match character {
+            '%' => "%25",
+            '\r' => "%0D",
+            '\n' => "%0A",
+            character if character.is_control() => "?",
+            character => {
+                if annotation.len() + character.len_utf8() + 1 > MAX_LINE_BYTES {
+                    break;
+                }
+                annotation.push(character);
+                continue;
+            }
+        };
+        if annotation.len() + escaped.len() + 1 > MAX_LINE_BYTES {
+            break;
+        }
+        annotation.push_str(escaped);
+    }
+    annotation.push('\n');
+    let _ = io::stderr().lock().write_all(annotation.as_bytes());
+}
 
 pub trait BoundedOutput {
     fn bounded_output(&mut self) -> io::Result<Output>;

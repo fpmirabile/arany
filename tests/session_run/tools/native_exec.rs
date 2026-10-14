@@ -19,8 +19,32 @@ fn cache_progress(stage: &str) {
 }
 
 fn exec_failure_summary(output: &std::process::Output, provider_finished: bool) -> String {
-    let mut event_kinds = Vec::new();
+    const PHASES: &[&str] = &["root_plan", "tool_review", "child_work", "root_synthesis"];
+    const DISPOSITIONS: &[&str] = &[
+        "finished",
+        "delegated",
+        "tool_requested",
+        "unavailable",
+        "rejected",
+        "invalid_response",
+        "output_limit",
+        "timed_out",
+        "cancelled",
+        "task_panic",
+    ];
+    const FAILURE_REASONS: &[&str] = &[
+        "account_access",
+        "usage_limit",
+        "usage_temporarily_unavailable",
+        "service_unavailable",
+        "stream_protocol",
+        "response_contract",
+        "outcome_contract",
+        "local_output_limit",
+    ];
+    const RUN_STATUSES: &[&str] = &["finished", "failed", "cancelled"];
     let mut provider_calls = Vec::new();
+    let mut run_statuses = Vec::new();
     for line in output.stdout.split(|byte| *byte == b'\n').take(128) {
         if line.is_empty() || line.len() > 64 * 1024 {
             continue;
@@ -31,27 +55,38 @@ fn exec_failure_summary(output: &std::process::Output, provider_finished: bool) 
         let Some(kind) = event["kind"].as_str() else {
             continue;
         };
-        if kind.len() <= 64
-            && kind
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        {
-            event_kinds.push(kind.to_owned());
+        if kind == "RunFinished" && run_statuses.len() < 8 {
+            run_statuses.push(enum_label(
+                event["payload"]["disposition"].as_str(),
+                RUN_STATUSES,
+            ));
         }
         if kind == "ProviderCallRecorded" && provider_calls.len() < 32 {
             let payload = &event["payload"];
-            let phase = payload["phase"].as_str().unwrap_or("unknown");
-            let disposition = payload["disposition"].as_str().unwrap_or("unknown");
-            let failure = payload["failure_reason"].as_str().unwrap_or("none");
+            let phase = enum_label(payload["phase"].as_str(), PHASES);
+            let disposition = enum_label(payload["disposition"].as_str(), DISPOSITIONS);
+            let failure = if payload["failure_reason"].is_null() {
+                "none"
+            } else {
+                enum_label(payload["failure_reason"].as_str(), FAILURE_REASONS)
+            };
             provider_calls.push(format!("{phase}:{disposition}:{failure}"));
         }
     }
     format!(
-        "exit={:?}, stderr_present={}, provider_peer_completed={}, events={event_kinds:?}, provider_calls={provider_calls:?}",
+        "exit={:?}, stderr_present={}, provider_peer_completed={}, run_statuses={run_statuses:?}, provider_calls={provider_calls:?}",
         output.status.code(),
         !output.stderr.is_empty(),
         provider_finished,
     )
+}
+
+fn enum_label(value: Option<&str>, allowed: &[&'static str]) -> &'static str {
+    allowed
+        .iter()
+        .copied()
+        .find(|candidate| Some(*candidate) == value)
+        .unwrap_or("unknown")
 }
 
 fn cache_public_failure_stage(output: &str) -> &'static str {
@@ -1087,6 +1122,22 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
         server.child().kill().unwrap();
         server.child().wait().unwrap();
         let response = responder.join();
+        if !output.status.success() || response.is_err() {
+            let failure = if output.status.success() {
+                "provider_exchange"
+            } else {
+                "product_exit"
+            };
+            let profile = if profile == "openai" {
+                "openai"
+            } else {
+                "anthropic"
+            };
+            crate::process::annotate_native_fixture(&format!(
+                "fixture=shipped_exec; profile={profile}; failure={failure}; {}",
+                exec_failure_summary(&output, response.is_ok())
+            ));
+        }
         assert!(
             output.status.success(),
             "native exec failed: {}",
