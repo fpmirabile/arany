@@ -754,6 +754,9 @@ fn request(pipe: &mut impl Read) -> Vec<u8> {
 #[test]
 #[ignore = "native Linux shipped exec --tools, both native adapters, local TLS and actual Guard"]
 fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
+    if !crate::isolation::enter_native_account_isolated_test() {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let shim = root.join("loopback.so");
