@@ -113,9 +113,183 @@ cannot replace project-specific adversarial and task evaluations.
 [evaluation research](./evaluation-and-quality-strategy.md) covers model quality;
 [next steps](../../NEXT_STEPS.md) owns current gaps.
 
+## Long-lived canonical history
+
+**Question:** Does Arany need persisted replay snapshots, another history index,
+or an archive/new-Session policy before reaching its current admission bounds?
+**Source checked:** 2026-10-14. This is an evaluation; it authorizes no runtime
+change.
+
+**Conclusion:** The Store already reuses a bounded in-memory projection for
+consecutive appends to one direct Session while cumulative serialized payload
+stays at or below 128 MiB. Above that cache bound, each append cold-resolves the
+prefix even though the shared Store can hold up to 256 MiB. No quota-scale
+benchmark currently establishes whether that fallback needs a change. Cold
+replay reduces canonical Events into a `SessionView`. On Session switches or
+width/detail changes, terminal row indexing rebuilds rows from that loaded
+view.
+Measure those distinct paths before adding persisted snapshots or another
+index. Keep canonical Events and fork ancestry intact. A new Session in the
+same StateRoot avoids adding old Events to a separate Session's lineage, but it
+does not reclaim shared database bytes or make a fork's inherited Events
+disappear.
+
+### Current path and evidence
+
+The single SQLite-owner thread holds one `HotSession`: its reduced view, Event
+count and serialized payload-byte count, capped at 128 MiB. An append reuses it
+only for the same Session, unchanged `PRAGMA data_version`, and the next global
+sequence; it drops the cache for another Session, a fork, compaction, or a
+failed append. Once the serialized payload sum exceeds 128 MiB, it cannot be
+installed, so subsequent appends cold-resolve and reduce the persisted prefix.
+The view becomes the next cache only after the transaction commits. The Store
+replies to append only after commit, so the optimization preserves durable
+acknowledgement. [Store append path](../../src/store/journal.rs)
+and [Store rules](../../agents/store.md) own these constraints. SQLite defines
+`data_version` as connection-local: it changes on commits from other
+connections and does not change for that connection's own commits, so Arany also
+checks global sequence. It is an invalidation hint, not a durable revision
+identifier. [SQLite `data_version`](https://www.sqlite.org/pragma.html#pragma_data_version)
+
+Cold `load_session_events` currently filters by Session while scanning and
+decoding the journal in global sequence order. That scan checks contiguous
+global sequence and bounded, decodable envelopes. Fork resolution loads each
+ancestor, verifies the recorded committed boundary and SHA-256 prefix digest,
+then includes only committed Runs through that boundary; at most eight links
+and 10,000 combined Events are admitted. The schema already has
+`events_by_session(session_id, sequence)`, but replay does not use it. Replacing
+the global scan with a per-Session lookup alone would stop checking the global
+journal properties on that path. Keep canonical replay and its integrity checks
+as the source of truth. [Replay](../../src/store/replay.rs), [digest
+implementation](../../src/session/lineage.rs), and [Session rules](../../agents/session.md)
+own this behavior.
+
+Terminal history is an ephemeral row-count/source-anchor index over the
+already-loaded `SessionView`; it does not retain another transcript or read
+State. A same-Session/same-width append replaces only the last Run's index.
+Session switches, width changes and detail-mode changes rebuild it; find scans
+its bounded rows synchronously. [History implementation](../../src/terminal/history.rs)
+and [terminal-history rules](../../agents/history.md) own this boundary.
+
+**Smallest path, proposed:** Measure serialized Event payload, DB size, append
+latency and peak RSS through the 128 MiB cache boundary and toward the shared
+Store limit. If scans of unrelated Sessions dominate cold resume, evaluate the
+existing per-Session index only with an integrity path that retains current
+global sequence/envelope checks and strict selected-lineage replay; a direct
+indexed lookup alone would weaken validation. If reduction after that dominates
+above the hot-cache bound, compare a bounded in-memory continuation with a
+digest-bound rebuildable snapshot; do not raise the payload cap without an RSS
+bound or skip canonical validation. Add or persist a separate find index only if
+measured search latency misses its target at the admitted Event bound.
+
+The current limits remain: 10,000 Events across the selected fork lineage,
+256 MiB for the shared SQLite file, and 65,536 discovered Session heads. The
+Session lock namespace separately caps lock files at 65,536. A new ordinary
+Session starts a separate lineage count, but all its Events still consume the
+same SQLite file and it consumes a Session slot. Forks continue to count their
+inherited source Events. Event admission and append-byte preflight preserve the
+current rejection-before-disclosure and commit-before-acknowledgement rules;
+byte preflight is not a reservation against independent writers. The
+[execution contract](../specs/execution.md#admission-persistence-and-recovery)
+owns those public limits.
+
+The ignored Linux tmux gate,
+[`active_keyboard_stays_visible_with_near_cap_history`](../../tests/session_run/active_terminal/tmux/history_latency.rs),
+now encodes 800 Runs across 50 current Goal lifecycles. Each Run includes its
+link, accepted Message, active-time reservation and settlement, Agent spawn,
+Provider-call reservation and successful `ProviderCallRecorded`, finish and
+commit. Its seed count is `1 + 800 × 11 + 50 × 2 = 8,901` Events, leaving 1,099
+below the 10,000 lineage limit. The per-Run objective and answer strings total
+32,764,000 raw bytes, about half the old 65,528,000-byte intent; that is a
+smaller workload, not a same-volume replacement. The fixture asserts the seed
+count, text bytes, serialized payload bytes and SQLite file size, and replays
+the Session with 100 fresh read-only Store instances while reporting nearest-
+rank p50/p95/max `load_view` times. It then resumes one fresh product process
+in tmux, retains the existing input/delegation scenario, and reports resume to
+composer-ready time plus idle/final product RSS and high-water RSS. The replay
+samples start with fresh Store state but do not clear the OS page cache; they
+are not cold-disk evidence. Store replay timing and interactive terminal
+history/input timing are separate observations, with the latter including
+terminal work after the SessionView has been reduced.
+
+The hosted run strictly replayed all 8,901 Events and sampled 100 fresh
+read-only `load_view` calls. It did not reach the resumed composer within the
+unchanged 30-second readiness gate, so the run supplies workload-scoped Store
+replay timing only; it produced no complete resume/input latency or RSS
+evidence. The old
+Classic path synchronously inserted every historical Run before drawing the
+composer. The bounded whole-Run projection now has assertions for its status
+cue and a full-history find into the omitted prefix, but the repaired hosted
+path still needs a rerun. Fresh Store instances do not clear the OS page cache,
+so these timings are not cold-disk evidence. This workload does not establish
+the exact 10,000-Event boundary, the 128 MiB HotSession limit, 256 MiB
+shared-Store quota, near-quota fallback, or prior 65.5 MB text volume. The separate named-host
+`show_replay_latency_on_named_host` gate in
+[`tests/session_run/performance.rs`](../../tests/session_run/performance.rs)
+uses a 100-Event Session. A different ignored
+`database_capacity_is_admitted_before_provider_usage` gate in
+[`tests/engine_run.rs`](../../tests/engine_run.rs) pads a non-Event table near
+the shared file limit to check StorageFull admission and canonical reopen; it
+is not history replay or latency evidence. Record sanitized Linux CPU/kernel,
+load and pressure metadata on the named run; neither this metadata nor an
+unexecuted fixture is performance evidence. The remaining evidence gap is
+tracked in [`agents/history.md`](../../agents/history.md) and
+[`NEXT_STEPS.md`](../../NEXT_STEPS.md).
+
+### Proposed policy, not accepted behavior
+
+Keep the current fail-closed limits. Do not automatically prune Events or
+archive individual Sessions: a fork's source Events and prefix digest remain
+necessary to replay it, while per-Session deletion cannot reclaim the one
+shared database safely. The `--state-dir` option
+([setup guide](../setup.md#storage-and-recovery)) can select an independent
+StateRoot for future work, but that only starts a separate journal. The old
+root must be retained to inspect or resume its Sessions; a Session in the new
+root cannot fork a source stored only in the old root. Moving the complete
+closed StateRoot to user-managed archive storage and selecting a new root would
+reduce active root growth only after the user deliberately makes that change.
+It does not erase the archived bytes. Each root has separate `tools.json`
+configuration; an explicitly configured grant stays with its root and is not
+copied to a new root ([Tools contract](../specs/tools.md#private-grants)).
+
+The proposed pre-quota choice is therefore split: a fresh ordinary Session
+avoids inheriting a source lineage when Event-count pressure is high; shared
+byte pressure requires a separate StateRoot, since starting a Session inside
+the full root cannot make `StorageFull` recoverable. Selecting another
+`--state-dir` changes Session-root configuration, including its `tools.json`,
+but it does not change the fixed OS-user account root. Remembered trust for the
+same folder and its generated default Tool grant, saved accounts and saved
+account/model preferences remain available across StateRoots; changing roots is
+not an implicit trust revocation or account-isolation boundary. The user can
+revisit folder trust through `/permissions`. The [Workspace trust loader](../../src/tools/workspace.rs)
+and [Tools contract](../specs/tools.md#folder-trust-and-approvals) own folder
+trust; the [account scope contract](../specs/credentials.md#account-scope-and-identity)
+owns saved account and preference scope. The UI thresholds and recovery wording
+remain unaccepted until measured and specified.
+
+If an archive/switch workflow is later accepted, archive the complete
+StateRoot and keep it independently readable; do not delete canonical Events
+or promise cross-root lineage. Prefer quiescing all Store workers and writers,
+waiting for in-flight appends, releasing active Session and Workspace claims,
+and closing all Store handles before making a checked, user-managed whole-root
+copy. Any switch requires that quiesced state and a checked acknowledged-commit
+cutoff: the archive must include every Event acknowledged by the old Store
+through that cutoff and preserve all fork references. If copying while the
+source remains writable, reconcile the final incremental prefix and global
+sequence through the cutoff after quiescence, then reopen and strictly validate
+the archived journal and fork lineages before switching. SQLite's Online
+Backup API can make a consistent snapshot, but snapshot validity alone does not
+prove it contains every commit acknowledged by the old root through cutover;
+validating a snapshot cannot recover a later acknowledged Event omitted from it.
+[SQLite Online Backup API](https://www.sqlite.org/backup.html) Any early warning threshold,
+archive lifecycle or user-facing recovery choice needs a separate accepted
+contract and measured trigger. No new threshold, snapshot schema, migration,
+automatic archive, or cutover behavior is proposed as current behavior.
+
 ## Primary sources
 
 - OpenAI: [prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching), [compaction](https://developers.openai.com/api/docs/guides/compaction), [conversation state](https://developers.openai.com/api/docs/guides/conversation-state), [data controls](https://developers.openai.com/api/docs/guides/your-data)
 - Anthropic: [context windows](https://platform.claude.com/docs/en/build-with-claude/context-windows), [prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching), [Memory tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/memory-tool), [data retention](https://platform.claude.com/docs/en/manage-claude/api-and-data-retention)
-- [SQLite FTS5](https://www.sqlite.org/fts5.html), [pgvector filtering and search](https://github.com/pgvector/pgvector), [OCI content descriptors](https://github.com/opencontainers/image-spec/blob/main/descriptor.md)
+- SQLite: [`data_version`](https://www.sqlite.org/pragma.html#pragma_data_version), [transactions](https://www.sqlite.org/lang_transaction.html), [Online Backup API](https://www.sqlite.org/backup.html), [FTS5](https://www.sqlite.org/fts5.html)
+- [pgvector filtering and search](https://github.com/pgvector/pgvector), [OCI content descriptors](https://github.com/opencontainers/image-spec/blob/main/descriptor.md)
 - [LongMemEval](https://proceedings.iclr.cc/paper_files/paper/2025/hash/d813d324dbf0598bbdc9c8e79740ed01-Abstract-Conference.html), [LoCoMo](https://aclanthology.org/2024.acl-long.747/), [RULER](https://github.com/NVIDIA/RULER), [Lost in the Middle](https://direct.mit.edu/tacl/article/doi/10.1162/tacl_a_00638/119630/Lost-in-the-Middle-How-Language-Models-Use-Long)

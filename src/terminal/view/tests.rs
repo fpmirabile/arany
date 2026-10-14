@@ -59,6 +59,34 @@ fn help_keeps_every_registered_command_reachable_at_narrow_widths() {
 }
 
 #[test]
+fn narrow_classic_history_cue_keeps_ctrl_t_action_visible() {
+    let width = 20;
+    let status = super::super::classic_history_status(width, true, false);
+    assert_eq!(status, "Ctrl+T history");
+    let model = PresentationModel {
+        status_line: "ready · custom:local/model-1".into(),
+        activity_lines: Vec::new(),
+        setup_required: false,
+        draft_action: DraftAction::Retain,
+    };
+    let mut terminal = Terminal::new(TestBackend::new(width, 8)).expect("narrow terminal");
+    terminal
+        .draw(|frame| {
+            draw_frame_with_history(
+                frame,
+                &model,
+                &Composer::default(),
+                None,
+                Palette { color: false },
+                &[],
+                Some(status),
+            )
+        })
+        .expect("narrow history status");
+    assert!(buffer_row(terminal.backend().buffer(), 7).contains(status));
+}
+
+#[test]
 fn setup_step_stays_centered_and_borderless_without_echoing_input() {
     for (width, height, top, left) in [
         (16, 8, 0u16, 0),

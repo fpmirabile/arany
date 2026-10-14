@@ -146,6 +146,10 @@ pub(crate) fn tool_detail_text(tool: &crate::session::ToolView) -> String {
 }
 
 pub(crate) fn display_answer(run: &RunView) -> Option<String> {
+    Some(display_answer_chunks(run)?.collect())
+}
+
+pub(crate) fn display_answer_chunks(run: &RunView) -> Option<impl Iterator<Item = &str>> {
     let call = run
         .display
         .iter()
@@ -158,12 +162,11 @@ pub(crate) fn display_answer(run: &RunView) -> Option<String> {
     Some(
         run.display
             .iter()
-            .filter(|chunk| {
+            .filter(move |chunk| {
                 chunk.call_index == call
                     && chunk.category == crate::session::DisplayCategory::Answer
             })
-            .map(|chunk| chunk.text.as_str())
-            .collect(),
+            .map(|chunk| chunk.text.as_str()),
     )
 }
 
@@ -802,7 +805,7 @@ pub(crate) fn image_message_lines(
         .collect()
 }
 
-fn image_description(image: &crate::provider::ImageAttachment, index: usize) -> String {
+pub(crate) fn image_description(image: &crate::provider::ImageAttachment, index: usize) -> String {
     let (width, height) = image.dimensions();
     format!(
         "Image {}: PNG {width}x{height}, {:.1} KB",
@@ -840,6 +843,19 @@ pub fn escape_terminal(value: &str) -> String {
         }
     }
     safe
+}
+
+pub(crate) fn escaped_terminal_bytes(value: &str) -> usize {
+    value
+        .chars()
+        .map(|character| {
+            if unsafe_display_character(character) {
+                character.escape_unicode().count().max(8)
+            } else {
+                character.len_utf8()
+            }
+        })
+        .sum()
 }
 
 pub(crate) fn escaped_terminal_width(value: &str) -> usize {
@@ -892,7 +908,7 @@ pub(crate) fn session_access_label(defaults: &crate::session::SessionDefaults) -
 
 #[cfg(test)]
 mod tests {
-    use super::user_message_lines;
+    use super::{escape_terminal, escaped_terminal_bytes, user_message_lines};
     use unicode_width::UnicodeWidthStr;
 
     #[test]
@@ -911,5 +927,11 @@ mod tests {
         );
         assert!(!lines.join("\n").contains('\u{1b}'));
         assert_eq!(user_message_lines("你好", 5), ["You:", "  你…"]);
+    }
+
+    #[test]
+    fn escaped_terminal_byte_count_matches_safe_text_without_materializing_it() {
+        let text = "a\u{001b}\u{202e}é";
+        assert_eq!(escaped_terminal_bytes(text), escape_terminal(text).len());
     }
 }

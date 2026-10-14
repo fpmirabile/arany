@@ -14,6 +14,12 @@ RUSTFLAGS='--cfg arany_ci' cargo test --workspace --locked --offline
 
 Repeat with `--release` for the optimized profile. To run one ignored gate, use `cargo test <path> -- --exact --ignored`. The isolated macOS Keychain gate also needs `ARANY_TEST_EXE` set to a built debug `arany`. Other ignored native, manual, performance and live Provider gates remain separate; CI uses no account credentials or paid calls. Passing compilation or an OS-specific subset does not prove platform parity.
 
+Manual CI dispatch with `history_benchmark: true` additionally runs the exact
+ignored long-history tmux owner in the Linux release job and requires one
+completed test. It reports that runner's workload, timings and resource metrics;
+the ordinary suite leaves this benchmark ignored, and its measurements do not
+establish other-host performance or cold-disk behavior.
+
 ## Beta continuation and deferred evidence
 
 - Beta 1 delivery order is functional implementation, consolidated local verification, then final user-owned testing. At each continuation, select the next implementable functional item before reviewing verification debt. While functionality remains, run only focused local/synthetic checks needed for a changed invariant or known failure; collect remaining checks for implementation closeout rather than starting another verification-only cycle.
@@ -105,6 +111,7 @@ Repeat with `--release` for the optimized profile. To run one ignored gate, use 
 - Inline completion rows are cell-diff output, not full-line announcements. Gate a known-geometry draft edit on cursor-show followed by its fresh final caret position; the same bare coordinate can occur while painting draft text. The Classic viewport starts at the answered cursor row and moves down as confirmed transcript is inserted above it, so gate on the caret column, a captured composer row or an emulated screen rather than fixed full-height rows. Scope fresh-process gates after the restart marker, since prior cleanup may emit the same coordinates; use frame evidence for the full visible label. Send Escape separately and wait for the restored input frame before typing a suffix, since adjacent bytes can otherwise encode an Alt key.
 - In a 16-column model-browser PTY, the model ID and close notice are clipped. Wait for the complete `Up/Dn Enter Esc` footer before controlling the browser, and use the post-cancel abbreviated notice rather than the full-width model ID or `closed` word as a readiness marker.
 - For native tmux proof, use an exact test-owned `-S` socket beneath a private temporary root. A detached fixed-size pane provides a bounded screen-capture gate; attach a supervised outer PTY and send keys through that client. After a resize, wait for Arany's completed frame at the new geometry before sending history keys; tmux can report the new pane size while the old input geometry is still active. Verify both pane and outer terminal settings. A lingering socket pathname alone does not prove a live server; query the exact socket after shutdown. When the ignored release gate selects an extracted binary, use that same exact executable for data-free Provider conformance, the pane, and guarded process cleanup; still require the private State argument before signaling it.
+- In long-lived tmux journeys, resolve the product only within a bounded descendant walk anchored at the exact pane PID; tmux's pane shell can launch a wrapper shell before the product. Check the exact executable and private State argument before retaining its PID guard or signaling it. Verify that same process remains owned after closing a History or other full-screen panel. A captured pane can retain its last rendered frame after the product exits, so frame readiness alone does not prove process liveness. If the wrapper exits unexpectedly, report only its bounded exit code and whether terminal settings were restored.
 
 ## Storage, Workspace and resource faults
 
