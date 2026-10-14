@@ -125,12 +125,14 @@ consecutive appends to one direct Session while cumulative serialized payload
 stays at or below 128 MiB. Above that cache bound, each append cold-resolves the
 prefix even though the shared Store can hold up to 256 MiB. No quota-scale
 benchmark currently establishes whether that fallback needs a change. Cold
-replay and terminal reindexing after restart, Session or width/detail changes
-also reduce canonical Events. Measure those paths before adding persisted
-snapshots or another index. Keep canonical Events and fork ancestry intact. A
-new Session in the same StateRoot avoids adding old Events to a separate
-Session's lineage, but it does not reclaim shared database bytes or make a
-fork's inherited Events disappear.
+replay reduces canonical Events into a `SessionView`. On Session switches or
+width/detail changes, terminal row indexing rebuilds rows from that loaded
+view.
+Measure those distinct paths before adding persisted snapshots or another
+index. Keep canonical Events and fork ancestry intact. A new Session in the
+same StateRoot avoids adding old Events to a separate Session's lineage, but it
+does not reclaim shared database bytes or make a fork's inherited Events
+disappear.
 
 ### Current path and evidence
 
@@ -197,13 +199,20 @@ is written to seed one 1,600-Run/9,601-Event Session with 65,528,000 bytes of
 objective and answer text, then exercise resume and row indexing while measuring
 Run submission-to-Provider dispatch and active key response during delegation.
 As currently checked in, however, its seed records `AgentFinished(Finished)`
-without a preceding `ProviderCallRecorded(Finished)`. The current reducer
-requires that observed successful call, so it rejects the first Run before the
-fixture reaches its intended history or measurements. Treat this source as an
-intended workload, not valid or runnable benchmark evidence; recheck and repair
-it against the current lifecycle contract before measuring. Even after that,
-the test does not isolate cold replay duration, assert serialized payload across
-128 MiB, assert database size or sample RSS. The separate named-host
+without a preceding `ProviderCallRecorded(Finished)`. The
+[current reducer](../../src/session/reducer.rs) requires that observed
+successful call, so it rejects the first Run before the
+fixture reaches its intended history or measurements. On the current baseline,
+recording that required successful Provider call for each of the 1,600 Runs
+alone would increase the seed from 9,601 to 11,201 Events, already above the
+10,000-Event lineage limit; any additional lifecycle or reservation Events
+change that count further. Treat the checked-in counts as intended workload
+only. Once all required lifecycle and reservation Events are accounted for,
+rebalance the Run count and text/Event mix under the final bounds, then
+explicitly assert Event and serialized-payload counts before measuring.
+Even if repaired, this gate does not isolate cold replay duration, assert
+payload across 128 MiB, assert database size or sample RSS. The separate
+named-host
 `show_replay_latency_on_named_host` gate in
 [`tests/session_run/performance.rs`](../../tests/session_run/performance.rs)
 uses a 100-Event Session. A different ignored
@@ -227,27 +236,43 @@ root must be retained to inspect or resume its Sessions; a Session in the new
 root cannot fork a source stored only in the old root. Moving the complete
 closed StateRoot to user-managed archive storage and selecting a new root would
 reduce active root growth only after the user deliberately makes that change.
-It does not erase the archived bytes. StateRoot also owns Tool configuration,
-so a new root starts without the old root's grants
-([Store rules](../../agents/store.md)).
+It does not erase the archived bytes. Each root has separate `tools.json`
+configuration; an explicitly configured grant stays with its root and is not
+copied to a new root ([Tools contract](../specs/tools.md#private-grants)).
 
 The proposed pre-quota choice is therefore split: a fresh ordinary Session
 avoids inheriting a source lineage when Event-count pressure is high; shared
 byte pressure requires a separate StateRoot, since starting a Session inside
-the full root cannot make `StorageFull` recoverable. The UI thresholds and
-recovery wording remain unaccepted until measured and specified.
+the full root cannot make `StorageFull` recoverable. Selecting another
+`--state-dir` changes Session-root configuration, including its `tools.json`,
+but it does not change the fixed OS-user account root. Remembered trust for the
+same folder and its generated default Tool grant, saved accounts and saved
+account/model preferences remain available across StateRoots; changing roots is
+not an implicit trust revocation or account-isolation boundary. The user can
+revisit folder trust through `/permissions`. The [Workspace trust loader](../../src/tools/workspace.rs)
+and [Tools contract](../specs/tools.md#folder-trust-and-approvals) own folder
+trust; the [account scope contract](../specs/credentials.md#account-scope-and-identity)
+owns saved account and preference scope. The UI thresholds and recovery wording
+remain unaccepted until measured and specified.
 
-If an in-app archive is later accepted, archive the complete StateRoot and keep
-it independently readable; do not delete canonical Events or promise
-cross-root lineage. An online copy must use SQLite's snapshot-capable backup
-mechanism or a checked Store-closed copy, then reopen and strictly validate the
-archive before switching. SQLite's Online Backup API describes the result as a
-snapshot from when copying commenced and allows incremental copying while other
-connections use the database. [SQLite Online Backup API](https://www.sqlite.org/backup.html)
-Any early warning threshold, archive lifecycle or user-facing recovery choice
-needs a separate accepted contract and measured trigger. No new threshold,
-snapshot schema, migration, or archive operation is proposed as current
-behavior.
+If an archive/switch workflow is later accepted, archive the complete
+StateRoot and keep it independently readable; do not delete canonical Events
+or promise cross-root lineage. Prefer quiescing all Store workers and writers,
+waiting for in-flight appends, releasing active Session and Workspace claims,
+and closing all Store handles before making a checked, user-managed whole-root
+copy. Any switch requires that quiesced state and a checked acknowledged-commit
+cutoff: the archive must include every Event acknowledged by the old Store
+through that cutoff and preserve all fork references. If copying while the
+source remains writable, reconcile the final incremental prefix and global
+sequence through the cutoff after quiescence, then reopen and strictly validate
+the archived journal and fork lineages before switching. SQLite's Online
+Backup API can make a consistent snapshot, but snapshot validity alone does not
+prove it contains every commit acknowledged by the old root through cutover;
+validating a snapshot cannot recover a later acknowledged Event omitted from it.
+[SQLite Online Backup API](https://www.sqlite.org/backup.html) Any early warning threshold,
+archive lifecycle or user-facing recovery choice needs a separate accepted
+contract and measured trigger. No new threshold, snapshot schema, migration,
+automatic archive, or cutover behavior is proposed as current behavior.
 
 ## Primary sources
 
