@@ -8,10 +8,13 @@ use std::path::{Path, PathBuf};
 mod build_cache;
 mod lock;
 pub(crate) use build_cache::{
-    AGGREGATE_BYTES as BUILD_CACHE_AGGREGATE_BYTES, BuildCacheIdentity, BuildCacheLease,
-    MAX_ARCHIVE_BYTES as BUILD_CACHE_ARCHIVE_BYTES, archive_size, capture_archive,
-    capture_archive_async, restore_archive, restore_archive_async,
+    BuildCacheIdentity, BuildCacheLease, MAX_ARCHIVE_BYTES as BUILD_CACHE_ARCHIVE_BYTES,
+    archive_size,
 };
+#[cfg(target_os = "linux")]
+pub(crate) use build_cache::{capture_archive, restore_archive};
+#[cfg(target_os = "macos")]
+pub(crate) use build_cache::{capture_archive_async, restore_archive_async};
 pub(crate) use lock::SessionRunLock;
 
 const PROVIDER_PROFILES_FILE: &str = "provider-profiles.json";

@@ -175,7 +175,7 @@ impl BuildCacheLease {
                         .take()
                         .ok_or(StoreError::InvalidBuildCache)?;
                     if !is_excluded(&entry.path, exclusions) {
-                        bytes = write_entry(&mut stage, &entry, &mut bytes, &mut entries)?;
+                        write_entry(&mut stage, &mut entry, &mut bytes, &mut entries)?;
                     } else {
                         entry.skip()?;
                     }
@@ -184,7 +184,7 @@ impl BuildCacheLease {
                 std::cmp::Ordering::Greater => {
                     let mut entry = previous_entry.take().ok_or(StoreError::InvalidBuildCache)?;
                     if is_excluded(&entry.path, exclusions) {
-                        bytes = write_entry(&mut stage, &entry, &mut bytes, &mut entries)?;
+                        write_entry(&mut stage, &mut entry, &mut bytes, &mut entries)?;
                     } else {
                         entry.skip()?;
                     }
@@ -200,10 +200,10 @@ impl BuildCacheLease {
                         .ok_or(StoreError::InvalidBuildCache)?;
                     let mut old = previous_entry.take().ok_or(StoreError::InvalidBuildCache)?;
                     if is_excluded(&old.path, exclusions) {
-                        bytes = write_entry(&mut stage, &old, &mut bytes, &mut entries)?;
+                        write_entry(&mut stage, &mut old, &mut bytes, &mut entries)?;
                         current.skip()?;
                     } else if !is_excluded(&current.path, exclusions) {
-                        bytes = write_entry(&mut stage, &current, &mut bytes, &mut entries)?;
+                        write_entry(&mut stage, &mut current, &mut bytes, &mut entries)?;
                         old.skip()?;
                     } else {
                         old.skip()?;
@@ -219,7 +219,7 @@ impl BuildCacheLease {
             }
         }
         candidate.finish()?;
-        if let Some(previous) = previous {
+        if let Some(mut previous) = previous {
             previous.finish()?;
         }
         write_terminator(&mut stage)?;
@@ -245,7 +245,7 @@ impl BuildCacheLease {
         let operation = (|| {
             if old.is_some() {
                 self.dir
-                    .rename(&name, &self.dir, &previous_name(&self.token))?;
+                    .rename(&name, &self.dir, previous_name(&self.token))?;
                 sync_directory(&self.dir)?;
             }
             self.dir.rename(&staged, &self.dir, &name)?;
@@ -306,7 +306,7 @@ impl StateRoot {
         &self,
         identity: BuildCacheIdentity,
     ) -> Result<BuildCacheLease, StoreError> {
-        let workspace = crate::private_fs::open_directory(Path::new(&identity.path))
+        let workspace = crate::private_fs::open_directory(Path::new(&identity.path), false)
             .map_err(StoreError::from)?;
         self.ensure_outside_workspace(&workspace.dir)?;
         let workspace_metadata = workspace.dir.dir_metadata()?;
@@ -381,7 +381,7 @@ impl StateRoot {
     }
 
     pub(crate) fn clear_build_cache(&self, identity: BuildCacheIdentity) -> Result<(), StoreError> {
-        let workspace = crate::private_fs::open_directory(Path::new(&identity.path))
+        let workspace = crate::private_fs::open_directory(Path::new(&identity.path), false)
             .map_err(StoreError::from)?;
         self.ensure_outside_workspace(&workspace.dir)?;
         let metadata = workspace.dir.dir_metadata()?;
@@ -412,16 +412,17 @@ impl StateRoot {
         Ok(())
     }
 
-    pub(crate) fn clear_workspace_build_cache(&self, workspace: &Path) -> Result<(), StoreError> {
+    pub fn clear_workspace_build_cache(&self, workspace: &Path) -> Result<(), StoreError> {
         let canonical = workspace.canonicalize()?;
-        let opened = crate::private_fs::open_directory(&canonical).map_err(StoreError::from)?;
+        let opened =
+            crate::private_fs::open_directory(&canonical, false).map_err(StoreError::from)?;
         self.ensure_outside_workspace(&opened.dir)?;
         let metadata = opened.dir.dir_metadata()?;
         let identity = BuildCacheIdentity::new(&opened.path, metadata.dev(), metadata.ino())?;
         self.clear_build_cache(identity)
     }
 
-    pub(crate) fn clear_all_build_caches(&self) -> Result<(), StoreError> {
+    pub fn clear_all_build_caches(&self) -> Result<(), StoreError> {
         let dir = match cache_directory(self, false) {
             Ok(dir) => dir,
             Err(error) if io_kind(&error) == Some(io::ErrorKind::NotFound) => return Ok(()),
@@ -479,6 +480,7 @@ impl StateRoot {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn restore_archive<R: Read>(
     input: &mut R,
     destination: &Dir,
@@ -661,6 +663,7 @@ async fn discard_async<R: tokio::io::AsyncRead + Unpin>(
     Ok(())
 }
 
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn capture_archive<W: Write>(
     source: &Dir,
     identity: &BuildCacheIdentity,
@@ -672,7 +675,7 @@ pub(crate) fn capture_archive<W: Write>(
     let mut total = header_size(identity)?;
     let paths = cache_paths(source, exclusions)?;
     for path in paths.iter() {
-        let metadata = metadata_relative(source, &path)?;
+        let metadata = metadata_relative(source, path)?;
         let directory = metadata.is_dir();
         let executable = !directory && metadata.mode() & 0o111 != 0;
         if !directory
@@ -684,7 +687,7 @@ pub(crate) fn capture_archive<W: Write>(
         if !directory && size > MAX_ARCHIVE_BYTES {
             return Err(StoreError::StorageFull);
         }
-        let entry_size = entry_header_size(&path)?
+        let entry_size = entry_header_size(path)?
             .checked_add(size)
             .ok_or(StoreError::StorageFull)?;
         total = total
@@ -693,11 +696,14 @@ pub(crate) fn capture_archive<W: Write>(
         if total.checked_add(12).ok_or(StoreError::StorageFull)? > MAX_ARCHIVE_BYTES {
             return Err(StoreError::StorageFull);
         }
-        write_entry_header(writer, &path, directory, executable, size)?;
+        write_entry_header(writer, path, directory, executable, size)?;
         if !directory {
-            let mut file = open_nofollow(source, &path)?;
-            if io::copy(&mut file.take(size), writer)? != size {
-                return Err(StoreError::InvalidBuildCache);
+            let mut file = open_nofollow(source, path)?;
+            {
+                let mut limited = (&mut file).take(size);
+                if io::copy(&mut limited, writer)? != size {
+                    return Err(StoreError::InvalidBuildCache);
+                }
             }
             let mut extra = [0; 1];
             if file.read(&mut extra)? != 0 {
@@ -759,7 +765,7 @@ pub(crate) async fn capture_archive_async<W: tokio::io::AsyncWrite + Unpin>(
     let mut total = header_size(identity)?;
     let mut buffer = [0; 32 * 1024];
     for path in paths.iter() {
-        let metadata = metadata_relative(source, &path)?;
+        let metadata = metadata_relative(source, path)?;
         let directory = metadata.is_dir();
         let executable = !directory && metadata.mode() & 0o111 != 0;
         if !directory
@@ -770,7 +776,7 @@ pub(crate) async fn capture_archive_async<W: tokio::io::AsyncWrite + Unpin>(
         let size = if directory { 0 } else { metadata.len() };
         total = total
             .checked_add(
-                entry_header_size(&path)?
+                entry_header_size(path)?
                     .checked_add(size)
                     .ok_or(StoreError::StorageFull)?,
             )
@@ -779,10 +785,10 @@ pub(crate) async fn capture_archive_async<W: tokio::io::AsyncWrite + Unpin>(
             return Err(StoreError::StorageFull);
         }
         let mut entry_header = Vec::with_capacity(12 + path.len());
-        write_entry_header(&mut entry_header, &path, directory, executable, size)?;
+        write_entry_header(&mut entry_header, path, directory, executable, size)?;
         writer.write_all(&entry_header).await?;
         if !directory {
-            let mut file = open_nofollow(source, &path)?;
+            let mut file = open_nofollow(source, path)?;
             let mut remaining = size;
             while remaining > 0 {
                 let wanted =
@@ -835,7 +841,7 @@ fn cache_paths(source: &Dir, exclusions: &[String]) -> Result<Vec<String>, Store
                     .checked_add(root.len())
                     .ok_or(StoreError::StorageFull)?;
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) if io_kind(&error) == Some(io::ErrorKind::NotFound) => continue,
             _ => return Err(StoreError::StateNotPrivate),
         }
     }
@@ -963,7 +969,7 @@ impl<'a, R: Read> ArchiveReader<'a, R> {
         self.finish()
     }
 
-    fn finish(mut self) -> Result<(), StoreError> {
+    fn finish(&mut self) -> Result<(), StoreError> {
         if !self.done {
             return Err(StoreError::InvalidBuildCache);
         }
@@ -1425,14 +1431,14 @@ fn identity_count(dir: &Dir) -> Result<usize, StoreError> {
 }
 
 fn contains_cache_identity(dir: &Dir, token: &str) -> Result<bool, StoreError> {
-    Ok(dir.symlink_metadata(&archive_name(token)).is_ok()
-        || dir.symlink_metadata(&previous_name(token)).is_ok()
-        || dir.symlink_metadata(&reservation_name(token)).is_ok()
-        || dir.symlink_metadata(&stage_name(token)).is_ok()
-        || dir.symlink_metadata(&candidate_name(token)).is_ok()
-        || dir.symlink_metadata(&transaction_name(token)).is_ok()
-        || dir.symlink_metadata(&transaction_next_name(token)).is_ok()
-        || dir.symlink_metadata(&identity_lock_name(token)).is_ok())
+    Ok(dir.symlink_metadata(archive_name(token)).is_ok()
+        || dir.symlink_metadata(previous_name(token)).is_ok()
+        || dir.symlink_metadata(reservation_name(token)).is_ok()
+        || dir.symlink_metadata(stage_name(token)).is_ok()
+        || dir.symlink_metadata(candidate_name(token)).is_ok()
+        || dir.symlink_metadata(transaction_name(token)).is_ok()
+        || dir.symlink_metadata(transaction_next_name(token)).is_ok()
+        || dir.symlink_metadata(identity_lock_name(token)).is_ok())
 }
 
 fn remove_if_present(dir: &Dir, name: &str) -> Result<(), StoreError> {
@@ -1488,7 +1494,7 @@ fn write_transaction(
     write!(file, "{token}\n{}\n", transaction.record())?;
     file.sync_all()?;
     drop(file);
-    dir.rename(&next, dir, &transaction_name(token))?;
+    dir.rename(&next, dir, transaction_name(token))?;
     sync_directory(dir)
 }
 
@@ -1519,7 +1525,7 @@ fn read_transaction(dir: &Dir, token: &str) -> Result<Option<CacheTransaction>, 
 }
 
 fn validate_transaction(file: &File, token: &str) -> Result<(), StoreError> {
-    let mut copy = file.try_clone()?;
+    let copy = file.try_clone()?;
     let mut bytes = Vec::with_capacity(96);
     copy.take(97).read_to_end(&mut bytes)?;
     let record = std::str::from_utf8(&bytes).map_err(|_| StoreError::StateNotPrivate)?;
@@ -1563,7 +1569,7 @@ fn set_reservation(dir: &Dir, token: &str, reserved: u64) -> Result<(), StoreErr
     let mut options = OpenOptions::new();
     options.read(true).write(true).follow(FollowSymlinks::No);
     nonblocking(&mut options);
-    let mut file = dir.open_with(&reservation_name(token), &options)?;
+    let mut file = dir.open_with(reservation_name(token), &options)?;
     check_private(&file, 96)?;
     write_reservation(&mut file, token, reserved)?;
     file.sync_all()?;
@@ -1909,7 +1915,7 @@ fn validate_reservation(file: &File, token: &str) -> Result<u64, StoreError> {
     } else if bytes == archive.as_bytes() {
         Ok(MAX_ARCHIVE_BYTES)
     } else {
-        return Err(StoreError::StateNotPrivate);
+        Err(StoreError::StateNotPrivate)
     }
 }
 
@@ -1963,7 +1969,7 @@ mod tests {
     }
 
     fn identity(path: &Path) -> BuildCacheIdentity {
-        let opened = crate::private_fs::open_directory(path).expect("Workspace admission");
+        let opened = crate::private_fs::open_directory(path, false).expect("Workspace admission");
         let metadata = opened.dir.dir_metadata().expect("Workspace metadata");
         BuildCacheIdentity::new(&opened.path, metadata.dev(), metadata.ino())
             .expect("Workspace cache identity")
@@ -2116,13 +2122,13 @@ mod tests {
             write_transaction(&dir, &identity.token(), CacheTransaction::RollbackPrevious)
                 .expect("rollback record");
             dir.rename(
-                &archive_name(&identity.token()),
+                archive_name(&identity.token()),
                 &dir,
-                &previous_name(&identity.token()),
+                previous_name(&identity.token()),
             )
             .expect("move previous archive aside");
             sync_directory(&dir).expect("previous archive sync");
-            dir.rename(&staged_name, &dir, &archive_name(&identity.token()))
+            dir.rename(&staged_name, &dir, archive_name(&identity.token()))
                 .expect("install interrupted candidate");
             set_reservation(&dir, &identity.token(), MAX_ARCHIVE_BYTES)
                 .expect("candidate reservation");
@@ -2179,9 +2185,9 @@ mod tests {
             staged.sync_all().expect("staged sync");
             write_transaction(&dir, &token, CacheTransaction::RollbackPrevious)
                 .expect("rollback record");
-            dir.rename(&archive_name(&token), &dir, &previous_name(&token))
+            dir.rename(archive_name(&token), &dir, previous_name(&token))
                 .expect("move previous archive aside");
-            dir.rename(&staged_name, &dir, &archive_name(&token))
+            dir.rename(&staged_name, &dir, archive_name(&token))
                 .expect("install new archive");
             set_reservation(&dir, &token, MAX_ARCHIVE_BYTES).expect("candidate reservation");
             sync_directory(&dir).expect("new archive sync");
@@ -2212,7 +2218,7 @@ mod tests {
             staged.sync_all().expect("staged sync");
             write_transaction(&dir, &token, CacheTransaction::RollbackEmpty)
                 .expect("rollback record");
-            dir.rename(&staged_name, &dir, &archive_name(&token))
+            dir.rename(&staged_name, &dir, archive_name(&token))
                 .expect("install first archive");
             set_reservation(&dir, &token, MAX_ARCHIVE_BYTES).expect("candidate reservation");
             sync_directory(&dir).expect("first archive sync");
@@ -2263,9 +2269,9 @@ mod tests {
             staged.sync_all().expect("staged sync");
             write_transaction(&dir, &token, CacheTransaction::RollbackPrevious)
                 .expect("rollback record");
-            dir.rename(&archive_name(&token), &dir, &previous_name(&token))
+            dir.rename(archive_name(&token), &dir, previous_name(&token))
                 .expect("move previous archive aside");
-            dir.rename(&staged_name, &dir, &archive_name(&token))
+            dir.rename(&staged_name, &dir, archive_name(&token))
                 .expect("install new archive");
             set_reservation(&dir, &token, MAX_ARCHIVE_BYTES).expect("candidate reservation");
             sync_directory(&dir).expect("new archive sync");

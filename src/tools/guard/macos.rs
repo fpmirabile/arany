@@ -1123,6 +1123,7 @@ mod tests {
                 use_count: 1,
             },
             config,
+            cache: None,
             workspace,
             guard_executable: std::env::current_exe().unwrap(),
             system_programs: None,

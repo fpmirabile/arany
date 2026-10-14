@@ -16,10 +16,12 @@ use replay::{latest_session_id, list_session_items, load_session, resolve_view, 
 pub use state::HistoryReset;
 pub use state::StateRoot;
 pub(crate) use state::{
-    BUILD_CACHE_AGGREGATE_BYTES, BUILD_CACHE_ARCHIVE_BYTES, BuildCacheIdentity, BuildCacheLease,
-    SessionRunLock, archive_size, capture_archive, capture_archive_async, restore_archive,
-    restore_archive_async,
+    BUILD_CACHE_ARCHIVE_BYTES, BuildCacheIdentity, BuildCacheLease, SessionRunLock, archive_size,
 };
+#[cfg(target_os = "linux")]
+pub(crate) use state::{capture_archive, restore_archive};
+#[cfg(target_os = "macos")]
+pub(crate) use state::{capture_archive_async, restore_archive_async};
 
 const DATABASE_FILE: &str = "events.sqlite3";
 pub(crate) const MAX_EVENT_BYTES: usize = 64 * 1024;

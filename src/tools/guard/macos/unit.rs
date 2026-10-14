@@ -967,7 +967,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                     }
                     if length > 0 {
                         let volumes = storage.as_ref().ok_or(ToolError::Operation)?;
-                        let mut archive = input.take(length);
+                        let mut archive = (&mut input).take(length);
                         crate::store::restore_archive_async(
                             &mut archive,
                             &volumes[1],
@@ -976,6 +976,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                         )
                         .await
                         .map_err(|_| ToolError::ProtectionUnavailable)?;
+                        drop(archive);
                     }
                 }
                 let (go, receive_go) = tokio::sync::oneshot::channel();
