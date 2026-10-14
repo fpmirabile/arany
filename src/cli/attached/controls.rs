@@ -1,4 +1,6 @@
-use super::{Admission, load_view, recover_defaults_change, update_defaults};
+use super::{
+    Admission, LoopError, load_view, open_state, recover_defaults_change, update_defaults,
+};
 use crate::cli::{chatgpt, exec::ProviderArg};
 use arany::{
     AttachedTerminal, CollaborationPolicy, CommandAvailability, CommandParseError,
@@ -10,7 +12,6 @@ use std::str::FromStr;
 
 const CACHE_USAGE: &str = "Usage: /cache clear [all]";
 const CACHE_CLEAR_FAILED: &str = "Error: private build cache could not be cleared";
-pub(super) const STATE_UNAVAILABLE: &str = "state directory unavailable or unsafe";
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -309,7 +310,7 @@ pub(super) async fn select_model(
     view: &mut SessionView,
     model: &str,
     effort: Option<Effort>,
-) -> Result<String, String> {
+) -> Result<String, LoopError> {
     let Some(profile) = view.defaults.provider.as_deref() else {
         return Ok("Select /provider first".into());
     };
@@ -317,9 +318,7 @@ pub(super) async fn select_model(
         return Ok("Error: invalid native model".into());
     }
     if let Some(name) = profile.strip_prefix("custom:") {
-        let Ok(root) = StateRoot::open_existing(&admission.state_dir) else {
-            return Ok(format!("Error: {STATE_UNAVAILABLE}"));
-        };
+        let root = open_state(admission)?;
         let custom = match CustomProfile::load_named(&root, name) {
             Ok(custom) => custom,
             Err(error) => return Ok(format!("Error: {error}")),
@@ -466,7 +465,7 @@ pub(super) async fn handle_command(
     view: &mut SessionView,
     command: InteractiveCommand,
     argument: Option<&str>,
-) -> Result<String, String> {
+) -> Result<String, LoopError> {
     let notice = match command {
         InteractiveCommand::New => {
             let defaults = view.defaults.clone();
@@ -479,9 +478,7 @@ pub(super) async fn handle_command(
             let Some(id) = argument.and_then(|value| SessionId::from_str(value).ok()) else {
                 return Ok("Usage: /resume SESSION_ID".into());
             };
-            let Ok(root) = StateRoot::open_existing(&admission.state_dir) else {
-                return Ok(format!("Error: {STATE_UNAVAILABLE}"));
-            };
+            let root = open_state(admission)?;
             match resume_session(root, admission.workspace.clone(), id).await {
                 Ok(resumed) => {
                     let resumed =
@@ -516,9 +513,7 @@ pub(super) async fn handle_command(
                 },
                 None => *session_id,
             };
-            let Ok(root) = StateRoot::open_existing(&admission.state_dir) else {
-                return Ok(format!("Error: {STATE_UNAVAILABLE}"));
-            };
+            let root = open_state(admission)?;
             match fork_session(root, admission.workspace.clone(), source_id, None).await {
                 Ok(id) => {
                     let forked = match load_view(&admission.state_dir, id).await {
@@ -567,9 +562,7 @@ pub(super) async fn handle_command(
                 view.title_is_explicit = true;
                 return Ok(format!("Renamed conversation: {title}"));
             }
-            let Ok(root) = StateRoot::open_existing(&admission.state_dir) else {
-                return Ok(format!("Error: {STATE_UNAVAILABLE}"));
-            };
+            let root = open_state(admission)?;
             match rename_session(
                 root,
                 admission.workspace.clone(),
@@ -1616,7 +1609,7 @@ mod tests {
             let workspace = admission.workspace.clone();
             admission.workspace = temp.path().join("other-workspace");
             std::fs::create_dir(&admission.workspace).expect("other Workspace");
-            assert_eq!(
+            assert!(matches!(
                 handle_command(
                     &admission,
                     &mut session_id,
@@ -1626,8 +1619,8 @@ mod tests {
                 )
                 .await
                 .expect_err("Workspace failure stays fatal"),
-                "Session belongs to a different Workspace"
-            );
+                LoopError::Fatal(error) if error == "Session belongs to a different Workspace"
+            ));
             assert_eq!(view, before);
             admission.workspace = workspace;
             assert_eq!(

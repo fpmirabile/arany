@@ -29,6 +29,7 @@ use picker::{PickerChoice, QuickChoice, pick_quick_action, pick_session};
 
 const MAX_OBJECTIVE_BYTES: usize = 8 * 1024;
 const EMPTY_INTERRUPT_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+const STATE_UNAVAILABLE: &str = "state directory unavailable or unsafe";
 
 #[derive(Args, Default)]
 pub(crate) struct AttachedArgs {
@@ -106,6 +107,39 @@ impl std::fmt::Display for Feedback {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self)
     }
+}
+
+/// `Notice` keeps the Session; `Fatal` ends it through terminal restoration. Unclassified errors are `Fatal`.
+#[derive(Debug)]
+enum LoopError {
+    Fatal(String),
+    Notice(String),
+}
+
+impl From<String> for LoopError {
+    fn from(error: String) -> Self {
+        Self::Fatal(error)
+    }
+}
+
+impl From<&str> for LoopError {
+    fn from(error: &str) -> Self {
+        Self::Fatal(error.to_owned())
+    }
+}
+
+/// The attached loop's only decision point for command failures.
+fn feedback_or_end<T: Into<Feedback>>(result: Result<T, LoopError>) -> Result<Feedback, String> {
+    match result {
+        Ok(feedback) => Ok(feedback.into()),
+        Err(LoopError::Notice(text)) => Ok(Feedback::History(text)),
+        Err(LoopError::Fatal(reason)) => Err(reason),
+    }
+}
+
+fn open_state(admission: &Admission) -> Result<StateRoot, LoopError> {
+    StateRoot::open_existing(&admission.state_dir)
+        .map_err(|_| LoopError::Notice(format!("Error: {STATE_UNAVAILABLE}")))
 }
 
 #[derive(Clone, Copy)]
@@ -504,19 +538,25 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
             .map_err(|error| error.to_string())?;
         match submit_objective(&mut terminal, &admission, &mut view, &mut composer, prompt).await? {
             RunSubmission::Completed(outcome, user_recorded) => {
-                (view, notice) = finish_submission(
+                notice = finish_submission(
                     &mut terminal,
                     &admission,
                     &mut composer,
+                    &mut view,
                     &outcome,
                     user_recorded,
                 )
                 .await?;
             }
             RunSubmission::InterruptedBeforeRun => {
-                (view, notice) =
-                    finish_interrupted_submission(&mut terminal, &admission, &composer, session_id)
-                        .await?;
+                notice = finish_interrupted_submission(
+                    &mut terminal,
+                    &admission,
+                    &composer,
+                    &mut view,
+                    session_id,
+                )
+                .await?;
             }
             RunSubmission::Shutdown(reason) => return Err(reason),
         }
@@ -629,7 +669,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                         ));
                     }
                     QuickChoice::Selected(selector) => {
-                        notice = Some(
+                        notice = Some(feedback_or_end(
                             run_selector(
                                 selector,
                                 &mut terminal,
@@ -638,8 +678,8 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 &mut view,
                                 &mut composer,
                             )
-                            .await?,
-                        );
+                            .await,
+                        )?);
                     }
                     QuickChoice::Closed => {}
                     QuickChoice::Shutdown(signal) => {
@@ -815,20 +855,22 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                         .await
                         {
                             Ok(RunSubmission::Completed(outcome, user_recorded)) => {
-                                (view, notice) = finish_submission(
+                                notice = finish_submission(
                                     &mut terminal,
                                     &admission,
                                     &mut composer,
+                                    &mut view,
                                     &outcome,
                                     user_recorded,
                                 )
                                 .await?;
                             }
                             Ok(RunSubmission::InterruptedBeforeRun) => {
-                                (view, notice) = finish_interrupted_submission(
+                                notice = finish_interrupted_submission(
                                     &mut terminal,
                                     &admission,
                                     &composer,
+                                    &mut view,
                                     session_id,
                                 )
                                 .await?;
@@ -843,15 +885,12 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                         composer.character_count()
                                     )
                                 };
-                                notice = Some(Feedback::History(
-                                    reload_view_or_keep(
-                                        &admission.state_dir,
-                                        session_id,
-                                        &mut view,
-                                        text,
-                                    )
-                                    .await,
-                                ));
+                                notice = reload_view_or_keep(
+                                    &mut view,
+                                    load_view(&admission.state_dir, session_id).await,
+                                    Some(text),
+                                )
+                                .map(Feedback::History);
                             }
                         }
                     }
@@ -956,7 +995,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                         } else if command == InteractiveCommand::Help {
                             terminal.open_help().map_err(|error| error.to_string())?;
                         } else if command == InteractiveCommand::Resume && argument.is_none() {
-                            notice = Some(
+                            notice = Some(feedback_or_end(
                                 run_selector(
                                     Selector::Resume,
                                     &mut terminal,
@@ -965,8 +1004,8 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                     &mut view,
                                     &mut composer,
                                 )
-                                .await?,
-                            );
+                                .await,
+                            )?);
                         } else if command == InteractiveCommand::Compact {
                             if view.created_sequence == 0 {
                                 notice = Some(Feedback::History(
@@ -996,15 +1035,12 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 Some(draft) => format!("{maintenance}; {draft}"),
                                 None => maintenance,
                             };
-                            notice = Some(Feedback::History(
-                                reload_view_or_keep(
-                                    &admission.state_dir,
-                                    session_id,
-                                    &mut view,
-                                    text,
-                                )
-                                .await,
-                            ));
+                            notice = reload_view_or_keep(
+                                &mut view,
+                                load_view(&admission.state_dir, session_id).await,
+                                Some(text),
+                            )
+                            .map(Feedback::History);
                         } else if argument.is_none()
                             && matches!(
                                 command,
@@ -1016,7 +1052,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                             } else {
                                 Selector::Models
                             };
-                            notice = Some(
+                            notice = Some(feedback_or_end(
                                 run_selector(
                                     selector,
                                     &mut terminal,
@@ -1025,10 +1061,10 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                     &mut view,
                                     &mut composer,
                                 )
-                                .await?,
-                            );
+                                .await,
+                            )?);
                         } else {
-                            notice = Some(Feedback::History(
+                            notice = Some(feedback_or_end(
                                 controls::handle_command(
                                     &admission,
                                     &mut session_id,
@@ -1036,8 +1072,8 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                     command,
                                     argument,
                                 )
-                                .await?,
-                            ));
+                                .await,
+                            )?);
                         }
                     }
                 }
@@ -1102,31 +1138,28 @@ async fn run_selector(
     session_id: &mut SessionId,
     view: &mut SessionView,
     composer: &mut Composer,
-) -> Result<Feedback, String> {
+) -> Result<Feedback, LoopError> {
     match selector {
         Selector::Setup => {
-            configure_account(terminal, admission, *session_id, view, composer).await
+            Ok(configure_account(terminal, admission, *session_id, view, composer).await?)
         }
         Selector::Models => {
             match models::browse(terminal, admission, *session_id, view, composer).await? {
                 ModelBrowse::Notice(notice) => Ok(notice),
-                ModelBrowse::Shutdown(signal) => Err(format!("terminated by {}", signal.name())),
+                ModelBrowse::Shutdown(signal) => {
+                    Err(format!("terminated by {}", signal.name()).into())
+                }
             }
         }
         Selector::Agents => match agents::inspect(terminal, view).await? {
-            Some(signal) => Err(format!("terminated by {}", signal.name())),
+            Some(signal) => Err(format!("terminated by {}", signal.name()).into()),
             None => Ok(Feedback::Transient("Agent inspection closed".into())),
         },
         Selector::Resume => {
             let choice = pick_session(terminal, admission, Some(&view.defaults)).await?;
             match choice {
                 PickerChoice::Selected(id) => {
-                    let Ok(root) = StateRoot::open_existing(&admission.state_dir) else {
-                        return Ok(Feedback::History(format!(
-                            "Error: {}",
-                            controls::STATE_UNAVAILABLE
-                        )));
-                    };
+                    let root = open_state(admission)?;
                     match resume_session(root, admission.workspace.clone(), id).await {
                         Ok(selected) => {
                             let selected =
@@ -1162,7 +1195,9 @@ async fn run_selector(
                     Ok(Feedback::History("No Sessions for this Workspace".into()))
                 }
                 PickerChoice::Closed => Ok(Feedback::Transient("Session selection closed".into())),
-                PickerChoice::Shutdown(signal) => Err(format!("terminated by {}", signal.name())),
+                PickerChoice::Shutdown(signal) => {
+                    Err(format!("terminated by {}", signal.name()).into())
+                }
             }
         }
     }
@@ -1244,59 +1279,57 @@ async fn finish_interrupted_submission(
     terminal: &mut AttachedTerminal,
     admission: &Admission,
     composer: &Composer,
+    view: &mut SessionView,
     session_id: SessionId,
-) -> Result<(SessionView, Option<Feedback>), String> {
-    let view = load_view(&admission.state_dir, session_id).await?;
+) -> Result<Option<Feedback>, String> {
+    let notice = reload_view_or_keep(
+        view,
+        load_view(&admission.state_dir, session_id).await,
+        Some("Submission interrupted before Run admission; no task was accepted. Account work already started may still complete.".into()),
+    );
     terminal
-        .draw(
-            &view,
-            composer,
-            Some("Submission interrupted before Run admission; no task was accepted. Account work already started may still complete."),
-        )
+        .draw(view, composer, notice.as_deref())
         .map_err(|error| error.to_string())?;
-    Ok((view, retained_draft_notice(composer)))
+    Ok(retained_draft_notice(composer))
 }
 
 async fn finish_submission(
     terminal: &mut AttachedTerminal,
     admission: &Admission,
     composer: &mut Composer,
+    view: &mut SessionView,
     outcome: &RunOutcome,
     user_recorded: bool,
-) -> Result<(SessionView, Option<Feedback>), String> {
+) -> Result<Option<Feedback>, String> {
     let automatic =
         outcome.run.config.as_ref().filter(|config| {
             outcome.run.status == RunStatus::Finished && config.auto_compaction_due()
         });
     let linear = terminal.is_linear();
     let preview_already_printed = user_recorded && linear;
-    let confirmed = if linear {
+    let reloaded = load_confirmed_outcome(&admission.state_dir, outcome).await;
+    if linear {
         terminal.restore().map_err(|error| error.to_string())?;
-        emit_outcome(
-            &admission.state_dir,
-            outcome,
-            preview_already_printed,
-            false,
-            None,
-        )
-        .await?;
+        let emitted = match &reloaded {
+            Ok(confirmed) => emit_outcome(confirmed, outcome, preview_already_printed, false, None),
+            Err(_) => Ok(()),
+        };
         terminal
             .reacquire_after_output()
             .map_err(|error| error.to_string())?;
-        load_confirmed_outcome(&admission.state_dir, outcome).await?
+        emitted?;
     } else {
-        let confirmed = load_confirmed_outcome(&admission.state_dir, outcome).await?;
         if !std::io::stdout().is_terminal() {
             AttachedTerminal::print_assistant_run(&outcome.run)
                 .map_err(|_| "output failed".to_owned())?;
         }
         terminal.finish_run_display();
-        confirmed
-    };
+    }
+    let reload_error = reload_view_or_keep(view, reloaded, None);
     if automatic.is_some() {
         terminal
             .draw(
-                &confirmed,
+                view,
                 composer,
                 Some("Context threshold reached; attempting automatic compaction"),
             )
@@ -1305,7 +1338,6 @@ async fn finish_submission(
     terminal
         .restore_draft_input(composer.text().len())
         .map_err(|error| error.to_string())?;
-    let mut view = confirmed;
     let mut notice = retained_draft_notice(composer);
     let feedback = render_run_feedback(&outcome.run);
     if let Some(feedback) = feedback {
@@ -1313,7 +1345,7 @@ async fn finish_submission(
             notice = Some(Feedback::History(feedback));
         } else {
             terminal
-                .draw(&view, composer, Some(&feedback))
+                .draw(view, composer, Some(&feedback))
                 .map_err(|error| error.to_string())?;
         }
     }
@@ -1321,7 +1353,7 @@ async fn finish_submission(
         let compaction_notice = match compact_current(
             terminal,
             admission,
-            &view,
+            view,
             composer,
             Some((config, outcome.run.id)),
         )
@@ -1338,13 +1370,21 @@ async fn finish_submission(
                 return Err(format!("terminated by {}", signal.name()));
             }
         };
-        notice = Some(Feedback::History(match retained_draft_notice(composer) {
+        let text = match retained_draft_notice(composer) {
             Some(draft) => format!("{compaction_notice}; {draft}"),
             None => compaction_notice,
-        }));
-        view = load_view(&admission.state_dir, outcome.session_id).await?;
+        };
+        notice = reload_view_or_keep(
+            view,
+            load_view(&admission.state_dir, outcome.session_id).await,
+            Some(text),
+        )
+        .map(Feedback::History);
     }
-    Ok((view, notice))
+    if let Some(error) = reload_error {
+        append_notice(&mut notice, &error);
+    }
+    Ok(notice)
 }
 
 async fn start_session(admission: &Admission) -> Result<(SessionId, SessionView), String> {
@@ -1816,14 +1856,13 @@ async fn load_confirmed_outcome(
     Ok(view)
 }
 
-async fn emit_outcome(
-    state_dir: &Path,
+fn emit_outcome(
+    view: &SessionView,
     outcome: &RunOutcome,
     user_recorded: bool,
     inline: bool,
     visual_mode: Option<arany::TerminalMode>,
 ) -> Result<(), String> {
-    let view = load_confirmed_outcome(state_dir, outcome).await?;
     let run = view
         .runs
         .iter()
@@ -1871,7 +1910,7 @@ async fn emit_outcome(
 
 #[derive(Debug, thiserror::Error)]
 enum DefaultsError {
-    #[error("state directory unavailable or unsafe")]
+    #[error("{}", STATE_UNAVAILABLE)]
     StateAdmission,
     #[error("{0}")]
     Operation(arany::EngineError),
@@ -1885,13 +1924,17 @@ impl From<DefaultsError> for String {
     }
 }
 
-fn recover_defaults_change(error: DefaultsError) -> Result<String, String> {
+fn recover_defaults_change(error: DefaultsError) -> Result<String, LoopError> {
     match error {
         DefaultsError::Operation(arany::EngineError::SessionBusy) => Ok(
             "Error: Session has an active operation; selection unchanged. Try again when it finishes"
                 .into(),
         ),
-        error => Err(error.into()),
+        DefaultsError::StateAdmission => Err(LoopError::Notice(format!("Error: {STATE_UNAVAILABLE}"))),
+        DefaultsError::Reload(error) => Err(LoopError::Notice(format!(
+            "Error: Settings saved, but the conversation could not be reloaded: {error}"
+        ))),
+        error => Err(LoopError::Fatal(error.into())),
     }
 }
 
@@ -1921,21 +1964,26 @@ async fn load_view(state_dir: &Path, session_id: SessionId) -> Result<SessionVie
     Ok(view)
 }
 
-// Events are already committed when this runs, so a failed reload keeps the displayed history.
-async fn reload_view_or_keep(
-    state_dir: &Path,
-    session_id: SessionId,
+/// Events are already committed when this runs, so a failed reload keeps the displayed history
+/// and returns the notice with the reload failure.
+fn reload_view_or_keep(
     view: &mut SessionView,
-    notice: String,
-) -> String {
-    match load_view(state_dir, session_id).await {
+    reloaded: Result<SessionView, String>,
+    notice: Option<String>,
+) -> Option<String> {
+    match reloaded {
         Ok(reloaded) => {
             *view = reloaded;
             notice
         }
-        Err(error) => format!(
-            "{notice}; Error: history could not be reloaded: {error}; use /resume to reload it"
-        ),
+        Err(error) => Some(match notice {
+            Some(notice) => format!(
+                "{notice}; Error: history could not be reloaded: {error}; use /resume to reload it"
+            ),
+            None => {
+                format!("Error: history could not be reloaded: {error}; use /resume to reload it")
+            }
+        }),
     }
 }
 

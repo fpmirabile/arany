@@ -1994,6 +1994,18 @@ fn inline_session_picker_closes_after_quick_action() {
     session_picker_close_case(true);
 }
 
+/// Restores State's mode if an assertion fails while it is unavailable.
+struct StateModeGuard {
+    path: std::path::PathBuf,
+    mode: std::fs::Permissions,
+}
+
+impl Drop for StateModeGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::set_permissions(&self.path, self.mode.clone());
+    }
+}
+
 #[test]
 fn screen_reader_rejected_command_does_not_join_the_next_line() {
     let temp = tempfile::tempdir().expect("private test root");
@@ -2337,7 +2349,10 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
         rename_at,
         b"Notice: Error: Title is empty or too long; use a shorter title\r\nInput:\r\n",
     );
-    let state_mode = std::fs::metadata(&state).expect("State").permissions();
+    let state_guard = StateModeGuard {
+        path: state.clone(),
+        mode: std::fs::metadata(&state).expect("State").permissions(),
+    };
     std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o000))
         .expect("make State unavailable mid-Session");
     let unavailable_at = transcript.len();
@@ -2352,7 +2367,7 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
         unavailable_at,
         b"Notice: Error: state directory unavailable or unsafe\r\nInput:\r\n",
     );
-    std::fs::set_permissions(&state, state_mode).expect("restore State");
+    std::fs::set_permissions(&state, state_guard.mode.clone()).expect("restore State");
     let corrected_at = transcript.len();
     input
         .write_all(b"/rename Corrected title\r")
