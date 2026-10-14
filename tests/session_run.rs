@@ -2645,11 +2645,9 @@ fn exec_process_rejects_a_busy_session_and_recovers_after_holder_death() {
         let view = SessionView::replay(session_id, &interrupted_events)
             .expect("valid interrupted Goal history")
             .expect("Session");
-        let interrupted_goal = view
-            .active_goal()
-            .filter(|goal| goal.status == arany::GoalStatus::Interrupted)
+        let goal_id = view
+            .interrupted_goal_id()
             .expect("held Goal became interrupted");
-        let goal_id = interrupted_goal.id;
         store.close().await.expect("close interrupted Store");
 
         let released = contender(Some(goal_id));

@@ -1812,3 +1812,176 @@ async fn autonomous_goal_stopped_by_a_failed_admission_returns_the_committed_run
         "a non-budget stop leaves the Goal open for explicit resume"
     );
 }
+
+#[tokio::test]
+async fn paused_goal_coexists_with_a_new_goal_and_resumes_with_its_pinned_objective() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let state_path = temp.path().join("state");
+    let cancellation = RunCancellation::new();
+    let mut paused_provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
+        summary: "done".into(),
+        result: "cancelled answer".into(),
+    })]);
+    paused_provider.cancel_at_completion = Some((AgentPhase::RootPlan, cancellation.clone()));
+    let mut engine = Engine::open(
+        StateRoot::admit(&state_path).expect("state"),
+        paused_provider,
+    )
+    .expect("engine");
+    // Only an autonomous Goal pauses on cancellation; a one-Run Goal records its terminal Cancelled receipt.
+    let mut paused = request(&workspace, "Pinned objective of the paused Goal");
+    paused.include_paths.clear();
+    paused.goal = arany::GoalRequest::autonomous(
+        arany::GoalBudget::default(),
+        arany::GoalPhase::Implementation,
+    );
+    let cancelled = engine
+        .run_with_cancel(paused, cancellation)
+        .await
+        .expect("cancelled Run");
+    assert_eq!(cancelled.run.status, RunStatus::Cancelled);
+    let session_id = cancelled.session_id;
+    engine.close().await.expect("first engine shutdown");
+
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Finish(Finish {
+            summary: "second".into(),
+            result: "second answer".into(),
+        }),
+        ProviderOutcome::Finish(Finish {
+            summary: "resumed".into(),
+            result: "resumed answer".into(),
+        }),
+    ]);
+    let requests = Arc::clone(&provider.requests);
+    let mut engine = Engine::open(
+        StateRoot::open_existing(&state_path).expect("reopened state"),
+        provider,
+    )
+    .expect("second engine");
+
+    let mut second = request(&workspace, "A new plain prompt");
+    second.session_id = Some(session_id);
+    second.title = None;
+    second.include_paths.clear();
+    let second_run = engine
+        .run(second)
+        .await
+        .expect("a new Goal starts while the earlier Goal is paused");
+    assert_eq!(second_run.run.status, RunStatus::Finished);
+    assert_ne!(second_run.goal_id, cancelled.goal_id);
+
+    let mut resumed = request(&workspace, "");
+    resumed.session_id = Some(session_id);
+    resumed.title = None;
+    resumed.include_paths.clear();
+    resumed.objective = String::new();
+    resumed.goal = arany::GoalRequest::resume(cancelled.goal_id, true);
+    let resumed_run = engine
+        .run(resumed)
+        .await
+        .expect("the most recent paused Goal resumes after a newer Goal finished");
+    assert_eq!(resumed_run.goal_id, cancelled.goal_id);
+    assert_eq!(resumed_run.run.status, RunStatus::Finished);
+    assert_eq!(
+        resumed_run.run.objective, "Pinned objective of the paused Goal",
+        "resume runs the pinned objective"
+    );
+    engine.close().await.expect("second engine shutdown");
+    assert_eq!(requests.lock().expect("Provider requests").len(), 2);
+
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
+        .expect("read-only Store");
+    let view = store
+        .load_view(session_id)
+        .await
+        .expect("replayed Session")
+        .expect("Session");
+    let paused_goal = view.goal(cancelled.goal_id).expect("paused Goal");
+    assert_eq!(paused_goal.status, arany::GoalStatus::Completed);
+    assert_eq!(paused_goal.run_ids, [cancelled.run.id, resumed_run.run.id]);
+    assert_eq!(
+        view.goal(second_run.goal_id).expect("new Goal").status,
+        arany::GoalStatus::Completed
+    );
+    store.close().await.expect("Store shutdown");
+}
+
+#[tokio::test]
+async fn older_paused_goal_is_refused_once_a_newer_goal_is_paused() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let state_path = temp.path().join("state");
+    let autonomous = || {
+        arany::GoalRequest::autonomous(
+            arany::GoalBudget::default(),
+            arany::GoalPhase::Implementation,
+        )
+    };
+    let mut session_id = None;
+    let mut paused_goals = Vec::new();
+    for objective in ["First paused objective", "Second paused objective"] {
+        let cancellation = RunCancellation::new();
+        let mut provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
+            summary: "done".into(),
+            result: "cancelled answer".into(),
+        })]);
+        provider.cancel_at_completion = Some((AgentPhase::RootPlan, cancellation.clone()));
+        let mut engine =
+            Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+        let mut input = request(&workspace, objective);
+        input.include_paths.clear();
+        input.session_id = session_id;
+        input.title = None;
+        input.goal = autonomous();
+        let cancelled = engine
+            .run_with_cancel(input, cancellation)
+            .await
+            .expect("cancelled Run");
+        assert_eq!(cancelled.run.status, RunStatus::Cancelled);
+        session_id = Some(cancelled.session_id);
+        paused_goals.push(cancelled.goal_id);
+        engine.close().await.expect("engine shutdown");
+    }
+    let (first, second) = (paused_goals[0], paused_goals[1]);
+    let session_id = session_id.expect("Session");
+
+    let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
+        summary: "resumed".into(),
+        result: "resumed answer".into(),
+    })]);
+    let requests = Arc::clone(&provider.requests);
+    let mut engine = Engine::open(
+        StateRoot::open_existing(&state_path).expect("reopened state"),
+        provider,
+    )
+    .expect("engine");
+    let mut stale = request(&workspace, "");
+    stale.session_id = Some(session_id);
+    stale.title = None;
+    stale.include_paths.clear();
+    stale.objective = String::new();
+    stale.goal = arany::GoalRequest::resume(first, true);
+    assert!(matches!(
+        engine.run(stale).await,
+        Err(EngineError::GoalUnavailable)
+    ));
+    assert!(requests.lock().expect("Provider requests").is_empty());
+
+    let mut resumed = request(&workspace, "");
+    resumed.session_id = Some(session_id);
+    resumed.title = None;
+    resumed.include_paths.clear();
+    resumed.objective = String::new();
+    resumed.goal = arany::GoalRequest::resume(second, true);
+    let outcome = engine
+        .run(resumed)
+        .await
+        .expect("the most recent paused Goal resumes");
+    assert_eq!(outcome.goal_id, second);
+    assert_eq!(outcome.run.objective, "Second paused objective");
+    engine.close().await.expect("engine shutdown");
+}

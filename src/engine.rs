@@ -1037,7 +1037,7 @@ mod goal_workspace_lease_tests {
     }
 
     #[tokio::test]
-    async fn goal_workspace_lease_survives_dropped_start_acknowledgment() {
+    async fn dropped_start_acknowledgment_releases_the_lease_once_the_goal_is_paused() {
         let temp = tempfile::tempdir().expect("temporary root");
         let state_path = temp.path().join("state-a");
         let second_state_path = temp.path().join("state-b");
@@ -1071,10 +1071,15 @@ mod goal_workspace_lease_tests {
             })
             .await
             .expect("install acknowledgment gate");
-        let mut admission = Box::pin(engine.append_goal_lifecycle(
+        let mut leases = WorkspaceLeases::new();
+        Engine::<NeverProvider>::retain_goal_workspace(
+            &mut leases,
             goal_id,
             workspace_identity,
             Some(workspace_lock),
+        );
+        let mut admission = Box::pin(engine.append_goal_lifecycle(
+            goal_id,
             session_id,
             None,
             Event::GoalStarted {
@@ -1099,17 +1104,23 @@ mod goal_workspace_lease_tests {
             .send(())
             .expect("release Store acknowledgment");
 
+        assert!(matches!(
+            second_state.lock_workspace_in(&account_root, workspace_identity),
+            Err(StoreError::WorkspaceBusy)
+        ));
+        // The call ends with its dropped future; the committed Goal is paused and no longer holds the writer lock.
+        drop(leases);
         let view = engine
             .store
             .load_view(session_id)
             .await
             .expect("canonical Session view")
             .expect("Session exists");
-        assert!(view.active_goal().is_some_and(|goal| goal.id == goal_id));
-        assert!(matches!(
-            second_state.lock_workspace_in(&account_root, workspace_identity),
-            Err(StoreError::WorkspaceBusy)
-        ));
+        assert_eq!(view.interrupted_goal_id(), Some(goal_id));
+        let writer = second_state
+            .lock_workspace_in(&account_root, workspace_identity)
+            .expect("paused Goal releases the Workspace writer lock");
+        drop(writer);
         let events = engine
             .store
             .load_session(session_id)
@@ -1333,9 +1344,14 @@ fn resolve_goal_admission(
 ) -> Result<GoalAdmission, EngineError> {
     if let Some(id) = request.goal.id {
         let goal = history
-            .and_then(|view| view.goals.last())
-            .filter(|goal| goal.id == id)
+            .and_then(|view| view.goal(id))
             .ok_or(EngineError::GoalUnavailable)?;
+        // Only the most recent unfinished Goal is resumable; older paused Goals stay history.
+        if goal.status == GoalStatus::Interrupted
+            && history.and_then(crate::session::SessionView::interrupted_goal_id) != Some(id)
+        {
+            return Err(EngineError::GoalUnavailable);
+        }
         if !request.objective.trim().is_empty()
             && !goal.run_ids.iter().any(|run_id| {
                 history.is_some_and(|view| view.runs.iter().any(|run| run.id == *run_id))
@@ -1406,12 +1422,7 @@ fn resolve_goal_admission(
             .unwrap_or(u8::MAX),
         })
     } else {
-        if history
-            .and_then(crate::session::SessionView::active_goal)
-            .is_some()
-        {
-            return Err(EngineError::SessionBusy);
-        }
+        // A paused Goal does not block a new one; the Session lock serializes live Runs.
         Ok(GoalAdmission {
             id: GoalId::new(),
             objective: request.objective.clone(),
@@ -1444,8 +1455,10 @@ pub struct Engine<P: Provider> {
     tools: Option<(crate::tools::config::Config, PathBuf)>,
     workspace_permissions: Option<crate::tools::WorkspacePermissions>,
     tool_approvals: Option<crate::tools::ToolApprovals>,
-    workspace_locks: HashMap<(u64, u64), GoalWorkspaceLock>,
 }
+
+/// Writer locks held by one call. A paused Goal holds none: the call drops them when it returns.
+type WorkspaceLeases = HashMap<(u64, u64), GoalWorkspaceLock>;
 
 struct GoalWorkspaceLock {
     goal_id: GoalId,
@@ -1481,11 +1494,12 @@ impl<P: Provider + 'static> Engine<P> {
     }
 
     fn acquire_goal_workspace(
-        &mut self,
+        &self,
+        leases: &WorkspaceLeases,
         goal_id: GoalId,
         identity: (u64, u64),
     ) -> Result<Option<WorkspaceRunLock>, EngineError> {
-        if let Some(held) = self.workspace_locks.get(&identity) {
+        if let Some(held) = leases.get(&identity) {
             return if held.goal_id == goal_id {
                 Ok(None)
             } else {
@@ -1503,13 +1517,13 @@ impl<P: Provider + 'static> Engine<P> {
     }
 
     fn retain_goal_workspace(
-        &mut self,
+        leases: &mut WorkspaceLeases,
         goal_id: GoalId,
         identity: (u64, u64),
         lock: Option<WorkspaceRunLock>,
     ) {
         if let Some(lock) = lock {
-            self.workspace_locks.insert(
+            leases.insert(
                 identity,
                 GoalWorkspaceLock {
                     goal_id,
@@ -1519,36 +1533,30 @@ impl<P: Provider + 'static> Engine<P> {
         }
     }
 
-    fn release_goal_workspace(&mut self, goal_id: GoalId, identity: (u64, u64)) {
-        if self
-            .workspace_locks
+    fn release_goal_workspace(leases: &mut WorkspaceLeases, goal_id: GoalId, identity: (u64, u64)) {
+        if leases
             .get(&identity)
             .is_some_and(|held| held.goal_id == goal_id)
         {
-            self.workspace_locks.remove(&identity);
+            leases.remove(&identity);
         }
     }
 
     async fn append_goal_lifecycle(
         &mut self,
         goal_id: GoalId,
-        workspace_identity: (u64, u64),
-        workspace_lock: Option<WorkspaceRunLock>,
         session_id: SessionId,
         progress: Option<&ProgressPublisher>,
         event: Event,
     ) -> Result<u64, EngineError> {
-        self.retain_goal_workspace(goal_id, workspace_identity, workspace_lock);
         match append_observed(&self.store, progress, None, session_id, event).await {
             Ok(sequence) => Ok(sequence),
+            // A committed Goal is paused from here on; the failed call drops its lease either way.
             Err(error) => match self.store.load_view(session_id).await {
-                Ok(Some(view)) if view.active_goal().is_some() => {
+                Ok(Some(view)) if view.goal(goal_id).is_some() => {
                     Err(EngineError::GoalAdmissionUncertain)
                 }
-                Ok(_) => {
-                    self.release_goal_workspace(goal_id, workspace_identity);
-                    Err(error)
-                }
+                Ok(_) => Err(error),
                 Err(_) => Err(EngineError::GoalAdmissionUncertain),
             },
         }
@@ -1572,7 +1580,6 @@ impl<P: Provider + 'static> Engine<P> {
             tools: None,
             workspace_permissions: None,
             tool_approvals: None,
-            workspace_locks: HashMap::new(),
         })
     }
 
@@ -1656,8 +1663,15 @@ impl<P: Provider + 'static> Engine<P> {
         let workspace = request.workspace.clone();
         let include_paths = request.include_paths.clone();
         let policy = request.policy;
+        let mut leases = WorkspaceLeases::new();
         let mut turn = self
-            .run_turn(request, cancellation.clone(), progress.clone(), false)
+            .run_turn(
+                request,
+                cancellation.clone(),
+                progress.clone(),
+                false,
+                &mut leases,
+            )
             .await?;
         while turn.continues() && !cancellation.is_cancelled() {
             let next = RunRequest {
@@ -1672,7 +1686,13 @@ impl<P: Provider + 'static> Engine<P> {
             };
             // Settlement left the Goal open under the same admits_next_run check, so this cannot be refused for budget.
             turn = match self
-                .run_turn(next, cancellation.clone(), progress.clone(), true)
+                .run_turn(
+                    next,
+                    cancellation.clone(),
+                    progress.clone(),
+                    true,
+                    &mut leases,
+                )
                 .await
             {
                 Ok(turn) => turn,
@@ -1702,6 +1722,7 @@ impl<P: Provider + 'static> Engine<P> {
         cancellation: RunCancellation,
         progress: Option<RunProgress>,
         continuation: bool,
+        leases: &mut WorkspaceLeases,
     ) -> Result<RunTurn, EngineError> {
         if cancellation.is_cancelled() {
             return Err(EngineError::CancelledBeforeStart);
@@ -1776,7 +1797,7 @@ impl<P: Provider + 'static> Engine<P> {
         let provisional_workspace_lock = if goal.phase == crate::session::GoalPhase::Implementation
             && self.tools.as_ref().is_some_and(|(config, _)| config.write)
         {
-            self.acquire_goal_workspace(goal.id, workspace_identity)?
+            self.acquire_goal_workspace(leases, goal.id, workspace_identity)?
         } else {
             None
         };
@@ -1916,12 +1937,16 @@ impl<P: Provider + 'static> Engine<P> {
         if cancellation.is_cancelled() {
             return Err(EngineError::CancelledBeforeStart);
         }
+        Self::retain_goal_workspace(
+            leases,
+            goal.id,
+            workspace_identity,
+            provisional_workspace_lock,
+        );
         if goal.is_new {
             let sequence = self
                 .append_goal_lifecycle(
                     goal.id,
-                    workspace_identity,
-                    provisional_workspace_lock,
                     session_id,
                     publisher.as_ref(),
                     Event::GoalStarted {
@@ -1939,16 +1964,12 @@ impl<P: Provider + 'static> Engine<P> {
             let sequence = self
                 .append_goal_lifecycle(
                     goal.id,
-                    workspace_identity,
-                    provisional_workspace_lock,
                     session_id,
                     publisher.as_ref(),
                     Event::GoalResumed { goal_id: goal.id },
                 )
                 .await?;
             goal_trace.event_committed(sequence, crate::telemetry::TraceEventKind::GoalResumed);
-        } else {
-            self.retain_goal_workspace(goal.id, workspace_identity, provisional_workspace_lock);
         }
         if cancellation.is_cancelled() {
             return Err(EngineError::CancelledBeforeStart);
@@ -1957,8 +1978,6 @@ impl<P: Provider + 'static> Engine<P> {
         let linked_sequence = self
             .append_goal_lifecycle(
                 goal.id,
-                workspace_identity,
-                None,
                 session_id,
                 publisher.as_ref(),
                 Event::GoalRunLinked {
@@ -2172,7 +2191,7 @@ impl<P: Provider + 'static> Engine<P> {
                 },
             )
             .await?;
-            self.release_goal_workspace(goal.id, workspace_identity);
+            Self::release_goal_workspace(leases, goal.id, workspace_identity);
             goal_status = status;
         }
         let trace_outcome = match run.status {

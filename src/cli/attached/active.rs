@@ -70,11 +70,6 @@ pub(super) fn goal_request(
             .map(|id| arany::GoalRequest::resume(id, true))
             .ok_or_else(|| "No interrupted Goal is available to resume".into());
     }
-    if let Some(id) = view.interrupted_goal_id() {
-        return Err(format!(
-            "Interrupted Goal {id} is waiting; use /goal resume to continue it"
-        ));
-    }
     if let Some(goal) = view.active_goal() {
         return Err(format!(
             "Goal {} is still active and cannot accept another Run",
@@ -171,9 +166,13 @@ pub(super) async fn submit_objective(
         .clone()
         .ok_or("select /model before submitting")?;
     let starting_sequence = view.last_sequence;
-    let autonomous = view
-        .active_goal()
-        .map_or(goal == GoalStart::Autonomous, |active| active.autonomous);
+    let autonomous = match goal {
+        GoalStart::Resume => view
+            .interrupted_goal_id()
+            .and_then(|id| view.goal(id))
+            .is_some_and(|resumed| resumed.autonomous),
+        GoalStart::Plain | GoalStart::Autonomous => goal == GoalStart::Autonomous,
+    };
     let cancellation = RunCancellation::new();
     let mut progress = if terminal.is_linear() {
         RunProgress::new()
@@ -957,7 +956,7 @@ mod goal_request_tests {
     }
 
     #[test]
-    fn interrupted_goal_resumes_only_through_goal_resume() {
+    fn paused_goal_admits_new_goals_and_resumes_only_through_goal_resume() {
         let mut view = session_with_goal(true);
         view.goals[0].status = arany::GoalStatus::Interrupted;
         let id = view.goals[0].id;
@@ -965,14 +964,16 @@ mod goal_request_tests {
             goal_request(&view, GoalStart::Resume),
             Ok(arany::GoalRequest::resume(id, true))
         );
-        for start in [GoalStart::Plain, GoalStart::Autonomous] {
-            let message = goal_request(&view, start).expect_err("new objective waits for resume");
-            assert!(message.contains("/goal resume"), "{message}");
-        }
+        assert_eq!(
+            goal_request(&view, GoalStart::Plain),
+            Ok(arany::GoalRequest::default())
+        );
+        let autonomous = goal_request(&view, GoalStart::Autonomous).expect("autonomous start");
+        assert!(autonomous.autonomous);
     }
 
     #[test]
-    fn idle_goal_refusal_precedes_draft_images_and_session_state() {
+    fn idle_resume_refusal_precedes_draft_images_and_session_state() {
         let temp = tempfile::tempdir().expect("temporary root");
         let mut view = session_with_goal(true);
         view.goals[0].status = arany::GoalStatus::Interrupted;
@@ -995,11 +996,6 @@ mod goal_request_tests {
             prompt: None,
             resume_goal: None,
         };
-        for start in [GoalStart::Plain, GoalStart::Autonomous] {
-            let message = preflight_idle_run(&admission, &view, start, "draft", true, false)
-                .expect_err("an interrupted Goal refuses a new objective");
-            assert!(message.contains("/goal resume"), "{message}");
-        }
         view.goals.clear();
         let message = preflight_idle_run(&admission, &view, GoalStart::Resume, "", false, false)
             .expect_err("no interrupted Goal to resume");

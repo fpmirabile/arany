@@ -1,5 +1,5 @@
 use super::{
-    AgentStatus, GoalView, RunStatus, SessionView, current_goal_mut, current_run,
+    AgentStatus, GoalView, RunStatus, RunView, SessionView, current_goal_mut, current_run,
     goal_tool_observations, model_tool_count,
 };
 use crate::provider::AgentPhase;
@@ -19,12 +19,19 @@ impl SessionView {
         prior: u64,
     ) -> Result<(), ReplayError> {
         if self.goals.iter().any(|goal| goal.id == *goal_id)
-            || self.goals.last().is_some_and(GoalView::is_active)
             || self
                 .workspace_identity
                 .is_some_and(|identity| identity != *workspace_identity)
         {
             return Err(ReplayError::InvalidTransition);
+        }
+        // A new Goal pauses an unfinished predecessor, such as one a crash left Running.
+        for goal in self
+            .goals
+            .iter_mut()
+            .filter(|goal| goal.status == GoalStatus::Running)
+        {
+            seal_unfinished_goal(goal, &mut self.runs);
         }
         self.workspace_identity = Some(*workspace_identity);
         self.goals.push(GoalView {
@@ -80,36 +87,20 @@ impl SessionView {
     }
 
     pub(super) fn resume_goal(&mut self, goal_id: &GoalId) -> Result<(), ReplayError> {
-        let active_run = self
-            .goals
-            .last()
-            .filter(|goal| goal.id == *goal_id && goal.status == GoalStatus::Running)
-            .and_then(|goal| goal.active_run);
-        if let Some(run_id) = active_run
-            && let Some(run) = self.runs.last_mut().filter(|run| run.id == run_id)
-        {
-            run.interrupt();
-        }
+        let index = self
+            .resumable_goal_index()
+            .filter(|index| self.goals[*index].id == *goal_id)
+            .ok_or(ReplayError::InvalidTransition)?;
         // A crashed predecessor is still Running in the raw journal; this explicit resume seals it.
-        if let Some(goal) = self
-            .goals
-            .last_mut()
-            .filter(|goal| goal.id == *goal_id && goal.status == GoalStatus::Running)
-        {
-            goal.status = GoalStatus::Interrupted;
-            goal.active_run = None;
+        if self.goals[index].status == GoalStatus::Running {
+            seal_unfinished_goal(&mut self.goals[index], &mut self.runs);
         }
-        let recoverable = self
-            .goals
+        let recoverable = self.goals[index].can_resume(self);
+        let has_unaccepted_run = self.goals[index]
+            .run_ids
             .last()
-            .filter(|goal| goal.id == *goal_id)
-            .is_some_and(|goal| goal.can_resume(self));
-        let has_unaccepted_run = self.goals.last().is_some_and(|goal| {
-            goal.run_ids
-                .last()
-                .is_some_and(|run_id| !self.runs.iter().any(|run| run.id == *run_id))
-        });
-        let goal = current_goal_mut(self, *goal_id)?;
+            .is_some_and(|run_id| !self.runs.iter().any(|run| run.id == *run_id));
+        let goal = &mut self.goals[index];
         if goal.status != GoalStatus::Interrupted || goal.active_run.is_some() || !recoverable {
             return Err(ReplayError::InvalidTransition);
         }
@@ -314,9 +305,7 @@ impl SessionView {
         prior: u64,
     ) -> Result<(), ReplayError> {
         let run_id = self
-            .goals
-            .last()
-            .filter(|goal| goal.id == *goal_id)
+            .goal(*goal_id)
             .and_then(|goal| goal.run_ids.last())
             .copied()
             .ok_or(ReplayError::InvalidTransition)?;
@@ -354,4 +343,17 @@ impl SessionView {
         goal.finished_sequence = Some(prior);
         Ok(())
     }
+}
+
+/// Projects an unfinished Goal as paused: its live Run is interrupted and no later event may retry its calls or effects.
+fn seal_unfinished_goal(goal: &mut GoalView, runs: &mut [RunView]) {
+    if let Some(run) = goal
+        .active_run
+        .and_then(|run_id| runs.iter_mut().find(|run| run.id == run_id))
+    {
+        run.interrupt();
+    }
+    goal.active_run = None;
+    goal.awaiting_plan_contract = false;
+    goal.status = GoalStatus::Interrupted;
 }

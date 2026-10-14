@@ -569,6 +569,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         require_access(access_authorized, notice.as_ref())?;
         active::validate_objective_inputs(&admission, &prompt)?;
         materialize_session(&admission, &mut session_id, &mut view).await?;
+        let starting_sequence = view.last_sequence;
         terminal
             .draw_progress(&view, notice.as_deref().expect("startup notice exists"))
             .map_err(|error| error.to_string())?;
@@ -601,6 +602,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                     &composer,
                     &mut view,
                     session_id,
+                    starting_sequence,
                 )
                 .await?;
             }
@@ -1273,6 +1275,7 @@ async fn submit_idle_run(
     objective: String,
 ) -> Result<Option<Feedback>, String> {
     materialize_session(admission, session_id, view).await?;
+    let starting_sequence = view.last_sequence;
     match submit_objective(terminal, admission, start, view, composer, objective).await {
         Ok(RunSubmission::Completed(outcome, user_recorded, stop)) => {
             finish_submission(
@@ -1287,7 +1290,15 @@ async fn submit_idle_run(
             .await
         }
         Ok(RunSubmission::InterruptedBeforeRun) => {
-            finish_interrupted_submission(terminal, admission, composer, view, *session_id).await
+            finish_interrupted_submission(
+                terminal,
+                admission,
+                composer,
+                view,
+                *session_id,
+                starting_sequence,
+            )
+            .await
         }
         Ok(RunSubmission::Shutdown(reason)) => Err(reason),
         Err(error) => {
@@ -1310,8 +1321,7 @@ async fn submit_idle_run(
     }
 }
 
-const INTERRUPTED_GOAL_NOTICE: &str =
-    "Goal interrupted before the next Run; use /goal resume to continue.";
+const INTERRUPTED_GOAL_NOTICE: &str = "Goal paused; use /goal resume to continue.";
 
 /// An interrupted Goal's resume hint follows the Run's feedback. Cancelled Run feedback only
 /// restates the cancellation that the hint already covers, so the hint replaces it.
@@ -1336,6 +1346,7 @@ async fn finish_interrupted_submission(
     composer: &Composer,
     view: &mut SessionView,
     session_id: SessionId,
+    starting_sequence: u64,
 ) -> Result<Option<Feedback>, String> {
     let reload_error = reload_view_or_keep(
         view,
@@ -1343,7 +1354,12 @@ async fn finish_interrupted_submission(
         None,
         None,
     );
-    let interrupted = if view.interrupted_goal_id().is_some() {
+    // Only a Goal this submission started can be paused by it; an older paused Goal is not news.
+    let started_goal_paused = view
+        .interrupted_goal_id()
+        .and_then(|id| view.goal(id))
+        .is_some_and(|goal| goal.started_sequence > starting_sequence);
+    let interrupted = if started_goal_paused {
         INTERRUPTED_GOAL_NOTICE
     } else {
         "Submission interrupted before Run admission; no task was accepted. Account work already started may still complete."
@@ -1424,7 +1440,12 @@ async fn finish_submission(
         }),
         None => run_feedback,
     };
-    let feedback = submission_notice(view.interrupted_goal_id(), outcome.run.status, run_feedback);
+    // Only this Run's Goal can have been paused by it; an older paused Goal is not news here.
+    let paused_goal = view
+        .goal(outcome.goal_id)
+        .filter(|goal| goal.status == arany::GoalStatus::Interrupted)
+        .map(|goal| goal.id);
+    let feedback = submission_notice(paused_goal, outcome.run.status, run_feedback);
     if let Some(feedback) = feedback {
         if composer.is_empty() {
             notice = Some(Feedback::History(feedback));

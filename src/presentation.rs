@@ -505,7 +505,8 @@ struct EventLine {
     created_at_ms: i64,
 }
 
-/// Read-only status of the Session's current or last Goal, shown by `/goal`.
+/// Read-only status of the Session's current or last Goal, shown by `/goal`. A paused Goal that is
+/// not that Goal is named on its own line, since `/goal resume` continues it.
 pub fn goal_status(view: &SessionView) -> String {
     let Some(goal) = view.goals.last() else {
         return "No Goal in this Session; send a message or use /goal <objective>".into();
@@ -539,6 +540,12 @@ pub fn goal_status(view: &SessionView) -> String {
     );
     if goal.status == crate::session::GoalStatus::Interrupted {
         text.push_str(" · Use /goal resume to continue");
+    }
+    if let Some(paused) = view.interrupted_goal_id().filter(|id| *id != goal.id) {
+        text.push_str(&format!(
+            "\nPaused Goal {} can be resumed with /goal resume",
+            paused.to_string().chars().take(8).collect::<String>()
+        ));
     }
     text
 }
@@ -1043,6 +1050,39 @@ mod goal_status_tests {
 
         let single = goal_status(&session_with_goal(false));
         assert!(single.contains(" · single Run · "), "{single}");
+    }
+
+    #[test]
+    fn goal_status_names_a_paused_goal_that_is_not_the_last_one() {
+        let mut view = session_with_goal(true);
+        view.goals[0].status = GoalStatus::Interrupted;
+        let paused = view.goals[0]
+            .id
+            .to_string()
+            .chars()
+            .take(8)
+            .collect::<String>();
+        let mut newer = view.goals[0].clone();
+        newer.id = crate::session::GoalId::new();
+        newer.status = GoalStatus::Completed;
+        let newer_short = newer.id.to_string().chars().take(8).collect::<String>();
+        view.goals.push(newer);
+        let status = goal_status(&view);
+        assert!(
+            status.starts_with(&format!("Goal {newer_short} · completed")),
+            "{status}"
+        );
+        assert!(
+            status.ends_with(&format!(
+                "\nPaused Goal {paused} can be resumed with /goal resume"
+            )),
+            "{status}"
+        );
+        assert!(!status.contains("Use /goal resume to continue"), "{status}");
+
+        view.goals[1].status = GoalStatus::Interrupted;
+        let last_paused = goal_status(&view);
+        assert!(!last_paused.contains("Paused Goal"), "{last_paused}");
     }
 
     #[test]

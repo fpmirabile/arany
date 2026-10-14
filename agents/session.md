@@ -7,7 +7,7 @@ The [decision register](../docs/research/next-step-decision-register.md) and [co
 ## Domain boundaries
 
 - A Session is one durable ordered conversation across process exits. A Run is one bounded execution caused by one accepted user Message. An AgentRun is one primary or child execution inside that Run.
-- Every accepted task belongs to a durable Goal; each Run is linked before its accepted Message. Replay rejects missing linkage and projects unfinished Goals as interrupted without retrying prior calls or effects. Goal is task lifecycle; Session remains conversation/history identity.
+- Every accepted task belongs to a durable Goal; each Run is linked before its accepted Message. Replay rejects missing linkage and projects unfinished Goals as interrupted without retrying prior calls or effects. Starting a Goal seals an unfinished predecessor as interrupted, so at most one Goal is Running; explicit resume targets only the most recent unfinished Goal, and older paused Goals are history. Goal is task lifecycle; Session remains conversation/history identity.
 - Resume preserves Session identity. Fork creates a new Session from an exact committed Run boundary and records immutable source Session, Run, sequence, and prefix digest.
 - A fork's first Event is `SessionForked`; replay resolves at most eight lineage links and 10,000 total Events, verifies each canonical Event-prefix digest, and includes only inherited committed Runs through the recorded boundary. A missing or changed source fails replay before context compilation.
 - Historical agents remain inspectable after resume; no in-memory child is fabricated or restarted. Retrying interrupted work creates a new Run ID.
