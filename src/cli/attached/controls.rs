@@ -347,21 +347,15 @@ pub(super) async fn select_model(
         Err(DefaultsError::Reload(error)) => Some(error),
         Err(error) => return recover_defaults_change(error),
     };
-    let mut notice = match &reload_error {
-        Some(error) => {
-            format!("Error: Settings saved, but the conversation could not be reloaded: {error}")
-        }
+    let notice = match &reload_error {
+        Some(error) => super::settings_reload_notice(error),
         None => format!(
             "Model: {model} · {}",
             effort.map_or("default", Effort::as_str)
         ),
     };
     // After a Reload failure, view.defaults still holds the saved selection.
-    if let Err(error) =
-        super::models::remember_models(&admission.workspace, &view.defaults, None, true).await
-    {
-        notice = format!("{notice}; Error: {error}; selection kept for this conversation only");
-    }
+    let notice = super::remembered_session_notice(admission, view, notice).await;
     match reload_error {
         Some(_) => Err(LoopError::Notice(notice)),
         None => Ok(notice),
@@ -1248,6 +1242,7 @@ mod tests {
         let admission = Admission {
             telemetry: arany::Telemetry::disabled(),
             state_dir: temp.path().join("state"),
+            explicit_state_dir: false,
             workspace,
             include_paths: Vec::new(),
             tools: false,
@@ -1358,6 +1353,7 @@ mod tests {
         let mut admission = Admission {
             telemetry: arany::Telemetry::disabled(),
             state_dir: temp.path().join("state"),
+            explicit_state_dir: false,
             workspace,
             include_paths: Vec::new(),
             tools: false,

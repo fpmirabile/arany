@@ -153,6 +153,7 @@ enum Selector {
 struct Admission {
     telemetry: Telemetry,
     state_dir: PathBuf,
+    explicit_state_dir: bool,
     workspace: PathBuf,
     include_paths: Vec<PathBuf>,
     tools: bool,
@@ -249,6 +250,7 @@ impl AttachedArgs {
         {
             return Err("a prompt requires --provider and --model".into());
         }
+        let explicit_state_dir = self.state_dir.is_some();
         let (workspace, state_dir) =
             super::admit_workspace(self.workspace, self.state_dir).map_err(str::to_owned)?;
         let provider = self.provider.map(|value| value.profile_label());
@@ -262,6 +264,7 @@ impl AttachedArgs {
         Ok(Admission {
             telemetry,
             state_dir,
+            explicit_state_dir,
             workspace,
             include_paths: self.include_paths,
             tools: self.tools,
@@ -1322,7 +1325,13 @@ async fn finish_submission(
         });
     let linear = terminal.is_linear();
     let preview_already_printed = user_recorded && linear;
-    let hidden_answer = hidden_answer_guidance(linear, outcome.run.id);
+    let hidden_answer = hidden_answer_guidance(
+        linear,
+        outcome.run.id,
+        admission
+            .explicit_state_dir
+            .then_some(admission.state_dir.as_path()),
+    );
     let reloaded = load_view(&admission.state_dir, outcome.session_id).await;
     if let Ok(confirmed) = &reloaded {
         confirm_outcome(confirmed, outcome)?;
@@ -1957,6 +1966,10 @@ impl From<DefaultsError> for String {
     }
 }
 
+fn settings_reload_notice(error: &str) -> String {
+    format!("Error: Settings saved, but the conversation could not be reloaded: {error}")
+}
+
 fn recover_defaults_change(error: DefaultsError) -> Result<String, LoopError> {
     match error {
         DefaultsError::Operation(arany::EngineError::SessionBusy) => Ok(
@@ -1964,9 +1977,7 @@ fn recover_defaults_change(error: DefaultsError) -> Result<String, LoopError> {
                 .into(),
         ),
         DefaultsError::StateAdmission => Err(LoopError::Notice(format!("Error: {STATE_UNAVAILABLE}"))),
-        DefaultsError::Reload(error) => Err(LoopError::Notice(format!(
-            "Error: Settings saved, but the conversation could not be reloaded: {error}"
-        ))),
+        DefaultsError::Reload(error) => Err(LoopError::Notice(settings_reload_notice(&error))),
         error => Err(LoopError::Fatal(error.into())),
     }
 }
@@ -2029,14 +2040,28 @@ fn reload_failure(error: &str, hidden: Option<&str>) -> String {
 }
 
 /// Linear output has no history view, so `/resume` cannot show the answer there; `show` replays it.
-fn hidden_answer_guidance(linear: bool, run: arany::RunId) -> String {
+/// Only an explicit `--state-dir` must be repeated; `show` also reads `ARANY_STATE_DIR` and the default.
+fn hidden_answer_guidance(
+    linear: bool,
+    run: arany::RunId,
+    explicit_state_dir: Option<&Path>,
+) -> String {
     if linear {
-        format!(
-            "the committed answer was not shown; use `arany show --output text {run}` to read it"
-        )
+        let show = match explicit_state_dir {
+            Some(dir) => format!(
+                "arany show --state-dir {} --output text {run}",
+                shell_quote(&dir.to_string_lossy())
+            ),
+            None => format!("arany show --output text {run}"),
+        };
+        format!("the committed answer was not shown; use `{show}` to read it")
     } else {
         "the committed answer was not shown; use /resume to reload it".into()
     }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 /// Prints a confirmed Run answer for this presentation. Linear output runs on the restored terminal;
@@ -2070,6 +2095,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn linear_hidden_answer_guidance_repeats_only_an_explicit_state_dir() {
+        let run = arany::RunId::new();
+        assert_eq!(
+            hidden_answer_guidance(true, run, None),
+            format!(
+                "the committed answer was not shown; use `arany show --output text {run}` to read it"
+            )
+        );
+        assert_eq!(
+            hidden_answer_guidance(true, run, Some(Path::new("/tmp/a b/it's"))),
+            format!(
+                "the committed answer was not shown; use `arany show --state-dir '/tmp/a b/it'\\''s' --output text {run}` to read it"
+            )
+        );
+    }
+
+    #[test]
     fn startup_rejects_invalid_model_before_workspace_or_state_admission() {
         let args = AttachedArgs {
             model: Some("bad\nmodel".into()),
@@ -2096,6 +2138,7 @@ mod tests {
         let new = Admission {
             telemetry: Telemetry::disabled(),
             state_dir: state_dir.clone(),
+            explicit_state_dir: false,
             workspace: workspace.clone(),
             include_paths: Vec::new(),
             tools: false,
@@ -2127,6 +2170,7 @@ mod tests {
         let resumed = Admission {
             telemetry: Telemetry::disabled(),
             state_dir: state_dir.clone(),
+            explicit_state_dir: false,
             workspace: workspace.clone(),
             include_paths: Vec::new(),
             tools: false,
@@ -2153,6 +2197,7 @@ mod tests {
         let continued = Admission {
             telemetry: Telemetry::disabled(),
             state_dir: state_dir.clone(),
+            explicit_state_dir: false,
             workspace: workspace.clone(),
             include_paths: Vec::new(),
             tools: false,
@@ -2195,6 +2240,7 @@ mod tests {
         let forked = Admission {
             telemetry: Telemetry::disabled(),
             state_dir,
+            explicit_state_dir: false,
             workspace,
             include_paths: Vec::new(),
             tools: false,
