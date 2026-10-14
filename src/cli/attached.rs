@@ -1325,8 +1325,8 @@ async fn finish_submission(
         });
     let linear = terminal.is_linear();
     let preview_already_printed = user_recorded && linear;
-    let hidden_answer = hidden_answer_guidance(
-        linear,
+    let hidden_answer = hidden_answer_guidance(linear);
+    let show = show_command(
         outcome.run.id,
         admission
             .explicit_state_dir
@@ -1341,11 +1341,12 @@ async fn finish_submission(
         reloaded.as_ref().ok(),
         outcome,
         preview_already_printed,
+        &show,
     )?;
     if !linear {
         terminal.finish_run_display();
     }
-    let mut reload_error = reload_view_or_keep(view, reloaded, None, Some(&hidden_answer));
+    let mut reload_error = reload_view_or_keep(view, reloaded, None, Some(hidden_answer));
     if automatic.is_some() {
         terminal
             .draw(
@@ -1400,13 +1401,19 @@ async fn finish_submission(
         let reloaded = load_view(&admission.state_dir, outcome.session_id).await;
         if let (true, Ok(confirmed)) = (answer_hidden, &reloaded) {
             confirm_outcome(confirmed, outcome)?;
-            print_run_answer(terminal, Some(confirmed), outcome, preview_already_printed)?;
+            print_run_answer(
+                terminal,
+                Some(confirmed),
+                outcome,
+                preview_already_printed,
+                &show,
+            )?;
         }
         notice = reload_view_or_keep(
             view,
             reloaded,
             Some(text),
-            answer_hidden.then_some(hidden_answer.as_str()),
+            answer_hidden.then_some(hidden_answer),
         )
         .map(Feedback::History);
     }
@@ -2039,25 +2046,34 @@ fn reload_failure(error: &str, hidden: Option<&str>) -> String {
     )
 }
 
-/// Linear output has no history view, so `/resume` cannot show the answer there; `show` replays it.
-/// Only an explicit `--state-dir` must be repeated; `show` also reads `ARANY_STATE_DIR` and the default.
-fn hidden_answer_guidance(
-    linear: bool,
-    run: arany::RunId,
-    explicit_state_dir: Option<&Path>,
-) -> String {
+/// Linear output has no history view, so `/resume` cannot show the answer there. Its notice points to
+/// the recovery line that `print_run_answer` writes untruncated; other presentations use `/resume`.
+fn hidden_answer_guidance(linear: bool) -> &'static str {
     if linear {
-        let show = match explicit_state_dir {
-            Some(dir) => format!(
-                "arany show --state-dir {} --output text {run}",
-                shell_quote(&dir.to_string_lossy())
-            ),
-            None => format!("arany show --output text {run}"),
-        };
-        format!("the committed answer was not shown; use `{show}` to read it")
+        "the committed answer was not shown; see the command above"
     } else {
-        "the committed answer was not shown; use /resume to reload it".into()
+        "the committed answer was not shown; use /resume to reload it"
     }
+}
+
+/// Builds the `show` command that replays a Run. Only an explicit `--state-dir` must be repeated;
+/// `show` also reads `ARANY_STATE_DIR` and the default store.
+fn show_command(run: arany::RunId, explicit_state_dir: Option<&Path>) -> String {
+    match explicit_state_dir {
+        Some(dir) => format!(
+            "arany show --state-dir {} --output text {run}",
+            shell_quote(&dir.to_string_lossy())
+        ),
+        None => format!("arany show --output text {run}"),
+    }
+}
+
+fn write_hidden_answer_recovery(writer: &mut impl Write, show: &str) -> std::io::Result<()> {
+    writeln!(
+        writer,
+        "Committed answer not shown; read it with: {}",
+        arany::escape_terminal(show)
+    )
 }
 
 fn shell_quote(value: &str) -> String {
@@ -2065,18 +2081,20 @@ fn shell_quote(value: &str) -> String {
 }
 
 /// Prints a confirmed Run answer for this presentation. Linear output runs on the restored terminal;
-/// a missing `confirmed` view (failed reload) prints nothing but still restores and reacquires it.
+/// a missing `confirmed` view (failed reload) writes the untruncated `show` recovery line instead.
 fn print_run_answer(
     terminal: &mut AttachedTerminal,
     confirmed: Option<&SessionView>,
     outcome: &RunOutcome,
     preview_already_printed: bool,
+    show: &str,
 ) -> Result<(), String> {
     if terminal.is_linear() {
         terminal.restore().map_err(|error| error.to_string())?;
         let emitted = match confirmed {
             Some(view) => emit_outcome(view, outcome, preview_already_printed, false, None),
-            None => Ok(()),
+            None => write_hidden_answer_recovery(&mut std::io::stderr(), show)
+                .map_err(|_| "output failed".to_owned()),
         };
         terminal
             .reacquire_after_output()
@@ -2097,17 +2115,41 @@ mod tests {
     #[test]
     fn linear_hidden_answer_guidance_repeats_only_an_explicit_state_dir() {
         let run = arany::RunId::new();
+        let mut plain = Vec::new();
+        write_hidden_answer_recovery(&mut plain, &show_command(run, None)).unwrap();
         assert_eq!(
-            hidden_answer_guidance(true, run, None),
+            plain,
+            format!("Committed answer not shown; read it with: arany show --output text {run}\n")
+                .into_bytes()
+        );
+        let mut explicit = Vec::new();
+        write_hidden_answer_recovery(
+            &mut explicit,
+            &show_command(run, Some(Path::new("/tmp/a b/it's"))),
+        )
+        .unwrap();
+        assert_eq!(
+            explicit,
             format!(
-                "the committed answer was not shown; use `arany show --output text {run}` to read it"
+                "Committed answer not shown; read it with: arany show --state-dir '/tmp/a b/it'\\''s' --output text {run}\n"
             )
+            .into_bytes()
+        );
+        let long_dir = format!("/tmp/{}", "d".repeat(300));
+        let long = show_command(run, Some(Path::new(&long_dir)));
+        assert!(long.starts_with(&format!("arany show --state-dir '{long_dir}' ")));
+        assert!(long.ends_with(&format!(" --output text {run}")));
+    }
+
+    #[test]
+    fn linear_hidden_answer_notice_is_short_and_fixed() {
+        assert_eq!(
+            hidden_answer_guidance(true),
+            "the committed answer was not shown; see the command above"
         );
         assert_eq!(
-            hidden_answer_guidance(true, run, Some(Path::new("/tmp/a b/it's"))),
-            format!(
-                "the committed answer was not shown; use `arany show --state-dir '/tmp/a b/it'\\''s' --output text {run}` to read it"
-            )
+            hidden_answer_guidance(false),
+            "the committed answer was not shown; use /resume to reload it"
         );
     }
 
