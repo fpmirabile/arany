@@ -658,7 +658,15 @@ fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
         &mut input,
         &mut transcript,
         &mut answered,
-        "Could not prepare folder permission choices",
+        "Runtime profile discovery failed",
+    );
+    input.write_all(b"\x1b").unwrap();
+    wait(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "Permissions unchanged",
     );
     input.write_all(b"/status").unwrap();
     wait(

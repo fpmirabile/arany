@@ -53,9 +53,9 @@ pub use store::{HistoryReset, StateRoot, Store, StoreError};
 pub use telemetry::{Telemetry, TelemetryConfigError};
 pub use terminal::{
     AttachedTerminal, CommandAvailability, CommandParseError, CompletionLayout, Composer,
-    ComposerEdit, InteractiveCommand, ModelCatalogState, ModelPicker, ShutdownSignal, Submission,
-    TerminalError, TerminalInput, TerminalMode, TerminalNotice, command_completions,
-    parse_submission,
+    ComposerEdit, InteractiveCommand, ModelCatalogState, ModelPicker, ProfileSelection,
+    ShutdownSignal, Submission, TerminalError, TerminalInput, TerminalMode, TerminalNotice,
+    command_completions, parse_submission,
 };
 pub use tools::{
     ApprovalInbox, ApprovalMode, CommandChangeset, EffectIntent, FileChange, FileVersion,

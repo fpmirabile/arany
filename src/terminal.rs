@@ -380,6 +380,15 @@ pub struct AttachedTerminal {
     terminate: tokio::signal::unix::Signal,
 }
 
+/// Profile rows and cursor state for the folder consent screen; `options` and `selected` align by index.
+pub struct ProfileSelection<'a> {
+    pub options: &'a [crate::tools::RuntimeProfileOption],
+    pub selected: &'a [bool],
+    pub focused: Option<usize>,
+    pub enabled: bool,
+    pub discovery_error: Option<&'a str>,
+}
+
 impl AttachedTerminal {
     pub fn set_waiting_tool(&mut self, id: Option<uuid::Uuid>) {
         self.waiting_tool = id;
@@ -388,24 +397,30 @@ impl AttachedTerminal {
         &mut self,
         id: uuid::Uuid,
         workspace: &std::path::Path,
-        profile_selection: (
-            &[crate::tools::RuntimeProfileOption],
-            &[bool],
-            Option<usize>,
-            bool,
-        ),
+        profile_selection: ProfileSelection<'_>,
         page: usize,
         trust: bool,
         configured: bool,
     ) -> Result<(bool, usize), TerminalError> {
-        let (options, selected_profiles, focused_profile, profile_selection_enabled) =
-            profile_selection;
+        let ProfileSelection {
+            options,
+            selected: selected_profiles,
+            focused: focused_profile,
+            enabled: profile_selection_enabled,
+            discovery_error,
+        } = profile_selection;
         self.cancel_clipboard_paste();
         let mut lines = crate::presentation::workspace_permission_lines(workspace);
         if configured {
             lines.push(
                 "--tools is selected. Continue with its private configuration or remember folder trust; the explicit configuration keeps precedence.".into(),
             );
+        }
+        if let Some(error) = discovery_error {
+            lines.push(format!(
+                "Runtime profile discovery failed: {}; saved profiles stay listed.",
+                crate::presentation::escape_terminal(error)
+            ));
         }
         let profile_start;
         if options.is_empty() {

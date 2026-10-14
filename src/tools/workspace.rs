@@ -4,7 +4,7 @@ use super::toolchains::{
     Candidate, MAX_RUNTIME_GRANTS, RuntimeGrant, discover, validate_selection,
 };
 use super::types::{MAX_SNAPSHOT_BYTES, hex_digest};
-use super::{ToolError, fs};
+use super::{ToolError, fs, guard};
 use crate::store::{StateRoot, StoreError};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -69,6 +69,7 @@ pub struct WorkspacePermissions {
     mode: ApprovalMode,
     runtime_grants: Vec<RuntimeGrant>,
     candidates: Vec<Candidate>,
+    discovery_error: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -136,8 +137,9 @@ impl WorkspacePermissions {
         &self.path
     }
 
-    pub(crate) fn runtime_candidates(&self) -> &[Candidate] {
-        &self.candidates
+    /// Discovery failure that left the chooser with saved profiles only.
+    pub fn discovery_error(&self) -> Option<&str> {
+        self.discovery_error.as_deref()
     }
 
     pub fn runtime_profile_choices(&self) -> Vec<RuntimeProfileOption> {
@@ -147,7 +149,7 @@ impl WorkspacePermissions {
             .filter_map(|grant| grant.token().ok())
             .collect::<std::collections::BTreeSet<_>>();
         let mut options = self
-            .runtime_candidates()
+            .candidates
             .iter()
             .map(|candidate| RuntimeProfileOption {
                 token: candidate.token.clone(),
@@ -163,15 +165,9 @@ impl WorkspacePermissions {
             if options.iter().any(|option| option.token == token) {
                 continue;
             }
-            let version = grant.version.as_deref().unwrap_or("selected cache");
             options.push(RuntimeProfileOption {
                 token,
-                label: format!(
-                    "{} · {} · {} (no longer detected)",
-                    grant.kind.label(),
-                    version,
-                    grant.path.display()
-                ),
+                label: saved_profile_label(grant),
                 group: grant.kind.label(),
                 selected: true,
             });
@@ -180,7 +176,15 @@ impl WorkspacePermissions {
         options
     }
 
-    /// Saved runtime grants that no longer match the host; they are kept for removal but never mounted.
+    /// Labels of every saved profile, for the inspection notice; a drifted one is marked.
+    pub fn selected_runtime_profiles(&self) -> Vec<String> {
+        self.runtime_grants
+            .iter()
+            .map(saved_profile_label)
+            .collect()
+    }
+
+    /// Saved grants that no longer verify; they stay pinned, so commands using them are rejected.
     pub fn stale_runtime_profiles(&self) -> Vec<&'static str> {
         self.runtime_grants
             .iter()
@@ -209,6 +213,7 @@ impl WorkspacePermissions {
                     mode: ApprovalMode::AutoEdits,
                     runtime_grants: Vec::new(),
                     candidates: Vec::new(),
+                    discovery_error: None,
                 })
             }
             Err(_) => Err(ToolError::Configuration),
@@ -216,12 +221,16 @@ impl WorkspacePermissions {
     }
 
     pub fn open_for_profile_selection(path: &Path) -> Result<Self, ToolError> {
-        Self::open(path)?.prepare_profile_selection()
+        Ok(Self::open(path)?.prepare_profile_selection())
     }
 
-    pub fn prepare_profile_selection(mut self) -> Result<Self, ToolError> {
-        self.candidates = discover_home_candidates()?;
-        Ok(self)
+    /// Discovery failure keeps the saved profiles listed and is reported with the chooser.
+    pub fn prepare_profile_selection(mut self) -> Self {
+        match discover_home_candidates() {
+            Ok(candidates) => self.candidates = candidates,
+            Err(error) => self.discovery_error = Some(error.to_string()),
+        }
+        self
     }
 
     fn load(path: &Path, root: &StateRoot) -> Result<Self, ToolError> {
@@ -243,11 +252,8 @@ impl WorkspacePermissions {
             mode: entry.map_or(ApprovalMode::AutoEdits, |entry| entry.mode),
             runtime_grants,
             candidates: Vec::new(),
+            discovery_error: None,
         })
-    }
-
-    pub fn remember(&mut self, trusted: bool, mode: ApprovalMode) -> Result<(), ToolError> {
-        self.remember_profiles(trusted, mode, &[])
     }
 
     pub fn remember_profiles(
@@ -260,33 +266,42 @@ impl WorkspacePermissions {
             return Err(ToolError::Configuration);
         }
         let runtime_grants = self.selected_grants(tokens)?;
+        let account = StateRoot::account_path().map_err(|_| ToolError::Configuration)?;
+        let root = StateRoot::admit(&account).map_err(|_| ToolError::Configuration)?;
         for grant in &runtime_grants {
-            grant.verify_host()?;
+            for protected in [self.path.as_path(), root.path(), account.as_path()] {
+                fs::reject_overlap(&grant.path, protected)?;
+            }
+            for runtime in guard::runtime_roots() {
+                fs::reject_overlap(&grant.path, Path::new(runtime))?;
+            }
         }
-        let root =
-            StateRoot::admit(&StateRoot::account_path().map_err(|_| ToolError::Configuration)?)
-                .map_err(|_| ToolError::Configuration)?;
         self.save(&root, trusted, mode, runtime_grants)
     }
 
+    /// Fresh candidates are verified now; a saved grant keeps its pin and rejects dispatch on drift.
     fn selected_grants(&self, tokens: &[String]) -> Result<Vec<RuntimeGrant>, ToolError> {
         if tokens.len() > MAX_RUNTIME_GRANTS {
             return Err(ToolError::Limit);
         }
         let mut runtime_grants = Vec::new();
         for token in tokens {
-            let grant = self
+            let grant = match self
                 .candidates
                 .iter()
                 .find(|candidate| &candidate.token == token)
-                .map(|candidate| candidate.grant.clone())
-                .or_else(|| {
-                    self.runtime_grants
-                        .iter()
-                        .find(|grant| grant.token().ok().as_deref() == Some(token.as_str()))
-                        .cloned()
-                })
-                .ok_or(ToolError::Configuration)?;
+            {
+                Some(candidate) => {
+                    candidate.grant.verify_host()?;
+                    candidate.grant.clone()
+                }
+                None => self
+                    .runtime_grants
+                    .iter()
+                    .find(|grant| grant.token().ok().as_deref() == Some(token.as_str()))
+                    .cloned()
+                    .ok_or(ToolError::Configuration)?,
+            };
             runtime_grants.push(grant);
         }
         validate_selection(&runtime_grants)?;
@@ -371,15 +386,18 @@ impl WorkspacePermissions {
             commands,
             skills: Vec::new(),
             mcp: Vec::new(),
-            runtime_grants: self
-                .runtime_grants
-                .iter()
-                .filter(|grant| grant.verify_host().is_ok())
-                .cloned()
-                .collect(),
+            runtime_grants: self.runtime_grants.clone(),
         };
         config.validate()?;
         Ok(config)
+    }
+}
+
+fn saved_profile_label(grant: &RuntimeGrant) -> String {
+    if grant.verify_host().is_ok() {
+        grant.profile_label()
+    } else {
+        format!("{} (no longer detected)", grant.profile_label())
     }
 }
 
@@ -638,7 +656,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn stale_runtime_grant_is_kept_for_removal_but_not_mounted() {
+    fn stale_runtime_grant_stays_pinned_for_rejection_and_removal() {
         use super::super::toolchains::{RuntimeKind, RuntimeManager};
 
         let temp = tempfile::tempdir().unwrap();
@@ -666,11 +684,44 @@ mod tests {
         let restored = WorkspacePermissions::load(&path, &root).unwrap();
         assert!(restored.is_trusted());
         assert_eq!(restored.stale_runtime_profiles(), ["Cargo archive cache"]);
-        assert!(restored.config(&path).unwrap().runtime_grants.is_empty());
+        assert_eq!(restored.config(&path).unwrap().runtime_grants.len(), 1);
         let choices = restored.runtime_profile_choices();
         assert_eq!(choices.len(), 1);
         assert!(choices[0].selected);
         assert!(choices[0].label.ends_with("(no longer detected)"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_grant_identity_drift_fails_verification_and_changes_token() {
+        use super::super::toolchains::{RuntimeKind, RuntimeManager};
+
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join(".cargo/registry/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let grant_at = |path: &Path| {
+            let (device, inode) = fs::identity(&fs::open_directory(path).unwrap()).unwrap();
+            RuntimeGrant {
+                kind: RuntimeKind::CargoCache,
+                manager: RuntimeManager::HostCache,
+                version: None,
+                path: path.to_owned(),
+                device,
+                inode,
+            }
+        };
+        let original = grant_at(&cache);
+        original.verify_host().unwrap();
+        let original_token = original.token().unwrap();
+
+        // Keep the old directory alive while the path is recreated, so the new inode cannot be reused.
+        std::fs::rename(&cache, temp.path().join("previous-cache")).unwrap();
+        std::fs::create_dir(&cache).unwrap();
+        assert!(matches!(
+            original.verify_host(),
+            Err(ToolError::ChangedInput)
+        ));
+        assert_ne!(grant_at(&cache).token().unwrap(), original_token);
     }
 
     #[test]

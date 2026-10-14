@@ -1,7 +1,7 @@
 use super::setup::SetupError;
 use arany::{
-    ApprovalMode, AttachedTerminal, Composer, TerminalInput, WorkspacePermissions,
-    native_protection_supported,
+    ApprovalMode, AttachedTerminal, Composer, ProfileSelection, TerminalInput,
+    WorkspacePermissions, native_protection_supported,
 };
 use std::path::Path;
 
@@ -80,12 +80,13 @@ pub(super) async fn admit(
         composer.set_approval_mode(native_protection_supported().then_some(access.mode()));
         Ok(PermissionChoice::Selected(access))
     } else {
-        let access = access.prepare_profile_selection().map_err(|error| {
-            SetupError::Recoverable(format!(
-                "Could not prepare folder permission choices: {error}"
-            ))
-        })?;
-        choose(terminal, access, composer, configured).await
+        choose(
+            terminal,
+            access.prepare_profile_selection(),
+            composer,
+            configured,
+        )
+        .await
     }
 }
 
@@ -110,12 +111,13 @@ pub(super) async fn choose(
         let (more, visible_page) = terminal.draw_workspace_permissions(
             id,
             permissions.path(),
-            (
-                &options,
-                &selected_profiles,
-                focused_profile,
-                explanation_pages_seen,
-            ),
+            ProfileSelection {
+                options: &options,
+                selected: &selected_profiles,
+                focused: focused_profile,
+                enabled: explanation_pages_seen,
+                discovery_error: permissions.discovery_error(),
+            },
             page,
             selected == 1,
             configured,

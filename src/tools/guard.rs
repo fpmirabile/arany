@@ -546,7 +546,6 @@ pub(super) fn helper_main() -> ExitCode {
         };
         #[cfg(target_os = "linux")]
         {
-            attest_runtime_mounts(&task.intent.call, &task.config.runtime_grants, &mut stage)?;
             stage = BootstrapStage::Capabilities;
             linux::harden()?;
         }
@@ -580,7 +579,6 @@ pub(super) fn helper_main() -> ExitCode {
         }
         verify_intent_runtime_grants(&task.intent, &task.config)?;
         attest_runtime_mounts(&task.intent.call, &task.config.runtime_grants, &mut stage)?;
-        stage = BootstrapStage::Handshake;
         drop(stdin);
         stage = BootstrapStage::Payload;
         #[cfg(not(target_os = "macos"))]

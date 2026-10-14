@@ -9,7 +9,7 @@ use crate::tools::types::{
 };
 use crate::tools::{ToolError, ToolRuntime};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncWriteExt, BufReader};
@@ -53,7 +53,7 @@ pub(super) fn check_available() -> Result<(), ToolError> {
 }
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
-    let mut bytes = b"arany-guard-v11:shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;fixed-root-owned-unshare-bootstrap-user-map-current-recursive-private-no-retained-caps;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;bounded-namespace-mountinfo-private-root-and-unique-exact-private-aliases-no-descendants-before-ready-and-after-go".to_vec();
+    let mut bytes = b"arany-guard-v12:shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;fixed-root-owned-unshare-bootstrap-user-map-current-recursive-private-no-retained-caps;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go".to_vec();
     bytes.extend_from_slice(&profile::profile_digest()?);
     bytes.extend_from_slice(&(MAX_CHANGESET_FILES as u64).to_le_bytes());
     bytes.extend_from_slice(&(MAX_CHANGESET_BYTES as u64).to_le_bytes());
@@ -552,15 +552,16 @@ pub(super) async fn execute_inner(
         + Duration::from_millis(u64::from(intent.limits.runtime_ms))
         + Duration::from_secs(5);
     crate::tools::fs::validate_workspace(runtime)?;
-    let workspace = crate::tools::fs::open_directory(&runtime.workspace)?;
-    let (seed_path, seed_dir) =
-        permit.prepare_seed(&workspace, &runtime.config, intent.call.is_process())?;
     let runtime_grants = if intent.call.is_process() {
         runtime.config.runtime_grants.as_slice()
     } else {
         &[]
     };
+    let (runtime_directories, mounts) = runtime_mounts(runtime_grants)?;
     let runtime_path = runtime_path(runtime_grants)?;
+    let workspace = crate::tools::fs::open_directory(&runtime.workspace)?;
+    let (seed_path, seed_dir) =
+        permit.prepare_seed(&workspace, &runtime.config, intent.call.is_process())?;
     let mut unit = Unit {
         name: format!("arany-tool-{}.service", permit.id),
         invocation: None,
@@ -642,23 +643,6 @@ pub(super) async fn execute_inner(
             "--ro-bind",
         ]);
     command.arg(&seed_path).arg("/seed");
-    let mut runtime_directories = std::collections::BTreeSet::new();
-    let mut mounts = Vec::new();
-    for grant in runtime_grants {
-        grant.verify_host()?;
-        let target = grant.mounted_path()?;
-        let root = if grant.kind.is_toolchain() {
-            Path::new("/runtime")
-        } else {
-            Path::new("/scratch")
-        };
-        for parent in target.ancestors().take_while(|path| *path != root) {
-            runtime_directories.insert(parent.to_owned());
-        }
-        mounts.push((grant.path.clone(), target));
-    }
-    let mut runtime_directories = runtime_directories.into_iter().collect::<Vec<_>>();
-    runtime_directories.sort_by_key(|path| (path.components().count(), path.clone()));
     for directory in runtime_directories {
         command.args(["--dir"]).arg(directory);
     }
@@ -799,6 +783,68 @@ pub(super) async fn execute_inner(
         return Err(ToolError::GuardRejected(stage));
     }
     result
+}
+
+/// Paths the Linux profile mounts or creates itself; a toolchain may not overlap them.
+const PROFILE_MOUNT_TARGETS: [&str; 13] = [
+    "/usr",
+    "/lib",
+    "/lib64",
+    "/bin",
+    "/proc",
+    "/dev",
+    "/scratch",
+    "/workspace",
+    "/seed",
+    "/programs",
+    "/inputs",
+    "/skills",
+    "/arany",
+];
+
+fn reject_profile_overlap(target: &Path) -> Result<(), ToolError> {
+    if PROFILE_MOUNT_TARGETS
+        .iter()
+        .map(Path::new)
+        .any(|fixed| target.starts_with(fixed) || fixed.starts_with(target))
+    {
+        return Err(ToolError::Configuration);
+    }
+    Ok(())
+}
+
+/// Ancestors of a mount target below `root`, shallowest first, each created as a bwrap directory.
+fn mount_directories(target: &Path, root: &Path) -> Vec<PathBuf> {
+    let mut directories = target
+        .ancestors()
+        .take_while(|path| *path != root)
+        .map(Path::to_path_buf)
+        .collect::<Vec<_>>();
+    directories.sort_by_key(|path| (path.components().count(), path.clone()));
+    directories
+}
+
+/// Verifies every grant before any seed exists; a rejected grant leaves no state behind.
+fn runtime_mounts(
+    grants: &[super::super::toolchains::RuntimeGrant],
+) -> Result<(Vec<PathBuf>, Vec<(PathBuf, PathBuf)>), ToolError> {
+    let mut directories = Vec::new();
+    let mut mounts = Vec::new();
+    for grant in grants {
+        grant.verify_host()?;
+        let target = grant.mounted_path()?;
+        let root = if grant.kind.is_toolchain() {
+            reject_profile_overlap(&target)?;
+            Path::new("/")
+        } else {
+            Path::new("/scratch")
+        };
+        directories.extend(mount_directories(&target, root));
+        mounts.push((grant.path.clone(), target));
+    }
+    directories.sort_by_key(|path| (path.components().count(), path.clone()));
+    directories.dedup();
+    Ok((directories, mounts))
 }
 
 fn runtime_path(grants: &[super::super::toolchains::RuntimeGrant]) -> Result<String, ToolError> {
@@ -1016,9 +1062,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn toolchain_targets_keep_host_paths_and_reject_profile_overlap() {
+        assert_eq!(
+            mount_directories(
+                Path::new("/home/user/.pyenv/versions/3.13.0"),
+                Path::new("/")
+            ),
+            [
+                "/home",
+                "/home/user",
+                "/home/user/.pyenv",
+                "/home/user/.pyenv/versions",
+                "/home/user/.pyenv/versions/3.13.0",
+            ]
+            .map(PathBuf::from)
+        );
+        for target in ["/home/user/.pyenv/versions/3.13.0", "/opt/node/v22"] {
+            assert!(
+                reject_profile_overlap(Path::new(target)).is_ok(),
+                "{target}"
+            );
+        }
+        for target in [
+            "/",
+            "/usr",
+            "/usr/local/node",
+            "/lib/x",
+            "/dev/shm",
+            "/scratch/rust",
+            "/workspace",
+        ] {
+            assert!(
+                reject_profile_overlap(Path::new(target)).is_err(),
+                "{target}"
+            );
+        }
+    }
+
     fn mountinfo_with_runtime(optional: &str, descendants: &[&str]) -> Vec<u8> {
         let mut bytes = format!(
-            "1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:1 /cache /runtime/toolchains/rust ro{optional} - ext4 /dev/root ro\n"
+            "1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:1 /cache /opt/toolchains/rust ro{optional} - ext4 /dev/root ro\n"
         )
         .into_bytes();
         for (index, path) in descendants.iter().enumerate() {
@@ -1035,7 +1119,7 @@ mod tests {
 
     #[test]
     fn runtime_mount_attestation_requires_private_root_and_exact_leaf_mounts() {
-        let target = Path::new("/runtime/toolchains/rust").to_owned();
+        let target = Path::new("/opt/toolchains/rust").to_owned();
         let valid = parse_mountinfo(&mountinfo_with_runtime("", &[])).unwrap();
         assert!(verify_mount_entries(&valid, std::slice::from_ref(&target)).is_ok());
 
@@ -1048,7 +1132,7 @@ mod tests {
             .is_err()
         );
 
-        let nested = mountinfo_with_runtime("", &["/runtime/toolchains/rust/nested"]);
+        let nested = mountinfo_with_runtime("", &["/opt/toolchains/rust/nested"]);
         assert!(
             verify_mount_entries(
                 &parse_mountinfo(&nested).unwrap(),
@@ -1057,7 +1141,7 @@ mod tests {
             .is_err()
         );
 
-        let shared_root = b"1 0 8:1 / / rw shared:1 - ext4 /dev/root rw\n2 1 8:1 /cache /runtime/toolchains/rust ro - ext4 /dev/root ro\n";
+        let shared_root = b"1 0 8:1 / / rw shared:1 - ext4 /dev/root rw\n2 1 8:1 /cache /opt/toolchains/rust ro - ext4 /dev/root ro\n";
         assert!(
             verify_mount_entries(
                 &parse_mountinfo(shared_root).unwrap(),
@@ -1069,19 +1153,19 @@ mod tests {
 
     #[test]
     fn mountinfo_decodes_only_kernel_path_escapes_and_rejects_ambiguous_records() {
-        let target = Path::new("/runtime/toolchains/a b").to_owned();
-        let escaped = b"1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:1 /cache/a\\040b /runtime/toolchains/a\\040b ro - ext4 /dev/root ro\n";
+        let target = Path::new("/opt/toolchains/a b").to_owned();
+        let escaped = b"1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:1 /cache/a\\040b /opt/toolchains/a\\040b ro - ext4 /dev/root ro\n";
         let entries = parse_mountinfo(escaped).unwrap();
         assert!(verify_mount_entries(&entries, std::slice::from_ref(&target)).is_ok());
 
-        let invalid_escape = b"1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:1 /cache/a\\141b /runtime/toolchains/a\\141b ro - ext4 /dev/root ro\n";
+        let invalid_escape = b"1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:1 /cache/a\\141b /opt/toolchains/a\\141b ro - ext4 /dev/root ro\n";
         assert!(parse_mountinfo(invalid_escape).is_err());
 
-        let stacked = b"1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:1 /cache /runtime/toolchains/rust ro - ext4 /dev/root ro\n3 1 8:1 /other /runtime/toolchains/rust ro - ext4 /dev/root ro\n";
+        let stacked = b"1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:1 /cache /opt/toolchains/rust ro - ext4 /dev/root ro\n3 1 8:1 /other /opt/toolchains/rust ro - ext4 /dev/root ro\n";
         assert!(
             verify_mount_entries(
                 &parse_mountinfo(stacked).unwrap(),
-                &[Path::new("/runtime/toolchains/rust").to_owned()]
+                &[Path::new("/opt/toolchains/rust").to_owned()]
             )
             .is_err()
         );
@@ -1585,13 +1669,11 @@ mod tests {
                         "/dev",
                         "--tmpfs",
                         "/scratch",
-                        "--dir",
-                        "/runtime",
-                        "--dir",
-                        "/runtime/toolchains",
-                        "--dir",
-                    ])
-                    .arg(&target)
+                    ]);
+                for directory in mount_directories(Path::new(&target), Path::new("/")) {
+                    command.args(["--dir"]).arg(directory);
+                }
+                command
                     .arg("--ro-bind")
                     .arg(alias)
                     .arg(&target)

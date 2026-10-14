@@ -642,6 +642,20 @@ pub(super) async fn handle_command(
         InteractiveCommand::Permissions => {
             if admission.tools {
                 "Tools requested from private tools.json; native protection must be admitted before a Run. File mutation requires the write grant; command changes are discarded. Primary only; commands/MCP have no network, host home or account state. Arany requests: selected Provider; OS TLS checks may connect separately.".into()
+            } else if let Some(access) = admission
+                .workspace_permissions
+                .as_ref()
+                .filter(|access| access.is_trusted())
+            {
+                let profiles = access.selected_runtime_profiles();
+                format!(
+                    "Folder trusted; file Tools use the Workspace. Commands/MCP use a private selected-project copy without network or account state; only these selected read-only toolchains and caches are mounted: {}. Arany requests: selected Provider; OS TLS checks may connect separately.",
+                    if profiles.is_empty() {
+                        "none".into()
+                    } else {
+                        profiles.join("; ")
+                    }
+                )
             } else {
                 "Read-only Workspace; Arany requests: selected Provider; OS TLS checks may connect separately; no Tools or sandbox".into()
             }
@@ -720,7 +734,7 @@ pub(super) fn active_command_notice(
                 .and_then(|run| run.config.as_ref())
                 .is_some_and(|config| config.tool_policy.is_some())
             {
-                "Primary has pinned guarded Tool grants: at most 16 Tool calls with bounded Tool context. Commands/MCP use a private selected-project copy without network or host credentials; their file changes are discarded. Children remain read-only. Arany requests: selected Provider; OS TLS checks may connect separately.".into()
+                "Primary has pinned guarded Tool grants: at most 16 Tool calls with bounded Tool context. Commands/MCP use a private selected-project copy without network or account state; only the selected read-only toolchains and caches from home are mounted, and their file changes are discarded. Children remain read-only. Arany requests: selected Provider; OS TLS checks may connect separately.".into()
             } else {
                 "Read-only Workspace; Arany requests: selected Provider; OS TLS checks may connect separately; no Tools or sandbox".into()
             }

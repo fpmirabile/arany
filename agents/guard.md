@@ -26,11 +26,11 @@ limits and compatibility.
   [Bubblewrap](https://github.com/containers/bubblewrap/blob/main/bubblewrap.c)).
   Do not add capabilities to payloads. Before
   Ready and again after GO, parse bounded `/proc/self/mountinfo` and require a
-  private root and one exact private entry per selected alias, with no optional
+  private root and one exact private entry per selected runtime mount, with no optional
   propagation fields, stacked entries or descendant mounts; malformed or
   oversized data fails closed. The actual production fixture covers a shared
   source, a pre-existing nested mount refusal at the topology stage and a late
-  host mount that does not appear in the isolated alias. Its outer test owner
+  host mount that does not appear in the isolated runtime mount. Its outer test owner
   uses a private PID namespace with `--kill-child`; a separate forced-timeout
   gate records the init and held descendant PIDs from each process's own
   `/proc/self/status`, binds both pidfds before killing and reaping the unshare
@@ -82,10 +82,13 @@ limits and compatibility.
   retain C string lifetimes through each call and free native error allocations
   once. Never parse or print arbitrary native diagnostics. The syscall-number
   filter and explicit Darwin syscall numbers support only reviewed 64-bit ABIs.
-- Keep Linux runtime aliases distinct: `/lib` targets `/usr/lib`, while `/lib64`
-  targets `/usr/lib64`. Mapping both to `/usr/lib` hides the x86-64 ELF loader
-  even when the ARM64 native gates pass. Native fixtures must preserve the same
-  loader layout as the production mount profile.
+- Linux toolchains mount at their exact host paths; caches mount under
+  `/scratch`. A toolchain target that equals, lies under or contains a path the
+  profile mounts or creates is rejected before seed creation. Keep Linux
+  `/lib` targeting `/usr/lib` and `/lib64` targeting `/usr/lib64`: mapping both to
+  `/usr/lib` hides the x86-64 ELF loader even when the ARM64 native gates pass.
+  Native fixtures must preserve the same loader layout as the production mount
+  profile.
 - Grant ancestor metadata only, without directory-data access; unrelated host
   metadata and control-root listings must remain denied. The compiled policy
   fingerprint covers profile rules, admission algorithms and enforced constants.

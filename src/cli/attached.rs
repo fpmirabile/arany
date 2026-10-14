@@ -878,15 +878,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                             let permissions =
                                 arany::WorkspacePermissions::open(&admission.workspace)
                                     .map_err(|error| error.to_string())?;
-                            let permissions = match permissions.prepare_profile_selection() {
-                                Ok(permissions) => permissions,
-                                Err(error) => {
-                                    notice = Some(Feedback::History(format!(
-                                        "Error: Could not prepare folder permission choices: {error}; existing permissions unchanged"
-                                    )));
-                                    continue;
-                                }
-                            };
+                            let permissions = permissions.prepare_profile_selection();
                             let choice = permissions::choose(
                                 &mut terminal,
                                 permissions,
@@ -1469,7 +1461,7 @@ async fn admit_startup(
                 append_notice(
                     setup_notice,
                     &format!(
-                        "Runtime profile {profile} no longer matches; use /permissions to remove or reselect it"
+                        "Runtime profile {profile} no longer matches; commands using it are rejected until you remove it in /permissions"
                     ),
                 );
             }

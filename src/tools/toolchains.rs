@@ -43,15 +43,17 @@ impl RuntimeKind {
         !self.is_toolchain()
     }
 
-    pub(crate) fn cache_token(self) -> Option<&'static str> {
+    fn token_prefix(self) -> &'static str {
         match self {
-            Self::CargoCache => Some("cargo-cache"),
-            Self::CargoSource => Some("cargo-source"),
-            Self::CargoIndex => Some("cargo-index"),
-            Self::NpmCache => Some("npm-cache"),
-            Self::PipHttpCache => Some("pip-http-cache"),
-            Self::PipWheelCache => Some("pip-wheel-cache"),
-            _ => None,
+            Self::Rust => "rust",
+            Self::Node => "node",
+            Self::Python => "python",
+            Self::CargoCache => "cargo-cache",
+            Self::CargoSource => "cargo-source",
+            Self::CargoIndex => "cargo-index",
+            Self::NpmCache => "npm-cache",
+            Self::PipHttpCache => "pip-http-cache",
+            Self::PipWheelCache => "pip-wheel-cache",
         }
     }
 
@@ -79,21 +81,6 @@ impl RuntimeKind {
             _ => None,
         }
     }
-
-    fn toolchain_token(self, grant: &RuntimeGrant) -> Result<String, ToolError> {
-        let prefix = match self {
-            Self::Rust => "rust",
-            Self::Node => "node",
-            Self::Python => "python",
-            _ => return Err(ToolError::Configuration),
-        };
-        let path = grant.path.to_str().ok_or(ToolError::Path)?;
-        let mut identity = path.as_bytes().to_vec();
-        identity.extend_from_slice(&grant.device.to_le_bytes());
-        identity.extend_from_slice(&grant.inode.to_le_bytes());
-        let hash = super::types::hex_digest(&identity);
-        Ok(format!("{prefix}-{}", &hash[..12]))
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -120,11 +107,23 @@ pub(crate) struct RuntimeGrant {
 }
 
 impl RuntimeGrant {
+    /// Binds the kind to the exact directory identity, so a recreated root is a new profile.
     pub(crate) fn token(&self) -> Result<String, ToolError> {
-        self.kind
-            .cache_token()
-            .map(str::to_owned)
-            .map_or_else(|| self.kind.toolchain_token(self), Ok)
+        let path = self.path.to_str().ok_or(ToolError::Path)?;
+        let mut identity = path.as_bytes().to_vec();
+        identity.extend_from_slice(&self.device.to_le_bytes());
+        identity.extend_from_slice(&self.inode.to_le_bytes());
+        let hash = super::types::hex_digest(&identity);
+        Ok(format!("{}-{}", self.kind.token_prefix(), &hash[..12]))
+    }
+
+    pub(crate) fn profile_label(&self) -> String {
+        format!(
+            "{} · {} · {}",
+            self.kind.label(),
+            self.version.as_deref().unwrap_or("selected cache"),
+            self.path.display()
+        )
     }
 
     pub(crate) fn validate_shape(&self) -> Result<(), ToolError> {
@@ -154,36 +153,17 @@ impl RuntimeGrant {
         if fs::identity(&directory)? != (self.device, self.inode) {
             return Err(ToolError::ChangedInput);
         }
-        match self.kind {
-            RuntimeKind::Rust => {
-                if !executable(&path.join("bin/cargo")) || !executable(&path.join("bin/rustc")) {
-                    return Err(ToolError::ChangedInput);
-                }
-            }
-            RuntimeKind::Node => {
-                if !executable(&path.join("bin/node")) {
-                    return Err(ToolError::ChangedInput);
-                }
-            }
-            RuntimeKind::Python => {
-                if !has_python_executable(path) {
-                    return Err(ToolError::ChangedInput);
-                }
-            }
-            RuntimeKind::CargoCache
-            | RuntimeKind::CargoSource
-            | RuntimeKind::CargoIndex
-            | RuntimeKind::NpmCache
-            | RuntimeKind::PipHttpCache
-            | RuntimeKind::PipWheelCache => {}
+        if !has_executables(self.kind, path) {
+            return Err(ToolError::ChangedInput);
         }
         Ok(())
     }
 
+    /// Linux mounts a toolchain at its exact host path so absolute shebangs resolve.
     #[cfg(target_os = "linux")]
     pub(crate) fn mounted_path(&self) -> Result<PathBuf, ToolError> {
         if self.kind.is_toolchain() {
-            Ok(PathBuf::from("/runtime/toolchains").join(self.token()?))
+            Ok(self.path.clone())
         } else {
             let relative = self
                 .kind
@@ -370,13 +350,23 @@ fn has_toolchain(path: &Path, kind: RuntimeKind) -> bool {
     if fs::open_directory(path).is_err() {
         return false;
     }
+    has_executables(kind, path)
+}
+
+/// Caches have no executables to check, so they always pass.
+fn has_executables(kind: RuntimeKind, path: &Path) -> bool {
     match kind {
         RuntimeKind::Rust => {
             executable(&path.join("bin/cargo")) && executable(&path.join("bin/rustc"))
         }
         RuntimeKind::Node => executable(&path.join("bin/node")),
         RuntimeKind::Python => has_python_executable(path),
-        _ => false,
+        RuntimeKind::CargoCache
+        | RuntimeKind::CargoSource
+        | RuntimeKind::CargoIndex
+        | RuntimeKind::NpmCache
+        | RuntimeKind::PipHttpCache
+        | RuntimeKind::PipWheelCache => true,
     }
 }
 
@@ -546,14 +536,8 @@ fn push_candidate(candidates: &mut Vec<Candidate>, grant: RuntimeGrant) -> Resul
         return Err(ToolError::Limit);
     }
     let token = grant.token()?;
-    let version = grant.version.as_deref().unwrap_or("selected cache");
     candidates.push(Candidate {
-        label: format!(
-            "{} · {} · {}",
-            grant.kind.label(),
-            version,
-            grant.path.display()
-        ),
+        label: grant.profile_label(),
         token,
         grant,
     });
