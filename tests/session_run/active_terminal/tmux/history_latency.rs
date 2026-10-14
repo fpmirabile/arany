@@ -12,6 +12,7 @@ use std::{
     io::Read,
     net::{TcpListener, TcpStream},
     os::unix::fs::{MetadataExt, PermissionsExt},
+    path::Path,
     process::Stdio,
     sync::mpsc,
     thread,
@@ -61,6 +62,25 @@ fn process_memory_kib(pid: Pid) -> (usize, usize) {
             .expect("Linux process memory field")
     };
     (field("VmRSS:"), field("VmHWM:"))
+}
+
+fn wrapper_exit_status(path: &Path) -> String {
+    let marker = match std::fs::read_to_string(path) {
+        Ok(marker) => marker,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return "wrapper has not exited".into();
+        }
+        Err(_) => return "wrapper exit marker unavailable".into(),
+    };
+    let mut lines = marker.lines();
+    let exit = lines
+        .next()
+        .and_then(|line| line.parse::<i32>().ok())
+        .map_or_else(|| "invalid".to_owned(), |code| code.to_string());
+    let before = lines.next().unwrap_or_default();
+    let after = lines.next().unwrap_or_default();
+    let terminal_restored = !before.is_empty() && before == after;
+    format!("wrapper exit={exit}; terminal_restored={terminal_restored}")
 }
 
 fn report_replay_samples(samples: &mut [Duration]) {
@@ -556,6 +576,26 @@ async fn run_history_fixture() {
         "history_process_resume_ready_ms={}",
         resume_to_ready.as_millis()
     );
+    let pane_pid = server.run(&[
+        "display-message",
+        "-p",
+        "-t",
+        "arany-test:0.0",
+        "#{pane_pid}",
+    ]);
+    assert!(pane_pid.status.success(), "test-owned pane PID");
+    let pane_pid = String::from_utf8(pane_pid.stdout)
+        .expect("pane PID UTF-8")
+        .trim()
+        .parse::<u32>()
+        .expect("pane PID");
+    let product_pid = super::product_child_of_executable(pane_pid, &executable);
+    let product_guard = super::ProductGuard::for_executable(product_pid, state.clone(), executable);
+    assert!(
+        product_guard.is_owned_and_running(),
+        "composer belongs to the live product process; {}",
+        wrapper_exit_status(&exit_path)
+    );
     let screen = capture_pane(&server).expect("resumed Classic pane");
     assert!(
         String::from_utf8_lossy(&screen).contains("More history · Ctrl+T history"),
@@ -619,6 +659,11 @@ async fn run_history_fixture() {
         );
         thread::yield_now();
     }
+    assert!(
+        product_guard.is_owned_and_running(),
+        "same product process remains live after closing History; {}",
+        wrapper_exit_status(&exit_path)
+    );
     let native_history = server.run(&["capture-pane", "-p", "-S", "-", "-t", "arany-test:0.0"]);
     assert!(native_history.status.success(), "native scrollback capture");
     assert!(
@@ -638,22 +683,6 @@ async fn run_history_fixture() {
         !native_history.contains("objective 0000"),
         "old prefix is omitted"
     );
-    let pane_pid = server.run(&[
-        "display-message",
-        "-p",
-        "-t",
-        "arany-test:0.0",
-        "#{pane_pid}",
-    ]);
-    assert!(pane_pid.status.success(), "test-owned pane PID");
-    let pane_pid = String::from_utf8(pane_pid.stdout)
-        .expect("pane PID UTF-8")
-        .trim()
-        .parse::<u32>()
-        .expect("pane PID");
-    let product_pid = super::product_child_of_executable(pane_pid, &executable);
-    let product_guard = super::ProductGuard::for_executable(product_pid, state.clone(), executable);
-    assert!(product_guard.is_owned_and_running(), "private Arany child");
     let (idle_rss_kib, idle_hwm_kib) = process_memory_kib(product_pid);
     assert!(
         server
