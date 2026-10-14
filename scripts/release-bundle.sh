@@ -96,8 +96,8 @@ if (( selected_count < 1 || selected_count > 512 )) ||
 fi
 
 source_bytes=0
-license_bytes=0
-license_count=0
+notice_bytes=0
+notice_count=0
 copy_selected_package() {
   local name="$1" version="$2" checksum archive candidate member relative leaf output size root_texts=0
   checksum="$(locked_checksum "$name" "$version")"
@@ -150,9 +150,9 @@ copy_selected_package() {
       exit 1
     fi
     size="$(wc -c < "$output")"
-    (( license_bytes += size ))
-    (( license_count += 1 ))
-    if (( size == 0 || size > 1048576 || license_bytes > 33554432 )); then
+    (( notice_bytes += size ))
+    (( notice_count += 1 ))
+    if (( size == 0 || size > 1048576 || notice_bytes > 33554432 )); then
       printf 'bundle refused: selected package notices exceed the bundle limit\n' >&2
       exit 1
     fi
@@ -174,12 +174,16 @@ while read -r name version; do
   copy_selected_package "$name" "$version"
 done < "$stage/selected-packages"
 if ! cmp -s "$stage/missing-root-license" <(printf '%s\n' \
+  'jsonschema-regex 0.56.0' \
+  'jsonschema-value 0.56.0' \
   'opentelemetry 0.33.0' \
   'opentelemetry-http 0.33.0' \
   'opentelemetry-otlp 0.33.0' \
   'opentelemetry-proto 0.33.0' \
-  'opentelemetry_sdk 0.33.0'); then
-  printf 'bundle refused: packages without root license texts changed\n' >&2
+  'opentelemetry_sdk 0.33.0' \
+  'uuid-simd 0.8.0' \
+  'vsimd 0.8.0'); then
+  printf 'bundle refused: package archives without root license files changed\n' >&2
   exit 1
 fi
 cp "$stage/missing-root-license" "$bundle/MISSING-ROOT-LICENSES.txt"
@@ -188,12 +192,10 @@ if ! cmp -s "$bundle/SELECTED-NESTED-NOTICES.txt" <(printf '%s\n' \
   'aws-lc-sys 0.45.0 aws-lc/LICENSE' \
   'aws-lc-sys 0.45.0 aws-lc/third_party/fiat/LICENSE' \
   'libsqlite3-sys 0.38.2 sqlcipher/LICENSE' \
+  'micromap 0.3.0 .github/workflows/copyrights.yml' \
+  'regex-syntax 0.8.11 src/unicode_tables/LICENSE-UNICODE' \
   'tracing-core 0.1.36 src/spin/LICENSE'); then
   printf 'bundle refused: selected nested package notices changed\n' >&2
-  exit 1
-fi
-if (( license_count > 1024 )); then
-  printf 'bundle refused: too many selected package notices\n' >&2
   exit 1
 fi
 for spec in \
@@ -212,19 +214,54 @@ for spec in \
     exit 1
   fi
 done
+copy_checked_notice_text() {
+  local source_file="$1" expected_hash="$2" label="$3" output="$4" size
+  if [[ ! -f "$source_file" ]] ||
+    [[ "$(shasum -a 256 "$source_file" | cut -d ' ' -f 1)" != "$expected_hash" ]]; then
+    printf 'bundle refused: pinned %s text changed\n' "$label" >&2
+    exit 1
+  fi
+  size="$(wc -c < "$source_file")"
+  (( notice_bytes += size ))
+  (( notice_count += 1 ))
+  if (( size == 0 || size > 1048576 || notice_bytes > 33554432 )); then
+    printf 'bundle refused: selected package notices exceed the bundle limit\n' >&2
+    exit 1
+  fi
+  mkdir -p "${output%/*}"
+  cp "$source_file" "$output"
+}
+
 apache_license="$bundle/third-party/rustls-platform-verifier-0.7.1/LICENSE-APACHE"
-if [[ "$(shasum -a 256 "$apache_license" | cut -d ' ' -f 1)" != c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4 ]]; then
-  printf 'bundle refused: pinned OpenTelemetry upstream license text changed\n' >&2
-  exit 1
-fi
 for name in opentelemetry opentelemetry-http opentelemetry-otlp opentelemetry-proto opentelemetry_sdk; do
   vcs_info="$(tar -xOzf "$bundle/sources/$name-0.33.0.crate" "$name-0.33.0/.cargo_vcs_info.json")"
   if ! grep -Fq '"sha1": "19833847cab86c8464c1dfb6d28b1de9c0b50038"' <<< "$vcs_info"; then
     printf 'bundle refused: %s 0.33.0 upstream revision changed\n' "$name" >&2
     exit 1
   fi
-  cp "$apache_license" "$bundle/third-party/$name-0.33.0/UPSTREAM-LICENSE-APACHE"
+  copy_checked_notice_text "$apache_license" c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4 \
+    "$name 0.33.0 Apache license" "$bundle/third-party/$name-0.33.0/UPSTREAM-LICENSE-APACHE"
 done
+
+for spec in \
+  'jsonschema-regex 0.56.0 1e244c994dd81a1feb7801556a813c6bf2d45dad crates/jsonschema-regex scripts/release-licenses/jsonschema-MIT.txt 117829c3ca21efb132d81a44b55363d395ab8eea18526873bc828da4c0e5f038' \
+  'jsonschema-value 0.56.0 1e244c994dd81a1feb7801556a813c6bf2d45dad crates/jsonschema-value scripts/release-licenses/jsonschema-MIT.txt 117829c3ca21efb132d81a44b55363d395ab8eea18526873bc828da4c0e5f038' \
+  'uuid-simd 0.8.0 d74c030d9dc4f3cae02146d1f497ff62726ef09a crates/uuid-simd scripts/release-licenses/simd-MIT.txt 71674605ec4c087fe9eb534e3e4f9e26eb2e4aabcd76a29fd156c6a844d44b3d' \
+  'vsimd 0.8.0 d74c030d9dc4f3cae02146d1f497ff62726ef09a crates/vsimd scripts/release-licenses/simd-MIT.txt 71674605ec4c087fe9eb534e3e4f9e26eb2e4aabcd76a29fd156c6a844d44b3d'; do
+  read -r name version revision source_path license_source license_hash <<< "$spec"
+  vcs_info="$(tar -xOzf "$bundle/sources/$name-$version.crate" "$name-$version/.cargo_vcs_info.json")"
+  if ! grep -Fq "\"sha1\": \"$revision\"" <<< "$vcs_info" ||
+    ! grep -Fq "\"path_in_vcs\": \"$source_path\"" <<< "$vcs_info"; then
+    printf 'bundle refused: %s %s upstream source provenance changed\n' "$name" "$version" >&2
+    exit 1
+  fi
+  copy_checked_notice_text "$license_source" "$license_hash" "$name $version upstream MIT license" \
+    "$bundle/third-party/$name-$version/UPSTREAM-LICENSE-MIT"
+done
+if (( notice_count > 1024 )); then
+  printf 'bundle refused: too many selected package notices\n' >&2
+  exit 1
+fi
 cat > "$bundle/third-party/aws-lc-rs-1.18.1/NOTICE" <<'EOF'
 AWS Libcrypto for Rust
 Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
@@ -263,17 +300,39 @@ The complete third-party and native-code notice review remains open.
 SELECTED-PACKAGES.txt records the Linux and macOS normal/build registry union
 and each source archive's locked checksum. Every selected registry source archive
 is in sources/; its packaged license/copyright texts are in third-party/ at
-their original relative paths. SELECTED-NESTED-NOTICES.txt identifies the
-four currently selected nested texts; a changed set blocks candidate creation.
+their original relative paths. MISSING-ROOT-LICENSES.txt records the selected
+archives that contain no root license-named file; the supplementary texts below
+are included separately. SELECTED-NESTED-NOTICES.txt identifies six nested
+license and attribution materials. It includes the Unicode data/software license
+from regex-syntax and the micromap workflow's copyright/SPDX metadata; the latter
+is attribution metadata, not a separate license text.
+
+The jsonschema-regex 0.56.0 and jsonschema-value 0.56.0 manifests declare MIT.
+Their packaged VCS records pin Stranger6667/jsonschema commit
+1e244c994dd81a1feb7801556a813c6bf2d45dad at crates/jsonschema-regex and
+crates/jsonschema-value. The matching root MIT text is included at
+third-party/jsonschema-regex-0.56.0/UPSTREAM-LICENSE-MIT and
+third-party/jsonschema-value-0.56.0/UPSTREAM-LICENSE-MIT (SHA-256
+117829c3ca21efb132d81a44b55363d395ab8eea18526873bc828da4c0e5f038).
+The uuid-simd 0.8.0 and vsimd 0.8.0 manifests declare MIT. Their packaged VCS
+records pin Nugine/simd commit d74c030d9dc4f3cae02146d1f497ff62726ef09a
+at crates/uuid-simd and crates/vsimd. Their matching root MIT text is included
+at each package's UPSTREAM-LICENSE-MIT (SHA-256
+71674605ec4c087fe9eb534e3e4f9e26eb2e4aabcd76a29fd156c6a844d44b3d).
+These source-pinned texts supplement archives that do not contain a root license
+file; this inventory does not complete binary-specific attribution review.
+
 The five OpenTelemetry 0.33.0 packages in MISSING-ROOT-LICENSES.txt declare
 Apache-2.0 but contain no root license text. Their packaged VCS records pin
 the same upstream revision, whose root LICENSE matches the pinned SHA-256 of
 each packaged UPSTREAM-LICENSE-APACHE. Embedded file-level notices still
 require release review.
 
-option-ext 0.2.0 is included under MPL-2.0. Its exact published source is
-sources/option-ext-0.2.0.crate; its license is in
-third-party/option-ext-0.2.0/LICENSE.txt. Arany does not modify its source.
+option-ext 0.2.0 is included under MPL-2.0. To obtain its unchanged source
+form from this candidate, unpack sources/option-ext-0.2.0.crate (SHA-256
+04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d).
+Its license text is in third-party/option-ext-0.2.0/LICENSE.txt. Arany does not
+modify its source; this path does not constitute release approval.
 
 Crossterm 0.29.0 is the unmodified published crate under MIT. Its license
 is in third-party/crossterm-0.29.0/LICENSE; its checksum-matched source
