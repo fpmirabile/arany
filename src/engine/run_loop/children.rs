@@ -7,9 +7,7 @@ use crate::provider::{
     AgentPhase, ChildResult, Finish, Provider, ProviderOutcome, ProviderRequest, ProviderResponse,
 };
 use crate::session::{AgentDisposition, AgentRole, AgentRunId, CollaborationPolicy, Event};
-use crate::telemetry::{
-    AgentTrace, ProviderTrace, ProviderTraceOutcome, TraceFailure, TraceOutcome,
-};
+use crate::telemetry::{AgentTrace, ProviderTrace, TraceOutcome};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
@@ -283,11 +281,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
             let synthesis_trace =
                 primary.begin_provider(AgentPhase::RootSynthesis, &root_request.model);
             let Some(synthesis) = self.invoke_primary(root_request.clone(), deadline).await? else {
-                synthesis_trace.finish_with_usage(
-                    ProviderTraceOutcome::Failed(TraceFailure::Rejected),
-                    None,
-                    None,
-                );
+                synthesis_trace.finish_refused();
                 return self.fail_primary(primary).await;
             };
             let (input_tokens, output_tokens) = call_trace_usage(&synthesis);

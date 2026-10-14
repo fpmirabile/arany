@@ -593,6 +593,15 @@ impl PlanTrace {
 }
 
 impl ProviderTrace {
+    /// Closes a call the Goal budget refused before dispatch; no usage was observed.
+    pub(crate) fn finish_refused(self) {
+        self.finish_with_usage(
+            ProviderTraceOutcome::Failed(TraceFailure::Rejected),
+            None,
+            None,
+        );
+    }
+
     pub(crate) fn finish_with_usage(
         self,
         outcome: ProviderTraceOutcome,

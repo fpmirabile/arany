@@ -419,6 +419,19 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             let next_trace = (step != 0)
                 .then(|| primary.begin_provider(AgentPhase::RootPlan, &root_request.model));
             let Some(first) = self.invoke_primary(root_request.clone(), deadline).await? else {
+                if let Some(first_trace) = first_trace {
+                    first_trace.finish(
+                        &primary,
+                        &root_request.model,
+                        false,
+                        ProviderTraceOutcome::Failed(TraceFailure::Rejected),
+                        None,
+                        None,
+                    );
+                }
+                if let Some(next_trace) = next_trace {
+                    next_trace.finish_refused();
+                }
                 return self.fail_primary(primary).await;
             };
             let (input_tokens, output_tokens) = call_trace_usage(&first);
@@ -1021,7 +1034,10 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             child_results: Vec::new(), tools: None, max_output_tokens: 256,
         };
         let trace = primary.begin_provider(AgentPhase::ToolReview, &review.model);
-        self.reserve_provider_call(self.primary_id).await?;
+        if let Err(error) = self.reserve_provider_call(self.primary_id).await {
+            trace.finish_refused();
+            return Err(error);
+        }
         let result = invoke_bounded(
             self.provider.as_ref(),
             review,
