@@ -679,7 +679,7 @@ pub(super) async fn handle_command(
                     root.clear_all_build_caches(),
                     "Cleared all private build caches",
                 ),
-                _ => return Err(CACHE_USAGE.into()),
+                _ => return Ok(format!("Error: {CACHE_USAGE}")),
             };
             match result {
                 Ok(()) => cleared.into(),
