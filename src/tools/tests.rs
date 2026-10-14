@@ -214,6 +214,7 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
         commands: vec![pinned, copied_program],
         skills: Vec::new(),
         mcp: Vec::new(),
+        runtime_grants: Vec::new(),
     };
     for (case, drift) in [("fresh", false), ("changed-input", true)] {
         let target = temp.path().join(case);
@@ -1152,6 +1153,41 @@ fn tool_admission_corpus_is_closed_and_restrict_only() {
             .validate()
             .is_err()
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn host_runtime_roots_can_only_come_from_remembered_folder_trust() {
+    use crate::store::StateRoot;
+    use crate::tools::toolchains::{RuntimeKind, discover};
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let node = home.join(".nvm/versions/node/v22.3.0");
+    std::fs::create_dir_all(node.join("bin")).unwrap();
+    std::fs::write(node.join("bin/node"), b"synthetic executable").unwrap();
+    std::fs::set_permissions(
+        node.join("bin/node"),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let grant = discover(&home)
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.grant.kind == RuntimeKind::Node)
+        .unwrap()
+        .grant;
+    let mut value = config_value();
+    value["runtime_grants"] = json!([grant]);
+    let config: Config = serde_json::from_value(value.clone()).unwrap();
+    config.validate().unwrap();
+
+    let state = StateRoot::admit(&temp.path().join("state")).unwrap();
+    let path = state.path().join("tools.json");
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(Config::load(&state).is_err());
 }
 
 #[test]

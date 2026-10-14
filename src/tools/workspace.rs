@@ -1,5 +1,8 @@
 use super::approval::ApprovalMode;
 use super::config::{Config, Program};
+use super::toolchains::{
+    Candidate, MAX_RUNTIME_GRANTS, RuntimeGrant, discover, validate_selection,
+};
 use super::types::{MAX_SNAPSHOT_BYTES, hex_digest};
 use super::{ToolError, fs};
 use crate::store::{StateRoot, StoreError};
@@ -64,6 +67,15 @@ pub struct WorkspacePermissions {
     identity: (u64, u64),
     trusted: bool,
     mode: ApprovalMode,
+    runtime_grants: Vec<RuntimeGrant>,
+    candidates: Vec<Candidate>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RuntimeProfileOption {
+    pub token: String,
+    pub label: String,
+    pub selected: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -80,6 +92,7 @@ struct Entry {
     device: u64,
     inode: u64,
     mode: ApprovalMode,
+    runtime_grants: Vec<RuntimeGrant>,
 }
 
 fn read(root: &StateRoot) -> Result<Permissions, ToolError> {
@@ -88,17 +101,20 @@ fn read(root: &StateRoot) -> Result<Permissions, ToolError> {
         .map_err(|_| ToolError::Configuration)?
     else {
         return Ok(Permissions {
-            version: 1,
+            version: 2,
             workspaces: Vec::new(),
         });
     };
     let value = super::skills::parse_json(&bytes, 64 * 1024)?;
     let record: Permissions =
         serde_json::from_value(value).map_err(|_| ToolError::Configuration)?;
-    if record.version != 1
+    if record.version != 2
         || record.workspaces.len() > 128
         || record.workspaces.iter().any(|entry| {
-            !entry.path.is_absolute() || entry.path.as_os_str().len() > 4096 || entry.inode == 0
+            !entry.path.is_absolute()
+                || entry.path.as_os_str().len() > 4096
+                || entry.inode == 0
+                || validate_selection(&entry.runtime_grants).is_err()
         })
     {
         return Err(ToolError::Configuration);
@@ -114,9 +130,75 @@ impl WorkspacePermissions {
     pub fn mode(&self) -> ApprovalMode {
         self.mode
     }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn runtime_candidates(&self) -> &[Candidate] {
+        &self.candidates
+    }
+
+    pub fn runtime_profile_options(&self) -> Vec<(String, String)> {
+        self.runtime_profile_choices()
+            .into_iter()
+            .map(|option| (option.token, option.label))
+            .collect()
+    }
+
+    pub fn runtime_profile_choices(&self) -> Vec<RuntimeProfileOption> {
+        let selected = self
+            .runtime_grants
+            .iter()
+            .filter_map(|grant| grant.token().ok())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut options = self
+            .runtime_candidates()
+            .iter()
+            .map(|candidate| RuntimeProfileOption {
+                token: candidate.token.clone(),
+                label: candidate.label.clone(),
+                selected: selected.contains(&candidate.token),
+            })
+            .collect::<Vec<_>>();
+        for grant in &self.runtime_grants {
+            let Ok(token) = grant.token() else {
+                continue;
+            };
+            if options.iter().any(|option| option.token == token) {
+                continue;
+            }
+            let version = grant.version.as_deref().unwrap_or("selected cache");
+            options.push(RuntimeProfileOption {
+                token,
+                label: format!(
+                    "{} · {} · {} (no longer detected)",
+                    grant.kind.label(),
+                    version,
+                    grant.path.display()
+                ),
+                selected: true,
+            });
+        }
+        options.sort_by(|left, right| left.token.cmp(&right.token));
+        options
+    }
+
+    pub fn profile_tokens_valid(&self, tokens: &[String]) -> bool {
+        self.selected_grants(tokens).is_ok()
+    }
+
     pub(crate) fn matches_identity(&self, identity: (u64, u64)) -> bool {
         self.identity == identity
     }
+
+    pub fn verify_runtime_grants(&self) -> Result<(), ToolError> {
+        for grant in &self.runtime_grants {
+            grant.verify_host()?;
+        }
+        Ok(())
+    }
+
     pub fn open(path: &Path) -> Result<Self, ToolError> {
         let account = StateRoot::account_path().map_err(|_| ToolError::Configuration)?;
         match StateRoot::open_existing(&account) {
@@ -131,10 +213,21 @@ impl WorkspacePermissions {
                     identity,
                     trusted: false,
                     mode: ApprovalMode::AutoEdits,
+                    runtime_grants: Vec::new(),
+                    candidates: Vec::new(),
                 })
             }
             Err(_) => Err(ToolError::Configuration),
         }
+    }
+
+    pub fn open_for_profile_selection(path: &Path) -> Result<Self, ToolError> {
+        Self::open(path)?.prepare_profile_selection()
+    }
+
+    pub fn prepare_profile_selection(mut self) -> Result<Self, ToolError> {
+        self.candidates = discover_home_candidates()?;
+        Ok(self)
     }
 
     fn load(path: &Path, root: &StateRoot) -> Result<Self, ToolError> {
@@ -147,19 +240,63 @@ impl WorkspacePermissions {
             .workspaces
             .iter()
             .find(|entry| entry.path == path && (entry.device, entry.inode) == identity);
+        let runtime_grants = entry.map_or_else(Vec::new, |entry| entry.runtime_grants.clone());
+        let trusted = entry.is_some();
         Ok(Self {
             path: path.to_owned(),
             identity,
-            trusted: entry.is_some(),
+            trusted,
             mode: entry.map_or(ApprovalMode::AutoEdits, |entry| entry.mode),
+            runtime_grants,
+            candidates: Vec::new(),
         })
     }
 
     pub fn remember(&mut self, trusted: bool, mode: ApprovalMode) -> Result<(), ToolError> {
+        self.remember_profiles(trusted, mode, &[])
+    }
+
+    pub fn remember_profiles(
+        &mut self,
+        trusted: bool,
+        mode: ApprovalMode,
+        tokens: &[String],
+    ) -> Result<(), ToolError> {
+        if !trusted && !tokens.is_empty() {
+            return Err(ToolError::Configuration);
+        }
+        let runtime_grants = self.selected_grants(tokens)?;
+        for grant in &runtime_grants {
+            grant.verify_host()?;
+        }
         let root =
             StateRoot::admit(&StateRoot::account_path().map_err(|_| ToolError::Configuration)?)
                 .map_err(|_| ToolError::Configuration)?;
-        self.save(&root, trusted, mode)
+        self.save(&root, trusted, mode, runtime_grants)
+    }
+
+    fn selected_grants(&self, tokens: &[String]) -> Result<Vec<RuntimeGrant>, ToolError> {
+        if tokens.len() > MAX_RUNTIME_GRANTS {
+            return Err(ToolError::Limit);
+        }
+        let mut runtime_grants = Vec::new();
+        for token in tokens {
+            let grant = self
+                .candidates
+                .iter()
+                .find(|candidate| &candidate.token == token)
+                .map(|candidate| candidate.grant.clone())
+                .or_else(|| {
+                    self.runtime_grants
+                        .iter()
+                        .find(|grant| grant.token().ok().as_deref() == Some(token.as_str()))
+                        .cloned()
+                })
+                .ok_or(ToolError::Configuration)?;
+            runtime_grants.push(grant);
+        }
+        validate_selection(&runtime_grants)?;
+        Ok(runtime_grants)
     }
 
     fn save(
@@ -167,6 +304,7 @@ impl WorkspacePermissions {
         root: &StateRoot,
         trusted: bool,
         mode: ApprovalMode,
+        runtime_grants: Vec<RuntimeGrant>,
     ) -> Result<(), ToolError> {
         root.with_account_replacement_lock(&self.path, || {
             self.verify(&self.path)?;
@@ -181,6 +319,11 @@ impl WorkspacePermissions {
                     device: self.identity.0,
                     inode: self.identity.1,
                     mode,
+                    runtime_grants: if trusted {
+                        runtime_grants.clone()
+                    } else {
+                        Vec::new()
+                    },
                 });
             }
             let bytes = serde_json::to_vec(&record).map_err(|_| ToolError::Configuration)?;
@@ -190,6 +333,7 @@ impl WorkspacePermissions {
         .map_err(|_| ToolError::Configuration)??;
         self.trusted = trusted;
         self.mode = mode;
+        self.runtime_grants = if trusted { runtime_grants } else { Vec::new() };
         Ok(())
     }
 
@@ -233,15 +377,132 @@ impl WorkspacePermissions {
             commands,
             skills: Vec::new(),
             mcp: Vec::new(),
+            runtime_grants: self.runtime_grants.clone(),
         };
         config.validate()?;
         Ok(config)
     }
 }
 
+fn discover_home_candidates() -> Result<Vec<Candidate>, ToolError> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Ok(Vec::new());
+    };
+    if !home.is_absolute() {
+        return Ok(Vec::new());
+    }
+    discover(&home)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_discovery_is_bounded_metadata_only_and_pins_exact_versions() {
+        use super::super::toolchains::{RuntimeKind, RuntimeManager, discover};
+        use std::os::unix::fs::PermissionsExt;
+
+        fn executable(path: &Path) {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"synthetic executable marker").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let rust = home.join(".rustup/toolchains/1.88.0-x86_64-unknown-linux-gnu");
+        executable(&rust.join("bin/cargo"));
+        executable(&rust.join("bin/rustc"));
+        let channel_alias = home.join(".rustup/toolchains/stable");
+        executable(&channel_alias.join("bin/cargo"));
+        executable(&channel_alias.join("bin/rustc"));
+        let node = home.join(".nvm/versions/node/v22.3.0");
+        executable(&node.join("bin/node"));
+        let python_alias = home.join(".pyenv/versions/3.13.0");
+        executable(&python_alias.join("bin/python3.13"));
+        std::os::unix::fs::symlink("python3.13", python_alias.join("bin/python3")).unwrap();
+        let python_regular = home.join(".pyenv/versions/3.13.1");
+        executable(&python_regular.join("bin/python3.13"));
+        let python_escape = home.join(".pyenv/versions/3.13.2");
+        std::fs::create_dir_all(python_escape.join("bin")).unwrap();
+        std::os::unix::fs::symlink("/usr/bin/python3", python_escape.join("bin/python3")).unwrap();
+        let cache = home.join(".cargo/registry/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::create_dir_all(home.join(".cargo")).unwrap();
+        std::fs::write(
+            home.join(".cargo/config.toml"),
+            "synthetic credential canary",
+        )
+        .unwrap();
+
+        let candidates = discover(&home).unwrap();
+        let rust = candidates
+            .iter()
+            .find(|candidate| candidate.grant.kind == RuntimeKind::Rust)
+            .unwrap();
+        assert_eq!(rust.grant.manager, RuntimeManager::Rustup);
+        assert_eq!(
+            rust.grant.version.as_deref(),
+            Some("1.88.0-x86_64-unknown-linux-gnu")
+        );
+        assert!(
+            rust.grant
+                .path
+                .ends_with(".rustup/toolchains/1.88.0-x86_64-unknown-linux-gnu")
+        );
+        let node = candidates
+            .iter()
+            .find(|candidate| candidate.grant.kind == RuntimeKind::Node)
+            .unwrap();
+        assert_eq!(node.grant.version.as_deref(), Some("v22.3.0"));
+        let python = candidates
+            .iter()
+            .filter(|candidate| candidate.grant.kind == RuntimeKind::Python)
+            .collect::<Vec<_>>();
+        assert_eq!(python.len(), 2);
+        assert!(
+            python
+                .iter()
+                .any(|candidate| candidate.grant.path == python_alias)
+        );
+        assert!(
+            python
+                .iter()
+                .any(|candidate| candidate.grant.path == python_regular)
+        );
+        assert!(
+            python
+                .iter()
+                .all(|candidate| candidate.grant.path != python_escape)
+        );
+        assert!(candidates.iter().all(|candidate| {
+            !candidate.label.contains("synthetic credential canary")
+                && candidate.grant.path != home.join(".cargo")
+                && candidate.grant.path != channel_alias
+        }));
+        assert!(candidates.iter().any(|candidate| {
+            candidate.grant.kind == RuntimeKind::CargoCache && candidate.grant.path == cache
+        }));
+        rust.grant.verify_host().unwrap();
+
+        let mut wrong_version = rust.grant.clone();
+        wrong_version.version = Some("stable".into());
+        assert!(wrong_version.validate_shape().is_err());
+        let mut duplicate_kind = vec![rust.grant.clone(), rust.grant.clone()];
+        assert!(validate_selection(&duplicate_kind).is_err());
+        duplicate_kind.truncate(1);
+        validate_selection(&duplicate_kind).unwrap();
+
+        let replaced = rust.grant.clone();
+        std::fs::rename(&replaced.path, home.join("old-rust")).unwrap();
+        std::fs::create_dir_all(&replaced.path).unwrap();
+        assert!(matches!(
+            replaced.verify_host(),
+            Err(ToolError::ChangedInput)
+        ));
+    }
 
     #[test]
     fn explicit_mentions_and_file_discovery_exclude_unsafe_inputs() {
@@ -384,7 +645,9 @@ mod tests {
         std::fs::create_dir(&path).unwrap();
         let mut access = WorkspacePermissions::load(&path, &root).unwrap();
         assert!(!access.is_trusted());
-        access.save(&root, true, ApprovalMode::AutoEdits).unwrap();
+        access
+            .save(&root, true, ApprovalMode::AutoEdits, Vec::new())
+            .unwrap();
         #[cfg(target_os = "macos")]
         {
             let config = access.config(&path).unwrap();
@@ -406,20 +669,24 @@ mod tests {
                 .unwrap()
                 .is_trusted()
         );
-        assert!(access.save(&root, true, ApprovalMode::Auto).is_err());
+        assert!(
+            access
+                .save(&root, true, ApprovalMode::Auto, Vec::new())
+                .is_err()
+        );
         let mut replacement = WorkspacePermissions::load(&path, &root).unwrap();
         replacement
-            .save(&root, true, ApprovalMode::Request)
+            .save(&root, true, ApprovalMode::Request, Vec::new())
             .unwrap();
         replacement
-            .save(&root, false, ApprovalMode::Request)
+            .save(&root, false, ApprovalMode::Request, Vec::new())
             .unwrap();
         assert!(
             !WorkspacePermissions::load(&path, &root)
                 .unwrap()
                 .is_trusted()
         );
-        for record in [br#"{"version":2,"workspaces":[]}"#.as_slice(), br#"{"version":1,"workspaces":[{"path":"/project","device":1,"inode":1,"mode":"bypass"}]}"#.as_slice()] {
+        for record in [br#"{"version":1,"workspaces":[]}"#.as_slice(), br#"{"version":2,"workspaces":[{"path":"/project","device":1,"inode":1,"mode":"bypass","runtime_grants":[]}] }"#.as_slice()] {
             root.replace_workspace_permissions(record).unwrap();
             assert!(WorkspacePermissions::load(&path, &root).is_err());
         }

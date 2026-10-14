@@ -36,6 +36,7 @@ Specs state the agreed contract. Source and tests establish implementation and e
 | Provider, model or billing route | [Provider rules](../agents/provider.md) | [Credential spec](./specs/credentials.md), [ChatGPT](../agents/chatgpt.md), [security](../agents/security.md) |
 | Saved accounts, OS-store authorization, storage or recovery | [Credential spec](./specs/credentials.md), [credential rules](../agents/credentials.md) | [ChatGPT](../agents/chatgpt.md), [Store](../agents/store.md), [terminal](./specs/terminal.md), [security](../agents/security.md) |
 | Model-driven Tools, commands, Skills or MCP | [Tool spec](./specs/tools.md), [Tool rules](../agents/tools.md), [Guard rules](../agents/guard.md), [tool guide](./tools.md) | Engine, Provider, Session, Store and security |
+| Runtime profile discovery, toolchain identity or optional host-cache selection | [Tool spec](./specs/tools.md), [runtime profile rules](../agents/toolchains.md) | [Tools](../agents/tools.md) for grants and [Guard](../agents/guard.md) for native enforcement |
 | Trace export or local diagnostics | [Diagnostic spec](./specs/diagnostics.md), [Telemetry rules](../agents/telemetry.md) or [diagnostic rules](../agents/diagnostics.md) | Security and CLI admission |
 | Behavior change, defect fix or release claim | The owning contract and [testing rules](../agents/testing.md) | Existing evidence owner and current handoff |
 | Architecture or ownership change | [System overview](./architecture/system-overview.md) | Relevant module rules and [planning workflow](../planning/PLANNING.md) |

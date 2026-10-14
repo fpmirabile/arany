@@ -1096,6 +1096,7 @@ mod tests {
             commands: Vec::new(),
             skills: Vec::new(),
             mcp: Vec::new(),
+            runtime_grants: Vec::new(),
         }
     }
 

@@ -232,6 +232,7 @@ dispatch. A pure read-only task can finish without fabricated effect scope.
 | 2026-10-13 | The whole initiative is Beta 1 scope (reverses R10-8) | Plan outcome, beta plan, next steps |
 | 2026-10-13 | No native Windows: Windows users run the Linux build under WSL2 | AGENTS.md priority 2, README, CONTRIBUTING, planning template, security rules, decision D-17, next steps, plan OS impact |
 | 2026-10-13 | Registry fetch joins Beta 1 as A6 (reverses Q6) | Plan A6, security model, OS impact, execution step 8; removed from next steps as a separate initiative |
+| 2026-10-13 | A3/A4 finite configurable ceilings: 4 GiB memory, 8 GiB cache, 1 GiB writable project storage, 256 tasks; 120-second command default, 600-second maximum | A3/A4 policy defaults; native build evidence and named-host measurement remain separate support gates |
 
 ## Expansion options
 
@@ -249,6 +250,6 @@ nodes below wait on implementation data; they are not silently assumed.
 
 ## Blocked nodes
 
-- After A2 lands: `build` resource profile values per OS and default settings
-  maxima, from measured builds on named hosts.
+- After A3/A4: native build verification and named-host measurements for any
+  build-support claim; approved policy ceilings do not establish support.
 - After shadow-mode data: thresholds for loop, probing and disproportion.

@@ -1,10 +1,11 @@
 use super::config::Config;
+use super::toolchains::{RuntimeGrant, validate_selection};
 use super::types::*;
 use super::{ToolError, ToolRuntime, now_ms};
 use crate::engine::RunCancellation;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
@@ -68,13 +69,34 @@ struct Task {
 impl Task {
     fn enforcement_digest(&self) -> Result<[u8; 32], ToolError> {
         #[cfg(target_os = "macos")]
-        {
-            macos_enforcement_digest(self.system_programs.as_ref())
+        if !self.intent.call.is_process() && self.system_programs.is_some() {
+            return Err(ToolError::Configuration);
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            enforcement_digest()
+        intent_enforcement_digest(
+            self.intent.call.is_process(),
+            &self.config.runtime_grants,
+            #[cfg(target_os = "macos")]
+            self.system_programs.as_ref(),
+        )
+    }
+}
+
+fn intent_enforcement_digest(
+    is_process: bool,
+    runtime_grants: &[RuntimeGrant],
+    #[cfg(target_os = "macos")] programs: Option<&SystemPrograms>,
+) -> Result<[u8; 32], ToolError> {
+    #[cfg(target_os = "macos")]
+    {
+        if is_process {
+            macos_runtime_enforcement_digest(programs, runtime_grants)
+        } else {
+            enforcement_digest(&[])
         }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        enforcement_digest(if is_process { runtime_grants } else { &[] })
     }
 }
 
@@ -93,6 +115,7 @@ struct Ready {
 enum BootstrapStage {
     Admission,
     Workspace,
+    RuntimeMounts,
     Capabilities,
     Handshake,
     Payload,
@@ -104,6 +127,7 @@ impl BootstrapStage {
         match self {
             Self::Admission => "admission",
             Self::Workspace => "Workspace identity",
+            Self::RuntimeMounts => "runtime mount topology",
             Self::Capabilities => "kernel capability",
             Self::Handshake => "handshake",
             Self::Payload => "payload",
@@ -129,6 +153,7 @@ impl BootstrapFailure {
         match self.stage {
             BootstrapStage::Admission => "admission",
             BootstrapStage::Workspace => "pinned input",
+            BootstrapStage::RuntimeMounts => "runtime mount topology",
             BootstrapStage::Capabilities => "native protection",
             BootstrapStage::Handshake => "handshake",
             BootstrapStage::Payload => "execution",
@@ -186,19 +211,81 @@ pub(super) fn check_available() -> Result<(), ToolError> {
     }
 }
 
-pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
+pub(super) fn enforcement_digest(runtime_grants: &[RuntimeGrant]) -> Result<[u8; 32], ToolError> {
     #[cfg(target_os = "linux")]
     {
-        linux::enforcement_digest()
+        bind_runtime_grants(linux::enforcement_digest()?, runtime_grants)
     }
     #[cfg(target_os = "macos")]
     {
-        macos::enforcement_digest()
+        bind_runtime_grants(macos::enforcement_digest()?, runtime_grants)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         Err(ToolError::ProtectionUnavailable)
     }
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn macos_runtime_enforcement_digest(
+    programs: Option<&SystemPrograms>,
+    runtime_grants: &[RuntimeGrant],
+) -> Result<[u8; 32], ToolError> {
+    bind_runtime_grants(macos_enforcement_digest(programs)?, runtime_grants)
+}
+
+fn bind_runtime_grants(
+    profile: [u8; 32],
+    runtime_grants: &[RuntimeGrant],
+) -> Result<[u8; 32], ToolError> {
+    validate_selection(runtime_grants)?;
+    if runtime_grants.is_empty() {
+        return Ok(profile);
+    }
+    let mut bytes = b"arany-runtime-profile-v2:metadata-detected;exact-versioned-roots;explicit-read-only-cache-grants;bounded-output-may-disclose;no-automatic-cache-load;no-parent-cache-config-or-credentials".to_vec();
+    bytes.extend_from_slice(&profile);
+    bytes.extend_from_slice(
+        &serde_json::to_vec(runtime_grants).map_err(|_| ToolError::Configuration)?,
+    );
+    Ok(digest(&bytes))
+}
+
+fn verify_runtime_grants(config: &Config) -> Result<(), ToolError> {
+    for grant in &config.runtime_grants {
+        #[cfg(target_os = "linux")]
+        grant.verify_at(&grant.mounted_path()?)?;
+        #[cfg(target_os = "macos")]
+        grant.verify_host()?;
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok(())
+}
+
+fn verify_intent_runtime_grants(intent: &EffectIntent, config: &Config) -> Result<(), ToolError> {
+    if intent.call.is_process() {
+        verify_runtime_grants(config)
+    } else {
+        Ok(())
+    }
+}
+
+fn attest_runtime_mounts(
+    call: &ToolCall,
+    grants: &[RuntimeGrant],
+    stage: &mut BootstrapStage,
+) -> Result<(), ToolError> {
+    if !call.is_process() {
+        return Ok(());
+    }
+    *stage = BootstrapStage::RuntimeMounts;
+    #[cfg(target_os = "linux")]
+    linux::verify_runtime_mounts(grants)?;
+    #[cfg(target_os = "macos")]
+    macos::verify_runtime_mounts(grants)?;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    return Err(ToolError::ProtectionUnavailable);
+    Ok(())
 }
 
 pub(super) async fn execute(
@@ -395,7 +482,7 @@ fn bootstrap_locations(
     stage: &mut BootstrapStage,
 ) -> Result<(std::path::PathBuf, std::path::PathBuf), ToolError> {
     *stage = BootstrapStage::Capabilities;
-    let root = macos::install(task)?;
+    let root = macos::install(task, stage)?;
     let workspace = if task.intent.call.is_process() {
         root.join("workspace")
     } else {
@@ -423,6 +510,7 @@ pub(super) fn helper_main() -> ExitCode {
         let mut stdin = std::io::BufReader::new(std::io::stdin().lock());
         let task = read_task(&mut stdin)?;
         task.config.validate()?;
+        verify_intent_runtime_grants(&task.intent, &task.config)?;
         if !task.intent.valid()
             || task.intent.policy_digest != task.config.digest()
             || task.intent.expires_at_ms <= now_ms()
@@ -433,6 +521,7 @@ pub(super) fn helper_main() -> ExitCode {
             return Err(ToolError::Configuration);
         }
         let (root, workspace) = bootstrap_locations(&task, &mut stage)?;
+        attest_runtime_mounts(&task.intent.call, &task.config.runtime_grants, &mut stage)?;
         let workspace = workspace.as_path();
         stage = BootstrapStage::Workspace;
         if (matches!(
@@ -457,6 +546,7 @@ pub(super) fn helper_main() -> ExitCode {
         };
         #[cfg(target_os = "linux")]
         {
+            attest_runtime_mounts(&task.intent.call, &task.config.runtime_grants, &mut stage)?;
             stage = BootstrapStage::Capabilities;
             linux::harden()?;
         }
@@ -488,6 +578,9 @@ pub(super) fn helper_main() -> ExitCode {
         if go != *b"GO\n" || task.intent.expires_at_ms <= now_ms() {
             return Err(ToolError::Configuration);
         }
+        verify_intent_runtime_grants(&task.intent, &task.config)?;
+        attest_runtime_mounts(&task.intent.call, &task.config.runtime_grants, &mut stage)?;
+        stage = BootstrapStage::Handshake;
         drop(stdin);
         stage = BootstrapStage::Payload;
         #[cfg(not(target_os = "macos"))]
@@ -509,7 +602,8 @@ pub(super) fn helper_main() -> ExitCode {
                         .ok_or(ToolError::Configuration)?;
                     #[cfg(target_os = "linux")]
                     let before = super::fs::command_snapshot(workspace)?;
-                    let mut command = payload(definition, args, cwd, &root)?;
+                    let mut command =
+                        payload(definition, args, cwd, &root, &task.config.runtime_grants)?;
                     let (status, out, err) = capture(
                         command.spawn().map_err(|_| ToolError::Operation)?,
                         (task.intent.limits.result_bytes as usize / 2).saturating_sub(128),
@@ -672,6 +766,7 @@ pub(super) fn payload(
     args: &[String],
     cwd: &str,
     root: &Path,
+    runtime_grants: &[RuntimeGrant],
 ) -> Result<Command, ToolError> {
     let resources = if cfg!(target_os = "macos") {
         root.join("runtime")
@@ -691,6 +786,17 @@ pub(super) fn payload(
     )?;
     if hex_digest(&bytes) != program.sha256 {
         return Err(ToolError::ChangedInput);
+    }
+    let mut path = vec!["/usr/bin".to_owned(), "/bin".to_owned()];
+    for grant in runtime_grants
+        .iter()
+        .filter(|grant| grant.kind.is_toolchain())
+    {
+        #[cfg(target_os = "linux")]
+        let runtime = grant.mounted_path()?;
+        #[cfg(target_os = "macos")]
+        let runtime = grant.path.clone();
+        path.insert(0, runtime.join("bin").to_string_lossy().into_owned());
     }
     let mut command = Command::new(executable);
     command
@@ -712,11 +818,36 @@ pub(super) fn payload(
         }))
         .current_dir(workspace.join(cwd))
         .env_clear()
-        .env("PATH", "/usr/bin:/bin")
+        .env("PATH", path.join(":"))
         .env("HOME", &scratch)
         .env("TMPDIR", &scratch)
         .env("CARGO_HOME", scratch.join("cargo"))
         .env("CARGO_TARGET_DIR", scratch.join("target"))
+        .env(
+            "npm_config_cache",
+            cache_root(
+                runtime_grants,
+                super::toolchains::RuntimeKind::NpmCache,
+                &scratch,
+            )
+            .unwrap_or_else(|| scratch.join(".npm")),
+        )
+        .env(
+            "PIP_CACHE_DIR",
+            cache_root(
+                runtime_grants,
+                super::toolchains::RuntimeKind::PipHttpCache,
+                &scratch,
+            )
+            .or_else(|| {
+                cache_root(
+                    runtime_grants,
+                    super::toolchains::RuntimeKind::PipWheelCache,
+                    &scratch,
+                )
+            })
+            .unwrap_or_else(|| scratch.join(".cache/pip")),
+        )
         .env("ARANY_TOOL_WORKSPACE", &workspace)
         .env("ARANY_TOOL_INPUTS", resources.join("inputs"))
         .env("ARANY_TOOL_SKILLS", resources.join("skills"))
@@ -726,4 +857,150 @@ pub(super) fn payload(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     Ok(command)
+}
+
+fn cache_root(
+    runtime_grants: &[RuntimeGrant],
+    kind: super::toolchains::RuntimeKind,
+    scratch: &Path,
+) -> Option<PathBuf> {
+    if !runtime_grants.iter().any(|grant| grant.kind == kind) {
+        return None;
+    }
+    Some(match kind {
+        super::toolchains::RuntimeKind::NpmCache => scratch.join(".npm"),
+        super::toolchains::RuntimeKind::PipHttpCache
+        | super::toolchains::RuntimeKind::PipWheelCache => scratch.join(".cache/pip"),
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node_grant(home: &Path) -> RuntimeGrant {
+        RuntimeGrant {
+            kind: super::super::toolchains::RuntimeKind::Node,
+            manager: super::super::toolchains::RuntimeManager::Nvm,
+            version: Some("v22.3.0".into()),
+            path: home.join(".nvm/versions/node/v22.3.0"),
+            device: 1,
+            inode: 2,
+        }
+    }
+
+    fn intent(call: ToolCall) -> EffectIntent {
+        EffectIntent {
+            id: uuid::Uuid::now_v7(),
+            run_id: crate::session::RunId::default(),
+            agent_run_id: crate::session::AgentRunId::default(),
+            policy_digest: [0; 32],
+            enforcement_digest: [0; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call,
+            limits: ToolLimits::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        }
+    }
+
+    fn config(runtime_grants: Vec<RuntimeGrant>) -> Config {
+        Config {
+            version: 1,
+            workspace_paths: vec![".".into()],
+            write: false,
+            commands: Vec::new(),
+            skills: Vec::new(),
+            mcp: Vec::new(),
+            runtime_grants,
+        }
+    }
+
+    #[test]
+    fn runtime_mount_rejection_reports_its_own_bootstrap_stage() {
+        let failure = BootstrapFailure {
+            stage: BootstrapStage::RuntimeMounts,
+        };
+        assert_eq!(failure.failure_stage(), "runtime mount topology");
+        assert_eq!(failure.to_string(), "runtime mount topology");
+    }
+
+    #[test]
+    fn file_profile_digest_excludes_selected_process_runtimes() {
+        let temp = tempfile::tempdir().unwrap();
+        let grants = [node_grant(temp.path())];
+        let file_profile = intent_enforcement_digest(
+            false,
+            &grants,
+            #[cfg(target_os = "macos")]
+            None,
+        )
+        .unwrap();
+        let process_profile = intent_enforcement_digest(
+            true,
+            &grants,
+            #[cfg(target_os = "macos")]
+            None,
+        )
+        .unwrap();
+        assert_eq!(file_profile, enforcement_digest(&[]).unwrap());
+        assert_ne!(file_profile, process_profile);
+    }
+
+    #[test]
+    fn helper_revalidates_runtime_roots_only_for_process_intents() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config(vec![node_grant(temp.path())]);
+        let file = intent(ToolCall::Read {
+            path: "selected.txt".into(),
+            offset: 0,
+            limit: 32,
+        });
+        let process = intent(ToolCall::Command {
+            program: "node".into(),
+            args: Vec::new(),
+            cwd: ".".into(),
+        });
+        assert!(verify_intent_runtime_grants(&file, &config).is_ok());
+        assert!(verify_intent_runtime_grants(&process, &config).is_err());
+    }
+
+    #[test]
+    fn package_manager_cache_paths_follow_private_scratch() {
+        let scratch = Path::new("/native-unit/scratch");
+        let npm = RuntimeGrant {
+            kind: super::super::toolchains::RuntimeKind::NpmCache,
+            manager: super::super::toolchains::RuntimeManager::HostCache,
+            version: None,
+            path: PathBuf::from("/home/user/.npm/_cacache"),
+            device: 1,
+            inode: 2,
+        };
+        let pip = RuntimeGrant {
+            kind: super::super::toolchains::RuntimeKind::PipHttpCache,
+            manager: super::super::toolchains::RuntimeManager::HostCache,
+            version: None,
+            path: PathBuf::from("/home/user/.cache/pip/http-v2"),
+            device: 1,
+            inode: 2,
+        };
+        assert_eq!(
+            cache_root(
+                std::slice::from_ref(&npm),
+                super::super::toolchains::RuntimeKind::NpmCache,
+                scratch,
+            ),
+            Some(scratch.join(".npm"))
+        );
+        assert_eq!(
+            cache_root(
+                std::slice::from_ref(&pip),
+                super::super::toolchains::RuntimeKind::PipHttpCache,
+                scratch,
+            ),
+            Some(scratch.join(".cache/pip"))
+        );
+    }
 }

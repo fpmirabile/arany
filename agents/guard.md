@@ -10,6 +10,46 @@ limits and compatibility.
   adapter admits typed files and pinned Skill data through a non-spawning
   profile. Commands/MCP use the private snapshot and ordinary-launch profile;
   keep those authorities distinct and reject unavailable enforcement.
+- Revalidate selected runtime path/version/directory identities before Ready
+  and GO for process intents. File/Skill intents carry no runtime grants in
+  their enforcement fingerprint or native profile and skip runtime rechecks.
+  Linux mounts exact runtime and cache roots read-only; macOS grants exact
+  toolchain read/execute scopes and read-only cache scopes. Do not grant parent
+  cache/configuration paths. Candidate identity and consent rules live in
+  [runtime profile rules](./toolchains.md).
+- Linux `ro-bind` imports source submounts recursively. Start the unchanged
+  Bubblewrap profile through the fixed, root-owned `/usr/bin/unshare` user and
+  mount namespace bootstrap with recursive-private propagation, cleared
+  environment and fixed arguments. Do not use `--keep-caps`: util-linux makes
+  propagation private before exec, and retained capabilities make Bubblewrap
+  reject a non-root real UID ([unshare](https://github.com/util-linux/util-linux/blob/v2.39.3/sys-utils/unshare.c),
+  [Bubblewrap](https://github.com/containers/bubblewrap/blob/main/bubblewrap.c)).
+  Do not add capabilities to payloads. Before
+  Ready and again after GO, parse bounded `/proc/self/mountinfo` and require a
+  private root and one exact private entry per selected alias, with no optional
+  propagation fields, stacked entries or descendant mounts; malformed or
+  oversized data fails closed. The actual production fixture covers a shared
+  source, a pre-existing nested mount refusal at the topology stage and a late
+  host mount that does not appear in the isolated alias. Its outer test owner
+  uses a private PID namespace with `--kill-child`; a separate forced-timeout
+  gate records the init and held descendant PIDs from each process's own
+  `/proc/self/status`, binds both pidfds before killing and reaping the unshare
+  owner, then awaits both exit signals before dropping the fixture directory.
+  The topology path also gates the namespace init and each exact-filter worker
+  until their host identities are bound, then confirms their pidfd exits after
+  capture on success and failure. It keeps the fixture directory if any
+  identity or exit remains unproved; assertions run only after confirmed exit.
+  Publish PID records and release gates atomically so pollers observe either no
+  signal or a complete record.
+  The outer fixture keeps the host procfs view so those reports include host
+  PIDs ([`NSpid` field](https://man7.org/linux/man-pages/man5/proc_pid_status.5.html));
+  the production Bubblewrap profile still mounts its own `/proc`. Captured
+  Rust helper output uses a full exact test filter and proves one test completed.
+  This is separate from the systemd-owned full Guard journey. On macOS,
+  canonicalize selected roots
+  and reject strict descendant targets in the native `getfsstat` mount table
+  before Seatbelt and before Ready/GO; this is a point-in-time check, not a
+  lifetime mount-isolation guarantee.
 - Capture command changesets only after positive payload-descendant absence.
   Linux retains its attested private PID namespace init/helper while stopping
   and killing every other namespace process; final owned-cgroup cleanup still
