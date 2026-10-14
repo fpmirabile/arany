@@ -361,18 +361,27 @@ impl SessionView {
         prior: u64,
     ) -> Result<(), ReplayError> {
         let goal = self.goal(*goal_id).ok_or(ReplayError::InvalidTransition)?;
-        // A paused Goal is one whose last Run was cancelled, or whose non-autonomous Run finished without
-        // finishing the Goal; an autonomous Finished Run is settled by its own rules.
-        let paused = run_status == RunStatus::Cancelled
-            || (run_status == RunStatus::Finished && !goal.autonomous);
         if status != GoalStatus::Failed
-            || !paused
             || !matches!(goal.status, GoalStatus::Running | GoalStatus::Interrupted)
-            || goal.active_run.is_some()
         {
             return Err(ReplayError::InvalidTransition);
         }
         let mut settled = goal.clone();
+        let mut runs = self.runs.clone();
+        // A crash leaves the live Run unfinished in the raw journal; sealing it reads as interrupted.
+        let run_status = if settled.active_run.is_some() {
+            seal_unfinished_goal(&mut settled, &mut runs);
+            RunStatus::Interrupted
+        } else {
+            run_status
+        };
+        // A paused Goal is one whose last Run was cancelled or interrupted, or whose non-autonomous Run
+        // finished without finishing the Goal; an autonomous Finished Run is settled by its own rules.
+        let paused = matches!(run_status, RunStatus::Cancelled | RunStatus::Interrupted)
+            || (run_status == RunStatus::Finished && !goal.autonomous);
+        if !paused {
+            return Err(ReplayError::InvalidTransition);
+        }
         let has_unaccepted_run = settled
             .run_ids
             .last()
@@ -401,6 +410,7 @@ impl SessionView {
         settled.awaiting_plan_contract = false;
         settled.report = Some(report.clone());
         settled.finished_sequence = Some(prior);
+        self.runs = runs;
         *current_goal_mut(self, *goal_id)? = settled;
         Ok(())
     }

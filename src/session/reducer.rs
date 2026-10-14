@@ -1777,6 +1777,70 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn exhausted_goal_closes_over_a_crash_left_provider_call() {
+        let (goal, run, agent) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let report = GoalReport {
+            summary: "Goal budget is exhausted.".into(),
+            changes: Vec::new(),
+            evidence: Vec::new(),
+            unresolved: Vec::new(),
+        };
+        let close = Event::GoalFinished {
+            goal_id: goal,
+            status: GoalStatus::Failed,
+            active_ms: 0,
+            report,
+        };
+        let budget = GoalBudget {
+            max_provider_calls: 1,
+            ..GoalBudget::default()
+        };
+        // The process died inside the only admitted provider call: no RunFinished was journaled.
+        let mut crashed = vec![goal_started(goal, budget)];
+        crashed.extend(start_run(
+            goal,
+            run,
+            agent,
+            config(CollaborationPolicy::Single, false),
+        ));
+        crashed.push(Event::GoalProviderCallReserved {
+            goal_id: goal,
+            run_id: run,
+            agent_run_id: agent,
+        });
+        let session = SessionId::new();
+        let mut closing = crashed.clone();
+        closing.push(close.clone());
+        let view = SessionView::replay_open(session, &session_with(session, closing))
+            .expect("an exhausted crash-left Goal closes as Failed")
+            .expect("Session exists");
+        let goal_view = view.goal(goal).expect("Goal");
+        assert_eq!(goal_view.status, GoalStatus::Failed);
+        assert_eq!(goal_view.active_run, None);
+        assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+        assert_eq!(view.interrupted_goal_id(), None);
+
+        let session = SessionId::new();
+        let mut admissible = vec![goal_started(goal, GoalBudget::default())];
+        admissible.extend(start_run(
+            goal,
+            run,
+            agent,
+            config(CollaborationPolicy::Single, false),
+        ));
+        admissible.push(Event::GoalProviderCallReserved {
+            goal_id: goal,
+            run_id: run,
+            agent_run_id: agent,
+        });
+        admissible.push(close);
+        assert!(
+            SessionView::replay_open(session, &session_with(session, admissible)).is_err(),
+            "a crash-left Goal that still admits a Run cannot close as Failed"
+        );
+    }
+
+    #[test]
     fn resumed_orphaned_provider_reservation_settles_as_uncertain() {
         let session_id = SessionId::new();
         let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());

@@ -601,6 +601,134 @@ async fn interrupted_preaccept_goal_prefixes_resume_without_spending_runs_or_rep
     }
 }
 
+#[tokio::test]
+async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume() {
+    use std::os::unix::fs::MetadataExt;
+
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let metadata = std::fs::metadata(&workspace).expect("Workspace identity");
+    let identity = (metadata.dev(), metadata.ino());
+    let state_path = temp.path().join("state");
+    let session_id = SessionId::new();
+    let (goal_id, run_id, agent_run_id) =
+        (arany::GoalId::new(), RunId::new(), arany::AgentRunId::new());
+    let store = Store::open(StateRoot::admit(&state_path).expect("state")).expect("Store");
+    // The process died inside the only admitted Provider call: the Run is journaled Active.
+    let crashed = [
+        Event::SessionStarted {
+            title: "Crashed Goal".into(),
+            workspace_identity: identity,
+        },
+        Event::GoalStarted {
+            goal_id,
+            phase: arany::GoalPhase::Implementation,
+            autonomous: false,
+            objective: "Use the only Provider call".into(),
+            workspace_identity: identity,
+            budget: arany::GoalBudget {
+                max_provider_calls: 1,
+                ..arany::GoalBudget::default()
+            },
+        },
+        Event::GoalRunLinked {
+            goal_id,
+            run_id,
+            phase: arany::GoalPhase::Implementation,
+        },
+        Event::MessageAccepted {
+            run_id,
+            text: "Use the only Provider call".into(),
+            images: Vec::new(),
+        },
+        Event::RunStarted {
+            run_id,
+            config: arany::RunConfig {
+                provider: "scripted".into(),
+                model: "scripted-model".into(),
+                effort: None,
+                custom_profile_provenance: None,
+                saved_api_account_id: None,
+                chatgpt_provenance: None,
+                output_token_bound: arany::OutputTokenBound::ProviderEnforced,
+                policy: CollaborationPolicy::Single,
+                output_token_cap: 4096,
+                provider_concurrency: 1,
+                workspace_device: identity.0,
+                workspace_inode: identity.1,
+                instruction_digest: None,
+                include_digests: Vec::new(),
+                history_run_ids: Vec::new(),
+                excluded_history_runs: 0,
+                context_usage: None,
+                compaction_event_sequence: None,
+                compaction_content_digest: None,
+                tool_policy: None,
+            },
+        },
+        Event::AgentSpawned {
+            run_id,
+            agent_run_id,
+            role: arany::AgentRole::Primary,
+            ordinal: 0,
+            objective: None,
+        },
+        Event::GoalProviderCallReserved {
+            goal_id,
+            run_id,
+            agent_run_id,
+        },
+    ];
+    for event in crashed {
+        store
+            .append(session_id, event)
+            .await
+            .expect("crash-left journal prefix");
+    }
+    store.close().await.expect("seed Store shutdown");
+
+    let provider = ScriptedProvider::new(Vec::new());
+    let requests = Arc::clone(&provider.requests);
+    let mut engine = Engine::open(
+        StateRoot::open_existing(&state_path).expect("reopened state"),
+        provider,
+    )
+    .expect("Engine");
+    let mut resumed = request(&workspace, "Resume the crashed Goal");
+    resumed.session_id = Some(session_id);
+    resumed.title = None;
+    resumed.include_paths.clear();
+    resumed.goal = arany::GoalRequest::resume(goal_id, true);
+    assert!(
+        matches!(
+            engine.run(resumed).await,
+            Err(EngineError::GoalBudgetExhausted)
+        ),
+        "the exhausted crash-left Goal reports its budget, not a store or replay error"
+    );
+    assert!(requests.lock().expect("Provider requests").is_empty());
+
+    let mut again = request(&workspace, "Resume the closed Goal");
+    again.session_id = Some(session_id);
+    again.title = None;
+    again.include_paths.clear();
+    again.goal = arany::GoalRequest::resume(goal_id, true);
+    assert!(
+        matches!(engine.run(again).await, Err(EngineError::GoalUnavailable)),
+        "a closed Goal is not resumable"
+    );
+    engine.close().await.expect("Engine shutdown");
+
+    let (_, view) = replayed(&state_path, session_id).await;
+    let goal = view.goal(goal_id).expect("Goal");
+    assert_eq!(goal.status, arany::GoalStatus::Failed);
+    assert!(goal.report.is_some(), "closed Goal keeps its report");
+    assert_eq!(view.runs.len(), 1);
+    assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+    assert_eq!(view.interrupted_goal_id(), None);
+}
+
 struct ExactCapToolReview;
 
 impl Provider for ExactCapToolReview {
