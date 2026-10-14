@@ -46,7 +46,7 @@ pub fn annotate_native_fixture(message: &str) {
     let _ = io::stderr().lock().write_all(annotation.as_bytes());
 }
 
-pub fn relay_native_fixture_annotation(stdout: &[u8], stderr: &[u8]) {
+pub fn relay_native_fixture_annotation(stdout: &[u8], stderr: &[u8]) -> bool {
     const PREFIX: &[u8] = b"::error title=Arany native fixture::";
     const MAX_LINE_BYTES: usize = 2048;
     for captured in [stdout, stderr] {
@@ -84,9 +84,63 @@ pub fn relay_native_fixture_annotation(stdout: &[u8], stderr: &[u8]) {
             let mut output = io::stderr().lock();
             let _ = output.write_all(line);
             let _ = output.write_all(b"\n");
-            return;
+            return true;
         }
     }
+    false
+}
+
+pub fn relay_native_panic_location(stderr: &[u8], expected_case: &str) -> bool {
+    const PREFIX: &str = "ARANY_NATIVE_PANIC; case=";
+    const MAX_LINE_BYTES: usize = 256;
+    if !matches!(
+        expected_case,
+        "shipped_exec" | "goal_token_cap" | "workspace_lease" | "native_account_test"
+    ) {
+        return false;
+    }
+    for line in stderr.split(|byte| *byte == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.len() > MAX_LINE_BYTES {
+            continue;
+        }
+        let Ok(line) = std::str::from_utf8(line) else {
+            continue;
+        };
+        let Some(fields) = line.strip_prefix(PREFIX) else {
+            continue;
+        };
+        let Some((case, fields)) = fields.split_once("; file=") else {
+            continue;
+        };
+        let Some((file, fields)) = fields.split_once("; line=") else {
+            continue;
+        };
+        let Some((line_number, column)) = fields.split_once("; column=") else {
+            continue;
+        };
+        if case != expected_case
+            || file.is_empty()
+            || file.len() > 64
+            || !file
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        {
+            continue;
+        }
+        let (Ok(line_number), Ok(column)) = (line_number.parse::<u32>(), column.parse::<u32>())
+        else {
+            continue;
+        };
+        if line_number == 0 {
+            continue;
+        }
+        annotate_native_fixture(&format!(
+            "fixture=isolated_child_panic; case={case}; file={file}; line={line_number}; column={column}"
+        ));
+        return true;
+    }
+    false
 }
 
 pub trait BoundedOutput {

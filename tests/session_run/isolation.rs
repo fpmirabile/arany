@@ -67,12 +67,37 @@ pub fn enter_account_isolated_test() -> bool {
 #[cfg(target_os = "linux")]
 pub fn enter_native_account_isolated_test() -> bool {
     const CHILD: &str = "ARANY_ACCOUNT_ISOLATED_TEST";
+    use crate::process::BoundedOutput;
+    use std::{io::Write, os::unix::fs::DirBuilderExt, path::Path, time::Duration};
 
     if std::env::var_os(CHILD).is_some() {
+        let test = std::thread::current()
+            .name()
+            .expect("named native test thread")
+            .to_owned();
+        let case = native_account_test_case(&test);
+        std::panic::set_hook(Box::new(move |panic| {
+            let (file, line, column) = panic.location().map_or(("unknown", 0, 0), |location| {
+                let file = Path::new(location.file())
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .filter(|name| {
+                        !name.is_empty()
+                            && name.len() <= 64
+                            && name.bytes().all(|byte| {
+                                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
+                            })
+                    })
+                    .unwrap_or("unknown");
+                (file, location.line(), location.column())
+            });
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "ARANY_NATIVE_PANIC; case={case}; file={file}; line={line}; column={column}"
+            );
+        }));
         return true;
     }
-    use crate::process::BoundedOutput;
-    use std::{os::unix::fs::DirBuilderExt, path::Path, time::Duration};
 
     let _gate = crate::process::NATIVE_GATE
         .lock()
@@ -81,6 +106,7 @@ pub fn enter_native_account_isolated_test() -> bool {
         .name()
         .expect("named test thread")
         .to_owned();
+    let case = native_account_test_case(&test);
     let executable = std::env::current_exe().expect("test executable");
     let temp = tempfile::tempdir().expect("native account test root");
     for name in ["account-home", "home", "state"] {
@@ -101,7 +127,15 @@ pub fn enter_native_account_isolated_test() -> bool {
             .bounded_output_for(Duration::from_secs(90), 32 * 1024 * 1024)
             .expect("native account test process");
         if !output.status.success() {
-            crate::process::relay_native_fixture_annotation(&output.stdout, &output.stderr);
+            let relayed =
+                crate::process::relay_native_fixture_annotation(&output.stdout, &output.stderr)
+                    || crate::process::relay_native_panic_location(&output.stderr, case);
+            if !relayed {
+                crate::process::annotate_native_fixture(&format!(
+                    "fixture={case}; stage=isolated_child_exit_without_fixture_annotation; exit={:?}",
+                    output.status.code()
+                ));
+            }
         }
         assert!(
             output.status.success(),
@@ -121,6 +155,19 @@ pub fn enter_native_account_isolated_test() -> bool {
         "successful native fixture is cleaned up"
     );
     false
+}
+
+fn native_account_test_case(test: &str) -> &'static str {
+    match test {
+        "tools::native_exec::shipped_exec_continues_after_guarded_command_and_replays_closed_events" => {
+            "shipped_exec"
+        }
+        "tools::exact_goal_token_cap_fails_before_a_tool_request_is_journaled" => "goal_token_cap",
+        "tools::unfinished_implementation_goal_holds_workspace_lease_across_runs" => {
+            "workspace_lease"
+        }
+        _ => "native_account_test",
+    }
 }
 
 #[cfg(target_os = "linux")]
