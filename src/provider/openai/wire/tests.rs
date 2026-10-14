@@ -267,6 +267,20 @@ fn structured_and_native_tool_outcomes_preserve_the_sibling_goal_contract() {
 }
 
 #[test]
+fn run_instructions_join_without_an_empty_plan_contract_part() {
+    let request = run_request();
+    let body = run_body(&request);
+    assert_eq!(
+        body["instructions"],
+        format!(
+            "{} {}",
+            crate::provider::READ_ONLY_INSTRUCTIONS,
+            crate::provider::COLLABORATION_INSTRUCTIONS
+        )
+    );
+}
+
+#[test]
 fn outbound_documents_pin_privacy_schema_and_scope() {
     let request = run_request();
     let body = run_body(&request);

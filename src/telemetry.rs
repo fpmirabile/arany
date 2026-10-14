@@ -99,6 +99,7 @@ pub(crate) enum TraceOutcome {
     Finished,
     Failed,
     Cancelled,
+    Interrupted,
 }
 
 #[derive(Clone, Copy)]
@@ -128,7 +129,6 @@ pub(crate) enum TraceEventKind {
     GoalPlanContractRecorded,
     GoalFinished,
     GoalProviderCallReserved,
-    GoalCompactionCallReserved,
     MessageAccepted,
     RunStarted,
     AgentSpawned,
@@ -470,11 +470,14 @@ impl GoalTrace {
                 context.span().set_attribute(attribute);
             }
         }
+        // A segment ends with its Run. A Goal still Running stays open for a later segment,
+        // so only the Goal's own terminal status maps to a terminal outcome.
         let outcome = match status {
             GoalStatus::Completed => TraceOutcome::Finished,
             GoalStatus::Failed => TraceOutcome::Failed,
             GoalStatus::Cancelled => TraceOutcome::Cancelled,
-            GoalStatus::Running | GoalStatus::Interrupted => TraceOutcome::Finished,
+            GoalStatus::Running => TraceOutcome::Finished,
+            GoalStatus::Interrupted => TraceOutcome::Interrupted,
         };
         self.span.finish(outcome);
     }
@@ -817,6 +820,7 @@ impl TraceOutcome {
             Self::Finished => "finished",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
+            Self::Interrupted => "interrupted",
         }
     }
 }
@@ -853,19 +857,28 @@ impl TraceFailure {
 }
 
 impl TraceEventKind {
+    /// Goal lifecycle kinds are named with the `Goal` prefix, so the name is the single source.
     fn is_goal_event(self) -> bool {
-        matches!(
-            self,
+        match self {
             Self::GoalStarted
-                | Self::GoalRunLinked
-                | Self::GoalResumed
-                | Self::GoalActiveTimeReserved
-                | Self::GoalActiveTimeSettled
-                | Self::GoalPlanContractRecorded
-                | Self::GoalFinished
-                | Self::GoalProviderCallReserved
-                | Self::GoalCompactionCallReserved
-        )
+            | Self::GoalRunLinked
+            | Self::GoalResumed
+            | Self::GoalActiveTimeReserved
+            | Self::GoalActiveTimeSettled
+            | Self::GoalPlanContractRecorded
+            | Self::GoalFinished
+            | Self::GoalProviderCallReserved => true,
+            Self::MessageAccepted
+            | Self::RunStarted
+            | Self::AgentSpawned
+            | Self::ProviderCallRecorded
+            | Self::ToolStarted
+            | Self::ToolFinished
+            | Self::AgentFinished
+            | Self::MessageCommitted
+            | Self::RunFinished
+            | Self::ContextCompacted => false,
+        }
     }
 
     fn name(self) -> &'static str {
@@ -878,7 +891,6 @@ impl TraceEventKind {
             Self::GoalPlanContractRecorded => "GoalPlanContractRecorded",
             Self::GoalFinished => "GoalFinished",
             Self::GoalProviderCallReserved => "GoalProviderCallReserved",
-            Self::GoalCompactionCallReserved => "GoalCompactionCallReserved",
             Self::MessageAccepted => "MessageAccepted",
             Self::RunStarted => "RunStarted",
             Self::AgentSpawned => "AgentSpawned",
@@ -893,14 +905,11 @@ impl TraceEventKind {
     }
 }
 
-fn goal_status_name(status: GoalStatus) -> &'static str {
-    match status {
-        GoalStatus::Running => "running",
-        GoalStatus::Interrupted => "interrupted",
-        GoalStatus::Completed => "completed",
-        GoalStatus::Failed => "failed",
-        GoalStatus::Cancelled => "cancelled",
-    }
+fn goal_status_name(status: GoalStatus) -> String {
+    serde_json::to_value(status)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default()
 }
 
 fn phase_name(phase: AgentPhase) -> &'static str {

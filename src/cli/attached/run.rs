@@ -22,9 +22,17 @@ enum SelectedProvider {
     Custom(CustomProvider),
 }
 
+#[derive(Debug, PartialEq)]
 pub(super) enum RunAttemptError {
+    /// Cancelled before the next Run was admitted; an interrupted Goal stays resumable.
     InterruptedBeforeRun,
     Failed(String),
+}
+
+impl From<String> for RunAttemptError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -131,7 +139,6 @@ pub(super) async fn run_selected(
             .await
         }
     }
-    .map_err(RunAttemptError::Failed)
 }
 
 pub(super) async fn compact_selected(
@@ -282,6 +289,13 @@ async fn native_key(selection: Selection<'_>) -> Result<NativeApiCredentials, St
     }
 }
 
+fn classify_run_error(error: arany::EngineError) -> RunAttemptError {
+    match error {
+        arany::EngineError::CancelledBeforeStart => RunAttemptError::InterruptedBeforeRun,
+        error => RunAttemptError::Failed(error.to_string()),
+    }
+}
+
 async fn run_with_provider<P: Provider + 'static>(
     state_dir: &Path,
     telemetry: &Telemetry,
@@ -290,7 +304,7 @@ async fn run_with_provider<P: Provider + 'static>(
     cancellation: RunCancellation,
     progress: RunProgress,
     tools: ToolAccess<'_>,
-) -> Result<RunOutcome, String> {
+) -> Result<RunOutcome, RunAttemptError> {
     let trusted_tools =
         !tools.configured && super::permissions::supports_tools(Some(provider.profile_name()));
     let root = StateRoot::admit(state_dir)
@@ -299,7 +313,7 @@ async fn run_with_provider<P: Provider + 'static>(
         .map_err(|_| "state store unavailable".to_owned())?;
     if tools.configured {
         if !native_protection_supported() {
-            return Err(super::permissions::UNAVAILABLE_NOTICE.to_owned());
+            return Err(super::permissions::UNAVAILABLE_NOTICE.to_owned().into());
         }
         engine
             .enable_tools(
@@ -331,7 +345,7 @@ async fn run_with_provider<P: Provider + 'static>(
         .run_with_progress(request, cancellation, progress)
         .await;
     let closed = engine.close().await;
-    let outcome = result.map_err(|error| error.to_string())?;
+    let outcome = result.map_err(classify_run_error)?;
     closed.map_err(|_| "store shutdown failed".to_owned())?;
     Ok(outcome)
 }
@@ -375,6 +389,18 @@ mod tests {
         ProviderRequest, ProviderResponse, RunStatus,
     };
     use arany::{SessionView, Store};
+
+    #[test]
+    fn engine_cancellation_before_admission_is_an_interrupted_attempt() {
+        assert!(matches!(
+            classify_run_error(arany::EngineError::CancelledBeforeStart),
+            RunAttemptError::InterruptedBeforeRun
+        ));
+        assert!(matches!(
+            classify_run_error(arany::EngineError::CoordinatorFailed),
+            RunAttemptError::Failed(_)
+        ));
+    }
     #[cfg(target_os = "macos")]
     use std::sync::{Arc, Mutex};
     use std::{
@@ -1451,13 +1477,15 @@ mod tests {
             #[cfg(debug_assertions)]
             assert_eq!(
                 error,
-                arany::ToolError::ChangedInput.to_string(),
+                RunAttemptError::Failed(arany::ToolError::ChangedInput.to_string()),
                 "the admitted private account fixture must reach stale executable-pin rejection"
             );
             #[cfg(not(debug_assertions))]
             assert_eq!(
                 error,
-                arany::EngineError::Store(arany::StoreError::InvalidStateDirectory).to_string(),
+                RunAttemptError::Failed(
+                    arany::EngineError::Store(arany::StoreError::InvalidStateDirectory).to_string()
+                ),
                 "the optimized account override must reject from the Workspace lease before Tool discovery or Provider use"
             );
             assert_eq!(

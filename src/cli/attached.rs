@@ -23,7 +23,7 @@ mod permissions;
 mod picker;
 mod run;
 mod setup;
-use active::{CompactionOutcome, RunSubmission, compact_current, submit_objective};
+use active::{CompactionOutcome, GoalStart, RunSubmission, compact_current, submit_objective};
 use models::ModelBrowse;
 use picker::{PickerChoice, QuickChoice, pick_quick_action, pick_session};
 
@@ -62,7 +62,6 @@ pub(crate) struct AttachedArgs {
     fork: Option<String>,
     #[arg(
         long,
-        requires = "resume",
         help = "Explicitly resume an interrupted Goal in --resume SESSION_ID"
     )]
     resume_goal: Option<String>,
@@ -171,6 +170,7 @@ struct Admission {
     setup_requested: bool,
     entry: EntryMode,
     prompt: Option<String>,
+    resume_goal: Option<arany::GoalId>,
 }
 
 impl AttachedArgs {
@@ -193,7 +193,7 @@ impl AttachedArgs {
             && self.prompt.is_none()
     }
 
-    fn admit(self, telemetry: Telemetry) -> Result<(Admission, Option<arany::GoalId>), String> {
+    fn admit(self, telemetry: Telemetry) -> Result<Admission, String> {
         if self.model.as_ref().is_some_and(|model| {
             model.is_empty() || model.len() > 128 || model.chars().any(char::is_control)
         }) {
@@ -277,31 +277,30 @@ impl AttachedArgs {
             account_id: None,
             policy: CollaborationPolicy::default(),
         };
-        Ok((
-            Admission {
-                telemetry,
-                state_dir,
-                explicit_state_dir,
-                workspace,
-                include_paths: self.include_paths,
-                tools: self.tools,
-                workspace_permissions: None,
-                defaults,
-                classic: self.classic,
-                screen_reader: self.screen_reader
-                    || std::env::var("ARANY_SCREEN_READER").ok().as_deref() == Some("1"),
-                no_color: self.no_color || std::env::var_os("NO_COLOR").is_some(),
-                setup_requested: self.setup,
-                entry,
-                prompt: self.prompt,
-            },
-            goal_resume,
-        ))
+        Ok(Admission {
+            telemetry,
+            state_dir,
+            explicit_state_dir,
+            workspace,
+            include_paths: self.include_paths,
+            tools: self.tools,
+            workspace_permissions: None,
+            defaults,
+            classic: self.classic,
+            screen_reader: self.screen_reader
+                || std::env::var("ARANY_SCREEN_READER").ok().as_deref() == Some("1"),
+            no_color: self.no_color || std::env::var_os("NO_COLOR").is_some(),
+            setup_requested: self.setup,
+            entry,
+            prompt: self.prompt,
+            resume_goal: goal_resume,
+        })
     }
 }
 
 pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), String> {
-    let (mut admission, mut goal_resume) = args.admit(telemetry)?;
+    let mut admission = args.admit(telemetry)?;
+    let goal_resume = admission.resume_goal;
     let restored_settings = controls::restore_settings(&admission).await;
     let mut saved_view = restored_settings.as_ref().copied().unwrap_or_default().view;
     let mut terminal = AttachedTerminal::acquire_with_mode(
@@ -470,18 +469,26 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
     }
     let (mut session_id, mut view) = start_session(&admission).await?;
     if let Some(goal_id) = goal_resume
-        && !view
-            .active_goal()
-            .is_some_and(|goal| goal.id == goal_id && goal.status == arany::GoalStatus::Interrupted)
+        && view.interrupted_goal_id() != Some(goal_id)
     {
         return Err("selected Session does not contain that interrupted Goal".into());
     }
+    // `--resume-goal` is the explicit confirmation: without a prompt it resumes at once.
+    let startup_objective = admission
+        .prompt
+        .clone()
+        .or_else(|| goal_resume.map(|_| String::new()));
+    let startup_goal = if goal_resume.is_some() {
+        GoalStart::Resume
+    } else {
+        GoalStart::Plain
+    };
     if !matches!(admission.entry, EntryMode::New) {
         match authorize_or_notice(&mut terminal, &view.defaults, &mut setup_notice).await? {
             ControlFlow::Continue(authorized) => access_authorized = authorized,
             ControlFlow::Break(()) => return Ok(()),
         }
-        if admission.prompt.is_some() {
+        if startup_objective.is_some() {
             require_access(access_authorized, setup_notice.as_ref())?;
             preflight_prompt(
                 &admission.state_dir,
@@ -558,7 +565,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
     }
     .map(Feedback::History);
     let mut empty_interrupt = None::<Instant>;
-    if let Some(prompt) = admission.prompt.clone() {
+    if let Some(prompt) = startup_objective {
         require_access(access_authorized, notice.as_ref())?;
         active::validate_objective_inputs(&admission, &prompt)?;
         materialize_session(&admission, &mut session_id, &mut view).await?;
@@ -567,8 +574,8 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
             .map_err(|error| error.to_string())?;
         match submit_objective(
             &mut terminal,
-            &mut admission,
-            &mut goal_resume,
+            &admission,
+            startup_goal,
             &mut view,
             &mut composer,
             prompt,
@@ -707,9 +714,6 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                         ));
                     }
                     QuickChoice::Selected(selector) => {
-                        if matches!(selector, Selector::Resume) {
-                            goal_resume = None;
-                        }
                         notice = Some(feedback_or_end(
                             run_selector(
                                 selector,
@@ -765,6 +769,31 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                         empty_interrupt = None;
                         continue;
                     }
+                    Ok(Submission::Command {
+                        command: InteractiveCommand::Goal,
+                        argument: Some(argument),
+                    }) => {
+                        let start = if argument == "resume" {
+                            GoalStart::Resume
+                        } else {
+                            GoalStart::Autonomous
+                        };
+                        if let Err(message) = active::preflight_idle_run(
+                            &admission,
+                            &view,
+                            start,
+                            composer.text(),
+                            !composer.images().is_empty(),
+                            terminal.is_linear(),
+                        ) {
+                            notice = Some(Feedback::History(message));
+                            if terminal.is_linear() {
+                                composer.take();
+                            }
+                            empty_interrupt = None;
+                            continue;
+                        }
+                    }
                     Ok(Submission::Command { command, argument }) => {
                         if !composer.images().is_empty()
                             && matches!(
@@ -792,109 +821,16 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                             continue;
                         }
                     }
-                    Ok(Submission::Objective(_))
-                        if goal_resume.is_some_and(|id| {
-                            !view.active_goal().is_some_and(|goal| {
-                                goal.id == id && goal.status == arany::GoalStatus::Interrupted
-                            })
-                        }) =>
-                    {
-                        goal_resume = None;
-                        notice = Some(Feedback::History(
-                            "The confirmed Goal is no longer the interrupted Goal in this Session"
-                                .into(),
-                        ));
-                        empty_interrupt = None;
-                        continue;
-                    }
-                    Ok(Submission::Objective(_)) if view.defaults.provider.is_none() => {
-                        notice = Some(Feedback::History("Use /setup to choose an account".into()));
-                        if terminal.is_linear() {
-                            composer.take();
-                        }
-                        empty_interrupt = None;
-                        continue;
-                    }
-                    Ok(Submission::Objective(_)) if view.defaults.model.is_none() => {
-                        let missing_model = "Choose a model with /model before submitting";
-                        notice = Some(Feedback::History(
-                            match view
-                                .defaults
-                                .account_id
-                                .filter(|_| view.defaults.provider.as_deref() == Some("chatgpt"))
-                            {
-                                Some(id) => match chatgpt::selected_reauthorization_target(id) {
-                                    Ok(target) if target.plan_permission_missing => {
-                                        chatgpt::AuthorizationError::PermissionMissing.to_string()
-                                    }
-                                    Err(error) => error.to_string(),
-                                    _ => missing_model.into(),
-                                },
-                                None => missing_model.into(),
-                            },
-                        ));
-                        if terminal.is_linear() {
-                            composer.take();
-                        }
-                        empty_interrupt = None;
-                        continue;
-                    }
                     Ok(Submission::Objective(_)) => {
-                        if let Some(goal) = view
-                            .active_goal()
-                            .filter(|goal| goal.status == arany::GoalStatus::Interrupted)
-                            && goal_resume != Some(goal.id)
-                        {
-                            notice = Some(Feedback::History(format!(
-                                "Interrupted Goal {} is waiting; use /resume-goal to confirm before submitting",
-                                goal.id
-                            )));
-                            empty_interrupt = None;
-                            continue;
-                        }
-                        if !composer.images().is_empty()
-                            && view
-                                .defaults
-                                .provider
-                                .as_deref()
-                                .is_some_and(|profile| profile.starts_with("custom:"))
-                        {
-                            notice = Some(Feedback::History("Error: Image input is not admitted for custom Providers; clear these attachments first".into()));
-                            if terminal.is_linear() {
-                                composer.take();
-                            }
-                            empty_interrupt = None;
-                            continue;
-                        }
-                        if let Err(error) = run::validate_local_selection(run::Selection {
-                            workspace: &admission.workspace,
-                            profile: view
-                                .defaults
-                                .provider
-                                .as_deref()
-                                .expect("selected Provider"),
-                            model: view.defaults.model.as_deref().expect("selected model"),
-                            effort: view.defaults.effort,
-                            account_id: view.defaults.account_id,
-                        }) {
-                            notice = Some(Feedback::History(format!("Error: {error}")));
-                            if terminal.is_linear() {
-                                composer.take();
-                            }
-                            empty_interrupt = None;
-                            continue;
-                        }
-                        if let Err(error) =
-                            active::validate_objective_inputs(&admission, composer.text())
-                        {
-                            notice = Some(Feedback::History(format!(
-                                "Error: {error}; {}",
-                                if terminal.is_linear() {
-                                    "check the file inputs and enter a new line"
-                                } else {
-                                    "check the file inputs; draft unchanged"
-                                }
-                            )));
+                        if let Err(message) = active::preflight_idle_run(
+                            &admission,
+                            &view,
+                            GoalStart::Plain,
+                            composer.text(),
+                            !composer.images().is_empty(),
+                            terminal.is_linear(),
+                        ) {
+                            notice = Some(Feedback::History(message));
                             if terminal.is_linear() {
                                 composer.take();
                             }
@@ -912,82 +848,42 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                 };
                 match submission {
                     Submission::Objective(objective) => {
-                        materialize_session(&admission, &mut session_id, &mut view).await?;
-                        match submit_objective(
+                        notice = submit_idle_run(
                             &mut terminal,
-                            &mut admission,
-                            &mut goal_resume,
-                            &mut view,
+                            &admission,
                             &mut composer,
+                            &mut session_id,
+                            &mut view,
+                            GoalStart::Plain,
                             objective.to_owned(),
                         )
-                        .await
-                        {
-                            Ok(RunSubmission::Completed(outcome, user_recorded)) => {
-                                notice = finish_submission(
-                                    &mut terminal,
-                                    &admission,
-                                    &mut composer,
-                                    &mut view,
-                                    &outcome,
-                                    user_recorded,
-                                )
-                                .await?;
-                            }
-                            Ok(RunSubmission::InterruptedBeforeRun) => {
-                                notice = finish_interrupted_submission(
-                                    &mut terminal,
-                                    &admission,
-                                    &composer,
-                                    &mut view,
-                                    session_id,
-                                )
-                                .await?;
-                            }
-                            Ok(RunSubmission::Shutdown(reason)) => return Err(reason),
-                            Err(error) => {
-                                let text = if composer.is_empty() {
-                                    format!("Error: {error}")
-                                } else {
-                                    format!(
-                                        "Error: {error}; draft retained ({} characters)",
-                                        composer.character_count()
-                                    )
-                                };
-                                notice = reload_view_or_keep(
-                                    &mut view,
-                                    load_view(&admission.state_dir, session_id).await,
-                                    Some(text),
-                                    None,
-                                )
-                                .map(Feedback::History);
-                            }
-                        }
+                        .await?;
+                    }
+                    Submission::Command {
+                        command: InteractiveCommand::Goal,
+                        argument: Some(argument),
+                    } => {
+                        let (start, objective) = if argument == "resume" {
+                            (GoalStart::Resume, String::new())
+                        } else {
+                            (GoalStart::Autonomous, argument.to_owned())
+                        };
+                        notice = submit_idle_run(
+                            &mut terminal,
+                            &admission,
+                            &mut composer,
+                            &mut session_id,
+                            &mut view,
+                            start,
+                            objective,
+                        )
+                        .await?;
                     }
                     Submission::Command { command, argument } => {
                         if command == InteractiveCommand::Exit {
                             break;
                         }
-                        if matches!(
-                            command,
-                            InteractiveCommand::New
-                                | InteractiveCommand::Resume
-                                | InteractiveCommand::Fork
-                        ) {
-                            goal_resume = None;
-                        }
-                        if command == InteractiveCommand::ResumeGoal {
-                            goal_resume = view
-                                .active_goal()
-                                .filter(|goal| goal.status == arany::GoalStatus::Interrupted)
-                                .map(|goal| goal.id);
-                            notice = Some(Feedback::History(match goal_resume {
-                                Some(id) => format!(
-                                    "Confirmed resume of Goal {id}; submit a message to continue it"
-                                ),
-                                None => "No interrupted Goal is available to resume".into(),
-                            }));
-                        } else if command == InteractiveCommand::Paste {
+                        if command == InteractiveCommand::Paste {
                             notice = Some(match terminal.request_clipboard_paste() {
                                 Ok(()) => Feedback::Transient(
                                     "Reading clipboard... draft retained".into(),
@@ -1365,6 +1261,45 @@ fn retained_draft_notice(composer: &Composer) -> Option<Feedback> {
     })
 }
 
+/// Runs one idle submission, materializing an unsaved conversation first.
+async fn submit_idle_run(
+    terminal: &mut AttachedTerminal,
+    admission: &Admission,
+    composer: &mut Composer,
+    session_id: &mut SessionId,
+    view: &mut SessionView,
+    start: GoalStart,
+    objective: String,
+) -> Result<Option<Feedback>, String> {
+    materialize_session(admission, session_id, view).await?;
+    match submit_objective(terminal, admission, start, view, composer, objective).await {
+        Ok(RunSubmission::Completed(outcome, user_recorded)) => {
+            finish_submission(terminal, admission, composer, view, &outcome, user_recorded).await
+        }
+        Ok(RunSubmission::InterruptedBeforeRun) => {
+            finish_interrupted_submission(terminal, admission, composer, view, *session_id).await
+        }
+        Ok(RunSubmission::Shutdown(reason)) => Err(reason),
+        Err(error) => {
+            let text = if composer.is_empty() {
+                format!("Error: {error}")
+            } else {
+                format!(
+                    "Error: {error}; draft retained ({} characters)",
+                    composer.character_count()
+                )
+            };
+            Ok(reload_view_or_keep(
+                view,
+                load_view(&admission.state_dir, *session_id).await,
+                Some(text),
+                None,
+            )
+            .map(Feedback::History))
+        }
+    }
+}
+
 async fn finish_interrupted_submission(
     terminal: &mut AttachedTerminal,
     admission: &Admission,
@@ -1378,7 +1313,11 @@ async fn finish_interrupted_submission(
         None,
         None,
     );
-    let interrupted = "Submission interrupted before Run admission; no task was accepted. Account work already started may still complete.";
+    let interrupted = if view.interrupted_goal_id().is_some() {
+        "Goal interrupted before the next Run; use /goal resume to continue"
+    } else {
+        "Submission interrupted before Run admission; no task was accepted. Account work already started may still complete."
+    };
     let drawn = match &reload_error {
         Some(error) => format!("{interrupted}; {error}"),
         None => interrupted.to_owned(),
@@ -2278,6 +2217,7 @@ mod tests {
             setup_requested: false,
             entry: EntryMode::New,
             prompt: None,
+            resume_goal: None,
         };
         let (mut original_id, mut original) = start_session(&new).await.expect("new Session");
         assert_eq!(original.defaults, defaults);
@@ -2316,6 +2256,7 @@ mod tests {
             setup_requested: false,
             entry: EntryMode::Resume(original_id),
             prompt: None,
+            resume_goal: None,
         };
         let (same_id, resumed_view) = start_session(&resumed).await.expect("resumed Session");
         assert_eq!(same_id, original_id);
@@ -2337,6 +2278,7 @@ mod tests {
             setup_requested: false,
             entry: EntryMode::Continue,
             prompt: None,
+            resume_goal: None,
         };
         let (latest_id, latest_view) = start_session(&continued).await.expect("continued Session");
         assert_eq!(latest_id, original_id);
@@ -2380,6 +2322,7 @@ mod tests {
             setup_requested: false,
             entry: EntryMode::Fork(original_id),
             prompt: None,
+            resume_goal: None,
         };
         let error = match start_session(&forked).await {
             Ok(_) => panic!("empty Session cannot be forked"),

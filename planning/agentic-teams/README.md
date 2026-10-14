@@ -434,8 +434,10 @@ execution contracts own the resulting behavior.
 11. **Every task is a Goal.** RPI adds Research and Plan; Ask, Accept edits and
     Auto go straight to Implementation. In every mode, bounded read-only
     inspection may precede the plan contract; every other Tool requires it
-    before dispatch. A Session holds at most one active Goal; a prompt while it
-    runs is a steering note, and the next prompt after it ends starts a new Goal.
+    before dispatch. A Session holds at most one active Goal. Steering a running
+    Goal is deferred beyond the Foundation slice; until then a prompt while it
+    runs is not a steering note, and the next prompt after it ends starts a new
+    Goal.
 12. **Settings.** New settings live in one private, owner-only, versioned
     user settings file edited through `/settings`; per-folder values live with
     the folder-trust record; project files never set them. `tools.json`,
@@ -538,11 +540,14 @@ E13 telemetry spans land with the slice that introduces each span's subject.
 Next action: complete Goal Foundation, then A4 and dogfooding before the
 remaining Goal workflows. The A3 per-Workspace cache has a 64 MiB initial
 archive/view limit and shares an 8 GiB StateRoot aggregate; A4 binds the
-effective admitted cache quota to the native build profile. Approved build
-maxima are 4 GiB memory, 8 GiB requested cache, 1 GiB writable project storage
-and 256 processes/threads. These remain finite policy ceilings, not support
-evidence. Native build verification and named-host measurements remain
-required before support claims.
+effective admitted cache quota to the native build profile. The planned A4 build
+profile proposes 4 GiB memory, 8 GiB requested cache, 1 GiB writable project
+storage and a 256 process/thread ceiling. That ceiling is separate from the
+ordinary command Guard limit of 64 processes/threads in
+[the Tools spec](../../docs/specs/tools.md), which stays in force until A4 admits
+a build profile. These remain finite policy ceilings, not support evidence.
+Native build verification and named-host measurements remain required before
+support claims.
 
 ## Open questions
 

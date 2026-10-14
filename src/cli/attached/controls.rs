@@ -407,6 +407,10 @@ pub(super) fn handle_active_submission(
             composer.take();
             return ActiveSubmission::OpenHelp;
         }
+        Ok(Submission::Command {
+            command: InteractiveCommand::Goal,
+            argument: Some(_),
+        }) => "Goal changes are locked for this run; /goal shows status".into(),
         Ok(Submission::Command { command, .. }) => {
             active_command_notice(view, command, starting_sequence)
         }
@@ -434,11 +438,8 @@ pub(super) fn validate_idle_command(
         {
             Err("Usage: /resume SESSION_ID")
         }
-        InteractiveCommand::ResumeGoal if argument.is_some() => Err("Usage: /resume-goal"),
-        InteractiveCommand::ResumeGoal
-            if !view
-                .active_goal()
-                .is_some_and(|goal| goal.status == arany::GoalStatus::Interrupted) =>
+        InteractiveCommand::Goal
+            if argument == Some("resume") && view.interrupted_goal_id().is_none() =>
         {
             Err("No interrupted Goal is available to resume")
         }
@@ -514,9 +515,7 @@ pub(super) async fn handle_command(
                 Err(error) => format!("Error: {error}"),
             }
         }
-        InteractiveCommand::ResumeGoal => {
-            "Use /resume-goal while an interrupted Goal is selected".into()
-        }
+        InteractiveCommand::Goal => arany::goal_status(view),
         InteractiveCommand::Fork => {
             if argument.is_none() && view.created_sequence == 0 {
                 return Ok("Send a message before forking this conversation".into());
@@ -758,6 +757,7 @@ pub(super) fn active_command_notice(
             }
             None => "Preparing message · Ctrl+C cancels".into(),
         },
+        InteractiveCommand::Goal => arany::goal_status(view),
         InteractiveCommand::Agents => {
             "Collaboration locked for this run; /agents opens details".into()
         }
@@ -1169,6 +1169,11 @@ mod tests {
         let oversized_unicode_title = "é".repeat(65);
         for (command, argument, expected) in [
             (
+                InteractiveCommand::Goal,
+                "resume",
+                "No interrupted Goal is available to resume",
+            ),
+            (
                 InteractiveCommand::Provider,
                 "other",
                 "Provider must be openai, anthropic, chatgpt, or custom:NAME",
@@ -1267,6 +1272,7 @@ mod tests {
             setup_requested: false,
             entry: EntryMode::New,
             prompt: None,
+            resume_goal: None,
         };
         let combined_classic = Preferences {
             completion: CompletionLayout::Combined,
@@ -1378,6 +1384,7 @@ mod tests {
             setup_requested: false,
             entry: EntryMode::New,
             prompt: None,
+            resume_goal: None,
         };
         let root = StateRoot::admit(&admission.state_dir).expect("state");
         let original_id = create_session(root, admission.workspace.clone(), None)
@@ -1670,6 +1677,8 @@ mod tests {
                     objective: "Prior accepted objective".into(),
                     workspace_identity,
                     budget: arany::GoalBudget::default(),
+                    phase: arany::GoalPhase::Implementation,
+                    autonomous: false,
                 },
             )
             .await

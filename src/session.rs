@@ -24,8 +24,9 @@ pub use events::{
     GoalPlanContract, GoalReport, GoalSkillBinding, GoalStatus, GoalSuccessCriterion,
     MAX_DISPLAY_CHUNK_BYTES, MAX_DISPLAY_CHUNKS, MAX_DISPLAY_COMMENTARY_ITEMS,
     MAX_DISPLAY_TEXT_BYTES, MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_MCP_TOOLS, MAX_GOAL_PLAN_SKILLS,
-    MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS, ProviderCallDisposition,
-    ProviderCallRecord, RunConfig, RunDisposition, RunId, SessionDefaults, SessionId,
+    MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUN_ACTIVE_MS, MAX_GOAL_RUNS,
+    ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition, RunId, SessionDefaults,
+    SessionId,
 };
 pub(crate) use lineage::prefix_digest;
 pub use reducer::{

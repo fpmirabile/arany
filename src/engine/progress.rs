@@ -235,7 +235,6 @@ pub(super) async fn append_observed(
     event: Event,
 ) -> Result<u64, EngineError> {
     let kind = match &event {
-        Event::AssistantDisplayRecorded { .. } => None,
         Event::GoalStarted { .. } => Some(TraceEventKind::GoalStarted),
         Event::GoalRunLinked { .. } => Some(TraceEventKind::GoalRunLinked),
         Event::GoalResumed { .. } => Some(TraceEventKind::GoalResumed),
@@ -244,9 +243,6 @@ pub(super) async fn append_observed(
         Event::GoalPlanContractRecorded { .. } => Some(TraceEventKind::GoalPlanContractRecorded),
         Event::GoalFinished { .. } => Some(TraceEventKind::GoalFinished),
         Event::GoalProviderCallReserved { .. } => Some(TraceEventKind::GoalProviderCallReserved),
-        Event::GoalCompactionCallReserved { .. } => {
-            Some(TraceEventKind::GoalCompactionCallReserved)
-        }
         Event::MessageAccepted { .. } => Some(TraceEventKind::MessageAccepted),
         Event::RunStarted { .. } => Some(TraceEventKind::RunStarted),
         Event::AgentSpawned { .. } => Some(TraceEventKind::AgentSpawned),
@@ -256,7 +252,12 @@ pub(super) async fn append_observed(
         Event::AgentFinished { .. } => Some(TraceEventKind::AgentFinished),
         Event::MessageCommitted { .. } => Some(TraceEventKind::MessageCommitted),
         Event::RunFinished { .. } => Some(TraceEventKind::RunFinished),
-        _ => None,
+        Event::AssistantDisplayRecorded { .. }
+        | Event::SessionStarted { .. }
+        | Event::SessionDefaultChanged { .. }
+        | Event::SessionForked { .. }
+        | Event::ContextCompacted { .. }
+        | Event::SessionRenamed { .. } => None,
     };
     let committed = store.append(session_id, event).await?;
     crate::diagnostics::event_failure(&committed.event);

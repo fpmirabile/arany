@@ -1034,7 +1034,7 @@ fn project_skill_discovery_preserves_grants_and_reports_missing_installation() {
                 observations: Vec::new(),
             };
             assert!(context.model_input()["catalog"].is_object());
-            let branch = context.outcome_branch();
+            let branch = context.outcome_branch_with_plan(false, None).remove(0);
             let skill = branch["properties"]["call"]["anyOf"]
                 .as_array()
                 .unwrap()
@@ -1473,4 +1473,98 @@ fn guard_error_after_dispatch_marks_only_a_selected_command_cache_not_attempted(
     assert!(observation.stops_run());
     assert!(observation.guard.is_none());
     assert_eq!(observation.cache_update, CacheUpdate::NotAttempted);
+}
+
+#[test]
+fn goal_success_criterion_offers_only_admitted_calls() {
+    let context = ToolContext {
+        catalog: json!({
+            "write": false,
+            "commands": [{"name": "cargo"}],
+            "skills": [],
+            "mcp_servers": []
+        })
+        .to_string(),
+        observations: Vec::new(),
+    };
+    let budget = crate::session::GoalBudget::default();
+    let branches = context.outcome_branch_with_plan(true, Some(&budget));
+    let success_calls: Vec<Value> = branches
+        .iter()
+        .filter_map(|branch| {
+            let contract = &branch["properties"]["plan_contract"];
+            let contract = contract
+                .get("properties")
+                .or_else(|| contract["anyOf"][0].get("properties"))?;
+            contract["success_criterion"]["anyOf"][0]["properties"]["call"]["anyOf"].as_array()
+        })
+        .flatten()
+        .cloned()
+        .collect();
+    let operations: Vec<&str> = success_calls
+        .iter()
+        .filter_map(|call| call["properties"]["operation"]["enum"][0].as_str())
+        .collect();
+    assert!(!operations.is_empty());
+    assert!(operations.iter().all(|operation| *operation == "command"));
+    assert!(
+        success_calls
+            .iter()
+            .all(|call| call["properties"]["program"]["enum"] == json!(["cargo"]))
+    );
+}
+
+#[test]
+fn goal_success_criterion_without_admitted_calls_omits_the_call_alternative() {
+    fn assert_no_empty_any_of(value: &Value) {
+        match value {
+            Value::Object(map) => {
+                assert!(
+                    map.get("anyOf").is_none_or(|any_of| any_of
+                        .as_array()
+                        .is_some_and(|alternatives| !alternatives.is_empty())),
+                    "JSON Schema anyOf must list at least one alternative"
+                );
+                map.values().for_each(assert_no_empty_any_of);
+            }
+            Value::Array(items) => items.iter().for_each(assert_no_empty_any_of),
+            _ => {}
+        }
+    }
+
+    let context = ToolContext {
+        catalog: json!({
+            "write": false,
+            "commands": [],
+            "skills": [],
+            "mcp_servers": []
+        })
+        .to_string(),
+        observations: Vec::new(),
+    };
+    let budget = crate::session::GoalBudget::default();
+    let branches = context.outcome_branch_with_plan(true, Some(&budget));
+    assert_no_empty_any_of(&Value::Array(branches.clone()));
+    let criteria: Vec<Value> = branches
+        .iter()
+        .map(|branch| {
+            let contract = &branch["properties"]["plan_contract"];
+            let contract = if contract.get("properties").is_some() {
+                contract
+            } else {
+                &contract["anyOf"][0]
+            };
+            contract["properties"]["success_criterion"].clone()
+        })
+        .collect();
+    assert!(!criteria.is_empty());
+    for criterion in criteria {
+        let kinds: Vec<&str> = criterion["anyOf"]
+            .as_array()
+            .expect("success criterion alternatives")
+            .iter()
+            .filter_map(|alternative| alternative["properties"]["kind"]["enum"][0].as_str())
+            .collect();
+        assert_eq!(kinds, ["workspace_file_digest", "workspace_file_content"]);
+    }
 }

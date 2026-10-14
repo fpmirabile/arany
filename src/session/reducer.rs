@@ -6,6 +6,8 @@ use super::events::{
 };
 use crate::provider::AgentPhase;
 
+mod goal;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunStatus {
     Pending,
@@ -40,7 +42,8 @@ pub struct GoalView {
     pub objective: String,
     pub workspace_identity: (u64, u64),
     pub budget: GoalBudget,
-    pub phase: Option<GoalPhase>,
+    pub phase: GoalPhase,
+    pub autonomous: bool,
     pub status: GoalStatus,
     pub run_ids: Vec<RunId>,
     pub active_run: Option<RunId>,
@@ -49,12 +52,10 @@ pub struct GoalView {
     pub awaiting_plan_contract: bool,
     pub active_ms: u64,
     pub uncertain_active_ms: u64,
-    pub reserved_active_run: Option<RunId>,
-    pub reserved_active_ms: Option<u64>,
+    /// Run and reserved milliseconds of the unsettled active-time segment.
+    pub active_time_reservation: Option<(RunId, u64)>,
     pub provider_calls: u32,
     pub unobserved_provider_calls: Vec<AgentRunId>,
-    pub compaction_call_reserved: Option<RunId>,
-    pub uncertain_compaction_calls: u32,
     pub known_tokens: u64,
     pub token_usage_unknown: bool,
     pub report: Option<GoalReport>,
@@ -65,6 +66,10 @@ pub struct GoalView {
 impl GoalView {
     pub fn is_active(&self) -> bool {
         matches!(self.status, GoalStatus::Running | GoalStatus::Interrupted)
+    }
+
+    pub(crate) fn effective_budget(&self) -> GoalBudget {
+        self.budget.effective(self.plan_contract.as_ref())
     }
 
     pub(crate) fn can_resume(&self, view: &SessionView) -> bool {
@@ -165,7 +170,8 @@ mod goal_recovery_tests {
                 objective: "Inspect before planning".into(),
                 workspace_identity: (1, 2),
                 budget: GoalBudget::default(),
-                phase: Some(GoalPhase::Research),
+                phase: GoalPhase::Research,
+                autonomous: false,
                 status: GoalStatus::Interrupted,
                 run_ids: vec![run_id],
                 active_run: None,
@@ -174,12 +180,9 @@ mod goal_recovery_tests {
                 awaiting_plan_contract: true,
                 active_ms: 0,
                 uncertain_active_ms: 0,
-                reserved_active_run: None,
-                reserved_active_ms: None,
+                active_time_reservation: None,
                 provider_calls: 1,
                 unobserved_provider_calls: Vec::new(),
-                compaction_call_reserved: None,
-                uncertain_compaction_calls: 0,
                 known_tokens: 0,
                 token_usage_unknown: false,
                 report: None,
@@ -604,6 +607,7 @@ impl SessionView {
                 Event::GoalResumed { goal_id }
                     if current.goals.last().is_some_and(|goal| goal.id == *goal_id)
             )
+            && !closes_run_without_plan(&envelope.event)
         {
             return Err(ReplayError::InvalidTransition);
         }
@@ -630,205 +634,37 @@ impl SessionView {
                 objective,
                 workspace_identity,
                 budget,
+                phase,
+                autonomous,
             } => {
-                if current.goals.iter().any(|goal| goal.id == *goal_id)
-                    || current.goals.last().is_some_and(GoalView::is_active)
-                    || current
-                        .workspace_identity
-                        .is_some_and(|identity| identity != *workspace_identity)
-                {
-                    return Err(ReplayError::InvalidTransition);
+                current.start_goal(goal_id, objective, workspace_identity, budget, phase, prior)?;
+                if let Some(goal) = current.goals.last_mut() {
+                    goal.autonomous = *autonomous;
                 }
-                current.workspace_identity = Some(*workspace_identity);
-                current.goals.push(GoalView {
-                    id: *goal_id,
-                    objective: objective.clone(),
-                    workspace_identity: *workspace_identity,
-                    budget: budget.clone(),
-                    phase: None,
-                    status: GoalStatus::Running,
-                    run_ids: Vec::new(),
-                    active_run: None,
-                    plan_contract: None,
-                    success_criterion_satisfied: false,
-                    awaiting_plan_contract: false,
-                    active_ms: 0,
-                    uncertain_active_ms: 0,
-                    reserved_active_run: None,
-                    reserved_active_ms: None,
-                    provider_calls: 0,
-                    unobserved_provider_calls: Vec::new(),
-                    compaction_call_reserved: None,
-                    uncertain_compaction_calls: 0,
-                    known_tokens: 0,
-                    token_usage_unknown: false,
-                    report: None,
-                    started_sequence: prior,
-                    finished_sequence: None,
-                });
             }
             Event::GoalRunLinked {
                 goal_id,
                 run_id,
                 phase,
             } => {
-                if current.runs.iter().any(|run| run.id == *run_id) {
-                    return Err(ReplayError::InvalidTransition);
-                }
-                let goal = current_goal_mut(current, *goal_id)?;
-                let run_limit = goal
-                    .plan_contract
-                    .as_ref()
-                    .map_or(goal.budget.max_runs, |plan| plan.budget.max_runs);
-                if goal.status != GoalStatus::Running
-                    || goal.active_run.is_some()
-                    || goal.run_ids.len() >= usize::from(run_limit)
-                {
-                    return Err(ReplayError::InvalidTransition);
-                }
-                goal.active_run = Some(*run_id);
-                goal.phase = Some(*phase);
-                goal.run_ids.push(*run_id);
+                current.link_goal_run(goal_id, run_id, phase)?;
             }
             Event::GoalResumed { goal_id } => {
-                let active_run = current
-                    .goals
-                    .last()
-                    .filter(|goal| goal.id == *goal_id && goal.status == GoalStatus::Running)
-                    .and_then(|goal| goal.active_run);
-                if let Some(run_id) = active_run
-                    && let Some(run) = current.runs.last_mut().filter(|run| run.id == run_id)
-                {
-                    run.interrupt();
-                }
-                if let Some(goal) = current
-                    .goals
-                    .last_mut()
-                    .filter(|goal| goal.id == *goal_id && goal.status == GoalStatus::Running)
-                {
-                    goal.status = GoalStatus::Interrupted;
-                    goal.active_run = None;
-                }
-                let recoverable = current
-                    .goals
-                    .last()
-                    .filter(|goal| goal.id == *goal_id)
-                    .is_some_and(|goal| goal.can_resume(current));
-                let has_unaccepted_run = current.goals.last().is_some_and(|goal| {
-                    goal.run_ids
-                        .last()
-                        .is_some_and(|run_id| !current.runs.iter().any(|run| run.id == *run_id))
-                });
-                let goal = current_goal_mut(current, *goal_id)?;
-                if goal.status != GoalStatus::Interrupted
-                    || goal.active_run.is_some()
-                    || !recoverable
-                {
-                    return Err(ReplayError::InvalidTransition);
-                }
-                if has_unaccepted_run {
-                    goal.run_ids.pop();
-                }
-                if goal.status == GoalStatus::Interrupted {
-                    let reservation = match (goal.reserved_active_run, goal.reserved_active_ms) {
-                        (Some(run_id), Some(reserved_ms))
-                            if goal.run_ids.last() == Some(&run_id) =>
-                        {
-                            Some(reserved_ms)
-                        }
-                        (None, None) => None,
-                        _ => return Err(ReplayError::InvalidTransition),
-                    };
-                    if let Some(reserved_ms) = reservation {
-                        goal.active_ms = goal
-                            .active_ms
-                            .checked_add(reserved_ms)
-                            .ok_or(ReplayError::InvalidTransition)?;
-                        goal.uncertain_active_ms = goal
-                            .uncertain_active_ms
-                            .checked_add(reserved_ms)
-                            .ok_or(ReplayError::InvalidTransition)?;
-                        goal.reserved_active_run = None;
-                        goal.reserved_active_ms = None;
-                    }
-                    if let Some(run_id) = goal.compaction_call_reserved.take() {
-                        if goal.run_ids.last() != Some(&run_id) {
-                            return Err(ReplayError::InvalidTransition);
-                        }
-                        goal.uncertain_compaction_calls = goal
-                            .uncertain_compaction_calls
-                            .checked_add(1)
-                            .ok_or(ReplayError::InvalidTransition)?;
-                        goal.token_usage_unknown = true;
-                    }
-                } else if goal.reserved_active_run.is_some() || goal.reserved_active_ms.is_some() {
-                    return Err(ReplayError::InvalidTransition);
-                }
-                let active_limit = goal
-                    .plan_contract
-                    .as_ref()
-                    .map_or(goal.budget.max_active_ms, |plan| plan.budget.max_active_ms);
-                if goal.active_ms > active_limit {
-                    return Err(ReplayError::InvalidTransition);
-                }
-                goal.awaiting_plan_contract = false;
-                goal.status = GoalStatus::Running;
+                current.resume_goal(goal_id)?;
             }
             Event::GoalActiveTimeReserved {
                 goal_id,
                 run_id,
                 reserved_ms,
             } => {
-                let goal = current_goal_mut(current, *goal_id)?;
-                let consumed = goal
-                    .active_ms
-                    .checked_add(*reserved_ms)
-                    .ok_or(ReplayError::InvalidTransition)?;
-                let active_limit = goal
-                    .plan_contract
-                    .as_ref()
-                    .map_or(goal.budget.max_active_ms, |plan| plan.budget.max_active_ms);
-                if goal.status != GoalStatus::Running
-                    || goal.active_run != Some(*run_id)
-                    || goal.reserved_active_run.is_some()
-                    || goal.reserved_active_ms.is_some()
-                    || consumed > active_limit
-                {
-                    return Err(ReplayError::InvalidTransition);
-                }
-                goal.reserved_active_run = Some(*run_id);
-                goal.reserved_active_ms = Some(*reserved_ms);
+                current.reserve_goal_active_time(goal_id, run_id, reserved_ms)?;
             }
             Event::GoalActiveTimeSettled {
                 goal_id,
                 run_id,
                 active_ms,
             } => {
-                let run_status = current_run(current, *run_id)?.status;
-                let goal = current_goal_mut(current, *goal_id)?;
-                let reserved = goal
-                    .reserved_active_ms
-                    .ok_or(ReplayError::InvalidTransition)?;
-                let total = goal
-                    .active_ms
-                    .checked_add(*active_ms)
-                    .ok_or(ReplayError::InvalidTransition)?;
-                let active_limit = goal
-                    .plan_contract
-                    .as_ref()
-                    .map_or(goal.budget.max_active_ms, |plan| plan.budget.max_active_ms);
-                if goal.status != GoalStatus::Running
-                    || goal.active_run.is_some()
-                    || goal.reserved_active_run != Some(*run_id)
-                    || *active_ms > reserved
-                    || !run_status.is_terminal()
-                    || total > active_limit
-                {
-                    return Err(ReplayError::InvalidTransition);
-                }
-                goal.active_ms += *active_ms;
-                goal.reserved_active_run = None;
-                goal.reserved_active_ms = None;
+                current.settle_goal_active_time(goal_id, run_id, active_ms)?;
             }
             Event::GoalPlanContractRecorded {
                 goal_id,
@@ -837,143 +673,20 @@ impl SessionView {
                 active_ms,
                 reserved_ms,
             } => {
-                let run = current
-                    .runs
-                    .last()
-                    .filter(|run| run.id == *run_id)
-                    .ok_or(ReplayError::InvalidTransition)?;
-                let primary = run.primary().ok_or(ReplayError::InvalidTransition)?;
-                let valid_previous_tools = run.tools.iter().all(|tool| {
-                    tool.intent.call.is_goal_plan_prelude()
-                        && tool
-                            .observation
-                            .as_ref()
-                            .is_some_and(|observation| !observation.stops_run())
-                });
-                let requested_tools = primary
-                    .provider_calls
-                    .iter()
-                    .filter(|call| call.disposition == ProviderCallDisposition::ToolRequested)
-                    .count();
-                let valid_contract_call = run.status == RunStatus::Active
-                    && primary.role == AgentRole::Primary
-                    && primary.provider_calls.last().is_some_and(|call| {
-                        call.disposition == ProviderCallDisposition::ToolRequested
-                            && matches!(
-                                call.phase,
-                                AgentPhase::RootPlan | AgentPhase::RootSynthesis
-                            )
-                    })
-                    && valid_previous_tools
-                    && requested_tools == model_tool_count(run) + 1;
-                let goal = current_goal_mut(current, *goal_id)?;
-                let reserved = goal
-                    .reserved_active_ms
-                    .ok_or(ReplayError::InvalidTransition)?;
-                let active_total = goal
-                    .active_ms
-                    .checked_add(*active_ms)
-                    .ok_or(ReplayError::InvalidTransition)?;
-                let reserved_total = active_total
-                    .checked_add(*reserved_ms)
-                    .ok_or(ReplayError::InvalidTransition)?;
-                if goal.status != GoalStatus::Running
-                    || goal.active_run != Some(*run_id)
-                    || goal.reserved_active_run != Some(*run_id)
-                    || goal.plan_contract.is_some()
-                    || !goal.awaiting_plan_contract
-                    || !valid_contract_call
-                    || !contract.budget.is_within(&goal.budget)
-                    || goal.provider_calls > contract.budget.max_provider_calls
-                    || goal.run_ids.len() > usize::from(contract.budget.max_runs)
-                    || *active_ms > reserved
-                    || active_ms.saturating_add(*reserved_ms) > reserved
-                    || reserved_total > contract.budget.max_active_ms
-                    || contract
-                        .budget
-                        .max_tokens
-                        .is_some_and(|limit| goal.token_usage_unknown || goal.known_tokens >= limit)
-                {
-                    return Err(ReplayError::InvalidTransition);
-                }
-                goal.active_ms = active_total;
-                goal.reserved_active_ms = Some(*reserved_ms);
-                goal.plan_contract = Some(contract.clone());
-                goal.success_criterion_satisfied = false;
-                goal.awaiting_plan_contract = false;
+                current.record_goal_plan_contract(
+                    goal_id,
+                    run_id,
+                    contract,
+                    active_ms,
+                    reserved_ms,
+                )?;
             }
             Event::GoalProviderCallReserved {
                 goal_id,
                 run_id,
                 agent_run_id,
             } => {
-                let agent_active = current_run(current, *run_id)?
-                    .agents
-                    .iter()
-                    .any(|agent| agent.id == *agent_run_id && agent.status == AgentStatus::Active);
-                let goal = current_goal_mut(current, *goal_id)?;
-                let goal_call_limit = goal
-                    .plan_contract
-                    .as_ref()
-                    .map_or(goal.budget.max_provider_calls, |plan| {
-                        plan.budget.max_provider_calls
-                    });
-                let goal_token_limit = goal
-                    .plan_contract
-                    .as_ref()
-                    .and_then(|plan| plan.budget.max_tokens)
-                    .or(goal.budget.max_tokens);
-                if goal.status != GoalStatus::Running
-                    || goal.active_run != Some(*run_id)
-                    || !agent_active
-                    || goal.unobserved_provider_calls.contains(agent_run_id)
-                    || goal.provider_calls >= goal_call_limit
-                    || goal.compaction_call_reserved.is_some()
-                    || goal_token_limit.is_some_and(|limit| {
-                        goal.token_usage_unknown
-                            || goal.known_tokens >= limit
-                            || !goal.unobserved_provider_calls.is_empty()
-                    })
-                {
-                    return Err(ReplayError::InvalidTransition);
-                }
-                goal.provider_calls = goal
-                    .provider_calls
-                    .checked_add(1)
-                    .ok_or(ReplayError::InvalidTransition)?;
-                goal.unobserved_provider_calls.push(*agent_run_id);
-            }
-            Event::GoalCompactionCallReserved { goal_id, run_id } => {
-                let run_status = current_run(current, *run_id)?.status;
-                let goal = current_goal_mut(current, *goal_id)?;
-                let call_limit = goal
-                    .plan_contract
-                    .as_ref()
-                    .map_or(goal.budget.max_provider_calls, |plan| {
-                        plan.budget.max_provider_calls
-                    });
-                let token_limit = goal
-                    .plan_contract
-                    .as_ref()
-                    .and_then(|plan| plan.budget.max_tokens)
-                    .or(goal.budget.max_tokens);
-                if goal.status != GoalStatus::Running
-                    || goal.active_run.is_some()
-                    || goal.run_ids.last() != Some(run_id)
-                    || !run_status.is_terminal()
-                    || !goal.unobserved_provider_calls.is_empty()
-                    || goal.compaction_call_reserved.is_some()
-                    || goal.provider_calls >= call_limit
-                    || token_limit
-                        .is_some_and(|limit| goal.token_usage_unknown || goal.known_tokens >= limit)
-                {
-                    return Err(ReplayError::InvalidTransition);
-                }
-                goal.provider_calls = goal
-                    .provider_calls
-                    .checked_add(1)
-                    .ok_or(ReplayError::InvalidTransition)?;
-                goal.compaction_call_reserved = Some(*run_id);
+                current.reserve_goal_provider_call(goal_id, run_id, agent_run_id)?;
             }
             Event::GoalFinished {
                 goal_id,
@@ -981,43 +694,7 @@ impl SessionView {
                 active_ms,
                 report,
             } => {
-                let run_id = current
-                    .goals
-                    .last()
-                    .filter(|goal| goal.id == *goal_id)
-                    .and_then(|goal| goal.run_ids.last())
-                    .copied()
-                    .ok_or(ReplayError::InvalidTransition)?;
-                let run_status = current_run(current, run_id)?.status;
-                let disposition_matches = matches!(
-                    (*status, run_status),
-                    (GoalStatus::Completed, RunStatus::Finished)
-                        | (GoalStatus::Failed, RunStatus::Failed)
-                        | (GoalStatus::Cancelled, RunStatus::Cancelled)
-                );
-                let goal = current_goal_mut(current, *goal_id)?;
-                let active_limit = goal
-                    .plan_contract
-                    .as_ref()
-                    .map_or(goal.budget.max_active_ms, |plan| plan.budget.max_active_ms);
-                if goal.status != GoalStatus::Running
-                    || goal.active_run.is_some()
-                    || !disposition_matches
-                    || goal.reserved_active_run.is_some()
-                    || goal.reserved_active_ms.is_some()
-                    || goal.compaction_call_reserved.is_some()
-                    || *active_ms != goal.active_ms
-                    || *active_ms > active_limit
-                    || *status == GoalStatus::Completed
-                        && goal.plan_contract.is_some()
-                        && !goal.success_criterion_satisfied
-                {
-                    return Err(ReplayError::InvalidTransition);
-                }
-                goal.active_ms = *active_ms;
-                goal.status = *status;
-                goal.report = Some(report.clone());
-                goal.finished_sequence = Some(prior);
+                current.finish_goal(goal_id, status, active_ms, report, prior)?;
             }
             Event::ContextCompacted { record } => {
                 let boundary = if let Some(run) = current.runs.last() {
@@ -1031,22 +708,6 @@ impl SessionView {
                     || boundary != Some((record.covered_run_id, record.covered_sequence))
                 {
                     return Err(ReplayError::InvalidSnapshot);
-                }
-                if let Some(goal) = current.goals.last_mut()
-                    && goal.status == GoalStatus::Running
-                    && goal.run_ids.last() == Some(&record.covered_run_id)
-                {
-                    if goal.compaction_call_reserved != Some(record.covered_run_id) {
-                        return Err(ReplayError::InvalidTransition);
-                    }
-                    let tokens = u64::from(record.input_tokens.unwrap_or_default())
-                        .checked_add(u64::from(record.output_tokens.unwrap_or_default()))
-                        .and_then(|tokens| goal.known_tokens.checked_add(tokens))
-                        .ok_or(ReplayError::InvalidTransition)?;
-                    goal.known_tokens = tokens;
-                    goal.token_usage_unknown |=
-                        record.input_tokens.is_none() || record.output_tokens.is_none();
-                    goal.compaction_call_reserved = None;
                 }
                 current.compactions.push(CompactionView {
                     event_sequence: prior,
@@ -1117,11 +778,12 @@ impl SessionView {
             } => {
                 if *role == AgentRole::Child {
                     let goal = current.goals.last().ok_or(ReplayError::InvalidTransition)?;
+                    let budget = goal.effective_budget();
                     if goal.active_run != Some(*run_id)
-                        || goal.provider_calls >= goal.budget.max_provider_calls
-                        || goal.budget.max_tokens.is_some()
-                            && (goal.token_usage_unknown
-                                || goal.known_tokens >= goal.budget.max_tokens.unwrap_or(0))
+                        || goal.provider_calls >= budget.max_provider_calls
+                        || budget.max_tokens.is_some_and(|limit| {
+                            goal.token_usage_unknown || goal.known_tokens >= limit
+                        })
                     {
                         return Err(ReplayError::InvalidTransition);
                     }
@@ -1330,8 +992,8 @@ impl SessionView {
                 intent,
             } => {
                 let goal = current.goals.last().ok_or(ReplayError::InvalidTransition)?;
-                let phase_allows_call = goal.phase == Some(GoalPhase::Implementation)
-                    || intent.call.is_goal_plan_prelude();
+                let phase_allows_call =
+                    goal.phase == GoalPhase::Implementation || intent.call.is_goal_plan_prelude();
                 let plan_allows_call = if let Some(contract) = &goal.plan_contract {
                     !goal.awaiting_plan_contract
                         && (contract.allows_call(&intent.call)
@@ -1346,10 +1008,8 @@ impl SessionView {
                     || !phase_allows_call
                     || !plan_allows_call
                     || goal
-                        .plan_contract
-                        .as_ref()
-                        .and_then(|plan| plan.budget.max_tokens)
-                        .or(goal.budget.max_tokens)
+                        .effective_budget()
+                        .max_tokens
                         .is_some_and(|limit| goal.token_usage_unknown || goal.known_tokens >= limit)
                 {
                     return Err(ReplayError::InvalidTransition);
@@ -1430,10 +1090,10 @@ impl SessionView {
                         return Err(ReplayError::InvalidTransition);
                     }
                     tool.observation = Some(observation.clone());
-                    let observations: Vec<_> = run
+                    let observations: Vec<&crate::tools::ToolObservation> = run
                         .tools
                         .iter()
-                        .filter_map(|tool| tool.observation.as_ref().cloned())
+                        .filter_map(|tool| tool.observation.as_ref())
                         .collect();
                     if !serde_json::to_vec(&observations)
                         .is_ok_and(|bytes| bytes.len() <= crate::tools::MAX_TOOL_CONTEXT_BYTES)
@@ -1447,11 +1107,16 @@ impl SessionView {
                     .filter(|goal| goal.active_run == Some(*run_id))
                     .map(|goal| goal.id)
                     .ok_or(ReplayError::InvalidTransition)?;
-                let observations = goal_tool_observations(current, goal_id)?;
-                if let Some(goal) = current.goals.last_mut()
-                    && let Some(contract) = &goal.plan_contract
+                if let Some(contract) = current
+                    .goals
+                    .last()
+                    .and_then(|goal| goal.plan_contract.as_ref())
                 {
-                    goal.success_criterion_satisfied = contract.matches_success(&observations);
+                    let satisfied =
+                        contract.matches_success(goal_tool_observations(current, goal_id)?);
+                    if let Some(goal) = current.goals.last_mut() {
+                        goal.success_criterion_satisfied = satisfied;
+                    }
                 }
                 let unplanned_prelude = current
                     .goals
@@ -1469,16 +1134,14 @@ impl SessionView {
                 summary,
                 result,
             } => {
-                let token_budget_exceeded = current.goals.last().is_none_or(|goal| {
-                    goal.budget
+                // Unknown usage blocks Tool and Delegate outcomes and Provider calls, not a Finish.
+                let over_token_cap = match current.goals.last() {
+                    Some(goal) => goal
+                        .effective_budget()
                         .max_tokens
-                        .is_some_and(|limit| goal.token_usage_unknown || goal.known_tokens > limit)
-                        || goal.plan_contract.as_ref().is_some_and(|plan| {
-                            plan.budget.max_tokens.is_some_and(|limit| {
-                                goal.token_usage_unknown || goal.known_tokens > limit
-                            })
-                        })
-                });
+                        .is_some_and(|limit| goal.known_tokens > limit),
+                    None => return Err(ReplayError::InvalidTransition),
+                };
                 let run = active_run(current, *run_id)?;
                 let index = run
                     .agents
@@ -1522,7 +1185,7 @@ impl SessionView {
                 {
                     return Err(ReplayError::InvalidTransition);
                 }
-                if *disposition == AgentDisposition::Finished && token_budget_exceeded {
+                if *disposition == AgentDisposition::Finished && over_token_cap {
                     return Err(ReplayError::InvalidTransition);
                 }
                 if *disposition == AgentDisposition::Finished
@@ -1596,6 +1259,7 @@ impl SessionView {
                     && goal.active_run == Some(*run_id)
                 {
                     goal.active_run = None;
+                    goal.awaiting_plan_contract = false;
                 }
             }
         }
@@ -1605,6 +1269,13 @@ impl SessionView {
 
     pub fn active_goal(&self) -> Option<&GoalView> {
         self.goals.last().filter(|goal| goal.is_active())
+    }
+
+    /// The active Goal when it is interrupted and therefore eligible for explicit resume.
+    pub fn interrupted_goal_id(&self) -> Option<GoalId> {
+        self.active_goal()
+            .filter(|goal| goal.status == GoalStatus::Interrupted)
+            .map(|goal| goal.id)
     }
 
     pub fn goal(&self, id: GoalId) -> Option<&GoalView> {
@@ -1629,7 +1300,7 @@ fn current_goal_mut(view: &mut SessionView, id: GoalId) -> Result<&mut GoalView,
 fn goal_tool_observations(
     view: &SessionView,
     id: GoalId,
-) -> Result<Vec<crate::tools::ToolObservation>, ReplayError> {
+) -> Result<Vec<&crate::tools::ToolObservation>, ReplayError> {
     let goal = view
         .goals
         .last()
@@ -1640,8 +1311,24 @@ fn goal_tool_observations(
         .iter()
         .filter(|run| goal.run_ids.contains(&run.id))
         .flat_map(|run| run.tools.iter())
-        .filter_map(|tool| tool.observation.clone())
+        .filter_map(|tool| tool.observation.as_ref())
         .collect())
+}
+
+/// A failed or cancelled end of the Run is valid while a plan wait is open: the engine
+/// ends the Run when a Tool is refused before `ToolStarted`, and that refusal leaves no
+/// pending plan to record.
+fn closes_run_without_plan(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::AgentFinished {
+            disposition: AgentDisposition::Failed | AgentDisposition::Cancelled,
+            ..
+        } | Event::RunFinished {
+            disposition: RunDisposition::Failed | RunDisposition::Cancelled,
+            ..
+        }
+    )
 }
 
 fn active_run(view: &mut SessionView, id: RunId) -> Result<&mut RunView, ReplayError> {
@@ -1650,4 +1337,591 @@ fn active_run(view: &mut SessionView, id: RunId) -> Result<&mut RunView, ReplayE
         return Err(ReplayError::InvalidTransition);
     }
     Ok(run)
+}
+
+#[cfg(test)]
+mod goal_replay_tests {
+    use super::*;
+    use crate::provider::{AgentPhase, OutputTokenBound};
+    use crate::session::events::{CollaborationPolicy, GoalSuccessCriterion};
+    use crate::tools::{
+        CacheUpdate, EffectIntent, GuardReceipt, ToolCall, ToolDisposition, ToolLimits,
+        ToolObservation, ToolPolicyReceipt,
+    };
+
+    const GOAL_OBJECTIVE: &str = "Goal";
+
+    fn config(policy: CollaborationPolicy, tools: bool) -> RunConfig {
+        RunConfig {
+            provider: "openai".into(),
+            model: "gpt-5.4".into(),
+            effort: None,
+            custom_profile_provenance: None,
+            saved_api_account_id: None,
+            chatgpt_provenance: None,
+            output_token_bound: OutputTokenBound::ProviderEnforced,
+            policy,
+            output_token_cap: 4096,
+            provider_concurrency: 1,
+            workspace_device: 1,
+            workspace_inode: 2,
+            instruction_digest: None,
+            include_digests: Vec::new(),
+            history_run_ids: Vec::new(),
+            excluded_history_runs: 0,
+            context_usage: None,
+            compaction_event_sequence: None,
+            compaction_content_digest: None,
+            tool_policy: tools.then_some(ToolPolicyReceipt {
+                contract_version: 1,
+                config_digest: [1; 32],
+                max_tool_calls: crate::tools::MAX_TOOL_CALLS as u32,
+                max_model_steps: crate::tools::MAX_MODEL_STEPS as u32,
+                max_context_bytes: crate::tools::MAX_TOOL_CONTEXT_BYTES as u32,
+            }),
+        }
+    }
+
+    fn record(
+        phase: AgentPhase,
+        disposition: ProviderCallDisposition,
+        tokens: Option<u32>,
+    ) -> ProviderCallRecord {
+        ProviderCallRecord {
+            phase,
+            disposition,
+            response_id: None,
+            input_tokens: tokens,
+            output_tokens: tokens,
+            wire_provenance: None,
+            failure_reason: None,
+        }
+    }
+
+    fn journal(session_id: SessionId, events: Vec<Event>) -> Vec<EventEnvelope> {
+        events
+            .into_iter()
+            .zip(1..)
+            .map(|(event, sequence)| {
+                let (run_id, agent_run_id) = event.scope();
+                EventEnvelope {
+                    sequence,
+                    session_id,
+                    run_id,
+                    agent_run_id,
+                    event,
+                    created_at_ms: 0,
+                }
+            })
+            .collect()
+    }
+
+    fn goal_started(goal_id: GoalId, budget: GoalBudget) -> Event {
+        Event::GoalStarted {
+            goal_id,
+            objective: GOAL_OBJECTIVE.into(),
+            workspace_identity: (1, 2),
+            budget,
+            phase: GoalPhase::Implementation,
+            autonomous: false,
+        }
+    }
+
+    /// Links one Run, accepts its message and spawns its primary AgentRun.
+    fn start_run(
+        goal_id: GoalId,
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        config: RunConfig,
+    ) -> Vec<Event> {
+        vec![
+            Event::GoalRunLinked {
+                goal_id,
+                run_id,
+                phase: GoalPhase::Implementation,
+            },
+            Event::MessageAccepted {
+                run_id,
+                text: GOAL_OBJECTIVE.into(),
+                images: Vec::new(),
+            },
+            Event::RunStarted { run_id, config },
+            Event::AgentSpawned {
+                run_id,
+                agent_run_id,
+                role: AgentRole::Primary,
+                ordinal: 0,
+                objective: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn resumed_orphaned_provider_reservation_settles_as_uncertain() {
+        let session_id = SessionId::new();
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let mut events = vec![
+            Event::SessionStarted {
+                title: "Goal".into(),
+                workspace_identity: (1, 2),
+            },
+            goal_started(goal_id, GoalBudget::default()),
+        ];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.push(Event::GoalProviderCallReserved {
+            goal_id,
+            run_id,
+            agent_run_id,
+        });
+        events.push(Event::GoalResumed { goal_id });
+
+        let view = SessionView::replay_open(session_id, &journal(session_id, events))
+            .expect("resumed Goal replays")
+            .expect("Session exists");
+        let goal = view.goals.last().expect("Goal");
+        assert!(goal.unobserved_provider_calls.is_empty());
+        assert!(goal.token_usage_unknown);
+    }
+
+    #[test]
+    fn finish_with_unknown_usage_is_not_a_tool_or_delegate_outcome() {
+        let session_id = SessionId::new();
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let budget = GoalBudget {
+            max_tokens: Some(1000),
+            ..GoalBudget::default()
+        };
+        let mut events = vec![
+            Event::SessionStarted {
+                title: "Goal".into(),
+                workspace_identity: (1, 2),
+            },
+            goal_started(goal_id, budget),
+        ];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.push(Event::GoalProviderCallReserved {
+            goal_id,
+            run_id,
+            agent_run_id,
+        });
+        events.push(Event::ProviderCallRecorded {
+            run_id,
+            agent_run_id,
+            record: record(
+                AgentPhase::RootPlan,
+                ProviderCallDisposition::Finished,
+                None,
+            ),
+        });
+        events.push(Event::AgentFinished {
+            run_id,
+            agent_run_id,
+            disposition: AgentDisposition::Finished,
+            summary: Some("done".into()),
+            result: Some("done".into()),
+        });
+
+        let view = SessionView::replay_open(session_id, &journal(session_id, events))
+            .expect("unknown usage does not block a Finish")
+            .expect("Session exists");
+        assert_eq!(view.runs[0].agents[0].status, AgentStatus::Finished);
+    }
+
+    #[test]
+    fn plan_wait_does_not_block_a_terminal_failure_before_tool_start() {
+        let session_id = SessionId::new();
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let mut events = vec![
+            Event::SessionStarted {
+                title: "Goal".into(),
+                workspace_identity: (1, 2),
+            },
+            goal_started(goal_id, GoalBudget::default()),
+        ];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, true),
+        ));
+        events.push(Event::GoalActiveTimeReserved {
+            goal_id,
+            run_id,
+            reserved_ms: 1000,
+        });
+        events.push(Event::GoalProviderCallReserved {
+            goal_id,
+            run_id,
+            agent_run_id,
+        });
+        events.push(Event::ProviderCallRecorded {
+            run_id,
+            agent_run_id,
+            record: record(
+                AgentPhase::RootPlan,
+                ProviderCallDisposition::ToolRequested,
+                Some(0),
+            ),
+        });
+        // Engine fails the primary when the Tool deadline or context capacity refuses before ToolStarted.
+        events.push(Event::AgentFinished {
+            run_id,
+            agent_run_id,
+            disposition: AgentDisposition::Failed,
+            summary: None,
+            result: None,
+        });
+        events.push(Event::RunFinished {
+            run_id,
+            disposition: RunDisposition::Failed,
+        });
+        events.push(Event::GoalActiveTimeSettled {
+            goal_id,
+            run_id,
+            active_ms: 0,
+        });
+        events.push(Event::GoalFinished {
+            goal_id,
+            status: GoalStatus::Failed,
+            active_ms: 0,
+            report: GoalReport {
+                summary: "failed".into(),
+                changes: Vec::new(),
+                evidence: Vec::new(),
+                unresolved: Vec::new(),
+            },
+        });
+
+        let view = SessionView::replay_open(session_id, &journal(session_id, events))
+            .expect("a terminal failure closes the plan wait")
+            .expect("Session exists");
+        let goal = view.goals.last().expect("Goal");
+        assert_eq!(goal.status, GoalStatus::Failed);
+        assert!(!goal.awaiting_plan_contract);
+        assert_eq!(view.runs[0].status, RunStatus::Failed);
+    }
+
+    #[test]
+    fn unsettled_active_time_reservation_blocks_the_next_run_link() {
+        let session_id = SessionId::new();
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let next_run_id = RunId::new();
+        let mut events = vec![
+            Event::SessionStarted {
+                title: "Goal".into(),
+                workspace_identity: (1, 2),
+            },
+            goal_started(goal_id, GoalBudget::default()),
+        ];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.push(Event::GoalActiveTimeReserved {
+            goal_id,
+            run_id,
+            reserved_ms: 1000,
+        });
+        events.push(Event::AgentFinished {
+            run_id,
+            agent_run_id,
+            disposition: AgentDisposition::Failed,
+            summary: None,
+            result: None,
+        });
+        events.push(Event::RunFinished {
+            run_id,
+            disposition: RunDisposition::Failed,
+        });
+        let unsettled = events.clone();
+        let link_next = Event::GoalRunLinked {
+            goal_id,
+            run_id: next_run_id,
+            phase: GoalPhase::Implementation,
+        };
+        let mut blocked = unsettled.clone();
+        blocked.push(link_next.clone());
+        assert!(
+            SessionView::replay_open(session_id, &journal(session_id, blocked)).is_err(),
+            "a Run cannot link while its active-time reservation is outstanding"
+        );
+
+        let mut resumed = unsettled;
+        resumed.push(Event::GoalResumed { goal_id });
+        resumed.push(link_next);
+        SessionView::replay_open(session_id, &journal(session_id, resumed))
+            .expect("explicit resume converts the orphaned reservation before linking");
+    }
+
+    fn delegated_session(known_tokens: u64) -> SessionView {
+        let session_id = SessionId::new();
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let contract = GoalPlanContract {
+            mission: "Plan".into(),
+            paths: vec!["src/lib.rs".into()],
+            commands: Vec::new(),
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: GoalSuccessCriterion::WorkspaceFileContent {
+                path: "src/lib.rs".into(),
+                content: "ok".into(),
+            },
+            budget: GoalBudget {
+                max_tokens: Some(1000),
+                ..GoalBudget::default()
+            },
+        };
+        SessionView {
+            id: session_id,
+            title: "Goal".into(),
+            title_is_explicit: false,
+            inherited_title: None,
+            workspace_identity: Some((1, 2)),
+            defaults: SessionDefaults::default(),
+            created_sequence: 0,
+            last_sequence: 1,
+            lineage: None,
+            runs: vec![RunView {
+                id: run_id,
+                objective: GOAL_OBJECTIVE.into(),
+                images: Vec::new(),
+                config: Some(config(
+                    CollaborationPolicy::Auto {
+                        max_active_children: 1,
+                    },
+                    false,
+                )),
+                agents: vec![AgentView {
+                    id: agent_run_id,
+                    role: AgentRole::Primary,
+                    ordinal: 0,
+                    objective: None,
+                    summary: None,
+                    result: None,
+                    provider_calls: vec![record(
+                        AgentPhase::RootPlan,
+                        ProviderCallDisposition::Delegated,
+                        Some(0),
+                    )],
+                    status: AgentStatus::Active,
+                }],
+                assistant_message: None,
+                status: RunStatus::Active,
+                accepted_sequence: 1,
+                finished_sequence: None,
+                tools: Vec::new(),
+                display: Vec::new(),
+            }],
+            compactions: Vec::new(),
+            goals: vec![GoalView {
+                id: goal_id,
+                objective: GOAL_OBJECTIVE.into(),
+                workspace_identity: (1, 2),
+                budget: GoalBudget::default(),
+                phase: GoalPhase::Implementation,
+                autonomous: false,
+                status: GoalStatus::Running,
+                run_ids: vec![run_id],
+                active_run: Some(run_id),
+                plan_contract: Some(contract),
+                success_criterion_satisfied: false,
+                awaiting_plan_contract: false,
+                active_ms: 0,
+                uncertain_active_ms: 0,
+                active_time_reservation: None,
+                provider_calls: 1,
+                unobserved_provider_calls: Vec::new(),
+                known_tokens,
+                token_usage_unknown: false,
+                report: None,
+                started_sequence: 1,
+                finished_sequence: None,
+            }],
+        }
+    }
+
+    fn apply_child_spawn(view: &mut SessionView) -> Result<(), ReplayError> {
+        let run_id = view.runs[0].id;
+        let event = Event::AgentSpawned {
+            run_id,
+            agent_run_id: AgentRunId::new(),
+            role: AgentRole::Child,
+            ordinal: 1,
+            objective: Some("Check the child result".into()),
+        };
+        let (run_id, agent_run_id) = event.scope();
+        view.apply_committed(&EventEnvelope {
+            sequence: 2,
+            session_id: view.id,
+            run_id,
+            agent_run_id,
+            event,
+            created_at_ms: 0,
+        })
+    }
+
+    #[test]
+    fn child_admission_uses_the_effective_plan_token_ceiling() {
+        let mut below_cap = delegated_session(999);
+        assert!(apply_child_spawn(&mut below_cap).is_ok());
+
+        let mut at_cap = delegated_session(1000);
+        assert!(apply_child_spawn(&mut at_cap).is_err());
+    }
+
+    fn read_observation(path: &str, content: &[u8]) -> ToolObservation {
+        let intent = EffectIntent {
+            id: uuid::Uuid::now_v7(),
+            run_id: RunId::new(),
+            agent_run_id: AgentRunId::new(),
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call: ToolCall::Read {
+                path: path.into(),
+                offset: 0,
+                limit: 1024,
+            },
+            limits: ToolLimits::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        };
+        ToolObservation {
+            guard: Some(GuardReceipt {
+                contract_version: 1,
+                intent_digest: intent.digest(),
+                enforcement_digest: intent.enforcement_digest,
+                limits: intent.limits.clone(),
+            }),
+            intent,
+            disposition: ToolDisposition::Succeeded,
+            output: serde_json::json!({
+                "sha256": crate::tools::types::hex_digest(content)
+            })
+            .to_string(),
+            cache_update: CacheUpdate::NotApplicable,
+        }
+    }
+
+    #[test]
+    fn plan_contract_counts_a_pre_plan_read_matching_its_digest() {
+        let session_id = SessionId::new();
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let read = read_observation("src/main.rs", b"before");
+        let read_intent = read.intent.clone();
+        let contract = GoalPlanContract {
+            mission: "Verify the file".into(),
+            paths: vec!["src/main.rs".into()],
+            commands: Vec::new(),
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: GoalSuccessCriterion::WorkspaceFileDigest {
+                path: "src/main.rs".into(),
+                sha256: crate::tools::types::hex_digest(b"before"),
+            },
+            budget: GoalBudget::default(),
+        };
+        let mut view = SessionView {
+            id: session_id,
+            title: "Goal".into(),
+            title_is_explicit: false,
+            inherited_title: None,
+            workspace_identity: Some((1, 2)),
+            defaults: SessionDefaults::default(),
+            created_sequence: 0,
+            last_sequence: 1,
+            lineage: None,
+            runs: vec![RunView {
+                id: run_id,
+                objective: GOAL_OBJECTIVE.into(),
+                images: Vec::new(),
+                config: Some(config(CollaborationPolicy::Single, true)),
+                agents: vec![AgentView {
+                    id: agent_run_id,
+                    role: AgentRole::Primary,
+                    ordinal: 0,
+                    objective: None,
+                    summary: None,
+                    result: None,
+                    provider_calls: vec![
+                        record(
+                            AgentPhase::RootPlan,
+                            ProviderCallDisposition::ToolRequested,
+                            Some(0),
+                        ),
+                        record(
+                            AgentPhase::RootPlan,
+                            ProviderCallDisposition::ToolRequested,
+                            Some(0),
+                        ),
+                    ],
+                    status: AgentStatus::Active,
+                }],
+                assistant_message: None,
+                status: RunStatus::Active,
+                accepted_sequence: 1,
+                finished_sequence: None,
+                tools: vec![ToolView {
+                    intent: read_intent,
+                    observation: Some(read),
+                    review_call_index: None,
+                }],
+                display: Vec::new(),
+            }],
+            compactions: Vec::new(),
+            goals: vec![GoalView {
+                id: goal_id,
+                objective: GOAL_OBJECTIVE.into(),
+                workspace_identity: (1, 2),
+                budget: GoalBudget::default(),
+                phase: GoalPhase::Research,
+                autonomous: false,
+                status: GoalStatus::Running,
+                run_ids: vec![run_id],
+                active_run: Some(run_id),
+                plan_contract: None,
+                success_criterion_satisfied: false,
+                awaiting_plan_contract: true,
+                active_ms: 0,
+                uncertain_active_ms: 0,
+                active_time_reservation: Some((run_id, 1000)),
+                provider_calls: 2,
+                unobserved_provider_calls: Vec::new(),
+                known_tokens: 0,
+                token_usage_unknown: false,
+                report: None,
+                started_sequence: 1,
+                finished_sequence: None,
+            }],
+        };
+        view.apply_committed(&EventEnvelope {
+            sequence: 2,
+            session_id,
+            run_id: Some(run_id),
+            agent_run_id: None,
+            event: Event::GoalPlanContractRecorded {
+                goal_id,
+                run_id,
+                contract,
+                active_ms: 0,
+                reserved_ms: 1000,
+            },
+            created_at_ms: 0,
+        })
+        .expect("contract records");
+        assert!(view.goals[0].success_criterion_satisfied);
+    }
 }

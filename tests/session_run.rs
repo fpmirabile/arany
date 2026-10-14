@@ -1512,6 +1512,8 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
                     objective: "pending objective".into(),
                     workspace_identity: (workspace_device, workspace_inode),
                     budget: arany::GoalBudget::default(),
+                    phase: arany::GoalPhase::Research,
+                    autonomous: false,
                 },
             )
             .await
@@ -2167,6 +2169,8 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                     objective: "Question".into(),
                     workspace_identity: identity,
                     budget: arany::GoalBudget::default(),
+                    phase: arany::GoalPhase::Research,
+                    autonomous: false,
                 },
                 Event::GoalRunLinked {
                     goal_id,

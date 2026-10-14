@@ -1,6 +1,7 @@
 use super::{
     Admission, Feedback, controls::ActiveSubmission, emit_outcome, load_confirmed_outcome, run,
 };
+use crate::cli::chatgpt;
 use arany::{
     AttachedTerminal, CompactionFailure, CompactionRecord, CompactionStatus, Composer,
     ComposerEdit, RunCancellation, RunOutcome, RunProgress, RunRequest, SessionView,
@@ -47,10 +48,103 @@ pub(super) fn validate_objective_inputs(
         .map_err(|error| error.to_string())
 }
 
+/// How an idle submission starts or continues its Goal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum GoalStart {
+    /// A plain message: one Run in a new Goal.
+    Plain,
+    /// `/goal OBJECTIVE`: a new Goal that the Engine keeps running until it stops.
+    Autonomous,
+    /// Continues the interrupted Goal of the Session with its pinned objective.
+    Resume,
+}
+
+pub(super) fn goal_request(
+    view: &SessionView,
+    start: GoalStart,
+) -> Result<arany::GoalRequest, String> {
+    if start == GoalStart::Resume {
+        return view
+            .interrupted_goal_id()
+            .map(|id| arany::GoalRequest::resume(id, true))
+            .ok_or_else(|| "No interrupted Goal is available to resume".into());
+    }
+    if let Some(id) = view.interrupted_goal_id() {
+        return Err(format!(
+            "Interrupted Goal {id} is waiting; use /goal resume to continue it"
+        ));
+    }
+    if let Some(goal) = view.active_goal() {
+        return Err(format!(
+            "Goal {} is still active and cannot accept another Run",
+            goal.id
+        ));
+    }
+    Ok(match start {
+        GoalStart::Autonomous => arany::GoalRequest::autonomous(
+            arany::GoalBudget::default(),
+            arany::GoalPhase::Implementation,
+        ),
+        _ => arany::GoalRequest::default(),
+    })
+}
+
+/// Checks an idle run before any Session or Goal state is created. Returns the notice to show.
+pub(super) fn preflight_idle_run(
+    admission: &Admission,
+    view: &SessionView,
+    start: GoalStart,
+    draft: &str,
+    has_images: bool,
+    linear: bool,
+) -> Result<(), String> {
+    let Some(profile) = view.defaults.provider.as_deref() else {
+        return Err("Use /setup to choose an account".into());
+    };
+    let Some(model) = view.defaults.model.as_deref() else {
+        return Err(
+            match view.defaults.account_id.filter(|_| profile == "chatgpt") {
+                Some(id) => match chatgpt::selected_reauthorization_target(id) {
+                    Ok(target) if target.plan_permission_missing => {
+                        chatgpt::AuthorizationError::PermissionMissing.to_string()
+                    }
+                    Err(error) => error.to_string(),
+                    _ => "Choose a model with /model before submitting".into(),
+                },
+                None => "Choose a model with /model before submitting".into(),
+            },
+        );
+    };
+    if start == GoalStart::Resume && has_images {
+        return Err("Error: /goal resume takes no image attachments; clear them first".into());
+    }
+    if has_images && profile.starts_with("custom:") {
+        return Err("Error: Image input is not admitted for custom Providers; clear these attachments first".into());
+    }
+    run::validate_local_selection(run::Selection {
+        workspace: &admission.workspace,
+        profile,
+        model,
+        effort: view.defaults.effort,
+        account_id: view.defaults.account_id,
+    })
+    .map_err(|error| format!("Error: {error}"))?;
+    validate_objective_inputs(admission, draft).map_err(|error| {
+        format!(
+            "Error: {error}; {}",
+            if linear {
+                "check the file inputs and enter a new line"
+            } else {
+                "check the file inputs; draft unchanged"
+            }
+        )
+    })
+}
+
 pub(super) async fn submit_objective(
     terminal: &mut AttachedTerminal,
-    admission: &mut Admission,
-    goal_resume: &mut Option<arany::GoalId>,
+    admission: &Admission,
+    goal: GoalStart,
     view: &mut SessionView,
     composer: &mut Composer,
     objective: String,
@@ -89,39 +183,7 @@ pub(super) async fn submit_objective(
         workspace: admission.workspace.clone(),
         include_paths,
         policy: view.defaults.policy,
-        goal: match (view.active_goal(), goal_resume.take()) {
-            (Some(goal), Some(id))
-                if goal.id == id && goal.status == arany::GoalStatus::Interrupted =>
-            {
-                arany::GoalRequest::resume(
-                    id,
-                    goal.phase.unwrap_or(arany::GoalPhase::Implementation),
-                    true,
-                )
-            }
-            (Some(goal), None) if goal.status == arany::GoalStatus::Interrupted => {
-                return Err(format!(
-                    "Interrupted Goal {} requires explicit confirmation with /resume-goal",
-                    goal.id
-                ));
-            }
-            (Some(goal), Some(_)) => {
-                return Err(format!(
-                    "Goal {} is no longer the interrupted Goal in this Session",
-                    goal.id
-                ));
-            }
-            (None, Some(_)) => {
-                return Err("the confirmed Goal is no longer active in this Session".into());
-            }
-            (Some(goal), None) => {
-                return Err(format!(
-                    "Goal {} is still active and cannot accept another Run",
-                    goal.id
-                ));
-            }
-            (None, None) => arany::GoalRequest::default(),
-        },
+        goal: goal_request(view, goal)?,
     };
     draw_active_snapshot(terminal, view, composer, false, false, None)
         .map_err(|error| error.to_string())?;
@@ -752,6 +814,74 @@ mod tests {
                     "Error: Compaction failed: {label}; usage unavailable; remote usage not capped"
                 )
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod goal_request_tests {
+    use super::*;
+
+    fn session_with_goal(autonomous: bool) -> SessionView {
+        let session_id = arany::SessionId::new();
+        let event = arany::Event::GoalStarted {
+            goal_id: arany::GoalId::new(),
+            objective: "Ship the parser".into(),
+            workspace_identity: (1, 2),
+            budget: arany::GoalBudget::default(),
+            phase: arany::GoalPhase::Implementation,
+            autonomous,
+        };
+        let started = arany::Event::SessionStarted {
+            title: "Goals".into(),
+            workspace_identity: (1, 2),
+        };
+        let events = [started, event]
+            .into_iter()
+            .zip(1..)
+            .map(|(event, sequence)| arany::EventEnvelope {
+                sequence,
+                session_id,
+                run_id: None,
+                agent_run_id: None,
+                event,
+                created_at_ms: 0,
+            })
+            .collect::<Vec<_>>();
+        SessionView::replay(session_id, &events)
+            .expect("valid Goal history")
+            .expect("Session")
+    }
+
+    #[test]
+    fn goal_starts_map_to_plain_autonomous_and_resume_requests() {
+        let mut view = session_with_goal(false);
+        view.goals.clear();
+        assert_eq!(
+            goal_request(&view, GoalStart::Plain),
+            Ok(arany::GoalRequest::default())
+        );
+        let autonomous = goal_request(&view, GoalStart::Autonomous).expect("autonomous start");
+        assert!(autonomous.autonomous);
+        assert_eq!(autonomous.id, None);
+        assert_eq!(
+            goal_request(&view, GoalStart::Resume),
+            Err("No interrupted Goal is available to resume".into())
+        );
+    }
+
+    #[test]
+    fn interrupted_goal_resumes_only_through_goal_resume() {
+        let mut view = session_with_goal(true);
+        view.goals[0].status = arany::GoalStatus::Interrupted;
+        let id = view.goals[0].id;
+        assert_eq!(
+            goal_request(&view, GoalStart::Resume),
+            Ok(arany::GoalRequest::resume(id, true))
+        );
+        for start in [GoalStart::Plain, GoalStart::Autonomous] {
+            let message = goal_request(&view, start).expect_err("new objective waits for resume");
+            assert!(message.contains("/goal resume"), "{message}");
         }
     }
 }

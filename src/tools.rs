@@ -146,23 +146,14 @@ impl ToolRuntime {
             }
             crate::session::GoalSuccessCriterion::WorkspaceFileDigest { path, .. }
             | crate::session::GoalSuccessCriterion::WorkspaceFileContent { path, .. } => {
-                self.config.workspace_paths == ["."]
-                    || self
-                        .config
-                        .workspace_paths
-                        .iter()
-                        .any(|root| Path::new(path).starts_with(root))
+                self.config.in_workspace_scope(path)
             }
         };
         criterion_allowed
-            && contract.paths.iter().all(|path| {
-                self.config.workspace_paths == ["."]
-                    || self
-                        .config
-                        .workspace_paths
-                        .iter()
-                        .any(|root| Path::new(path).starts_with(root))
-            })
+            && contract
+                .paths
+                .iter()
+                .all(|path| self.config.in_workspace_scope(path))
             && contract.commands.iter().all(|command| {
                 self.config
                     .commands

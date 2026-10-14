@@ -2,8 +2,8 @@ use crate::provider::{AgentPhase, ImageAttachment, Provider, ProviderRequest};
 use crate::session::input::{InputError, WorkspaceInputs};
 use crate::session::{
     AgentRole, AgentRunId, CollaborationPolicy, CompiledContext, Event, GoalBudget, GoalId,
-    GoalPlanContract, GoalReport, GoalStatus, MAX_USER_MESSAGE_BYTES as MAX_OBJECTIVE_BYTES,
-    RunConfig, RunId, RunView, SessionId,
+    GoalPhase, GoalPlanContract, GoalReport, GoalStatus,
+    MAX_USER_MESSAGE_BYTES as MAX_OBJECTIVE_BYTES, RunConfig, RunId, RunView, SessionId,
 };
 use crate::store::{SessionRunLock, StateRoot, Store, StoreError, WorkspaceRunLock};
 use crate::telemetry::{Telemetry, TraceOutcome};
@@ -38,7 +38,6 @@ pub fn validate_workspace_inputs(
 }
 
 const OUTPUT_TOKEN_CAP: u32 = 4096;
-const GOAL_RUN_ACTIVE_SEGMENT_MS: u64 = 300_000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -129,6 +128,7 @@ impl From<InputError> for EngineError {
 pub struct RunRequest {
     pub session_id: Option<SessionId>,
     pub title: Option<String>,
+    /// Empty only for an explicit Goal resume, which runs the Goal's pinned objective.
     pub objective: String,
     pub images: Vec<ImageAttachment>,
     pub workspace: PathBuf,
@@ -140,9 +140,12 @@ pub struct RunRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GoalRequest {
     pub id: Option<crate::session::GoalId>,
-    pub phase: crate::session::GoalPhase,
+    pub phase: Option<crate::session::GoalPhase>,
     pub budget: Option<crate::session::GoalBudget>,
+    /// Ignored for autonomous Goals, which finish only at a Goal stop condition.
     pub finish_after_run: bool,
+    /// Set only by `autonomous`; a resumed Goal keeps the flag it was started with.
+    pub autonomous: bool,
 }
 
 impl GoalRequest {
@@ -150,23 +153,33 @@ impl GoalRequest {
     pub fn new(budget: crate::session::GoalBudget, phase: crate::session::GoalPhase) -> Self {
         Self {
             id: None,
-            phase,
+            phase: Some(phase),
             budget: Some(budget),
             finish_after_run: true,
+            autonomous: false,
+        }
+    }
+
+    /// A new Goal that the Engine keeps running, Run after Run, until it is satisfied or stops.
+    #[must_use]
+    pub fn autonomous(
+        budget: crate::session::GoalBudget,
+        phase: crate::session::GoalPhase,
+    ) -> Self {
+        Self {
+            autonomous: true,
+            ..Self::new(budget, phase)
         }
     }
 
     #[must_use]
-    pub fn resume(
-        id: crate::session::GoalId,
-        phase: crate::session::GoalPhase,
-        finish_after_run: bool,
-    ) -> Self {
+    pub fn resume(id: crate::session::GoalId, finish_after_run: bool) -> Self {
         Self {
             id: Some(id),
-            phase,
+            phase: None,
             budget: None,
             finish_after_run,
+            autonomous: false,
         }
     }
 }
@@ -184,6 +197,22 @@ pub struct RunOutcome {
     pub session_id: SessionId,
     pub goal_id: crate::session::GoalId,
     pub run: RunView,
+}
+
+/// One admitted Run and the Goal state it left behind.
+struct RunTurn {
+    outcome: RunOutcome,
+    autonomous: bool,
+    goal_status: GoalStatus,
+}
+
+impl RunTurn {
+    /// An autonomous Goal continues after an unsatisfied Run that it did not finish.
+    fn continues(&self) -> bool {
+        self.autonomous
+            && self.goal_status == GoalStatus::Running
+            && self.outcome.run.status == crate::session::RunStatus::Finished
+    }
 }
 
 #[derive(Clone)]
@@ -240,7 +269,10 @@ struct ProviderSelection {
 
 struct GoalAdmission {
     id: GoalId,
+    objective: String,
+    phase: GoalPhase,
     budget: GoalBudget,
+    autonomous: bool,
     plan_contract: Option<GoalPlanContract>,
     is_new: bool,
     resume: bool,
@@ -275,9 +307,7 @@ fn goal_report(
         unresolved: Vec::new(),
     };
     let mut omitted_facts = false;
-    let uncertain_calls = goal.unobserved_provider_calls.len()
-        + usize::try_from(goal.uncertain_compaction_calls).unwrap_or(usize::MAX)
-        + usize::from(goal.compaction_call_reserved.is_some());
+    let uncertain_calls = goal.unobserved_provider_calls.len();
     if uncertain_calls > 0 {
         push_goal_report_item(
             &mut report,
@@ -353,17 +383,10 @@ fn goal_report(
             &mut omitted_facts,
         );
     }
-    let mut summary_bytes = raw_summary.len().min(1_800);
-    let mut summary_notice_added = summary_bytes < raw_summary.len();
-    if summary_notice_added {
-        push_goal_report_item(
-            &mut report,
-            GoalReportSection::Unresolved,
-            "The primary summary was shortened to fit the durable Goal report.",
-            &mut omitted_facts,
-        );
-    }
-    report.summary = truncate_utf8(raw_summary, summary_bytes).to_owned();
+    // The serialized-size loop below is the only truncation; it starts from the full summary.
+    let mut summary_bytes = raw_summary.len();
+    let mut summary_notice_added = false;
+    report.summary = raw_summary.to_owned();
     while !goal_report_fits_with_omission(&mut report) {
         summary_bytes = summary_bytes.saturating_sub(128);
         if summary_bytes < raw_summary.len() && !summary_notice_added {
@@ -625,7 +648,8 @@ mod goal_report_tests {
             objective: "Report bounded evidence".into(),
             workspace_identity: (1, 2),
             budget: GoalBudget::default(),
-            phase: Some(GoalPhase::Implementation),
+            phase: GoalPhase::Implementation,
+            autonomous: false,
             status: GoalStatus::Running,
             run_ids: vec![run_id],
             active_run: None,
@@ -634,12 +658,9 @@ mod goal_report_tests {
             awaiting_plan_contract: false,
             active_ms: 0,
             uncertain_active_ms: 0,
-            reserved_active_run: None,
-            reserved_active_ms: None,
+            active_time_reservation: None,
             provider_calls: 1,
             unobserved_provider_calls: Vec::new(),
-            compaction_call_reserved: None,
-            uncertain_compaction_calls: 0,
             known_tokens: 0,
             token_usage_unknown: true,
             report: None,
@@ -1046,6 +1067,8 @@ mod goal_workspace_lease_tests {
                 objective: "Keep the Workspace lease through Store acknowledgment".into(),
                 workspace_identity,
                 budget: GoalBudget::default(),
+                phase: GoalPhase::Implementation,
+                autonomous: false,
             },
         ));
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -1231,19 +1254,21 @@ fn goal_report_evidence(call: &crate::tools::ToolCall, output: &str) -> String {
     }
 }
 
+/// `continuation` admits the next Run of a live autonomous Goal, whose history projects as interrupted.
 fn resolve_goal_admission(
     request: &RunRequest,
     history: Option<&crate::session::SessionView>,
+    continuation: bool,
 ) -> Result<GoalAdmission, EngineError> {
     if let Some(id) = request.goal.id {
         let goal = history
             .and_then(|view| view.goals.last())
             .filter(|goal| goal.id == id)
             .ok_or(EngineError::GoalUnavailable)?;
-        if !goal
-            .run_ids
-            .iter()
-            .any(|run_id| history.is_some_and(|view| view.runs.iter().any(|run| run.id == *run_id)))
+        if !request.objective.trim().is_empty()
+            && !goal.run_ids.iter().any(|run_id| {
+                history.is_some_and(|view| view.runs.iter().any(|run| run.id == *run_id))
+            })
             && goal.objective != request.objective
         {
             return Err(EngineError::GoalUnavailable);
@@ -1256,7 +1281,7 @@ fn resolve_goal_admission(
         }
         let resume = match goal.status {
             GoalStatus::Running => false,
-            GoalStatus::Interrupted => true,
+            GoalStatus::Interrupted => !continuation,
             GoalStatus::Completed | GoalStatus::Failed | GoalStatus::Cancelled => {
                 return Err(EngineError::GoalUnavailable);
             }
@@ -1264,7 +1289,8 @@ fn resolve_goal_admission(
         let active_ms = goal
             .active_ms
             .checked_add(if goal.status == GoalStatus::Interrupted {
-                goal.reserved_active_ms.unwrap_or_default()
+                goal.active_time_reservation
+                    .map_or(0, |(_, reserved_ms)| reserved_ms)
             } else {
                 0
             })
@@ -1276,7 +1302,10 @@ fn resolve_goal_admission(
         });
         Ok(GoalAdmission {
             id,
+            objective: goal.objective.clone(),
+            phase: goal.phase,
             budget: goal.budget.clone(),
+            autonomous: goal.autonomous,
             plan_contract: goal.plan_contract.clone(),
             is_new: false,
             resume,
@@ -1291,13 +1320,12 @@ fn resolve_goal_admission(
                 .filter_map(|tool| tool.observation.clone())
                 .collect(),
             token_usage_unknown: goal.token_usage_unknown
-                || goal
-                    .plan_contract
-                    .as_ref()
-                    .and_then(|plan| plan.budget.max_tokens)
-                    .or(goal.budget.max_tokens)
+                || (goal
+                    .budget
+                    .effective(goal.plan_contract.as_ref())
+                    .max_tokens
                     .is_some()
-                    && !goal.unobserved_provider_calls.is_empty(),
+                    && !goal.unobserved_provider_calls.is_empty()),
             active_ms,
             runs_used: u8::try_from(
                 goal.run_ids
@@ -1315,11 +1343,14 @@ fn resolve_goal_admission(
         }
         Ok(GoalAdmission {
             id: GoalId::new(),
+            objective: request.objective.clone(),
+            phase: request.goal.phase.ok_or(EngineError::InvalidRequest)?,
             budget: request
                 .goal
                 .budget
                 .clone()
                 .ok_or(EngineError::InvalidRequest)?,
+            autonomous: request.goal.autonomous,
             plan_contract: None,
             is_new: true,
             resume: false,
@@ -1544,12 +1575,47 @@ impl<P: Provider + 'static> Engine<P> {
             .inspect_err(crate::diagnostics::engine_failure)
     }
 
+    /// Runs one admitted Run, then keeps an autonomous Goal iterating on its pinned objective.
     async fn run_inner(
         &mut self,
         request: RunRequest,
         cancellation: RunCancellation,
         progress: Option<RunProgress>,
     ) -> Result<RunOutcome, EngineError> {
+        let workspace = request.workspace.clone();
+        let include_paths = request.include_paths.clone();
+        let policy = request.policy;
+        let mut turn = self
+            .run_turn(request, cancellation.clone(), progress.clone(), false)
+            .await?;
+        while turn.continues() {
+            if cancellation.is_cancelled() {
+                return Err(EngineError::CancelledBeforeStart);
+            }
+            let next = RunRequest {
+                session_id: Some(turn.outcome.session_id),
+                title: None,
+                objective: String::new(),
+                images: Vec::new(),
+                workspace: workspace.clone(),
+                include_paths: include_paths.clone(),
+                policy,
+                goal: GoalRequest::resume(turn.outcome.goal_id, false),
+            };
+            turn = self
+                .run_turn(next, cancellation.clone(), progress.clone(), true)
+                .await?;
+        }
+        Ok(turn.outcome)
+    }
+
+    async fn run_turn(
+        &mut self,
+        request: RunRequest,
+        cancellation: RunCancellation,
+        progress: Option<RunProgress>,
+        continuation: bool,
+    ) -> Result<RunTurn, EngineError> {
         if cancellation.is_cancelled() {
             return Err(EngineError::CancelledBeforeStart);
         }
@@ -1584,26 +1650,17 @@ impl<P: Provider + 'static> Engine<P> {
         if let Some(view) = &history {
             ensure_session_workspace(view, workspace_identity.0, workspace_identity.1)?;
         }
-        let goal = resolve_goal_admission(&request, history.as_ref())?;
-        let call_limit = goal
-            .plan_contract
-            .as_ref()
-            .map_or(goal.budget.max_provider_calls, |plan| {
-                plan.budget.max_provider_calls
-            });
-        let run_limit = goal
-            .plan_contract
-            .as_ref()
-            .map_or(goal.budget.max_runs, |plan| plan.budget.max_runs);
-        let active_limit = goal
-            .plan_contract
-            .as_ref()
-            .map_or(goal.budget.max_active_ms, |plan| plan.budget.max_active_ms);
-        let token_limit = goal
-            .plan_contract
-            .as_ref()
-            .and_then(|plan| plan.budget.max_tokens)
-            .or(goal.budget.max_tokens);
+        let goal = resolve_goal_admission(&request, history.as_ref(), continuation)?;
+        let objective = if request.objective.trim().is_empty() && request.goal.id.is_some() {
+            goal.objective.clone()
+        } else {
+            request.objective.clone()
+        };
+        let budget = goal.budget.effective(goal.plan_contract.as_ref());
+        let call_limit = budget.max_provider_calls;
+        let run_limit = budget.max_runs;
+        let active_limit = budget.max_active_ms;
+        let token_limit = budget.max_tokens;
         let calls_remaining = call_limit.saturating_sub(goal.calls_used);
         let runs_remaining = run_limit.saturating_sub(goal.runs_used);
         let active_remaining_ms = active_limit.saturating_sub(goal.active_ms);
@@ -1630,11 +1687,10 @@ impl<P: Provider + 'static> Engine<P> {
         self.store
             .admit_operation(
                 session_id,
-                event_slots + usize::from(request.session_id.is_none()),
+                event_slots.saturating_add(usize::from(request.session_id.is_none())),
             )
             .await?;
-        let provisional_workspace_lock = if request.goal.phase
-            == crate::session::GoalPhase::Implementation
+        let provisional_workspace_lock = if goal.phase == crate::session::GoalPhase::Implementation
             && self.tools.as_ref().is_some_and(|(config, _)| config.write)
         {
             self.acquire_goal_workspace(goal.id, workspace_identity)?
@@ -1689,7 +1745,7 @@ impl<P: Provider + 'static> Engine<P> {
         let context_started = SystemTime::now();
         let context = CompiledContext::compile(
             history.as_ref(),
-            &request.objective,
+            &objective,
             &request.images,
             &inputs,
             request.policy,
@@ -1789,9 +1845,11 @@ impl<P: Provider + 'static> Engine<P> {
                     publisher.as_ref(),
                     Event::GoalStarted {
                         goal_id: goal.id,
-                        objective: request.objective.clone(),
+                        objective: objective.clone(),
                         workspace_identity,
                         budget: goal.budget.clone(),
+                        phase: goal.phase,
+                        autonomous: goal.autonomous,
                     },
                 )
                 .await?;
@@ -1822,7 +1880,7 @@ impl<P: Provider + 'static> Engine<P> {
             Event::GoalRunLinked {
                 goal_id: goal.id,
                 run_id,
-                phase: request.goal.phase,
+                phase: goal.phase,
             },
         )
         .await?;
@@ -1840,7 +1898,7 @@ impl<P: Provider + 'static> Engine<P> {
             session_id,
             Event::MessageAccepted {
                 run_id,
-                text: request.objective.clone(),
+                text: objective.clone(),
                 images: request.images,
             },
         )
@@ -1853,7 +1911,7 @@ impl<P: Provider + 'static> Engine<P> {
             Event::RunStarted { run_id, config },
         )
         .await?;
-        let active_segment_ms = active_remaining_ms.min(GOAL_RUN_ACTIVE_SEGMENT_MS);
+        let active_segment_ms = active_remaining_ms.min(crate::session::MAX_GOAL_RUN_ACTIVE_MS);
         let active_reserved_sequence = append_observed(
             &self.store,
             publisher.as_ref(),
@@ -1908,7 +1966,7 @@ impl<P: Provider + 'static> Engine<P> {
             collaboration: request.policy,
             model: selection.model,
             instructions: inputs.instructions.map(|(_, snapshot)| snapshot.content),
-            objective: request.objective,
+            objective,
             images: context.images,
             includes: inputs
                 .includes
@@ -1917,11 +1975,7 @@ impl<P: Provider + 'static> Engine<P> {
                 .collect(),
             history: context.history,
             context_summary: context.summary,
-            goal_budget: Some(
-                goal.plan_contract
-                    .as_ref()
-                    .map_or_else(|| goal.budget.clone(), |plan| plan.budget.clone()),
-            ),
+            goal_budget: Some(budget.clone()),
             goal_plan_contract: goal.plan_contract.clone(),
             child_results: Vec::new(),
             max_output_tokens: OUTPUT_TOKEN_CAP,
@@ -1929,8 +1983,7 @@ impl<P: Provider + 'static> Engine<P> {
         };
         let goal_run_budget = Arc::new(GoalRunBudget::new(
             &goal,
-            call_limit,
-            token_limit,
+            &budget,
             active_segment_ms,
             active_started,
         ));
@@ -1946,7 +1999,7 @@ impl<P: Provider + 'static> Engine<P> {
             RunControls {
                 policy: request.policy,
                 concurrency: provider_concurrency,
-                goal_phase: request.goal.phase,
+                goal_phase: goal.phase,
                 cancellation,
                 tools: tools.as_ref(),
                 approvals: self.tool_approvals.as_ref(),
@@ -1971,7 +2024,9 @@ impl<P: Provider + 'static> Engine<P> {
             .clone();
         let reserved_active_ms = view
             .goal(goal.id)
-            .and_then(|goal| goal.reserved_active_ms)
+            .and_then(|goal| goal.active_time_reservation)
+            .filter(|(reserved_run, _)| *reserved_run == run_id)
+            .map(|(_, reserved_ms)| reserved_ms)
             .ok_or(EngineError::InvalidHistory)?;
         let active_ms = goal_run_budget.elapsed_active_ms().min(reserved_active_ms);
         append_observed(
@@ -1992,50 +2047,40 @@ impl<P: Provider + 'static> Engine<P> {
             .await?
             .ok_or(EngineError::InvalidHistory)?;
         let goal_view = view.goal(goal.id).ok_or(EngineError::InvalidHistory)?;
+        // An autonomous Goal ends only at its own stop conditions; a cancelled Run leaves it open to resume.
+        let terminal = match run.status {
+            crate::session::RunStatus::Finished if goal.autonomous => {
+                (goal_view.plan_contract.is_none() || goal_view.success_criterion_satisfied)
+                    .then_some(GoalStatus::Completed)
+            }
+            crate::session::RunStatus::Finished => request
+                .goal
+                .finish_after_run
+                .then_some(GoalStatus::Completed),
+            crate::session::RunStatus::Failed => Some(GoalStatus::Failed),
+            crate::session::RunStatus::Cancelled => {
+                (!goal.autonomous).then_some(GoalStatus::Cancelled)
+            }
+            _ => None,
+        };
         let mut goal_status = GoalStatus::Running;
-        match run.status {
-            crate::session::RunStatus::Finished if request.goal.finish_after_run => {
-                let report = goal_report(&view, &run, goal_view);
-                goal_status = GoalStatus::Completed;
-                append_observed(
-                    &self.store,
-                    None,
-                    Some(&trace),
-                    session_id,
-                    Event::GoalFinished {
-                        goal_id: goal.id,
-                        status: GoalStatus::Completed,
-                        active_ms: goal_view.active_ms,
-                        report,
-                    },
-                )
-                .await?;
-                self.release_goal_workspace(goal.id, workspace_identity);
-            }
-            crate::session::RunStatus::Failed | crate::session::RunStatus::Cancelled => {
-                let status = if run.status == crate::session::RunStatus::Failed {
-                    GoalStatus::Failed
-                } else {
-                    GoalStatus::Cancelled
-                };
-                goal_status = status;
-                let report = goal_report(&view, &run, goal_view);
-                append_observed(
-                    &self.store,
-                    None,
-                    Some(&trace),
-                    session_id,
-                    Event::GoalFinished {
-                        goal_id: goal.id,
-                        status,
-                        active_ms: goal_view.active_ms,
-                        report,
-                    },
-                )
-                .await?;
-                self.release_goal_workspace(goal.id, workspace_identity);
-            }
-            _ => {}
+        if let Some(status) = terminal {
+            let report = goal_report(&view, &run, goal_view);
+            append_observed(
+                &self.store,
+                None,
+                Some(&trace),
+                session_id,
+                Event::GoalFinished {
+                    goal_id: goal.id,
+                    status,
+                    active_ms: goal_view.active_ms,
+                    report,
+                },
+            )
+            .await?;
+            self.release_goal_workspace(goal.id, workspace_identity);
+            goal_status = status;
         }
         let trace_outcome = match run.status {
             crate::session::RunStatus::Finished => TraceOutcome::Finished,
@@ -2052,18 +2097,24 @@ impl<P: Provider + 'static> Engine<P> {
             goal_view.active_ms,
             goal_view.uncertain_active_ms,
         );
-        Ok(RunOutcome {
-            session_id,
-            goal_id: goal.id,
-            run,
+        Ok(RunTurn {
+            outcome: RunOutcome {
+                session_id,
+                goal_id: goal.id,
+                run,
+            },
+            autonomous: goal.autonomous,
+            goal_status,
         })
     }
 
     fn validate_request(&self, request: &RunRequest) -> Result<(), EngineError> {
-        if request.objective.trim().is_empty() && request.images.is_empty()
+        if (request.objective.trim().is_empty()
+            && request.images.is_empty()
+            && request.goal.id.is_none())
             || request.objective.len() > MAX_OBJECTIVE_BYTES
             || !crate::provider::valid_image_collection(&request.images)
-            || request.session_id.is_some() && request.title.is_some()
+            || (request.session_id.is_some() && request.title.is_some())
             || request
                 .title
                 .as_ref()
@@ -2074,7 +2125,8 @@ impl<P: Provider + 'static> Engine<P> {
                 (Some(_), None) => false,
                 (None, Some(budget)) => budget.validate().is_err(),
             }
-            || request.goal.id.is_some() && request.session_id.is_none()
+            || (request.goal.id.is_some() && request.session_id.is_none())
+            || (request.goal.autonomous && request.goal.id.is_some())
         {
             return Err(EngineError::InvalidRequest);
         }

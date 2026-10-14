@@ -505,6 +505,49 @@ struct EventLine {
     created_at_ms: i64,
 }
 
+/// Read-only status of the Session's current or last Goal, shown by `/goal`.
+pub fn goal_status(view: &SessionView) -> String {
+    let Some(goal) = view.goals.last() else {
+        return "No Goal in this Session; send a message or use /goal <objective>".into();
+    };
+    let budget = goal.effective_budget();
+    let mut text = format!(
+        "Goal {} · {} · {} · {} · Runs {}/{} · calls {}/{} · tokens {}/{}{} · active {}/{}",
+        goal.id.to_string().chars().take(8).collect::<String>(),
+        format!("{:?}", goal.status).to_ascii_lowercase(),
+        format!("{:?}", goal.phase).to_ascii_lowercase(),
+        if goal.autonomous {
+            "autonomous"
+        } else {
+            "single Run"
+        },
+        goal.run_ids.len(),
+        budget.max_runs,
+        goal.provider_calls,
+        budget.max_provider_calls,
+        goal.known_tokens,
+        budget
+            .max_tokens
+            .map_or_else(|| "unlimited".to_owned(), |limit| limit.to_string()),
+        if goal.token_usage_unknown {
+            " (some unknown)"
+        } else {
+            ""
+        },
+        goal_clock(goal.active_ms),
+        goal_clock(budget.max_active_ms),
+    );
+    if goal.status == crate::session::GoalStatus::Interrupted {
+        text.push_str(" · Use /goal resume to continue");
+    }
+    text
+}
+
+fn goal_clock(ms: u64) -> String {
+    let seconds = ms / 1000;
+    format!("{}m{:02}s", seconds / 60, seconds % 60)
+}
+
 pub fn render_session(view: &SessionView, events: &[EventEnvelope], output: Output) -> String {
     let mut rendered = String::new();
     if output == Output::Text {
@@ -609,6 +652,8 @@ mod exec_jsonl_tests {
             objective: objective.into(),
             workspace_identity: (1, 2),
             budget: GoalBudget::default(),
+            phase: GoalPhase::Implementation,
+            autonomous: false,
         }
     }
 
@@ -912,5 +957,83 @@ mod tests {
         );
         assert!(!lines.join("\n").contains('\u{1b}'));
         assert_eq!(user_message_lines("你好", 5), ["You:", "  你…"]);
+    }
+}
+
+#[cfg(test)]
+mod goal_status_tests {
+    use super::*;
+    use crate::session::{GoalBudget, GoalId, GoalPhase, GoalStatus};
+
+    fn session_with_goal(autonomous: bool) -> SessionView {
+        let session_id = crate::session::SessionId::new();
+        let events = [
+            Event::SessionStarted {
+                title: "Goals".into(),
+                workspace_identity: (1, 2),
+            },
+            Event::GoalStarted {
+                goal_id: GoalId::new(),
+                objective: "Ship the parser".into(),
+                workspace_identity: (1, 2),
+                budget: GoalBudget::default(),
+                phase: GoalPhase::Implementation,
+                autonomous,
+            },
+        ]
+        .into_iter()
+        .zip(1..)
+        .map(|(event, sequence)| EventEnvelope {
+            sequence,
+            session_id,
+            run_id: None,
+            agent_run_id: None,
+            event,
+            created_at_ms: 0,
+        })
+        .collect::<Vec<_>>();
+        SessionView::replay(session_id, &events)
+            .expect("valid Goal history")
+            .expect("Session")
+    }
+
+    #[test]
+    fn goal_status_reports_limits_and_the_resume_hint_only_when_interrupted() {
+        // An unfinished Goal reopens as Interrupted, so the running case is set explicitly.
+        let mut view = session_with_goal(true);
+        view.goals[0].status = GoalStatus::Running;
+        let running = goal_status(&view);
+        assert!(running.starts_with("Goal "), "{running}");
+        assert!(
+            running.contains(" · running · implementation · autonomous · Runs 0/16 · calls 0/64 · tokens 0/unlimited · active 0m00s/30m00s"),
+            "{running}"
+        );
+        assert!(!running.contains("/goal resume"), "{running}");
+
+        view.goals[0].status = GoalStatus::Interrupted;
+        view.goals[0].token_usage_unknown = true;
+        let interrupted = goal_status(&view);
+        assert!(interrupted.contains(" · interrupted · "), "{interrupted}");
+        assert!(
+            interrupted.contains("tokens 0/unlimited (some unknown)"),
+            "{interrupted}"
+        );
+        assert!(
+            interrupted.ends_with(" · Use /goal resume to continue"),
+            "{interrupted}"
+        );
+
+        let single = goal_status(&session_with_goal(false));
+        assert!(single.contains(" · single Run · "), "{single}");
+    }
+
+    #[test]
+    fn goal_status_without_a_goal_is_a_short_notice() {
+        let mut view = session_with_goal(false);
+        view.goals.clear();
+        assert_eq!(
+            goal_status(&view),
+            "No Goal in this Session; send a message or use /goal <objective>"
+        );
     }
 }

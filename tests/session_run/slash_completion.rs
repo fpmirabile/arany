@@ -374,6 +374,8 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
                     objective: "Prior accepted objective".into(),
                     workspace_identity,
                     budget: arany::GoalBudget::default(),
+                    phase: arany::GoalPhase::Implementation,
+                    autonomous: false,
                 },
             )
             .await

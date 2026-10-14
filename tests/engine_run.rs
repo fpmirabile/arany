@@ -42,6 +42,7 @@ struct ScriptedProvider {
     capacity: u8,
     responses: Mutex<VecDeque<Result<ProviderOutcome, ProviderError>>>,
     cancel_at_completion: Option<(AgentPhase, RunCancellation)>,
+    before_call: Option<(usize, Box<dyn Fn() + Send + Sync>)>,
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
     compact_responses: Mutex<VecDeque<Result<CompactionResponse, ProviderError>>>,
     compact_requests: Arc<Mutex<Vec<CompactionRequest>>>,
@@ -59,10 +60,17 @@ impl ScriptedProvider {
             capacity: 3,
             responses: Mutex::new(responses.into_iter().map(Ok).collect()),
             cancel_at_completion: None,
+            before_call: None,
             requests: Arc::new(Mutex::new(Vec::new())),
             compact_responses: Mutex::new(VecDeque::new()),
             compact_requests: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Runs `hook` when the zero-based provider call `index` is invoked, before its response is returned.
+    fn with_before_call(mut self, index: usize, hook: impl Fn() + Send + Sync + 'static) -> Self {
+        self.before_call = Some((index, Box::new(hook)));
+        self
     }
 
     fn with_compactions(
@@ -135,7 +143,16 @@ impl Provider for ScriptedProvider {
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         let phase = request.phase;
-        self.requests.lock().expect("requests lock").push(request);
+        let index = {
+            let mut requests = self.requests.lock().expect("requests lock");
+            requests.push(request);
+            requests.len() - 1
+        };
+        if let Some((target, hook)) = &self.before_call
+            && *target == index
+        {
+            hook();
+        }
         let outcome = self
             .responses
             .lock()
@@ -2142,6 +2159,8 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
                     objective: "Unfinished question".into(),
                     workspace_identity,
                     budget: arany::GoalBudget::default(),
+                    phase: arany::GoalPhase::Implementation,
+                    autonomous: false,
                 },
             )
             .await
@@ -2190,7 +2209,7 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
         let mut resumed = request(&workspace, "Finished question");
         resumed.session_id = Some(session_id);
         resumed.title = None;
-        resumed.goal = arany::GoalRequest::resume(goal_id, arany::GoalPhase::Implementation, true);
+        resumed.goal = arany::GoalRequest::resume(goal_id, true);
         engine.run(resumed).await.expect("completed later Run");
         engine
             .compact_session(session_id, workspace.clone())
@@ -5403,7 +5422,7 @@ fn preview_checkpoint_survives_abrupt_process_death() {
         next.include_paths.clear();
         next.session_id = Some(id);
         next.title = None;
-        next.goal = arany::GoalRequest::resume(goal_id, arany::GoalPhase::Implementation, true);
+        next.goal = arany::GoalRequest::resume(goal_id, true);
         assert_eq!(
             engine.run(next).await.unwrap().run.status,
             RunStatus::Finished

@@ -314,19 +314,13 @@ pub(super) fn decode_compaction(
 pub(super) fn run_body(request: &ProviderRequest, effort: Effort) -> Value {
     let input = run_input(request);
     let schema = crate::provider::restrict_outcome_schema(outcome_schema(), request);
-    let instructions = format!(
-        "{} {} {}",
+    let instructions = crate::provider::run_instructions(
         if request.tools.is_some() {
             TOOL_INSTRUCTIONS
         } else {
             READ_ONLY_INSTRUCTIONS
         },
-        if request.tools.is_some() && request.goal_plan_contract.is_none() {
-            "Before using a Tool other than bounded Workspace List/Read/Search, an admitted Skill read, or configured bounded MCP catalog listing, include a model-authored plan_contract with a bounded mission, exact path/command/Skill resource/MCP tool scope, typed success_criterion, and budget no larger than goal_budget. Set plan_contract to null when a prelude call has no contract. MCP catalog listing is the only process-backed prelude; every MCP tool call and command requires a contract, even when an MCP catalog labels a tool read-only. A supplied contract is always validated and journaled before dispatch. success_criterion must be tool_call_succeeded with the exact command/write/edit/mkdir/Skill/MCP call, workspace_file_digest with an exact path and SHA-256, or workspace_file_content with exact path and desired content (at most 8 KiB); generic successful Read is never enough. Pure read-only inspection can finish without a plan. Arany rejects missing, invalid or later widened scope."
-        } else {
-            ""
-        },
-        crate::provider::COLLABORATION_INSTRUCTIONS
+        request,
     );
     let mut body = message_body(
         &request.model,

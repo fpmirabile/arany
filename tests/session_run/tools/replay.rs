@@ -109,6 +109,8 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             objective: "Past work".into(),
             workspace_identity: (1, 2),
             budget: arany::GoalBudget::default(),
+            phase: arany::GoalPhase::Implementation,
+            autonomous: false,
         },
         Event::GoalRunLinked {
             goal_id: goal,
@@ -212,8 +214,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                     Event::GoalRunLinked { run_id, .. }
                     | Event::GoalActiveTimeReserved { run_id, .. }
                     | Event::GoalActiveTimeSettled { run_id, .. }
-                    | Event::GoalPlanContractRecorded { run_id, .. }
-                    | Event::GoalCompactionCallReserved { run_id, .. } => (Some(*run_id), None),
+                    | Event::GoalPlanContractRecorded { run_id, .. } => (Some(*run_id), None),
                     Event::MessageAccepted { run_id, .. }
                     | Event::RunStarted { run_id, .. }
                     | Event::MessageCommitted { run_id, .. }

@@ -288,14 +288,7 @@ impl ToolCall {
     }
 
     pub(crate) fn is_goal_plan_prelude(&self) -> bool {
-        matches!(
-            self,
-            Self::List { .. }
-                | Self::Read { .. }
-                | Self::Search { .. }
-                | Self::Skill { .. }
-                | Self::McpList { .. }
-        )
+        GOAL_PLAN_PRELUDE_OPERATIONS.contains(&self.label())
     }
 
     pub(crate) fn label(&self) -> &'static str {
@@ -314,6 +307,9 @@ impl ToolCall {
         }
     }
 }
+
+/// Operations allowed before a Goal plan contract; each name is the wire `operation` and `label()`.
+const GOAL_PLAN_PRELUDE_OPERATIONS: [&str; 5] = ["list", "read", "search", "skill", "mcp_list"];
 
 pub(crate) fn valid_relative(value: &str, root: bool) -> bool {
     if value.is_empty() || value == "." {
@@ -582,14 +578,6 @@ impl ToolContext {
         json!({"catalog":catalog,"observations":observations})
     }
 
-    #[cfg(test)]
-    pub(crate) fn outcome_branch(&self) -> Value {
-        self.outcome_branch_with_plan(false, None)
-            .into_iter()
-            .next()
-            .unwrap_or(Value::Null)
-    }
-
     pub(crate) fn outcome_branch_with_plan(
         &self,
         require_plan_contract: bool,
@@ -623,8 +611,9 @@ impl ToolContext {
                 call["properties"][field]["enum"] = json!(names);
                 true
             });
+        let success_call = goal_success_call_schema(&branch);
         let Some(schema) = require_plan_contract
-            .then(|| plan_contract_schema(budget))
+            .then(|| plan_contract_schema(budget, success_call.as_ref()))
             .flatten()
         else {
             return vec![branch];
@@ -636,10 +625,10 @@ impl ToolContext {
         let mut prelude = Vec::new();
         let mut planned = Vec::new();
         for call in calls {
-            if matches!(
-                call["properties"]["operation"]["enum"][0].as_str(),
-                Some("list" | "read" | "search" | "skill" | "mcp_list")
-            ) {
+            if call["properties"]["operation"]["enum"][0]
+                .as_str()
+                .is_some_and(|operation| GOAL_PLAN_PRELUDE_OPERATIONS.contains(&operation))
+            {
                 prelude.push(call);
             } else {
                 planned.push(call);
@@ -677,13 +666,47 @@ impl ToolContext {
     }
 }
 
-fn plan_contract_schema(budget: Option<&crate::session::GoalBudget>) -> Option<Value> {
+fn plan_contract_schema(
+    budget: Option<&crate::session::GoalBudget>,
+    call_schema: Option<&Value>,
+) -> Option<Value> {
     let budget = budget?;
     let calls = budget.max_provider_calls;
     let active_ms = budget.max_active_ms;
     let runs = budget.max_runs;
     let max_tokens = budget.max_tokens.unwrap_or(u64::MAX);
-    let call_schema = goal_success_call_schema();
+    let mut criteria = Vec::with_capacity(3);
+    if let Some(call_schema) = call_schema {
+        criteria.push(json!({
+            "type":"object",
+            "properties":{
+                "kind":{"type":"string","enum":["tool_call_succeeded"]},
+                "call":call_schema.clone()
+            },
+            "required":["kind","call"],
+            "additionalProperties":false
+        }));
+    }
+    criteria.push(json!({
+        "type":"object",
+        "properties":{
+            "kind":{"type":"string","enum":["workspace_file_digest"]},
+            "path":{"type":"string","minLength":1,"maxLength":512},
+            "sha256":{"type":"string","minLength":64,"maxLength":64}
+        },
+        "required":["kind","path","sha256"],
+        "additionalProperties":false
+    }));
+    criteria.push(json!({
+        "type":"object",
+        "properties":{
+            "kind":{"type":"string","enum":["workspace_file_content"]},
+            "path":{"type":"string","minLength":1,"maxLength":512},
+            "content":{"type":"string","maxLength":8192}
+        },
+        "required":["kind","path","content"],
+        "additionalProperties":false
+    }));
     Some(json!({
         "type": "object",
         "properties": {
@@ -708,37 +731,7 @@ fn plan_contract_schema(budget: Option<&crate::session::GoalBudget>) -> Option<V
                 "required":["server","tool"],
                 "additionalProperties":false
             }},
-            "success_criterion": {"anyOf":[
-                {
-                    "type":"object",
-                    "properties":{
-                        "kind":{"type":"string","enum":["tool_call_succeeded"]},
-                        "call":call_schema
-                    },
-                    "required":["kind","call"],
-                    "additionalProperties":false
-                },
-                {
-                    "type":"object",
-                    "properties":{
-                        "kind":{"type":"string","enum":["workspace_file_digest"]},
-                        "path":{"type":"string","minLength":1,"maxLength":512},
-                        "sha256":{"type":"string","minLength":64,"maxLength":64}
-                    },
-                    "required":["kind","path","sha256"],
-                    "additionalProperties":false
-                },
-                {
-                    "type":"object",
-                    "properties":{
-                        "kind":{"type":"string","enum":["workspace_file_content"]},
-                        "path":{"type":"string","minLength":1,"maxLength":512},
-                        "content":{"type":"string","maxLength":8192}
-                    },
-                    "required":["kind","path","content"],
-                    "additionalProperties":false
-                }
-            ]},
+            "success_criterion": {"anyOf": criteria},
             "budget": {
                 "type":"object",
                 "properties": {
@@ -756,18 +749,20 @@ fn plan_contract_schema(budget: Option<&crate::session::GoalBudget>) -> Option<V
     }))
 }
 
-fn goal_success_call_schema() -> Value {
-    let mut schema = outcome_branch()["properties"]["call"].clone();
+/// Calls that can satisfy a Goal success criterion, taken from the catalog-restricted branch.
+/// `None` when the catalog admits none, because JSON Schema `anyOf` must not be empty.
+fn goal_success_call_schema(branch: &Value) -> Option<Value> {
+    let mut schema = branch["properties"]["call"].clone();
     schema["anyOf"]
         .as_array_mut()
         .expect("closed Tool call schema")
-        .retain(|branch| {
+        .retain(|call| {
             matches!(
-                branch["properties"]["operation"]["enum"][0].as_str(),
+                call["properties"]["operation"]["enum"][0].as_str(),
                 Some("mkdir" | "write" | "edit" | "command" | "skill" | "mcp_call")
             )
         });
-    schema
+    (!schema["anyOf"].as_array().is_some_and(Vec::is_empty)).then_some(schema)
 }
 
 pub(crate) fn outcome_branch() -> Value {

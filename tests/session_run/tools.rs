@@ -770,8 +770,7 @@ async fn unfinished_implementation_goal_holds_workspace_lease_across_runs() {
     let mut resumed = proposal_request(&workspace);
     resumed.session_id = Some(initial.session_id);
     resumed.title = None;
-    resumed.goal =
-        arany::GoalRequest::resume(initial.goal_id, arany::GoalPhase::Implementation, true);
+    resumed.goal = arany::GoalRequest::resume(initial.goal_id, true);
     let terminal = first_engine.run(resumed).await.unwrap();
     assert_eq!(terminal.run.status, RunStatus::Finished);
     assert_eq!(first_requests.lock().unwrap().len(), 2);

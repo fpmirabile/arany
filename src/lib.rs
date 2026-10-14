@@ -28,8 +28,8 @@ pub use engine::{
     list_sessions, rename_session, resume_session, set_session_defaults, validate_workspace_inputs,
 };
 pub use presentation::{
-    Output, escape_terminal, render_cache_update_feedback, render_exec, render_run_feedback,
-    render_session,
+    Output, escape_terminal, goal_status, render_cache_update_feedback, render_exec,
+    render_run_feedback, render_session,
 };
 pub use provider::{
     AgentPhase, AnthropicProvider, ChatGptAdmission, ChatGptProvenance, ChatGptProvider,

@@ -1,8 +1,8 @@
 use super::{CommandOutput, OutputArg, chatgpt, native_run_key_from_env};
 use arany::{
-    AnthropicProvider, CollaborationPolicy, CustomProvider, Effort, Engine, OpenAiProvider,
-    Provider, RunRequest, RunStatus, SessionId, StateRoot, Store, Telemetry,
-    native_protection_supported, render_exec, resolve_native_effort_for_run,
+    AnthropicProvider, CollaborationPolicy, CustomProvider, Effort, Engine, GoalBudget, GoalPhase,
+    GoalRequest, OpenAiProvider, Provider, RunRequest, RunStatus, SessionId, StateRoot, Store,
+    Telemetry, native_protection_supported, render_exec, resolve_native_effort_for_run,
     validate_native_model_id,
 };
 use clap::{Args, ValueEnum};
@@ -79,6 +79,12 @@ pub(crate) struct ExecArgs {
         help = "Explicitly resume an interrupted Goal in --session-id"
     )]
     pub resume_goal: Option<String>,
+    #[arg(
+        long,
+        conflicts_with_all = ["prompt", "resume_goal"],
+        help = "Run an autonomous Goal on this objective until it is satisfied or stops"
+    )]
+    pub goal: Option<String>,
     #[arg(long, value_enum, default_value_t = OutputArg::Text)]
     pub output: OutputArg,
     #[arg(long, value_enum, default_value_t = CollaborationArg::Auto)]
@@ -89,22 +95,21 @@ pub(crate) struct ExecArgs {
     pub include_paths: Vec<PathBuf>,
     #[arg(long, help = "Enable guarded tools from private tools.json")]
     pub tools: bool,
-    pub prompt: String,
+    /// Objective of a new Run; omitted only with --resume-goal, which continues the pinned objective.
+    pub prompt: Option<String>,
 }
 
 struct Admission {
     state_dir: PathBuf,
     workspace: PathBuf,
     session_id: Option<SessionId>,
-    resume_goal: Option<arany::GoalId>,
+    objective: String,
+    goal: GoalRequest,
     policy: CollaborationPolicy,
 }
 
 impl ExecArgs {
     fn admit(&self) -> Result<Admission, &'static str> {
-        if self.prompt.trim().is_empty() || self.prompt.len() > 8 * 1024 {
-            return Err("invalid objective");
-        }
         if matches!(
             self.provider,
             ProviderArg::Openai | ProviderArg::Anthropic | ProviderArg::Chatgpt
@@ -144,22 +149,35 @@ impl ExecArgs {
             .as_deref()
             .map(SessionId::from_str)
             .transpose()?;
-        if self.resume_goal.is_some() && session_id.is_none() {
-            return Err("--resume-goal requires --session-id");
-        }
         let resume_goal = self
             .resume_goal
             .as_deref()
             .map(arany::GoalId::from_str)
             .transpose()
             .map_err(|_| "invalid Goal ID")?;
+        let resumes_without_text =
+            self.goal.is_none() && self.prompt.is_none() && resume_goal.is_some();
+        let (objective, goal) = match (&self.goal, &self.prompt, resume_goal) {
+            (Some(objective), None, None) => (
+                objective.clone(),
+                GoalRequest::autonomous(GoalBudget::default(), GoalPhase::Implementation),
+            ),
+            (None, Some(prompt), None) => (prompt.clone(), GoalRequest::default()),
+            (None, Some(prompt), Some(id)) => (prompt.clone(), GoalRequest::resume(id, true)),
+            (None, None, Some(id)) => (String::new(), GoalRequest::resume(id, true)),
+            _ => return Err("pass exactly one of a prompt, --goal, or --resume-goal"),
+        };
+        if !resumes_without_text && (objective.trim().is_empty() || objective.len() > 8 * 1024) {
+            return Err("invalid objective");
+        }
         let (workspace, state_dir) =
             super::admit_workspace(self.workspace.clone(), self.state_dir.clone())?;
         Ok(Admission {
             state_dir,
             workspace,
             session_id,
-            resume_goal,
+            objective,
+            goal,
             policy,
         })
     }
@@ -236,21 +254,16 @@ async fn run_with_provider<P: Provider + 'static>(
             )
             .map_err(|error| error.to_string())?;
     }
-    let goal = admission
-        .resume_goal
-        .map_or_else(arany::GoalRequest::default, |id| {
-            arany::GoalRequest::resume(id, arany::GoalPhase::Implementation, true)
-        });
     let result = engine
         .run(RunRequest {
             session_id: admission.session_id,
             title: None,
-            objective: args.prompt,
+            objective: admission.objective,
             images: Vec::new(),
             workspace: admission.workspace,
             include_paths: args.include_paths,
             policy: admission.policy,
-            goal,
+            goal: admission.goal,
         })
         .await;
     engine
@@ -385,28 +398,112 @@ mod tests {
             effort: None,
             session_id: None,
             resume_goal: None,
+            goal: None,
             output: OutputArg::Text,
             collaboration: CollaborationArg::Single,
             max_active_children: None,
             include_paths: Vec::new(),
             tools: false,
-            prompt: prompt.into(),
+            prompt: Some(prompt.into()),
         }
     }
 
     #[test]
     fn interrupted_goal_resume_requires_an_explicit_session() {
-        let temp = tempfile::tempdir().expect("temporary directory");
-        let mut args = args(
-            temp.path().join("state"),
-            temp.path().join("workspace"),
+        #[derive(clap::Parser)]
+        struct Probe {
+            #[command(flatten)]
+            exec: ExecArgs,
+        }
+        let goal = arany::GoalId::new().to_string();
+        let error = <Probe as clap::Parser>::try_parse_from([
+            "probe",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.4",
+            "--resume-goal",
+            goal.as_str(),
             "resume",
-        );
-        args.resume_goal = Some(arany::GoalId::new().to_string());
+        ])
+        .err()
+        .expect("--resume-goal without --session-id is a usage error");
         assert_eq!(
-            args.admit().err(),
-            Some("--resume-goal requires --session-id")
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
         );
+    }
+
+    #[test]
+    fn exec_goal_and_prompt_less_resume_admit_their_objective_shapes() {
+        #[derive(clap::Parser)]
+        struct Probe {
+            #[command(flatten)]
+            exec: ExecArgs,
+        }
+        let temp = tempfile::tempdir().expect("private test root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let state = temp.path().join("state");
+        let (state_arg, workspace_arg) = (
+            state.to_str().expect("UTF-8 state path"),
+            workspace.to_str().expect("UTF-8 workspace path"),
+        );
+        let session = SessionId::default().to_string();
+        let goal_id = arany::GoalId::new().to_string();
+        let parse = |tail: &[&str]| {
+            let mut argv = vec![
+                "probe",
+                "--provider",
+                "openai",
+                "--model",
+                "gpt-5.4",
+                "--state-dir",
+                state_arg,
+                "--workspace",
+                workspace_arg,
+            ];
+            argv.extend_from_slice(tail);
+            <Probe as clap::Parser>::try_parse_from(argv).map(|probe| probe.exec)
+        };
+
+        let admission = parse(&["--goal", "Ship the change"])
+            .expect("--goal needs no positional prompt")
+            .admit()
+            .expect("autonomous objective");
+        assert_eq!(admission.objective, "Ship the change");
+        assert!(admission.goal.autonomous);
+
+        let admission = parse(&["--session-id", &session, "--resume-goal", &goal_id])
+            .expect("resume parses without a prompt")
+            .admit()
+            .expect("prompt-less resume");
+        assert!(admission.objective.is_empty());
+        assert_eq!(
+            admission.goal.id,
+            Some(arany::GoalId::from_str(&goal_id).expect("Goal ID"))
+        );
+
+        assert_eq!(
+            parse(&["--goal", " "]).expect("parses").admit().err(),
+            Some("invalid objective")
+        );
+        for tail in [
+            vec!["--goal", "Ship the change", "Also a prompt"],
+            vec![
+                "--goal",
+                "Ship the change",
+                "--session-id",
+                &session,
+                "--resume-goal",
+                &goal_id,
+            ],
+        ] {
+            assert_eq!(
+                parse(&tail).err().expect("conflicting shapes").kind(),
+                clap::error::ErrorKind::ArgumentConflict
+            );
+        }
     }
 
     fn scripted(
