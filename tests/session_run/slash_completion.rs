@@ -2337,6 +2337,22 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
         rename_at,
         b"Notice: Error: Title is empty or too long; use a shorter title\r\nInput:\r\n",
     );
+    let state_mode = std::fs::metadata(&state).expect("State").permissions();
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o000))
+        .expect("make State unavailable mid-Session");
+    let unavailable_at = transcript.len();
+    input
+        .write_all(format!("/resume {saved_id}\r").as_bytes())
+        .expect("resume with unavailable State");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        unavailable_at,
+        b"Notice: Error: state directory unavailable or unsafe\r\nInput:\r\n",
+    );
+    std::fs::set_permissions(&state, state_mode).expect("restore State");
     let corrected_at = transcript.len();
     input
         .write_all(b"/rename Corrected title\r")

@@ -10,6 +10,7 @@ use std::str::FromStr;
 
 const CACHE_USAGE: &str = "Usage: /cache clear [all]";
 const CACHE_CLEAR_FAILED: &str = "Error: private build cache could not be cleared";
+const STATE_UNAVAILABLE: &str = "state directory unavailable or unsafe";
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -316,8 +317,9 @@ pub(super) async fn select_model(
         return Ok("Error: invalid native model".into());
     }
     if let Some(name) = profile.strip_prefix("custom:") {
-        let root = StateRoot::open_existing(&admission.state_dir)
-            .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+        let Ok(root) = StateRoot::open_existing(&admission.state_dir) else {
+            return Ok(format!("Error: {STATE_UNAVAILABLE}"));
+        };
         let custom = match CustomProfile::load_named(&root, name) {
             Ok(custom) => custom,
             Err(error) => return Ok(format!("Error: {error}")),
@@ -477,8 +479,9 @@ pub(super) async fn handle_command(
             let Some(id) = argument.and_then(|value| SessionId::from_str(value).ok()) else {
                 return Ok("Usage: /resume SESSION_ID".into());
             };
-            let root = StateRoot::open_existing(&admission.state_dir)
-                .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+            let Ok(root) = StateRoot::open_existing(&admission.state_dir) else {
+                return Ok(format!("Error: {STATE_UNAVAILABLE}"));
+            };
             match resume_session(root, admission.workspace.clone(), id).await {
                 Ok(resumed) => {
                     let resumed =
@@ -513,11 +516,19 @@ pub(super) async fn handle_command(
                 },
                 None => *session_id,
             };
-            let root = StateRoot::open_existing(&admission.state_dir)
-                .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+            let Ok(root) = StateRoot::open_existing(&admission.state_dir) else {
+                return Ok(format!("Error: {STATE_UNAVAILABLE}"));
+            };
             match fork_session(root, admission.workspace.clone(), source_id, None).await {
                 Ok(id) => {
-                    let forked = load_view(&admission.state_dir, id).await?;
+                    let forked = match load_view(&admission.state_dir, id).await {
+                        Ok(forked) => forked,
+                        Err(error) => {
+                            return Ok(format!(
+                                "Error: Forked Session {id}, but it could not be opened: {error}"
+                            ));
+                        }
+                    };
                     let forked = match super::prepare_resume(
                         admission,
                         forked,
@@ -552,8 +563,9 @@ pub(super) async fn handle_command(
                 view.title_is_explicit = true;
                 return Ok(format!("Renamed conversation: {title}"));
             }
-            let root = StateRoot::open_existing(&admission.state_dir)
-                .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+            let Ok(root) = StateRoot::open_existing(&admission.state_dir) else {
+                return Ok(format!("Error: {STATE_UNAVAILABLE}"));
+            };
             match rename_session(
                 root,
                 admission.workspace.clone(),
@@ -562,10 +574,15 @@ pub(super) async fn handle_command(
             )
             .await
             {
-                Ok(()) => {
-                    *view = load_view(&admission.state_dir, *session_id).await?;
-                    format!("Renamed Session: {title}")
-                }
+                Ok(()) => match load_view(&admission.state_dir, *session_id).await {
+                    Ok(renamed) => {
+                        *view = renamed;
+                        format!("Renamed Session: {title}")
+                    }
+                    Err(error) => {
+                        format!("Error: Renamed Session, but it could not be reloaded: {error}")
+                    }
+                },
                 Err(error) => format!("Error: {error}"),
             }
         }
