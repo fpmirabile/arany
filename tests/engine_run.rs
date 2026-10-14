@@ -457,10 +457,15 @@ fn observe_process(
             break status;
         }
         assert!(std::time::Instant::now() < deadline, "process deadline");
+        let stdout_bytes = stdout.metadata().expect("stdout size").len();
+        let stderr_bytes = stderr.metadata().expect("stderr size").len();
         assert!(
-            stdout.metadata().expect("stdout size").len() <= stdout_limit as u64
-                && stderr.metadata().expect("stderr size").len() <= 256 * 1024,
-            "process output bound"
+            stdout_bytes <= stdout_limit as u64,
+            "stdout output bound: {stdout_bytes} bytes exceeds {stdout_limit}"
+        );
+        assert!(
+            stderr_bytes <= 256 * 1024,
+            "stderr output bound: {stderr_bytes} bytes exceeds 262144"
         );
         std::thread::yield_now();
     };
@@ -483,7 +488,11 @@ fn observe_process(
         file.take(limit as u64 + 1)
             .read_to_end(bytes)
             .expect("bounded observation");
-        assert!(bytes.len() <= limit, "process observation bound");
+        assert!(
+            bytes.len() <= limit,
+            "process observation bound: {} bytes exceeds {limit}",
+            bytes.len()
+        );
     }
     output
 }
@@ -857,13 +866,21 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         assert_eq!(view.runs[2].objective, "", "image-only objective is not invented text");
         assert_eq!(view.compactions[0].record, compacted);
         for output in ["text", "jsonl"] {
+            let expected = arany::render_session(
+                &view,
+                &events,
+                if output == "text" {
+                    arany::Output::Text
+                } else {
+                    arany::Output::Jsonl
+                },
+            );
             let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_arany"));
             command.env_clear().current_dir(temp.path()).args(["show", "--output", output, "--state-dir"])
                 .arg(&state_path).arg(first.session_id.to_string());
-            let observed = observe_process(&mut command, temp.path(), 512 * 1024);
+            let observed = observe_process(&mut command, temp.path(), expected.len());
             assert!(observed.status.success(), "image show {output} exit");
             assert!(observed.stderr.is_empty(), "image show {output} error channel");
-            let expected = arany::render_session(&view, &events, if output == "text" { arany::Output::Text } else { arany::Output::Jsonl });
             assert!(observed.stdout == expected.as_bytes(), "image show {output} bytes differ");
             if output == "text" {
                 let text = String::from_utf8(observed.stdout).unwrap();
