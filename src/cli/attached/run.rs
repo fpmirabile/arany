@@ -364,7 +364,8 @@ async fn compact_with_provider<P: Provider + 'static>(
     Ok(record)
 }
 
-#[cfg(all(test, unix))]
+// Linux release builds have no tests here: each one is debug-only or macOS-only.
+#[cfg(all(test, unix, any(debug_assertions, target_os = "macos")))]
 mod tests {
     use super::*;
     #[cfg(target_os = "macos")]
