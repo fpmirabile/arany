@@ -129,6 +129,29 @@ fn commit_marker_fault() -> io::Result<()> {
     Ok(())
 }
 
+// flock release can lag behind a drop while another test thread spawns a child.
+#[cfg(test)]
+fn retry_busy<T>(mut attempt: impl FnMut() -> Result<T, StoreError>) -> Result<T, StoreError> {
+    for _ in 1..50 {
+        match attempt() {
+            Err(StoreError::BuildCacheBusy) => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            result => return result,
+        }
+    }
+    attempt()
+}
+
+/// Acquires a cache lease that a prior lease or session in the same test has released.
+#[cfg(test)]
+pub(crate) fn begin_released(
+    state: &StateRoot,
+    identity: BuildCacheIdentity,
+) -> Result<BuildCacheLease, StoreError> {
+    retry_busy(|| state.begin_build_cache(identity.clone()))
+}
+
 pub(crate) struct BuildCacheLease {
     dir: Dir,
     _identity_lock: File,
@@ -1952,26 +1975,6 @@ mod tests {
     use super::*;
     use cap_std::ambient_authority;
     use std::os::unix::fs::DirBuilderExt;
-
-    // flock release can lag behind a drop while another test thread spawns a child.
-    fn retry_busy<T>(mut attempt: impl FnMut() -> Result<T, StoreError>) -> Result<T, StoreError> {
-        for _ in 1..50 {
-            match attempt() {
-                Err(StoreError::BuildCacheBusy) => {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                result => return result,
-            }
-        }
-        attempt()
-    }
-
-    fn begin_released(
-        state: &StateRoot,
-        identity: BuildCacheIdentity,
-    ) -> Result<BuildCacheLease, StoreError> {
-        retry_busy(|| state.begin_build_cache(identity.clone()))
-    }
 
     fn private_dir(path: &Path) {
         std::fs::DirBuilder::new()

@@ -1364,7 +1364,7 @@ mod tests {
         identity: &BuildCacheIdentity,
     ) -> BuildCacheSession {
         BuildCacheSession {
-            lease: state.begin_build_cache(identity.clone()).unwrap(),
+            lease: crate::store::begin_released(state, identity.clone()).unwrap(),
             transfer: BuildCacheTransfer {
                 identity: identity.clone(),
                 exclusions: Vec::new(),
@@ -1441,7 +1441,7 @@ mod tests {
         state: &crate::store::StateRoot,
         identity: &BuildCacheIdentity,
     ) -> Vec<u8> {
-        let lease = state.begin_build_cache(identity.clone()).unwrap();
+        let lease = crate::store::begin_released(state, identity.clone()).unwrap();
         let (mut file, length) = lease.archive().unwrap().unwrap();
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).unwrap();
@@ -1489,7 +1489,7 @@ mod tests {
         let candidate = captured_archive(temp.path(), &identity, b"candidate");
         publish_archive(&state, &identity, &prior);
 
-        let lease = state.begin_build_cache(identity.clone()).unwrap();
+        let lease = crate::store::begin_released(&state, identity.clone()).unwrap();
         let mut stream = b"CACHE_CANDIDATE\n".to_vec();
         stream.extend((candidate.len() as u64).to_le_bytes());
         stream.extend(&candidate);
@@ -1560,7 +1560,7 @@ mod tests {
         assert_eq!(observation.cache_update, CacheUpdate::Published);
         drop(session);
 
-        let lease = state.begin_build_cache(identity.clone()).unwrap();
+        let lease = crate::store::begin_released(&state, identity.clone()).unwrap();
         // Occupies the candidate name, so the create_new staging step fails.
         drop(lease.candidate_writer().unwrap());
 
@@ -1577,7 +1577,7 @@ mod tests {
         assert_eq!(trailer, "CACHE_DONE\n");
         drop(lease);
 
-        let lease = state.begin_build_cache(identity.clone()).unwrap();
+        let lease = crate::store::begin_released(&state, identity.clone()).unwrap();
         let (mut file, length) = lease.archive().unwrap().unwrap();
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).unwrap();
