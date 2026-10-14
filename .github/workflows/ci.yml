@@ -7,6 +7,17 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
+      lane:
+        description: Select one diagnostic lane; automatic runs always use the full matrix.
+        type: choice
+        required: true
+        default: full
+        options:
+          - full
+          - linux-debug
+          - linux-release
+          - macos-debug
+          - macos-release
       linux_arm64:
         description: Run native Linux ARM64 debug and release tests
         required: false
@@ -31,6 +42,71 @@ env:
   RUSTFLAGS: --cfg arany_ci
 
 jobs:
+  select-lanes:
+    name: Select CI lanes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    outputs:
+      run-lint: ${{ steps.select.outputs.run-lint }}
+      run-linux: ${{ steps.select.outputs.run-linux }}
+      linux-profiles: ${{ steps.select.outputs.linux-profiles }}
+      run-macos: ${{ steps.select.outputs.run-macos }}
+      macos-profiles: ${{ steps.select.outputs.macos-profiles }}
+    steps:
+      - id: select
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SELECTED_LANE: ${{ inputs.lane }}
+        run: |
+          case "$EVENT_NAME:$SELECTED_LANE" in
+            pull_request:*|push:*|workflow_dispatch:full)
+              run_lint=true
+              run_linux=true
+              linux_profiles='["debug","release"]'
+              run_macos=true
+              macos_profiles='["debug","release"]'
+              ;;
+            workflow_dispatch:linux-debug)
+              run_lint=false
+              run_linux=true
+              linux_profiles='["debug"]'
+              run_macos=false
+              macos_profiles='[]'
+              ;;
+            workflow_dispatch:linux-release)
+              run_lint=false
+              run_linux=true
+              linux_profiles='["release"]'
+              run_macos=false
+              macos_profiles='[]'
+              ;;
+            workflow_dispatch:macos-debug)
+              run_lint=false
+              run_linux=false
+              linux_profiles='[]'
+              run_macos=true
+              macos_profiles='["debug"]'
+              ;;
+            workflow_dispatch:macos-release)
+              run_lint=false
+              run_linux=false
+              linux_profiles='[]'
+              run_macos=true
+              macos_profiles='["release"]'
+              ;;
+            *)
+              echo "Unsupported CI lane selection" >&2
+              exit 2
+              ;;
+          esac
+          {
+            printf 'run-lint=%s\n' "$run_lint"
+            printf 'run-linux=%s\n' "$run_linux"
+            printf 'linux-profiles=%s\n' "$linux_profiles"
+            printf 'run-macos=%s\n' "$run_macos"
+            printf 'macos-profiles=%s\n' "$macos_profiles"
+          } >> "$GITHUB_OUTPUT"
+
   changes:
     name: Detect Markdown-only PR
     if: github.event_name == 'pull_request'
@@ -59,8 +135,8 @@ jobs:
 
   format-and-clippy:
     name: Linux Format and Clippy
-    needs: changes
-    if: ${{ !cancelled() }}
+    needs: [changes, select-lanes]
+    if: ${{ !cancelled() && needs.select-lanes.outputs.run-lint == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -82,14 +158,14 @@ jobs:
 
   tests:
     name: Linux Tests (${{ matrix.profile }})
-    needs: changes
-    if: ${{ !cancelled() }}
+    needs: [changes, select-lanes]
+    if: ${{ !cancelled() && needs.select-lanes.outputs.run-linux == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        profile: [debug, release]
+        profile: ${{ fromJSON(needs.select-lanes.outputs.linux-profiles) }}
     steps:
       - if: needs.changes.outputs.markdown-only != 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -234,8 +310,8 @@ jobs:
 
   macos-tests:
     name: macOS tests (${{ matrix.profile }})
-    needs: changes
-    if: ${{ !cancelled() }}
+    needs: [changes, select-lanes]
+    if: ${{ !cancelled() && needs.select-lanes.outputs.run-macos == 'true' }}
     runs-on: macos-15
     timeout-minutes: 30
     env:
@@ -244,7 +320,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        profile: [debug, release]
+        profile: ${{ fromJSON(needs.select-lanes.outputs.macos-profiles) }}
     steps:
       - if: needs.changes.outputs.markdown-only != 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -260,7 +336,7 @@ jobs:
       - if: needs.changes.outputs.markdown-only != 'true'
         run: cargo fetch --locked
       - name: Clippy on macOS
-        if: matrix.profile == 'debug' && needs.changes.outputs.markdown-only != 'true'
+        if: matrix.profile == 'debug' && needs.select-lanes.outputs.run-lint == 'true' && needs.changes.outputs.markdown-only != 'true'
         run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
       - if: needs.changes.outputs.markdown-only != 'true'
         run: cargo test --workspace --locked --offline ${{ matrix.profile == 'release' && '--release' || '' }}
