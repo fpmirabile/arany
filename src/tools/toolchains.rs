@@ -83,7 +83,6 @@ impl RuntimeKind {
         self.cache_layout().map(|(host, _)| host)
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn sandbox_cache_path(self) -> Option<&'static str> {
         self.cache_layout().map(|(_, sandbox)| sandbox)
     }

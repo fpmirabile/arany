@@ -30,7 +30,7 @@ Malformed/non-object/duplicate-key MCP arguments and selected-credential reflect
 
 ## Admission, persistence and recovery
 
-Persist only the current internal format: SQLite schema 4, Event payload version 2 and compaction compiler version 3. Required nullable fields are explicit, including Run configuration and Provider provenance. Reading unsupported stored formats or missing fields rejects without conversion, automatic deletion or an optimistic projection. Attached startup offers the [explicit history reset](./terminal.md#setup-and-account-choices); it discards history rather than converting or admitting an unsupported format.
+Persist only the current internal format: SQLite schema 4, Event payload version 3 and compaction compiler version 3. Required nullable fields are explicit, including Run configuration and Provider provenance. Reading unsupported stored formats or missing fields rejects without conversion, automatic deletion or an optimistic projection. Attached startup offers the [explicit history reset](./terminal.md#setup-and-account-choices); it discards history rather than converting or admitting an unsupported format.
 
 Admit the selected Provider and complete bounded request before Workspace disclosure. Pin the Workspace, instructions/includes, policy, model/effort and caps for the Run. Commit accepted Message, Run and primary identity before inference; commit each observed call before its terminal AgentRun disposition. Replay requires an observed delegation before child spawn and an observed successful call before successful Agent completion. Known call usage survives an interrupted journal prefix.
 

@@ -22,6 +22,7 @@ pub enum InteractiveCommand {
     Provider,
     Model,
     Permissions,
+    Cache,
     Exit,
 }
 
@@ -46,6 +47,7 @@ impl InteractiveCommand {
             }
             Self::Setup
             | Self::Settings
+            | Self::Cache
             | Self::New
             | Self::Resume
             | Self::Fork
@@ -98,7 +100,7 @@ const fn spec(
     }
 }
 
-const COMMANDS: [CommandSpec; 17] = [
+const COMMANDS: [CommandSpec; 18] = [
     spec("help", InteractiveCommand::Help, None, &[]),
     spec("setup", InteractiveCommand::Setup, None, &[]),
     spec("paste", InteractiveCommand::Paste, None, &[]),
@@ -133,6 +135,12 @@ const COMMANDS: [CommandSpec; 17] = [
         &[],
     ),
     spec("permissions", InteractiveCommand::Permissions, None, &[]),
+    spec(
+        "cache",
+        InteractiveCommand::Cache,
+        Some("clear [all]"),
+        &["clear"],
+    ),
     spec("settings", InteractiveCommand::Settings, None, &[]),
     spec("transcript", InteractiveCommand::Transcript, None, &[]),
     spec("exit", InteractiveCommand::Exit, None, &[]),
@@ -167,6 +175,7 @@ pub(super) fn help_entry(index: usize) -> Option<HelpEntry> {
         InteractiveCommand::Provider => "Choose Provider",
         InteractiveCommand::Model => "Choose model",
         InteractiveCommand::Permissions => "Folder trust and approval settings",
+        InteractiveCommand::Cache => "Clear private build caches",
         InteractiveCommand::Exit => "Exit Session",
     };
     Some(HelpEntry {
@@ -358,6 +367,15 @@ pub(super) fn completion_suffix(draft: &str, choices: &CommandChoices) -> Option
     if let Some(argument) = argument {
         let spec = COMMANDS.iter().find(|spec| spec.name == name)?;
         let argument = argument.trim_start_matches(' ');
+        if spec.command == InteractiveCommand::Cache {
+            return match argument {
+                "c" => Some("lear".to_owned()),
+                "clear" => Some(" ".to_owned()),
+                "clear " => Some("all".to_owned()),
+                "clear a" => Some("ll".to_owned()),
+                _ => None,
+            };
+        }
         if spec.command == InteractiveCommand::Model
             && let Some((model, effort)) = argument.split_once(' ')
         {
@@ -606,7 +624,12 @@ mod tests {
 
     #[test]
     fn closed_registry_aliases_completion_and_lifecycle_are_exact() {
-        assert_eq!(COMMANDS.len(), 17);
+        assert_eq!(COMMANDS.len(), 18);
+        assert_eq!(completion_suffix("/c", &CommandChoices::default()), None);
+        assert_eq!(
+            completion_suffix("/ca", &CommandChoices::default()),
+            Some("che ".into())
+        );
         for spec in COMMANDS {
             assert_eq!(
                 parse_submission(&format!("/{}", spec.name)),
@@ -668,6 +691,28 @@ mod tests {
             );
         }
         assert_eq!(parse_submission("/clear"), parse_submission("/new"));
+        assert_eq!(
+            parse_submission("/cache clear"),
+            Ok(Submission::Command {
+                command: InteractiveCommand::Cache,
+                argument: Some("clear"),
+            })
+        );
+        assert_eq!(
+            parse_submission("/cache clear all"),
+            Ok(Submission::Command {
+                command: InteractiveCommand::Cache,
+                argument: Some("clear all"),
+            })
+        );
+        assert_eq!(
+            completion_suffix("/cache c", &CommandChoices::default()),
+            Some("lear".into())
+        );
+        assert_eq!(
+            completion_suffix("/cache clear ", &CommandChoices::default()),
+            Some("all".into())
+        );
         assert_eq!(
             parse_submission("/settings tabs"),
             Err(CommandParseError::UnexpectedArgument {

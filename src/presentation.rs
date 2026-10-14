@@ -77,7 +77,61 @@ pub(crate) fn tool_summary(tool: &crate::session::ToolView) -> String {
         Some(ToolDisposition::Cancelled) => "cancelled",
         Some(ToolDisposition::Uncertain) => "uncertain",
     };
-    format!("Tool · {} · {state}", safe_truncate(&operation, 160))
+    let cache_update = tool
+        .observation
+        .as_ref()
+        .and_then(|observation| cache_update_label(observation.cache_update));
+    match cache_update {
+        Some(cache_update) => format!(
+            "Tool · {} · {state} · {cache_update}",
+            safe_truncate(&operation, 160)
+        ),
+        None => format!("Tool · {} · {state}", safe_truncate(&operation, 160)),
+    }
+}
+
+fn cache_update_label(update: crate::tools::CacheUpdate) -> Option<&'static str> {
+    use crate::tools::CacheUpdate;
+    match update {
+        CacheUpdate::NotApplicable => None,
+        CacheUpdate::NotAttempted => Some("cache not attempted"),
+        CacheUpdate::Published => Some("cache saved"),
+        CacheUpdate::Rejected => Some("cache not saved (limit)"),
+        CacheUpdate::Failed => Some("cache update failed"),
+        CacheUpdate::Uncertain => Some("cache outcome uncertain"),
+    }
+}
+
+pub fn render_cache_update_feedback(run: &RunView) -> Option<&'static str> {
+    use crate::tools::CacheUpdate;
+    let updates = run.tools.iter().filter_map(|tool| {
+        tool.observation
+            .as_ref()
+            .map(|observation| observation.cache_update)
+    });
+    let mut rejected = false;
+    let mut failed = false;
+    for update in updates {
+        match update {
+            CacheUpdate::Uncertain => {
+                return Some(
+                    "Build cache outcome is uncertain; inspect Session history before retrying.",
+                );
+            }
+            CacheUpdate::Rejected => rejected = true,
+            CacheUpdate::Failed => failed = true,
+            CacheUpdate::NotApplicable | CacheUpdate::NotAttempted | CacheUpdate::Published => {}
+        }
+    }
+    if failed {
+        Some("A build cache update failed; inspect Tool history for details.")
+    } else if rejected {
+        Some(
+            "A build cache update was rejected by its size or quota limit; the previous cache was kept.",
+        )
+    } else {
+        None
+    }
 }
 
 pub(crate) fn tool_detail_text(tool: &crate::session::ToolView) -> String {
@@ -298,6 +352,7 @@ pub(crate) fn workspace_permission_lines(path: &std::path::Path) -> Vec<String> 
 
 pub fn render_run_feedback(run: &RunView) -> Option<String> {
     match run.status {
+        RunStatus::Finished => render_cache_update_feedback(run).map(str::to_owned),
         RunStatus::Failed => {
             let reason = run
                 .agents
@@ -321,6 +376,14 @@ pub fn render_run_feedback(run: &RunView) -> Option<String> {
             }
             if run.tools.last().is_some_and(|tool| {
                 tool.observation.as_ref().is_some_and(|observation| {
+                    observation.disposition == crate::tools::ToolDisposition::Succeeded
+                        && observation.cache_update == crate::tools::CacheUpdate::Uncertain
+                })
+            }) {
+                return Some("Error: The command succeeded but its build cache update is uncertain; the Run stopped without retrying. No answer was committed.".into());
+            }
+            if run.tools.last().is_some_and(|tool| {
+                tool.observation.as_ref().is_some_and(|observation| {
                     observation.disposition == crate::tools::ToolDisposition::Denied
                         && observation.guard.is_none()
                 })
@@ -333,7 +396,7 @@ pub fn render_run_feedback(run: &RunView) -> Option<String> {
                         observation.disposition,
                         crate::tools::ToolDisposition::Uncertain
                             | crate::tools::ToolDisposition::Cancelled
-                    )
+                    ) || observation.cache_update == crate::tools::CacheUpdate::Uncertain
                 })
             {
                 return Some("Error: Tool completion is uncertain. Files or effects may have changed; inspect them before retrying. No answer was committed.".into());

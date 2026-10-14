@@ -8,7 +8,7 @@ use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::process::{Signal, kill_process};
 use std::{
     io::{Read, Write},
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -131,11 +131,57 @@ pub(super) fn saved_conversation(
         })
 }
 
+fn seed_empty_build_cache(
+    state: &std::path::Path,
+    workspace: &std::path::Path,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let workspace = workspace.canonicalize().expect("canonical Workspace");
+    let metadata = std::fs::metadata(&workspace).expect("Workspace metadata");
+    let path = workspace.to_str().expect("UTF-8 fixture Workspace");
+    let mut identity = path.as_bytes().to_vec();
+    identity.extend_from_slice(&metadata.dev().to_le_bytes());
+    identity.extend_from_slice(&metadata.ino().to_le_bytes());
+    let token = crate::hash(&identity);
+    let cache = state.join("build-cache");
+    if !cache.exists() {
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&cache)
+            .expect("private cache directory");
+    }
+    let archive = cache.join(format!("cache-{token}.arc"));
+    let lock = cache.join(format!("identity-{token}.lock"));
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"ARANYCACHE\0\x01");
+    bytes.extend_from_slice(&(path.len() as u16).to_le_bytes());
+    bytes.extend_from_slice(&metadata.dev().to_le_bytes());
+    bytes.extend_from_slice(&metadata.ino().to_le_bytes());
+    bytes.extend_from_slice(path.as_bytes());
+    bytes.extend_from_slice(&[0; 12]);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&archive)
+        .expect("cache archive");
+    file.write_all(&bytes).expect("write empty cache archive");
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&lock)
+        .expect("cache identity lock");
+    (archive, lock)
+}
+
 #[test]
 fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
     let temp = tempfile::tempdir().expect("private test root");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
+    let other_workspace = temp.path().join("other-workspace");
+    std::fs::create_dir(&other_workspace).expect("other Workspace");
     std::fs::write(workspace.join("skills-lock.json"), b"unparsed lock data").unwrap();
     let state = temp.path().join("state");
     let saved_id = saved_conversation(&state, &workspace, SessionDefaults::default());
@@ -407,6 +453,105 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
             b"Notice: Provider: anthropic\r\nInput:\r\n",
         );
     }
+    let (current_cache, current_lock) = seed_empty_build_cache(&state, &workspace);
+    let (other_cache, _) = seed_empty_build_cache(&state, &other_workspace);
+    let held_cache = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(current_lock)
+        .expect("current cache identity lock");
+    rustix::fs::flock(
+        &held_cache,
+        rustix::fs::FlockOperation::NonBlockingLockExclusive,
+    )
+    .expect("hold current cache lease");
+    let clear_result = StateRoot::open_existing(&state)
+        .expect("State")
+        .clear_workspace_build_cache(&workspace);
+    let clear_category = match &clear_result {
+        Ok(()) => "cleared".to_owned(),
+        Err(arany::StoreError::BuildCacheBusy) => "BuildCacheBusy".to_owned(),
+        Err(arany::StoreError::StateNotPrivate) => "StateNotPrivate".to_owned(),
+        Err(arany::StoreError::InvalidStateDirectory) => "InvalidStateDirectory".to_owned(),
+        Err(arany::StoreError::StorageFull) => "StorageFull".to_owned(),
+        Err(arany::StoreError::Io(error)) => format!("Io({:?})", error.kind()),
+        Err(_) => "other".to_owned(),
+    };
+    assert!(
+        matches!(clear_result, Err(arany::StoreError::BuildCacheBusy)),
+        "Store clear result category: {clear_category}"
+    );
+    let usage_at = transcript.len();
+    input
+        .write_all(b"/cache clear now\r")
+        .expect("malformed cache clear");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        usage_at,
+        b"Notice: Error: Usage: /cache clear [all]\r\n",
+    );
+    let busy_at = transcript.len();
+    input
+        .write_all(b"/cache clear\r")
+        .expect("busy cache clear");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        busy_at,
+        b"Notice: Build cache is in use; retry after its command finishes\r\nInput:\r\n",
+    );
+    assert!(current_cache.exists());
+    assert!(other_cache.exists());
+    rustix::fs::flock(&held_cache, rustix::fs::FlockOperation::Unlock)
+        .expect("release cache lease");
+    let clear_workspace_at = transcript.len();
+    input
+        .write_all(b"/cache clear\r")
+        .expect("clear current Workspace cache");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        clear_workspace_at,
+        b"Notice: Cleared this Workspace's private build cache\r\nInput:\r\n",
+    );
+    assert!(!current_cache.exists());
+    assert!(other_cache.exists());
+    let clear_all_at = transcript.len();
+    input
+        .write_all(b"/cache clear all\r")
+        .expect("clear all private build caches");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        clear_all_at,
+        b"Notice: Cleared all private build caches\r\nInput:\r\n",
+    );
+    assert!(!other_cache.exists());
+    let (planted_cache, planted_lock) = seed_empty_build_cache(&state, &workspace);
+    std::fs::set_permissions(&planted_lock, std::fs::Permissions::from_mode(0o644))
+        .expect("non-private cache identity lock");
+    let failed_clear_at = transcript.len();
+    input
+        .write_all(b"/cache clear\r")
+        .expect("cache clear over non-private storage");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        failed_clear_at,
+        b"Notice: Error: private build cache could not be cleared\r\nInput:\r\n",
+    );
+    assert!(planted_cache.exists());
     input.write_all(b"/exit\r").expect("exit");
     let result = super::loopback::wait_product(child.take());
     pump(&mut output, &mut input, &mut transcript, &mut answered);
@@ -416,7 +561,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
     let text = String::from_utf8(transcript).expect("linear transcript UTF-8");
     assert!(text.contains("Run npx --yes skills@1.7.0 experimental_install in this project: .agents/skills is missing and skills-lock.json exists."));
     assert!(!text.contains('\u{1b}'));
-    assert_eq!(text.matches("Notice: Error:").count(), 5);
+    assert_eq!(text.matches("Notice: Error:").count(), 7);
     assert_eq!(
         super::active_terminal::transcript_field(&text, "TTY_BEFORE:"),
         super::active_terminal::transcript_field(&text, "TTY_AFTER:"),
@@ -1849,6 +1994,18 @@ fn inline_session_picker_closes_after_quick_action() {
     session_picker_close_case(true);
 }
 
+/// Restores State's mode if an assertion fails while it is unavailable.
+struct StateModeGuard {
+    path: std::path::PathBuf,
+    mode: std::fs::Permissions,
+}
+
+impl Drop for StateModeGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::set_permissions(&self.path, self.mode.clone());
+    }
+}
+
 #[test]
 fn screen_reader_rejected_command_does_not_join_the_next_line() {
     let temp = tempfile::tempdir().expect("private test root");
@@ -2192,6 +2349,25 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
         rename_at,
         b"Notice: Error: Title is empty or too long; use a shorter title\r\nInput:\r\n",
     );
+    let state_guard = StateModeGuard {
+        path: state.clone(),
+        mode: std::fs::metadata(&state).expect("State").permissions(),
+    };
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o000))
+        .expect("make State unavailable mid-Session");
+    let unavailable_at = transcript.len();
+    input
+        .write_all(format!("/resume {saved_id}\r").as_bytes())
+        .expect("resume with unavailable State");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        unavailable_at,
+        b"Notice: Error: state directory unavailable or unsafe\r\nInput:\r\n",
+    );
+    std::fs::set_permissions(&state, state_guard.mode.clone()).expect("restore State");
     let corrected_at = transcript.len();
     input
         .write_all(b"/rename Corrected title\r")

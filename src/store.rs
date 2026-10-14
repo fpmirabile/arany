@@ -14,13 +14,23 @@ mod state;
 use journal::{HotSession, append, fork_session, open_connection};
 use replay::{latest_session_id, list_session_items, load_session, resolve_view, session_for_run};
 pub use state::HistoryReset;
-pub(crate) use state::SessionRunLock;
 pub use state::StateRoot;
+#[cfg(any(target_os = "linux", test))]
+pub(crate) use state::capture_archive;
+#[cfg(target_os = "linux")]
+pub(crate) use state::restore_archive;
+pub(crate) use state::{
+    BUILD_CACHE_ARCHIVE_BYTES, BuildCacheIdentity, BuildCacheLease, SessionRunLock, archive_size,
+};
+#[cfg(test)]
+pub(crate) use state::{begin_released, fail_next_commit_marker};
+#[cfg(target_os = "macos")]
+pub(crate) use state::{capture_archive_async, restore_archive_async};
 
 const DATABASE_FILE: &str = "events.sqlite3";
 pub(crate) const MAX_EVENT_BYTES: usize = 64 * 1024;
 fn event_payload_limit(kind: &str, version: i64) -> usize {
-    if kind == "MessageAccepted" && version == 2 {
+    if kind == "MessageAccepted" && version == 3 {
         320 * 1024
     } else {
         MAX_EVENT_BYTES
@@ -57,6 +67,10 @@ pub enum StoreError {
     SessionBusy,
     #[error("account replacement is already active")]
     AccountBusy,
+    #[error("Workspace build cache is in use by another Tool")]
+    BuildCacheBusy,
+    #[error("Workspace build cache is invalid or unsafe")]
+    InvalidBuildCache,
     #[error("history is in use by another Arany process; close it and retry")]
     HistoryBusy,
     #[error("saved history changed during recovery; retry before resetting")]

@@ -62,6 +62,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             enforcement_digest: intent.enforcement_digest,
             limits: intent.limits.clone(),
         }),
+        cache_update: arany::CacheUpdate::NotApplicable,
     };
     let record = |disposition| Event::ProviderCallRecorded {
         run_id: run,
@@ -380,6 +381,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 limits: intent.limits.clone(),
             }),
             intent,
+            cache_update: arany::CacheUpdate::NotApplicable,
         },
     };
     let command_result = serde_json::json!({
@@ -446,6 +448,63 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     let view = replay(unpublished).unwrap().unwrap();
     assert_eq!(view.runs[0].status, RunStatus::Failed);
     assert_eq!(view.runs[0].tools.len(), 1);
+    let mut unfinalized_cache = integrated[..7].to_vec();
+    if let Event::ToolFinished { observation, .. } = &mut unfinalized_cache[6] {
+        observation.disposition = ToolDisposition::Succeeded;
+        observation.output = serde_json::json!({
+            "exit_code": 0,
+            "stdout": "build complete",
+            "stderr": "",
+            "changeset": changeset,
+        })
+        .to_string();
+        observation.cache_update = arany::CacheUpdate::NotAttempted;
+    }
+    assert!(
+        replay(unfinalized_cache).is_err(),
+        "successful cache-backed command requires controller finalization before Event commit"
+    );
+    let mut uncertain_cache = integrated[..7].to_vec();
+    if let Event::ToolFinished { observation, .. } = &mut uncertain_cache[6] {
+        observation.disposition = ToolDisposition::Succeeded;
+        observation.output = serde_json::json!({
+            "exit_code": 0,
+            "stdout": "build complete",
+            "stderr": "",
+            "changeset": changeset,
+        })
+        .to_string();
+        observation.cache_update = arany::CacheUpdate::Uncertain;
+    }
+    uncertain_cache.extend([
+        Event::AgentFinished {
+            run_id: run,
+            agent_run_id: primary,
+            disposition: AgentDisposition::Failed,
+            summary: None,
+            result: None,
+        },
+        Event::RunFinished {
+            run_id: run,
+            disposition: RunDisposition::Failed,
+        },
+    ]);
+    let view = replay(uncertain_cache).unwrap().unwrap();
+    assert_eq!(view.runs[0].status, RunStatus::Failed);
+    assert_eq!(view.runs[0].tools.len(), 1);
+    let retained = view.runs[0].tools[0].observation.as_ref().unwrap();
+    assert_eq!(retained.disposition, ToolDisposition::Succeeded);
+    assert_eq!(retained.cache_update, arany::CacheUpdate::Uncertain);
+    assert_eq!(
+        arany::render_cache_update_feedback(&view.runs[0]),
+        Some("Build cache outcome is uncertain; inspect Session history before retrying.")
+    );
+    assert_eq!(
+        arany::render_run_feedback(&view.runs[0]).as_deref(),
+        Some(
+            "Error: The command succeeded but its build cache update is uncertain; the Run stopped without retrying. No answer was committed."
+        )
+    );
     for case in [
         "source",
         "content",
@@ -622,6 +681,8 @@ pub(super) async fn native_command_changeset_corpus(
         calls: Vec<ToolCall>,
         requests: Arc<Mutex<Vec<ProviderRequest>>>,
         review: bool,
+        #[cfg(target_os = "macos")]
+        trace_root: std::path::PathBuf,
     }
     impl Provider for CommandJourney {
         fn profile_name(&self) -> &str {
@@ -662,6 +723,10 @@ pub(super) async fn native_command_changeset_corpus(
                     ProviderOutcome::Tool,
                 )
             };
+            #[cfg(target_os = "macos")]
+            if !review && self.calls.get(step).is_some() {
+                crate::tools::reset_tool_trace_stages(&self.trace_root);
+            }
             requests.push(request);
             Ok(ProviderResponse {
                 outcome,
@@ -811,9 +876,13 @@ pub(super) async fn native_command_changeset_corpus(
                 calls,
                 requests: requests.clone(),
                 review: case == "ai-approve",
+                #[cfg(target_os = "macos")]
+                trace_root: root.to_path_buf(),
             },
         )
         .unwrap();
+        #[cfg(target_os = "macos")]
+        crate::tools::trace_case(root, case);
         engine
             .enable_tools(env!("CARGO_BIN_EXE_arany").into())
             .unwrap();

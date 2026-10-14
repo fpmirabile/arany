@@ -806,12 +806,23 @@ mod provider_call_tests {
             record: decoded,
         };
         let payload = event.payload().expect("current payload");
-        assert_eq!(event.version(), 2);
+        assert_eq!(event.version(), 3);
         assert_eq!(
-            Event::decode("ProviderCallRecorded", 2, &payload, run_id, agent_run_id).unwrap(),
+            Event::decode("ProviderCallRecorded", 3, &payload, run_id, agent_run_id).unwrap(),
             event
         );
-        assert!(Event::decode("ProviderCallRecorded", 1, &payload, run_id, agent_run_id).is_err());
+        for version in [0, 1, 2, 4] {
+            assert!(
+                Event::decode(
+                    "ProviderCallRecorded",
+                    version,
+                    &payload,
+                    run_id,
+                    agent_run_id
+                )
+                .is_err()
+            );
+        }
         for (reason, expected) in [
             (
                 ProviderFailureReason::AccountAccess,
@@ -879,14 +890,14 @@ mod provider_call_tests {
                     agent_run_id: agent,
                     record,
                 };
-                let payload = event.payload().expect("v2 payload");
-                assert_eq!(event.version(), 2);
+                let payload = event.payload().expect("v3 payload");
+                assert_eq!(event.version(), 3);
                 assert_eq!(
-                    Event::decode("ProviderCallRecorded", 2, &payload, run_id, agent_run_id)
-                        .expect("v2 replay"),
+                    Event::decode("ProviderCallRecorded", 3, &payload, run_id, agent_run_id)
+                        .expect("v3 replay"),
                     event
                 );
-                for version in [0, 1, 3] {
+                for version in [0, 1, 2, 4] {
                     assert!(
                         Event::decode(
                             "ProviderCallRecorded",
@@ -901,17 +912,17 @@ mod provider_call_tests {
                 }
                 for scope in [(None, agent_run_id), (run_id, None)] {
                     assert!(
-                        Event::decode("ProviderCallRecorded", 2, &payload, scope.0, scope.1)
+                        Event::decode("ProviderCallRecorded", 3, &payload, scope.0, scope.1)
                             .is_err()
                     );
                 }
                 let mut invalid: serde_json::Value =
-                    serde_json::from_str(&payload).expect("v2 JSON");
+                    serde_json::from_str(&payload).expect("v3 JSON");
                 invalid["failure_reason"] = "unknown_reason".into();
                 assert!(
                     Event::decode(
                         "ProviderCallRecorded",
-                        2,
+                        3,
                         &invalid.to_string(),
                         run_id,
                         agent_run_id
@@ -922,7 +933,7 @@ mod provider_call_tests {
                 assert!(
                     Event::decode(
                         "ProviderCallRecorded",
-                        2,
+                        3,
                         &invalid.to_string(),
                         run_id,
                         agent_run_id
@@ -933,7 +944,7 @@ mod provider_call_tests {
                 assert!(
                     Event::decode(
                         "ProviderCallRecorded",
-                        2,
+                        3,
                         &invalid.to_string(),
                         run_id,
                         agent_run_id
@@ -1160,7 +1171,7 @@ impl Event {
     }
 
     pub(crate) fn version(&self) -> i64 {
-        2
+        3
     }
 
     pub(crate) fn kind(&self) -> &'static str {
@@ -1299,7 +1310,7 @@ impl Event {
         run_id: Option<RunId>,
         agent_run_id: Option<AgentRunId>,
     ) -> Result<Self, ReplayError> {
-        if version != 2 {
+        if version != 3 {
             return Err(ReplayError::UnknownEvent);
         }
         let event = match kind {
@@ -1485,6 +1496,8 @@ impl Event {
                 observation,
             } => {
                 if observation.valid()
+                    && !(observation.cache_update == crate::tools::CacheUpdate::NotAttempted
+                        && observation.disposition == crate::tools::ToolDisposition::Succeeded)
                     && observation.intent.run_id == *run_id
                     && observation.intent.agent_run_id == *agent_run_id
                 {

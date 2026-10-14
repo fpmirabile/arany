@@ -1238,6 +1238,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         disposition: ToolDisposition::Succeeded,
         output: "observed".into(),
         guard: Some(guard),
+        cache_update: crate::tools::CacheUpdate::NotApplicable,
     };
     assert!(observation.valid());
     let mut profile_mismatch = observation.clone();
@@ -1262,6 +1263,51 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
     let mut mismatched = observation.clone();
     mismatched.guard.as_mut().unwrap().limits.max_processes += 1;
     assert!(!mismatched.valid());
+    let mut command_intent = observation.intent.clone();
+    command_intent.call = ToolCall::Command {
+        program: "cargo".into(),
+        args: vec!["build".into()],
+        cwd: ".".into(),
+    };
+    let command_guard = GuardReceipt {
+        contract_version: 1,
+        intent_digest: command_intent.digest(),
+        enforcement_digest: command_intent.enforcement_digest,
+        limits: command_intent.limits.clone(),
+    };
+    let uncertain_cache = ToolObservation {
+        intent: command_intent,
+        disposition: ToolDisposition::Uncertain,
+        output: r#"{"exit_code":0,"stdout":"build complete","stderr":"","changeset":{"files":[]}}"#
+            .into(),
+        guard: Some(command_guard),
+        cache_update: CacheUpdate::Uncertain,
+    };
+    assert!(uncertain_cache.valid());
+    assert!(uncertain_cache.stops_run());
+    let mut worker_observation = uncertain_cache.clone();
+    worker_observation.disposition = ToolDisposition::Succeeded;
+    worker_observation.cache_update = CacheUpdate::NotAttempted;
+    assert!(worker_observation.valid());
+    worker_observation.cache_update = CacheUpdate::Failed;
+    assert!(worker_observation.valid());
+    let mut encoded = serde_json::to_value(&worker_observation).unwrap();
+    encoded.as_object_mut().unwrap().remove("cache_update");
+    assert!(serde_json::from_value::<ToolObservation>(encoded).is_err());
+    let mut succeeded_uncertain_cache = uncertain_cache.clone();
+    succeeded_uncertain_cache.disposition = ToolDisposition::Succeeded;
+    assert!(succeeded_uncertain_cache.valid());
+    assert!(succeeded_uncertain_cache.stops_run());
+    assert_eq!(
+        succeeded_uncertain_cache.disposition,
+        ToolDisposition::Succeeded
+    );
+    let mut unattempted_error = uncertain_cache.clone();
+    unattempted_error.disposition = ToolDisposition::Uncertain;
+    unattempted_error.guard = None;
+    unattempted_error.cache_update = CacheUpdate::NotAttempted;
+    assert!(unattempted_error.valid());
+    assert!(unattempted_error.stops_run());
     let mut widened = intent.clone();
     widened.limits.runtime_ms += 1;
     assert!(!widened.valid());
@@ -1299,7 +1345,8 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         );
         let mut reserved = observation.intent.clone();
         reserved.limits.result_bytes = 128;
-        let receipt = super::uncertain_observation(reserved, error);
+        let receipt =
+            super::uncertain_observation(reserved, error, crate::tools::CacheUpdate::NotApplicable);
         assert_eq!(
             receipt.output,
             format!(
@@ -1311,7 +1358,8 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
     for error in errors {
         let mut reserved = observation.intent.clone();
         reserved.limits.result_bytes = 128;
-        let uncertain = super::uncertain_observation(reserved, error);
+        let uncertain =
+            super::uncertain_observation(reserved, error, crate::tools::CacheUpdate::NotApplicable);
         assert_eq!(uncertain.disposition, ToolDisposition::Uncertain);
         assert!(uncertain.guard.is_none());
         assert!(uncertain.valid(), "minimum-budget uncertainty receipt");
@@ -1320,4 +1368,48 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
     let mut oversized = observation;
     oversized.output = "x".repeat(MAX_TOOL_RESULT_BYTES + 1);
     assert!(!oversized.valid());
+}
+
+#[test]
+fn guard_error_after_dispatch_marks_only_a_selected_command_cache_not_attempted() {
+    let command = ToolCall::Command {
+        program: "cargo".into(),
+        args: vec!["build".into()],
+        cwd: ".".into(),
+    };
+    assert_eq!(
+        super::guard_error_cache_update(&command, true),
+        CacheUpdate::NotAttempted
+    );
+    assert_eq!(
+        super::guard_error_cache_update(&command, false),
+        CacheUpdate::NotApplicable
+    );
+    assert_eq!(
+        super::guard_error_cache_update(&ToolCall::List { path: "src".into() }, true),
+        CacheUpdate::NotApplicable
+    );
+
+    let intent = EffectIntent {
+        id: uuid::Uuid::now_v7(),
+        run_id: crate::session::RunId::new(),
+        agent_run_id: crate::session::AgentRunId::new(),
+        policy_digest: [1; 32],
+        enforcement_digest: [2; 32],
+        workspace_device: 1,
+        workspace_inode: 2,
+        call: command,
+        limits: ToolLimits::default(),
+        expires_at_ms: 1,
+        use_count: 1,
+    };
+    let observation = super::uncertain_observation(
+        intent,
+        super::ToolError::Operation,
+        CacheUpdate::NotAttempted,
+    );
+    assert!(observation.valid());
+    assert!(observation.stops_run());
+    assert!(observation.guard.is_none());
+    assert_eq!(observation.cache_update, CacheUpdate::NotAttempted);
 }

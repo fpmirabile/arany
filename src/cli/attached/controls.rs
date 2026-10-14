@@ -1,4 +1,7 @@
-use super::{Admission, load_view, recover_defaults_change, update_defaults};
+use super::{
+    Admission, DefaultsError, LoopError, load_view, open_state, recover_defaults_change,
+    update_defaults,
+};
 use crate::cli::{chatgpt, exec::ProviderArg};
 use arany::{
     AttachedTerminal, CollaborationPolicy, CommandAvailability, CommandParseError,
@@ -7,6 +10,9 @@ use arany::{
     resume_session, validate_native_model_id,
 };
 use std::str::FromStr;
+
+const CACHE_USAGE: &str = "Usage: /cache clear [all]";
+const CACHE_CLEAR_FAILED: &str = "Error: private build cache could not be cleared";
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -305,7 +311,7 @@ pub(super) async fn select_model(
     view: &mut SessionView,
     model: &str,
     effort: Option<Effort>,
-) -> Result<String, String> {
+) -> Result<String, LoopError> {
     let Some(profile) = view.defaults.provider.as_deref() else {
         return Ok("Select /provider first".into());
     };
@@ -313,8 +319,7 @@ pub(super) async fn select_model(
         return Ok("Error: invalid native model".into());
     }
     if let Some(name) = profile.strip_prefix("custom:") {
-        let root = StateRoot::open_existing(&admission.state_dir)
-            .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+        let root = open_state(admission)?;
         let custom = match CustomProfile::load_named(&root, name) {
             Ok(custom) => custom,
             Err(error) => return Ok(format!("Error: {error}")),
@@ -337,21 +342,24 @@ pub(super) async fn select_model(
     let mut defaults = view.defaults.clone();
     defaults.model = Some(model.to_owned());
     defaults.effort = effort;
-    if let Err(error) = update_defaults(admission, session_id, view, defaults).await {
-        return recover_defaults_change(error);
+    let reload_error = match update_defaults(admission, session_id, view, defaults).await {
+        Ok(()) => None,
+        Err(DefaultsError::Reload(error)) => Some(error),
+        Err(error) => return recover_defaults_change(error),
+    };
+    let notice = match &reload_error {
+        Some(error) => super::settings_reload_notice(error),
+        None => format!(
+            "Model: {model} · {}",
+            effort.map_or("default", Effort::as_str)
+        ),
+    };
+    // After a Reload failure, view.defaults still holds the saved selection.
+    let notice = super::remembered_session_notice(admission, view, notice).await;
+    match reload_error {
+        Some(_) => Err(LoopError::Notice(notice)),
+        None => Ok(notice),
     }
-    let notice = format!(
-        "Model: {model} · {}",
-        effort.map_or("default", Effort::as_str)
-    );
-    if let Err(error) =
-        super::models::remember_models(&admission.workspace, &view.defaults, None, true).await
-    {
-        return Ok(format!(
-            "{notice}; Error: {error}; selection kept for this conversation only"
-        ));
-    }
-    Ok(notice)
 }
 
 pub(super) enum ActiveSubmission {
@@ -448,6 +456,9 @@ pub(super) fn validate_idle_command(
         {
             Err("invalid collaboration policy")
         }
+        InteractiveCommand::Cache if !matches!(argument, Some("clear" | "clear all")) => {
+            Err(CACHE_USAGE)
+        }
         _ => Ok(()),
     }
 }
@@ -458,7 +469,7 @@ pub(super) async fn handle_command(
     view: &mut SessionView,
     command: InteractiveCommand,
     argument: Option<&str>,
-) -> Result<String, String> {
+) -> Result<String, LoopError> {
     let notice = match command {
         InteractiveCommand::New => {
             let defaults = view.defaults.clone();
@@ -471,8 +482,7 @@ pub(super) async fn handle_command(
             let Some(id) = argument.and_then(|value| SessionId::from_str(value).ok()) else {
                 return Ok("Usage: /resume SESSION_ID".into());
             };
-            let root = StateRoot::open_existing(&admission.state_dir)
-                .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+            let root = open_state(admission)?;
             match resume_session(root, admission.workspace.clone(), id).await {
                 Ok(resumed) => {
                     let resumed =
@@ -507,11 +517,17 @@ pub(super) async fn handle_command(
                 },
                 None => *session_id,
             };
-            let root = StateRoot::open_existing(&admission.state_dir)
-                .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+            let root = open_state(admission)?;
             match fork_session(root, admission.workspace.clone(), source_id, None).await {
                 Ok(id) => {
-                    let forked = load_view(&admission.state_dir, id).await?;
+                    let forked = match load_view(&admission.state_dir, id).await {
+                        Ok(forked) => forked,
+                        Err(error) => {
+                            return Ok(format!(
+                                "Error: Forked Session {id}, but it could not be opened: {error}"
+                            ));
+                        }
+                    };
                     let forked = match super::prepare_resume(
                         admission,
                         forked,
@@ -520,7 +536,11 @@ pub(super) async fn handle_command(
                     .await
                     {
                         Ok(forked) => forked,
-                        Err(error) => return Ok(format!("Error: {error}")),
+                        Err(error) => {
+                            return Ok(format!(
+                                "Error: Forked Session {id}, but it could not be opened: {error}"
+                            ));
+                        }
                     };
                     *session_id = id;
                     *view = forked;
@@ -546,8 +566,7 @@ pub(super) async fn handle_command(
                 view.title_is_explicit = true;
                 return Ok(format!("Renamed conversation: {title}"));
             }
-            let root = StateRoot::open_existing(&admission.state_dir)
-                .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+            let root = open_state(admission)?;
             match rename_session(
                 root,
                 admission.workspace.clone(),
@@ -556,10 +575,15 @@ pub(super) async fn handle_command(
             )
             .await
             {
-                Ok(()) => {
-                    *view = load_view(&admission.state_dir, *session_id).await?;
-                    format!("Renamed Session: {title}")
-                }
+                Ok(()) => match load_view(&admission.state_dir, *session_id).await {
+                    Ok(renamed) => {
+                        *view = renamed;
+                        format!("Renamed Session: {title}")
+                    }
+                    Err(error) => {
+                        format!("Error: Renamed Session, but it could not be reloaded: {error}")
+                    }
+                },
                 Err(error) => format!("Error: {error}"),
             }
         }
@@ -658,6 +682,29 @@ pub(super) async fn handle_command(
                 )
             } else {
                 "Read-only Workspace; Arany requests: selected Provider; OS TLS checks may connect separately; no Tools or sandbox".into()
+            }
+        }
+        InteractiveCommand::Cache => {
+            let Ok(root) = StateRoot::open_existing(&admission.state_dir) else {
+                return Ok(CACHE_CLEAR_FAILED.into());
+            };
+            let (result, cleared) = match argument {
+                Some("clear") => (
+                    root.clear_workspace_build_cache(&admission.workspace),
+                    "Cleared this Workspace's private build cache",
+                ),
+                Some("clear all") => (
+                    root.clear_all_build_caches(),
+                    "Cleared all private build caches",
+                ),
+                _ => return Ok(format!("Error: {CACHE_USAGE}")),
+            };
+            match result {
+                Ok(()) => cleared.into(),
+                Err(arany::StoreError::BuildCacheBusy) => {
+                    "Build cache is in use; retry after its command finishes".into()
+                }
+                Err(_) => CACHE_CLEAR_FAILED.into(),
             }
         }
         _ => "Command is not available in this build".into(),
@@ -1195,6 +1242,7 @@ mod tests {
         let admission = Admission {
             telemetry: arany::Telemetry::disabled(),
             state_dir: temp.path().join("state"),
+            explicit_state_dir: false,
             workspace,
             include_paths: Vec::new(),
             tools: false,
@@ -1305,6 +1353,7 @@ mod tests {
         let mut admission = Admission {
             telemetry: arany::Telemetry::disabled(),
             state_dir: temp.path().join("state"),
+            explicit_state_dir: false,
             workspace,
             include_paths: Vec::new(),
             tools: false,
@@ -1566,7 +1615,7 @@ mod tests {
             let workspace = admission.workspace.clone();
             admission.workspace = temp.path().join("other-workspace");
             std::fs::create_dir(&admission.workspace).expect("other Workspace");
-            assert_eq!(
+            assert!(matches!(
                 handle_command(
                     &admission,
                     &mut session_id,
@@ -1576,8 +1625,8 @@ mod tests {
                 )
                 .await
                 .expect_err("Workspace failure stays fatal"),
-                "Session belongs to a different Workspace"
-            );
+                LoopError::Fatal(error) if error == "Session belongs to a different Workspace"
+            ));
             assert_eq!(view, before);
             admission.workspace = workspace;
             assert_eq!(

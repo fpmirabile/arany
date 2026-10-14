@@ -60,6 +60,20 @@ limits and compatibility.
   Both scans reject whole hostile/over-limit snapshots without reading excluded
   content. Engine owns command-receipt linkage; Guard independently validates
   the integration's whole batch and file preconditions.
+- The persistent Workspace cache is imported into the existing quota-backed
+  scratch view before Ready/GO and is never backed by a StateRoot mount or a
+  host parent grant. Capture its candidate only after positive payload-descendant
+  termination, but retain no publication authority in the worker: the controller
+  streams bounded candidate data to Store only after native seed/unit cleanup is
+  positively confirmed. Input overflow rejects before GO; candidate overflow
+  rejects publication after command execution and preserves the last committed
+  cache. On macOS, read/capture the mounted scratch volume while its checked
+  handle is live, then positively empty the coalition and detach storage before
+  Store publication. An explicitly selected read-only host-cache subtree takes
+  precedence: exclude that exact relative root before private archive traversal,
+  never import host bytes, and preserve earlier private archive entries at that
+  root when other cache paths are published. Uncertain command, storage, seed
+  or unit cleanup never commits cache bytes.
 - Close inherited descriptors at the single-threaded worker entry before Rust
   opens persistent handles. Install shared descriptor/core limits at bootstrap;
   only the non-spawning file/Skill worker resets and unblocks SIGXCPU and installs

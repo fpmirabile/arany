@@ -811,14 +811,14 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 assert_eq!(lines.len(), events.len());
                 let accepted = lines.iter().filter(|line| line["kind"] == "MessageAccepted").collect::<Vec<_>>();
                 assert_eq!(accepted.len(), 5);
-                assert_eq!(accepted[0]["event_version"], 2);
+                assert_eq!(accepted[0]["event_version"], 3);
                 assert_eq!(accepted[0]["payload"]["images"][0]["media_type"], "image/png");
                 assert_eq!(accepted[0]["payload"]["images"][0]["data"], view.runs[0].images[0].base64());
                 assert_eq!(accepted[2]["payload"]["text"], "");
                 assert!(accepted[3]["payload"]["text"].as_str() == Some(maximal_objective.as_str()));
                 let image_payload_bytes = accepted[3]["payload"].to_string().len();
                 assert!((300 * 1024..=320 * 1024).contains(&image_payload_bytes), "maximally escaped image input fits its Event");
-                assert_eq!(accepted[4]["event_version"], 2);
+                assert_eq!(accepted[4]["event_version"], 3);
                 assert!(accepted[4]["payload"]["text"].as_str() == Some(maximal_objective.as_str()));
                 assert_eq!(accepted[4]["payload"].to_string().len(), 6 * 8 * 1024 + 23, "maximally escaped text-only input fits its Event");
                 assert_eq!(accepted[4]["payload"]["images"], serde_json::json!([]), "text-only input retains the current Message shape");
@@ -839,11 +839,11 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         let original: serde_json::Value = serde_json::from_str(&payload).unwrap();
         for fault in ["unsupported version", "unknown version", "missing images", "empty Message", "five images", "aggregate bytes", "non-PNG", "corrupted image", "URL", "extra field", "text overflow", "payload overflow", "agent scope"] {
             let mut invalid = original.clone();
-            let mut version = 2;
+            let mut version = 3;
             let mut agent_scope = None;
             match fault {
                 "unsupported version" => version = 1,
-                "unknown version" => version = 3,
+                "unknown version" => version = 4,
                 "missing images" => { invalid.as_object_mut().unwrap().remove("images"); }
                 "empty Message" => { invalid["text"] = "".into(); invalid["images"] = serde_json::json!([]); },
                 "five images" => invalid["images"] = serde_json::to_value(vec![second_image.clone(); 5]).unwrap(),
@@ -863,7 +863,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             assert!(matches!(store.load_view(first.session_id).await, Err(arany::StoreError::InvalidHistory)), "image replay fault: {fault}");
             store.close().await.unwrap();
         }
-        connection.execute("UPDATE events SET event_version=2, payload=?1, agent_run_id=NULL WHERE sequence=?2", rusqlite::params![payload, sequence]).unwrap();
+        connection.execute("UPDATE events SET event_version=3, payload=?1, agent_run_id=NULL WHERE sequence=?2", rusqlite::params![payload, sequence]).unwrap();
         drop(connection);
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
         assert_eq!(store.load_view(first.session_id).await.unwrap().unwrap(), view);
@@ -2137,7 +2137,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             let mut connection = rusqlite::Connection::open(path.join("events.sqlite3")).unwrap();
             let transaction = connection.transaction().unwrap();
             for sequence in 9..=prefix {
-                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',2,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string()]).unwrap();
+                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',3,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string()]).unwrap();
             }
             transaction.commit().unwrap();
             drop(connection);
@@ -2190,7 +2190,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             let mut connection = rusqlite::Connection::open(path.join("events.sqlite3")).unwrap();
             let transaction = connection.transaction().unwrap();
             for sequence in 9..=prefix {
-                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',2,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, root.to_string()]).unwrap();
+                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',3,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, root.to_string()]).unwrap();
             }
             transaction.commit().unwrap();
             drop(connection);
@@ -3789,7 +3789,7 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                         if let Event::ProviderCallRecorded { record, .. } = &envelope.event {
                             let document: serde_json::Value =
                                 serde_json::from_str(line).expect("canonical JSONL");
-                            assert_eq!(document["event_version"], 2);
+                            assert_eq!(document["event_version"], 3);
                             assert_eq!(document["payload"], serde_json::to_value(record).unwrap());
                         }
                     }
