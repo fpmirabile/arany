@@ -12,6 +12,21 @@ use std::{
 const CACHE_CANARY: &str = "EXPLICIT_CACHE_OUTPUT_CANARY";
 const PRIVATE_CACHE_CANARY: &str = "ARANY_PRIVATE_CACHE_PERSISTENCE_CANARY";
 
+fn shipped_exec_plan_contract() -> arany::GoalPlanContract {
+    arany::GoalPlanContract {
+        mission: "Run the guarded check and update the selected note".into(),
+        paths: vec!["src/check.sh".into(), "src/note.txt".into()],
+        commands: vec!["bash".into()],
+        skills: Vec::new(),
+        mcp_tools: Vec::new(),
+        success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
+            path: "src/note.txt".into(),
+            content: "native note\n2026-10-06\n".into(),
+        },
+        budget: arany::GoalBudget::default(),
+    }
+}
+
 fn cache_progress(stage: &str) {
     let mut stdout = std::io::stdout().lock();
     writeln!(stdout, "cache-canary:{stage}").expect("cache fixture progress write");
@@ -982,11 +997,16 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                 } else {
                     "POST /v1/messages HTTP/1.1\r\n"
                 }));
-                assert!(
-                    header
-                        .to_ascii_lowercase()
-                        .contains("authorization: bearer synthetic-native-key\r\n")
-                );
+                let lower_header = header.to_ascii_lowercase();
+                if profile == "openai" {
+                    assert!(
+                        lower_header.contains("authorization: bearer synthetic-native-key\r\n")
+                    );
+                } else {
+                    assert!(lower_header.contains("x-api-key: synthetic-native-key\r\n"));
+                    assert!(lower_header.contains("anthropic-version: 2023-06-01\r\n"));
+                    assert!(!lower_header.contains("authorization:"));
+                }
                 let body: Value = serde_json::from_slice(&bytes[end..]).unwrap();
                 assert_eq!(body["model"], model);
                 let context: Value = serde_json::from_str(if profile == "openai" {
@@ -998,6 +1018,15 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                 assert_eq!(context["phase"], "root_plan");
                 assert_eq!(context["collaboration"], json!({"mode":"single"}));
                 assert_eq!(context["objective"], "Native Tool CLI");
+                assert_eq!(context["goal_budget"], json!(arany::GoalBudget::default()));
+                assert_eq!(
+                    context["goal_plan_contract"],
+                    if step == 0 {
+                        Value::Null
+                    } else {
+                        json!(shipped_exec_plan_contract())
+                    }
+                );
                 assert_eq!(context["history"], json!([]));
                 assert_eq!(context["includes"], json!([]));
                 assert!(context["workspace_guidance"].is_null());
@@ -1038,7 +1067,7 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                 assert_eq!(context["tools"]["catalog"]["write"], true);
                 let outcome = match step {
                     0 => {
-                        json!({"outcome":{"type":"tool","call":{"operation":"command","program":"bash","args":["src/check.sh"],"cwd":""}}})
+                        json!({"outcome":{"type":"tool","call":{"operation":"command","program":"bash","args":["src/check.sh"],"cwd":""},"plan_contract":shipped_exec_plan_contract()}})
                     }
                     1 => {
                         json!({"outcome":{"type":"tool","call":{"operation":"read","path":"src/note.txt","offset":0,"limit":4096}}})
@@ -1068,6 +1097,9 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                     assert_eq!(body["parallel_tool_calls"], false);
                     assert_eq!(body["input"].as_array().unwrap().len(), 1 + step*2);
                     let mut arguments = if outcome["outcome"]["type"] == "tool" { outcome["outcome"]["call"].clone() } else { outcome["outcome"].clone() };
+                    if let Some(plan_contract) = outcome["outcome"].get("plan_contract") {
+                        arguments["plan_contract"] = plan_contract.clone();
+                    }
                     let key = if outcome["outcome"]["type"] == "tool" { "operation" } else { "type" };
                     let operation = arguments.as_object_mut().unwrap().remove(key).unwrap();
                     json!({"id":format!("resp_native_{step}"),"status":"completed","model":model,"output":[{"type":"function_call","id":format!("fc_native_{step}"),"call_id":format!("call_native_{step}"),"name":format!("arany_{}", operation.as_str().unwrap()),"arguments":arguments.to_string(),"status":"completed"}],"usage":{"input_tokens":12,"output_tokens":8}})
@@ -1171,6 +1203,7 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                 .unwrap()
                 .runs
                 .remove(0);
+            let replay = SessionView::replay(session_id, &events).unwrap().unwrap();
             assert_eq!(run.status, RunStatus::Finished);
             assert_eq!(
                 run.assistant_message.as_deref(),
@@ -1189,6 +1222,15 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
             );
             assert_eq!(contexts.len(), 4);
             assert_eq!(run.agents[0].provider_calls.len(), 4);
+            assert_eq!(replay.runs, vec![run.clone()]);
+            assert_eq!(replay.goals.len(), 1);
+            let goal = &replay.goals[0];
+            assert_eq!(goal.status, arany::GoalStatus::Completed);
+            assert_eq!(goal.plan_contract, Some(shipped_exec_plan_contract()));
+            assert!(goal.success_criterion_satisfied);
+            assert!(!goal.awaiting_plan_contract);
+            assert!(goal.report.is_some());
+            assert_eq!(goal.run_ids, vec![run.id]);
             assert_eq!(
                 output.stdout,
                 arany::render_exec(&run, &events, arany::Output::Jsonl, true).into_bytes()
