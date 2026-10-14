@@ -1066,7 +1066,7 @@ async fn native_runtime_mount_journey_helper() {
         program: "sh".into(),
         args: vec![
             "-c".into(),
-            "set -eu; /usr/bin/mkdir -p \"$CARGO_HOME/registry/cache\"; cache=\"$CARGO_HOME/registry/cache/private-bulk.crate\"; : > \"$cache\"; i=0; while test \"$i\" -lt 40; do printf '%1048576s' '' >> \"$cache\"; i=$((i + 1)); done".into(),
+            "if test -z \"${CARGO_HOME-}\"; then printf 'cache-seed:cargo-home-missing\\n' >&2; exit 90; fi; if ! mkdir -p \"$CARGO_HOME/registry/cache\" 2>/dev/null; then printf 'cache-seed:mkdir-failed\\n' >&2; exit 91; fi; set -eu; cache=\"$CARGO_HOME/registry/cache/private-bulk.crate\"; if ! { :; } 2>/dev/null > \"$cache\"; then printf 'cache-seed:create-failed\\n' >&2; exit 92; fi; i=0; while test \"$i\" -lt 40; do if ! { printf '%1048576s' ''; } 2>/dev/null >> \"$cache\"; then printf 'cache-seed:write-failed\\n' >&2; exit 93; fi; i=$((i + 1)); done".into(),
         ],
         cwd: String::new(),
     };
@@ -1132,19 +1132,30 @@ async fn native_runtime_mount_journey_helper() {
     .unwrap();
     let seed_observation = seed_outcome.run.tools[0].observation.as_ref().unwrap();
     let seed_stderr = seed_result["stderr"].as_str().unwrap_or_default();
+    let seed_stage = match seed_stderr {
+        "cache-seed:cargo-home-missing\n" => "cargo-home-missing",
+        "cache-seed:mkdir-failed\n" => "mkdir",
+        "cache-seed:create-failed\n" => "create",
+        "cache-seed:write-failed\n" => "write",
+        "" => "empty",
+        _ => "other",
+    };
+    let seed_trace = trace_snapshot(root);
     assert_eq!(
         seed_result["exit_code"],
         0,
-        "cache seed disposition {:?}; Guard receipt {}; cache update {:?}; stdout bytes {}; stderr bytes {}; no space {}; permission denied {}; operation denied {}; missing command {}",
+        "cache seed disposition {:?}; Guard receipt {}; cache update {:?}; stdout bytes {}; stderr bytes {}; stderr stage {}; no space {}; permission denied {}; operation denied {}; missing command {}; trace {:?}",
         seed_observation.disposition,
         seed_observation.guard.is_some(),
         seed_observation.cache_update,
         seed_result["stdout"].as_str().map_or(0, str::len),
         seed_stderr.len(),
+        seed_stage,
         seed_stderr.contains("No space left on device"),
         seed_stderr.contains("Permission denied"),
         seed_stderr.contains("Operation not permitted"),
         seed_stderr.contains("not found"),
+        seed_trace,
     );
     assert_eq!(
         seed_outcome.run.tools[0]
@@ -1194,7 +1205,7 @@ async fn native_runtime_mount_journey_helper() {
         program: "sh".into(),
         args: vec![
             "-c".into(),
-            "set -eu; /usr/bin/mkdir -p \"$CARGO_TARGET_DIR\"; cache=\"$CARGO_TARGET_DIR/overflow-marker\"; : > \"$cache\"; i=0; while test \"$i\" -lt 32; do printf '%1048576s' '' >> \"$cache\"; i=$((i + 1)); done".into(),
+            "set -eu; mkdir -p \"$CARGO_TARGET_DIR\"; cache=\"$CARGO_TARGET_DIR/overflow-marker\"; : > \"$cache\"; i=0; while test \"$i\" -lt 32; do printf '%1048576s' '' >> \"$cache\"; i=$((i + 1)); done".into(),
         ],
         cwd: String::new(),
     };
