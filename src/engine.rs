@@ -1817,15 +1817,15 @@ impl<P: Provider + 'static> Engine<P> {
         let include_paths = request.include_paths.clone();
         let policy = request.policy;
         let mut leases = WorkspaceLeases::new();
-        let mut turn = self
-            .run_turn(
-                request,
-                cancellation.clone(),
-                progress.clone(),
-                false,
-                &mut leases,
-            )
-            .await?;
+        // Boxed: keeps the large Run future off the caller stack in debug builds.
+        let mut turn = Box::pin(self.run_turn(
+            request,
+            cancellation.clone(),
+            progress.clone(),
+            false,
+            &mut leases,
+        ))
+        .await?;
         while turn.continues() && !cancellation.is_cancelled() {
             let next = RunRequest {
                 session_id: Some(turn.outcome.session_id),
@@ -1838,15 +1838,14 @@ impl<P: Provider + 'static> Engine<P> {
                 goal: GoalRequest::resume(turn.outcome.goal_id, false),
             };
             // Settlement left the Goal open under the same admits_next_run check, so this cannot be refused for budget.
-            turn = match self
-                .run_turn(
-                    next,
-                    cancellation.clone(),
-                    progress.clone(),
-                    true,
-                    &mut leases,
-                )
-                .await
+            turn = match Box::pin(self.run_turn(
+                next,
+                cancellation.clone(),
+                progress.clone(),
+                true,
+                &mut leases,
+            ))
+            .await
             {
                 Ok(turn) => turn,
                 // Cancellation before MessageAccepted admits no Run; the committed Finished Run keeps its outcome.

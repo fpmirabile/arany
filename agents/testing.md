@@ -51,6 +51,7 @@ consistency, not measured agent quality or runtime/platform support.
 - A refusal peer must return a valid success if a forbidden request arrives, so the owner's rejection assertion fails; a peer assertion/crash followed by generic product failure is not refusal proof. A native OOM owner must prove its actual payload reached execution, a kernel OOM-kill counter advanced, and cleanup was positively observed. Observer timeout, malformed output or command failure is not disappearance.
 - Use real temporary filesystem objects and real file-backed SQLite for state, reopen, permission, journaling, replay, and recovery evidence. `:memory:` is not durability evidence.
 - Use explicit gates and paused Tokio time for schedules and deadlines. Never coordinate with wall sleeps, randomness, repeated attempts, or assumed task order.
+- Pause Tokio time only after real subprocess or Guard I/O has finished: while paused, an idle runtime auto-advances timers, so Guard timeouts can fire during a Tool call. Pause from a Provider hook after the Tool result, as the Goal Finish tests do.
 - Keep provider response fixtures minimal and hand-reviewed from the official wire contract. Never capture production responses, credentials, prompts, or user data.
 - Use one bounded canary assertion across Provider observations, Events, database bytes, stdout, stderr, controlled panic/error text, and runtime-opt-in telemetry without echoing the canary on failure.
 

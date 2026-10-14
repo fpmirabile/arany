@@ -1589,7 +1589,7 @@ fn stopped_by_budget(result: &Result<arany::RunOutcome, EngineError>) -> bool {
     )
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn autonomous_goal_active_time_spent_after_a_finish_fails_the_goal_with_its_report() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "v1");
@@ -1607,7 +1607,9 @@ async fn autonomous_goal_active_time_spent_after_a_finish_fails_the_goal_with_it
         },
         finish_with("first pass"),
         finish_with("never requested"),
-    ]);
+    ])
+    // Paused before the Finish, not before the Read Tool: Guard I/O under a paused clock auto-advances its timeouts.
+    .with_before_call(1, || tokio::time::pause());
     let requests = Arc::clone(&provider.requests);
     let mut engine = facts_engine(
         StateRoot::admit(&state_path).expect("state"),
@@ -1747,7 +1749,7 @@ fn goal_segment_attribute(bodies: &[Vec<u8>], key: &str) -> Vec<String> {
         .collect()
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn exhausted_autonomous_segment_exports_its_failed_status() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "v1");
@@ -1765,7 +1767,9 @@ async fn exhausted_autonomous_segment_exports_its_failed_status() {
         },
         finish_with("first pass"),
         finish_with("never requested"),
-    ]);
+    ])
+    // Paused before the Finish, not before the Read Tool: Guard I/O under a paused clock auto-advances its timeouts.
+    .with_before_call(1, || tokio::time::pause());
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Collector listener");
     let endpoint = format!(
         "http://{}",
