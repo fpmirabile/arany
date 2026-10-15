@@ -2899,7 +2899,7 @@ done
                             args: Vec::new(),
                             cwd: ".".into(),
                         },
-                        limits: crate::tools::ToolLimits::default(),
+                        limits: limits.clone(),
                         expires_at_ms: crate::tools::now_ms() + 60_000,
                         use_count: 1,
                     },
