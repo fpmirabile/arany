@@ -774,29 +774,11 @@ impl AttachedTerminal {
         let screen = terminal.size()?.height;
         // Ratatui would need a one-row scroll region here, which DECSTBM terminals such as tmux reject.
         if screen < viewport.height + 2 {
-            use ratatui::widgets::Widget;
             let lines = rows
                 .iter()
                 .map(|row| view::native_line(row, width, palette))
                 .chain(std::iter::once(ratatui::text::Line::default()));
-            let backend = terminal.backend_mut();
-            for line in lines {
-                if viewport.y > 0 {
-                    backend.scroll_region_up(0..screen, 1)?;
-                }
-                let mut row = ratatui::buffer::Buffer::empty(Rect::new(0, 0, width, 1));
-                ratatui::widgets::Paragraph::new(line).render(row.area, &mut row);
-                backend.draw((0..width).zip(&row.content).map(|(x, cell)| (x, 0, cell)))?;
-                if viewport.y == 0 {
-                    backend.scroll_region_up(0..screen, 1)?;
-                }
-            }
-            // Line erases keep tmux from scrolling the stale screen into history, unlike a home-cursor erase.
-            for y in viewport.y..screen {
-                backend.set_cursor_position((0, y))?;
-                backend.clear_region(ratatui::backend::ClearType::CurrentLine)?;
-            }
-            terminal.swap_buffers();
+            insert_rows_scrolling_screen(terminal, screen, lines)?;
             return Ok(());
         }
         for chunk in rows.chunks(64) {
@@ -1329,7 +1311,6 @@ impl AttachedTerminal {
                     palette,
                     &history_rows,
                     history_status.as_deref(),
-                    native_transcript,
                 );
                 if let Some(picker) = picker {
                     draw_model_catalog_frame(frame, picker, composer, &model, palette);
@@ -2046,6 +2027,7 @@ impl AttachedTerminal {
         replacement.classic_history = std::mem::take(&mut self.classic_history);
         replacement.native = std::mem::take(&mut self.native);
         replacement.active_run = self.active_run;
+        replacement.classic_pinned = self.classic_pinned;
         #[cfg(unix)]
         {
             // Preserve notifications received before the new listeners were registered.
@@ -2058,8 +2040,164 @@ impl AttachedTerminal {
     }
 }
 
+/// Inserts rows above a viewport on a screen too short for Ratatui's scrolling-region path.
+/// Each row is cleared and drawn as a diff from blank cells, so wide-cell padding is not sent.
+fn insert_rows_scrolling_screen<'a, B: Backend>(
+    terminal: &mut Terminal<B>,
+    screen: u16,
+    lines: impl Iterator<Item = ratatui::text::Line<'a>>,
+) -> Result<(), B::Error> {
+    use ratatui::{backend::ClearType, buffer::Buffer, widgets::Paragraph, widgets::Widget};
+    let viewport = terminal.get_frame().area();
+    let backend = terminal.backend_mut();
+    for line in lines {
+        if viewport.y > 0 {
+            backend.scroll_region_up(0..screen, 1)?;
+        }
+        let mut row = Buffer::empty(Rect::new(0, 0, viewport.width, 1));
+        Paragraph::new(line).render(row.area, &mut row);
+        backend.set_cursor_position((0, 0))?;
+        backend.clear_region(ClearType::CurrentLine)?;
+        backend.draw(Buffer::empty(row.area).diff(&row).into_iter())?;
+        if viewport.y == 0 {
+            backend.scroll_region_up(0..screen, 1)?;
+        }
+    }
+    // Line erases keep tmux from scrolling the stale screen into history, unlike a home-cursor erase.
+    for y in viewport.y..screen {
+        backend.set_cursor_position((0, y))?;
+        backend.clear_region(ClearType::CurrentLine)?;
+    }
+    terminal.swap_buffers();
+    Ok(())
+}
+
 impl Drop for AttachedTerminal {
     fn drop(&mut self) {
         let _ = self.release();
+    }
+}
+
+#[cfg(test)]
+mod insert_rows_tests {
+    use super::insert_rows_scrolling_screen;
+    use ratatui::{
+        Terminal, TerminalOptions, Viewport,
+        backend::{Backend, CrosstermBackend, TestBackend},
+        buffer::Buffer,
+        layout::Rect,
+        text::Line,
+    };
+    use std::{cell::RefCell, io, rc::Rc};
+
+    fn text_rows(buffer: &Buffer) -> Vec<String> {
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    fn rows_with_separator() -> impl Iterator<Item = Line<'static>> {
+        ["alpha", "beta"]
+            .into_iter()
+            .map(Line::from)
+            .chain(std::iter::once(Line::default()))
+    }
+
+    struct Sink(Rc<RefCell<Vec<u8>>>);
+
+    impl io::Write for Sink {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn strip_csi(bytes: &[u8]) -> String {
+        let mut out = Vec::new();
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == 0x1b && bytes.get(index + 1) == Some(&b'[') {
+                index += 2;
+                while index < bytes.len() && !(0x40..=0x7e).contains(&bytes[index]) {
+                    index += 1;
+                }
+                index += 1;
+            } else {
+                out.push(bytes[index]);
+                index += 1;
+            }
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    #[test]
+    fn short_pane_at_screen_top_scrolls_rows_into_scrollback() {
+        let mut terminal = Terminal::with_options(
+            TestBackend::new(12, 8),
+            TerminalOptions {
+                viewport: Viewport::Inline(8),
+            },
+        )
+        .expect("terminal");
+        insert_rows_scrolling_screen(&mut terminal, 8, rows_with_separator()).expect("insert");
+        assert_eq!(
+            text_rows(terminal.backend().scrollback()),
+            ["alpha", "beta", ""]
+        );
+        assert!(
+            text_rows(terminal.backend().buffer())
+                .iter()
+                .all(String::is_empty)
+        );
+    }
+
+    #[test]
+    fn short_pane_below_row_zero_inserts_above_viewport_and_erases_it() {
+        let mut backend = TestBackend::new(12, 9);
+        backend.set_cursor_position((0, 1)).expect("cursor");
+        let mut terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(8),
+            },
+        )
+        .expect("terminal");
+        assert_eq!(terminal.get_frame().area().y, 1);
+        insert_rows_scrolling_screen(&mut terminal, 9, rows_with_separator()).expect("insert");
+        assert_eq!(
+            text_rows(terminal.backend().scrollback()),
+            ["", "alpha", "beta"]
+        );
+        assert!(
+            text_rows(terminal.backend().buffer())
+                .iter()
+                .all(String::is_empty)
+        );
+    }
+
+    #[test]
+    fn wide_cells_emit_no_padding_shift() {
+        let sink = Rc::new(RefCell::new(Vec::new()));
+        let mut terminal = Terminal::with_options(
+            CrosstermBackend::new(Sink(Rc::clone(&sink))),
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, 8, 2)),
+            },
+        )
+        .expect("terminal");
+        let lines = [Line::from("コンab"), Line::default()].into_iter();
+        insert_rows_scrolling_screen(&mut terminal, 3, lines).expect("insert");
+        let text = strip_csi(&sink.borrow());
+        assert!(text.contains("コンab"), "{text:?}");
     }
 }

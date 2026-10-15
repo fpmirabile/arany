@@ -1682,7 +1682,7 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
             let rows: Vec<_> = text.lines().collect();
             rows.len() == 24
                 && rows[23].starts_with("ready")
-                && rows[23].contains("· ok")
+                && rows[23].split(" · ").any(|field| field.trim() == "ok")
                 && !rows[23].contains("New Session")
                 && text.contains("Arany:")
                 && text.contains("pending")

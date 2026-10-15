@@ -431,6 +431,7 @@ fn empty_session_has_a_quiet_welcome_without_obscuring_the_composer() {
         activity_lines: Vec::new(),
         setup_required: false,
         draft_action: DraftAction::Submit,
+        empty_chat: true,
     };
     for (width, height) in [(16, 8), (40, 12), (80, 24)] {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
@@ -486,7 +487,6 @@ fn empty_session_has_a_quiet_welcome_without_obscuring_the_composer() {
                         matched: false,
                     }],
                     None,
-                    false,
                 );
             })
             .expect("history frame");
@@ -508,6 +508,7 @@ fn unconfigured_session_draws_typed_draft_in_the_composer() {
         activity_lines: Vec::new(),
         setup_required: true,
         draft_action: DraftAction::Submit,
+        empty_chat: true,
     };
     let mut composer = Composer::default();
     for character in "visible draft".chars() {
@@ -549,6 +550,7 @@ fn inline_frame_keeps_composer_and_status_in_the_viewport() {
             activity_lines: vec!["primary · working".into()],
             setup_required: false,
             draft_action: DraftAction::InspectRun,
+            empty_chat: true,
         };
         terminal
             .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
@@ -603,6 +605,7 @@ fn inline_frame_keeps_composer_and_status_in_the_viewport() {
         activity_lines: vec!["primary · working".into()],
         setup_required: false,
         draft_action: DraftAction::InspectRun,
+        empty_chat: true,
     };
     terminal
         .draw(|frame| {
@@ -647,6 +650,7 @@ fn inline_frame_keeps_composer_and_status_in_the_viewport() {
                         activity_lines: Vec::new(),
                         setup_required: false,
                         draft_action,
+                        empty_chat: true,
                     };
                     let mut composer = Composer::default();
                     for character in text.chars() {
@@ -736,6 +740,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
         activity_lines: vec!["primary · working".into()],
         setup_required: false,
         draft_action: DraftAction::InspectRun,
+        empty_chat: true,
     };
     let rows = vec![
         HistoryRow {
@@ -767,7 +772,6 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
                 Palette { color: false },
                 &rows,
                 Some("History · Ctrl+L live"),
-                false,
             );
         })
         .expect("history frame");
@@ -797,6 +801,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
         activity_lines: vec!["primary · working".into()],
         setup_required: false,
         draft_action: DraftAction::InspectRun,
+        empty_chat: true,
     };
     for color in [false, true] {
         let mut wide = Terminal::new(TestBackend::new(80, 12)).expect("wide terminal");
@@ -822,7 +827,6 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
                 Palette { color },
                 &rows,
                 Some("History · Ctrl+L live"),
-                false,
             );
         })
         .expect("wide history frame");
@@ -843,7 +847,6 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
                 Palette { color },
                 &feedback_rows,
                 Some("History · Ctrl+L live"),
-                false,
             );
         })
         .expect("wide error frame");
@@ -876,7 +879,6 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
                 Palette { color: true },
                 &rows,
                 None,
-                false,
             );
         })
         .expect("colored history frame");
@@ -899,7 +901,6 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
                         Palette { color },
                         &rows,
                         None,
-                        false,
                     );
                 })
                 .expect("narrow history frame");
@@ -957,7 +958,6 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
                         Palette { color },
                         &conversation,
                         None,
-                        false,
                     );
                 })
                 .expect("conversation frame");
@@ -1005,6 +1005,7 @@ fn multiline_frame_keeps_activity_draft_caret_and_status_in_order() {
             activity_lines: vec!["primary · working".into()],
             setup_required: false,
             draft_action: DraftAction::InspectRun,
+            empty_chat: true,
         };
         terminal
             .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
@@ -1046,6 +1047,7 @@ fn multiline_frame_keeps_activity_draft_caret_and_status_in_order() {
         activity_lines: vec!["primary · working".into(), "child 1 · waiting".into()],
         setup_required: false,
         draft_action: DraftAction::InspectRun,
+        empty_chat: true,
     };
     terminal
         .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
@@ -1113,6 +1115,7 @@ fn multiline_frame_keeps_activity_draft_caret_and_status_in_order() {
                 )],
                 setup_required: false,
                 draft_action: DraftAction::Retain,
+                empty_chat: true,
             };
             terminal
                 .draw(|frame| draw_frame(frame, &preparing, &composer, None, Palette { color }))
@@ -1150,6 +1153,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
         activity_lines: Vec::new(),
         setup_required: false,
         draft_action: DraftAction::Submit,
+        empty_chat: true,
     };
     let mut composer = Composer::default();
     for character in "/provider ".chars() {
@@ -1612,6 +1616,7 @@ fn composer_frame_wraps_draft_and_keeps_grapheme_cursor_visible() {
         activity_lines: Vec::new(),
         setup_required: false,
         draft_action: DraftAction::Submit,
+        empty_chat: true,
     };
     for width in [16, 40, 80] {
         for color in [true, false] {
@@ -1898,6 +1903,7 @@ fn composer_frame_wraps_draft_and_keeps_grapheme_cursor_visible() {
         activity_lines: Vec::new(),
         setup_required: false,
         draft_action: DraftAction::Submit,
+        empty_chat: true,
     };
     terminal
         .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
@@ -2069,6 +2075,7 @@ fn model_catalog_keeps_selected_row_visible_and_hostile_ids_inert() {
         activity_lines: Vec::new(),
         setup_required: false,
         draft_action: DraftAction::Submit,
+        empty_chat: true,
     };
     for width in [16, 20, 24, 40, 50, 79, 80, 120] {
         for height in [8, 12, 24] {
@@ -2199,6 +2206,7 @@ fn inline_custom_model_catalog_shows_declared_efforts() {
         activity_lines: Vec::new(),
         setup_required: false,
         draft_action: DraftAction::Submit,
+        empty_chat: true,
     };
     for width in [16, 24, 40, 50, 80] {
         for (filter, empty) in [("", false), ("MODEL", false), ("missing", true)] {
@@ -2391,6 +2399,44 @@ fn permission_choices_are_vertical_and_complete_before_selection() {
                 .chars()
                 .filter(|ch| !ch.is_whitespace())
                 .collect::<String>()
+        );
+    }
+}
+
+#[test]
+fn fullscreen_history_cue_stays_visible_behind_a_long_state() {
+    let status_line = "running · openai gpt-5.1-codex-max-high-reasoning · approval: ask before writes · goal active · model catalog refreshed";
+    for width in [80, 120] {
+        let mut terminal = Terminal::new(TestBackend::new(width, 6)).expect("test terminal");
+        let model = PresentationModel {
+            status_line: status_line.into(),
+            activity_lines: Vec::new(),
+            setup_required: false,
+            draft_action: DraftAction::Retain,
+            empty_chat: false,
+        };
+        terminal
+            .draw(|frame| {
+                draw_frame_with_history(
+                    frame,
+                    &model,
+                    &Composer::default(),
+                    None,
+                    Palette { color: false },
+                    &[],
+                    Some("History · Ctrl+L live"),
+                );
+            })
+            .expect("status frame");
+        let status = buffer_row(terminal.backend().buffer(), 5);
+        let status = status.trim_end();
+        assert!(
+            status.starts_with("running · openai"),
+            "{width}: {status:?}"
+        );
+        assert!(
+            status.ends_with("· History · Ctrl+L live"),
+            "{width}: {status:?}"
         );
     }
 }
