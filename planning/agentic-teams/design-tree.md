@@ -225,6 +225,42 @@ names only; every MCP tool invocation and command still requires the contract.
 Any contract supplied with a prelude call is validated and journaled before
 dispatch. A pure read-only task can finish without fabricated effect scope.
 
+## Round 14 — open
+
+Planning-only proposal; nothing here is accepted behavior. C needs these
+ownership rules before implementation: the
+[multi-agent supervision research](../../docs/research/multi-agent-loop-and-user-feedback.md#ownership-before-scheduling)
+puts stale-attempt rejection and lost-effect reconciliation ahead of leases
+and reassignment. Nodes build on R6-5, R7-8 and R11-1–R11-8 rather than
+restating them. Accepted answers apply to [C](./README.md#c-coding-teams) and
+reach the [execution](../../docs/specs/execution.md#collaboration),
+[Goals](../../docs/specs/goals.md#lifecycle-budgets-and-recovery) and
+[Tools](../../docs/specs/tools.md#command-changesets) contracts with the C
+slice.
+
+| # | Decision | Recommendation | Answer |
+|---|---|---|---|
+| R14-1 | Assignment identity: one assignment is one child AgentRun (UUIDv7 ID, ordinal) whose spawn fact pins mission, lease, grant (R7-8), success criterion and assignment base (digests of the leased paths). Reassignment (R11-4, R11-6) is always a new AgentRun; an AgentRun never takes a second assignment. This extends the AgentRun Events and needs a new current Event payload version (one current format, no compatibility readers) | Yes. The existing AgentRun identity is the attempt, so no separate attempt counter or fencing token is needed | Pending |
+| R14-2 | Stale-result rejection: a handover is a journaled fact bound to its AgentRun and changeset digest. The primary integrates only the handover of a Finished worker AgentRun of an open Run (no `RunFinished`) with no cancellation observed, that no reassignment superseded, whose own criterion passed (R11-5), and that was not already integrated or discarded. Any other handover is journaled as discarded with its reason, including a conflicted handover the primary resolves by hand (the resolution is the primary's own new change) and a handover whose Run has no terminal fact when the Goal resumes, which is never carried over. Replay rejects an integration without an eligible handover | Yes. Eligibility derives from journaled facts, so a late, duplicate or cancelled result cannot publish | Pending |
+| R14-3 | Lease lifecycle: Run-scoped and fixed at assignment, non-overlapping among live assignments, a subset of the Goal path scope; held until its handover is integrated or discarded, or until its AgentRun ends without one, so two pending changesets never overlap (R11-3); never carried across a Run boundary (R6-5). The Goal's Workspace OS writer lock already excludes other writers; out-of-lease writes reject at changeset validation (R11-2) | Yes. Inside one locked Run there is no lease renewal, expiry clock or cross-Run fencing to get wrong | Pending |
+| R14-4 | Worker view lifetime: the view (R11-1) is disposable Guard-owned storage, lost on cancellation, crash or process exit and never recovered. A resumed Goal reports the discarded worker work; the primary may reassign within budget; no automatic restart (R11-6) | Yes. Recovery stays at Run boundaries; recovering a half-built view would need its own durability contract | Pending |
+| R14-5 | Lost-effect reconciliation: a result lost inside a worker's view fails that worker and discards its view; the Workspace is not marked Uncertain. Workspace integration stays the primary's `ApplyChangeset`: a missing receipt after GO is Uncertain and stops the Run without retry; a failed digest precondition is a conflict (R11-4). This changes the [execution](../../docs/specs/execution.md#collaboration) rule that child failure drains siblings before primary failure: a worker failure is not fatal to the Run (R11-6) | Yes. The view bounds the loss; only the existing integration path can leave the Workspace uncertain | Pending |
+| R14-6 | Worker commands and the per-Workspace build cache (open): workers read the archive as of assignment and never publish, so only primary commands publish; or workers publish serially in completion order | Read-only for workers. Serial publication lets build state from work discarded after publication reach the shared archive; the cost is repeated builds inside worker views | Pending |
+| R14-7 | MCP for workers (open): the first C slice grants workers catalog listing only, no MCP invocations; this narrows the C intro's worker grant | Yes. MCP effects land outside the worker's view and lease, so neither R11-1 isolation nor R11-2 enforcement covers them | Pending |
+| R14-8 | Delivery order (user decision): (a) keep plan order, C at execution step 13; (b) stage C earlier: read-only researcher children, then edit-only workers, then command-capable views; (c) pull C1–C3 forward with only B5 ahead | (b) if multi-agent coding is wanted soon, otherwise (a). Until its last stage, (b) deviates from R11-1 and R11-5: edit-only workers cannot run their criterion inside a view. (b) and (c) revisit Q1, and before D every worker shares the primary's profile | Pending |
+
+Evidence owners if accepted; no new owner is proposed:
+
+| Node | Owner |
+|---|---|
+| R14-1, R14-2 | [Engine Run corpus](../../tests/engine_run.rs) for live admission and rejection; [reducer replay corpus](../../src/session/reducer.rs) for spawn pins and integration without an eligible handover |
+| R14-3 | [Tool journeys](../../tests/session_run/tools.rs) for out-of-lease rejection with the Workspace unchanged; [Goal corpus](../../tests/engine_run/goals.rs) for the Goal-scope subset and writer lock; reducer replay corpus for overlapping live leases and a lease held until its handover is integrated or discarded |
+| R14-4 | Goal corpus for resume reporting discarded work without restart; Engine Run corpus for cancellation discarding views |
+| R14-5 | Tool journeys for post-GO Uncertain and digest conflict; Engine Run corpus for a worker-local loss failing only that worker |
+| R14-6 | Tool journeys for the worker command's cache outcome |
+| R14-7 | Engine Run corpus for a worker `McpCall` rejected before dispatch |
+| R14-8 | None; ordering only |
+
 ## User directives after Round 12
 
 | Date | Directive | Applied to |

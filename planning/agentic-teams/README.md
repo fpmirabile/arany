@@ -4,7 +4,7 @@
 
 - Status: `In progress`
 - Owner: Fernando Mirabile
-- Last updated: 2026-10-14
+- Last updated: 2026-10-15
 
 ## Outcome
 
@@ -322,10 +322,11 @@ Skills and MCP tools; workers never receive Git or network capabilities.
 4. **Reviewer role.** A read-only reviewer child evaluates each changeset
    before integration, feeding the Supervisor review point (B4).
 
-This replaces decision D-03 for coding Runs and requires the attempt, lease,
-stale-result and lost-effect reconciliation rules listed in
+This replaces decision D-03 for coding Runs.
+[Round 14](./design-tree.md#round-14--open) proposes the attempt, lease,
+stale-result and lost-effect reconciliation rules that
 [multi-agent supervision](../../docs/research/multi-agent-loop-and-user-feedback.md#ownership-before-scheduling)
-before implementation.
+requires. C implementation is blocked until Round 14 is answered.
 
 ### D. Provider roster and per-agent routing
 
@@ -549,8 +550,9 @@ support claims.
 
 ## Open questions
 
-The [design tree](./design-tree.md) records every grilling round. Only
-data-dependent questions remain:
+The [design tree](./design-tree.md) records every grilling round.
+[Round 14](./design-tree.md#round-14--open) holds the open C ownership
+decisions; the remaining questions are data-dependent:
 
 - Default thresholds for loop, probing and disproportion signals. Decided from
   shadow-mode corpus and real Runs before those signals enforce.
