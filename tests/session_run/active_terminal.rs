@@ -353,7 +353,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             patterns.push(if expect_failure {
                 b"unavailable."
             } else {
-                b"cancelled."
+                b"continue."
             });
         }
         if expect_draft {
@@ -873,17 +873,20 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                 after += offset + word.len();
             }
         }
-        for word in ["No", "answer", "was", "committed."] {
-            let offset = transcript[after..]
-                .find(word)
-                .unwrap_or_else(|| panic!("missing chat feedback word {word}: {preview}"));
-            after += offset + word.len();
+        // A cancelled plain prompt pauses its Goal, so only the resume notice follows the receipt.
+        if expect_failure {
+            for word in ["No", "answer", "was", "committed."] {
+                let offset = transcript[after..]
+                    .find(word)
+                    .unwrap_or_else(|| panic!("missing chat feedback word {word}: {preview}"));
+                after += offset + word.len();
+            }
         }
         assert!(
             transcript[receipt..].contains(match (inline, expect_failure) {
                 (true, _) => classic_label,
                 (false, true) => "Notice: Error: Run failed.",
-                (false, false) => "Notice: Run cancelled.",
+                (false, false) => "Notice: Goal paused; use /goal resume to continue.",
             }),
             "labeled unsuccessful outcome: {preview}"
         );

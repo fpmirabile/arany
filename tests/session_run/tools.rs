@@ -21,6 +21,68 @@ fn assert_seed_retired(id: uuid::Uuid) {
     }
 }
 
+fn journey_plan_contract() -> arany::GoalPlanContract {
+    arany::GoalPlanContract {
+        mission: "Update and verify the synthetic Workspace files".into(),
+        paths: vec!["src".into()],
+        commands: vec!["bash".into()],
+        skills: vec![
+            arany::GoalSkillBinding {
+                name: "synthetic".into(),
+                resource: None,
+            },
+            arany::GoalSkillBinding {
+                name: "synthetic".into(),
+                resource: Some("references/note.txt".into()),
+            },
+        ],
+        mcp_tools: vec![arany::GoalMcpTool {
+            server: "synthetic".into(),
+            tool: "echo".into(),
+        }],
+        success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
+            path: "src/main.c".into(),
+            content: "int main(void) { return 0; }\n".into(),
+        },
+        budget: arany::GoalBudget::default(),
+    }
+}
+
+fn proposal_plan_contract(call: &ToolCall) -> Option<arany::GoalPlanContract> {
+    match call {
+        ToolCall::McpList { .. } => None,
+        ToolCall::McpCall { server, tool, .. } => Some(arany::GoalPlanContract {
+            mission: "Invoke the exact synthetic MCP tool".into(),
+            paths: Vec::new(),
+            commands: Vec::new(),
+            skills: Vec::new(),
+            mcp_tools: vec![arany::GoalMcpTool {
+                server: server.clone(),
+                tool: tool.clone(),
+            }],
+            success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
+                call: Box::new(call.clone()),
+            },
+            budget: arany::GoalBudget::default(),
+        }),
+        _ => Some(arany::GoalPlanContract {
+            mission: "Exercise the proposed Tool and verify the unchanged sentinel".into(),
+            paths: vec!["src".into()],
+            commands: match call {
+                ToolCall::Command { program, .. } => vec![program.clone()],
+                _ => Vec::new(),
+            },
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
+                path: "src/current.txt".into(),
+                content: "current".into(),
+            },
+            budget: arany::GoalBudget::default(),
+        }),
+    }
+}
+
 struct Journey {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
     compactions: Arc<Mutex<Vec<CompactionRequest>>>,
@@ -45,7 +107,7 @@ impl Provider for Journey {
             .as_ref()
             .ok_or(ProviderError::InvalidOutcome)?;
         let call = match step {
-            0 => ToolCall::List { path: ".".into() },
+            0 => ToolCall::List { path: "src".into() },
             1 => ToolCall::Read {
                 path: "src/main.c".into(),
                 offset: 0,
@@ -126,7 +188,10 @@ impl Provider for Journey {
         };
         requests.push(request);
         Ok(ProviderResponse {
-            outcome: ProviderOutcome::Tool(call),
+            outcome: ProviderOutcome::Tool {
+                call,
+                plan_contract: (step == 0).then(|| Box::new(journey_plan_contract())),
+            },
             response_id: None,
             input_tokens: None,
             output_tokens: None,
@@ -152,6 +217,9 @@ impl Provider for Journey {
 #[tokio::test]
 #[ignore = "native Linux namespace/cgroup Tool conformance; offline and synthetic"]
 async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
+    if !super::isolation::enter_account_isolated_test() {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src")).unwrap();
@@ -214,6 +282,7 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
             workspace: workspace.clone(),
             include_paths: Vec::new(),
             policy: CollaborationPolicy::Single,
+            goal: arany::GoalRequest::default(),
         }),
     )
     .await
@@ -378,6 +447,9 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
 struct Proposal {
     call: ToolCall,
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
+    inspect_first: bool,
+    plan_on_inspection: bool,
+    omit_plan: bool,
 }
 
 impl Provider for Proposal {
@@ -392,15 +464,53 @@ impl Provider for Proposal {
     }
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         let mut requests = self.requests.lock().unwrap();
-        let outcome = if requests.is_empty() {
-            ProviderOutcome::Tool(self.call.clone())
-        } else if requests.len() == 1 {
-            ProviderOutcome::Finish(Finish {
-                summary: "Observed result".into(),
-                result: "Observed the Tool result without retrying.".into(),
-            })
-        } else {
-            return Err(ProviderError::InvalidOutcome);
+        let request_index = requests.len();
+        if self.inspect_first && request_index == 0 {
+            requests.push(request);
+            return Ok(ProviderResponse {
+                outcome: ProviderOutcome::Tool {
+                    call: ToolCall::Read {
+                        path: "src/current.txt".into(),
+                        offset: 0,
+                        limit: 64,
+                    },
+                    plan_contract: if self.plan_on_inspection {
+                        proposal_plan_contract(&self.call).map(Box::new)
+                    } else {
+                        None
+                    },
+                },
+                response_id: None,
+                input_tokens: None,
+                output_tokens: None,
+                wire_provenance: None,
+            });
+        }
+        let step = request_index.saturating_sub(if self.inspect_first { 1 } else { 0 });
+        let outcome = match (step, &self.call) {
+            (0, call) => ProviderOutcome::Tool {
+                call: call.clone(),
+                plan_contract: if self.omit_plan || self.plan_on_inspection {
+                    None
+                } else {
+                    proposal_plan_contract(call).map(Box::new)
+                },
+            },
+            (1, ToolCall::McpList { .. } | ToolCall::McpCall { .. }) | (2, _) => {
+                ProviderOutcome::Finish(Finish {
+                    summary: "Observed result".into(),
+                    result: "Observed the Tool result without retrying.".into(),
+                })
+            }
+            (1, _) => ProviderOutcome::Tool {
+                call: ToolCall::Read {
+                    path: "src/current.txt".into(),
+                    offset: 0,
+                    limit: 64,
+                },
+                plan_contract: None,
+            },
+            _ => return Err(ProviderError::InvalidOutcome),
         };
         requests.push(request);
         Ok(ProviderResponse {
@@ -431,7 +541,269 @@ fn proposal_request(workspace: &Path) -> RunRequest {
         workspace: workspace.into(),
         include_paths: Vec::new(),
         policy: CollaborationPolicy::Single,
+        goal: arany::GoalRequest::default(),
     }
+}
+
+struct ExactTokenTool {
+    requests: Arc<Mutex<Vec<ProviderRequest>>>,
+}
+
+impl arany::Provider for ExactTokenTool {
+    fn profile_name(&self) -> &str {
+        "scripted"
+    }
+
+    fn model_name(&self) -> &str {
+        "goal-budget-model"
+    }
+
+    fn max_concurrent_calls(&self) -> u8 {
+        1
+    }
+
+    async fn invoke(
+        &self,
+        request: ProviderRequest,
+    ) -> Result<arany::ProviderResponse, arany::ProviderError> {
+        self.requests.lock().unwrap().push(request);
+        Ok(arany::ProviderResponse {
+            outcome: ProviderOutcome::Tool {
+                call: ToolCall::Edit {
+                    path: "src/current.txt".into(),
+                    expected_digest: hash(b"current"),
+                    old: "current".into(),
+                    new: "after".into(),
+                },
+                plan_contract: Some(Box::new(arany::GoalPlanContract {
+                    mission: "Change the exact selected file".into(),
+                    paths: vec!["src".into()],
+                    commands: Vec::new(),
+                    skills: Vec::new(),
+                    mcp_tools: Vec::new(),
+                    success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
+                        path: "src/current.txt".into(),
+                        content: "after".into(),
+                    },
+                    budget: arany::GoalBudget {
+                        max_tokens: Some(8),
+                        ..arany::GoalBudget::default()
+                    },
+                })),
+            },
+            response_id: None,
+            input_tokens: Some(0),
+            output_tokens: Some(8),
+            wire_provenance: None,
+        })
+    }
+
+    async fn compact(
+        &self,
+        _: CompactionRequest,
+    ) -> Result<CompactionResponse, arany::ProviderError> {
+        Err(arany::ProviderError::InvalidOutcome)
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native Linux account-isolated Goal token admission"
+)]
+async fn exact_goal_token_cap_fails_before_a_tool_request_is_journaled() {
+    if !super::isolation::enter_native_account_isolated_test() {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    private_file(&workspace.join("src/current.txt"), b"current");
+    let state_path = temp.path().join("state");
+    let state = StateRoot::admit(&state_path).unwrap();
+    basic_config(&state_path);
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = Engine::open(
+        state,
+        ExactTokenTool {
+            requests: Arc::clone(&requests),
+        },
+    )
+    .unwrap();
+    engine
+        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
+        .unwrap();
+    let mut request = proposal_request(&workspace);
+    request.goal = arany::GoalRequest::new(
+        arany::GoalBudget {
+            max_tokens: Some(8),
+            ..arany::GoalBudget::default()
+        },
+        arany::GoalPhase::Implementation,
+    );
+    let outcome = engine.run(request).await.unwrap();
+    engine.close().await.unwrap();
+
+    assert_eq!(outcome.run.status, RunStatus::Failed);
+    assert!(outcome.run.tools.is_empty());
+    assert_eq!(
+        std::fs::read(workspace.join("src/current.txt")).unwrap(),
+        b"current"
+    );
+    {
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+    }
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+    let events = store.load_session(outcome.session_id).await.unwrap();
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        arany::Event::ProviderCallRecorded { record, .. }
+            if record.disposition == arany::ProviderCallDisposition::InvalidResponse
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(&event.event, arany::Event::ToolStarted { .. }))
+    );
+    store.close().await.unwrap();
+}
+
+struct GoalWorkspaceLease {
+    requests: Arc<Mutex<Vec<ProviderRequest>>>,
+}
+
+impl Provider for GoalWorkspaceLease {
+    fn profile_name(&self) -> &str {
+        "scripted"
+    }
+
+    fn model_name(&self) -> &str {
+        "goal-lease-model"
+    }
+
+    fn max_concurrent_calls(&self) -> u8 {
+        1
+    }
+
+    async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        self.requests.lock().unwrap().push(request);
+        Ok(ProviderResponse {
+            outcome: ProviderOutcome::Finish(Finish {
+                summary: "The selected task is complete".into(),
+                result: "No Workspace mutation was needed".into(),
+            }),
+            response_id: None,
+            input_tokens: Some(1),
+            output_tokens: Some(1),
+            wire_provenance: None,
+        })
+    }
+
+    async fn compact(&self, _: CompactionRequest) -> Result<CompactionResponse, ProviderError> {
+        Err(ProviderError::InvalidOutcome)
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native Linux cross-StateRoot Goal Workspace lease"
+)]
+async fn paused_implementation_goal_does_not_hold_the_workspace_writer() {
+    if !super::isolation::enter_native_account_isolated_test() {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    let first_state_path = temp.path().join("first-state");
+    let second_state_path = temp.path().join("second-state");
+    for state_path in [&first_state_path, &second_state_path] {
+        let state = StateRoot::admit(state_path).unwrap();
+        drop(state);
+        basic_config(state_path);
+    }
+
+    let first_requests = Arc::new(Mutex::new(Vec::new()));
+    let mut first_engine = Engine::open(
+        StateRoot::open_existing(&first_state_path).unwrap(),
+        GoalWorkspaceLease {
+            requests: Arc::clone(&first_requests),
+        },
+    )
+    .unwrap();
+    first_engine
+        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
+        .unwrap();
+    let mut first = proposal_request(&workspace);
+    first.goal = arany::GoalRequest::new(
+        arany::GoalBudget {
+            max_runs: 2,
+            ..arany::GoalBudget::default()
+        },
+        arany::GoalPhase::Implementation,
+    );
+    first.goal.finish_after_run = false;
+    let initial = first_engine.run(first).await.unwrap();
+    assert_eq!(initial.run.status, RunStatus::Finished);
+    assert_eq!(first_requests.lock().unwrap().len(), 1);
+
+    let blocked_requests = Arc::new(Mutex::new(Vec::new()));
+    let mut blocked_engine = Engine::open(
+        StateRoot::open_existing(&second_state_path).unwrap(),
+        GoalWorkspaceLease {
+            requests: Arc::clone(&blocked_requests),
+        },
+    )
+    .unwrap();
+    blocked_engine
+        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
+        .unwrap();
+    // The paused Goal holds no writer lock, so another StateRoot's Goal writes the Workspace.
+    assert_eq!(
+        blocked_engine
+            .run(proposal_request(&workspace))
+            .await
+            .unwrap()
+            .run
+            .status,
+        RunStatus::Finished
+    );
+    assert_eq!(blocked_requests.lock().unwrap().len(), 1);
+    blocked_engine.close().await.unwrap();
+
+    let mut resumed = proposal_request(&workspace);
+    resumed.session_id = Some(initial.session_id);
+    resumed.title = None;
+    resumed.goal = arany::GoalRequest::resume(initial.goal_id, true);
+    let terminal = first_engine.run(resumed).await.unwrap();
+    assert_eq!(terminal.run.status, RunStatus::Finished);
+    assert_eq!(first_requests.lock().unwrap().len(), 2);
+
+    let released_requests = Arc::new(Mutex::new(Vec::new()));
+    let mut released_engine = Engine::open(
+        StateRoot::open_existing(&second_state_path).unwrap(),
+        GoalWorkspaceLease {
+            requests: Arc::clone(&released_requests),
+        },
+    )
+    .unwrap();
+    released_engine
+        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
+        .unwrap();
+    assert_eq!(
+        released_engine
+            .run(proposal_request(&workspace))
+            .await
+            .unwrap()
+            .run
+            .status,
+        RunStatus::Finished
+    );
+    assert_eq!(released_requests.lock().unwrap().len(), 1);
+    released_engine.close().await.unwrap();
+    first_engine.close().await.unwrap();
 }
 
 fn mcp_definition() -> Value {
@@ -473,6 +845,9 @@ fn exec_tool_configuration_rejects_before_workspace_content_or_provider_egress()
 #[tokio::test]
 #[ignore = "native Linux real MCP version/framing/schema/capability failure corpus"]
 async fn mcp_stdio_corpus_rejects_unnegotiated_authority_and_hostile_results() {
+    if !super::isolation::enter_account_isolated_test() {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src")).unwrap();
@@ -531,6 +906,9 @@ async fn mcp_stdio_corpus_rejects_unnegotiated_authority_and_hostile_results() {
             Proposal {
                 call: proposal,
                 requests: requests.clone(),
+                inspect_first: false,
+                plan_on_inspection: false,
+                omit_plan: false,
             },
         )
         .unwrap();
@@ -545,7 +923,15 @@ async fn mcp_stdio_corpus_rejects_unnegotiated_authority_and_hostile_results() {
         .expect("MCP case parent deadline")
         .unwrap();
         engine.close().await.unwrap();
-        assert_eq!(outcome.run.status, RunStatus::Finished, "MCP case {mode}");
+        assert_eq!(
+            outcome.run.status,
+            if !call || expected == ToolDisposition::Succeeded {
+                RunStatus::Finished
+            } else {
+                RunStatus::Failed
+            },
+            "MCP case {mode}"
+        );
         let observation = outcome.run.tools[0].observation.as_ref().unwrap();
         assert_eq!(
             observation.disposition, expected,
@@ -558,15 +944,13 @@ async fn mcp_stdio_corpus_rejects_unnegotiated_authority_and_hostile_results() {
             assert_eq!(result["content"][0]["fetch"], "not authorized or performed");
         }
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
-        assert_eq!(
-            store
-                .load_view(outcome.session_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .runs[0],
-            outcome.run
-        );
+        let view = store.load_view(outcome.session_id).await.unwrap().unwrap();
+        assert_eq!(view.runs[0], outcome.run);
+        if !call {
+            assert_eq!(view.goals[0].status, arany::GoalStatus::Completed);
+            assert!(view.goals[0].plan_contract.is_none());
+            assert!(view.goals[0].report.is_some());
+        }
         store.close().await.unwrap();
     }
 }
@@ -586,13 +970,29 @@ fn assert_proposal_requests(requests: &[ProviderRequest], count: usize) {
                 && request.context_summary.is_none()
         );
         assert_eq!(request.max_output_tokens, 4096);
-        assert_eq!(request.tools.as_ref().unwrap().observations.len(), index);
+        let observations = request.tools.as_ref().unwrap().observations.len();
+        assert_eq!(observations, index);
     }
 }
 
 struct BoundedLoop {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
     team: bool,
+}
+
+fn bounded_loop_plan() -> arany::GoalPlanContract {
+    arany::GoalPlanContract {
+        mission: "Append the stated line after verifying the file".into(),
+        paths: vec!["src".into()],
+        commands: Vec::new(),
+        skills: Vec::new(),
+        mcp_tools: Vec::new(),
+        success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
+            path: "src/current.txt".into(),
+            content: "current\n2026-10-06\n".into(),
+        },
+        budget: arany::GoalBudget::default(),
+    }
 }
 
 impl Provider for BoundedLoop {
@@ -609,48 +1009,23 @@ impl Provider for BoundedLoop {
         let mut requests = self.requests.lock().unwrap();
         let outcome = if self.team {
             match requests.len() {
-                0 => ProviderOutcome::Tool(ToolCall::Search {
-                    path: "src/current.txt".into(),
-                    query: "current".into(),
+                0 => ProviderOutcome::Delegate(arany::Delegate {
+                    children: vec!["Review the stated task without effects".into()],
                 }),
-                3 => ProviderOutcome::Tool(ToolCall::Read {
-                    path: "src/current.txt".into(),
-                    offset: 0,
-                    limit: 4096,
-                }),
-                1 => {
-                    let observation = &request.tools.as_ref().unwrap().observations[0];
-                    assert_eq!(observation.disposition, ToolDisposition::Succeeded);
-                    let search: Value = serde_json::from_str(&observation.output).unwrap();
-                    assert_eq!(
-                        search["entries"],
-                        json!([{"path":"src/current.txt","line":1,"text":"current"}])
-                    );
-                    ProviderOutcome::Delegate(arany::Delegate {
-                        children: vec!["Review the stated task without effects".into()],
-                    })
-                }
-                2 => ProviderOutcome::Finish(Finish {
+                1 => ProviderOutcome::Finish(Finish {
                     summary: "Child reasoning".into(),
                     result: "Read-only child result".into(),
                 }),
-                4 => {
-                    let observation = request.tools.as_ref().unwrap().observations.last().unwrap();
-                    assert_eq!(observation.disposition, ToolDisposition::Succeeded);
-                    assert!(
-                        matches!(&observation.intent.call, ToolCall::Read { path, .. } if path == "src/current.txt")
-                    );
-                    let read: serde_json::Value =
-                        serde_json::from_str(&observation.output).unwrap();
-                    assert_eq!(read["text"], "current");
-                    ProviderOutcome::Tool(ToolCall::Edit {
+                2 => ProviderOutcome::Tool {
+                    call: ToolCall::Edit {
                         path: "src/current.txt".into(),
-                        expected_digest: read["sha256"].as_str().unwrap().into(),
+                        expected_digest: hash(b"current"),
                         old: "current".into(),
                         new: "current\n2026-10-06\n".into(),
-                    })
-                }
-                5 => {
+                    },
+                    plan_contract: Some(Box::new(bounded_loop_plan())),
+                },
+                3 => {
                     assert_eq!(
                         request
                             .tools
@@ -664,18 +1039,35 @@ impl Provider for BoundedLoop {
                     );
                     ProviderOutcome::Finish(Finish {
                         summary: "Finished team".into(),
-                        result: "Appended 2026-10-06 after reading the file; child only reasoned."
+                        result: "Appended 2026-10-06 after the attested Edit; child only reasoned."
                             .into(),
                     })
                 }
                 _ => return Err(ProviderError::InvalidOutcome),
             }
         } else {
-            ProviderOutcome::Tool(ToolCall::Read {
-                path: "unselected.txt".into(),
-                offset: 0,
-                limit: 1,
-            })
+            ProviderOutcome::Tool {
+                call: ToolCall::Read {
+                    path: "src/unselected.txt".into(),
+                    offset: 0,
+                    limit: 1,
+                },
+                plan_contract: (requests.is_empty()).then(|| {
+                    Box::new(arany::GoalPlanContract {
+                        mission: "Verify the requested Workspace file without following links"
+                            .into(),
+                        paths: vec!["src".into()],
+                        commands: Vec::new(),
+                        skills: Vec::new(),
+                        mcp_tools: Vec::new(),
+                        success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
+                            path: "src/current.txt".into(),
+                            content: "current".into(),
+                        },
+                        budget: arany::GoalBudget::default(),
+                    })
+                }),
+            }
         };
         requests.push(request);
         Ok(ProviderResponse {
@@ -691,10 +1083,16 @@ impl Provider for BoundedLoop {
 #[tokio::test]
 #[ignore = "native Linux aggregate Tool budget and primary-only team continuation"]
 async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
+    if !super::isolation::enter_account_isolated_test() {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src")).unwrap();
     private_file(&workspace.join("src/current.txt"), b"current");
+    let outside = temp.path().join("unselected.txt");
+    private_file(&outside, b"OUTSIDE_GUARD_CANARY");
+    std::os::unix::fs::symlink(&outside, workspace.join("src/unselected.txt")).unwrap();
     for team in [true, false] {
         let state_path = temp
             .path()
@@ -723,6 +1121,9 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
                         new: "must not run".into(),
                     },
                     requests: failed_requests.clone(),
+                    inspect_first: false,
+                    plan_on_inspection: false,
+                    omit_plan: false,
                 },
             )
             .unwrap();
@@ -798,15 +1199,13 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
                 std::fs::read_to_string(workspace.join("src/current.txt")).unwrap(),
                 "current\n2026-10-06\n"
             );
-            assert_eq!(requests.len(), 6);
+            assert_eq!(requests.len(), 4);
             for (index, request) in requests.iter().enumerate() {
                 assert_eq!(
                     request.phase,
                     [
                         AgentPhase::RootPlan,
-                        AgentPhase::RootPlan,
                         AgentPhase::ChildWork,
-                        AgentPhase::RootSynthesis,
                         AgentPhase::RootSynthesis,
                         AgentPhase::RootSynthesis
                     ][index]
@@ -835,7 +1234,7 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
                         hash(b"current")
                     )]
                 );
-                if index == 2 {
+                if index == 1 {
                     assert!(request.history.is_empty());
                     assert_eq!(request.objective, "Review the stated task without effects");
                     assert!(request.tools.is_none() && request.child_results.is_empty());
@@ -855,15 +1254,15 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
                     assert_eq!(request.objective, "Guard corpus");
                     assert_eq!(
                         request.tools.as_ref().unwrap().observations.len(),
-                        [0, 1, 0, 1, 2, 3][index]
+                        index.saturating_sub(2)
                     );
-                    assert_eq!(request.child_results.len(), usize::from(index >= 3));
-                    if index >= 3 {
+                    assert_eq!(request.child_results.len(), usize::from(index >= 2));
+                    if index >= 2 {
                         assert_eq!(request.child_results[0].result, "Read-only child result");
                     }
                 }
             }
-            assert_eq!(outcome.run.tools.len(), 3);
+            assert_eq!(outcome.run.tools.len(), 1);
         } else {
             assert_eq!(outcome.run.status, RunStatus::Failed);
             assert_eq!(outcome.run.tools.len(), 16);
@@ -914,6 +1313,9 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
 #[tokio::test]
 #[ignore = "native Linux denied-path, atomic-write, descendant and quota Tool conformance"]
 async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
+    if !super::isolation::enter_account_isolated_test() {
+        return;
+    }
     use std::os::unix::fs::symlink;
     let temp = tempfile::tempdir().unwrap();
     let runtime_state_path = temp.path().join("state-runtime-overlap");
@@ -925,6 +1327,9 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
         Proposal {
             call: ToolCall::List { path: "".into() },
             requests: runtime_requests.clone(),
+            inspect_first: false,
+            plan_on_inspection: false,
+            omit_plan: false,
         },
     )
     .unwrap();
@@ -1000,7 +1405,24 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
             search(&deep_path),
             ToolDisposition::Denied,
         ),
-        ("scope", read("unselected.txt"), ToolDisposition::Denied),
+        (
+            "scope",
+            ToolCall::Write {
+                path: "unselected.txt".into(),
+                expected_digest: None,
+                content: "must not be written".into(),
+            },
+            ToolDisposition::Denied,
+        ),
+        (
+            "unplanned",
+            ToolCall::Write {
+                path: "src/unplanned.txt".into(),
+                expected_digest: None,
+                content: "must not be written".into(),
+            },
+            ToolDisposition::Denied,
+        ),
         (
             "parent",
             ToolCall::Write {
@@ -1066,6 +1488,9 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
             Proposal {
                 call,
                 requests: requests.clone(),
+                inspect_first: matches!(name, "scope" | "unplanned" | "long-mkdir"),
+                plan_on_inspection: name == "long-mkdir",
+                omit_plan: name == "unplanned",
             },
         )
         .unwrap();
@@ -1080,39 +1505,57 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
         .expect("path-case parent deadline")
         .unwrap();
         engine.close().await.unwrap();
-        assert_eq!(outcome.run.status, RunStatus::Finished, "case {name}");
+        let rejected_by_plan = matches!(name, "scope" | "unplanned");
         assert_eq!(
-            outcome.run.tools[0]
-                .observation
-                .as_ref()
-                .unwrap()
-                .disposition,
-            expected,
+            outcome.run.status,
+            if rejected_by_plan {
+                RunStatus::Failed
+            } else {
+                RunStatus::Finished
+            },
             "case {name}"
         );
-        assert_proposal_requests(&requests.lock().unwrap(), 2);
-        if name.starts_with("root-search-") {
+        assert_proposal_requests(
+            &requests.lock().unwrap(),
+            if rejected_by_plan {
+                2
+            } else {
+                if name == "long-mkdir" { 4 } else { 3 }
+            },
+        );
+        if rejected_by_plan {
             assert!(
-                !outcome.run.tools[0]
-                    .observation
-                    .as_ref()
-                    .unwrap()
-                    .output
-                    .contains("OUTSIDE_GUARD_CANARY")
+                outcome.run.tools.len() == 1
+                    && matches!(outcome.run.tools[0].intent.call, ToolCall::Read { .. })
+                    && outcome.run.tools[0]
+                        .observation
+                        .as_ref()
+                        .is_some_and(|observation| {
+                            observation.disposition == ToolDisposition::Succeeded
+                        }),
+                "out-of-plan call is never dispatched"
             );
-        }
-        if expected == ToolDisposition::Succeeded {
-            let observation = outcome.run.tools[0].observation.as_ref().unwrap();
-            assert!(observation.output.len() <= 128);
-            match &observation.intent.call {
-                ToolCall::Mkdir { path } => assert!(workspace.join(path).is_dir()),
-                ToolCall::Write { path, content, .. } => {
-                    assert_eq!(
-                        std::fs::read(workspace.join(path)).unwrap(),
-                        content.as_bytes()
-                    );
+            assert!(!workspace.join("unselected.txt").exists());
+            assert!(!workspace.join("src/unplanned.txt").exists());
+        } else {
+            let tool_index = if name == "long-mkdir" { 1 } else { 0 };
+            let observation = outcome.run.tools[tool_index].observation.as_ref().unwrap();
+            assert_eq!(observation.disposition, expected, "case {name}");
+            if name.starts_with("root-search-") {
+                assert!(!observation.output.contains("OUTSIDE_GUARD_CANARY"));
+            }
+            if expected == ToolDisposition::Succeeded {
+                assert!(observation.output.len() <= 128);
+                match &observation.intent.call {
+                    ToolCall::Mkdir { path } => assert!(workspace.join(path).is_dir()),
+                    ToolCall::Write { path, content, .. } => {
+                        assert_eq!(
+                            std::fs::read(workspace.join(path)).unwrap(),
+                            content.as_bytes()
+                        );
+                    }
+                    _ => panic!("unexpected successful mutation case"),
                 }
-                _ => panic!("unexpected successful mutation case"),
             }
         }
         assert_eq!(std::fs::read(&outside).unwrap(), b"OUTSIDE_GUARD_CANARY");
@@ -1122,15 +1565,15 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
         );
         assert!(!temp.path().join("created").exists());
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
-        assert_eq!(
-            store
-                .load_view(outcome.session_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .runs[0],
-            outcome.run
-        );
+        let view = store.load_view(outcome.session_id).await.unwrap().unwrap();
+        assert_eq!(view.runs[0], outcome.run);
+        if name == "long-mkdir" {
+            assert!(view.goals[0].plan_contract.is_some());
+            assert!(matches!(
+                view.runs[0].tools[0].intent.call,
+                ToolCall::Read { .. }
+            ));
+        }
         store.close().await.unwrap();
     }
     std::fs::remove_file(workspace.join("src/link")).unwrap();
@@ -1164,6 +1607,9 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
                     cwd: "".into(),
                 },
                 requests: requests.clone(),
+                inspect_first: false,
+                plan_on_inspection: false,
+                omit_plan: false,
             },
         )
         .unwrap();
@@ -1186,7 +1632,7 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
         );
         let observation = outcome.run.tools[0].observation.as_ref().unwrap();
         assert_eq!(observation.disposition, expected, "case {name}");
-        assert_proposal_requests(&requests.lock().unwrap(), 2);
+        assert_proposal_requests(&requests.lock().unwrap(), 3);
         assert!(observation.guard.is_some());
         if name == "descendant" {
             let unit = format!("arany-tool-{}.service", observation.intent.id);
@@ -1303,6 +1749,9 @@ async fn unit_properties(
 #[tokio::test]
 #[ignore = "native Linux in-flight double-fork/setsid cancellation Tool conformance"]
 async fn cancellation_owns_the_actual_descendant_unit_and_never_retries_it() {
+    if !super::isolation::enter_account_isolated_test() {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src")).unwrap();
@@ -1327,6 +1776,9 @@ async fn cancellation_owns_the_actual_descendant_unit_and_never_retries_it() {
                 cwd: "".into(),
             },
             requests: requests.clone(),
+            inspect_first: false,
+            plan_on_inspection: false,
+            omit_plan: false,
         },
     )
     .unwrap();
@@ -1401,6 +1853,9 @@ async fn cancellation_owns_the_actual_descendant_unit_and_never_retries_it() {
 #[tokio::test]
 #[ignore = "native Linux host-network/credential isolation and inherited seccomp Tool conformance"]
 async fn command_descendants_cannot_reach_host_canaries_or_guard_memory() {
+    if !super::isolation::enter_account_isolated_test() {
+        return;
+    }
     use std::net::{TcpListener, UdpSocket};
     let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
     let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -1409,6 +1864,7 @@ async fn command_descendants_cannot_reach_host_canaries_or_guard_memory() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src")).unwrap();
+    private_file(&workspace.join("src/current.txt"), b"current");
     private_file(
         &workspace.join("src/isolation.c"),
         include_bytes!("../fixtures/tool-isolation.c"),
@@ -1435,6 +1891,9 @@ async fn command_descendants_cannot_reach_host_canaries_or_guard_memory() {
                 cwd: "".into(),
             },
             requests: requests.clone(),
+            inspect_first: false,
+            plan_on_inspection: false,
+            omit_plan: false,
         },
     )
     .unwrap();
@@ -1468,12 +1927,15 @@ async fn command_descendants_cannot_reach_host_canaries_or_guard_memory() {
             .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
     );
     assert_eq!(std::fs::read(&outside).unwrap(), b"HOST_ONLY_CANARY");
-    assert_proposal_requests(&requests.lock().unwrap(), 2);
+    assert_proposal_requests(&requests.lock().unwrap(), 3);
 }
 
 #[tokio::test]
 #[ignore = "native Linux aggregate memory/PID Tool enforcement, including OOM cleanup"]
 async fn resource_quotas_apply_to_payload_descendants_and_oom_is_uncertain() {
+    if !super::isolation::enter_account_isolated_test() {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src")).unwrap();
@@ -1500,6 +1962,9 @@ async fn resource_quotas_apply_to_payload_descendants_and_oom_is_uncertain() {
                     cwd: "".into(),
                 },
                 requests: requests.clone(),
+                inspect_first: false,
+                plan_on_inspection: false,
+                omit_plan: false,
             },
         )
         .unwrap();
@@ -1582,7 +2047,7 @@ async fn resource_quotas_apply_to_payload_descendants_and_oom_is_uncertain() {
             assert_eq!(output["exit_code"], 0);
             assert_eq!(output["stdout"], "descendant quota enforced\n");
             assert_eq!(outcome.run.status, RunStatus::Finished);
-            assert_proposal_requests(&requests.lock().unwrap(), 2);
+            assert_proposal_requests(&requests.lock().unwrap(), 3);
         } else {
             assert_eq!(
                 observation.disposition,
@@ -1692,9 +2157,26 @@ impl Provider for ApprovalJourney {
         if review && self.review == "error" {
             return Err(ProviderError::InvalidOutcome);
         }
+        let plan_contract = arany::GoalPlanContract {
+            mission: "Perform the exact approved Tool action".into(),
+            paths: vec![".".into()],
+            commands: match &self.call {
+                ToolCall::Command { program, .. } => vec![program.clone()],
+                _ => Vec::new(),
+            },
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
+                call: Box::new(self.call.clone()),
+            },
+            budget: arany::GoalBudget::default(),
+        };
         Ok(ProviderResponse {
             outcome: if first {
-                ProviderOutcome::Tool(self.call.clone())
+                ProviderOutcome::Tool {
+                    call: self.call.clone(),
+                    plan_contract: Some(Box::new(plan_contract)),
+                }
             } else {
                 ProviderOutcome::Finish(Finish {
                     summary: "Synthetic decision".into(),
@@ -1728,6 +2210,9 @@ impl Provider for ApprovalJourney {
 #[tokio::test]
 #[ignore = "native Linux Guard approval and AI review gate"]
 async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() {
+    if !super::isolation::enter_account_isolated_test() {
+        return;
+    }
     use arany::{
         ApprovalMode, ProviderCallDisposition, RunCancellation, RunProgress, ToolApprovals,
     };

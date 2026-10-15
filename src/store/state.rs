@@ -19,7 +19,7 @@ pub(crate) use build_cache::{
 pub(crate) use build_cache::{begin_released, fail_next_commit_marker};
 #[cfg(target_os = "macos")]
 pub(crate) use build_cache::{capture_archive_async, restore_archive_async};
-pub(crate) use lock::SessionRunLock;
+pub(crate) use lock::{SessionRunLock, WorkspaceRunLock};
 
 const PROVIDER_PROFILES_FILE: &str = "provider-profiles.json";
 const MAX_PROVIDER_PROFILES_BYTES: usize = 64 * 1024;

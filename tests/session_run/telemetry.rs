@@ -1,5 +1,5 @@
 use super::loopback::{check_profile, read_request, send_response, wait_product, write_profile};
-use arany::{RunStatus, SessionId, StateRoot, Store};
+use arany::{GoalStatus, RunStatus, SessionId, StateRoot, Store};
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::any_value::Value;
 use opentelemetry_proto::tonic::trace::v1::Span;
@@ -101,6 +101,69 @@ fn trace_spans(bodies: &[Vec<u8>]) -> Vec<Span> {
         );
     }
     spans
+}
+
+fn committed_markers(span: &Span) -> Vec<(u64, String)> {
+    span.events
+        .iter()
+        .map(|event| {
+            assert_eq!(event.name, "arany.event.committed");
+            let sequence = event
+                .attributes
+                .iter()
+                .find(|attribute| attribute.key == "arany.event.sequence")
+                .and_then(|attribute| attribute.value.as_ref())
+                .and_then(|value| value.value.as_ref());
+            let kind = event
+                .attributes
+                .iter()
+                .find(|attribute| attribute.key == "arany.event.kind")
+                .and_then(|attribute| attribute.value.as_ref())
+                .and_then(|value| value.value.as_ref());
+            match (sequence, kind) {
+                (Some(Value::IntValue(sequence)), Some(Value::StringValue(kind))) => {
+                    (*sequence as u64, kind.clone())
+                }
+                _ => panic!("typed committed marker missing"),
+            }
+        })
+        .collect()
+}
+
+fn string_attribute<'a>(span: &'a Span, key: &str) -> Option<&'a str> {
+    span.attributes
+        .iter()
+        .find(|attribute| attribute.key == key)
+        .and_then(|attribute| attribute.value.as_ref())
+        .and_then(|value| value.value.as_ref())
+        .and_then(|value| match value {
+            Value::StringValue(value) => Some(value.as_str()),
+            _ => None,
+        })
+}
+
+fn int_attribute(span: &Span, key: &str) -> Option<i64> {
+    span.attributes
+        .iter()
+        .find(|attribute| attribute.key == key)
+        .and_then(|attribute| attribute.value.as_ref())
+        .and_then(|value| value.value.as_ref())
+        .and_then(|value| match value {
+            Value::IntValue(value) => Some(*value),
+            _ => None,
+        })
+}
+
+fn bool_attribute(span: &Span, key: &str) -> Option<bool> {
+    span.attributes
+        .iter()
+        .find(|attribute| attribute.key == key)
+        .and_then(|attribute| attribute.value.as_ref())
+        .and_then(|value| value.value.as_ref())
+        .and_then(|value| match value {
+            Value::BoolValue(value) => Some(*value),
+            _ => None,
+        })
 }
 
 #[test]
@@ -221,11 +284,32 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
         );
     }
     let spans = trace_spans(&bodies);
-    assert_eq!(spans.len(), 4);
+    assert_eq!(spans.len(), 5);
+    let goal = spans
+        .iter()
+        .find(|span| span.name == "invoke_workflow arany.goal")
+        .expect("Goal span");
     let root = spans
         .iter()
         .find(|span| span.name == "invoke_workflow arany.run")
         .expect("Run span");
+    assert_eq!(root.parent_span_id, goal.span_id);
+    assert_eq!(
+        string_attribute(goal, "arany.goal.status"),
+        Some("completed")
+    );
+    for key in [
+        "arany.goal.provider_calls",
+        "arany.goal.known_tokens",
+        "arany.goal.token_usage_unknown",
+        "arany.goal.active_ms",
+        "arany.goal.uncertain_active_ms",
+    ] {
+        assert!(
+            goal.attributes.iter().any(|attribute| attribute.key == key),
+            "Goal usage attribute {key}"
+        );
+    }
     let primary = spans
         .iter()
         .find(|span| span.name == "invoke_agent arany.primary")
@@ -241,37 +325,21 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
         .find(|span| span.name == "compile_context arany.run")
         .expect("context compilation span");
     assert_eq!(compilation.parent_span_id, root.span_id);
+    assert!(
+        goal.start_time_unix_nano <= root.start_time_unix_nano,
+        "Goal starts no later than its Run child"
+    );
+    assert!(
+        goal.start_time_unix_nano <= compilation.start_time_unix_nano,
+        "Goal starts no later than context compilation"
+    );
 
     let lines = String::from_utf8(result.stdout)
         .expect("JSONL output")
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("Event JSONL"))
         .collect::<Vec<_>>();
-    let markers = root
-        .events
-        .iter()
-        .map(|event| {
-            assert_eq!(event.name, "arany.event.committed");
-            let sequence = event
-                .attributes
-                .iter()
-                .find(|attribute| attribute.key == "arany.event.sequence")
-                .and_then(|attribute| attribute.value.as_ref())
-                .and_then(|value| value.value.as_ref());
-            let kind = event
-                .attributes
-                .iter()
-                .find(|attribute| attribute.key == "arany.event.kind")
-                .and_then(|attribute| attribute.value.as_ref())
-                .and_then(|value| value.value.as_ref());
-            match (sequence, kind) {
-                (Some(Value::IntValue(sequence)), Some(Value::StringValue(kind))) => {
-                    (*sequence as u64, kind.as_str())
-                }
-                _ => panic!("typed committed marker missing"),
-            }
-        })
-        .collect::<Vec<_>>();
+    let markers = committed_markers(root);
     let expected = lines
         .iter()
         .skip(1)
@@ -282,7 +350,23 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
             )
         })
         .collect::<Vec<_>>();
-    assert_eq!(markers, expected, "trace markers follow committed Events");
+    let goal_event = |kind: &str| kind.starts_with("Goal");
+    let expected_goal = expected
+        .iter()
+        .filter(|(_, kind)| goal_event(kind))
+        .map(|(sequence, kind)| (*sequence, (*kind).to_owned()))
+        .collect::<Vec<_>>();
+    let expected_run = expected
+        .iter()
+        .filter(|(_, kind)| !goal_event(kind))
+        .map(|(sequence, kind)| (*sequence, (*kind).to_owned()))
+        .collect::<Vec<_>>();
+    assert_eq!(markers, expected_run, "Run trace markers follow Run Events");
+    assert_eq!(
+        committed_markers(goal),
+        expected_goal,
+        "Goal trace markers follow Goal Events"
+    );
     let session_id = SessionId::from_str(lines[0]["session_id"].as_str().expect("Session ID"))
         .expect("typed Session ID");
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -296,6 +380,34 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
         .expect("Session");
     assert_eq!(view.runs.len(), 1);
     assert_eq!(view.runs[0].status, RunStatus::Finished);
+    assert_eq!(view.goals.len(), 1);
+    let replayed_goal = &view.goals[0];
+    assert_eq!(replayed_goal.status, GoalStatus::Completed);
+    let replayed_goal_id = replayed_goal.id.to_string();
+    assert_eq!(
+        string_attribute(goal, "arany.goal.id"),
+        Some(replayed_goal_id.as_str())
+    );
+    assert_eq!(
+        int_attribute(goal, "arany.goal.provider_calls"),
+        Some(i64::from(replayed_goal.provider_calls))
+    );
+    assert_eq!(
+        int_attribute(goal, "arany.goal.known_tokens"),
+        Some(i64::try_from(replayed_goal.known_tokens).expect("bounded known token total"))
+    );
+    assert_eq!(
+        bool_attribute(goal, "arany.goal.token_usage_unknown"),
+        Some(replayed_goal.token_usage_unknown)
+    );
+    assert_eq!(
+        int_attribute(goal, "arany.goal.active_ms"),
+        Some(i64::try_from(replayed_goal.active_ms).expect("bounded active time"))
+    );
+    assert_eq!(
+        int_attribute(goal, "arany.goal.uncertain_active_ms"),
+        Some(i64::try_from(replayed_goal.uncertain_active_ms).expect("bounded uncertain time"))
+    );
     let run_id = view.runs[0].id.to_string();
     assert!(bodies.iter().any(|body| {
         body.windows(run_id.len())
@@ -349,9 +461,18 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
     let team_spans = trace_spans(&team_bodies);
     assert_eq!(
         team_spans.len(),
-        10,
+        11,
         "two admitted children produce dynamic topology"
     );
+    let team_goal = team_spans
+        .iter()
+        .find(|span| span.name == "invoke_workflow arany.goal")
+        .expect("team Goal span");
+    let team_run = team_spans
+        .iter()
+        .find(|span| span.name == "invoke_workflow arany.run")
+        .expect("team Run span");
+    assert_eq!(team_run.parent_span_id, team_goal.span_id);
     let team_primary = team_spans
         .iter()
         .find(|span| span.name == "invoke_agent arany.primary")

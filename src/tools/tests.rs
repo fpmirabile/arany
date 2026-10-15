@@ -7,6 +7,67 @@ fn config_value() -> Value {
     json!({"version":1,"workspace_paths":["src","Cargo.toml"],"write":false,"commands":[],"skills":[],"mcp":[]})
 }
 
+#[test]
+fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
+    use super::ToolRuntime;
+    use super::config::Skill;
+    use crate::session::{GoalBudget, GoalPlanContract, GoalSkillBinding, GoalSuccessCriterion};
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    let config = Config {
+        version: 1,
+        workspace_paths: vec![".agents/skills".into()],
+        write: false,
+        commands: Vec::new(),
+        skills: vec![Skill {
+            name: "review".into(),
+            description: "Review guidance".into(),
+            directory: "/tmp/skills/review".into(),
+            files: BTreeMap::from([
+                ("SKILL.md".into(), "0".repeat(64)),
+                ("references/note.md".into(), "1".repeat(64)),
+            ]),
+        }],
+        mcp: Vec::new(),
+        runtime_grants: Vec::new(),
+    };
+    let runtime = ToolRuntime {
+        cache_state: None,
+        config,
+        workspace: PathBuf::new(),
+        workspace_identity: (1, 2),
+        guard_executable: PathBuf::new(),
+        enforcement_digest: [1; 32],
+        queue_progress: None,
+        #[cfg(target_os = "macos")]
+        system_programs: None,
+        process_enforcement_digest: [1; 32],
+    };
+    let contract_for = |name: &str, resource: Option<&str>| GoalPlanContract {
+        mission: "Read the requested Skill guidance".into(),
+        paths: Vec::new(),
+        commands: Vec::new(),
+        skills: vec![GoalSkillBinding {
+            name: name.into(),
+            resource: resource.map(str::to_owned),
+        }],
+        mcp_tools: Vec::new(),
+        success_criterion: GoalSuccessCriterion::ToolCallSucceeded {
+            call: Box::new(ToolCall::Skill {
+                name: name.into(),
+                resource: resource.map(str::to_owned),
+            }),
+        },
+        budget: GoalBudget::default(),
+    };
+
+    assert!(runtime.allows_goal_contract(&contract_for("review", None)));
+    assert!(runtime.allows_goal_contract(&contract_for("review", Some("references/note.md"))));
+    assert!(!runtime.allows_goal_contract(&contract_for("review", Some("references/other.md"))));
+    assert!(!runtime.allows_goal_contract(&contract_for("undeclared", None)));
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn checked_tool_files_reject_links_traversal_and_special_objects() {
@@ -973,7 +1034,7 @@ fn project_skill_discovery_preserves_grants_and_reports_missing_installation() {
                 observations: Vec::new(),
             };
             assert!(context.model_input()["catalog"].is_object());
-            let branch = context.outcome_branch();
+            let branch = context.outcome_branch_with_plan(false, None).remove(0);
             let skill = branch["properties"]["call"]["anyOf"]
                 .as_array()
                 .unwrap()
@@ -1412,4 +1473,132 @@ fn guard_error_after_dispatch_marks_only_a_selected_command_cache_not_attempted(
     assert!(observation.stops_run());
     assert!(observation.guard.is_none());
     assert_eq!(observation.cache_update, CacheUpdate::NotAttempted);
+}
+
+#[test]
+fn goal_success_criterion_offers_only_admitted_calls() {
+    let context = ToolContext {
+        catalog: json!({
+            "write": false,
+            "commands": [{"name": "cargo"}],
+            "skills": [],
+            "mcp_servers": []
+        })
+        .to_string(),
+        observations: Vec::new(),
+    };
+    let budget = crate::session::GoalBudget::default();
+    let branches = context.outcome_branch_with_plan(true, Some(&budget));
+    let success_calls: Vec<Value> = branches
+        .iter()
+        .filter_map(|branch| {
+            let contract = &branch["properties"]["plan_contract"];
+            let contract = contract
+                .get("properties")
+                .or_else(|| contract["anyOf"][0].get("properties"))?;
+            contract["success_criterion"]["anyOf"][0]["properties"]["call"]["anyOf"].as_array()
+        })
+        .flatten()
+        .cloned()
+        .collect();
+    let operations: Vec<&str> = success_calls
+        .iter()
+        .filter_map(|call| call["properties"]["operation"]["enum"][0].as_str())
+        .collect();
+    assert!(!operations.is_empty());
+    assert!(operations.iter().all(|operation| *operation == "command"));
+    assert!(
+        success_calls
+            .iter()
+            .all(|call| call["properties"]["program"]["enum"] == json!(["cargo"]))
+    );
+}
+
+#[test]
+fn goal_success_criterion_without_admitted_calls_omits_the_call_alternative() {
+    fn assert_no_empty_any_of(value: &Value) {
+        match value {
+            Value::Object(map) => {
+                assert!(
+                    map.get("anyOf").is_none_or(|any_of| any_of
+                        .as_array()
+                        .is_some_and(|alternatives| !alternatives.is_empty())),
+                    "JSON Schema anyOf must list at least one alternative"
+                );
+                map.values().for_each(assert_no_empty_any_of);
+            }
+            Value::Array(items) => items.iter().for_each(assert_no_empty_any_of),
+            _ => {}
+        }
+    }
+
+    let context = ToolContext {
+        catalog: json!({
+            "write": false,
+            "commands": [],
+            "skills": [],
+            "mcp_servers": []
+        })
+        .to_string(),
+        observations: Vec::new(),
+    };
+    let budget = crate::session::GoalBudget::default();
+    let branches = context.outcome_branch_with_plan(true, Some(&budget));
+    assert_no_empty_any_of(&Value::Array(branches.clone()));
+    let criteria: Vec<Value> = branches
+        .iter()
+        .map(|branch| {
+            let contract = &branch["properties"]["plan_contract"];
+            let contract = if contract.get("properties").is_some() {
+                contract
+            } else {
+                &contract["anyOf"][0]
+            };
+            contract["properties"]["success_criterion"].clone()
+        })
+        .collect();
+    assert!(!criteria.is_empty());
+    for criterion in criteria {
+        let kinds: Vec<&str> = criterion["anyOf"]
+            .as_array()
+            .expect("success criterion alternatives")
+            .iter()
+            .filter_map(|alternative| alternative["properties"]["kind"]["enum"][0].as_str())
+            .collect();
+        assert_eq!(kinds, ["workspace_file_digest", "workspace_file_content"]);
+    }
+}
+
+#[test]
+fn goal_without_pinned_budget_offers_only_the_plan_free_prelude() {
+    let context = ToolContext {
+        catalog: json!({
+            "write": true,
+            "commands": [{"name": "cargo"}],
+            "skills": [{"name": "review"}],
+            "mcp_servers": [{"name": "local"}]
+        })
+        .to_string(),
+        observations: Vec::new(),
+    };
+    let branches = context.outcome_branch_with_plan(true, None);
+    assert_eq!(branches.len(), 1);
+    let operations: Vec<&str> = branches[0]["properties"]["call"]["anyOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|call| call["properties"]["operation"]["enum"][0].as_str())
+        .collect();
+    assert!(operations.contains(&"list"));
+    assert!(operations.contains(&"read"));
+    assert!(
+        operations
+            .iter()
+            .all(|operation| ["list", "read", "search", "skill", "mcp_list"].contains(operation)),
+        "{operations:?}"
+    );
+    assert_eq!(
+        branches[0]["properties"]["plan_contract"],
+        json!({"type": "null"})
+    );
 }
