@@ -269,6 +269,7 @@ pub(super) async fn append_observed(
         Event::MessageCommitted { .. } => Some(TraceEventKind::MessageCommitted),
         Event::RunFinished { .. } => Some(TraceEventKind::RunFinished),
         Event::AssistantDisplayRecorded { .. }
+        | Event::GoalSteeringNoteRecorded { .. }
         | Event::SessionStarted { .. }
         | Event::SessionDefaultChanged { .. }
         | Event::SessionForked { .. }

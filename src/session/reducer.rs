@@ -206,6 +206,7 @@ mod goal_recovery_tests {
                 tool_compaction_summary: None,
                 tool_compaction_covered_count: 0,
                 display: Vec::new(),
+                steering_notes: Vec::new(),
             }],
             compactions: Vec::new(),
             goals: vec![GoalView {
@@ -286,6 +287,7 @@ pub struct RunView {
     pub tool_compaction_summary: Option<String>,
     pub tool_compaction_covered_count: u32,
     pub display: Vec<super::events::DisplayChunk>,
+    pub steering_notes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -876,7 +878,15 @@ impl SessionView {
                     tool_compaction_summary: None,
                     tool_compaction_covered_count: 0,
                     display: Vec::new(),
+                    steering_notes: Vec::new(),
                 });
+            }
+            Event::GoalSteeringNoteRecorded {
+                goal_id,
+                run_id,
+                text,
+            } => {
+                current.record_goal_steering_note(goal_id, run_id, text)?;
             }
             Event::RunStarted { run_id, config } => {
                 let workspace_identity = (config.workspace_device, config.workspace_inode);
@@ -1689,6 +1699,171 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn steering_note_is_accepted_only_inside_an_open_primary_reservation() {
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let session = SessionId::new();
+        let started = || {
+            let mut events = vec![goal_started(goal_id, GoalBudget::default())];
+            events.extend(start_run(
+                goal_id,
+                run_id,
+                agent_run_id,
+                config(CollaborationPolicy::Single, false),
+            ));
+            events
+        };
+        let open = || {
+            let mut events = started();
+            events.push(Event::GoalProviderCallReserved {
+                goal_id,
+                run_id,
+                agent_run_id,
+            });
+            events
+        };
+        let note = |goal_id: GoalId, text: &str| Event::GoalSteeringNoteRecorded {
+            goal_id,
+            run_id,
+            text: text.into(),
+        };
+        let accepts = |events: Vec<Event>| {
+            SessionView::replay_open(session, &session_with(session, events)).is_ok()
+        };
+
+        let mut accepted = open();
+        accepted.push(note(goal_id, "use the smaller fixture"));
+        let view = SessionView::replay_open(session, &session_with(session, accepted.clone()))
+            .expect("a note inside the open reservation replays")
+            .expect("Session exists");
+        assert_eq!(view.runs[0].steering_notes, vec!["use the smaller fixture"]);
+
+        let mut before = started();
+        before.push(note(goal_id, "before the reservation"));
+        assert!(!accepts(before));
+
+        let mut recorded = open();
+        recorded.push(Event::ProviderCallRecorded {
+            run_id,
+            agent_run_id,
+            record: record(
+                AgentPhase::RootPlan,
+                ProviderCallDisposition::Finished,
+                None,
+            ),
+        });
+        recorded.push(note(goal_id, "after the call settled"));
+        assert!(!accepts(recorded));
+
+        let child = AgentRunId::new();
+        let mut child_open = vec![goal_started(goal_id, GoalBudget::default())];
+        child_open.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(
+                CollaborationPolicy::Auto {
+                    max_active_children: 1,
+                },
+                false,
+            ),
+        ));
+        child_open.push(Event::GoalProviderCallReserved {
+            goal_id,
+            run_id,
+            agent_run_id,
+        });
+        child_open.push(Event::ProviderCallRecorded {
+            run_id,
+            agent_run_id,
+            record: record(
+                AgentPhase::RootPlan,
+                ProviderCallDisposition::Delegated,
+                None,
+            ),
+        });
+        child_open.push(Event::AgentSpawned {
+            run_id,
+            agent_run_id: child,
+            role: AgentRole::Child,
+            ordinal: 1,
+            objective: Some("inspect the parser".into()),
+        });
+        child_open.push(Event::GoalProviderCallReserved {
+            goal_id,
+            run_id,
+            agent_run_id: child,
+        });
+        child_open.push(note(goal_id, "for the child"));
+        assert!(!accepts(child_open));
+
+        let mut full = open();
+        full.extend((1..=4).map(|n| note(goal_id, &n.to_string())));
+        assert!(accepts(full.clone()));
+        full.push(note(goal_id, "fifth"));
+        assert!(!accepts(full));
+
+        let mut oversized = open();
+        oversized.push(note(goal_id, &"a".repeat(5 * 1024)));
+        oversized.push(note(goal_id, &"b".repeat(4 * 1024)));
+        assert!(!accepts(oversized));
+
+        let mut finished = open();
+        finished.extend(cancel_run(run_id, agent_run_id));
+        finished.push(note(goal_id, "after the Run ended"));
+        assert!(!accepts(finished));
+
+        let mut other = open();
+        other.push(note(GoalId::new(), "another Goal"));
+        assert!(!accepts(other));
+    }
+
+    #[test]
+    fn crash_after_steering_note_replays_interrupted_and_resume_starts_without_notes() {
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let session = SessionId::new();
+        let mut events = vec![goal_started(goal_id, GoalBudget::default())];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.push(Event::GoalProviderCallReserved {
+            goal_id,
+            run_id,
+            agent_run_id,
+        });
+        events.push(Event::GoalSteeringNoteRecorded {
+            goal_id,
+            run_id,
+            text: "steer".into(),
+        });
+        // The process dies before the reserved call's outcome commits.
+        let crashed = SessionView::replay(session, &session_with(session, events.clone()))
+            .expect("crashed journal replays")
+            .expect("Session exists");
+        assert_eq!(crashed.runs[0].status, RunStatus::Interrupted);
+        assert_eq!(crashed.goals[0].status, GoalStatus::Interrupted);
+        assert_eq!(crashed.runs[0].steering_notes, vec!["steer"]);
+
+        let resumed_run = RunId::new();
+        let resumed_agent = AgentRunId::new();
+        events.push(Event::GoalResumed { goal_id });
+        events.extend(start_run(
+            goal_id,
+            resumed_run,
+            resumed_agent,
+            config(CollaborationPolicy::Single, false),
+        ));
+        let resumed = SessionView::replay_open(session, &session_with(session, events))
+            .expect("resume replays")
+            .expect("Session exists");
+        assert_eq!(resumed.runs.len(), 2);
+        assert_eq!(resumed.runs[0].steering_notes, vec!["steer"]);
+        assert!(resumed.runs[1].steering_notes.is_empty());
+    }
+
+    #[test]
     fn a_new_goal_is_accepted_after_a_paused_goal_and_owns_its_run() {
         let (first, second) = (GoalId::new(), GoalId::new());
         let (first_run, first_agent) = (RunId::new(), AgentRunId::new());
@@ -2480,6 +2655,7 @@ mod goal_replay_tests {
                 tool_compaction_summary: None,
                 tool_compaction_covered_count: 0,
                 display: Vec::new(),
+                steering_notes: Vec::new(),
             }],
             compactions: Vec::new(),
             goals: vec![GoalView {
@@ -2654,6 +2830,7 @@ mod goal_replay_tests {
                 tool_compaction_summary: None,
                 tool_compaction_covered_count: 0,
                 display: Vec::new(),
+                steering_notes: Vec::new(),
             }],
             compactions: Vec::new(),
             goals: vec![GoalView {
@@ -2759,6 +2936,7 @@ mod goal_replay_tests {
                     tool_compaction_summary: None,
                     tool_compaction_covered_count: 0,
                     display: Vec::new(),
+                    steering_notes: Vec::new(),
                 },
                 RunView {
                     id: run_id,
@@ -2787,6 +2965,7 @@ mod goal_replay_tests {
                     tool_compaction_summary: None,
                     tool_compaction_covered_count: 0,
                     display: Vec::new(),
+                    steering_notes: Vec::new(),
                 },
             ],
             compactions: Vec::new(),

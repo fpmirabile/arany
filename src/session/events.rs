@@ -106,6 +106,7 @@ pub const MAX_GOAL_PLAN_MCP_TOOLS: usize = 64;
 pub const MAX_GOAL_PLAN_SKILLS: usize = 64;
 pub const MAX_GOAL_PLAN_CONTRACT_BYTES: usize = 8 * 1024;
 pub const MAX_GOAL_REPORT_BYTES: usize = 8 * 1024;
+pub const MAX_GOAL_STEERING_NOTES_PER_RUN: usize = 4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -728,6 +729,39 @@ mod goal_success_tests {
         };
         assert!(reserve(MAX_GOAL_ACTION_ACTIVE_MS).validate().is_ok());
         assert!(reserve(MAX_GOAL_ACTION_ACTIVE_MS + 1).validate().is_err());
+    }
+
+    #[test]
+    fn goal_steering_note_round_trips_and_rejects_bad_scope_and_bounds() {
+        let (goal_id, run_id) = (GoalId::new(), RunId::new());
+        let note = |text: &str| Event::GoalSteeringNoteRecorded {
+            goal_id,
+            run_id,
+            text: text.into(),
+        };
+        let event = note("use the smaller fixture");
+        assert_eq!(event.scope(), (Some(run_id), None));
+        let payload = event.payload().unwrap();
+        assert_eq!(
+            Event::decode(event.kind(), event.version(), &payload, Some(run_id), None).unwrap(),
+            event
+        );
+
+        assert!(note("").validate().is_err());
+        assert!(note(" \n\t").validate().is_err());
+        let limit = crate::session::MAX_USER_MESSAGE_BYTES;
+        assert!(note(&"x".repeat(limit)).validate().is_ok());
+        assert!(note(&"x".repeat(limit + 1)).validate().is_err());
+
+        let kind = event.kind();
+        let agent_run_id = Some(AgentRunId::new());
+        assert!(Event::decode(kind, 4, &payload, Some(run_id), agent_run_id).is_err());
+        assert!(Event::decode(kind, 4, &payload, None, None).is_err());
+        assert!(Event::decode(kind, 3, &payload, Some(run_id), None).is_err());
+
+        let mut extra: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        extra["unexpected"] = serde_json::Value::Bool(true);
+        assert!(Event::decode(kind, 4, &extra.to_string(), Some(run_id), None).is_err());
     }
 
     #[test]
@@ -2165,6 +2199,11 @@ pub enum Event {
         covered_tool_count: u32,
         record: CompactionRecord,
     },
+    GoalSteeringNoteRecorded {
+        goal_id: GoalId,
+        run_id: RunId,
+        text: String,
+    },
     AssistantDisplayRecorded {
         run_id: RunId,
         agent_run_id: AgentRunId,
@@ -2317,6 +2356,12 @@ struct GoalContextCompactionPayload {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct GoalSteeringNotePayload {
+    goal_id: GoalId,
+    text: String,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SpawnPayload {
     role: AgentRole,
     ordinal: u8,
@@ -2373,6 +2418,7 @@ impl Event {
             Self::GoalProviderCallReserved { .. } => "GoalProviderCallReserved",
             Self::GoalCompactionCallReserved { .. } => "GoalCompactionCallReserved",
             Self::GoalContextCompacted { .. } => "GoalContextCompacted",
+            Self::GoalSteeringNoteRecorded { .. } => "GoalSteeringNoteRecorded",
             Self::AssistantDisplayRecorded { .. } => "AssistantDisplayRecorded",
             Self::ToolStarted { .. } => "ToolStarted",
             Self::ToolFinished { .. } => "ToolFinished",
@@ -2398,6 +2444,7 @@ impl Event {
             | Self::GoalPlanContractRecorded { run_id, .. }
             | Self::GoalCompactionCallReserved { run_id, .. }
             | Self::GoalContextCompacted { run_id, .. }
+            | Self::GoalSteeringNoteRecorded { run_id, .. }
             | Self::MessageAccepted { run_id, .. }
             | Self::RunStarted { run_id, .. }
             | Self::MessageCommitted { run_id, .. }
@@ -2556,6 +2603,12 @@ impl Event {
                 covered_tool_count: *covered_tool_count,
                 record: record.clone(),
             }),
+            Self::GoalSteeringNoteRecorded { goal_id, text, .. } => {
+                serialize(&GoalSteeringNotePayload {
+                    goal_id: *goal_id,
+                    text: text.clone(),
+                })
+            }
             Self::AssistantDisplayRecorded { chunk, .. } => serialize(chunk),
             Self::ToolStarted { intent, .. } => serialize(intent),
             Self::ToolFinished { observation, .. } => serialize(observation),
@@ -2735,6 +2788,14 @@ impl Event {
                     record: data.record,
                 }
             }
+            "GoalSteeringNoteRecorded" if run_id.is_some() && agent_run_id.is_none() => {
+                let data: GoalSteeringNotePayload = parse(payload)?;
+                Self::GoalSteeringNoteRecorded {
+                    goal_id: data.goal_id,
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    text: data.text,
+                }
+            }
             "ToolStarted" if run_id.is_some() && agent_run_id.is_some() => Self::ToolStarted {
                 run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
                 agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
@@ -2780,6 +2841,7 @@ impl Event {
             | "ProviderCallRecorded"
             | "GoalCompactionCallReserved"
             | "GoalContextCompacted"
+            | "GoalSteeringNoteRecorded"
             | "AssistantDisplayRecorded"
             | "ToolStarted"
             | "ToolFinished"
@@ -2804,6 +2866,7 @@ impl Event {
             | Self::GoalPlanContractRecorded { goal_id, .. }
             | Self::GoalCompactionCallReserved { goal_id, .. }
             | Self::GoalContextCompacted { goal_id, .. }
+            | Self::GoalSteeringNoteRecorded { goal_id, .. }
             | Self::GoalFinished { goal_id, .. } => goal_id.valid(),
             _ => true,
         };
@@ -2864,6 +2927,12 @@ impl Event {
             }
             Self::GoalPlanContractRecorded { contract, .. } => {
                 contract.validate()?;
+                Ok(())
+            }
+            Self::GoalSteeringNoteRecorded { text, .. } => {
+                if text.trim().is_empty() || text.len() > super::MAX_USER_MESSAGE_BYTES {
+                    return Err(ReplayError::InvalidPayload);
+                }
                 Ok(())
             }
             Self::GoalFinished { status, report, .. } => {

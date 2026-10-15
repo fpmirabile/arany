@@ -702,6 +702,7 @@ mod goal_report_tests {
             tool_compaction_summary: None,
             tool_compaction_covered_count: 0,
             display: Vec::new(),
+            steering_notes: Vec::new(),
         };
         let goal = GoalView {
             id: goal_id,

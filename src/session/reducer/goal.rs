@@ -1,12 +1,13 @@
 use super::{
-    AgentStatus, GoalView, RunStatus, RunView, SessionView, current_goal_mut, current_run,
-    model_tool_count,
+    AgentStatus, GoalView, RunStatus, RunView, SessionView, active_run, current_goal_mut,
+    current_run, model_tool_count,
 };
 use crate::provider::AgentPhase;
 use crate::session::events::{
     AgentRole, AgentRunId, GoalBudget, GoalId, GoalPhase, GoalPlanContract, GoalReport, GoalStatus,
     ProviderCallDisposition, ReplayError, RunId,
 };
+use crate::session::{MAX_GOAL_STEERING_NOTES_PER_RUN, MAX_USER_MESSAGE_BYTES};
 
 impl SessionView {
     // The event's fields plus the replay prior; a struct would only forward them.
@@ -302,6 +303,38 @@ impl SessionView {
             .checked_add(1)
             .ok_or(ReplayError::InvalidTransition)?;
         goal.unobserved_provider_calls.push(*agent_run_id);
+        Ok(())
+    }
+
+    /// Accepts a steering note only while the Run's primary call holds an open provider reservation.
+    pub(super) fn record_goal_steering_note(
+        &mut self,
+        goal_id: &GoalId,
+        run_id: &RunId,
+        text: &str,
+    ) -> Result<(), ReplayError> {
+        let run = active_run(self, *run_id)?;
+        let primary_id = run
+            .primary()
+            .filter(|agent| agent.status == AgentStatus::Active)
+            .map(|agent| agent.id)
+            .ok_or(ReplayError::InvalidTransition)?;
+        let stored_bytes: usize = run.steering_notes.iter().map(String::len).sum();
+        if run.steering_notes.len() >= MAX_GOAL_STEERING_NOTES_PER_RUN
+            || stored_bytes + text.len() > MAX_USER_MESSAGE_BYTES
+        {
+            return Err(ReplayError::InvalidTransition);
+        }
+        let goal = current_goal_mut(self, *goal_id)?;
+        if goal.status != GoalStatus::Running
+            || goal.active_run != Some(*run_id)
+            || !goal.unobserved_provider_calls.contains(&primary_id)
+        {
+            return Err(ReplayError::InvalidTransition);
+        }
+        active_run(self, *run_id)?
+            .steering_notes
+            .push(text.to_owned());
         Ok(())
     }
 

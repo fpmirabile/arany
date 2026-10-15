@@ -624,6 +624,7 @@ mod tests {
             tool_compaction_summary: None,
             tool_compaction_covered_count: 0,
             display: Vec::new(),
+            steering_notes: Vec::new(),
         });
         let mut progress = Vec::new();
         linear
