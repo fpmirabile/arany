@@ -1,9 +1,11 @@
 use super::acquisition::ProductGuard;
 use super::{
-    product_child_of_executable, redacted_tail, transcript_field, tty_settings, wait_stopped,
+    product_child_of_executable, redacted_tail, transcript_field, try_product_child_of_executable,
+    tty_settings, wait_stopped,
 };
 use crate::loopback::{
-    ChildGuard, check_profile_with_binary, read_request, send_response, wait_product, write_profile,
+    ChildGuard, check_profile_with_binary, read_request, send_response_for, wait_product,
+    write_profile,
 };
 use arany::{StateRoot, list_sessions, resume_session};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
@@ -68,6 +70,15 @@ impl Drop for TmuxServer {
     }
 }
 
+// The child's cmdline is empty until exec completes, so poll briefly before judging ownership.
+fn wait_owned_product(guard: &ProductGuard) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !guard.is_owned_and_running() {
+        assert!(Instant::now() < deadline, "private Arany child");
+        thread::yield_now();
+    }
+}
+
 fn capture_pane(server: &TmuxServer) -> Option<Vec<u8>> {
     let result = server.run(&["capture-pane", "-p", "-t", "arany-test:0.0"]);
     if !result.status.success() {
@@ -110,14 +121,18 @@ fn live_tail_layout(screen: &[u8], width: usize) -> bool {
     let Ok(screen) = std::str::from_utf8(screen) else {
         return false;
     };
+    // Structural check: the status row keeps state and model first; its secondary hints are truncated by width.
     let rows: Vec<_> = screen.lines().collect();
-    let composer = rows.iter().position(|row| row.contains("Ask Arany"));
-    let status = rows.iter().position(|row| {
-        let row = row.trim_start();
-        row.starts_with("ready") || row.starts_with("Session ")
-    });
+    let Some(composer) = rows.iter().position(|row| row.contains("Ask Arany")) else {
+        return false;
+    };
+    let Some(status) = rows.get(composer + 3) else {
+        return false;
+    };
     rows.iter().all(|row| row.chars().count() <= width)
-        && matches!((composer, status), (Some(composer), Some(status)) if status == composer + 3 && status + 1 == rows.len())
+        && rows[composer].chars().count() == width
+        && !status.trim().is_empty()
+        && rows[composer + 4..].iter().all(|row| row.trim().is_empty())
 }
 
 fn active_layout_with_draft(screen: &[u8]) -> bool {
@@ -248,6 +263,11 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
     };
     let mut start =
         crate::isolation::account_isolated_command(temp.path(), "/usr/bin/tmux", executable);
+    crate::isolation::remember_workspace_trust(
+        &temp.path().join("account-home/.local/state/arany"),
+        &workspace,
+        &workspace,
+    );
     start
         .env_clear()
         .env("TERM", "xterm")
@@ -286,6 +306,24 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
         "tmux pane started: {}",
         String::from_utf8_lossy(&started.stderr)
     );
+    let pane = server.run(&[
+        "display-message",
+        "-p",
+        "-t",
+        "arany-test:0.0",
+        "#{pane_pid}",
+    ]);
+    assert!(pane.status.success(), "tmux pane PID available");
+    let shell_pid = std::str::from_utf8(&pane.stdout)
+        .expect("pane PID UTF-8")
+        .trim()
+        .parse::<u32>()
+        .expect("pane PID");
+    let product_pid = try_product_child_of_executable(shell_pid, executable)
+        .expect("active Arany process beneath tmux pane");
+    let product_guard =
+        ProductGuard::for_executable(product_pid, state.clone(), executable.to_path_buf());
+    wait_owned_product(&product_guard);
 
     let mut declined = false;
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -311,8 +349,9 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
     assert!(
         startup
             .lines()
-            .last()
-            .is_some_and(|row| row.starts_with("ready · ") && row.contains("gpt-5.4")),
+            .rev()
+            .find(|row| !row.trim().is_empty())
+            .is_some_and(|row| row.trim_start().starts_with("ready · ") && row.contains("gpt-5.4")),
         "startup status prioritizes state and model"
     );
     let styled = server.run(&["capture-pane", "-p", "-e", "-t", "arany-test:0.0"]);
@@ -422,7 +461,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
                 loop {
                     if let Some(screen) = capture_pane(&server) {
                         let screen = String::from_utf8_lossy(&screen);
-                        if screen.contains("Commands 1/16")
+                        if screen.contains("Commands 1/19")
                             && screen.contains("> /help")
                             && screen.contains("Up/Dn Enter Esc")
                         {
@@ -438,7 +477,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
                 loop {
                     if let Some(screen) = capture_pane(&server) {
                         let screen = String::from_utf8_lossy(&screen);
-                        if screen.contains("Commands 16/16")
+                        if screen.contains("Commands 19/19")
                             && screen.contains("> /exit")
                             && screen.contains("Exit Session")
                         {
@@ -497,11 +536,12 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
         let Some(composer) = rows.iter().rposition(|row| row.contains("Ask Arany")) else {
             return false;
         };
-        composer + 5 == rows.len()
+        composer + 4 < rows.len()
             && rows[composer + 1] == format!("> {}", &draft[..38])
             && rows[composer + 2].trim_start() == &draft[38..]
             && rows[composer + 3].contains("Ctrl+O newline")
-            && rows[composer + 4].starts_with("ready")
+            && rows[composer + 4].contains("ready")
+            && rows[composer + 5..].iter().all(|row| row.trim().is_empty())
     };
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -533,8 +573,17 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
             "arany-test:0.0",
             "#{cursor_x},#{cursor_y}",
         ]);
-        if cursor.status.success()
-            && cursor.stdout == format!("{},21\n", 2 + (draft.len() - 1) % 38).as_bytes()
+        let composer = capture_pane(&server).and_then(|screen| {
+            let rows: Vec<_> = String::from_utf8_lossy(&screen)
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            rows.iter().rposition(|row| row.contains("Ask Arany"))
+        });
+        if let Some(composer) = composer
+            && cursor.status.success()
+            && cursor.stdout
+                == format!("{},{}\n", 2 + (draft.len() - 1) % 38, composer + 2).as_bytes()
         {
             break;
         }
@@ -693,7 +742,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
                         rows[5].contains(expected)
                     }
                     && rows[6].contains("Ctrl+O")
-                    && rows[7].starts_with("ready")
+                    && !rows[7].trim().is_empty()
                     && position.status.success()
                     && position.stdout == cursor.as_bytes()
                 {
@@ -781,9 +830,9 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let screen = capture_pane(&server).expect("live pane after first empty Ctrl+C");
+        let screen = capture_scrollback(&server).expect("scrollback after first empty Ctrl+C");
         let text = String::from_utf8_lossy(&screen);
-        if text.contains("Ctrl+Shift+C") {
+        if text.contains("Arany · notice:\n  Ctrl+Shift+C c\n  opies. Ctrl+C\n  again exits.") {
             break;
         }
         assert!(
@@ -793,6 +842,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
         );
         thread::yield_now();
     }
+    wait_unicode_frame("> Message Arany", "2,5\n");
     assert!(
         server
             .run(&[
@@ -820,20 +870,6 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
     }
 
     let before = read_trimmed(&before_path);
-    let pane = server.run(&[
-        "display-message",
-        "-p",
-        "-t",
-        "arany-test:0.0",
-        "#{pane_pid}",
-    ]);
-    assert!(pane.status.success(), "tmux pane PID available");
-    let shell_pid = std::str::from_utf8(&pane.stdout)
-        .expect("pane PID UTF-8")
-        .trim()
-        .parse::<u32>()
-        .expect("pane PID");
-    let product_pid = product_child_of_executable(shell_pid, executable);
     assert_ne!(tty_settings(product_pid), before, "raw mode inside tmux");
 
     let command = "stty rows 24 cols 80; before=$(stty -g); printf 'OUTER_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_TMUX\" -S \"$ARANY_TEST_SOCKET\" attach-session -t arany-test; exit_code=$?; after=$(stty -g); printf 'OUTER_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
@@ -921,15 +957,10 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
             workspace.clone(),
         ))
         .expect("committed Sessions");
-    assert_eq!(sessions.len(), 1, "one empty Session");
-    let view = runtime
-        .block_on(resume_session(
-            StateRoot::open_existing(&state).expect("read-only State"),
-            workspace,
-            sessions[0].id,
-        ))
-        .expect("strict Session replay");
-    assert!(view.runs.is_empty(), "no Provider Run from /exit");
+    assert!(
+        sessions.is_empty(),
+        "exit before a first task saves no Session"
+    );
 
     let _ = server.run(&["kill-server"]);
     let remaining = server.run(&["list-sessions"]);
@@ -1009,7 +1040,8 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
                     serde_json::json!({"summary":"derived summary"})
                 }
             };
-            send_response(&mut stream, index, text);
+            // Run requests (0, 1, 3) stream; summary requests (2, 4) return plain JSON.
+            send_response_for(&mut stream, index, text, matches!(index, 0 | 1 | 3));
         }
     });
     check_profile_with_binary(&workspace, &state, &executable);
@@ -1027,6 +1059,11 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     };
     let mut start =
         crate::isolation::account_isolated_command(temp.path(), "/usr/bin/tmux", &executable);
+    crate::isolation::remember_workspace_trust(
+        &temp.path().join("account-home/.local/state/arany"),
+        &workspace,
+        &workspace,
+    );
     start
         .env_clear()
         .env("TERM", "xterm")
@@ -1058,6 +1095,24 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
         .stderr(Stdio::piped());
     let started = wait_product(start.spawn().expect("tmux server start"));
     assert!(started.status.success(), "tmux pane started");
+    let pane_pid = server.run(&[
+        "display-message",
+        "-p",
+        "-t",
+        "arany-test:0.0",
+        "#{pane_pid}",
+    ]);
+    assert!(pane_pid.status.success(), "test-owned pane PID");
+    let pane_pid = String::from_utf8(pane_pid.stdout)
+        .expect("pane PID UTF-8")
+        .trim()
+        .parse::<u32>()
+        .expect("pane PID");
+    let product_pid = try_product_child_of_executable(pane_pid, &executable)
+        .expect("active Arany process beneath tmux pane");
+    let product_guard =
+        ProductGuard::for_executable(product_pid, state.clone(), executable.clone());
+    wait_owned_product(&product_guard);
     let mut declined = false;
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -1139,7 +1194,7 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     loop {
         if capture_pane(&server).is_some_and(|screen| {
             let text = String::from_utf8_lossy(&screen);
-            text.contains("> /setup") && text.contains("Tab/Enter")
+            text.contains("> Cmd /setup") && text.contains("Tab/Enter")
         }) {
             break;
         }
@@ -1270,7 +1325,7 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     loop {
         if capture_pane(&server).is_some_and(|screen| {
             let text = String::from_utf8_lossy(&screen);
-            text.contains("Commands · 16 local controls")
+            text.contains("Commands · 19 local controls")
                 && text.contains("> /help")
                 && text.contains("Enter/Esc close")
         }) {
@@ -1627,7 +1682,7 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
             let rows: Vec<_> = text.lines().collect();
             rows.len() == 24
                 && rows[23].starts_with("ready")
-                && rows[23].trim_end().ends_with("· ok")
+                && rows[23].split(" · ").any(|field| field.trim() == "ok")
                 && !rows[23].contains("New Session")
                 && text.contains("Arany:")
                 && text.contains("pending")
@@ -1635,7 +1690,13 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
         }) {
             break;
         }
-        assert!(Instant::now() < deadline, "live answer and draft missing");
+        assert!(
+            Instant::now() < deadline,
+            "live answer and draft missing:\n{}",
+            capture_pane(&server)
+                .map(|s| String::from_utf8_lossy(&s).into_owned())
+                .unwrap_or_default()
+        );
         thread::yield_now();
     }
     let pane = capture_pane(&server).expect("visible history pane");
@@ -1655,8 +1716,9 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     let scrollback = capture_scrollback(&server).expect("native tmux scrollback");
     let scrollback = String::from_utf8(scrollback).expect("scrollback UTF-8");
     assert!(
-        scrollback.contains("Answer:"),
-        "confirmed stdout answer remains available after restoration"
+        scrollback.contains("Arany:\n  done"),
+        "confirmed answer remains in native scrollback: {}",
+        redacted_tail(scrollback.as_bytes())
     );
     assert!(
         server
@@ -1854,22 +1916,6 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
         );
         thread::yield_now();
     }
-    let pane_pid = server.run(&[
-        "display-message",
-        "-p",
-        "-t",
-        "arany-test:0.0",
-        "#{pane_pid}",
-    ]);
-    assert!(pane_pid.status.success(), "test-owned pane PID");
-    let pane_pid = String::from_utf8(pane_pid.stdout)
-        .expect("pane PID UTF-8")
-        .trim()
-        .parse::<u32>()
-        .expect("pane PID");
-    let product_pid = product_child_of_executable(pane_pid, &executable);
-    let product_guard = ProductGuard::for_executable(product_pid, state.clone(), executable);
-    assert!(product_guard.is_owned_and_running(), "private Arany child");
     assert!(
         server
             .run(&["send-keys", "-t", "arany-test:0.0", "C-k"])

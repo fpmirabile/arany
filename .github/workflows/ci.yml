@@ -12,6 +12,11 @@ on:
         required: false
         default: false
         type: boolean
+      linux_native_advanced:
+        description: Run native Linux release Guard and tmux gates on x86_64 and ARM64
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -101,8 +106,9 @@ jobs:
         if: needs.changes.outputs.markdown-only != 'true'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes bubblewrap util-linux
+          sudo apt-get install --yes bubblewrap iproute2 util-linux
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          test -x /usr/sbin/ip
           bwrap --unshare-user --unshare-net --ro-bind / / -- true
       - if: needs.changes.outputs.markdown-only != 'true'
         run: cargo fetch --locked
@@ -135,13 +141,96 @@ jobs:
       - name: Prepare isolated Linux terminal fixtures
         run: |
           sudo apt-get update
-          sudo apt-get install --yes bubblewrap util-linux
+          sudo apt-get install --yes bubblewrap iproute2 util-linux
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          test -x /usr/sbin/ip
           bwrap --unshare-user --unshare-net --ro-bind / / -- true
       - name: Fetch locked Rust dependencies
         run: cargo fetch --locked
       - name: Run workspace tests (${{ matrix.profile }})
         run: cargo test --workspace --locked --offline ${{ matrix.profile == 'release' && '--release' || '' }}
+
+  linux-native-advanced:
+    name: Native Linux Guard and tmux (${{ matrix.arch }})
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.linux_native_advanced }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+            machine: x86_64
+            host: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            machine: aarch64
+            host: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install repository Rust toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: native-advanced-${{ matrix.arch }}-release
+      - name: Verify native Linux host and Rust target
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "${{ matrix.machine }}"
+          test "$(rustc -vV | sed -n 's/^host: //p')" = "${{ matrix.host }}"
+      - name: Prepare native Guard and tmux prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap iproute2 tmux util-linux
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          test -x /usr/bin/tmux
+          test -x /usr/sbin/ip
+          bwrap --unshare-user --unshare-net --ro-bind / / -- true
+      - name: Fetch locked Rust dependencies
+        run: cargo fetch --locked
+      - name: Run exact native release parents
+        run: |
+          set -euo pipefail
+          log="$(mktemp)"
+          trap 'rm -f "$log"' EXIT
+
+          run_exact_parent() {
+            local parent="$1"
+            if ! cargo test --release --locked --offline --test session_run "$parent" -- --ignored --exact 2>&1 | python3 -c '
+          import sys
+
+          limit = int(sys.argv[2])
+          captured = 0
+          with open(sys.argv[1], "wb") as output:
+              while chunk := sys.stdin.buffer.read(65536):
+                  remaining = limit + 1 - captured
+                  if remaining > 0:
+                      kept = chunk[:remaining]
+                      output.write(kept)
+                      captured += len(kept)
+
+          if captured > limit:
+              print("native parent output exceeded the 1 MiB capture limit", file=sys.stderr)
+              sys.exit(1)
+          ' "$log" 1048576; then
+              cat "$log"
+              return 1
+            fi
+            cat "$log"
+            test "$(grep -Fxc 'running 1 test' "$log" || true)" = 1 || return 1
+            test "$(grep -Fxc "test $parent ... ok" "$log" || true)" = 1 || return 1
+            grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$log" || return 1
+          }
+
+          result=0
+          run_exact_parent tools::native_exec::shipped_exec_continues_after_guarded_command_and_replays_closed_events || result=1
+          run_exact_parent active_terminal::tmux::inline_composer_restores_tmux_pane_and_replays_empty_session || result=1
+          run_exact_parent active_terminal::tmux::active_shelf_stays_above_retained_draft_in_tmux || result=1
+          exit "$result"
 
   macos-tests:
     name: macOS tests (${{ matrix.profile }})

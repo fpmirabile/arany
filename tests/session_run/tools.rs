@@ -545,6 +545,15 @@ fn proposal_request(workspace: &Path) -> RunRequest {
     }
 }
 
+fn assert_goal_provider_request(request: &ProviderRequest, expected_budget: &arany::GoalBudget) {
+    assert_eq!(request.phase, AgentPhase::RootPlan);
+    assert_eq!(request.collaboration, CollaborationPolicy::Single);
+    assert_eq!(request.objective, "Guard corpus");
+    assert_eq!(request.goal_budget.as_ref(), Some(expected_budget));
+    assert!(request.goal_plan_contract.is_none());
+    assert!(request.tools.is_some());
+}
+
 struct ExactTokenTool {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
 }
@@ -653,6 +662,13 @@ async fn exact_goal_token_cap_fails_before_a_tool_request_is_journaled() {
     {
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
+        assert_goal_provider_request(
+            &requests[0],
+            &arany::GoalBudget {
+                max_tokens: Some(8),
+                ..arany::GoalBudget::default()
+            },
+        );
     }
     let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
     let events = store.load_session(outcome.session_id).await.unwrap();
@@ -747,7 +763,15 @@ async fn paused_implementation_goal_does_not_hold_the_workspace_writer() {
     first.goal.finish_after_run = false;
     let initial = first_engine.run(first).await.unwrap();
     assert_eq!(initial.run.status, RunStatus::Finished);
-    assert_eq!(first_requests.lock().unwrap().len(), 1);
+    let lease_budget = arany::GoalBudget {
+        max_runs: 2,
+        ..arany::GoalBudget::default()
+    };
+    {
+        let requests = first_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_goal_provider_request(&requests[0], &lease_budget);
+    }
 
     let blocked_requests = Arc::new(Mutex::new(Vec::new()));
     let mut blocked_engine = Engine::open(
@@ -779,7 +803,13 @@ async fn paused_implementation_goal_does_not_hold_the_workspace_writer() {
     resumed.goal = arany::GoalRequest::resume(initial.goal_id, true);
     let terminal = first_engine.run(resumed).await.unwrap();
     assert_eq!(terminal.run.status, RunStatus::Finished);
-    assert_eq!(first_requests.lock().unwrap().len(), 2);
+    {
+        let requests = first_requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        for request in requests.iter() {
+            assert_goal_provider_request(request, &lease_budget);
+        }
+    }
 
     let released_requests = Arc::new(Mutex::new(Vec::new()));
     let mut released_engine = Engine::open(
@@ -801,7 +831,11 @@ async fn paused_implementation_goal_does_not_hold_the_workspace_writer() {
             .status,
         RunStatus::Finished
     );
-    assert_eq!(released_requests.lock().unwrap().len(), 1);
+    {
+        let requests = released_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_goal_provider_request(&requests[0], &arany::GoalBudget::default());
+    }
     released_engine.close().await.unwrap();
     first_engine.close().await.unwrap();
 }

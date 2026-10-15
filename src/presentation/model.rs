@@ -20,6 +20,7 @@ pub(crate) struct PresentationModel {
     pub(crate) activity_lines: Vec<String>,
     pub(crate) setup_required: bool,
     pub(crate) draft_action: DraftAction,
+    pub(crate) empty_chat: bool,
 }
 
 impl PresentationModel {
@@ -162,6 +163,7 @@ impl PresentationModel {
             status_line,
             activity_lines,
             setup_required,
+            empty_chat: view.runs.is_empty(),
             draft_action: if preparing {
                 DraftAction::Retain
             } else if run.is_some_and(|run| run.status == RunStatus::Active) {
