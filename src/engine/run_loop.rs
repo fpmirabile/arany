@@ -474,8 +474,8 @@ impl GoalRunBudget {
     }
 
     fn can_narrow(&self, contract: &crate::session::GoalPlanContract) -> bool {
-        // This Run is already linked, so the plan must allow it along with the earlier Runs. Only settled
-        // usage counts here; a caller while an active segment is reserved must add that segment's elapsed time.
+        // This Run is already linked, so the plan must allow it along with the earlier Runs. The in-segment
+        // check is provisional; admit_plan_contract rechecks after settlement.
         self.admission_usage(self.runs_used_before)
             .is_some_and(|usage| {
                 let reserved = self.reserved_active_ms.load(Ordering::Acquire);

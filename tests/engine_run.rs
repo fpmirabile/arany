@@ -2420,6 +2420,62 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             }
             store.close().await.unwrap();
         }
+        // Two children in two slots form one wave with a 4N+10 = 18 Event tail: 9973 admits to exactly 10,000 Events.
+        for (prefix, admitted) in [(9973_i64, true), (9974, false)] {
+            let path = temp.path().join(format!("two-child-{prefix}"));
+            let finish = || ProviderOutcome::Finish(Finish { summary: "done".into(), result: "answer".into() });
+            let mut engine = Engine::open(StateRoot::admit(&path).unwrap(), ScriptedProvider::new(vec![finish()])).unwrap();
+            let id = engine.run(request(&workspace, "Initial")).await.unwrap().session_id;
+            engine.close().await.unwrap();
+            let mut connection = rusqlite::Connection::open(path.join("events.sqlite3")).unwrap();
+            let transaction = connection.transaction().unwrap();
+            let first_padding_sequence: i64 = transaction
+                .query_row("SELECT COALESCE(MAX(sequence), 0) + 1 FROM events", [], |row| row.get(0))
+                .unwrap();
+            for sequence in first_padding_sequence..=prefix {
+                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',4,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string()]).unwrap();
+            }
+            transaction.commit().unwrap();
+            drop(connection);
+            let provider = ScriptedProvider::new(vec![
+                ProviderOutcome::Delegate(Delegate { children: vec!["Child one".into(), "Child two".into()] }),
+                finish(),
+                finish(),
+                finish(),
+            ]);
+            let requests = provider.requests.clone();
+            let mut engine = Engine::open(StateRoot::admit(&path).unwrap(), provider).unwrap();
+            let mut next = request(&workspace, "Next");
+            next.session_id = Some(id);
+            next.title = None;
+            next.policy = CollaborationPolicy::Team { max_active_children: 2 };
+            next.goal.budget = Some(arany::GoalBudget {
+                max_provider_calls: Some(4),
+                max_tokens: None,
+                max_active_ms: Some(30 * 60 * 1000),
+                max_runs: 1,
+            });
+            let result = engine.run(next).await;
+            if admitted {
+                assert_eq!(result.unwrap().run.status, RunStatus::Finished, "two children at {prefix}");
+            } else {
+                assert!(matches!(result, Err(EngineError::Store(arany::StoreError::ReplayLimit))), "two children at {prefix}");
+            }
+            engine.close().await.unwrap();
+            let phases: Vec<_> = requests.lock().unwrap().iter().map(|request| request.phase).collect();
+            let expected_phases = if admitted {
+                vec![AgentPhase::RootPlan, AgentPhase::ChildWork, AgentPhase::ChildWork, AgentPhase::RootSynthesis]
+            } else {
+                vec![AgentPhase::RootPlan]
+            };
+            assert_eq!(phases, expected_phases, "two children at {prefix}");
+            let store = Store::open_read_only(StateRoot::open_existing(&path).unwrap()).unwrap();
+            let events = store.load_session(id).await.unwrap();
+            let spawned = events.iter().filter(|event| matches!(event.event, Event::AgentSpawned { role: arany::AgentRole::Child, .. })).count();
+            assert_eq!(spawned, if admitted { 2 } else { 0 }, "two children at {prefix}: AgentSpawned");
+            assert_eq!(events.len(), if admitted { 10_000 } else { prefix as usize + 9 }, "two children at {prefix}: committed Events");
+            store.close().await.unwrap();
+        }
         for (index, (prefix, prior_forks, admitted)) in [
             (Some(9999), 0, true),
             (Some(10_000), 0, false),

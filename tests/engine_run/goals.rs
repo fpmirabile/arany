@@ -2375,11 +2375,25 @@ async fn plan_active_limit_below_elapsed_call_time_fails_the_run() {
     assert_eq!(outcome.run.status, RunStatus::Failed);
     engine.close().await.expect("engine shutdown");
 
-    let (_, view) = replayed(&state_path, outcome.session_id).await;
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
     let goal = view.goal(outcome.goal_id).expect("Goal");
     assert!(
         goal.plan_contract.is_none(),
         "the refused plan is not recorded"
+    );
+    let root_plan_dispositions: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            Event::ProviderCallRecorded { record, .. } if record.phase == AgentPhase::RootPlan => {
+                Some(record.disposition)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        root_plan_dispositions,
+        [ProviderCallDisposition::ToolRequested],
+        "the plan-bearing call is refused at the plan contract, after its Tool was requested"
     );
 }
 

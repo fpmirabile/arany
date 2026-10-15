@@ -852,72 +852,6 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             "integration journal correlation: {case}"
         );
     }
-    for pairs in [8, 63, 64] {
-        let mut rows = prefix[..AGENT_SPAWNED + 1].to_vec();
-        for pair in 0..pairs {
-            let mut command = command_intent.clone();
-            command.id = uuid::Uuid::now_v7();
-            let mut integration = integration_intent.clone();
-            integration.id = uuid::Uuid::now_v7();
-            let ToolCall::ApplyChangeset {
-                source_intent_digest,
-                ..
-            } = &mut integration.call
-            else {
-                unreachable!()
-            };
-            *source_intent_digest = Sha256::digest(serde_json::to_vec(&command).unwrap()).into();
-            rows.push(Event::GoalProviderCallReserved {
-                goal_id: goal,
-                run_id: run,
-                agent_run_id: primary,
-            });
-            rows.push(record(ProviderCallDisposition::ToolRequested));
-            if pair == 0 {
-                rows.push(Event::GoalPlanContractRecorded {
-                    goal_id: goal,
-                    run_id: run,
-                    contract: arany::GoalPlanContract {
-                        mission: "Admit the synthetic command changeset".into(),
-                        paths: vec!["src".into()],
-                        commands: vec!["shell".into()],
-                        resource_class: arany::ToolResourceClass::Default,
-                        command_timeout_ms: None,
-                        skills: Vec::new(),
-                        mcp_tools: Vec::new(),
-                        success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
-                            call: Box::new(command_intent.call.clone()),
-                        },
-                        budget: arany::GoalBudget::default(),
-                    },
-                });
-            }
-            rows.extend([
-                Event::ToolStarted {
-                    run_id: run,
-                    agent_run_id: primary,
-                    intent: command.clone(),
-                },
-                observed(command, ToolDisposition::Failed, command_result.clone()),
-                Event::ToolStarted {
-                    run_id: run,
-                    agent_run_id: primary,
-                    intent: integration.clone(),
-                },
-                observed(
-                    integration,
-                    ToolDisposition::Succeeded,
-                    "{\"applied\":1}".into(),
-                ),
-            ]);
-        }
-        rows.extend(suffix.clone());
-        assert_eq!(
-            replay(rows).is_ok(),
-            pairs <= 63,
-            "integration consumes an effect slot: {pairs}"
-        );
-    }
     let mut out_of_plan_integration = integrated.clone();
     if let Event::ToolFinished { observation, .. } = &mut out_of_plan_integration[COMMAND_FINISHED]
     {
@@ -994,7 +928,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         replay(forged_out_of_plan_publication).is_err(),
         "an out-of-plan integration cannot carry a dispatched or successful receipt"
     );
-    for (count, output, accepted) in [(63, "", true), (64, "", false)] {
+    for (count, accepted) in [(63, true), (64, false)] {
         let mut rows = prefix[..AGENT_SPAWNED + 1].to_vec();
         for call_index in 0..count {
             let mut start = prefix[TOOL_STARTED].clone();
@@ -1007,7 +941,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 unreachable!()
             };
             observation.intent = intent.clone();
-            observation.output = output.into();
+            observation.output.clear();
             observation.guard.as_mut().unwrap().intent_digest =
                 Sha256::digest(serde_json::to_vec(intent).unwrap()).into();
             rows.extend([

@@ -990,7 +990,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut transcript,
         &mut answered,
         settings_at,
-        b"Esc",
+        b"> Slash",
     );
     let saved_at = transcript.len();
     input.write_all(b"\x1b[C\r").expect("save combined menu");

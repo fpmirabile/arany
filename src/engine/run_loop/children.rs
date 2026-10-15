@@ -129,12 +129,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         let active_bound =
             super::CALL_DEADLINE.saturating_mul(u32::try_from(waves).unwrap_or(u32::MAX));
         // Covers this wave's Events and the largest later child admission, so a refusal precedes AgentSpawned.
-        let children_count = objectives.len();
-        let pending_max = children_count
-            .saturating_sub(1)
-            .min(parallel.saturating_sub(1));
-        let active_event_tail =
-            1 + children_count + 3 * children_count.saturating_sub(1) + 12 + 2 * pending_max;
+        let active_event_tail = 4 * objectives.len() + 10;
         let active_segment = match self
             .reserve_active_segment_with_tail(active_bound, active_event_tail)
             .await

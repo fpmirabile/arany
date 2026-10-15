@@ -134,6 +134,7 @@ enum Request {
     AdmitOperation {
         session_id: SessionId,
         event_slots: usize,
+        message_extra: bool,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
     Append {
@@ -267,12 +268,18 @@ impl Store {
                         Request::AdmitOperation {
                             session_id,
                             event_slots,
+                            message_extra,
                             reply,
                         } => {
                             let result = if read_only {
                                 Err(StoreError::ReadOnly)
                             } else {
-                                journal::admit_operation(&mut connection, session_id, event_slots)
+                                journal::admit_operation(
+                                    &mut connection,
+                                    session_id,
+                                    event_slots,
+                                    message_extra,
+                                )
                             };
                             let _ = reply.send(result);
                         }
@@ -557,9 +564,28 @@ impl Store {
         session_id: SessionId,
         event_slots: usize,
     ) -> Result<(), StoreError> {
+        self.admit(session_id, event_slots, false).await
+    }
+
+    /// Admits the Run start, the only operation that precedes `MessageAccepted` and so reserves its image envelope.
+    pub(crate) async fn admit_run_start(
+        &self,
+        session_id: SessionId,
+        event_slots: usize,
+    ) -> Result<(), StoreError> {
+        self.admit(session_id, event_slots, true).await
+    }
+
+    async fn admit(
+        &self,
+        session_id: SessionId,
+        event_slots: usize,
+        message_extra: bool,
+    ) -> Result<(), StoreError> {
         self.call(|reply| Request::AdmitOperation {
             session_id,
             event_slots,
+            message_extra,
             reply,
         })
         .await

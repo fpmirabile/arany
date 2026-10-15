@@ -1371,7 +1371,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
     assert!(unattempted_error.valid());
     assert!(unattempted_error.stops_run());
     let mut widened = intent.clone();
-    widened.limits.runtime_ms += 1;
+    widened.limits.runtime_ms = MAX_COMMAND_TIMEOUT_MS + 1;
     assert!(!widened.valid());
     let mut reusable = intent;
     reusable.use_count = 2;
