@@ -787,6 +787,35 @@ impl AttachedTerminal {
         let terminal = self.terminal.as_mut().expect("owned terminal");
         let width = terminal.get_frame().area().width;
         let rows = history::display_rows(kind, text, usize::from(width));
+        let viewport = terminal.get_frame().area();
+        let screen = terminal.size()?.height;
+        // Ratatui would need a one-row scroll region here, which DECSTBM terminals such as tmux reject.
+        if screen < viewport.height + 2 {
+            use ratatui::widgets::Widget;
+            let lines = rows
+                .iter()
+                .map(|row| view::native_line(row, width, palette))
+                .chain(std::iter::once(ratatui::text::Line::default()));
+            let backend = terminal.backend_mut();
+            for line in lines {
+                if viewport.y > 0 {
+                    backend.scroll_region_up(0..screen, 1)?;
+                }
+                let mut row = ratatui::buffer::Buffer::empty(Rect::new(0, 0, width, 1));
+                ratatui::widgets::Paragraph::new(line).render(row.area, &mut row);
+                backend.draw((0..width).zip(&row.content).map(|(x, cell)| (x, 0, cell)))?;
+                if viewport.y == 0 {
+                    backend.scroll_region_up(0..screen, 1)?;
+                }
+            }
+            // Line erases keep tmux from scrolling the stale screen into history, unlike a home-cursor erase.
+            for y in viewport.y..screen {
+                backend.set_cursor_position((0, y))?;
+                backend.clear_region(ratatui::backend::ClearType::CurrentLine)?;
+            }
+            terminal.swap_buffers();
+            return Ok(());
+        }
         for chunk in rows.chunks(64) {
             terminal.insert_before(chunk.len() as u16, |buffer| {
                 use ratatui::widgets::Widget;
@@ -838,6 +867,16 @@ impl AttachedTerminal {
                 continue;
             }
             if !self.native.objectives.contains(&run.id) {
+                if self.native.objectives.is_empty() {
+                    let terminal = self.terminal.as_mut().expect("owned terminal");
+                    let area = terminal.get_frame().area();
+                    if history_top_padding(terminal.size()?.height.saturating_sub(area.height)) > 0
+                    {
+                        terminal.insert_before(1, |_| {})?;
+                        let area = terminal.get_frame().area();
+                        terminal.backend_mut().set_area(area);
+                    }
+                }
                 self.insert_native(
                     history::MessageKind::User,
                     &crate::presentation::image_message_text(&run.objective, &run.images),
@@ -940,21 +979,26 @@ impl AttachedTerminal {
             }
             self.transcript_open = false;
         } else {
-            if self.mode == TerminalMode::Classic {
-                let terminal = self.terminal.as_mut().expect("classic viewport");
-                terminal.backend_mut().clear_owned()?;
-                let alternate = AlternateScreen::acquire()?;
-                let panel = screen_terminal(
-                    TerminalMode::Fullscreen,
-                    self.input.as_ref().and_then(TerminalReader::cursor_query),
-                )?;
-                self.parked_terminal = self.terminal.replace(panel);
-                self.alternate = Some(alternate);
-            }
-            self.transcript_open = true;
+            self.open_transcript_panel()?;
         }
         let details = self.transcript_open;
         self.history_mut().set_details(details);
+        Ok(())
+    }
+
+    fn open_transcript_panel(&mut self) -> Result<(), TerminalError> {
+        if self.mode == TerminalMode::Classic {
+            let terminal = self.terminal.as_mut().expect("classic viewport");
+            terminal.backend_mut().clear_owned()?;
+            let alternate = AlternateScreen::acquire()?;
+            let panel = screen_terminal(
+                TerminalMode::Fullscreen,
+                self.input.as_ref().and_then(TerminalReader::cursor_query),
+            )?;
+            self.parked_terminal = self.terminal.replace(panel);
+            self.alternate = Some(alternate);
+        }
+        self.transcript_open = true;
         Ok(())
     }
 
@@ -1141,6 +1185,7 @@ impl AttachedTerminal {
         if let Some(panel) = &mut panel {
             panel.last_linear = None;
         }
+        let reading_panel = self.transcript_open;
         self.release()?;
         kill_process(getpid(), Signal::STOP).map_err(io::Error::from)?;
         let mut resumed = Self::acquire_with_mode(screen_reader, self.mode)?;
@@ -1156,6 +1201,9 @@ impl AttachedTerminal {
             .expect("active terminal input")
             .restore_draft_bytes(draft_bytes)?;
         self.replace_released(resumed);
+        if reading_panel {
+            self.open_transcript_panel()?;
+        }
         Ok(())
     }
 
@@ -1272,7 +1320,7 @@ impl AttachedTerminal {
                 mode.label().to_owned()
             };
             model.status_line = crate::presentation::safe_truncate(
-                &format!("{permissions} · {}", model.status_line),
+                &format!("{} · {permissions}", model.status_line),
                 usize::from(area.width),
             );
         }
@@ -1293,20 +1341,27 @@ impl AttachedTerminal {
         } else {
             self.classic_history.live_rows(view)
         };
-        let history_status =
-            if self.mode == TerminalMode::Classic && !self.transcript_open && !view.runs.is_empty()
-            {
-                Some(
-                    classic_history_status(
-                        area.width,
-                        self.native.omitted_history,
-                        self.classic_pinned,
-                    )
-                    .to_owned(),
-                )
+        let native_transcript =
+            self.mode == TerminalMode::Classic && !self.transcript_open && !view.runs.is_empty();
+        let history_status = if native_transcript {
+            let hint = classic_history_status(
+                area.width,
+                self.native.omitted_history,
+                self.classic_pinned,
+            );
+            if self.native.omitted_history {
+                Some(hint.to_owned())
             } else {
-                self.history_mut().status()
-            };
+                // State and model lead; the mode hint is secondary and truncation drops it first.
+                model.status_line = crate::presentation::safe_truncate(
+                    &format!("{} · {hint}", model.status_line),
+                    usize::from(area.width),
+                );
+                None
+            }
+        } else {
+            self.history_mut().status()
+        };
         let palette = self.palette();
         self.terminal
             .as_mut()
@@ -1324,6 +1379,7 @@ impl AttachedTerminal {
                     palette,
                     &history_rows,
                     history_status.as_deref(),
+                    native_transcript,
                 );
                 if let Some(picker) = picker {
                     draw_model_catalog_frame(frame, picker, composer, &model, palette);

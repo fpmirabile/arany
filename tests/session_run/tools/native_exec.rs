@@ -1045,14 +1045,8 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                     "POST /v1/messages HTTP/1.1\r\n"
                 }));
                 let lower_header = header.to_ascii_lowercase();
-                if profile == "openai" {
-                    assert!(
-                        lower_header.contains("authorization: bearer synthetic-native-key\r\n")
-                    );
-                } else {
-                    assert!(
-                        lower_header.contains("authorization: bearer synthetic-native-key\r\n")
-                    );
+                assert!(lower_header.contains("authorization: bearer synthetic-native-key\r\n"));
+                if profile != "openai" {
                     assert!(lower_header.contains("anthropic-version: 2023-06-01\r\n"));
                     assert!(!lower_header.contains("x-api-key:"));
                 }
