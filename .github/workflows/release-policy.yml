@@ -1,0 +1,118 @@
+name: Release policy
+
+# Fresh advisory and dependency-policy scan for every lockfile or policy change; never a required check.
+on:
+  pull_request:
+    branches: [main]
+    paths: [Cargo.lock, deny.toml, .github/workflows/release-policy.yml]
+  push:
+    branches: [main]
+    paths: [Cargo.lock, deny.toml, .github/workflows/release-policy.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  policy:
+    name: Fresh dependency policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_AUDIT_VERSION: 0.22.2
+      CARGO_DENY_VERSION: 0.20.2
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install repository Rust toolchain
+        run: rustup show
+      - name: Install pinned scanners and check fresh policy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # A new directory makes both advisory databases private fetches, never a reused feed.
+          work="$(mktemp -d "$RUNNER_TEMP/release-policy.XXXXXX")"
+          audit_db="$work/audit-db"
+          deny_db="$work/deny-db"
+          output_limit=65536
+
+          run_bounded() {
+            local seconds="$1" label="$2"
+            shift 2
+            local -a statuses
+            set +e
+            timeout --signal=TERM --kill-after=10s "${seconds}s" "$@" 2>&1 |
+              head -c "$((output_limit + 1))" | tee "$work/$label.log"
+            statuses=("${PIPESTATUS[@]}")
+            set -e
+            if (( $(stat -c %s "$work/$label.log") > output_limit )); then
+              printf '\nrelease-policy: %s output exceeded %s bytes\n' "$label" "$output_limit" >&2
+              return 125
+            fi
+            for status in "${statuses[@]}"; do
+              (( status == 0 )) || return "$status"
+            done
+          }
+
+          run_bounded 540 install-audit cargo install --quiet --locked --version "$CARGO_AUDIT_VERSION" cargo-audit
+          run_bounded 540 install-deny cargo install --quiet --locked --version "$CARGO_DENY_VERSION" cargo-deny
+          run_bounded 30 audit-version cargo audit --version
+          run_bounded 30 deny-version cargo deny --version
+          if [[ "$(< "$work/audit-version.log")" != *" $CARGO_AUDIT_VERSION" ||
+                "$(< "$work/deny-version.log")" != *" $CARGO_DENY_VERSION" ]]; then
+            printf 'release-policy: installed scanner versions do not match the pins\n' >&2
+            exit 1
+          fi
+          run_bounded 180 locked-fetch cargo fetch --locked --quiet
+
+          DENY_DB="$deny_db" WORK="$work" python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          source = Path("deny.toml").read_text()
+          if re.search(r"(?m)^\s*db-(path|urls)\s*=", source):
+              raise SystemExit("release-policy: deny.toml must not override the advisory database")
+          updated, count = re.subn(
+              r"(?m)^\[advisories\]\s*$",
+              f"[advisories]\ndb-path = {json.dumps(os.environ['DENY_DB'])}",
+              source,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("release-policy: expected one [advisories] section")
+          Path(os.environ["WORK"], "deny.toml").write_text(updated)
+          PY
+
+          run_bounded 300 audit-scan cargo audit --color never -D warnings --db "$audit_db"
+          run_bounded 300 deny-fetch cargo deny --config "$work/deny.toml" fetch db
+          run_bounded 300 deny-check cargo deny --config "$work/deny.toml" --locked --offline check
+
+          advisory_count="$(sed -nE 's/^ *Loaded ([0-9]+) security advisories .*/\1/p' "$work/audit-scan.log")"
+          deny_git=("$deny_db"/*/.git)
+          if [[ ! "$advisory_count" =~ ^[1-9][0-9]*$ || ${#deny_git[@]} -ne 1 || ! -d "${deny_git[0]}" ]]; then
+            printf 'release-policy: fresh advisory databases are missing or ambiguous\n' >&2
+            exit 1
+          fi
+          lock_sha256="$(sha256sum Cargo.lock | cut -d ' ' -f 1)"
+          audit_revision="$(git -C "$audit_db" rev-parse --verify HEAD)"
+          deny_revision="$(git -C "${deny_git[0]%/.git}" rev-parse --verify HEAD)"
+          {
+            printf '### Fresh dependency policy\n\n'
+            printf -- '- Result: strict cargo-audit and selected-target cargo-deny checks passed.\n'
+            printf -- '- Checked commit: `%s`\n' "$GITHUB_SHA"
+            printf -- '- `Cargo.lock` SHA-256: `%s`\n' "$lock_sha256"
+            printf -- '- UTC check time: `%s`\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            printf -- '- RustSec advisories loaded: `%s`\n' "$advisory_count"
+            printf -- '- cargo-audit DB revision: `%s`\n' "$audit_revision"
+            printf -- '- cargo-deny DB revision: `%s`\n' "$deny_revision"
+            printf -- '- Tools: `cargo-audit %s`, `cargo-deny %s`\n' "$CARGO_AUDIT_VERSION" "$CARGO_DENY_VERSION"
+          } >> "$GITHUB_STEP_SUMMARY"
