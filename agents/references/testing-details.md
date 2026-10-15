@@ -4,28 +4,9 @@ Load the section named by [testing rules](../testing.md) when its task applies. 
 
 ## Local verification and CI
 
-Manual `workflow_dispatch` runs have one closed `lane` choice: `full`
-(default), `linux-debug`, `linux-release`, `macos-debug`, or
-`macos-release`. A focused choice runs exactly one existing OS/profile test
-lane and is diagnostic only; it does not satisfy required pull-request checks
-or final release evidence. The workflow rejects unknown values and accepts no
-test-name, command, or argument input. Use a focused lane only after a failure
-has been diagnosed. After the correction, require a full workflow on the exact
-final head before marking the change ready. Automatic PR/push runs always use
-the full matrix; when no automatic run covers that head, a manual
-`workflow_dispatch` run with `lane=full` qualifies. Focused lanes never
-qualify.
+Use the standard checks in [the development guide](../../docs/development.md#verification). The [CI workflow](../../.github/workflows/ci.yml) runs on pull requests and pushes to `main`: formatting and Clippy on Linux, Clippy on macOS, and debug and release default tests on Linux and macOS. Markdown-only pull requests skip these steps after a bounded change-detection job; the five required checks still complete so branch protection permits merging. Detection failure, any non-`.md` path (including the old path of a rename), pushes to `main` and manual dispatch retain the full checks. CodeQL default setup is managed separately by GitHub and is not controlled by this workflow. CI provisions prerequisites on disposable GitHub-hosted runners. Linux terminal fixtures need Bubblewrap and util-linux `script`, with user and network namespaces enabled. For macOS temporary-root and account-isolation requirements, read [host and account isolation](#host-and-account-isolation).
 
-Use the standard checks in [the development guide](../../docs/development.md#verification). The [CI workflow](../../.github/workflows/ci.yml) runs formatting and Clippy on Linux, Clippy on macOS, and debug/release tests on both OSes.
-Pull-request and push runs always select the full matrix. Markdown-only
-pull requests skip these steps after bounded change detection; the five
-required checks still complete for branch protection. Detection failure,
-any non-`.md` path (including the old path of a rename), and pushes to
-`main` run the full matrix. CodeQL default setup is managed separately by
-GitHub. CI provisions prerequisites on disposable hosted runners. Linux
-terminal fixtures need Bubblewrap and util-linux `script`, with user and
-network namespaces enabled. For macOS temporary-root and account
-isolation, read [host and account isolation](#host-and-account-isolation).
+The separate [focused CI workflow](../../.github/workflows/ci-focused.yml) is dispatched manually with one closed `lane` choice (`linux-debug`, `linux-release`, `macos-debug` or `macos-release`) and runs that single `ci.yml` test lane. Its job names never match required checks. When to use it, and what it does not prove, is owned by [failure and maintenance discipline](../testing.md#failure-and-maintenance-discipline).
 
 Default suites exercise only the scenarios enabled for their native OS. The heavy native Guard, clipboard, credential-helper and database-capacity gates use the activation rules in [testing rules](../testing.md#evidence-lanes). To reproduce CI locally, set `RUSTFLAGS=--cfg arany_ci` for the test invocation; in a POSIX shell:
 
