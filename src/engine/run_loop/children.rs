@@ -51,6 +51,16 @@ impl ChildQueue {
         }
     }
 
+    /// Drains aborted calls and returns the failure that caused the abort; a drain error is
+    /// recorded as a diagnostic instead of replacing that failure.
+    async fn abort_with(&mut self, error: EngineError) -> EngineError {
+        let _ = self
+            .abort_and_drain()
+            .await
+            .inspect_err(crate::diagnostics::engine_failure);
+        error
+    }
+
     async fn abort_and_drain(&mut self) -> Result<(), EngineError> {
         self.calls.abort_all();
         let deadline = Instant::now() + CANCELLATION_DRAIN;
@@ -85,7 +95,8 @@ impl ChildQueue {
 
 impl<P: Provider + 'static> RunLoop<'_, P> {
     pub(super) fn valid_delegation(&self, children: &[String]) -> bool {
-        !matches!(self.controls.policy, CollaborationPolicy::Single)
+        self.controls.goal_budget.can_start_provider_call()
+            && !matches!(self.controls.policy, CollaborationPolicy::Single)
             && !children.is_empty()
             && children.len() <= usize::from(self.controls.policy.max_children())
             && children.iter().all(|objective| {
@@ -97,9 +108,15 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         &self,
         root_request: &mut ProviderRequest,
         objectives: Vec<String>,
-        deadline: Instant,
+        mut deadline: Instant,
         primary: AgentTrace,
     ) -> Result<(), EngineError> {
+        // Reserves room for every child and synthesis, so fill_slots is never refused by count.
+        if self.controls.goal_budget.remaining_calls()
+            < u32::try_from(objectives.len().saturating_add(1)).unwrap_or(u32::MAX)
+        {
+            return self.fail_primary(primary).await;
+        }
         let mut children = Vec::with_capacity(objectives.len());
         for (index, objective) in objectives.into_iter().enumerate() {
             if self.controls.cancellation.is_cancelled() {
@@ -137,8 +154,15 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         let parallel = usize::from(self.controls.concurrency)
             .min(usize::from(self.controls.policy.max_children()));
         let mut queue = ChildQueue::new(children.len(), parallel);
-        self.fill_slots(&mut queue, &children, root_request, deadline);
-        let mut abort_reason = None;
+        if let Err(error) = self
+            .fill_slots(&mut queue, &children, root_request, deadline)
+            .await
+        {
+            return Err(queue.abort_with(error).await);
+        }
+        let mut abort_reason = (!queue.pending.is_empty()
+            && !self.controls.goal_budget.can_start_provider_call())
+        .then_some(AbortReason::Failed);
         let mut drain_deadline = None;
 
         while !queue.active.is_empty() {
@@ -150,7 +174,8 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
             }
             .ok_or(EngineError::CoordinatorFailed)?;
             let (task_id, result) = classify_join(joined);
-            let valid_response = valid_child_response(&result);
+            let valid_response =
+                valid_child_response(&result) && self.controls.goal_budget.tokens_within_limit();
             let (disposition, finish) = match &result {
                 CallResult::Response(ProviderResponse {
                     outcome: ProviderOutcome::Finish(finish),
@@ -160,8 +185,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 _ => (AgentDisposition::Failed, None),
             };
             let Some(index) = queue.close_provider_span(task_id, &result, valid_response) else {
-                queue.abort_and_drain().await?;
-                return Err(EngineError::CoordinatorFailed);
+                return Err(queue.abort_with(EngineError::CoordinatorFailed).await);
             };
             if let Err(error) = self
                 .append(Event::ProviderCallRecorded {
@@ -171,15 +195,13 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 })
                 .await
             {
-                queue.abort_and_drain().await?;
-                return Err(error);
+                return Err(queue.abort_with(error).await);
             }
             if let Err(error) = self
                 .finish_child(children[index].agent_run_id, disposition, finish)
                 .await
             {
-                queue.abort_and_drain().await?;
-                return Err(error);
+                return Err(queue.abort_with(error).await);
             }
             children[index]
                 .trace
@@ -213,13 +235,20 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 queue.calls.abort_all();
                 drain_deadline = Some(Instant::now() + CANCELLATION_DRAIN);
             }
-            if abort_reason.is_none() {
-                self.fill_slots(&mut queue, &children, root_request, deadline);
+            if abort_reason.is_none()
+                && let Err(error) = self
+                    .fill_slots(&mut queue, &children, root_request, deadline)
+                    .await
+            {
+                return Err(queue.abort_with(error).await);
             }
         }
 
         if abort_reason.is_none() && self.controls.cancellation.is_cancelled() {
             abort_reason = Some(AbortReason::Cancelled);
+        }
+        if abort_reason.is_none() && !queue.pending.is_empty() {
+            abort_reason = Some(AbortReason::Failed);
         }
         if let Some(reason) = abort_reason {
             for index in queue.pending {
@@ -240,6 +269,9 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 AbortReason::Cancelled => self.cancel_primary(primary).await,
             };
         }
+        if !self.controls.goal_budget.can_start_provider_call() {
+            return self.fail_primary(primary).await;
+        }
         root_request.phase = AgentPhase::RootSynthesis;
         root_request.child_results = results
             .into_iter()
@@ -248,15 +280,19 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         for _ in 0..=crate::tools::MAX_TOOL_CALLS {
             let synthesis_trace =
                 primary.begin_provider(AgentPhase::RootSynthesis, &root_request.model);
-            let synthesis = self.invoke_primary(root_request.clone(), deadline).await?;
+            let Some(synthesis) = self.invoke_primary(root_request.clone(), deadline).await? else {
+                synthesis_trace.finish_refused();
+                return self.fail_primary(primary).await;
+            };
             let (input_tokens, output_tokens) = call_trace_usage(&synthesis);
-            let valid_response = matches!(
-                &synthesis,
-                CallResult::Response(ProviderResponse {
-                    outcome: ProviderOutcome::Finish(finish),
-                    ..
-                }) if valid_finish(finish, MAX_PRIMARY_RESULT_BYTES)
-            ) || matches!(&synthesis, CallResult::Response(ProviderResponse { outcome: ProviderOutcome::Tool(call), .. }) if self.valid_tool(root_request, call));
+            let valid_response = self.controls.goal_budget.tokens_within_limit()
+                && (matches!(
+                    &synthesis,
+                    CallResult::Response(ProviderResponse {
+                        outcome: ProviderOutcome::Finish(finish),
+                        ..
+                    }) if valid_finish(finish, MAX_PRIMARY_RESULT_BYTES)
+                ) || matches!(&synthesis, CallResult::Response(ProviderResponse { outcome: ProviderOutcome::Tool { call, plan_contract }, .. }) if self.valid_tool(root_request, call, plan_contract)));
             synthesis_trace.finish_with_usage(
                 call_trace_result(&synthesis, valid_response),
                 input_tokens,
@@ -274,9 +310,22 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                     ..
                 }) if valid_response => return self.finish_primary(finish, primary).await,
                 CallResult::Response(ProviderResponse {
-                    outcome: ProviderOutcome::Tool(call),
+                    outcome:
+                        ProviderOutcome::Tool {
+                            call,
+                            plan_contract,
+                        },
                     ..
                 }) if valid_response => {
+                    if let Some(contract) = plan_contract {
+                        let Some(narrowed) = self
+                            .admit_plan_contract(root_request, *contract, deadline)
+                            .await?
+                        else {
+                            return self.fail_primary(primary).await;
+                        };
+                        deadline = narrowed;
+                    }
                     if !self
                         .execute_tool(root_request, call, deadline, false, &primary)
                         .await?
@@ -291,14 +340,21 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         self.fail_primary(primary).await
     }
 
-    fn fill_slots(
+    async fn fill_slots(
         &self,
         queue: &mut ChildQueue,
         children: &[ChildWork],
         root_request: &ProviderRequest,
         deadline: Instant,
-    ) {
-        while queue.active.len() < queue.parallel && !self.controls.cancellation.is_cancelled() {
+    ) -> Result<(), EngineError> {
+        while queue.active.len()
+            < self
+                .controls
+                .goal_budget
+                .provider_concurrency(queue.parallel)
+            && !self.controls.cancellation.is_cancelled()
+            && self.controls.goal_budget.can_start_provider_call()
+        {
             let Some(index) = queue.pending.pop_front() else {
                 break;
             };
@@ -321,17 +377,25 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 includes: root_request.includes.clone(),
                 history: Vec::new(),
                 context_summary: None,
+                goal_budget: root_request.goal_budget.clone(),
+                goal_plan_contract: None,
                 child_results: Vec::new(),
                 max_output_tokens: OUTPUT_TOKEN_CAP,
                 tools: None,
             };
+            self.reserve_provider_call(children[index].agent_run_id)
+                .await?;
             let provider_trace = children[index]
                 .trace
                 .as_ref()
                 .expect("child trace exists")
                 .begin_provider(AgentPhase::ChildWork, &request.model);
+            let goal_budget = Arc::clone(&self.controls.goal_budget);
             let handle = queue.calls.spawn(async move {
-                invoke_bounded(provider.as_ref(), request, deadline, cancellation).await
+                let result =
+                    invoke_bounded(provider.as_ref(), request, deadline, cancellation).await;
+                goal_budget.account_result(&result);
+                result
             });
             queue.active.insert(
                 handle.id(),
@@ -341,6 +405,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 },
             );
         }
+        Ok(())
     }
 
     async fn finish_child(

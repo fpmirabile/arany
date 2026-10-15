@@ -110,6 +110,17 @@ pub struct CommandResult {
     pub changeset: CommandChangeset,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheUpdate {
+    NotApplicable,
+    NotAttempted,
+    Published,
+    Rejected,
+    Failed,
+    Uncertain,
+}
+
 impl CommandResult {
     pub(crate) fn valid(&self) -> bool {
         self.changeset.valid()
@@ -276,6 +287,10 @@ impl ToolCall {
         )
     }
 
+    pub(crate) fn is_goal_plan_prelude(&self) -> bool {
+        GOAL_PLAN_PRELUDE_OPERATIONS.contains(&self.label())
+    }
+
     pub(crate) fn label(&self) -> &'static str {
         match self {
             Self::List { .. } => "list",
@@ -292,6 +307,9 @@ impl ToolCall {
         }
     }
 }
+
+/// Operations allowed before a Goal plan contract; each name is the wire `operation` and `label()`.
+const GOAL_PLAN_PRELUDE_OPERATIONS: [&str; 5] = ["list", "read", "search", "skill", "mcp_list"];
 
 pub(crate) fn valid_relative(value: &str, root: bool) -> bool {
     if value.is_empty() || value == "." {
@@ -485,6 +503,7 @@ pub struct ToolObservation {
     pub disposition: ToolDisposition,
     pub output: String,
     pub guard: Option<GuardReceipt>,
+    pub cache_update: CacheUpdate,
 }
 
 impl ToolObservation {
@@ -496,6 +515,7 @@ impl ToolObservation {
             self.disposition,
             ToolDisposition::Uncertain | ToolDisposition::Cancelled
         ) || (self.disposition == ToolDisposition::Failed && self.guard.is_none())
+            || self.cache_update == CacheUpdate::Uncertain
     }
 
     pub(crate) fn valid(&self) -> bool {
@@ -507,6 +527,15 @@ impl ToolObservation {
                 .as_ref()
                 .is_none_or(|guard| guard.valid_for(&self.intent))
             && (self.disposition != ToolDisposition::Succeeded || self.guard.is_some())
+            && match self.cache_update {
+                CacheUpdate::NotApplicable => true,
+                CacheUpdate::NotAttempted | CacheUpdate::Uncertain => self.intent.call.is_process(),
+                CacheUpdate::Published | CacheUpdate::Rejected | CacheUpdate::Failed => {
+                    self.intent.call.is_process()
+                        && self.guard.is_some()
+                        && self.disposition == ToolDisposition::Succeeded
+                }
+            }
     }
 }
 
@@ -543,13 +572,17 @@ impl ToolContext {
                 if let ToolCall::ApplyChangeset { .. } = observation.intent.call {
                     call.as_object_mut().expect("typed call").remove("source_intent_digest");
                 }
-                json!({"call":call,"disposition":observation.disposition,"output":output,"workspace_effect":effect})
+                json!({"call":call,"disposition":observation.disposition,"output":output,"workspace_effect":effect,"cache_update":observation.cache_update})
             })
             .collect();
         json!({"catalog":catalog,"observations":observations})
     }
 
-    pub(crate) fn outcome_branch(&self) -> Value {
+    pub(crate) fn outcome_branch_with_plan(
+        &self,
+        require_plan_contract: bool,
+        budget: Option<&crate::session::GoalBudget>,
+    ) -> Vec<Value> {
         let catalog = super::skills::parse_json(self.catalog.as_bytes(), MAX_TOOL_CATALOG_BYTES)
             .unwrap_or(Value::Null);
         let mut branch = outcome_branch();
@@ -578,8 +611,154 @@ impl ToolContext {
                 call["properties"][field]["enum"] = json!(names);
                 true
             });
-        branch
+        if !require_plan_contract {
+            return vec![branch];
+        }
+        let success_call = goal_success_call_schema(&branch);
+        let plan_schema = budget.map(|budget| plan_contract_schema(budget, success_call.as_ref()));
+        let calls = branch["properties"]["call"]["anyOf"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let (prelude, planned): (Vec<Value>, Vec<Value>) = calls.into_iter().partition(|call| {
+            call["properties"]["operation"]["enum"][0]
+                .as_str()
+                .is_some_and(|operation| GOAL_PLAN_PRELUDE_OPERATIONS.contains(&operation))
+        });
+        let mut branches = Vec::with_capacity(2);
+        if !prelude.is_empty() {
+            // Without a pinned budget no contract can be recorded, so only the prelude stays offered.
+            let contract = match &plan_schema {
+                Some(schema) => json!({"anyOf":[schema.clone(), {"type":"null"}]}),
+                None => json!({"type":"null"}),
+            };
+            let mut prelude_branch = branch.clone();
+            prelude_branch["properties"]["call"]["anyOf"] = json!(prelude);
+            prelude_branch["properties"]
+                .as_object_mut()
+                .expect("Tool properties")
+                .insert("plan_contract".into(), contract);
+            prelude_branch["required"]
+                .as_array_mut()
+                .expect("Tool required fields")
+                .push(json!("plan_contract"));
+            branches.push(prelude_branch);
+        }
+        if let Some(schema) = plan_schema.filter(|_| !planned.is_empty()) {
+            let mut planned_branch = branch;
+            planned_branch["properties"]["call"]["anyOf"] = json!(planned);
+            planned_branch["properties"]
+                .as_object_mut()
+                .expect("Tool properties")
+                .insert("plan_contract".into(), schema);
+            planned_branch["required"]
+                .as_array_mut()
+                .expect("Tool required fields")
+                .push(json!("plan_contract"));
+            branches.push(planned_branch);
+        }
+        branches
     }
+}
+
+fn plan_contract_schema(budget: &crate::session::GoalBudget, call_schema: Option<&Value>) -> Value {
+    let path = "Workspace-relative file path, at most 512 bytes; paths must cover it.";
+    let tokens = match budget.max_tokens {
+        Some(limit) => {
+            json!({"type":"integer", "description": format!("integer 1 through {limit} inclusive; null is rejected because the pinned Goal budget sets a token ceiling.")})
+        }
+        None => {
+            json!({"type":["integer","null"], "description": "positive integer, or null for no plan token ceiling."})
+        }
+    };
+    let mut criteria = Vec::with_capacity(3);
+    if let Some(call_schema) = call_schema {
+        criteria.push(json!({
+            "type":"object",
+            "properties":{
+                "kind":{"type":"string","enum":["tool_call_succeeded"]},
+                "call":call_schema.clone()
+            },
+            "required":["kind","call"],
+            "additionalProperties":false
+        }));
+    }
+    criteria.push(json!({
+        "type":"object",
+        "properties":{
+            "kind":{"type":"string","enum":["workspace_file_digest"]},
+            "path":{"type":"string", "description": path},
+            "sha256":{"type":"string", "description": "Exact lowercase 64-character SHA-256."}
+        },
+        "required":["kind","path","sha256"],
+        "additionalProperties":false
+    }));
+    criteria.push(json!({
+        "type":"object",
+        "properties":{
+            "kind":{"type":"string","enum":["workspace_file_content"]},
+            "path":{"type":"string", "description": path},
+            "content":{"type":"string", "description": "UTF-8 text, at most 8192 bytes; the whole plan contract must serialize within 8 KiB."}
+        },
+        "required":["kind","path","content"],
+        "additionalProperties":false
+    }));
+    json!({
+        "type": "object",
+        "properties": {
+            "mission": {"type":"string", "description": "Non-empty UTF-8 Goal mission, at most 2048 bytes."},
+            "paths": {"type":"array", "description": "Up to 64 distinct Workspace-relative paths in ascending order, each at most 512 bytes. Use \".\" alone for the whole Workspace; nested paths are rejected.", "items":{"type":"string"}},
+            "commands": {"type":"array", "description": "Up to 8 distinct admitted command names in ascending order; each uses lowercase letters, digits, '-' or '_', at most 64 bytes.", "items":{"type":"string"}},
+            "skills": {"type":"array", "description": "Up to 64 distinct admitted Skill bindings in ascending name and resource order. Names use lowercase letters, digits, '-' or '_', at most 64 bytes; resource is null for SKILL.md or a relative path of at most 512 bytes.", "items":{
+                "type":"object",
+                "properties": {
+                    "name":{"type":"string"},
+                    "resource":{"type":["string", "null"]}
+                },
+                "required":["name","resource"],
+                "additionalProperties":false
+            }},
+            "mcp_tools": {"type":"array", "description": "Up to 64 distinct admitted MCP bindings in ascending server and tool order. Server names are at most 64 bytes and tool names at most 128 bytes, each using lowercase letters, digits, '-' or '_'.", "items":{
+                "type":"object",
+                "properties": {
+                    "server":{"type":"string"},
+                    "tool":{"type":"string"}
+                },
+                "required":["server","tool"],
+                "additionalProperties":false
+            }},
+            "success_criterion": {"anyOf": criteria},
+            "budget": {
+                "type":"object",
+                "properties": {
+                    "max_provider_calls": {"type":"integer", "description": format!("integer 1 through {} inclusive.", budget.max_provider_calls)},
+                    "max_tokens": tokens,
+                    "max_active_ms": {"type":"integer", "description": format!("integer 1 through {} inclusive.", budget.max_active_ms)},
+                    "max_runs": {"type":"integer", "description": format!("integer 1 through {} inclusive.", budget.max_runs)}
+                },
+                "required":["max_provider_calls","max_tokens","max_active_ms","max_runs"],
+                "additionalProperties":false
+            }
+        },
+        "required":["mission","paths","commands","skills","mcp_tools","success_criterion","budget"],
+        "additionalProperties":false
+    })
+}
+
+/// Calls that can satisfy a Goal success criterion, taken from the catalog-restricted branch.
+/// `None` when the catalog admits none, because JSON Schema `anyOf` must not be empty.
+fn goal_success_call_schema(branch: &Value) -> Option<Value> {
+    let mut schema = branch["properties"]["call"].clone();
+    schema["anyOf"]
+        .as_array_mut()
+        .expect("closed Tool call schema")
+        .retain(|call| {
+            matches!(
+                call["properties"]["operation"]["enum"][0].as_str(),
+                Some("mkdir" | "write" | "edit" | "command" | "skill" | "mcp_call")
+            )
+        });
+    (!schema["anyOf"].as_array().is_some_and(Vec::is_empty)).then_some(schema)
 }
 
 pub(crate) fn outcome_branch() -> Value {

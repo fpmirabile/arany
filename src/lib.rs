@@ -23,11 +23,14 @@ pub use diagnostics::{
     DevelopmentFailure, enable_development_diagnostics, record_development_failure,
 };
 pub use engine::{
-    DisplayUpdate, Engine, EngineError, RunCancellation, RunOutcome, RunPreview, RunProgress,
-    RunRequest, RunUpdate, continue_session, create_session, fork_session, list_sessions,
-    rename_session, resume_session, set_session_defaults, validate_workspace_inputs,
+    DisplayUpdate, Engine, EngineError, GoalRequest, RunCancellation, RunOutcome, RunPreview,
+    RunProgress, RunRequest, RunUpdate, continue_session, create_session, fork_session,
+    list_sessions, rename_session, resume_session, set_session_defaults, validate_workspace_inputs,
 };
-pub use presentation::{Output, escape_terminal, render_exec, render_run_feedback, render_session};
+pub use presentation::{
+    Output, escape_terminal, goal_status, render_cache_update_feedback, render_exec,
+    render_run_feedback, render_session,
+};
 pub use provider::{
     AgentPhase, AnthropicProvider, ChatGptAdmission, ChatGptProvenance, ChatGptProvider,
     ChildResult, CompactionItem, CompactionRequest, CompactionResponse, CustomProfile,
@@ -45,23 +48,26 @@ pub use provider::{
 pub use session::{
     AgentDisposition, AgentRole, AgentRunId, AgentStatus, AgentView, CollaborationPolicy,
     CompactionFailure, CompactionRecord, CompactionStatus, CompactionView, ContextUsage,
-    DisplayCategory, DisplayChunk, Event, EventEnvelope, ForkLineage, ProviderCallDisposition,
-    ProviderCallRecord, RunConfig, RunDisposition, RunId, RunStatus, RunView, SessionDefaults,
-    SessionId, SessionListItem, SessionView, ToolView,
+    DisplayCategory, DisplayChunk, Event, EventEnvelope, ForkLineage, GoalBudget, GoalId,
+    GoalMcpTool, GoalPhase, GoalPlanContract, GoalReport, GoalSkillBinding, GoalStatus,
+    GoalSuccessCriterion, GoalView, MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_MCP_TOOLS,
+    MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS,
+    ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition, RunId, RunStatus,
+    RunView, SessionDefaults, SessionId, SessionListItem, SessionView, ToolView,
 };
 pub use store::{HistoryReset, StateRoot, Store, StoreError};
 pub use telemetry::{Telemetry, TelemetryConfigError};
 pub use terminal::{
     AttachedTerminal, CommandAvailability, CommandParseError, CompletionLayout, Composer,
-    ComposerEdit, InteractiveCommand, ModelCatalogState, ModelPicker, ShutdownSignal, Submission,
-    TerminalError, TerminalInput, TerminalMode, TerminalNotice, command_completions,
-    parse_submission,
+    ComposerEdit, InteractiveCommand, ModelCatalogState, ModelPicker, ProfileSelection,
+    ShutdownSignal, Submission, TerminalError, TerminalInput, TerminalMode, TerminalNotice,
+    command_completions, parse_submission,
 };
 pub use tools::{
-    ApprovalInbox, ApprovalMode, CommandChangeset, EffectIntent, FileChange, FileVersion,
-    GuardReceipt, MAX_SKILLS, NetworkGrant, ProjectSkills, ToolApproval, ToolApprovals, ToolCall,
-    ToolContext, ToolDisposition, ToolError, ToolLimits, ToolObservation, ToolPolicyReceipt,
-    ToolResourceProfile, WorkspacePermissions, configured_skill_names, list_workspace_entries,
-    mention_paths, native_protection_supported, project_skills, runtime_skill_names,
-    tool_guard_main,
+    ApprovalInbox, ApprovalMode, CacheUpdate, CommandChangeset, EffectIntent, FileChange,
+    FileVersion, GuardReceipt, MAX_SKILLS, NetworkGrant, ProjectSkills, RuntimeProfileOption,
+    ToolApproval, ToolApprovals, ToolCall, ToolContext, ToolDisposition, ToolError, ToolLimits,
+    ToolObservation, ToolPolicyReceipt, ToolResourceProfile, WorkspacePermissions,
+    configured_skill_names, list_workspace_entries, mention_paths, native_protection_supported,
+    project_skills, runtime_skill_names, tool_guard_main,
 };

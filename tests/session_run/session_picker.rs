@@ -76,6 +76,17 @@ pub(super) fn screen_rows(transcript: &[u8], columns: usize, rows: usize) -> Vec
         .collect()
 }
 
+pub(super) fn screen_contains(
+    transcript: &[u8],
+    columns: usize,
+    rows: usize,
+    needle: &str,
+) -> bool {
+    screen_rows(transcript, columns, rows)
+        .join(" ")
+        .contains(needle)
+}
+
 pub(super) struct PtyResponses {
     pub(super) cursor_queries: usize,
     consent_from: usize,

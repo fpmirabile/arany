@@ -10,6 +10,47 @@ limits and compatibility.
   adapter admits typed files and pinned Skill data through a non-spawning
   profile. Commands/MCP use the private snapshot and ordinary-launch profile;
   keep those authorities distinct and reject unavailable enforcement.
+- Revalidate selected runtime path/version/directory identities before Ready
+  and GO for process intents. File/Skill intents carry no runtime grants in
+  their enforcement fingerprint or native profile and skip runtime rechecks.
+  Linux mounts exact runtime and cache roots read-only; macOS grants each
+  selected toolchain's whole subtree read and execute, so `bin` symlinks whose
+  targets live elsewhere resolve, and read-only cache scopes. Do not grant parent
+  cache/configuration paths. Candidate identity and consent rules live in
+  [runtime profile rules](./toolchains.md).
+- Linux `ro-bind` imports source submounts recursively. Start the unchanged
+  Bubblewrap profile through the fixed, root-owned `/usr/bin/unshare` user and
+  mount namespace bootstrap with recursive-private propagation, cleared
+  environment and fixed arguments. Do not use `--keep-caps`: util-linux makes
+  propagation private before exec, and retained capabilities make Bubblewrap
+  reject a non-root real UID ([unshare](https://github.com/util-linux/util-linux/blob/v2.39.3/sys-utils/unshare.c),
+  [Bubblewrap](https://github.com/containers/bubblewrap/blob/main/bubblewrap.c)).
+  Do not add capabilities to payloads. Before
+  Ready and again after GO, parse bounded `/proc/self/mountinfo` and require a
+  private root and one exact private entry per selected runtime mount, with no optional
+  propagation fields, stacked entries or descendant mounts; malformed or
+  oversized data fails closed. The actual production fixture covers a shared
+  source, a pre-existing nested mount refusal at the topology stage and a late
+  host mount that does not appear in the isolated runtime mount. Its outer test owner
+  uses a private PID namespace with `--kill-child`; a separate forced-timeout
+  gate records the init and held descendant PIDs from each process's own
+  `/proc/self/status`, binds both pidfds before killing and reaping the unshare
+  owner, then awaits both exit signals before dropping the fixture directory.
+  The topology path also gates the namespace init and each exact-filter worker
+  until their host identities are bound, then confirms their pidfd exits after
+  capture on success and failure. It keeps the fixture directory if any
+  identity or exit remains unproved; assertions run only after confirmed exit.
+  Publish PID records and release gates atomically so pollers observe either no
+  signal or a complete record.
+  The outer fixture keeps the host procfs view so those reports include host
+  PIDs ([`NSpid` field](https://man7.org/linux/man-pages/man5/proc_pid_status.5.html));
+  the production Bubblewrap profile still mounts its own `/proc`. Captured
+  Rust helper output uses a full exact test filter and proves one test completed.
+  This is separate from the systemd-owned full Guard journey. On macOS,
+  canonicalize selected roots
+  and reject strict descendant targets in the native `getfsstat` mount table
+  before Seatbelt and before Ready/GO; this is a point-in-time check, not a
+  lifetime mount-isolation guarantee.
 - Capture command changesets only after positive payload-descendant absence.
   Linux retains its attested private PID namespace init/helper while stopping
   and killing every other namespace process; final owned-cgroup cleanup still
@@ -19,6 +60,20 @@ limits and compatibility.
   Both scans reject whole hostile/over-limit snapshots without reading excluded
   content. Engine owns command-receipt linkage; Guard independently validates
   the integration's whole batch and file preconditions.
+- The persistent Workspace cache is imported into the existing quota-backed
+  scratch view before Ready/GO and is never backed by a StateRoot mount or a
+  host parent grant. Capture its candidate only after positive payload-descendant
+  termination, but retain no publication authority in the worker: the controller
+  streams bounded candidate data to Store only after native seed/unit cleanup is
+  positively confirmed. Input overflow rejects before GO; candidate overflow
+  rejects publication after command execution and preserves the last committed
+  cache. On macOS, read/capture the mounted scratch volume while its checked
+  handle is live, then positively empty the coalition and detach storage before
+  Store publication. An explicitly selected read-only host-cache subtree takes
+  precedence: exclude that exact relative root before private archive traversal,
+  never import host bytes, and preserve earlier private archive entries at that
+  root when other cache paths are published. Uncertain command, storage, seed
+  or unit cleanup never commits cache bytes.
 - Close inherited descriptors at the single-threaded worker entry before Rust
   opens persistent handles. Install shared descriptor/core limits at bootstrap;
   only the non-spawning file/Skill worker resets and unblocks SIGXCPU and installs
@@ -42,10 +97,13 @@ limits and compatibility.
   retain C string lifetimes through each call and free native error allocations
   once. Never parse or print arbitrary native diagnostics. The syscall-number
   filter and explicit Darwin syscall numbers support only reviewed 64-bit ABIs.
-- Keep Linux runtime aliases distinct: `/lib` targets `/usr/lib`, while `/lib64`
-  targets `/usr/lib64`. Mapping both to `/usr/lib` hides the x86-64 ELF loader
-  even when the ARM64 native gates pass. Native fixtures must preserve the same
-  loader layout as the production mount profile.
+- Linux toolchains mount at their exact host paths; caches mount under
+  `/scratch`. A toolchain target that equals, lies under or contains a path the
+  profile mounts or creates is rejected before seed creation. Keep Linux
+  `/lib` targeting `/usr/lib` and `/lib64` targeting `/usr/lib64`: mapping both to
+  `/usr/lib` hides the x86-64 ELF loader even when the ARM64 native gates pass.
+  Native fixtures must preserve the same loader layout as the production mount
+  profile.
 - Grant ancestor metadata only, without directory-data access; unrelated host
   metadata and control-root listings must remain denied. The compiled policy
   fingerprint covers profile rules, admission algorithms and enforced constants.

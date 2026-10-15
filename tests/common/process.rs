@@ -10,6 +10,15 @@ use std::{
 #[allow(dead_code)]
 pub static NATIVE_GATE: Mutex<()> = Mutex::new(());
 
+pub const READ_ONLY_CONSENT_PROMPT: &str = concat!(
+    "Type trust [profile numbers], trust none, or read only; bare trust ",
+    "preserves selected profiles. Ctrl+C exits:"
+);
+pub const CONFIG_CONSENT_PROMPT: &str = concat!(
+    "Type trust [profile numbers], trust none, or config; bare trust ",
+    "preserves selected profiles. Ctrl+C exits:"
+);
+
 pub trait BoundedOutput {
     fn bounded_output(&mut self) -> io::Result<Output>;
     fn bounded_output_for(&mut self, duration: Duration, cap: usize) -> io::Result<Output>;
@@ -285,21 +294,28 @@ pub fn decline_workspace_consent(
     if *declined {
         return;
     }
-    let prompt = b"Type trust or read only; empty Enter selects read only. Ctrl+C exits:";
-    if let Some(start) = transcript
-        .windows(prompt.len())
-        .rposition(|part| part == prompt)
-    {
-        let after = &transcript[start + prompt.len()..];
-        if (after.starts_with(b"\r\n") || after.starts_with(b"\n"))
-            && !after.windows(b"Input:".len()).any(|part| part == b"Input:")
+    for (prompt, choice) in [
+        (
+            READ_ONLY_CONSENT_PROMPT.as_bytes(),
+            b"read only\r".as_slice(),
+        ),
+        (CONFIG_CONSENT_PROMPT.as_bytes(), b"config\r".as_slice()),
+    ] {
+        if let Some(start) = transcript
+            .windows(prompt.len())
+            .rposition(|part| part == prompt)
         {
-            input
-                .write_all(b"read only\r")
-                .expect("explicit read-only fixture decision");
-            *declined = true;
+            let after = &transcript[start + prompt.len()..];
+            if (after.starts_with(b"\r\n") || after.starts_with(b"\n"))
+                && !after.windows(b"Input:".len()).any(|part| part == b"Input:")
+            {
+                input
+                    .write_all(choice)
+                    .expect("explicit safe folder permission decision");
+                *declined = true;
+            }
+            return;
         }
-        return;
     }
     if !transcript.windows(2).any(|part| part == b"\x1b[") {
         return;
@@ -320,9 +336,6 @@ pub fn decline_workspace_consent(
     if visible
         .windows(b"Doyoutrust".len())
         .any(|part| part == b"Doyoutrust")
-        && [b"Ctrl+Cexit".as_slice(), b"^Cexit".as_slice()]
-            .iter()
-            .any(|needle| visible.windows(needle.len()).any(|part| part == *needle))
     {
         input
             .write_all(b"\x1b")
