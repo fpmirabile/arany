@@ -272,10 +272,14 @@ pub(super) fn decode_run(
             ProviderOutcome::Finish(Finish { summary, result })
         }
         WireOutcome::Delegate { children } => ProviderOutcome::Delegate(Delegate { children }),
-        WireOutcome::Tool { call }
-            if call.valid() && !matches!(call, crate::tools::ToolCall::ApplyChangeset { .. }) =>
-        {
-            ProviderOutcome::Tool(call)
+        WireOutcome::Tool {
+            call,
+            plan_contract,
+        } if call.valid() && !matches!(call, crate::tools::ToolCall::ApplyChangeset { .. }) => {
+            ProviderOutcome::Tool {
+                call,
+                plan_contract,
+            }
         }
         WireOutcome::Tool { .. } => return Err(ProviderError::InvalidOutcome),
     };
@@ -310,14 +314,13 @@ pub(super) fn decode_compaction(
 pub(super) fn run_body(request: &ProviderRequest, effort: Effort) -> Value {
     let input = run_input(request);
     let schema = crate::provider::restrict_outcome_schema(outcome_schema(), request);
-    let instructions = format!(
-        "{} {}",
+    let instructions = crate::provider::run_instructions(
         if request.tools.is_some() {
             TOOL_INSTRUCTIONS
         } else {
             READ_ONLY_INSTRUCTIONS
         },
-        crate::provider::COLLABORATION_INSTRUCTIONS
+        request,
     );
     let mut body = message_body(
         &request.model,
@@ -485,9 +488,18 @@ struct OutcomeEnvelope {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 enum WireOutcome {
-    Finish { summary: String, result: String },
-    Delegate { children: Vec<String> },
-    Tool { call: crate::tools::ToolCall },
+    Finish {
+        summary: String,
+        result: String,
+    },
+    Delegate {
+        children: Vec<String>,
+    },
+    Tool {
+        call: crate::tools::ToolCall,
+        #[serde(default)]
+        plan_contract: Option<Box<crate::session::GoalPlanContract>>,
+    },
 }
 
 #[derive(Deserialize)]

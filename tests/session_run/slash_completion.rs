@@ -358,11 +358,44 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
     runtime.block_on(async {
         let store = Store::open(StateRoot::open_existing(&state).expect("State"))
             .expect("interrupted source Store");
+        let view = store
+            .load_view(current_id)
+            .await
+            .expect("current Session history")
+            .expect("current Session");
+        let workspace_identity = view.workspace_identity.expect("pinned Workspace identity");
+        let goal_id = arany::GoalId::new();
+        let run_id = arany::RunId::new();
+        store
+            .append(
+                current_id,
+                arany::Event::GoalStarted {
+                    goal_id,
+                    objective: "Prior accepted objective".into(),
+                    workspace_identity,
+                    budget: arany::GoalBudget::default(),
+                    phase: arany::GoalPhase::Implementation,
+                    autonomous: false,
+                },
+            )
+            .await
+            .expect("source Goal");
+        store
+            .append(
+                current_id,
+                arany::Event::GoalRunLinked {
+                    goal_id,
+                    run_id,
+                    phase: arany::GoalPhase::Implementation,
+                },
+            )
+            .await
+            .expect("source Goal Run link");
         store
             .append(
                 current_id,
                 arany::Event::MessageAccepted {
-                    run_id: arany::RunId::new(),
+                    run_id,
                     text: "Prior accepted objective".into(),
                     images: Vec::new(),
                 },

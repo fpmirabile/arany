@@ -137,7 +137,35 @@ impl Provider for CacheCanary {
             return Err(ProviderError::InvalidOutcome);
         }
         let outcome = if step < self.calls.len() {
-            ProviderOutcome::Tool(self.calls[step].clone())
+            let call = self.calls[step].clone();
+            let plan_contract = if step == 0 {
+                let program = match &call {
+                    ToolCall::Command { program, .. } => program.clone(),
+                    _ => return Err(ProviderError::InvalidOutcome),
+                };
+                let success_call = self
+                    .calls
+                    .last()
+                    .cloned()
+                    .ok_or(ProviderError::InvalidOutcome)?;
+                Some(Box::new(arany::GoalPlanContract {
+                    mission: "Use the selected cache through authorized commands".into(),
+                    paths: Vec::new(),
+                    commands: vec![program],
+                    skills: Vec::new(),
+                    mcp_tools: Vec::new(),
+                    success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
+                        call: Box::new(success_call),
+                    },
+                    budget: arany::GoalBudget::default(),
+                }))
+            } else {
+                None
+            };
+            ProviderOutcome::Tool {
+                call,
+                plan_contract,
+            }
         } else {
             ProviderOutcome::Finish(Finish {
                 summary: "Selected cache output was explicit".into(),
@@ -291,6 +319,7 @@ async fn selected_cache_canary_helper_inner() {
                 workspace: workspace.clone(),
                 include_paths: Vec::new(),
                 policy: CollaborationPolicy::Single,
+                goal: arany::GoalRequest::default(),
             })
             .await;
         cache_progress("seed-run-returned");
@@ -431,6 +460,7 @@ async fn selected_cache_canary_helper_inner() {
                 workspace: workspace.clone(),
                 include_paths: Vec::new(),
                 policy: CollaborationPolicy::Single,
+                goal: arany::GoalRequest::default(),
             })
             .await;
         cache_progress("selected-run-returned");
@@ -643,6 +673,7 @@ async fn selected_cache_canary_helper_inner() {
                 workspace,
                 include_paths: Vec::new(),
                 policy: CollaborationPolicy::Single,
+                goal: arany::GoalRequest::default(),
             })
             .await;
         cache_progress("verify-run-returned");

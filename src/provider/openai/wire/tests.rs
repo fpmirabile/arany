@@ -20,6 +20,8 @@ fn run_request() -> ProviderRequest {
             assistant: "previous assistant canary".into(),
         }],
         context_summary: Some("derived summary canary".into()),
+        goal_budget: None,
+        goal_plan_contract: None,
         child_results: vec![ChildResult {
             objective: "child objective canary".into(),
             summary: "child summary canary".into(),
@@ -28,6 +30,254 @@ fn run_request() -> ProviderRequest {
         max_output_tokens: 4096,
         tools: None,
     }
+}
+
+fn goal_plan_contract() -> crate::session::GoalPlanContract {
+    crate::session::GoalPlanContract {
+        mission: "Verify the requested Workspace update".into(),
+        paths: vec!["src".into()],
+        commands: vec!["bash".into()],
+        skills: vec![crate::session::GoalSkillBinding {
+            name: "review".into(),
+            resource: Some("references/checklist.md".into()),
+        }],
+        mcp_tools: vec![crate::session::GoalMcpTool {
+            server: "local".into(),
+            tool: "inspect".into(),
+        }],
+        success_criterion: crate::session::GoalSuccessCriterion::WorkspaceFileContent {
+            path: "src/main.rs".into(),
+            content: "verified\n".into(),
+        },
+        budget: crate::session::GoalBudget::default(),
+    }
+}
+
+#[test]
+fn first_effect_requires_a_plan_and_bounded_read_only_prelude_is_available() {
+    let mut request = run_request();
+    request.collaboration = crate::session::CollaborationPolicy::Single;
+    request.goal_budget = Some(crate::session::GoalBudget::default());
+    request.tools = Some(crate::tools::ToolContext {
+        catalog: json!({
+            "write": true,
+            "commands": [{"name":"bash"}],
+            "skills": [{"name":"sample"}],
+            "mcp_servers": [{"name":"local"}]
+        })
+        .to_string(),
+        observations: Vec::new(),
+    });
+    for phase in [AgentPhase::RootPlan, AgentPhase::RootSynthesis] {
+        request.phase = phase;
+        let body = run_body_with_effort(&request, Effort::Low);
+        assert!(
+            body["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("MCP catalog listing is the only process-backed prelude")
+        );
+        let functions = body["tools"].as_array().unwrap();
+        assert!(
+            functions
+                .iter()
+                .any(|function| function["name"] == "arany_mcp_list")
+        );
+        assert!(
+            functions
+                .iter()
+                .any(|function| function["name"] == "arany_mcp_call")
+        );
+        for function in functions {
+            if !function["parameters"]["properties"]["operation"].is_object() {
+                continue;
+            }
+            let name = function["name"].as_str().unwrap();
+            let required = function["parameters"]["required"].as_array().unwrap();
+            let prelude = matches!(
+                name,
+                "arany_list" | "arany_read" | "arany_search" | "arany_skill" | "arany_mcp_list"
+            );
+            assert!(
+                required.iter().any(|field| field == "plan_contract"),
+                "{name}"
+            );
+            let contract = &function["parameters"]["properties"]["plan_contract"];
+            let contract = if prelude {
+                assert!(
+                    contract["anyOf"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!({"type":"null"}))
+                );
+                &contract["anyOf"][0]
+            } else {
+                assert_eq!(contract["type"], "object");
+                contract
+            };
+            assert!(
+                contract["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("skills"))
+            );
+            let skill = &contract["properties"]["skills"]["items"];
+            assert_eq!(skill["required"], json!(["name", "resource"]));
+            let eligible_calls = contract["properties"]["success_criterion"]["anyOf"][0]
+                ["properties"]["call"]["anyOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|call| {
+                    call["properties"]["operation"]["enum"][0]
+                        .as_str()
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                eligible_calls,
+                vec!["mkdir", "write", "edit", "command", "skill", "mcp_call"]
+            );
+        }
+    }
+    request.phase = AgentPhase::RootSynthesis;
+    request.goal_plan_contract = Some(goal_plan_contract());
+    let continued = run_body_with_effort(&request, Effort::Low);
+    assert!(
+        continued["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|function| !function["parameters"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "plan_contract"))
+    );
+}
+
+#[test]
+fn structured_and_native_tool_outcomes_preserve_the_sibling_goal_contract() {
+    let call = crate::tools::ToolCall::Write {
+        path: "src/new.rs".into(),
+        expected_digest: None,
+        content: "verified\n".into(),
+    };
+    let contract = goal_plan_contract();
+    let text = json!({
+        "outcome": {
+            "type": "tool",
+            "call": call.clone(),
+            "plan_contract": contract.clone()
+        }
+    })
+    .to_string();
+    let decoded = decode_run(
+        &serde_json::to_vec(&response("completed", json!([message(&text)]))).unwrap(),
+        "gpt-5.4",
+    )
+    .unwrap();
+    assert!(matches!(
+        decoded.outcome,
+        ProviderOutcome::Tool {
+            plan_contract: Some(_),
+            ..
+        }
+    ));
+
+    let mut arguments = serde_json::to_value(call).unwrap();
+    let operation = arguments
+        .as_object_mut()
+        .unwrap()
+        .remove("operation")
+        .unwrap();
+    arguments["plan_contract"] = serde_json::to_value(contract).unwrap();
+    let decoded = decode_tool_run(
+        &serde_json::to_vec(&response(
+            "completed",
+            json!([function_call(
+                &format!("arany_{}", operation.as_str().unwrap()),
+                &arguments
+            )]),
+        ))
+        .unwrap(),
+        "gpt-5.4",
+    )
+    .unwrap();
+    assert!(matches!(
+        decoded.outcome,
+        ProviderOutcome::Tool {
+            plan_contract: Some(_),
+            ..
+        }
+    ));
+
+    let prelude = crate::tools::ToolCall::Read {
+        path: "src/main.rs".into(),
+        offset: 0,
+        limit: 4096,
+    };
+    let text = json!({
+        "outcome": {
+            "type": "tool",
+            "call": prelude.clone(),
+            "plan_contract": null
+        }
+    })
+    .to_string();
+    let decoded = decode_run(
+        &serde_json::to_vec(&response("completed", json!([message(&text)]))).unwrap(),
+        "gpt-5.4",
+    )
+    .unwrap();
+    assert!(matches!(
+        decoded.outcome,
+        ProviderOutcome::Tool {
+            plan_contract: None,
+            ..
+        }
+    ));
+
+    let mut arguments = serde_json::to_value(prelude).unwrap();
+    let operation = arguments
+        .as_object_mut()
+        .unwrap()
+        .remove("operation")
+        .unwrap();
+    arguments["plan_contract"] = Value::Null;
+    let decoded = decode_tool_run(
+        &serde_json::to_vec(&response(
+            "completed",
+            json!([function_call(
+                &format!("arany_{}", operation.as_str().unwrap()),
+                &arguments
+            )]),
+        ))
+        .unwrap(),
+        "gpt-5.4",
+    )
+    .unwrap();
+    assert!(matches!(
+        decoded.outcome,
+        ProviderOutcome::Tool {
+            plan_contract: None,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn run_instructions_join_without_an_empty_plan_contract_part() {
+    let request = run_request();
+    let body = run_body(&request);
+    assert_eq!(
+        body["instructions"],
+        format!(
+            "{} {}",
+            crate::provider::READ_ONLY_INSTRUCTIONS,
+            crate::provider::COLLABORATION_INSTRUCTIONS
+        )
+    );
 }
 
 #[test]
@@ -400,6 +650,8 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
             .contains("synthesis must Finish"),
         "primary synthesis must be able to read and edit before finishing"
     );
+    request.goal_budget = Some(crate::session::GoalBudget::default());
+    request.goal_plan_contract = Some(goal_plan_contract());
     let rows: Vec<Value> = serde_json::from_str(include_str!(
         "../../../../tests/fixtures/tool-outcomes.json"
     ))
@@ -644,14 +896,14 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
         let bytes = serde_json::to_vec(&fixture).unwrap();
         let decoded = decode_tool_run(&bytes, "gpt-5.4").unwrap();
         assert!(
-            matches!(decoded.outcome, ProviderOutcome::Tool(call) if serde_json::to_value(&call).unwrap() == row["outcome"]["call"])
+            matches!(decoded.outcome, ProviderOutcome::Tool { call, .. } if serde_json::to_value(&call).unwrap() == row["outcome"]["call"])
         );
         let streamed = json!({"type":"response.completed","response":fixture});
         assert!(matches!(
             decode_streamed_tool_run(&serde_json::to_vec(&streamed).unwrap(), "gpt-5.4")
                 .unwrap()
                 .outcome,
-            ProviderOutcome::Tool(_)
+            ProviderOutcome::Tool { .. }
         ));
     }
     let read = function_call(
@@ -1089,4 +1341,59 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
 
 fn function_call(name: &str, arguments: &Value) -> Value {
     json!({"type":"function_call","id":"fc_test","call_id":"call_test","name":name,"arguments":arguments.to_string(),"status":"completed"})
+}
+
+const SCHEMA_BOUND_KEYWORDS: [&str; 6] = [
+    "minLength",
+    "maxLength",
+    "minItems",
+    "maxItems",
+    "minimum",
+    "maximum",
+];
+
+fn assert_no_schema_bounds(value: &Value, at: &str) {
+    match value {
+        Value::Object(map) => {
+            for keyword in SCHEMA_BOUND_KEYWORDS {
+                assert!(!map.contains_key(keyword), "{at} carries {keyword}");
+            }
+            for (key, child) in map {
+                assert_no_schema_bounds(child, &format!("{at}.{key}"));
+            }
+        }
+        Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                assert_no_schema_bounds(child, &format!("{at}[{index}]"));
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn provider_bound_schemas_carry_no_validation_keywords() {
+    let mut request = run_request();
+    request.collaboration = crate::session::CollaborationPolicy::Single;
+    assert_no_schema_bounds(&run_body_with_effort(&request, Effort::Low), "read_only");
+    request.goal_budget = Some(crate::session::GoalBudget::default());
+    request.tools = Some(crate::tools::ToolContext {
+        catalog: json!({
+            "write": true,
+            "commands": [{"name":"bash"}],
+            "skills": [{"name":"sample"}],
+            "mcp_servers": [{"name":"local"}]
+        })
+        .to_string(),
+        observations: Vec::new(),
+    });
+    for (label, phase) in [
+        ("plan", AgentPhase::RootPlan),
+        ("synthesis", AgentPhase::RootSynthesis),
+    ] {
+        request.phase = phase;
+        assert_no_schema_bounds(&run_body_with_effort(&request, Effort::Low), label);
+    }
+    request.goal_plan_contract = Some(goal_plan_contract());
+    assert_no_schema_bounds(&run_body_with_effort(&request, Effort::Low), "continued");
 }

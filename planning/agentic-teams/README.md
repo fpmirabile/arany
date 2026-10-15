@@ -37,7 +37,8 @@ the user-owned checks in [next steps](../../NEXT_STEPS.md).
 ## Terms
 
 - **Goal.** A durable, Engine-owned unit of user intent that spans one or more
-  Runs and ends Completed, Failed or Cancelled with a final report (E11).
+  Runs and ends Completed or Failed with a final report (E11). Cancellation
+  (Ctrl+C) pauses it as Interrupted until `/goal resume`.
 - **RPI.** Research → Plan → Implementation, the default mode (B6).
 - **Plan contract.** An agent's declared scope (paths, command names), success
   criterion and budget; the anchor for every Supervisor signal (B1).
@@ -192,12 +193,17 @@ a research note verifies its API from primary sources.
   asks the user instead of skipping evaluation.
 
 1. **Plan contract.** The primary declares each worker's mission, direction
-   and scope in its assignment; a worker can only narrow it. Each agent's
-   first Tool outcome carries its scope
-   (paths and command names), success criterion (an explicit check such as a
-   named test command) and budget, without an extra model call. It is
-   mandatory for every agent that performs effects, bounded, validated and journaled.
-   Changing it requires approval under the current approval mode.
+   and scope in its assignment; a worker can only narrow it. Before its plan,
+   an agent may use bounded Workspace List/Read/Search, an admitted Skill read,
+   and configured bounded MCP catalog listing to inspect the task. Before any
+   other Tool, a bounded contract covers paths, command names, exact Skill
+   resources and MCP tools, a typed success criterion and budget, without an
+   extra model call. Catalog listing discovers names only; every MCP tool
+   invocation requires a contract even if the catalog labels it read-only. A
+   contract may accompany pre-plan inspection and is always validated and
+   journaled. A task limited to read-only inspection can finish without
+   inventing effect scope. Contract changes require approval under the current
+   approval mode.
 2. **Deterministic signals.** Each signal has a fixed threshold and response:
 
    | Signal | Detection | Default response |
@@ -262,9 +268,12 @@ a research note verifies its API from primary sources.
        recommendation; answers are journaled Goal facts.
      - A Goal ends Completed when the Finish gate passes and a final report
        (changes, evidence, unresolved items) is committed; otherwise it ends
-       Failed or Cancelled with the same report.
+       Failed with the same report. Cancellation (Ctrl+C) pauses it as
+       Interrupted until `/goal resume`.
      - After a crash or restart, an unfinished Goal resumes at its last phase
-       or Run boundary only after the user confirms.
+       or Run boundary only through an explicit user action: `/goal resume` or
+       `--resume-goal`, with no further confirmation prompt in the Foundation
+       contract. An RPI flow may add its own confirmation step.
    - **Ask** asks before every effect.
    - **Accept edits** integrates typed edits and in-scope changesets without
      prompts; commands and MCP calls ask.
@@ -427,9 +436,12 @@ execution contracts own the resulting behavior.
    the final report. Without the flag it goes straight to Implementation. Goal
    progress and the final report use the existing JSONL channel.
 11. **Every task is a Goal.** RPI adds Research and Plan; Ask, Accept edits and
-    Auto go straight to Implementation with the plan contract in the first
-    outcome. A Session holds at most one active Goal; a prompt while it runs
-    is a steering note, and the next prompt after it ends starts a new Goal.
+    Auto go straight to Implementation. In every mode, bounded read-only
+    inspection may precede the plan contract; every other Tool requires it
+    before dispatch. A Session holds at most one active Goal. Steering a running
+    Goal is deferred beyond the Foundation slice; until then a prompt while it
+    runs is not a steering note, and the next prompt after it ends starts a new
+    Goal.
 12. **Settings.** New settings live in one private, owner-only, versioned
     user settings file edited through `/settings`; per-folder values live with
     the folder-trust record; project files never set them. `tools.json`,
@@ -491,33 +503,41 @@ Each slice that crosses one of these boundaries runs the
 Each item is one PR with its own contract update, security pass where
 triggered and evidence under [testing rules](../../agents/testing.md).
 
-3. **Goal Foundation prerequisites.** E11 Goal lifecycle, B1 plan contract,
-   bounded Goal budgets, cancellation and the E3 Workspace lock. Creates the
-   initial `docs/specs/goals.md` domain spec and supplies the lifecycle,
-   cancellation, budget and ownership contracts required by A4.
+3. **Goal Foundation and budgets.** E11 every task is a Goal, B1 plan contract
+   after bounded read-only inspection, typed success receipts, bounded reports,
+   explicit recovery, Goal budgets and cross-StateRoot Workspace writer
+   exclusion. Creates the `docs/specs/goals.md` domain spec and supplies the
+   lifecycle, cancellation, context and budget owner required by A4. The
+   follow-on steering, checkpoint, rewind and RPI workflows remain in Goal
+   completion. Delivered in this slice: the autonomous `/goal OBJECTIVE` loop,
+   owned by the Engine, which starts Runs until the success criterion is met or
+   the budget, a failure or cancellation stops it. A cancelled loop leaves the
+   Goal Interrupted for `/goal resume`. Prompts typed during a loop are retained
+   as drafts; steering stays deferred. See [the Goal spec](../../docs/specs/goals.md).
 4. **A4 Flexible limits.** Replace the Run's fixed tool/model/context ceilings
    with Finish, compaction, cancellation and Goal-budget bounds; add the
    agreed command timeout and finite build resource profile settings. Guard
-   resource ceilings remain finite. This slice depends on Goal Foundation
-   prerequisites and must not make the current fixed Run loop unlimited by
-   itself.
+   resource ceilings remain finite. This slice depends on Goal Foundation and
+   must not make the current fixed Run loop unlimited by itself.
 5. **Dogfooding milestone: Arany develops Arany.** Use Arany for this
    repository's own work from here on. Requires Beta 1 check 7 (live
    validation of the chosen model's strict Tool encoding) in
    [next steps](../../NEXT_STEPS.md#beta-1-final-user-owned-checks). Every
    later slice is exercised through real use, which supplies the shadow-mode
    calibration data B2 needs.
-6. **Remaining Goal artifacts.** E1 steering, E2 phase context, E4 checkpoints
-   and rewind, E8 compaction and E10 `exec` integration. B6 modes including
-   RPI and grilling, E7 Goal view and E12 settings follow dogfooding as listed.
-7. B2, B3, B5 and E5 Supervisor signals, escalation, Finish gate and override.
-8. A5 Typed Git reads and E6 Git writes.
-9. A6 Registry fetch.
-10. D1–D5 Provider roster and per-agent routing.
-11. Configurable judges over the roster (agent-capable judges first, then a
-   typed-judge adapter after its API research note).
-12. C1–C3 Writable workers, leases and integrator.
-13. B4 and C4 Review-point review and reviewer role.
+6. **Goal completion.** E1–E4 steering, context reinjection, Workspace
+   checkpoints and rewind, E8 compaction and E10 `exec` integration. This
+   follows dogfooding and extends Goal Foundation with the remaining durable
+   workflows and UI.
+7. B6 modes including RPI and grilling, E7 Goal view and E12 settings.
+8. B2, B3, B5 and E5 Supervisor signals, escalation, Finish gate and override.
+9. A5 Typed Git reads and E6 Git writes.
+10. A6 Registry fetch.
+11. D1–D5 Provider roster and per-agent routing.
+12. Configurable judges over the roster (agent-capable judges first, then a
+    typed-judge adapter after its API research note).
+13. C1–C3 Writable workers, leases and integrator.
+14. B4 and C4 Review-point review and reviewer role.
 
 Observe during dogfooding, without changing the plan unless evidence demands
 it: whether RPI's Plan gate adds friction to small tasks, and whether the
@@ -525,14 +545,17 @@ per-slice specification and evidence cost slows delivery.
 
 E13 telemetry spans land with the slice that introduces each span's subject.
 
-Next action: implement Goal Foundation prerequisites (lifecycle, cancellation,
-budgets, plan contract and Workspace lock), then A4 and dogfooding before the
-remaining Goal artifacts. The per-Workspace cache currently uses a 64 MiB
-writable view and shares an 8 GiB StateRoot aggregate; A4 will bind a selected
-cache quota to the native build profile. Approved build maxima are 4 GiB
-memory, 8 GiB cache, 1 GiB writable project storage and 256 tasks. These remain finite policy
-ceilings, not support evidence. Native build verification and named-host
-measurements remain required before support claims.
+Next action: complete Goal Foundation, then A4 and dogfooding before the
+remaining Goal workflows. The A3 per-Workspace cache has a 64 MiB initial
+archive/view limit and shares an 8 GiB StateRoot aggregate; A4 binds the
+effective admitted cache quota to the native build profile. The planned A4 build
+profile proposes 4 GiB memory, 8 GiB requested cache, 1 GiB writable project
+storage and a 256 process/thread ceiling. That ceiling is separate from the
+ordinary command Guard limit of 64 processes/threads in
+[the Tools spec](../../docs/specs/tools.md), which stays in force until A4 admits
+a build profile. These remain finite policy ceilings, not support evidence.
+Native build verification and named-host measurements remain required before
+support claims.
 
 ## Open questions
 
@@ -561,8 +584,9 @@ data-dependent questions remain:
 - A team of a primary and writable workers completes a scripted coding task
   (edit, format, build, test, integrate) on Linux and macOS with closed replay.
 - An RPI Goal runs Research → Plan (with grilling) → approved multi-Run
-  Implementation to Completed, and to Failed/Cancelled with a final report;
-  restart resumes only after confirmation.
+  Implementation to Completed, and to Failed with a final report; Ctrl+C
+  pauses it until `/goal resume`, and restart resumes only through the
+  explicit user action in the Goal contract.
 - One Goal mixes at least two Providers across roles; an unadmittable or
   failing profile names itself, pauses its agents or switches to the enabled
   fallback, without re-dispatching uncertain effects.

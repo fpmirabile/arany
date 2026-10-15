@@ -16,17 +16,21 @@ pub(crate) use compaction::{
     validate_compaction_references,
 };
 pub(crate) use context::CompiledContext;
-pub(crate) use events::ReplayError;
 pub use events::{
     AgentDisposition, AgentRole, AgentRunId, CollaborationPolicy, CompactionFailure,
     CompactionRecord, CompactionStatus, ContextUsage, DISPLAY_LIMIT_TEXT, DisplayCategory,
-    DisplayChunk, Event, EventEnvelope, ForkLineage, MAX_DISPLAY_CHUNK_BYTES, MAX_DISPLAY_CHUNKS,
-    MAX_DISPLAY_COMMENTARY_ITEMS, MAX_DISPLAY_TEXT_BYTES, ProviderCallDisposition,
-    ProviderCallRecord, RunConfig, RunDisposition, RunId, SessionDefaults, SessionId,
+    DisplayChunk, Event, EventEnvelope, ForkLineage, GoalBudget, GoalId, GoalMcpTool, GoalPhase,
+    GoalPlanContract, GoalReport, GoalSkillBinding, GoalStatus, GoalSuccessCriterion,
+    MAX_DISPLAY_CHUNK_BYTES, MAX_DISPLAY_CHUNKS, MAX_DISPLAY_COMMENTARY_ITEMS,
+    MAX_DISPLAY_TEXT_BYTES, MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_MCP_TOOLS, MAX_GOAL_PLAN_SKILLS,
+    MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUN_ACTIVE_MS, MAX_GOAL_RUNS,
+    ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition, RunId, SessionDefaults,
+    SessionId,
 };
+pub(crate) use events::{GoalUsage, ReplayError};
 pub(crate) use lineage::prefix_digest;
 pub use reducer::{
-    AgentStatus, AgentView, CompactionView, RunStatus, RunView, SessionView, ToolView,
+    AgentStatus, AgentView, CompactionView, GoalView, RunStatus, RunView, SessionView, ToolView,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]

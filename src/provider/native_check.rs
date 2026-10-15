@@ -10,7 +10,7 @@ use aws_lc_rs::hmac;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const CHECK_VERSION: &str = "native-strict-outcome-conformance-v9";
+const CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-v12";
 const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 const PROBE_OUTPUT_CAP: u32 = 1024;
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
@@ -201,6 +201,8 @@ async fn probe<P: Provider>(provider: &P) -> Result<(), NativeCheckError> {
         includes: Vec::new(),
         history: Vec::new(),
         context_summary: None,
+        goal_budget: None,
+        goal_plan_contract: None,
         child_results: Vec::new(),
         max_output_tokens: PROBE_OUTPUT_CAP,
         tools: None,

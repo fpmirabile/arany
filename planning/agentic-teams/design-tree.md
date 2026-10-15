@@ -11,7 +11,7 @@ applied to the plan; this file keeps the decision trail and open nodes.
 | Q1 | Single-agent foundation (A) and Supervisor core before writable teams (C) | Yes | Plan execution order |
 | Q2 | Command writes return as Engine-validated changesets, not a writable Workspace mount | Yes | A1 |
 | Q3 | Supervisor owned by the Engine over journaled Events | Yes, amended: evaluators must be configurable and not tied to Engine-only deterministic rules; typed model judges such as TypeSafe AI's Jev can decide non-deterministic cases | B intro, execution step 4 |
-| Q4 | Plan contract inside the first Tool outcome, mandatory for every Run with effects | Yes | B1 |
+| Q4 | A valid plan contract must precede the first non-prelude Tool; bounded read-only inspection may precede it, and the contract may accompany inspection | Yes, amended by R13-1 | B1 |
 | Q5 | Shadow mode for fuzzy signals; false completion and Finish gate enforce immediately | Yes | B2 |
 | Q6 | Registry fetch with network leaves this plan | Yes | Moved to [next steps](../../NEXT_STEPS.md#next-functional-priority) |
 | Q7 | Toolchains mount exact subtrees read-only with identity pins, never whole home/tool directories | Yes | A2 |
@@ -210,6 +210,20 @@ of time-based arguments.
 | R12-2 | Minimal Beta 2 cut | Medium (~55%): weak given the observed pace | Not applied | — |
 | R12-3 | RPI default may add friction to small tasks | Low (~40%): speculative | Observe during dogfooding | Execution note |
 | R12-4 | Per-slice process cost may slow delivery | Low (~35%): agents absorb most of it at the observed pace | Observe during dogfooding | Execution note |
+
+## Round 13 — settled 2026-10-13
+
+| # | Decision | Answer | Applied to |
+|---|---|---|---|
+| R13-1 | Permit a bounded read-only inspection prelude before the B1 Goal plan contract | “Allow read-only inspection first (Recommended)” | B1, E11 |
+
+The selected timing lets inspection inform an honest, exact scope while
+preserving the approved effect boundary. Before a contract is recorded, the
+prelude is limited to Workspace List/Read/Search, an admitted Skill read, and
+the existing configured bounded MCP catalog listing. Catalog listing discovers
+names only; every MCP tool invocation and command still requires the contract.
+Any contract supplied with a prelude call is validated and journaled before
+dispatch. A pure read-only task can finish without fabricated effect scope.
 
 ## User directives after Round 12
 
