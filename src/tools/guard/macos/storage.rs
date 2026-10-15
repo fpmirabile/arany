@@ -283,6 +283,9 @@ pub(super) async fn prepare_command_storage(
     if crate::tools::fs::identity(&workspace)? != runtime.workspace_identity {
         return Err(ToolError::ChangedInput);
     }
+    for grant in &runtime.config.runtime_grants {
+        grant.verify_host()?;
+    }
     crate::tools::fs::reject_overlap(root, &runtime.workspace)?;
     let mut sizes = vec![
         ("workspace", limits.project_bytes),
@@ -326,9 +329,11 @@ fn prepare_cache_links(
 
     let cache_path = root.join(volume_name);
     for grant in grants.iter().filter(|grant| grant.kind.is_cache()) {
-        grant.verify_host()?;
         crate::tools::fs::reject_overlap(&grant.path, root)?;
-        let relative = grant.kind.cache_root().ok_or(ToolError::Configuration)?;
+        let relative = grant
+            .kind
+            .sandbox_cache_path()
+            .ok_or(ToolError::Configuration)?;
         let destination = cache_path.join(relative);
         if std::fs::symlink_metadata(&destination).is_ok() {
             return Err(ToolError::ChangedInput);
@@ -350,7 +355,8 @@ fn prepare_cache_links(
                 .open_dir_nofollow(name)
                 .map_err(|_| ToolError::Path)?;
         }
-        std::os::unix::fs::symlink(&grant.path, &destination).map_err(|_| ToolError::Operation)?;
+        let leaf = Path::new(relative).file_name().ok_or(ToolError::Path)?;
+        rustix::fs::symlinkat(&grant.path, &current, leaf).map_err(|_| ToolError::Operation)?;
     }
     Ok(())
 }

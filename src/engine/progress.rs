@@ -1,6 +1,8 @@
 use super::EngineError;
 use crate::provider::PreviewText;
-use crate::session::{AgentRunId, Event, EventEnvelope, RunId, RunView, SessionId, SessionView};
+use crate::session::{
+    AgentRunId, Event, EventEnvelope, GoalView, RunId, RunView, SessionId, SessionView,
+};
 use crate::store::Store;
 use crate::telemetry::{RunTrace, TraceEventKind};
 use std::sync::Arc;
@@ -42,11 +44,12 @@ impl RunPreview {
     }
 }
 
-/// An acknowledged Event sequence and the Run state reduced through it.
+/// An acknowledged Event sequence, the Run state and the Goal that owns the Run, reduced through it.
 #[derive(Clone)]
 pub struct RunUpdate {
     pub sequence: u64,
     pub run: RunView,
+    pub goal: Option<GoalView>,
 }
 
 impl RunProgress {
@@ -217,6 +220,11 @@ impl ProgressPublisher {
                 .cloned()
                 .map(|run| RunUpdate {
                     sequence: envelope.sequence,
+                    goal: view
+                        .goals
+                        .iter()
+                        .find(|goal| goal.run_ids.contains(&self.run_id))
+                        .cloned(),
                     run,
                 })
         };
@@ -235,7 +243,6 @@ pub(super) async fn append_observed(
     event: Event,
 ) -> Result<u64, EngineError> {
     let kind = match &event {
-        Event::AssistantDisplayRecorded { .. } => None,
         Event::GoalStarted { .. } => Some(TraceEventKind::GoalStarted),
         Event::GoalRunLinked { .. } => Some(TraceEventKind::GoalRunLinked),
         Event::GoalResumed { .. } => Some(TraceEventKind::GoalResumed),
@@ -257,7 +264,12 @@ pub(super) async fn append_observed(
         Event::AgentFinished { .. } => Some(TraceEventKind::AgentFinished),
         Event::MessageCommitted { .. } => Some(TraceEventKind::MessageCommitted),
         Event::RunFinished { .. } => Some(TraceEventKind::RunFinished),
-        _ => None,
+        Event::AssistantDisplayRecorded { .. }
+        | Event::SessionStarted { .. }
+        | Event::SessionDefaultChanged { .. }
+        | Event::SessionForked { .. }
+        | Event::ContextCompacted { .. }
+        | Event::SessionRenamed { .. } => None,
     };
     let committed = store.append(session_id, event).await?;
     crate::diagnostics::event_failure(&committed.event);

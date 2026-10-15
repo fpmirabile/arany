@@ -151,6 +151,7 @@ fn subscription_body_is_streaming_and_omits_unsupported_remote_cap() {
         assert!(value.get(forbidden).is_none(), "{forbidden}");
     }
     let mut coding = request();
+    coding.goal_budget = Some(crate::session::GoalBudget::default());
     coding.tools = Some(crate::tools::ToolContext {
         catalog: json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]}).to_string(),
         history_summary: None,

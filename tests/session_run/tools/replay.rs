@@ -107,6 +107,8 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             objective: "Past work".into(),
             workspace_identity: (1, 2),
             budget: arany::GoalBudget::default(),
+            phase: arany::GoalPhase::Implementation,
+            autonomous: false,
             resource_settings: arany::ToolResourceSettings::default(),
         },
         Event::GoalRunLinked {
@@ -211,8 +213,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                     Event::GoalRunLinked { run_id, .. }
                     | Event::GoalActiveTimeReserved { run_id, .. }
                     | Event::GoalActiveTimeSettled { run_id, .. }
-                    | Event::GoalPlanContractRecorded { run_id, .. }
-                    | Event::GoalCompactionCallReserved { run_id, .. } => (Some(*run_id), None),
+                    | Event::GoalPlanContractRecorded { run_id, .. } => (Some(*run_id), None),
                     Event::MessageAccepted { run_id, .. }
                     | Event::RunStarted { run_id, .. }
                     | Event::MessageCommitted { run_id, .. }
@@ -708,7 +709,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     );
     let mut uncertain_cache = integrated[..COMMAND_FINISHED + 1].to_vec();
     if let Event::ToolFinished { observation, .. } = &mut uncertain_cache[COMMAND_FINISHED] {
-        observation.disposition = ToolDisposition::Uncertain;
+        observation.disposition = ToolDisposition::Succeeded;
         observation.output = serde_json::json!({
             "exit_code": 0,
             "stdout": "build complete",
@@ -734,13 +735,18 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     let view = replay(uncertain_cache).unwrap().unwrap();
     assert_eq!(view.runs[0].status, RunStatus::Failed);
     assert_eq!(view.runs[0].tools.len(), 1);
+    let retained = view.runs[0].tools[0].observation.as_ref().unwrap();
+    assert_eq!(retained.disposition, ToolDisposition::Succeeded);
+    assert_eq!(retained.cache_update, arany::CacheUpdate::Uncertain);
     assert_eq!(
-        view.runs[0].tools[0]
-            .observation
-            .as_ref()
-            .unwrap()
-            .cache_update,
-        arany::CacheUpdate::Uncertain
+        arany::render_cache_update_feedback(&view.runs[0]),
+        Some("Build cache outcome is uncertain; inspect Session history before retrying.")
+    );
+    assert_eq!(
+        arany::render_run_feedback(&view.runs[0]).as_deref(),
+        Some(
+            "Error: The command succeeded but its build cache update is uncertain; the Run stopped without retrying. No answer was committed."
+        )
     );
     for case in [
         "source",

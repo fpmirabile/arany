@@ -7,7 +7,7 @@ use crate::provider::{
 };
 use crate::session::{
     AgentDisposition, AgentRunId, CollaborationPolicy, CompactionFailure, CompactionRecord,
-    CompactionStatus, DisplayCategory, DisplayChunk, Event, GoalPhase,
+    CompactionStatus, DisplayCategory, DisplayChunk, Event, GoalBudget, GoalPhase, GoalUsage,
     MAX_ASSISTANT_MESSAGE_BYTES as MAX_PRIMARY_RESULT_BYTES, MAX_COMPACTION_OUTPUT_TOKENS,
     MAX_DISPLAY_CHUNK_BYTES, MAX_DISPLAY_CHUNKS, MAX_DISPLAY_COMMENTARY_ITEMS,
     MAX_DISPLAY_TEXT_BYTES, ProviderCallDisposition, ProviderCallRecord, RunDisposition, RunId,
@@ -30,6 +30,29 @@ const TOOL_CLEANUP_OVERHEAD: Duration = Duration::from_secs(10);
 const TOOL_PREPARATION_OVERHEAD: Duration = Duration::from_secs(5);
 #[cfg(target_os = "macos")]
 const TOOL_PREPARATION_OVERHEAD: Duration = Duration::from_secs(35);
+
+/// Compare-exchange update returning the previous value; `None` from `update` fails without writing.
+fn update_u32(counter: &AtomicU32, mut update: impl FnMut(u32) -> Option<u32>) -> Result<u32, u32> {
+    let mut current = counter.load(Ordering::Acquire);
+    loop {
+        let next = update(current).ok_or(current)?;
+        match counter.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return Ok(current),
+            Err(actual) => current = actual,
+        }
+    }
+}
+
+fn update_u64(counter: &AtomicU64, mut update: impl FnMut(u64) -> Option<u64>) -> Result<u64, u64> {
+    let mut current = counter.load(Ordering::Acquire);
+    loop {
+        let next = update(current).ok_or(current)?;
+        match counter.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return Ok(current),
+            Err(actual) => current = actual,
+        }
+    }
+}
 
 fn compaction_context_input(
     request: &ProviderRequest,
@@ -156,6 +179,9 @@ pub(super) struct RunIdentity {
 }
 
 pub(super) struct GoalRunBudget {
+    autonomous: bool,
+    pinned_budget: GoalBudget,
+    runs_used_before: usize,
     calls_used: AtomicU32,
     calls_limit: std::sync::Mutex<Option<u32>>,
     in_flight_children: AtomicU32,
@@ -185,17 +211,20 @@ impl GoalRunBudget {
             .as_ref()
             .map_or(goal.budget.max_active_ms, |plan| plan.budget.max_active_ms);
         Self {
-            calls_used: AtomicU32::new(goal.calls_used),
+            autonomous: goal.autonomous,
+            pinned_budget: goal.budget,
+            runs_used_before: goal.usage.runs,
+            calls_used: AtomicU32::new(goal.usage.provider_calls),
             calls_limit: std::sync::Mutex::new(calls_limit),
             in_flight_children: AtomicU32::new(0),
-            known_tokens: AtomicU64::new(goal.known_tokens),
-            token_usage_unknown: AtomicBool::new(goal.token_usage_unknown),
+            known_tokens: AtomicU64::new(goal.usage.known_tokens),
+            token_usage_unknown: AtomicBool::new(goal.usage.token_usage_unknown),
             token_limit: std::sync::Mutex::new(token_limit),
             plan_contract: std::sync::Mutex::new(goal.plan_contract.clone()),
             resource_settings: goal.resource_settings,
             criterion_satisfied: AtomicBool::new(goal.success_criterion_satisfied),
             success_state: std::sync::Mutex::new(goal.success_state.clone()),
-            active_ms: AtomicU64::new(goal.active_ms),
+            active_ms: AtomicU64::new(goal.usage.active_ms),
             reserved_active_ms: AtomicU64::new(0),
             uncertain_active_ms: goal.uncertain_active_ms,
             active_limit: std::sync::Mutex::new(active_limit),
@@ -208,17 +237,16 @@ impl GoalRunBudget {
         if !self.can_start_provider_call() {
             return false;
         }
-        self.calls_used
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                self.calls_limit.lock().ok().and_then(|limit| {
-                    if limit.is_none_or(|limit| used < limit) {
-                        used.checked_add(1)
-                    } else {
-                        None
-                    }
-                })
+        update_u32(&self.calls_used, |used| {
+            self.calls_limit.lock().ok().and_then(|limit| {
+                if limit.is_none_or(|limit| used < limit) {
+                    used.checked_add(1)
+                } else {
+                    None
+                }
             })
-            .is_ok()
+        })
+        .is_ok()
     }
 
     fn remaining_calls(&self) -> Option<u32> {
@@ -231,10 +259,7 @@ impl GoalRunBudget {
     }
 
     fn child_call_finished(&self) -> Result<(), EngineError> {
-        self.in_flight_children
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
-                pending.checked_sub(1)
-            })
+        update_u32(&self.in_flight_children, |pending| pending.checked_sub(1))
             .map_err(|_| EngineError::CoordinatorFailed)?;
         Ok(())
     }
@@ -243,17 +268,20 @@ impl GoalRunBudget {
         &self,
         contract: crate::session::GoalPlanContract,
         success_state: crate::session::GoalSuccessState,
-    ) {
-        if let Ok(mut current) = self.plan_contract.lock() {
-            self.criterion_satisfied.store(
-                contract.success_state_satisfied(&success_state),
-                Ordering::Release,
-            );
-            if let Ok(mut state) = self.success_state.lock() {
-                *state = success_state;
-                *current = Some(contract);
-            }
-        }
+    ) -> Result<(), EngineError> {
+        let satisfied = contract.success_state_satisfied(&success_state);
+        let mut current = self
+            .plan_contract
+            .lock()
+            .map_err(|_| EngineError::CoordinatorFailed)?;
+        let mut state = self
+            .success_state
+            .lock()
+            .map_err(|_| EngineError::CoordinatorFailed)?;
+        *state = success_state;
+        *current = Some(contract);
+        self.criterion_satisfied.store(satisfied, Ordering::Release);
+        Ok(())
     }
 
     fn allows_tool(&self, call: &crate::tools::ToolCall) -> bool {
@@ -294,40 +322,60 @@ impl GoalRunBudget {
         (requested > maximum).then_some((requested, maximum))
     }
 
-    fn observe_tool(&self, observation: &crate::tools::ToolObservation) {
-        if let Ok(plan) = self.plan_contract.lock()
-            && let Some(contract) = plan.as_ref()
-            && let Ok(mut state) = self.success_state.lock()
-        {
+    fn observe_tool(&self, observation: &crate::tools::ToolObservation) -> Result<(), EngineError> {
+        let plan = self
+            .plan_contract
+            .lock()
+            .map_err(|_| EngineError::CoordinatorFailed)?;
+        if let Some(contract) = plan.as_ref() {
+            let mut state = self
+                .success_state
+                .lock()
+                .map_err(|_| EngineError::CoordinatorFailed)?;
             contract.observe_success(&mut state, observation);
             self.criterion_satisfied
                 .store(contract.success_state_satisfied(&state), Ordering::Release);
         }
+        Ok(())
+    }
+
+    /// Whether an autonomous Goal can admit another Run after this unsatisfied Run.
+    pub(super) fn allows_next_run(&self) -> bool {
+        if !self.autonomous {
+            return false;
+        }
+        let Ok(plan) = self.plan_contract.lock() else {
+            return false;
+        };
+        let budget = self.pinned_budget.effective(plan.as_ref());
+        drop(plan);
+        // This Run is linked, so it counts toward the Goal's Runs.
+        self.admission_usage(self.runs_used_before + 1)
+            .is_some_and(|usage| budget.admits_next_run(usage))
+    }
+
+    /// Usage the admission rule judges, with the unsettled active segment counted as spent.
+    fn admission_usage(&self, runs: usize) -> Option<GoalUsage> {
+        let origin = *self.active_origin.lock().ok()?;
+        let pending = origin.map_or(0, |origin| {
+            duration_ms(Instant::now().saturating_duration_since(origin))
+        });
+        Some(GoalUsage {
+            runs,
+            provider_calls: self.calls_used.load(Ordering::Acquire),
+            active_ms: self
+                .active_ms
+                .load(Ordering::Acquire)
+                .saturating_add(self.reserved_active_ms.load(Ordering::Acquire))
+                .saturating_add(pending),
+            known_tokens: self.known_tokens.load(Ordering::Acquire),
+            token_usage_unknown: self.token_usage_unknown.load(Ordering::Acquire),
+        })
     }
 
     fn success_criterion_satisfied(&self) -> bool {
         self.plan_contract.lock().is_ok_and(|plan| plan.is_none())
             || self.criterion_satisfied.load(Ordering::Acquire)
-    }
-
-    fn active_remaining_ms(&self) -> Option<u64> {
-        let pending = match self.active_origin.lock() {
-            Ok(origin) => origin
-                .map(|origin| duration_ms(Instant::now().saturating_duration_since(origin)))
-                .unwrap_or_default(),
-            Err(_) => return Some(0),
-        };
-        match self.active_limit.lock() {
-            Ok(limit) => (*limit).map(|limit| {
-                limit.saturating_sub(
-                    self.active_ms
-                        .load(Ordering::Acquire)
-                        .saturating_add(self.reserved_active_ms.load(Ordering::Acquire))
-                        .saturating_add(pending),
-                )
-            }),
-            Err(_) => Some(0),
-        }
     }
 
     fn active_reservation(&self, action_ms: u64) -> Result<(Instant, u64), EngineError> {
@@ -386,11 +434,10 @@ impl GoalRunBudget {
     }
 
     fn active_segment_reserved(&self, reserved_ms: u64) -> Result<(), EngineError> {
-        self.reserved_active_ms
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |reserved| {
-                reserved.checked_add(reserved_ms)
-            })
-            .map_err(|_| EngineError::GoalBudgetExhausted)?;
+        update_u64(&self.reserved_active_ms, |reserved| {
+            reserved.checked_add(reserved_ms)
+        })
+        .map_err(|_| EngineError::GoalBudgetExhausted)?;
         *self
             .active_origin
             .lock()
@@ -407,16 +454,12 @@ impl GoalRunBudget {
         if active_ms > crate::session::MAX_GOAL_ACTION_ACTIVE_MS {
             return Err(EngineError::GoalBudgetExhausted);
         }
-        self.active_ms
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                used.checked_add(active_ms)
-            })
+        update_u64(&self.active_ms, |used| used.checked_add(active_ms))
             .map_err(|_| EngineError::GoalBudgetExhausted)?;
-        self.reserved_active_ms
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |reserved| {
-                reserved.checked_sub(reserved_ms)
-            })
-            .map_err(|_| EngineError::CoordinatorFailed)?;
+        update_u64(&self.reserved_active_ms, |reserved| {
+            reserved.checked_sub(reserved_ms)
+        })
+        .map_err(|_| EngineError::CoordinatorFailed)?;
         *self
             .active_origin
             .lock()
@@ -424,28 +467,30 @@ impl GoalRunBudget {
         Ok(())
     }
 
-    fn can_narrow(&self, contract: &crate::session::GoalPlanContract) -> bool {
-        let active_pending = match self.active_origin.lock() {
-            Ok(origin) => origin.map_or(0, |origin| {
-                duration_ms(Instant::now().saturating_duration_since(origin))
-            }),
-            Err(_) => return false,
+    fn active_remaining_ms(&self) -> Option<u64> {
+        let pending = match self.active_origin.lock() {
+            Ok(origin) => origin
+                .map(|origin| duration_ms(Instant::now().saturating_duration_since(origin)))
+                .unwrap_or_default(),
+            Err(_) => return Some(0),
         };
-        contract
-            .budget
-            .max_provider_calls
-            .is_none_or(|limit| limit > self.calls_used.load(Ordering::Acquire))
-            && contract.budget.max_tokens.is_none_or(|limit| {
-                !self.token_usage_unknown.load(Ordering::Acquire)
-                    && self.known_tokens.load(Ordering::Acquire) < limit
-            })
-            && contract.budget.max_active_ms.is_none_or(|limit| {
-                self.active_ms
-                    .load(Ordering::Acquire)
-                    .saturating_add(self.reserved_active_ms.load(Ordering::Acquire))
-                    .saturating_add(active_pending)
-                    < limit
-            })
+        match self.active_limit.lock() {
+            Ok(limit) => (*limit).map(|limit| {
+                limit.saturating_sub(
+                    self.active_ms
+                        .load(Ordering::Acquire)
+                        .saturating_add(self.reserved_active_ms.load(Ordering::Acquire))
+                        .saturating_add(pending),
+                )
+            }),
+            Err(_) => Some(0),
+        }
+    }
+
+    fn can_narrow(&self, contract: &crate::session::GoalPlanContract) -> bool {
+        // This Run is already linked, so the plan must allow it along with the earlier Runs.
+        self.admission_usage(self.runs_used_before)
+            .is_some_and(|usage| contract.budget.admits_next_run(usage))
     }
 
     fn active_time_exhausted(&self) -> bool {
@@ -524,11 +569,7 @@ impl GoalRunBudget {
 
     fn account_usage(&self, input: Option<u32>, output: Option<u32>) {
         let known = u64::from(input.unwrap_or_default()) + u64::from(output.unwrap_or_default());
-        let _ = self
-            .known_tokens
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                Some(used.saturating_add(known))
-            });
+        let _ = update_u64(&self.known_tokens, |used| Some(used.saturating_add(known)));
         if input.is_none() || output.is_none() {
             self.token_usage_unknown.store(true, Ordering::Release);
         }
@@ -832,15 +873,50 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         })
         .await?;
         if child_call {
-            self.controls
-                .goal_budget
-                .in_flight_children
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
-                    pending.checked_add(1)
-                })
-                .map_err(|_| EngineError::GoalBudgetExhausted)?;
+            update_u32(&self.controls.goal_budget.in_flight_children, |pending| {
+                pending.checked_add(1)
+            })
+            .map_err(|_| EngineError::GoalBudgetExhausted)?;
         }
         Ok(())
+    }
+
+    /// Records an admitted Plan contract and narrows this Run to it; `false` means the Run must fail.
+    pub(super) async fn admit_plan_contract(
+        &self,
+        root_request: &mut ProviderRequest,
+        contract: crate::session::GoalPlanContract,
+    ) -> Result<bool, EngineError> {
+        self.store.admit_operation(self.session_id, 5).await?;
+        self.append(Event::GoalPlanContractRecorded {
+            goal_id: self.goal_id,
+            run_id: self.run_id,
+            contract: contract.clone(),
+        })
+        .await?;
+        let success_state = self
+            .store
+            .load_view(self.session_id)
+            .await?
+            .and_then(|view| {
+                view.goals
+                    .last()
+                    .filter(|goal| goal.id == self.goal_id)
+                    .map(|goal| goal.success_state.clone())
+            })
+            .ok_or(EngineError::InvalidHistory)?;
+        if self
+            .controls
+            .goal_budget
+            .set_plan_contract(contract.clone(), success_state)
+            .is_err()
+            || self.controls.goal_budget.narrow(&contract).is_err()
+        {
+            return Ok(false);
+        }
+        root_request.goal_budget = Some(contract.budget);
+        root_request.goal_plan_contract = Some(contract);
+        Ok(true)
     }
 
     pub(super) async fn execute(
@@ -857,6 +933,12 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             let (first, active_segment) = match self.invoke_primary(root_request.clone()).await {
                 Ok(result) => result,
                 Err(EngineError::GoalBudgetExhausted) => {
+                    if let Some(first_trace) = first_trace {
+                        first_trace.finish_refused(&primary, &root_request.model);
+                    }
+                    if let Some(next_trace) = next_trace {
+                        next_trace.finish_refused();
+                    }
                     return self.fail_known_budget_exhaustion(primary).await;
                 }
                 Err(error) => return Err(error),
@@ -945,32 +1027,12 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                         },
                     ..
                 }) if valid_response => {
-                    if let Some(contract) = plan_contract {
-                        let contract = *contract;
-                        self.store.admit_operation(self.session_id, 5).await?;
-                        self.append(Event::GoalPlanContractRecorded {
-                            goal_id: self.goal_id,
-                            run_id: self.run_id,
-                            contract: contract.clone(),
-                        })
-                        .await?;
-                        let success_state = self
-                            .store
-                            .load_view(self.session_id)
+                    if let Some(contract) = plan_contract
+                        && !self
+                            .admit_plan_contract(&mut root_request, *contract)
                             .await?
-                            .and_then(|view| {
-                                view.goals
-                                    .last()
-                                    .filter(|goal| goal.id == self.goal_id)
-                                    .map(|goal| goal.success_state.clone())
-                            })
-                            .ok_or(EngineError::InvalidHistory)?;
-                        self.controls
-                            .goal_budget
-                            .set_plan_contract(contract.clone(), success_state);
-                        self.controls.goal_budget.narrow(&contract)?;
-                        root_request.goal_budget = Some(contract.budget);
-                        root_request.goal_plan_contract = Some(contract);
+                    {
+                        return self.fail_primary(primary).await;
                     }
                     let continuation = self
                         .execute_tool(
@@ -1400,7 +1462,14 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                 None
             };
             let tools = request.tools.as_mut().ok_or(EngineError::InvalidRequest)?;
-            self.controls.goal_budget.observe_tool(&observation);
+            if self
+                .controls
+                .goal_budget
+                .observe_tool(&observation)
+                .is_err()
+            {
+                return Ok(false);
+            }
             tools.observations.push(observation);
             let changeset = changeset.filter(|changeset| !changeset.files.is_empty());
             self.compact_tool_context_if_needed(request, 1).await?;
@@ -2064,6 +2133,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         let trace = primary.begin_provider(AgentPhase::ToolReview, &review.model);
         let active_segment = self.reserve_active_segment(CALL_DEADLINE).await?;
         if let Err(error) = self.reserve_provider_call(self.primary_id).await {
+            trace.finish_refused();
             if matches!(error, EngineError::GoalBudgetExhausted) {
                 self.settle_active_segment(active_segment).await?;
             }
@@ -2105,7 +2175,9 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         if self.controls.cancellation.is_cancelled() {
             return self.cancel_primary(primary).await;
         }
-        if !self.controls.goal_budget.success_criterion_satisfied() {
+        if !self.controls.goal_budget.success_criterion_satisfied()
+            && !self.controls.goal_budget.allows_next_run()
+        {
             return self.fail_primary(primary).await;
         }
         self.append(Event::AgentFinished {
@@ -2334,25 +2406,81 @@ fn valid_finish(finish: &Finish, result_limit: usize) -> bool {
 mod goal_budget_tests {
     use super::*;
     use crate::engine::GoalAdmission;
-    use crate::session::{GoalBudget, GoalId, GoalPlanContract, GoalSuccessCriterion};
+    use crate::session::{
+        GoalBudget, GoalId, GoalPhase, GoalPlanContract, GoalSuccessCriterion, GoalUsage,
+    };
 
     fn admission() -> GoalAdmission {
         GoalAdmission {
             id: GoalId::new(),
+            objective: String::new(),
+            phase: GoalPhase::Implementation,
+            autonomous: false,
             budget: GoalBudget::default(),
             resource_settings: crate::tools::ToolResourceSettings::default(),
             plan_contract: None,
             is_new: true,
             resume: false,
-            calls_used: 0,
-            known_tokens: 0,
-            token_usage_unknown: false,
+            usage: GoalUsage {
+                runs: 0,
+                provider_calls: 0,
+                active_ms: 0,
+                known_tokens: 0,
+                token_usage_unknown: false,
+            },
+            uncertain_active_ms: 0,
             success_criterion_satisfied: false,
             success_state: crate::session::GoalSuccessState::NoContract,
-            active_ms: 0,
-            uncertain_active_ms: 0,
-            runs_used: 0,
         }
+    }
+
+    #[test]
+    fn poisoned_plan_state_fails_instead_of_being_ignored() {
+        let budget = GoalRunBudget::new(&admission(), Some(64), None);
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = budget.plan_contract.lock().expect("fresh lock");
+            panic!("poison the plan contract lock");
+        }));
+        assert!(poisoned.is_err());
+        let contract = GoalPlanContract {
+            mission: "complete the task".into(),
+            paths: Vec::new(),
+            commands: Vec::new(),
+            resource_class: crate::tools::ToolResourceClass::Default,
+            command_timeout_ms: None,
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: GoalSuccessCriterion::WorkspaceFileDigest {
+                path: "src/main.rs".into(),
+                sha256: "0".repeat(64),
+            },
+            budget: GoalBudget::default(),
+        };
+        assert!(matches!(
+            budget.set_plan_contract(contract, crate::session::GoalSuccessState::NoContract),
+            Err(EngineError::CoordinatorFailed)
+        ));
+        let intent = crate::tools::EffectIntent {
+            id: uuid::Uuid::now_v7(),
+            run_id: RunId::new(),
+            agent_run_id: AgentRunId::new(),
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call: crate::tools::ToolCall::Read {
+                path: "src/main.rs".into(),
+                offset: 0,
+                limit: 32,
+            },
+            limits: crate::tools::ToolLimits::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        };
+        assert!(matches!(
+            budget.observe_tool(&active_time_limit_observation(intent)),
+            Err(EngineError::CoordinatorFailed)
+        ));
     }
 
     #[test]

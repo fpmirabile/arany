@@ -52,6 +52,16 @@ impl ChildQueue {
         }
     }
 
+    /// Drains aborted calls and returns the failure that caused the abort; a drain error is
+    /// recorded as a diagnostic instead of replacing that failure.
+    async fn abort_with(&mut self, error: EngineError) -> EngineError {
+        let _ = self
+            .abort_and_drain()
+            .await
+            .inspect_err(crate::diagnostics::engine_failure);
+        error
+    }
+
     async fn abort_and_drain(&mut self) -> Result<(), EngineError> {
         self.calls.abort_all();
         let deadline = Instant::now() + CANCELLATION_DRAIN;
@@ -174,8 +184,12 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
             Err(error) => return Err(error),
         };
         let deadline = active_segment.deadline();
-        self.fill_slots(&mut queue, &children, root_request, deadline)
-            .await?;
+        if let Err(error) = self
+            .fill_slots(&mut queue, &children, root_request, deadline)
+            .await
+        {
+            return Err(queue.abort_with(error).await);
+        }
         let mut abort_reason = (!queue.pending.is_empty()
             && !self.controls.goal_budget.can_start_provider_call())
         .then_some(AbortReason::Budget);
@@ -201,8 +215,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 _ => (AgentDisposition::Failed, None),
             };
             let Some(index) = queue.close_provider_span(task_id, &result, valid_response) else {
-                queue.abort_and_drain().await?;
-                return Err(EngineError::CoordinatorFailed);
+                return Err(queue.abort_with(EngineError::CoordinatorFailed).await);
             };
             if let Err(error) = self
                 .append(Event::ProviderCallRecorded {
@@ -212,15 +225,13 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 })
                 .await
             {
-                queue.abort_and_drain().await?;
-                return Err(error);
+                return Err(queue.abort_with(error).await);
             }
             if let Err(error) = self
                 .finish_child(children[index].agent_run_id, disposition, finish, true)
                 .await
             {
-                queue.abort_and_drain().await?;
-                return Err(error);
+                return Err(queue.abort_with(error).await);
             }
             children[index]
                 .trace
@@ -254,9 +265,12 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 queue.calls.abort_all();
                 drain_deadline = Some(Instant::now() + CANCELLATION_DRAIN);
             }
-            if abort_reason.is_none() {
-                self.fill_slots(&mut queue, &children, root_request, deadline)
-                    .await?;
+            if abort_reason.is_none()
+                && let Err(error) = self
+                    .fill_slots(&mut queue, &children, root_request, deadline)
+                    .await
+            {
+                return Err(queue.abort_with(error).await);
             }
         }
 
@@ -310,6 +324,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
             {
                 Ok(result) => result,
                 Err(EngineError::GoalBudgetExhausted) => {
+                    synthesis_trace.finish_refused();
                     return self.fail_known_budget_exhaustion(primary).await;
                 }
                 Err(error) => return Err(error),
@@ -357,31 +372,10 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                         },
                     ..
                 }) if valid_response => {
-                    if let Some(contract) = plan_contract {
-                        let contract = *contract;
-                        self.append(Event::GoalPlanContractRecorded {
-                            goal_id: self.goal_id,
-                            run_id: self.run_id,
-                            contract: contract.clone(),
-                        })
-                        .await?;
-                        let success_state = self
-                            .store
-                            .load_view(self.session_id)
-                            .await?
-                            .and_then(|view| {
-                                view.goals
-                                    .last()
-                                    .filter(|goal| goal.id == self.goal_id)
-                                    .map(|goal| goal.success_state.clone())
-                            })
-                            .ok_or(EngineError::InvalidHistory)?;
-                        self.controls
-                            .goal_budget
-                            .set_plan_contract(contract.clone(), success_state);
-                        self.controls.goal_budget.narrow(&contract)?;
-                        root_request.goal_budget = Some(contract.budget);
-                        root_request.goal_plan_contract = Some(contract);
+                    if let Some(contract) = plan_contract
+                        && !self.admit_plan_contract(root_request, *contract).await?
+                    {
+                        return self.fail_primary(primary).await;
                     }
                     match self.execute_tool(root_request, call, false, &primary).await {
                         Ok(true) => {}

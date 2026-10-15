@@ -1,6 +1,7 @@
 use super::{
     active_terminal::{ProductGuard, product_child_of, tty_settings},
     loopback::ChildGuard,
+    saved_ui_preferences,
     session_picker::{pump, tail},
 };
 use arany::{CollaborationPolicy, SessionDefaults, SessionId, StateRoot, Store, list_sessions};
@@ -13,13 +14,6 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-
-fn saved_ui_preferences(completion: &str, view: &str) -> Vec<u8> {
-    format!(
-        r#"{{"version":3,"preferences":{{"completion":"{completion}","view":"{view}","goal_budget":{{"max_provider_calls":64,"max_tokens":null,"max_active_ms":1800000,"max_runs":16}},"resources":{{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592}}}}}}"#
-    )
-    .into_bytes()
-}
 
 #[track_caller]
 fn wait_for(
@@ -381,6 +375,9 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
                     objective: "Prior accepted objective".into(),
                     workspace_identity,
                     budget: arany::GoalBudget::default(),
+                    phase: arany::GoalPhase::Implementation,
+                    autonomous: false,
+                    resource_settings: arany::ToolResourceSettings::default(),
                 },
             )
             .await
@@ -391,7 +388,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
                 arany::Event::GoalRunLinked {
                     goal_id,
                     run_id,
-                    phase: arany::GoalPhase::Research,
+                    phase: arany::GoalPhase::Implementation,
                 },
             )
             .await
@@ -519,6 +516,18 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         matches!(clear_result, Err(arany::StoreError::BuildCacheBusy)),
         "Store clear result category: {clear_category}"
     );
+    let usage_at = transcript.len();
+    input
+        .write_all(b"/cache clear now\r")
+        .expect("malformed cache clear");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        usage_at,
+        b"Notice: Error: Usage: /cache clear [all]\r\n",
+    );
     let busy_at = transcript.len();
     input
         .write_all(b"/cache clear\r")
@@ -562,6 +571,22 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         b"Notice: Cleared all private build caches\r\nInput:\r\n",
     );
     assert!(!other_cache.exists());
+    let (planted_cache, planted_lock) = seed_empty_build_cache(&state, &workspace);
+    std::fs::set_permissions(&planted_lock, std::fs::Permissions::from_mode(0o644))
+        .expect("non-private cache identity lock");
+    let failed_clear_at = transcript.len();
+    input
+        .write_all(b"/cache clear\r")
+        .expect("cache clear over non-private storage");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        failed_clear_at,
+        b"Notice: Error: private build cache could not be cleared\r\nInput:\r\n",
+    );
+    assert!(planted_cache.exists());
     input.write_all(b"/exit\r").expect("exit");
     let result = super::loopback::wait_product(child.take());
     pump(&mut output, &mut input, &mut transcript, &mut answered);
@@ -571,7 +596,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
     let text = String::from_utf8(transcript).expect("linear transcript UTF-8");
     assert!(text.contains("Run npx --yes skills@1.7.0 experimental_install in this project: .agents/skills is missing and skills-lock.json exists."));
     assert!(!text.contains('\u{1b}'));
-    assert_eq!(text.matches("Notice: Error:").count(), 5);
+    assert_eq!(text.matches("Notice: Error:").count(), 7);
     assert_eq!(
         super::active_terminal::transcript_field(&text, "TTY_BEFORE:"),
         super::active_terminal::transcript_field(&text, "TTY_AFTER:"),
@@ -1501,7 +1526,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
             .read_ui_preferences_record()
             .unwrap()
             .unwrap(),
-        record("fullscreen").as_bytes()
+        record("fullscreen")
     );
     let draft_at = transcript.len();
     input
@@ -2002,6 +2027,18 @@ fn inline_session_picker_closes_after_quick_action() {
     session_picker_close_case(true);
 }
 
+/// Restores State's mode if an assertion fails while it is unavailable.
+struct StateModeGuard {
+    path: std::path::PathBuf,
+    mode: std::fs::Permissions,
+}
+
+impl Drop for StateModeGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::set_permissions(&self.path, self.mode.clone());
+    }
+}
+
 #[test]
 fn screen_reader_rejected_command_does_not_join_the_next_line() {
     let temp = tempfile::tempdir().expect("private test root");
@@ -2345,6 +2382,25 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
         rename_at,
         b"Notice: Error: Title is empty or too long; use a shorter title\r\nInput:\r\n",
     );
+    let state_guard = StateModeGuard {
+        path: state.clone(),
+        mode: std::fs::metadata(&state).expect("State").permissions(),
+    };
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o000))
+        .expect("make State unavailable mid-Session");
+    let unavailable_at = transcript.len();
+    input
+        .write_all(format!("/resume {saved_id}\r").as_bytes())
+        .expect("resume with unavailable State");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        unavailable_at,
+        b"Notice: Error: state directory unavailable or unsafe\r\nInput:\r\n",
+    );
+    std::fs::set_permissions(&state, state_guard.mode.clone()).expect("restore State");
     let corrected_at = transcript.len();
     input
         .write_all(b"/rename Corrected title\r")

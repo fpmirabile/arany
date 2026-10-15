@@ -1,5 +1,5 @@
 use crate::provider::{AgentPhase, MAX_REPORTED_INPUT_TOKENS};
-use crate::session::{AgentRunId, GoalId, GoalStatus, RunId, SessionId};
+use crate::session::{AgentRunId, GoalId, GoalStatus, GoalView, RunId, SessionId};
 use opentelemetry::{
     Context, KeyValue,
     trace::{SpanKind, Status, TraceContextExt, Tracer, TracerProvider},
@@ -458,41 +458,35 @@ impl GoalTrace {
         self.span.event_committed(sequence, kind);
     }
 
-    pub(crate) fn finish(
-        self,
-        status: GoalStatus,
-        provider_calls: u32,
-        known_tokens: u64,
-        token_usage_unknown: bool,
-        active_ms: u64,
-        uncertain_active_ms: u64,
-    ) {
+    /// `run` is the segment's Run outcome, which decides the segment unless the Goal is terminal.
+    pub(crate) fn finish(self, status: GoalStatus, run: TraceOutcome, goal: &GoalView) {
         if let Some(context) = &self.span.context {
             for attribute in [
-                KeyValue::new("arany.goal.status", goal_status_name(status)),
-                KeyValue::new("arany.goal.provider_calls", i64::from(provider_calls)),
+                KeyValue::new("arany.goal.status", status.as_str()),
+                KeyValue::new("arany.goal.provider_calls", i64::from(goal.provider_calls)),
                 KeyValue::new(
                     "arany.goal.known_tokens",
-                    known_tokens.min(i64::MAX as u64) as i64,
+                    goal.known_tokens.min(i64::MAX as u64) as i64,
                 ),
-                KeyValue::new("arany.goal.token_usage_unknown", token_usage_unknown),
+                KeyValue::new("arany.goal.token_usage_unknown", goal.token_usage_unknown),
                 KeyValue::new(
                     "arany.goal.active_ms",
-                    active_ms.min(i64::MAX as u64) as i64,
+                    goal.active_ms.min(i64::MAX as u64) as i64,
                 ),
                 KeyValue::new(
                     "arany.goal.uncertain_active_ms",
-                    uncertain_active_ms.min(i64::MAX as u64) as i64,
+                    goal.uncertain_active_ms.min(i64::MAX as u64) as i64,
                 ),
             ] {
                 context.span().set_attribute(attribute);
             }
         }
+        // A segment ends with its Run. A Goal still open stays open for a later segment,
+        // so only the Goal's own terminal status overrides the Run outcome.
         let outcome = match status {
             GoalStatus::Completed => TraceOutcome::Finished,
             GoalStatus::Failed => TraceOutcome::Failed,
-            GoalStatus::Cancelled => TraceOutcome::Cancelled,
-            GoalStatus::Running | GoalStatus::Interrupted => TraceOutcome::Finished,
+            GoalStatus::Running | GoalStatus::Interrupted => run,
         };
         self.span.finish(outcome);
     }
@@ -617,6 +611,15 @@ impl PlanTrace {
 }
 
 impl ProviderTrace {
+    /// Closes a call the Goal budget refused before dispatch; no usage was observed.
+    pub(crate) fn finish_refused(self) {
+        self.finish_with_usage(
+            ProviderTraceOutcome::Failed(TraceFailure::Rejected),
+            None,
+            None,
+        );
+    }
+
     pub(crate) fn finish_with_usage(
         self,
         outcome: ProviderTraceOutcome,
@@ -666,6 +669,18 @@ impl ProviderTrace {
 }
 
 impl FirstProviderCall {
+    /// Closes a first call the Goal budget refused before dispatch; no usage was observed.
+    pub(crate) fn finish_refused(self, agent: &AgentTrace, model: &str) {
+        self.finish(
+            agent,
+            model,
+            false,
+            ProviderTraceOutcome::Failed(TraceFailure::Rejected),
+            None,
+            None,
+        );
+    }
+
     pub(crate) fn finish(
         self,
         agent: &AgentTrace,
@@ -871,20 +886,30 @@ impl TraceFailure {
 }
 
 impl TraceEventKind {
+    /// Goal lifecycle kinds are named with the `Goal` prefix, so the name is the single source.
     fn is_goal_event(self) -> bool {
-        matches!(
-            self,
+        match self {
             Self::GoalStarted
-                | Self::GoalRunLinked
-                | Self::GoalResumed
-                | Self::GoalActiveTimeReserved
-                | Self::GoalActiveTimeSettled
-                | Self::GoalPlanContractRecorded
-                | Self::GoalFinished
-                | Self::GoalProviderCallReserved
-                | Self::GoalCompactionCallReserved
-                | Self::GoalContextCompacted
-        )
+            | Self::GoalRunLinked
+            | Self::GoalResumed
+            | Self::GoalActiveTimeReserved
+            | Self::GoalActiveTimeSettled
+            | Self::GoalPlanContractRecorded
+            | Self::GoalFinished
+            | Self::GoalProviderCallReserved
+            | Self::GoalCompactionCallReserved
+            | Self::GoalContextCompacted => true,
+            Self::MessageAccepted
+            | Self::RunStarted
+            | Self::AgentSpawned
+            | Self::ProviderCallRecorded
+            | Self::ToolStarted
+            | Self::ToolFinished
+            | Self::AgentFinished
+            | Self::MessageCommitted
+            | Self::RunFinished
+            | Self::ContextCompacted => false,
+        }
     }
 
     fn name(self) -> &'static str {
@@ -910,16 +935,6 @@ impl TraceEventKind {
             Self::RunFinished => "RunFinished",
             Self::ContextCompacted => "ContextCompacted",
         }
-    }
-}
-
-fn goal_status_name(status: GoalStatus) -> &'static str {
-    match status {
-        GoalStatus::Running => "running",
-        GoalStatus::Interrupted => "interrupted",
-        GoalStatus::Completed => "completed",
-        GoalStatus::Failed => "failed",
-        GoalStatus::Cancelled => "cancelled",
     }
 }
 

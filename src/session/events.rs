@@ -110,8 +110,11 @@ pub const MAX_GOAL_REPORT_BYTES: usize = 8 * 1024;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GoalBudget {
+    #[serde(deserialize_with = "Option::deserialize")]
     pub max_provider_calls: Option<u32>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub max_tokens: Option<u64>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub max_active_ms: Option<u64>,
     pub max_runs: u8,
 }
@@ -125,6 +128,16 @@ impl Default for GoalBudget {
             max_runs: MAX_GOAL_RUNS,
         }
     }
+}
+
+/// Goal usage that decides whether another Run is admissible; `runs` counts linked Runs.
+#[derive(Clone, Copy)]
+pub(crate) struct GoalUsage {
+    pub(crate) runs: usize,
+    pub(crate) provider_calls: u32,
+    pub(crate) active_ms: u64,
+    pub(crate) known_tokens: u64,
+    pub(crate) token_usage_unknown: bool,
 }
 
 impl GoalBudget {
@@ -142,6 +155,31 @@ impl GoalBudget {
             return Err(ReplayError::InvalidPayload);
         }
         Ok(())
+    }
+
+    /// Limits in force once a Plan contract narrows the pinned budget; an absent plan token ceiling keeps the pinned one.
+    pub(crate) fn effective(&self, plan: Option<&GoalPlanContract>) -> Self {
+        plan.map_or_else(
+            || *self,
+            |plan| Self {
+                max_tokens: plan.budget.max_tokens.or(self.max_tokens),
+                ..plan.budget
+            },
+        )
+    }
+
+    /// The one admission rule for another Run: every finite dimension must have headroom.
+    pub(crate) fn admits_next_run(&self, usage: GoalUsage) -> bool {
+        usize::from(self.max_runs) > usage.runs
+            && self
+                .max_provider_calls
+                .is_none_or(|limit| limit > usage.provider_calls)
+            && self
+                .max_active_ms
+                .is_none_or(|limit| limit > usage.active_ms)
+            && self
+                .max_tokens
+                .is_none_or(|limit| !usage.token_usage_unknown && usage.known_tokens < limit)
     }
 
     pub(crate) fn is_within(&self, pinned: &Self) -> bool {
@@ -179,7 +217,18 @@ pub enum GoalStatus {
     Interrupted,
     Completed,
     Failed,
-    Cancelled,
+}
+
+impl GoalStatus {
+    /// Stable name, identical to the serde snake_case representation.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Interrupted => "interrupted",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -217,15 +266,6 @@ pub(crate) enum GoalSuccessState {
 }
 
 impl GoalPlanContract {
-    #[cfg(test)]
-    pub(crate) fn matches_success(&self, observations: &[crate::tools::ToolObservation]) -> bool {
-        let mut state = self.initial_success_state();
-        for observation in observations {
-            self.observe_success(&mut state, observation);
-        }
-        self.success_state_satisfied(&state)
-    }
-
     pub(crate) fn initial_success_state(&self) -> GoalSuccessState {
         match &self.success_criterion {
             GoalSuccessCriterion::ToolCallSucceeded { .. } => GoalSuccessState::ToolCall {
@@ -422,6 +462,17 @@ mod goal_success_tests {
         EffectIntent, GuardReceipt, ToolCall, ToolDisposition, ToolLimits, ToolObservation,
     };
 
+    fn matches_success<'a>(
+        contract: &GoalPlanContract,
+        observations: impl IntoIterator<Item = &'a ToolObservation>,
+    ) -> bool {
+        let mut state = contract.initial_success_state();
+        for observation in observations {
+            contract.observe_success(&mut state, observation);
+        }
+        contract.success_state_satisfied(&state)
+    }
+
     fn observation(
         call: ToolCall,
         disposition: ToolDisposition,
@@ -501,7 +552,7 @@ mod goal_success_tests {
             observation(call.clone(), ToolDisposition::Succeeded, "{}".into()),
             observation(call, ToolDisposition::Failed, "".into()),
         ];
-        assert!(!contract.matches_success(&observations));
+        assert!(!matches_success(&contract, &observations));
         let mut state = contract.initial_success_state();
         for observation in &observations {
             contract.observe_success(&mut state, observation);
@@ -542,11 +593,14 @@ mod goal_success_tests {
             ToolDisposition::Succeeded,
             "review guidance".into(),
         );
-        assert!(contract.matches_success(std::slice::from_ref(&success)));
-        assert!(!contract.matches_success(&[
-            success,
-            observation(call.clone(), ToolDisposition::Failed, "failed".into()),
-        ]));
+        assert!(matches_success(&contract, std::slice::from_ref(&success)));
+        assert!(!matches_success(
+            &contract,
+            &[
+                success,
+                observation(call.clone(), ToolDisposition::Failed, "failed".into()),
+            ]
+        ));
         let resource_call = ToolCall::Skill {
             name: "review".into(),
             resource: Some("references/checklist.md".into()),
@@ -557,11 +611,14 @@ mod goal_success_tests {
             call: Box::new(resource_call.clone()),
         };
         assert!(resource_contract.validate().is_ok());
-        assert!(resource_contract.matches_success(&[observation(
-            resource_call,
-            ToolDisposition::Succeeded,
-            "checklist".into(),
-        )]));
+        assert!(matches_success(
+            &resource_contract,
+            &[observation(
+                resource_call,
+                ToolDisposition::Succeeded,
+                "checklist".into(),
+            )]
+        ));
         let mut missing_resource = serde_json::to_value(&contract).unwrap();
         missing_resource["skills"][0]
             .as_object_mut()
@@ -663,12 +720,227 @@ mod goal_success_tests {
                 .to_string(),
             ),
         ];
-        assert!(!contract.matches_success(&observations));
+        assert!(!matches_success(&contract, &observations));
         let mut state = contract.initial_success_state();
         for observation in &observations {
             contract.observe_success(&mut state, observation);
         }
         assert!(!contract.success_state_satisfied(&state));
+    }
+
+    #[test]
+    fn active_time_segments_are_bounded_per_run() {
+        let (goal_id, run_id) = (GoalId::new(), RunId::new());
+        let reserve = |reserved_ms| Event::GoalActiveTimeReserved {
+            goal_id,
+            run_id,
+            reserved_ms,
+        };
+        assert!(reserve(MAX_GOAL_ACTION_ACTIVE_MS).validate().is_ok());
+        assert!(reserve(MAX_GOAL_ACTION_ACTIVE_MS + 1).validate().is_err());
+    }
+
+    #[test]
+    fn plan_contract_bounds_are_enforced_without_provider_schema_keywords() {
+        let base = || GoalPlanContract {
+            mission: "Verify".into(),
+            paths: vec!["src".into()],
+            commands: Vec::new(),
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            resource_class: crate::tools::ToolResourceClass::Default,
+            command_timeout_ms: None,
+            success_criterion: GoalSuccessCriterion::WorkspaceFileContent {
+                path: "src/main.rs".into(),
+                content: "ok".into(),
+            },
+            budget: GoalBudget::default(),
+        };
+        let long = |byte: char, len: usize| byte.to_string().repeat(len);
+        let mut cases: Vec<(&str, GoalPlanContract, bool)> = vec![
+            (
+                "mission at limit",
+                GoalPlanContract {
+                    mission: long('m', 2048),
+                    ..base()
+                },
+                true,
+            ),
+            (
+                "mission over limit",
+                GoalPlanContract {
+                    mission: long('m', 2049),
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "empty mission",
+                GoalPlanContract {
+                    mission: String::new(),
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "path count at limit",
+                GoalPlanContract {
+                    paths: (0..63)
+                        .map(|i| format!("p{i:02}"))
+                        .chain(["src".into()])
+                        .collect(),
+                    ..base()
+                },
+                true,
+            ),
+            (
+                "path count over limit",
+                GoalPlanContract {
+                    paths: (0..64)
+                        .map(|i| format!("p{i:02}"))
+                        .chain(["src".into()])
+                        .collect(),
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "path length at limit",
+                GoalPlanContract {
+                    paths: vec![long('a', 512)],
+                    success_criterion: GoalSuccessCriterion::WorkspaceFileContent {
+                        path: long('a', 512),
+                        content: "ok".into(),
+                    },
+                    ..base()
+                },
+                true,
+            ),
+            (
+                "path length over limit",
+                GoalPlanContract {
+                    paths: vec![long('a', 513)],
+                    success_criterion: GoalSuccessCriterion::WorkspaceFileContent {
+                        path: long('a', 513),
+                        content: "ok".into(),
+                    },
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "command count over limit",
+                GoalPlanContract {
+                    commands: (0..9).map(|i| format!("c{i}")).collect(),
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "command length over limit",
+                GoalPlanContract {
+                    commands: vec![long('a', 65)],
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "skill count over limit",
+                GoalPlanContract {
+                    skills: (0..65)
+                        .map(|i| GoalSkillBinding {
+                            name: format!("s{i:02}"),
+                            resource: None,
+                        })
+                        .collect(),
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "skill name over limit",
+                GoalPlanContract {
+                    skills: vec![GoalSkillBinding {
+                        name: long('a', 65),
+                        resource: None,
+                    }],
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "skill resource over limit",
+                GoalPlanContract {
+                    skills: vec![GoalSkillBinding {
+                        name: "review".into(),
+                        resource: Some(long('r', 513)),
+                    }],
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "mcp count over limit",
+                GoalPlanContract {
+                    mcp_tools: (0..65)
+                        .map(|i| GoalMcpTool {
+                            server: format!("m{i:02}"),
+                            tool: "t".into(),
+                        })
+                        .collect(),
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "mcp server over limit",
+                GoalPlanContract {
+                    mcp_tools: vec![GoalMcpTool {
+                        server: long('a', 65),
+                        tool: "t".into(),
+                    }],
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "mcp tool over limit",
+                GoalPlanContract {
+                    mcp_tools: vec![GoalMcpTool {
+                        server: "local".into(),
+                        tool: long('a', 129),
+                    }],
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "content over limit",
+                GoalPlanContract {
+                    success_criterion: GoalSuccessCriterion::WorkspaceFileContent {
+                        path: "src/main.rs".into(),
+                        content: long('x', 8193),
+                    },
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "digest length mismatch",
+                GoalPlanContract {
+                    success_criterion: GoalSuccessCriterion::WorkspaceFileDigest {
+                        path: "src/main.rs".into(),
+                        sha256: "a".repeat(63),
+                    },
+                    ..base()
+                },
+                false,
+            ),
+        ];
+        cases.push(("base", base(), true));
+        for (name, contract, admitted) in cases {
+            assert_eq!(contract.validate().is_ok(), admitted, "{name}");
+        }
     }
 }
 
@@ -1000,6 +1272,27 @@ mod account_default_tests {
             let mut missing = encoded.clone();
             missing.as_object_mut().unwrap().remove(field);
             assert!(serde_json::from_value::<SessionDefaults>(missing).is_err());
+        }
+    }
+
+    #[test]
+    fn goal_budget_requires_explicit_nullable_token_limit() {
+        let budget = GoalBudget::default();
+        let encoded = serde_json::to_value(budget).unwrap();
+        assert!(encoded["max_tokens"].is_null());
+        assert_eq!(
+            serde_json::from_value::<GoalBudget>(encoded.clone()).unwrap(),
+            budget
+        );
+        for field in [
+            "max_tokens",
+            "max_provider_calls",
+            "max_active_ms",
+            "max_runs",
+        ] {
+            let mut missing = encoded.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<GoalBudget>(missing).is_err());
         }
     }
 
@@ -1806,6 +2099,9 @@ pub enum Event {
         objective: String,
         workspace_identity: (u64, u64),
         budget: GoalBudget,
+        phase: GoalPhase,
+        /// Engine iterates Runs on the pinned objective until a Goal stop condition.
+        autonomous: bool,
         resource_settings: crate::tools::ToolResourceSettings,
     },
     GoalRunLinked {
@@ -1976,6 +2272,8 @@ struct GoalStartedPayload {
     workspace_device: u64,
     workspace_inode: u64,
     budget: GoalBudget,
+    phase: GoalPhase,
+    autonomous: bool,
     resource_settings: crate::tools::ToolResourceSettings,
 }
 #[derive(Serialize, Deserialize)]
@@ -2180,6 +2478,8 @@ impl Event {
                 objective,
                 workspace_identity: (workspace_device, workspace_inode),
                 budget,
+                phase,
+                autonomous,
                 resource_settings,
             } => serialize(&GoalStartedPayload {
                 goal_id: *goal_id,
@@ -2187,6 +2487,8 @@ impl Event {
                 workspace_device: *workspace_device,
                 workspace_inode: *workspace_inode,
                 budget: *budget,
+                phase: *phase,
+                autonomous: *autonomous,
                 resource_settings: *resource_settings,
             }),
             Self::GoalRunLinked { goal_id, phase, .. } => serialize(&GoalRunPayload {
@@ -2327,6 +2629,8 @@ impl Event {
                     objective: data.objective,
                     workspace_identity: (data.workspace_device, data.workspace_inode),
                     budget: data.budget,
+                    phase: data.phase,
+                    autonomous: data.autonomous,
                     resource_settings: data.resource_settings,
                 }
             }
@@ -2567,10 +2871,7 @@ impl Event {
                 Ok(())
             }
             Self::GoalFinished { status, report, .. } => {
-                if !matches!(
-                    status,
-                    GoalStatus::Completed | GoalStatus::Failed | GoalStatus::Cancelled
-                ) {
+                if !matches!(status, GoalStatus::Completed | GoalStatus::Failed) {
                     return Err(ReplayError::InvalidPayload);
                 }
                 report.validate()

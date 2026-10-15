@@ -175,6 +175,8 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                         max_runs: GOAL_RUNS as u8,
                         ..GoalBudget::default()
                     },
+                    phase: GoalPhase::Implementation,
+                    autonomous: false,
                     resource_settings: arany::ToolResourceSettings::default(),
                 },
             )

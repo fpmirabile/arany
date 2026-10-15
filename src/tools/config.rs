@@ -194,6 +194,15 @@ impl Config {
         }
     }
 
+    /// Whether a Workspace-relative path lies under an admitted root; `"."` admits the whole Workspace.
+    pub(crate) fn in_workspace_scope(&self, path: &str) -> bool {
+        self.workspace_paths == ["."]
+            || self
+                .workspace_paths
+                .iter()
+                .any(|root| std::path::Path::new(path).starts_with(root))
+    }
+
     pub(crate) fn allows(&self, call: &ToolCall) -> bool {
         if !call.valid() || call.mutates() && !self.write {
             return false;
@@ -209,13 +218,10 @@ impl Config {
                 return self.commands.iter().any(|value| &value.name == program);
             }
             ToolCall::ApplyChangeset { changeset, .. } => {
-                return changeset.files.iter().all(|change| {
-                    self.workspace_paths == ["."]
-                        || self
-                            .workspace_paths
-                            .iter()
-                            .any(|root| std::path::Path::new(&change.path).starts_with(root))
-                });
+                return changeset
+                    .files
+                    .iter()
+                    .all(|change| self.in_workspace_scope(&change.path));
             }
             ToolCall::Skill { name, resource } => {
                 return self.skills.iter().any(|value| {
@@ -236,12 +242,7 @@ impl Config {
             }
         };
         let path = path.expect("file operation has path");
-        (path.is_empty() || path == ".") && !call.mutates()
-            || self.workspace_paths == ["."]
-            || self
-                .workspace_paths
-                .iter()
-                .any(|root| std::path::Path::new(path).starts_with(root))
+        (path.is_empty() || path == ".") && !call.mutates() || self.in_workspace_scope(path)
     }
 }
 

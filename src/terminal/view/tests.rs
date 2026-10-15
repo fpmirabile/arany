@@ -1500,6 +1500,26 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
                     if last {
                         assert!(labels.iter().any(|row| row.starts_with("> Skill /skill-")));
                     }
+                    if width >= 79 && height == 24 && !skills_tab && !last {
+                        let shown = help_len() - 1;
+                        assert_eq!(
+                            labels.len(),
+                            shown + 1,
+                            "24-row Commands pane clips the registry tail"
+                        );
+                        assert!(
+                            labels[0].contains(&format!("1-{shown}/{}", help_len())),
+                            "24-row Commands header omits the visible range: {labels:?}"
+                        );
+                        let hidden = help_entry(help_len() - 1).expect("registered command");
+                        assert!(
+                            !labels
+                                .iter()
+                                .any(|row| row.contains(&format!("/{}", hidden.name))),
+                            "24-row Commands pane shows clipped /{}: {labels:?}",
+                            hidden.name
+                        );
+                    }
                     if width >= 79 && height == 26 && !skills_tab && !last {
                         assert_eq!(
                             labels.len(),

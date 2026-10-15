@@ -5,6 +5,15 @@ use std::path::{Path, PathBuf};
 pub(crate) const MAX_RUNTIME_GRANTS: usize = 9;
 const MAX_CANDIDATES: usize = 64;
 const MAX_DIRECTORY_ENTRIES: usize = 128;
+// pip follows the platform cache directory.
+#[cfg(target_os = "macos")]
+const PIP_HOST_HTTP_CACHE: &str = "Library/Caches/pip/http-v2";
+#[cfg(target_os = "macos")]
+const PIP_HOST_WHEEL_CACHE: &str = "Library/Caches/pip/wheels";
+#[cfg(not(target_os = "macos"))]
+const PIP_HOST_HTTP_CACHE: &str = ".cache/pip/http-v2";
+#[cfg(not(target_os = "macos"))]
+const PIP_HOST_WHEEL_CACHE: &str = ".cache/pip/wheels";
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -43,55 +52,39 @@ impl RuntimeKind {
         !self.is_toolchain()
     }
 
-    pub(crate) fn cache_token(self) -> Option<&'static str> {
+    fn token_prefix(self) -> &'static str {
         match self {
-            Self::CargoCache => Some("cargo-cache"),
-            Self::CargoSource => Some("cargo-source"),
-            Self::CargoIndex => Some("cargo-index"),
-            Self::NpmCache => Some("npm-cache"),
-            Self::PipHttpCache => Some("pip-http-cache"),
-            Self::PipWheelCache => Some("pip-wheel-cache"),
+            Self::Rust => "rust",
+            Self::Node => "node",
+            Self::Python => "python",
+            Self::CargoCache => "cargo-cache",
+            Self::CargoSource => "cargo-source",
+            Self::CargoIndex => "cargo-index",
+            Self::NpmCache => "npm-cache",
+            Self::PipHttpCache => "pip-http-cache",
+            Self::PipWheelCache => "pip-wheel-cache",
+        }
+    }
+
+    /// Host subtree and its path under the sandbox; Cargo's sandbox path follows the payload's `CARGO_HOME`.
+    fn cache_layout(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::CargoCache => Some((".cargo/registry/cache", "cargo/registry/cache")),
+            Self::CargoSource => Some((".cargo/registry/src", "cargo/registry/src")),
+            Self::CargoIndex => Some((".cargo/registry/index", "cargo/registry/index")),
+            Self::NpmCache => Some((".npm/_cacache", ".npm/_cacache")),
+            Self::PipHttpCache => Some((PIP_HOST_HTTP_CACHE, ".cache/pip/http-v2")),
+            Self::PipWheelCache => Some((PIP_HOST_WHEEL_CACHE, ".cache/pip/wheels")),
             _ => None,
         }
     }
 
     fn cache_suffix(self) -> Option<&'static str> {
-        match self {
-            Self::CargoCache => Some(".cargo/registry/cache"),
-            Self::CargoSource => Some(".cargo/registry/src"),
-            Self::CargoIndex => Some(".cargo/registry/index"),
-            Self::NpmCache => Some(".npm/_cacache"),
-            Self::PipHttpCache => Some(".cache/pip/http-v2"),
-            Self::PipWheelCache => Some(".cache/pip/wheels"),
-            _ => None,
-        }
+        self.cache_layout().map(|(host, _)| host)
     }
 
-    pub(crate) fn cache_root(self) -> Option<&'static str> {
-        match self {
-            Self::CargoCache => Some("cargo/registry/cache"),
-            Self::CargoSource => Some("cargo/registry/src"),
-            Self::CargoIndex => Some("cargo/registry/index"),
-            Self::NpmCache => Some(".npm/_cacache"),
-            Self::PipHttpCache => Some(".cache/pip/http-v2"),
-            Self::PipWheelCache => Some(".cache/pip/wheels"),
-            _ => None,
-        }
-    }
-
-    fn toolchain_token(self, grant: &RuntimeGrant) -> Result<String, ToolError> {
-        let prefix = match self {
-            Self::Rust => "rust",
-            Self::Node => "node",
-            Self::Python => "python",
-            _ => return Err(ToolError::Configuration),
-        };
-        let path = grant.path.to_str().ok_or(ToolError::Path)?;
-        let mut identity = path.as_bytes().to_vec();
-        identity.extend_from_slice(&grant.device.to_le_bytes());
-        identity.extend_from_slice(&grant.inode.to_le_bytes());
-        let hash = super::types::hex_digest(&identity);
-        Ok(format!("{prefix}-{}", &hash[..12]))
+    pub(crate) fn sandbox_cache_path(self) -> Option<&'static str> {
+        self.cache_layout().map(|(_, sandbox)| sandbox)
     }
 }
 
@@ -119,11 +112,23 @@ pub(crate) struct RuntimeGrant {
 }
 
 impl RuntimeGrant {
+    /// Binds the kind to the exact directory identity, so a recreated root is a new profile.
     pub(crate) fn token(&self) -> Result<String, ToolError> {
-        self.kind
-            .cache_token()
-            .map(str::to_owned)
-            .map_or_else(|| self.kind.toolchain_token(self), Ok)
+        let path = self.path.to_str().ok_or(ToolError::Path)?;
+        let mut identity = path.as_bytes().to_vec();
+        identity.extend_from_slice(&self.device.to_le_bytes());
+        identity.extend_from_slice(&self.inode.to_le_bytes());
+        let hash = super::types::hex_digest(&identity);
+        Ok(format!("{}-{}", self.kind.token_prefix(), &hash[..12]))
+    }
+
+    pub(crate) fn profile_label(&self) -> String {
+        format!(
+            "{} · {} · {}",
+            self.kind.label(),
+            self.version.as_deref().unwrap_or("selected cache"),
+            self.path.display()
+        )
     }
 
     pub(crate) fn validate_shape(&self) -> Result<(), ToolError> {
@@ -143,6 +148,17 @@ impl RuntimeGrant {
         Ok(())
     }
 
+    /// Rejects a grant overlapping protected Arany roots or the Guard's system runtime.
+    pub(crate) fn reject_overlap(&self, protected: &[&Path]) -> Result<(), ToolError> {
+        for path in protected {
+            fs::reject_overlap(&self.path, path)?;
+        }
+        for runtime in super::guard::runtime_roots() {
+            fs::reject_overlap(&self.path, Path::new(runtime))?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn verify_host(&self) -> Result<(), ToolError> {
         self.validate_shape()?;
         self.verify_at(&self.path)
@@ -153,36 +169,22 @@ impl RuntimeGrant {
         if fs::identity(&directory)? != (self.device, self.inode) {
             return Err(ToolError::ChangedInput);
         }
-        if self.kind.is_toolchain() {
-            match self.kind {
-                RuntimeKind::Rust => {
-                    if !executable(&path.join("bin/cargo")) || !executable(&path.join("bin/rustc"))
-                    {
-                        return Err(ToolError::ChangedInput);
-                    }
-                }
-                RuntimeKind::Node => {
-                    if !executable(&path.join("bin/node")) {
-                        return Err(ToolError::ChangedInput);
-                    }
-                }
-                RuntimeKind::Python => {
-                    if !has_python_executable(path) {
-                        return Err(ToolError::ChangedInput);
-                    }
-                }
-                _ => unreachable!(),
-            }
+        if !has_executables(self.kind, path) {
+            return Err(ToolError::ChangedInput);
         }
         Ok(())
     }
 
+    /// Linux mounts a toolchain at its exact host path so absolute shebangs resolve.
     #[cfg(target_os = "linux")]
     pub(crate) fn mounted_path(&self) -> Result<PathBuf, ToolError> {
         if self.kind.is_toolchain() {
-            Ok(PathBuf::from("/runtime/toolchains").join(self.token()?))
+            Ok(self.path.clone())
         } else {
-            let relative = self.kind.cache_root().ok_or(ToolError::Configuration)?;
+            let relative = self
+                .kind
+                .sandbox_cache_path()
+                .ok_or(ToolError::Configuration)?;
             Ok(Path::new("/cache").join(relative))
         }
     }
@@ -303,15 +305,15 @@ pub(crate) fn discover(home: &Path) -> Result<Vec<Candidate>, ToolError> {
         }
     }
 
-    for (kind, suffix) in [
-        (RuntimeKind::CargoCache, ".cargo/registry/cache"),
-        (RuntimeKind::CargoSource, ".cargo/registry/src"),
-        (RuntimeKind::CargoIndex, ".cargo/registry/index"),
-        (RuntimeKind::NpmCache, ".npm/_cacache"),
-        (RuntimeKind::PipHttpCache, ".cache/pip/http-v2"),
-        (RuntimeKind::PipWheelCache, ".cache/pip/wheels"),
+    for kind in [
+        RuntimeKind::CargoCache,
+        RuntimeKind::CargoSource,
+        RuntimeKind::CargoIndex,
+        RuntimeKind::NpmCache,
+        RuntimeKind::PipHttpCache,
+        RuntimeKind::PipWheelCache,
     ] {
-        let path = home.join(suffix);
+        let path = home.join(kind.cache_suffix().ok_or(ToolError::Configuration)?);
         if let Some(grant) = admit_directory(kind, RuntimeManager::HostCache, None, path)? {
             push_candidate(&mut candidates, grant)?;
         }
@@ -364,13 +366,23 @@ fn has_toolchain(path: &Path, kind: RuntimeKind) -> bool {
     if fs::open_directory(path).is_err() {
         return false;
     }
+    has_executables(kind, path)
+}
+
+/// Caches have no executables to check, so they always pass.
+fn has_executables(kind: RuntimeKind, path: &Path) -> bool {
     match kind {
         RuntimeKind::Rust => {
             executable(&path.join("bin/cargo")) && executable(&path.join("bin/rustc"))
         }
         RuntimeKind::Node => executable(&path.join("bin/node")),
         RuntimeKind::Python => has_python_executable(path),
-        _ => false,
+        RuntimeKind::CargoCache
+        | RuntimeKind::CargoSource
+        | RuntimeKind::CargoIndex
+        | RuntimeKind::NpmCache
+        | RuntimeKind::PipHttpCache
+        | RuntimeKind::PipWheelCache => true,
     }
 }
 
@@ -540,14 +552,8 @@ fn push_candidate(candidates: &mut Vec<Candidate>, grant: RuntimeGrant) -> Resul
         return Err(ToolError::Limit);
     }
     let token = grant.token()?;
-    let version = grant.version.as_deref().unwrap_or("selected cache");
     candidates.push(Candidate {
-        label: format!(
-            "{} · {} · {}",
-            grant.kind.label(),
-            version,
-            grant.path.display()
-        ),
+        label: grant.profile_label(),
         token,
         grant,
     });

@@ -383,6 +383,14 @@ pub fn render_run_feedback(run: &RunView) -> Option<String> {
             }
             if run.tools.last().is_some_and(|tool| {
                 tool.observation.as_ref().is_some_and(|observation| {
+                    observation.disposition == crate::tools::ToolDisposition::Succeeded
+                        && observation.cache_update == crate::tools::CacheUpdate::Uncertain
+                })
+            }) {
+                return Some("Error: The command succeeded but its build cache update is uncertain; the Run stopped without retrying. No answer was committed.".into());
+            }
+            if run.tools.last().is_some_and(|tool| {
+                tool.observation.as_ref().is_some_and(|observation| {
                     observation.disposition == crate::tools::ToolDisposition::Denied
                         && observation.guard.is_none()
                 })
@@ -395,7 +403,7 @@ pub fn render_run_feedback(run: &RunView) -> Option<String> {
                         observation.disposition,
                         crate::tools::ToolDisposition::Uncertain
                             | crate::tools::ToolDisposition::Cancelled
-                    )
+                    ) || observation.cache_update == crate::tools::CacheUpdate::Uncertain
                 })
             {
                 return Some("Error: Tool completion is uncertain. Files or effects may have changed; inspect them before retrying. No answer was committed.".into());
@@ -504,6 +512,79 @@ struct EventLine {
     created_at_ms: i64,
 }
 
+/// Read-only status of the Session's current or last Goal, shown by `/goal`. A paused Goal that is
+/// not that Goal is named on its own line, since `/goal resume` continues it.
+pub fn goal_status(view: &SessionView) -> String {
+    let Some(goal) = view.goals.last() else {
+        return "No Goal in this Session; send a message or use /goal <objective>".into();
+    };
+    let budget = goal.effective_budget();
+    let mut text = format!(
+        "Goal {} · {} · {} · {} · Runs {}/{} · calls {}/{} · tokens {}/{}{} · active {}/{}",
+        goal.id.to_string().chars().take(8).collect::<String>(),
+        goal.status.as_str(),
+        goal_phase_word(goal.phase),
+        if goal.autonomous {
+            "autonomous"
+        } else {
+            "single Run"
+        },
+        goal.run_ids.len(),
+        budget.max_runs,
+        goal.provider_calls,
+        budget
+            .max_provider_calls
+            .map_or_else(|| "unlimited".to_owned(), |limit| limit.to_string()),
+        goal.known_tokens,
+        budget
+            .max_tokens
+            .map_or_else(|| "unlimited".to_owned(), |limit| limit.to_string()),
+        if goal.token_usage_unknown {
+            " (some unknown)"
+        } else {
+            ""
+        },
+        goal_clock(goal.active_ms),
+        budget
+            .max_active_ms
+            .map_or_else(|| "unlimited".to_owned(), goal_clock),
+    );
+    if goal.status == crate::session::GoalStatus::Interrupted {
+        text.push_str(if goal.admits_resume(view) {
+            " · Use /goal resume to continue"
+        } else {
+            " · out of budget"
+        });
+    }
+    if let Some(paused) = view.interrupted_goal_id().filter(|id| *id != goal.id) {
+        let short = paused.to_string().chars().take(8).collect::<String>();
+        if view
+            .goal(paused)
+            .is_some_and(|paused| paused.admits_resume(view))
+        {
+            text.push_str(&format!(
+                "\nPaused Goal {short} can be resumed with /goal resume"
+            ));
+        } else {
+            text.push_str(&format!("\nPaused Goal {short} is out of budget"));
+        }
+    }
+    text
+}
+
+fn goal_phase_word(phase: crate::session::GoalPhase) -> &'static str {
+    match phase {
+        crate::session::GoalPhase::Research => "research",
+        crate::session::GoalPhase::Plan => "plan",
+        crate::session::GoalPhase::Implementation => "implementation",
+    }
+}
+
+fn goal_clock(ms: u64) -> String {
+    let seconds = ms / 1000;
+    format!("{}m{:02}s", seconds / 60, seconds % 60)
+}
+
 pub fn render_session(view: &SessionView, events: &[EventEnvelope], output: Output) -> String {
     let mut rendered = String::new();
     if output == Output::Text {
@@ -608,6 +689,8 @@ mod exec_jsonl_tests {
             objective: objective.into(),
             workspace_identity: (1, 2),
             budget: GoalBudget::default(),
+            phase: GoalPhase::Implementation,
+            autonomous: false,
             resource_settings: crate::tools::ToolResourceSettings::default(),
         }
     }
@@ -933,5 +1016,159 @@ mod tests {
     fn escaped_terminal_byte_count_matches_safe_text_without_materializing_it() {
         let text = "a\u{001b}\u{202e}é";
         assert_eq!(escaped_terminal_bytes(text), escape_terminal(text).len());
+    }
+}
+
+#[cfg(test)]
+mod goal_status_tests {
+    use super::*;
+    use crate::session::{GoalBudget, GoalId, GoalPhase, GoalStatus};
+
+    fn session_with_goal(autonomous: bool) -> SessionView {
+        let session_id = crate::session::SessionId::new();
+        let events = [
+            Event::SessionStarted {
+                title: "Goals".into(),
+                workspace_identity: (1, 2),
+            },
+            Event::GoalStarted {
+                goal_id: GoalId::new(),
+                objective: "Ship the parser".into(),
+                workspace_identity: (1, 2),
+                budget: GoalBudget::default(),
+                phase: GoalPhase::Implementation,
+                autonomous,
+                resource_settings: crate::tools::ToolResourceSettings::default(),
+            },
+        ]
+        .into_iter()
+        .zip(1..)
+        .map(|(event, sequence)| EventEnvelope {
+            sequence,
+            session_id,
+            run_id: None,
+            agent_run_id: None,
+            event,
+            created_at_ms: 0,
+        })
+        .collect::<Vec<_>>();
+        SessionView::replay(session_id, &events)
+            .expect("valid Goal history")
+            .expect("Session")
+    }
+
+    #[test]
+    fn goal_status_reports_limits_and_the_resume_hint_only_when_interrupted() {
+        // An unfinished Goal reopens as Interrupted, so the running case is set explicitly.
+        let mut view = session_with_goal(true);
+        view.goals[0].status = GoalStatus::Running;
+        let running = goal_status(&view);
+        assert!(running.starts_with("Goal "), "{running}");
+        assert!(
+            running.contains(" · running · implementation · autonomous · Runs 0/16 · calls 0/64 · tokens 0/unlimited · active 0m00s/30m00s"),
+            "{running}"
+        );
+        assert!(!running.contains("/goal resume"), "{running}");
+
+        view.goals[0].status = GoalStatus::Interrupted;
+        view.goals[0].token_usage_unknown = true;
+        let interrupted = goal_status(&view);
+        assert!(interrupted.contains(" · interrupted · "), "{interrupted}");
+        assert!(
+            interrupted.contains("tokens 0/unlimited (some unknown)"),
+            "{interrupted}"
+        );
+        assert!(
+            interrupted.ends_with(" · Use /goal resume to continue"),
+            "{interrupted}"
+        );
+
+        let single = goal_status(&session_with_goal(false));
+        assert!(single.contains(" · single Run · "), "{single}");
+    }
+
+    #[test]
+    fn goal_status_names_a_paused_goal_that_is_not_the_last_one() {
+        let mut view = session_with_goal(true);
+        view.goals[0].status = GoalStatus::Interrupted;
+        let paused = view.goals[0]
+            .id
+            .to_string()
+            .chars()
+            .take(8)
+            .collect::<String>();
+        let mut newer = view.goals[0].clone();
+        newer.id = crate::session::GoalId::new();
+        newer.status = GoalStatus::Completed;
+        let newer_short = newer.id.to_string().chars().take(8).collect::<String>();
+        view.goals.push(newer);
+        let status = goal_status(&view);
+        assert!(
+            status.starts_with(&format!("Goal {newer_short} · completed")),
+            "{status}"
+        );
+        assert!(
+            status.ends_with(&format!(
+                "\nPaused Goal {paused} can be resumed with /goal resume"
+            )),
+            "{status}"
+        );
+        assert!(!status.contains("Use /goal resume to continue"), "{status}");
+
+        view.goals[1].status = GoalStatus::Interrupted;
+        let last_paused = goal_status(&view);
+        assert!(!last_paused.contains("Paused Goal"), "{last_paused}");
+    }
+
+    #[test]
+    fn goal_status_shows_out_of_budget_instead_of_a_resume_hint() {
+        let mut view = session_with_goal(true);
+        view.goals[0].status = GoalStatus::Interrupted;
+        view.goals[0].provider_calls = view.goals[0]
+            .effective_budget()
+            .max_provider_calls
+            .unwrap_or(0);
+        let exhausted = goal_status(&view);
+        assert!(exhausted.ends_with(" · out of budget"), "{exhausted}");
+        assert!(!exhausted.contains("/goal resume"), "{exhausted}");
+
+        let mut newer = view.goals[0].clone();
+        newer.id = crate::session::GoalId::new();
+        newer.status = GoalStatus::Completed;
+        view.goals.push(newer);
+        let status = goal_status(&view);
+        assert!(!status.contains("/goal resume"), "{status}");
+        assert!(status.contains("\nPaused Goal "), "{status}");
+        assert!(status.ends_with(" is out of budget"), "{status}");
+    }
+
+    #[test]
+    fn goal_status_hint_matches_resume_admission_for_unaccepted_links_and_spent_time() {
+        // A trailing GoalRunLinked without its accepted Run is not a Run, so the hint still offers resume.
+        let mut view = session_with_goal(true);
+        view.goals[0].status = GoalStatus::Interrupted;
+        view.goals[0].budget.max_runs = 1;
+        view.goals[0].run_ids = vec![crate::session::RunId::new()];
+        let linked = goal_status(&view);
+        assert!(
+            linked.ends_with(" · Use /goal resume to continue"),
+            "{linked}"
+        );
+
+        let mut view = session_with_goal(true);
+        view.goals[0].status = GoalStatus::Interrupted;
+        view.goals[0].active_ms = view.goals[0].effective_budget().max_active_ms.unwrap_or(0);
+        let spent = goal_status(&view);
+        assert!(spent.ends_with(" · out of budget"), "{spent}");
+    }
+
+    #[test]
+    fn goal_status_without_a_goal_is_a_short_notice() {
+        let mut view = session_with_goal(false);
+        view.goals.clear();
+        assert_eq!(
+            goal_status(&view),
+            "No Goal in this Session; send a message or use /goal <objective>"
+        );
     }
 }

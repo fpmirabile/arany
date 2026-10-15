@@ -34,36 +34,7 @@ pub(crate) fn open_workspace_directory(path: &Path) -> Result<Dir, Error> {
     }
     #[cfg(target_os = "macos")]
     {
-        use rustix::fs::{Mode, OFlags, open, openat};
-        use std::fs::File;
-
-        let common = OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW;
-        let search = OFlags::from_bits_retain(nix::libc::O_SEARCH as _);
-        let mut components = path.components().skip(1).peekable();
-        let access = if components.peek().is_none() {
-            OFlags::RDONLY
-        } else {
-            search
-        };
-        let mut file = File::from(
-            open("/", common | access, Mode::empty())
-                .map_err(|error| Error::Io(io::Error::from(error)))?,
-        );
-        while let Some(component) = components.next() {
-            let std::path::Component::Normal(name) = component else {
-                return Err(Error::InvalidPath);
-            };
-            let access = if components.peek().is_none() {
-                OFlags::RDONLY
-            } else {
-                search
-            };
-            file = File::from(
-                openat(&file, name, common | access, Mode::empty())
-                    .map_err(|error| Error::Io(io::Error::from(error)))?,
-            );
-        }
-        Ok(Dir::from_std_file(file))
+        macos_directory(path, rustix::fs::OFlags::RDONLY)
     }
     #[cfg(target_os = "linux")]
     {
@@ -80,6 +51,40 @@ pub(crate) fn open_workspace_directory(path: &Path) -> Result<Dir, Error> {
     {
         Err(Error::InvalidPath)
     }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_directory(path: &Path, final_access: rustix::fs::OFlags) -> Result<Dir, Error> {
+    use rustix::fs::{Mode, OFlags, open, openat};
+    use std::fs::File;
+
+    let common = OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW;
+    let search = OFlags::from_bits_retain(nix::libc::O_SEARCH as _);
+    let mut components = path.components().skip(1).peekable();
+    let access = if components.peek().is_none() {
+        final_access
+    } else {
+        search
+    };
+    let mut file = File::from(
+        open("/", common | access, Mode::empty())
+            .map_err(|error| Error::Io(io::Error::from(error)))?,
+    );
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else {
+            return Err(Error::InvalidPath);
+        };
+        let access = if components.peek().is_none() {
+            final_access
+        } else {
+            search
+        };
+        file = File::from(
+            openat(&file, name, common | access, Mode::empty())
+                .map_err(|error| Error::Io(io::Error::from(error)))?,
+        );
+    }
+    Ok(Dir::from_std_file(file))
 }
 
 pub(crate) fn open_directory(path: &Path, create: bool) -> Result<PrivateDirectory, Error> {

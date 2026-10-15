@@ -96,6 +96,10 @@ fn saved_ui_preferences(completion: &str, view: &str) -> Vec<u8> {
 #[path = "session_run/custom.rs"]
 mod custom;
 
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+#[path = "session_run/exec_interrupt.rs"]
+mod exec_interrupt;
+
 #[cfg(unix)]
 #[path = "session_run/live.rs"]
 mod live;
@@ -1522,6 +1526,8 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
                     objective: "pending objective".into(),
                     workspace_identity: (workspace_device, workspace_inode),
                     budget: arany::GoalBudget::default(),
+                    phase: arany::GoalPhase::Research,
+                    autonomous: false,
                     resource_settings: arany::ToolResourceSettings::default(),
                 },
             )
@@ -2178,6 +2184,8 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                     objective: "Question".into(),
                     workspace_identity: identity,
                     budget: arany::GoalBudget::default(),
+                    phase: arany::GoalPhase::Research,
+                    autonomous: false,
                     resource_settings: arany::ToolResourceSettings::default(),
                 },
                 Event::GoalRunLinked {
@@ -2653,11 +2661,9 @@ fn exec_process_rejects_a_busy_session_and_recovers_after_holder_death() {
         let view = SessionView::replay(session_id, &interrupted_events)
             .expect("valid interrupted Goal history")
             .expect("Session");
-        let interrupted_goal = view
-            .active_goal()
-            .filter(|goal| goal.status == arany::GoalStatus::Interrupted)
+        let goal_id = view
+            .interrupted_goal_id()
             .expect("held Goal became interrupted");
-        let goal_id = interrupted_goal.id;
         store.close().await.expect("close interrupted Store");
 
         let released = contender(Some(goal_id));

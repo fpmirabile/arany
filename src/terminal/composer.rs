@@ -1022,7 +1022,7 @@ mod tests {
         assert_eq!(composer.text(), "/r");
         assert_eq!(
             composer.completion_rows().unwrap().0,
-            ["Cmd /resume", "Cmd /resume-goal", "Cmd /rename"]
+            ["Cmd /resume", "Cmd /rename"]
         );
         composer.apply(TerminalInput::Right);
         composer.apply(TerminalInput::Escape);

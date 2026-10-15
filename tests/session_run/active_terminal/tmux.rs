@@ -1,7 +1,6 @@
 use super::acquisition::ProductGuard;
 use super::{
-    product_child_of_executable, redacted_tail, transcript_field, try_product_child_of_executable,
-    tty_settings, wait_stopped,
+    redacted_tail, transcript_field, try_product_child_of_executable, tty_settings, wait_stopped,
 };
 use crate::loopback::{
     ChildGuard, check_profile_with_binary, read_request, send_response, wait_product, write_profile,

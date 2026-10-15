@@ -51,6 +51,7 @@ consistency, not measured agent quality or runtime/platform support.
 - A refusal peer must return a valid success if a forbidden request arrives, so the owner's rejection assertion fails; a peer assertion/crash followed by generic product failure is not refusal proof. A native OOM owner must prove its actual payload reached execution, a kernel OOM-kill counter advanced, and cleanup was positively observed. Observer timeout, malformed output or command failure is not disappearance.
 - Use real temporary filesystem objects and real file-backed SQLite for state, reopen, permission, journaling, replay, and recovery evidence. `:memory:` is not durability evidence.
 - Use explicit gates and paused Tokio time for schedules and deadlines. Never coordinate with wall sleeps, randomness, repeated attempts, or assumed task order.
+- Pause Tokio time only after real subprocess or Guard I/O has finished: while paused, an idle runtime auto-advances timers, so Guard timeouts can fire during a Tool call. Pause from a Provider hook after the Tool result, as the Goal Finish tests do. Advance the clock inside the Provider call that needs it; a progress observer races the Engine, which can pass several store round trips inside one poll before the observer runs.
 - Keep provider response fixtures minimal and hand-reviewed from the official wire contract. Never capture production responses, credentials, prompts, or user data.
 - Use one bounded canary assertion across Provider observations, Events, database bytes, stdout, stderr, controlled panic/error text, and runtime-opt-in telemetry without echoing the canary on failure.
 
@@ -70,15 +71,7 @@ consistency, not measured agent quality or runtime/platform support.
 
 ## Failure and maintenance discipline
 
-- After a hosted CI failure, consolidate the confirmed failures and review
-  findings from that exact head before making corrections. Use a focused
-  `workflow_dispatch` lane only after diagnosis identifies the relevant OS and
-  profile; a passing focused lane is diagnostic evidence, not full
-  verification. Before marking a change ready, require the complete workflow
-  on the exact final head, including Linux format/Clippy and Linux and macOS
-  debug/release tests. Automatic PR/push runs always use the full matrix; when
-  no automatic run covers that head, a manual `workflow_dispatch` run with
-  `lane=full` qualifies. Focused lanes never qualify.
+- After a hosted CI failure, consolidate the confirmed failures and review findings from that exact head before correcting. Dispatch a [focused CI lane](./references/testing-details.md#local-verification-and-ci) only after diagnosis identifies the OS and profile; its pass is diagnostic, not verification. Before marking a change ready, require the complete `ci.yml` workflow on the exact final head: an automatic PR/push run or a manual dispatch of that workflow.
 - Focused Cargo and test-binary invocations must report their intended nonzero test count. A self-spawned helper filtered with `--exact` must assert exactly one completed test and have a bounded parent wait/output plus kill/reap cleanup. Helper-only tests are explicitly ignored by default and require their parent's private fixture when activated; returning early without assertions is not a default passing test. Zero-test or ignored-child success provides no evidence.
 - Failure output names the scenario and case, expected and observed exit, bounded escaped stdout/stderr, semantic Event difference, and safe fixture identifier. It never dumps secrets, raw hostile controls, provider bodies, or database payloads.
 - Every test runs independently and owns its directories, files, ports, runtime, database, and processes. Do not mutate shared process environment from parallel tests.

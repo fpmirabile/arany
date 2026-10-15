@@ -969,7 +969,7 @@ fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
                             (true, true) => b"Status: failed".as_slice(),
                             (true, false) => b"Status: cancelled".as_slice(),
                             (false, true) => b"failed.".as_slice(),
-                            (false, false) => b"cancelled.".as_slice(),
+                            (false, false) => b"continue.".as_slice(),
                         };
                         if released
                             && !exited

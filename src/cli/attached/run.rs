@@ -22,9 +22,22 @@ enum SelectedProvider {
     Custom(CustomProvider),
 }
 
+#[derive(Debug, PartialEq)]
 pub(super) enum RunAttemptError {
+    /// Cancelled before the next Run was admitted; an interrupted Goal stays resumable.
     InterruptedBeforeRun,
+    /// A committed Run whose autonomous Goal stopped before its next Run, for `reason`.
+    Stopped {
+        outcome: Box<arany::RunOutcome>,
+        reason: String,
+    },
     Failed(String),
+}
+
+impl From<String> for RunAttemptError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -131,7 +144,6 @@ pub(super) async fn run_selected(
             .await
         }
     }
-    .map_err(RunAttemptError::Failed)
 }
 
 pub(super) async fn compact_selected(
@@ -282,6 +294,17 @@ async fn native_key(selection: Selection<'_>) -> Result<NativeApiCredentials, St
     }
 }
 
+fn classify_run_error(error: arany::EngineError) -> RunAttemptError {
+    match error {
+        arany::EngineError::CancelledBeforeStart => RunAttemptError::InterruptedBeforeRun,
+        arany::EngineError::StoppedAfterRun { run, reason } => RunAttemptError::Stopped {
+            outcome: run,
+            reason: reason.to_string(),
+        },
+        error => RunAttemptError::Failed(error.to_string()),
+    }
+}
+
 async fn run_with_provider<P: Provider + 'static>(
     state_dir: &Path,
     telemetry: &Telemetry,
@@ -290,7 +313,7 @@ async fn run_with_provider<P: Provider + 'static>(
     cancellation: RunCancellation,
     progress: RunProgress,
     tools: ToolAccess<'_>,
-) -> Result<RunOutcome, String> {
+) -> Result<RunOutcome, RunAttemptError> {
     let trusted_tools =
         !tools.configured && super::permissions::supports_tools(Some(provider.profile_name()));
     let root = StateRoot::admit(state_dir)
@@ -299,7 +322,7 @@ async fn run_with_provider<P: Provider + 'static>(
         .map_err(|_| "state store unavailable".to_owned())?;
     if tools.configured {
         if !native_protection_supported() {
-            return Err(super::permissions::UNAVAILABLE_NOTICE.to_owned());
+            return Err(super::permissions::UNAVAILABLE_NOTICE.to_owned().into());
         }
         engine
             .enable_tools(
@@ -331,7 +354,7 @@ async fn run_with_provider<P: Provider + 'static>(
         .run_with_progress(request, cancellation, progress)
         .await;
     let closed = engine.close().await;
-    let outcome = result.map_err(|error| error.to_string())?;
+    let outcome = result.map_err(classify_run_error)?;
     closed.map_err(|_| "store shutdown failed".to_owned())?;
     Ok(outcome)
 }
@@ -364,7 +387,8 @@ async fn compact_with_provider<P: Provider + 'static>(
     Ok(record)
 }
 
-#[cfg(all(test, unix))]
+// Linux release builds have no tests here: each one is debug-only or macOS-only.
+#[cfg(all(test, unix, any(debug_assertions, target_os = "macos")))]
 mod tests {
     use super::*;
     #[cfg(target_os = "macos")]
@@ -383,6 +407,18 @@ mod tests {
         process::{Child, Command, Stdio},
         time::Duration,
     };
+
+    #[test]
+    fn engine_cancellation_before_admission_is_an_interrupted_attempt() {
+        assert!(matches!(
+            classify_run_error(arany::EngineError::CancelledBeforeStart),
+            RunAttemptError::InterruptedBeforeRun
+        ));
+        assert!(matches!(
+            classify_run_error(arany::EngineError::CoordinatorFailed),
+            RunAttemptError::Failed(_)
+        ));
+    }
 
     struct OwnedChild(Child);
 
@@ -1445,18 +1481,19 @@ mod tests {
                 },
             )
             .await
-            .err()
-            .expect("explicit Tool admission must reject before inference");
+            .expect_err("explicit Tool admission must reject before inference");
             #[cfg(debug_assertions)]
             assert_eq!(
                 error,
-                arany::ToolError::ChangedInput.to_string(),
+                RunAttemptError::Failed(arany::ToolError::ChangedInput.to_string()),
                 "the admitted private account fixture must reach stale executable-pin rejection"
             );
             #[cfg(not(debug_assertions))]
             assert_eq!(
                 error,
-                arany::EngineError::Store(arany::StoreError::InvalidStateDirectory).to_string(),
+                RunAttemptError::Failed(
+                    arany::EngineError::Store(arany::StoreError::InvalidStateDirectory).to_string()
+                ),
                 "the optimized account override must reject from the Workspace lease before Tool discovery or Provider use"
             );
             assert_eq!(
@@ -1472,27 +1509,29 @@ mod tests {
             );
             store.close().await.unwrap();
         }
-        let choice = match arany::WorkspacePermissions::open_for_profile_selection(&workspace) {
-            Ok(access) => tokio::time::timeout(
-                Duration::from_secs(3),
-                super::super::permissions::choose(&mut terminal, access, &mut composer, false),
-            )
-            .await
-            .unwrap(),
-            Err(error) => Err(super::super::setup::SetupError::Recoverable(format!(
-                "Could not prepare folder permission choices: {error}"
-            ))),
+        let choice = match arany::WorkspacePermissions::open(&workspace) {
+            Ok(access) => Some(
+                tokio::time::timeout(
+                    Duration::from_secs(3),
+                    super::super::permissions::choose(
+                        &mut terminal,
+                        access.prepare_profile_selection(),
+                        &mut composer,
+                        false,
+                    ),
+                )
+                .await
+                .unwrap(),
+            ),
+            Err(_) => None,
         };
         #[cfg(debug_assertions)]
         assert!(matches!(
             choice,
-            Ok(super::super::permissions::PermissionChoice::Exit)
+            Some(Ok(super::super::permissions::PermissionChoice::Exit))
         ));
         #[cfg(not(debug_assertions))]
-        assert!(matches!(
-            choice,
-            Err(super::super::setup::SetupError::Recoverable(_))
-        ));
+        assert!(choice.is_none(), "release rejects the test account root");
         assert_eq!(
             super::super::permissions::cycle(&mut composer),
             if permissions.is_some() {

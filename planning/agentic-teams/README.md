@@ -37,7 +37,8 @@ the user-owned checks in [next steps](../../NEXT_STEPS.md).
 ## Terms
 
 - **Goal.** A durable, Engine-owned unit of user intent that spans one or more
-  Runs and ends Completed, Failed or Cancelled with a final report (E11).
+  Runs and ends Completed or Failed with a final report (E11). Cancellation
+  (Ctrl+C) pauses it as Interrupted until `/goal resume`.
 - **RPI.** Research → Plan → Implementation, the default mode (B6).
 - **Plan contract.** An agent's declared scope (paths, command names), success
   criterion and budget; the anchor for every Supervisor signal (B1).
@@ -270,9 +271,12 @@ a research note verifies its API from primary sources.
        recommendation; answers are journaled Goal facts.
      - A Goal ends Completed when the Finish gate passes and a final report
        (changes, evidence, unresolved items) is committed; otherwise it ends
-       Failed or Cancelled with the same report.
+       Failed with the same report. Cancellation (Ctrl+C) pauses it as
+       Interrupted until `/goal resume`.
      - After a crash or restart, an unfinished Goal resumes at its last phase
-       or Run boundary only after the user confirms.
+       or Run boundary only through an explicit user action: `/goal resume` or
+       `--resume-goal`, with no further confirmation prompt in the Foundation
+       contract. An RPI flow may add its own confirmation step.
    - **Ask** asks before every effect.
    - **Accept edits** integrates typed edits and in-scope changesets without
      prompts; commands and MCP calls ask.
@@ -437,8 +441,10 @@ execution contracts own the resulting behavior.
 11. **Every task is a Goal.** RPI adds Research and Plan; Ask, Accept edits and
     Auto go straight to Implementation. In every mode, bounded read-only
     inspection may precede the plan contract; every other Tool requires it
-    before dispatch. A Session holds at most one active Goal; a prompt while it
-    runs is a steering note, and the next prompt after it ends starts a new Goal.
+    before dispatch. A Session holds at most one active Goal. Steering a running
+    Goal is deferred beyond the Foundation slice; until then a prompt while it
+    runs is not a steering note, and the next prompt after it ends starts a new
+    Goal.
 12. **Settings.** New settings live in one private, owner-only, versioned
     user settings file edited through `/settings`; per-folder values live with
     the folder-trust record; project files never set them. `tools.json`,
@@ -500,20 +506,13 @@ Each slice that crosses one of these boundaries runs the
 Each item is one PR with its own contract update, security pass where
 triggered and evidence under [testing rules](../../agents/testing.md).
 
-3. **Goal Foundation and budgets.** E11 every task is a Goal, B1 plan contract
-   after bounded read-only inspection, typed success receipts, bounded reports,
-   explicit recovery, Goal budgets and cross-StateRoot Workspace writer
-   exclusion. Creates the `docs/specs/goals.md` domain spec and supplies the
-   lifecycle, cancellation, context and budget owner required by A4. The
-   follow-on steering, checkpoint, rewind and RPI workflows remain in Goal
-   completion.
 4. **A4 Flexible limits.** Replace the Run's fixed tool/model/context ceilings
    with Finish, compaction, cancellation and Goal-budget bounds; add the
    agreed command timeout and finite build resource profile settings. Guard
-   resource ceilings remain finite. This slice depends on Goal Foundation and
-   must not make the current fixed Run loop unlimited by itself. The
-   implementation is complete on the current branch and awaits full review and
-   hosted CI.
+   resource ceilings remain finite. This slice builds on the landed
+   [Goal Foundation](../../docs/specs/goals.md) and must not make the current
+   fixed Run loop unlimited by itself. The implementation is complete on the
+   current branch and awaits full review and hosted CI.
 5. **Dogfooding milestone: Arany develops Arany.** Use Arany for this
    repository's own work from here on. Requires Beta 1 check 7 (live
    validation of the chosen model's strict Tool encoding) in
@@ -563,7 +562,7 @@ data-dependent questions remain:
 
 ## Contract owners
 
-- `docs/specs/goals.md` (created in execution step 3): Goal lifecycle, RPI, steering, checkpoints, budgets and Goal view facts.
+- `docs/specs/goals.md` (created by Goal Foundation): Goal lifecycle, RPI, steering, checkpoints, budgets and Goal view facts.
 - [Execution](../../docs/specs/execution.md): Run admission, coordination, teams and recovery.
 - [Tools](../../docs/specs/tools.md): grants, effects, changesets, Guard and native differences.
 - [Terminal](../../docs/specs/terminal.md): interaction, Supervisor prompts and accessibility.
@@ -577,8 +576,9 @@ data-dependent questions remain:
 - A team of a primary and writable workers completes a scripted coding task
   (edit, format, build, test, integrate) on Linux and macOS with closed replay.
 - An RPI Goal runs Research → Plan (with grilling) → approved multi-Run
-  Implementation to Completed, and to Failed/Cancelled with a final report;
-  restart resumes only after confirmation.
+  Implementation to Completed, and to Failed with a final report; Ctrl+C
+  pauses it until `/goal resume`, and restart resumes only through the
+  explicit user action in the Goal contract.
 - One Goal mixes at least two Providers across roles; an unadmittable or
   failing profile names itself, pauses its agents or switches to the enabled
   fallback, without re-dispatching uncertain effects.

@@ -15,7 +15,7 @@ pub enum InteractiveCommand {
     Status,
     New,
     Resume,
-    ResumeGoal,
+    Goal,
     Fork,
     Rename,
     Compact,
@@ -43,7 +43,7 @@ impl InteractiveCommand {
             Self::Help | Self::Status | Self::Permissions | Self::Transcript => {
                 CommandAvailability::Available
             }
-            Self::Agents | Self::Provider | Self::Model | Self::Exit | Self::Paste => {
+            Self::Agents | Self::Provider | Self::Model | Self::Exit | Self::Paste | Self::Goal => {
                 CommandAvailability::ViewOnly
             }
             Self::Setup
@@ -51,7 +51,6 @@ impl InteractiveCommand {
             | Self::Cache
             | Self::New
             | Self::Resume
-            | Self::ResumeGoal
             | Self::Fork
             | Self::Rename
             | Self::Compact => CommandAvailability::Locked,
@@ -115,7 +114,12 @@ const COMMANDS: [CommandSpec; 19] = [
         Some("[session-id]"),
         &[],
     ),
-    spec("resume-goal", InteractiveCommand::ResumeGoal, None, &[]),
+    spec(
+        "goal",
+        InteractiveCommand::Goal,
+        Some("[resume|objective]"),
+        &["resume"],
+    ),
     spec("fork", InteractiveCommand::Fork, Some("[session-id]"), &[]),
     spec("rename", InteractiveCommand::Rename, Some("<title>"), &[]),
     spec("compact", InteractiveCommand::Compact, None, &[]),
@@ -171,7 +175,7 @@ pub(super) fn help_entry(index: usize) -> Option<HelpEntry> {
         InteractiveCommand::Status => "Session status",
         InteractiveCommand::New => "New Session",
         InteractiveCommand::Resume => "Resume Session",
-        InteractiveCommand::ResumeGoal => "Confirm resume of the interrupted Goal",
+        InteractiveCommand::Goal => "Goal status, resume or autonomous objective",
         InteractiveCommand::Fork => "Fork Session",
         InteractiveCommand::Rename => "Rename Session",
         InteractiveCommand::Compact => "Compact context",
@@ -342,6 +346,16 @@ pub fn parse_submission(line: &str) -> Result<Submission<'_>, CommandParseError>
         if spec.argument.is_none() && argument.is_some() {
             return Err(CommandParseError::UnexpectedArgument { command: spec.name });
         }
+        // `/goal Resume` is the same explicit resume; only the exact word is normalized.
+        let argument = match argument {
+            Some(word)
+                if spec.command == InteractiveCommand::Goal
+                    && word.eq_ignore_ascii_case("resume") =>
+            {
+                Some("resume")
+            }
+            other => other,
+        };
         return Ok(Submission::Command {
             command: spec.command,
             argument,
@@ -552,10 +566,7 @@ fn command_parts(draft: &str) -> Option<(&str, Option<&str>)> {
 }
 
 fn valid_command_prefix(name: &str) -> bool {
-    name.len() <= MAX_COMMAND_NAME_BYTES
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte == b'-')
+    name.len() <= MAX_COMMAND_NAME_BYTES && name.bytes().all(|byte| byte.is_ascii_lowercase())
 }
 
 fn unique_value<'a>(values: impl Iterator<Item = &'a str>, prefix: &str) -> Option<&'a str> {
@@ -737,15 +748,66 @@ mod tests {
         assert_eq!(command_completions("/set"), vec!["setup", "settings"]);
         assert_eq!(command_completions("/pas"), vec!["paste"]);
         assert_eq!(command_completions("/mo"), vec!["model"]);
-        assert_eq!(command_completions("/resume-g"), vec!["resume-goal"]);
-        let preview = command_preview("/resume-goal", &CommandChoices::default()).unwrap();
+        assert_eq!(command_completions("/goa"), vec!["goal"]);
+        assert_eq!(
+            completion_suffix("/goal r", &CommandChoices::default()),
+            Some("esume".into())
+        );
+        assert_eq!(
+            parse_submission("/goal"),
+            Ok(Submission::Command {
+                command: InteractiveCommand::Goal,
+                argument: None,
+            })
+        );
+        assert_eq!(
+            parse_submission("/goal resume"),
+            Ok(Submission::Command {
+                command: InteractiveCommand::Goal,
+                argument: Some("resume"),
+            })
+        );
+        assert_eq!(
+            parse_submission("/goal  Resume "),
+            Ok(Submission::Command {
+                command: InteractiveCommand::Goal,
+                argument: Some("resume"),
+            })
+        );
+        assert_eq!(
+            parse_submission("/goal resume now"),
+            Ok(Submission::Command {
+                command: InteractiveCommand::Goal,
+                argument: Some("resume now"),
+            })
+        );
+        assert_eq!(
+            parse_submission("/goal  finish the migration "),
+            Ok(Submission::Command {
+                command: InteractiveCommand::Goal,
+                argument: Some("finish the migration"),
+            })
+        );
+        assert_eq!(
+            parse_submission("/resume-goal"),
+            Err(CommandParseError::Unknown { suggestion: None })
+        );
+        assert_eq!(
+            InteractiveCommand::Goal.availability(true),
+            CommandAvailability::ViewOnly
+        );
+        let preview = command_preview("/goal", &CommandChoices::default()).unwrap();
         assert_eq!(
             (
                 preview.ghost.as_str(),
                 preview.ghost_is_placeholder,
                 preview.status.as_str()
             ),
-            ("", false, "Command: /resume-goal")
+            (
+                " [resume|objective]",
+                true,
+                "Command: /goal [resume|objective]; Tab: resume",
+            )
         );
         assert_eq!(
             parse_submission("/models"),
@@ -755,9 +817,7 @@ mod tests {
         );
         assert_eq!(
             parse_submission("/resume-goa"),
-            Err(CommandParseError::Unknown {
-                suggestion: Some("resume-goal"),
-            })
+            Err(CommandParseError::Unknown { suggestion: None })
         );
         assert!(command_completions("/sessions").is_empty());
         assert_eq!(
