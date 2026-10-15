@@ -108,33 +108,312 @@ async fn summary_within_the_serialized_report_budget_is_kept_whole() {
 }
 
 #[tokio::test]
-async fn goal_failure_has_a_terminal_receipt() {
+async fn long_read_only_goal_compacts_only_an_acknowledged_run_prefix() {
+    const PAGE_BYTES: usize = 4096;
+    const READS: usize = 104;
+
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = temp.path().join("workspace");
-    std::fs::create_dir(&workspace).expect("workspace");
+    std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
+    std::fs::write(
+        workspace.join("notes/data.txt"),
+        "x".repeat(PAGE_BYTES * READS),
+    )
+    .expect("bounded fixture file");
     let state_path = temp.path().join("state");
-    let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-        summary: String::new(),
-        result: "invalid finish".into(),
-    })]);
-    let mut engine =
-        Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
-    let mut input = request(&workspace, "Finish invalidly");
+
+    let mut outcomes = (0..READS)
+        .map(|page| ProviderOutcome::Tool {
+            call: arany::ToolCall::Read {
+                path: "notes/data.txt".into(),
+                offset: u32::try_from(page * PAGE_BYTES).expect("bounded file offset"),
+                limit: u32::try_from(PAGE_BYTES).expect("bounded page size"),
+            },
+            plan_contract: None,
+        })
+        .collect::<Vec<_>>();
+    outcomes.push(ProviderOutcome::Finish(Finish {
+        summary: "Read-only inspection completed".into(),
+        result: "The bounded pages were inspected".into(),
+    }));
+    let good_compaction = || {
+        Ok(CompactionResponse {
+            summary:
+                "Earlier pages were read; their exact results remain in the canonical journal."
+                    .into(),
+            response_id: None,
+            input_tokens: Some(32),
+            output_tokens: Some(12),
+            wire_provenance: None,
+        })
+    };
+    let provider = ScriptedProvider::new(outcomes).with_compactions(
+        std::iter::once(Ok(CompactionResponse {
+            summary: String::new(),
+            response_id: None,
+            input_tokens: None,
+            output_tokens: Some(8),
+            wire_provenance: None,
+        }))
+        .chain((0..8).map(|_| good_compaction()))
+        .collect(),
+    );
+    let requests = Arc::clone(&provider.requests);
+    let compaction_requests = Arc::clone(&provider.compact_requests);
+    let mut engine = Engine::open(
+        StateRoot::admit(&state_path).expect("private state"),
+        provider,
+    )
+    .expect("engine");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let config = state_path.join("tools.json");
+        std::fs::write(
+            &config,
+            br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        )
+        .expect("Tool configuration");
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
+            .expect("private Tool configuration");
+    }
+    engine
+        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
+        .expect("admit read-only Tools");
+    let mut input = request(&workspace, "Inspect the bounded file in pages");
     input.include_paths.clear();
-    let outcome = engine.run(input).await.expect("terminal Run");
-    assert_eq!(outcome.run.status, RunStatus::Failed);
+    input.goal.budget = Some(arany::GoalBudget {
+        max_provider_calls: None,
+        max_tokens: None,
+        max_active_ms: Some(30 * 60 * 1000),
+        max_runs: 1,
+    });
+    let outcome = engine.run(input).await.expect("read-only Goal");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
     engine.close().await.expect("engine shutdown");
+
+    {
+        let provider_requests = requests.lock().expect("Provider requests");
+        assert!(
+            provider_requests.iter().any(|request| request
+                .tools
+                .as_ref()
+                .is_some_and(|context| context.history_summary.is_some())),
+            "a later model turn receives the untrusted compacted history"
+        );
+        assert!(
+            provider_requests
+                .iter()
+                .filter_map(|request| request.goal_context_facts)
+                .any(|facts| {
+                    facts.provider_calls > 1
+                        && facts.known_tokens > 0
+                        && facts.token_usage_unknown
+                        && facts.reserved_active_ms > 0
+                        && facts.uncertain_active_ms == 0
+                        && facts.success_criterion_satisfied.is_none()
+                }),
+            "later requests retain typed usage facts without inventing a criterion"
+        );
+    }
+    let compacted_input_bytes = {
+        let compaction_requests = compaction_requests.lock().expect("compaction requests");
+        let compacted_request = compaction_requests
+            .iter()
+            .find(|request| request.items.len() == 1)
+            .expect("active Tool prefix compaction");
+        let CompactionItem::Completed(turn) = &compacted_request.items[0] else {
+            panic!("Tool prefix is one acknowledged completed turn");
+        };
+        let input: serde_json::Value =
+            serde_json::from_str(&turn.assistant).expect("bounded compaction context JSON");
+        let goal = &input["pinned_goal"];
+        assert_eq!(goal["objective"], "Inspect the bounded file in pages");
+        assert_eq!(goal["project_instructions"], serde_json::Value::Null);
+        assert_eq!(goal["includes"], serde_json::json!([]));
+        assert_eq!(goal["plan_contract"], serde_json::Value::Null);
+        assert_eq!(
+            goal["budget"]["max_provider_calls"],
+            serde_json::Value::Null
+        );
+        assert!(goal["facts"]["provider_calls"].as_u64().unwrap_or_default() > 1);
+        assert!(
+            goal["facts"]["reserved_active_ms"]
+                .as_u64()
+                .unwrap_or_default()
+                > 0
+        );
+        assert_eq!(
+            goal["facts"]["success_criterion_satisfied"],
+            serde_json::Value::Null
+        );
+        assert!(turn.user.contains("pinned Goal context"));
+        assert!(
+            input["tool_observations"]
+                .as_array()
+                .is_some_and(|observations| observations.len() < READS)
+        );
+        let input = serde_json::json!({
+            "previous_derived_summary": compacted_request.previous_summary,
+            "items": [{"status":"completed", "user":turn.user, "assistant":turn.assistant}],
+        });
+        let bytes = serde_json::to_vec(&input).unwrap().len();
+        assert!(bytes <= 256 * 1024);
+        bytes
+    };
 
     let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
         .expect("read-only Store");
-    let view = store
-        .load_view(outcome.session_id)
+    let events = store
+        .load_session(outcome.session_id)
         .await
-        .expect("replayed Session")
+        .expect("Events");
+    let compacted = events
+        .iter()
+        .filter_map(|envelope| match &envelope.event {
+            Event::GoalContextCompacted {
+                covered_tool_count,
+                record,
+                ..
+            } => Some((*covered_tool_count, record)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        compacted.len() >= 2,
+        "failed compaction is recorded and later retried"
+    );
+    assert!(
+        compacted
+            .iter()
+            .any(|(_, record)| { record.source_bytes as usize == compacted_input_bytes })
+    );
+    assert!(
+        compacted[1].0 > compacted[0].0,
+        "a new attempt must cover a later acknowledged Tool prefix"
+    );
+    assert!(matches!(
+        compacted[0].1.status,
+        CompactionStatus::Failed {
+            reason: CompactionFailure::InvalidOutcome
+        }
+    ));
+    assert!(matches!(
+        compacted[1].1.status,
+        CompactionStatus::Succeeded { .. }
+    ));
+    let view = SessionView::replay(outcome.session_id, &events)
+        .expect("closed replay validates active prefixes")
         .expect("Session");
-    assert_eq!(view.goals[0].status, arany::GoalStatus::Failed);
-    assert!(view.goals[0].report.is_some());
+    let run = &view.runs[0];
+    assert_eq!(
+        run.tools.len(),
+        READS,
+        "history remains canonical and complete"
+    );
+    assert!(run.tools.iter().all(|tool| tool.observation.is_some()));
+    assert!(run.tool_compaction_covered_count > 0);
+    assert!(run.tool_compaction_summary.is_some());
+
+    for corrupt in ["count", "sequence", "source", "summary"] {
+        let mut tampered = events.clone();
+        let envelope = tampered
+            .iter_mut()
+            .find(|envelope| match (&envelope.event, corrupt) {
+                (Event::GoalContextCompacted { record, .. }, "summary") => {
+                    matches!(record.status, CompactionStatus::Succeeded { .. })
+                }
+                (Event::GoalContextCompacted { .. }, _) => true,
+                _ => false,
+            })
+            .expect("active compaction event");
+        let Event::GoalContextCompacted {
+            covered_tool_count,
+            record,
+            ..
+        } = &mut envelope.event
+        else {
+            unreachable!();
+        };
+        match corrupt {
+            "count" => *covered_tool_count += 1,
+            "sequence" => record.covered_sequence += 1,
+            "source" => record.source_digest[0] ^= 1,
+            "summary" => {
+                if let CompactionStatus::Succeeded { content_digest, .. } = &mut record.status {
+                    content_digest[0] ^= 1;
+                } else {
+                    panic!("a successful record is available for digest validation");
+                }
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            SessionView::replay(outcome.session_id, &tampered).is_err(),
+            "replay rejects corrupted active compaction {corrupt}"
+        );
+    }
     store.close().await.expect("Store shutdown");
+}
+
+#[tokio::test]
+async fn goal_failure_and_cancellation_have_distinct_terminal_receipts() {
+    for cancel in [false, true] {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let state_path = temp.path().join("state");
+        let cancellation = RunCancellation::new();
+        let mut provider = if cancel {
+            ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
+                summary: "done".into(),
+                result: "answer".into(),
+            })])
+        } else {
+            ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
+                summary: String::new(),
+                result: "invalid finish".into(),
+            })])
+        };
+        if cancel {
+            provider.cancel_at_completion = Some((AgentPhase::RootPlan, cancellation.clone()));
+        }
+        let mut engine =
+            Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+        let mut input = request(&workspace, "Finish or cancel");
+        input.include_paths.clear();
+        let outcome = engine
+            .run_with_cancel(input, cancellation)
+            .await
+            .expect("terminal Run");
+        assert_eq!(
+            outcome.run.status,
+            if cancel {
+                RunStatus::Cancelled
+            } else {
+                RunStatus::Failed
+            }
+        );
+        engine.close().await.expect("engine shutdown");
+
+        let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
+            .expect("read-only Store");
+        let view = store
+            .load_view(outcome.session_id)
+            .await
+            .expect("replayed Session")
+            .expect("Session");
+        // Cancellation pauses the Goal, which stays resumable; failure closes it with a report.
+        assert_eq!(
+            view.goals[0].status,
+            if cancel {
+                arany::GoalStatus::Interrupted
+            } else {
+                arany::GoalStatus::Failed
+            }
+        );
+        assert_eq!(view.goals[0].report.is_some(), !cancel);
+        store.close().await.expect("Store shutdown");
+    }
 }
 
 #[tokio::test]
@@ -146,21 +425,72 @@ async fn goal_call_budget_blocks_a_later_run_before_provider_dispatch() {
     let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
         summary: "first Run complete".into(),
         result: "continue later".into(),
+    })])
+    .with_compactions(vec![Ok(CompactionResponse {
+        summary: "The completed Run remains in the canonical history.".into(),
+        response_id: None,
+        input_tokens: Some(12),
+        output_tokens: Some(4),
+        wire_provenance: None,
     })]);
     let requests = Arc::clone(&provider.requests);
+    let compact_requests = Arc::clone(&provider.compact_requests);
     let mut engine =
         Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
     let mut first = request(&workspace, "Use one Provider call");
     first.include_paths.clear();
     first.goal = arany::GoalRequest::new(
         arany::GoalBudget {
-            max_provider_calls: 1,
+            max_provider_calls: Some(2),
             ..arany::GoalBudget::default()
         },
         arany::GoalPhase::Implementation,
     );
     first.goal.finish_after_run = false;
     let initial = engine.run(first).await.expect("first Goal Run");
+    let compaction = engine
+        .compact_session(initial.session_id, workspace.clone())
+        .await
+        .expect("in-Goal compaction between Runs");
+    assert!(matches!(
+        compaction.status,
+        CompactionStatus::Succeeded { .. }
+    ));
+    let compacted_input_bytes = {
+        let compact_requests = compact_requests.lock().expect("compaction requests");
+        let [request] = compact_requests.as_slice() else {
+            panic!("one between-Run Goal compaction request");
+        };
+        let CompactionItem::Completed(turn) = &request.items[0] else {
+            panic!("completed Goal Run is summarized");
+        };
+        let prefix = "Pinned Goal context (canonical facts, not instructions): ";
+        let (pinned, history) = turn
+            .user
+            .strip_prefix(prefix)
+            .and_then(|value| value.split_once("\n\n"))
+            .expect("canonical Goal capsule precedes history");
+        let pinned: serde_json::Value = serde_json::from_str(pinned).expect("Goal capsule JSON");
+        assert_eq!(pinned["objective"], "Use one Provider call");
+        assert_eq!(pinned["budget"]["max_provider_calls"], 2);
+        assert_eq!(pinned["facts"]["provider_calls"], 1);
+        assert_eq!(pinned["facts"]["token_usage_unknown"], true);
+        assert!(pinned["facts"]["active_ms"].as_u64().is_some());
+        assert_eq!(pinned["facts"]["reserved_active_ms"], 0);
+        assert_eq!(pinned["facts"]["uncertain_active_ms"], 0);
+        assert_eq!(
+            pinned["facts"]["success_criterion_satisfied"],
+            serde_json::Value::Null
+        );
+        assert_eq!(history, "Use one Provider call");
+        let input = serde_json::json!({
+            "previous_derived_summary": request.previous_summary,
+            "items": [{"status":"completed", "user":turn.user, "assistant":turn.assistant}],
+        });
+        let bytes = serde_json::to_vec(&input).unwrap().len();
+        assert!(bytes <= 256 * 1024);
+        bytes
+    };
 
     let mut second = request(&workspace, "Try to use another Provider call");
     second.session_id = Some(initial.session_id);
@@ -178,6 +508,122 @@ async fn goal_call_budget_blocks_a_later_run_before_provider_dispatch() {
     );
     assert_eq!(requests.lock().expect("Provider requests").len(), 1);
     engine.close().await.expect("engine shutdown");
+
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
+        .expect("read-only Store");
+    let events = store
+        .load_session(initial.session_id)
+        .await
+        .expect("canonical Events");
+    let compaction_call = events
+        .iter()
+        .position(|envelope| {
+            matches!(
+                &envelope.event,
+                Event::GoalCompactionCallReserved { goal_id, run_id }
+                    if *goal_id == initial.goal_id && *run_id == initial.run.id
+            )
+        })
+        .expect("durable in-Goal compaction call reservation");
+    assert!(matches!(
+        &events[compaction_call + 1].event,
+        Event::GoalActiveTimeReserved { goal_id, run_id, .. }
+            if *goal_id == initial.goal_id && *run_id == initial.run.id
+    ));
+    assert!(matches!(
+        &events[compaction_call + 2].event,
+        Event::ContextCompacted { record }
+            if record.source_bytes as usize == compacted_input_bytes
+    ));
+    assert!(matches!(
+        &events[compaction_call + 3].event,
+        Event::GoalActiveTimeSettled { goal_id, run_id, .. }
+            if *goal_id == initial.goal_id && *run_id == initial.run.id
+    ));
+    SessionView::replay(initial.session_id, &events)
+        .expect("strict replay settles only after the compaction receipt commits");
+    let reserved_ms = match &events[compaction_call + 1].event {
+        Event::GoalActiveTimeReserved { reserved_ms, .. } => *reserved_ms,
+        _ => panic!("active compaction reservation"),
+    };
+    let settled_ms = reserved_ms.checked_add(1).unwrap();
+    let Event::GoalActiveTimeSettled {
+        active_ms: original_ms,
+        ..
+    } = &events[compaction_call + 3].event
+    else {
+        panic!("active compaction settlement");
+    };
+    let original_ms = *original_ms;
+    let mut delayed_ack = events.clone();
+    let Event::GoalActiveTimeSettled { active_ms, .. } =
+        &mut delayed_ack[compaction_call + 3].event
+    else {
+        panic!("active compaction settlement");
+    };
+    *active_ms = settled_ms;
+    // The terminal receipt records the Goal total, which the overrun shifts by the same delta.
+    let total_ms = match &mut delayed_ack.last_mut().expect("terminal Goal receipt").event {
+        Event::GoalFinished { active_ms, .. } => {
+            *active_ms = active_ms
+                .checked_sub(original_ms)
+                .and_then(|prior| prior.checked_add(settled_ms))
+                .unwrap();
+            *active_ms
+        }
+        _ => panic!("terminal Goal receipt"),
+    };
+    let replay = SessionView::replay(initial.session_id, &delayed_ack)
+        .expect("bounded acknowledged compaction overrun is settled rather than left reserved")
+        .expect("Session");
+    assert_eq!(replay.goals[0].reserved_active_ms, None);
+    assert_eq!(replay.goals[0].active_ms, total_ms);
+    store.close().await.expect("Store shutdown");
+}
+
+#[tokio::test]
+async fn known_active_time_exhaustion_closes_without_provider_dispatch() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let state_path = temp.path().join("state");
+    let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
+        summary: "must not run".into(),
+        result: "must not run".into(),
+    })]);
+    let requests = Arc::clone(&provider.requests);
+    let mut engine =
+        Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+    let mut input = request(&workspace, "Exhaust the tiny active-time budget");
+    input.include_paths.clear();
+    input.goal = arany::GoalRequest::new(
+        arany::GoalBudget {
+            max_active_ms: Some(1),
+            ..arany::GoalBudget::default()
+        },
+        arany::GoalPhase::Implementation,
+    );
+
+    let outcome = engine
+        .run(input)
+        .await
+        .expect("known active-time exhaustion has a durable terminal result");
+    assert_eq!(outcome.run.status, RunStatus::Failed);
+    assert!(requests.lock().expect("Provider requests").is_empty());
+    engine.close().await.expect("engine shutdown");
+
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
+        .expect("read-only Store");
+    let view = store
+        .load_view(outcome.session_id)
+        .await
+        .expect("replayed Session")
+        .expect("Session");
+    assert_eq!(view.goals[0].status, arany::GoalStatus::Failed);
+    assert_eq!(view.goals[0].active_ms, 0);
+    assert_eq!(view.goals[0].uncertain_active_ms, 0);
+    assert!(view.goals[0].reserved_active_ms.is_none());
+    store.close().await.expect("Store shutdown");
 }
 
 #[tokio::test]
@@ -199,7 +645,7 @@ async fn goal_paused_at_its_call_budget_closes_as_failed_on_explicit_resume() {
     first.include_paths.clear();
     first.goal = arany::GoalRequest::new(
         arany::GoalBudget {
-            max_provider_calls: 1,
+            max_provider_calls: Some(1),
             ..arany::GoalBudget::default()
         },
         arany::GoalPhase::Implementation,
@@ -530,6 +976,7 @@ async fn interrupted_preaccept_goal_prefixes_resume_without_spending_runs_or_rep
                         max_runs: 1,
                         ..arany::GoalBudget::default()
                     },
+                    resource_settings: arany::ToolResourceSettings::default(),
                 },
             )
             .await
@@ -625,10 +1072,11 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
             goal_id,
             phase: arany::GoalPhase::Implementation,
             autonomous: false,
+            resource_settings: arany::ToolResourceSettings::default(),
             objective: "Use the only Provider call".into(),
             workspace_identity: identity,
             budget: arany::GoalBudget {
-                max_provider_calls: 1,
+                max_provider_calls: Some(1),
                 ..arany::GoalBudget::default()
             },
         },
@@ -755,6 +1203,8 @@ impl Provider for ExactCapToolReview {
                     },
                     plan_contract: Some(Box::new(arany::GoalPlanContract {
                         mission: "Write one note".into(),
+                        resource_class: arany::ToolResourceClass::Default,
+                        command_timeout_ms: None,
                         paths: vec!["notes".into()],
                         commands: Vec::new(),
                         skills: Vec::new(),
@@ -1043,6 +1493,8 @@ fn facts_read() -> arany::ToolCall {
 fn facts_plan(sha256: String) -> arany::GoalPlanContract {
     arany::GoalPlanContract {
         mission: AUTONOMOUS_OBJECTIVE.into(),
+        resource_class: arany::ToolResourceClass::Default,
+        command_timeout_ms: None,
         paths: vec!["notes/facts.txt".into()],
         commands: Vec::new(),
         skills: Vec::new(),
@@ -1255,11 +1707,11 @@ async fn autonomous_goal_call_cap_at_its_boundary_fails_the_goal_with_a_report()
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
     let budget = arany::GoalBudget {
-        max_provider_calls: 3,
+        max_provider_calls: Some(3),
         ..arany::GoalBudget::default()
     };
     let mut plan = facts_plan(facts_digest("v2"));
-    plan.budget = budget.clone();
+    plan.budget = budget;
     let provider = ScriptedProvider::new(vec![
         ProviderOutcome::Tool {
             call: facts_read(),
@@ -1344,7 +1796,7 @@ async fn autonomous_goal_token_cap_at_its_boundary_fails_the_goal_with_a_report(
         ..arany::GoalBudget::default()
     };
     let mut plan = facts_plan(facts_digest("v2"));
-    plan.budget = budget.clone();
+    plan.budget = budget;
     // Five input tokens per call: the Read and the Finish reach the 10-token cap exactly.
     let provider = MeteredProvider {
         tokens: 5,
@@ -1584,11 +2036,11 @@ async fn autonomous_goal_active_time_spent_by_a_finish_fails_the_goal_with_its_r
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
     let budget = arany::GoalBudget {
-        max_active_ms: 60_000,
+        max_active_ms: Some(60_000),
         ..arany::GoalBudget::default()
     };
     let mut plan = facts_plan(facts_digest("v2"));
-    plan.budget = budget.clone();
+    plan.budget = budget;
     let provider = ScriptedProvider::new(vec![
         ProviderOutcome::Tool {
             call: facts_read(),
@@ -1738,11 +2190,11 @@ async fn exhausted_autonomous_segment_exports_its_failed_status() {
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
     let budget = arany::GoalBudget {
-        max_active_ms: 60_000,
+        max_active_ms: Some(60_000),
         ..arany::GoalBudget::default()
     };
     let mut plan = facts_plan(facts_digest("v2"));
-    plan.budget = budget.clone();
+    plan.budget = budget;
     let provider = ScriptedProvider::new(vec![
         ProviderOutcome::Tool {
             call: facts_read(),
@@ -1893,6 +2345,55 @@ async fn plan_with_fewer_runs_than_linked_is_refused_as_an_invalid_plan() {
     assert!(
         goal.plan_contract.is_none(),
         "the refused plan is not recorded"
+    );
+}
+
+#[tokio::test]
+async fn plan_active_limit_below_elapsed_call_time_fails_the_run() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let mut plan = facts_plan(facts_digest("v2"));
+    plan.budget.max_active_ms = Some(1);
+    // The plan-bearing call runs longer than the plan's active-time limit, so the plan cannot narrow the Goal.
+    let provider = ScriptedProvider::new(vec![ProviderOutcome::Tool {
+        call: facts_read(),
+        plan_contract: Some(Box::new(plan)),
+    }])
+    .with_before_call(0, || {
+        std::thread::sleep(std::time::Duration::from_millis(20))
+    });
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    let outcome = engine
+        .run(autonomous_input(&workspace))
+        .await
+        .expect("an unnarrowable plan is a Failed Run, not a Store error");
+    assert_eq!(outcome.run.status, RunStatus::Failed);
+    engine.close().await.expect("engine shutdown");
+
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    let goal = view.goal(outcome.goal_id).expect("Goal");
+    assert!(
+        goal.plan_contract.is_none(),
+        "the refused plan is not recorded"
+    );
+    let root_plan_dispositions: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            Event::ProviderCallRecorded { record, .. } if record.phase == AgentPhase::RootPlan => {
+                Some(record.disposition)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        root_plan_dispositions,
+        [ProviderCallDisposition::ToolRequested],
+        "the plan-bearing call is refused at the plan contract, after its Tool was requested"
     );
 }
 

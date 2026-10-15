@@ -25,7 +25,7 @@ pub struct RunProgress {
 pub struct DisplayUpdate {
     pub run_id: RunId,
     pub agent_run_id: AgentRunId,
-    pub call_index: u8,
+    pub call_index: u32,
     pub text: Arc<PreviewText>,
 }
 
@@ -53,6 +53,10 @@ pub struct RunUpdate {
 }
 
 impl RunProgress {
+    pub(super) fn previews_enabled(&self) -> bool {
+        self.previews_enabled
+    }
+
     #[must_use]
     pub fn new() -> Self {
         let (sender, receiver) = watch::channel(None);
@@ -81,10 +85,6 @@ impl RunProgress {
             receiver: self.preview_receiver.clone(),
             _sender: self.preview_sender.clone(),
         }
-    }
-
-    pub(super) fn previews_enabled(&self) -> bool {
-        self.previews_enabled
     }
 
     /// Latest temporary capacity wait, keyed to a committed pending Tool; never replayed.
@@ -121,7 +121,7 @@ impl Default for RunProgress {
 }
 
 pub(super) struct PreviewContext {
-    pub(super) call_index: u8,
+    pub(super) call_index: u32,
     pub(super) chunks: usize,
     pub(super) commentary_bytes: usize,
     pub(super) commentary_items: usize,
@@ -135,6 +135,10 @@ pub(super) struct ProgressPublisher {
 }
 
 impl ProgressPublisher {
+    pub(super) fn previews_enabled(&self) -> bool {
+        self.progress.previews_enabled()
+    }
+
     pub(super) fn tool_queue(&self) -> watch::Sender<Option<uuid::Uuid>> {
         self.progress.waiting_sender.clone()
     }
@@ -171,7 +175,7 @@ impl ProgressPublisher {
             })
             .sum();
         Ok(Some(PreviewContext {
-            call_index: u8::try_from(agent.provider_calls.len())
+            call_index: u32::try_from(agent.provider_calls.len())
                 .map_err(|_| EngineError::CoordinatorFailed)?,
             chunks: run.display.len(),
             commentary_bytes,
@@ -186,7 +190,7 @@ impl ProgressPublisher {
     pub(super) fn publish_preview(
         &self,
         agent_run_id: AgentRunId,
-        call_index: u8,
+        call_index: u32,
         text: Option<Arc<PreviewText>>,
     ) {
         self.progress
@@ -251,6 +255,10 @@ pub(super) async fn append_observed(
         Event::GoalPlanContractRecorded { .. } => Some(TraceEventKind::GoalPlanContractRecorded),
         Event::GoalFinished { .. } => Some(TraceEventKind::GoalFinished),
         Event::GoalProviderCallReserved { .. } => Some(TraceEventKind::GoalProviderCallReserved),
+        Event::GoalCompactionCallReserved { .. } => {
+            Some(TraceEventKind::GoalCompactionCallReserved)
+        }
+        Event::GoalContextCompacted { .. } => Some(TraceEventKind::GoalContextCompacted),
         Event::MessageAccepted { .. } => Some(TraceEventKind::MessageAccepted),
         Event::RunStarted { .. } => Some(TraceEventKind::RunStarted),
         Event::AgentSpawned { .. } => Some(TraceEventKind::AgentSpawned),

@@ -231,6 +231,8 @@ mod tests {
             accepted_sequence: ordinal as u64,
             finished_sequence: Some(ordinal as u64 + 1),
             tools: Vec::new(),
+            tool_compaction_summary: None,
+            tool_compaction_covered_count: 0,
             display: Vec::new(),
         }
     }

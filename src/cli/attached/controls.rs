@@ -26,9 +26,12 @@ struct UiPreferences {
 pub(super) struct Preferences {
     pub completion: CompletionLayout,
     pub view: TerminalMode,
+    pub goal_budget: arany::GoalBudget,
+    pub resources: arany::ToolResourceSettings,
 }
 
 fn apply_setting(preferences: &mut Preferences, value: &str) -> bool {
+    let original = *preferences;
     let completion = preferences.completion;
     let view = preferences.view;
     if let Some(completion) = [completion, completion.toggled()]
@@ -41,14 +44,244 @@ fn apply_setting(preferences: &mut Preferences, value: &str) -> bool {
         .find(|view| view.label() == value)
     {
         preferences.view = view;
+    } else if let Some((name, raw)) = value.split_once('=') {
+        let parsed = match name {
+            "calls" => raw
+                .parse::<u32>()
+                .ok()
+                .map(|limit| preferences.goal_budget.max_provider_calls = Some(limit))
+                .or_else(|| {
+                    (raw == "unlimited").then(|| {
+                        preferences.goal_budget.max_provider_calls = None;
+                    })
+                }),
+            "tokens" => raw
+                .parse::<u64>()
+                .ok()
+                .map(|limit| preferences.goal_budget.max_tokens = Some(limit))
+                .or_else(|| {
+                    (raw == "unlimited").then(|| {
+                        preferences.goal_budget.max_tokens = None;
+                    })
+                }),
+            "active-ms" => raw
+                .parse::<u64>()
+                .ok()
+                .map(|limit| preferences.goal_budget.max_active_ms = Some(limit))
+                .or_else(|| {
+                    (raw == "unlimited").then(|| {
+                        preferences.goal_budget.max_active_ms = None;
+                    })
+                }),
+            "default-timeout-ms" => raw.parse::<u32>().ok().map(|limit| {
+                preferences.resources.default_command_timeout_ms = limit;
+            }),
+            "max-timeout-ms" => raw.parse::<u32>().ok().map(|limit| {
+                preferences.resources.max_command_timeout_ms = limit;
+            }),
+            "build-memory-bytes" => raw.parse::<u64>().ok().map(|limit| {
+                preferences.resources.build_memory_bytes = limit;
+            }),
+            "build-processes" => raw.parse::<u32>().ok().map(|limit| {
+                preferences.resources.build_processes = limit;
+            }),
+            "build-project-bytes" => raw.parse::<u64>().ok().map(|limit| {
+                preferences.resources.build_project_bytes = limit;
+            }),
+            "build-cache-bytes" => raw.parse::<u64>().ok().map(|limit| {
+                preferences.resources.build_cache_bytes = limit;
+            }),
+            _ => None,
+        };
+        if parsed.is_none()
+            || preferences.goal_budget.validate().is_err()
+            || !preferences.resources.valid()
+        {
+            *preferences = original;
+            return false;
+        }
     } else {
         return false;
     }
     true
 }
 
+fn setting_rows(preferences: Preferences) -> Vec<String> {
+    let show =
+        |value: Option<u64>| value.map_or_else(|| "unlimited".into(), |value| value.to_string());
+    vec![
+        format!("Slash menu: {}", preferences.completion.label()),
+        format!("Chat view: {}", preferences.view.label()),
+        format!(
+            "Goal provider calls: {}",
+            show(preferences.goal_budget.max_provider_calls.map(u64::from))
+        ),
+        format!("Goal tokens: {}", show(preferences.goal_budget.max_tokens)),
+        format!(
+            "Goal active milliseconds: {}",
+            show(preferences.goal_budget.max_active_ms)
+        ),
+        format!(
+            "Default command timeout ms: {}",
+            preferences.resources.default_command_timeout_ms
+        ),
+        format!(
+            "Maximum command timeout ms: {}",
+            preferences.resources.max_command_timeout_ms
+        ),
+        format!(
+            "Build memory bytes: {}",
+            preferences.resources.build_memory_bytes
+        ),
+        format!(
+            "Build processes/threads: {}",
+            preferences.resources.build_processes
+        ),
+        format!(
+            "Build writable project bytes: {}",
+            preferences.resources.build_project_bytes
+        ),
+        format!(
+            "Build cache bytes: {}",
+            preferences.resources.build_cache_bytes
+        ),
+    ]
+}
+
+fn linear_settings_instruction(preferences: Preferences) -> String {
+    format!(
+        "Current menu: {} (tabs|combined); view: {} (fullscreen|classic).\nSettings: calls={} tokens={} active-ms={} default-timeout-ms={} max-timeout-ms={} build-memory-bytes={} build-processes={} build-project-bytes={} build-cache-bytes={}.\nSet a listed key=value or exact menu/view choice; Enter saves; q cancels.",
+        preferences.completion.label(),
+        preferences.view.label(),
+        preferences
+            .goal_budget
+            .max_provider_calls
+            .map_or_else(|| "unlimited".into(), |value| value.to_string()),
+        preferences
+            .goal_budget
+            .max_tokens
+            .map_or_else(|| "unlimited".into(), |value| value.to_string()),
+        preferences
+            .goal_budget
+            .max_active_ms
+            .map_or_else(|| "unlimited".into(), |value| value.to_string()),
+        preferences.resources.default_command_timeout_ms,
+        preferences.resources.max_command_timeout_ms,
+        preferences.resources.build_memory_bytes,
+        preferences.resources.build_processes,
+        preferences.resources.build_project_bytes,
+        preferences.resources.build_cache_bytes,
+    )
+}
+
+fn cycle_setting(preferences: &mut Preferences, row: usize, forward: bool) {
+    fn step<T: Copy + Eq>(current: T, values: &[T], forward: bool) -> T {
+        let index = values
+            .iter()
+            .position(|value| *value == current)
+            .unwrap_or(0);
+        values[if forward {
+            (index + 1) % values.len()
+        } else {
+            (index + values.len() - 1) % values.len()
+        }]
+    }
+    match row {
+        0 => preferences.completion = preferences.completion.toggled(),
+        1 => preferences.view = preferences.view.toggled(),
+        2 => {
+            preferences.goal_budget.max_provider_calls = step(
+                preferences.goal_budget.max_provider_calls,
+                &[Some(64), Some(32), Some(16), None],
+                forward,
+            );
+        }
+        3 => {
+            preferences.goal_budget.max_tokens = step(
+                preferences.goal_budget.max_tokens,
+                &[None, Some(1_000_000), Some(100_000)],
+                forward,
+            );
+        }
+        4 => {
+            preferences.goal_budget.max_active_ms = step(
+                preferences.goal_budget.max_active_ms,
+                &[Some(arany::MAX_GOAL_ACTIVE_MS), Some(15 * 60 * 1000), None],
+                forward,
+            );
+        }
+        5 => {
+            let values = [120_000, 60_000, 30_000];
+            let next = step(
+                preferences.resources.default_command_timeout_ms,
+                &values,
+                forward,
+            );
+            if next <= preferences.resources.max_command_timeout_ms {
+                preferences.resources.default_command_timeout_ms = next;
+            }
+        }
+        6 => {
+            let values = [600_000, 300_000, 120_000];
+            let next = step(
+                preferences.resources.max_command_timeout_ms,
+                &values,
+                forward,
+            );
+            if next >= preferences.resources.default_command_timeout_ms {
+                preferences.resources.max_command_timeout_ms = next;
+            }
+        }
+        7 => {
+            preferences.resources.build_memory_bytes = step(
+                preferences.resources.build_memory_bytes,
+                &[
+                    4 * 1024_u64.pow(3),
+                    2 * 1024_u64.pow(3),
+                    1024_u64.pow(3),
+                    512 * 1024 * 1024,
+                ],
+                forward,
+            );
+        }
+        8 => {
+            preferences.resources.build_processes = step(
+                preferences.resources.build_processes,
+                &[256, 128, 64, 32],
+                forward,
+            );
+        }
+        9 => {
+            preferences.resources.build_project_bytes = step(
+                preferences.resources.build_project_bytes,
+                &[
+                    1024_u64.pow(3),
+                    512 * 1024 * 1024,
+                    256 * 1024 * 1024,
+                    64 * 1024 * 1024,
+                ],
+                forward,
+            );
+        }
+        10 => {
+            preferences.resources.build_cache_bytes = step(
+                preferences.resources.build_cache_bytes,
+                &[8 * 1024_u64.pow(3), 4 * 1024_u64.pow(3), 1024_u64.pow(3), 0],
+                forward,
+            );
+        }
+        _ => {}
+    }
+}
+
 pub(super) async fn restore_settings(admission: &Admission) -> Result<Preferences, String> {
-    let path = admission.state_dir.clone();
+    restore_settings_at(&admission.state_dir).await
+}
+
+pub(super) async fn restore_settings_at(
+    state_dir: &std::path::Path,
+) -> Result<Preferences, String> {
+    let path = state_dir.to_owned();
     tokio::task::spawn_blocking(move || {
         let root = match StateRoot::open_existing(&path) {
             Ok(root) => root,
@@ -75,19 +308,25 @@ fn read_settings(root: &StateRoot) -> Result<Preferences, String> {
     };
     let record: UiPreferences = serde_json::from_slice(&record)
         .map_err(|_| "invalid display settings; use /settings to replace them")?;
-    if record.version != 2 {
-        return Err("unsupported display settings; use /settings to replace them".into());
+    if record.version != 3
+        || record.preferences.goal_budget.validate().is_err()
+        || !record.preferences.resources.valid()
+    {
+        return Err("unsupported settings; use /settings to replace them".into());
     }
     Ok(record.preferences)
 }
 
 async fn save_settings(admission: &Admission, preferences: Preferences) -> Result<(), String> {
+    if preferences.goal_budget.validate().is_err() || !preferences.resources.valid() {
+        return Err("invalid settings".into());
+    }
     let path = admission.state_dir.clone();
     let workspace = admission.workspace.clone();
     tokio::task::spawn_blocking(move || {
         let root = StateRoot::admit(&path).map_err(|_| "display settings unavailable or unsafe")?;
         let record = serde_json::to_vec(&UiPreferences {
-            version: 2,
+            version: 3,
             preferences,
         })
         .map_err(|_| "display settings unavailable")?;
@@ -102,64 +341,37 @@ async fn save_settings(admission: &Admission, preferences: Preferences) -> Resul
     .map_err(str::to_owned)
 }
 
-fn settings_rows(preferences: Preferences, linear: bool) -> [String; 2] {
-    let title = |label: &str| {
-        let mut characters = label.chars();
-        characters
-            .next()
-            .map(|first| first.to_ascii_uppercase().to_string() + characters.as_str())
-            .unwrap_or_default()
-    };
-    let completion = title(preferences.completion.label());
-    let view = title(preferences.view.label());
-    if linear {
-        [
-            format!("Slash menu: {completion}"),
-            format!("Chat view: {view}"),
-        ]
-    } else {
-        [
-            format!("Slash menu   < {completion} >"),
-            format!("Chat view    < {view} >"),
-        ]
-    }
-}
-
-/// Linear empty Enter saves the shown values rather than selecting a choice.
-const NO_DEFAULT_CHOICE: usize = usize::MAX;
-
 async fn choose_settings(
     terminal: &mut AttachedTerminal,
     mut chosen: Preferences,
 ) -> Result<Option<Preferences>, String> {
     let linear = terminal.is_linear();
-    let mut view_row = false;
+    let mut selected_row = 0usize;
     let mut answer = Composer::default();
     let mut invalid = false;
     loop {
-        let rows = settings_rows(chosen, linear);
+        let rows = setting_rows(chosen);
         if linear {
-            terminal.draw_setup_choices(
-                0,
+            let instruction = linear_settings_instruction(chosen);
+            terminal.draw_setup_text_input(
                 "Settings",
-                &format!("{}; {}; empty Enter saves, q closes", rows[0], rows[1]),
-                &[
-                    (1, "tabs"),
-                    (2, "combined"),
-                    (3, "fullscreen"),
-                    (4, "classic"),
-                ],
-                NO_DEFAULT_CHOICE,
-                invalid.then_some("Type tabs, combined, fullscreen or classic; q closes"),
+                &instruction,
+                &answer,
+                invalid.then_some("Type a valid setting and value; q cancels"),
             )
         } else {
+            let choices: Vec<_> = rows
+                .iter()
+                .enumerate()
+                .map(|(index, row)| (u8::try_from(index + 1).unwrap_or(u8::MAX), row.as_str()))
+                .collect();
             terminal.draw_setup_choices(
                 0,
                 "Settings",
-                "←→ changes the value; Enter saves both",
-                &[(1, rows[0].as_str()), (2, rows[1].as_str())],
-                usize::from(view_row),
-                None,
+                "↑↓ selects a setting; ←→ changes it; Enter saves",
+                &choices,
+                selected_row,
+                invalid.then_some("The selected settings could not be saved"),
             )
         }
         .map_err(|error| error.to_string())?;
@@ -168,14 +380,10 @@ async fn choose_settings(
             .await
             .map_err(|error| error.to_string())?
         {
-            TerminalInput::Up | TerminalInput::Down if !linear => view_row = !view_row,
-            TerminalInput::Left | TerminalInput::Right if !linear => {
-                if view_row {
-                    chosen.view = chosen.view.toggled();
-                } else {
-                    chosen.completion = chosen.completion.toggled();
-                }
-            }
+            TerminalInput::Up if !linear => selected_row = selected_row.saturating_sub(1),
+            TerminalInput::Down if !linear => selected_row = (selected_row + 1).min(rows.len() - 1),
+            TerminalInput::Left if !linear => cycle_setting(&mut chosen, selected_row, false),
+            TerminalInput::Right if !linear => cycle_setting(&mut chosen, selected_row, true),
             TerminalInput::Character(character) if linear => {
                 answer.apply(TerminalInput::Character(character));
             }
@@ -216,10 +424,9 @@ pub(super) async fn settings(
     saved_view: &mut TerminalMode,
 ) -> Result<String, String> {
     let linear = terminal.is_linear();
-    let current = Preferences {
-        completion: composer.completion_layout(),
-        view: *saved_view,
-    };
+    let mut current = restore_settings(admission).await?;
+    current.completion = composer.completion_layout();
+    current.view = *saved_view;
     let notice = match choose_settings(terminal, current).await? {
         None => "Settings unchanged".to_owned(),
         Some(chosen) => match save_settings(admission, chosen).await {
@@ -233,13 +440,20 @@ pub(super) async fn settings(
                         .map_err(|error| error.to_string())?;
                 }
                 format!(
-                    "Settings: slash menu {} · chat view {}{} · saved",
-                    chosen.completion.label(),
-                    chosen.view.label(),
+                    "Settings saved · calls {} · active ms {} · command max {} ms{}",
+                    chosen
+                        .goal_budget
+                        .max_provider_calls
+                        .map_or_else(|| "unlimited".into(), |value| value.to_string()),
+                    chosen
+                        .goal_budget
+                        .max_active_ms
+                        .map_or_else(|| "unlimited".into(), |value| value.to_string()),
+                    chosen.resources.max_command_timeout_ms,
                     if linear {
-                        " (visual sessions)"
+                        " · visual sessions"
                     } else if chosen.view != terminal.mode() {
-                        " (sessions without --classic)"
+                        " · sessions without --classic"
                     } else {
                         ""
                     },
@@ -995,6 +1209,8 @@ mod tests {
             accepted_sequence: 2,
             finished_sequence: None,
             tools: Vec::new(),
+            tool_compaction_summary: None,
+            tool_compaction_covered_count: 0,
             display: Vec::new(),
         });
         assert_eq!(
@@ -1145,6 +1361,35 @@ mod tests {
     }
 
     #[test]
+    fn invalid_linear_settings_leave_the_draft_unchanged() {
+        let mut preferences = Preferences::default();
+        let original = preferences;
+        for value in [
+            "calls=0",
+            "tokens=0",
+            "active-ms=0",
+            "default-timeout-ms=600001",
+            "max-timeout-ms=119999",
+            "build-memory-bytes=0",
+            "build-processes=257",
+            "build-project-bytes=1073741825",
+            "build-project-bytes=1",
+            "build-project-bytes=1073741823",
+            "build-cache-bytes=8589934593",
+            "build-cache-bytes=1",
+            "build-cache-bytes=8589934591",
+        ] {
+            assert!(!apply_setting(&mut preferences, value), "{value}");
+            assert_eq!(
+                preferences, original,
+                "invalid value changed draft: {value}"
+            );
+        }
+        assert!(apply_setting(&mut preferences, "calls=unlimited"));
+        assert_eq!(preferences.goal_budget.max_provider_calls, None);
+    }
+
+    #[test]
     fn idle_validation_rejects_local_arguments_before_any_effect() {
         let mut view = SessionView {
             id: SessionId::new(),
@@ -1267,12 +1512,14 @@ mod tests {
         let combined_classic = Preferences {
             completion: CompletionLayout::Combined,
             view: TerminalMode::Classic,
+            ..Preferences::default()
         };
         assert_eq!(
             restore_settings(&admission).await.unwrap(),
             Preferences {
                 completion: CompletionLayout::Tabs,
                 view: TerminalMode::Fullscreen,
+                ..Preferences::default()
             }
         );
         assert!(
@@ -1315,7 +1562,15 @@ mod tests {
         let original = root.read_ui_preferences_record().unwrap().unwrap();
         assert_eq!(
             original,
-            br#"{"version":2,"preferences":{"completion":"combined","view":"classic"}}"#
+            br#"{"version":3,"preferences":{"completion":"combined","view":"classic","goal_budget":{"max_provider_calls":64,"max_tokens":null,"max_active_ms":1800000,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592}}}"#
+        );
+        let mut invalid = Preferences::default();
+        invalid.resources.build_processes = 0;
+        assert!(save_settings(&admission, invalid).await.is_err());
+        assert_eq!(
+            root.read_ui_preferences_record().unwrap().unwrap(),
+            original,
+            "invalid settings never replace the current record"
         );
         assert!(
             root.replace_ui_preferences_record(&vec![b'x'; 1025])
@@ -1669,6 +1924,7 @@ mod tests {
                     budget: arany::GoalBudget::default(),
                     phase: arany::GoalPhase::Implementation,
                     autonomous: false,
+                    resource_settings: arany::ToolResourceSettings::default(),
                 },
             )
             .await

@@ -20,6 +20,7 @@ pub(crate) struct CompiledContext {
     pub compaction_event_sequence: Option<u64>,
     pub compaction_content_digest: Option<[u8; 32]>,
     pub context_usage: ContextUsage,
+    pub tool_context_budget_bytes: usize,
 }
 
 impl CompiledContext {
@@ -30,11 +31,14 @@ impl CompiledContext {
         inputs: &WorkspaceInputs,
         policy: CollaborationPolicy,
         tool_reserved: usize,
+        goal_metadata_reserved: usize,
     ) -> Result<Self, ContextTooLarge> {
-        let reserved = usize::from(policy.max_children()) * MAX_CHILD_CONTEXT_BYTES;
+        let child_reserved = usize::from(policy.max_children()) * MAX_CHILD_CONTEXT_BYTES;
+        let reserved = child_reserved;
         let budget = MAX_CONTEXT_CONTENT_BYTES
             .checked_sub(reserved)
             .and_then(|budget| budget.checked_sub(tool_reserved))
+            .and_then(|budget| budget.checked_sub(goal_metadata_reserved))
             .ok_or(ContextTooLarge)?;
         let mut used = objective.len()
             + objective_images
@@ -167,6 +171,15 @@ impl CompiledContext {
             .into_iter()
             .map(|(run, turn)| (run.id, turn))
             .unzip();
+        let tool_context_budget_bytes = if tool_reserved == 0 {
+            0
+        } else {
+            MAX_CONTEXT_CONTENT_BYTES
+                .checked_sub(child_reserved)
+                .and_then(|budget| budget.checked_sub(used))
+                .and_then(|budget| budget.checked_sub(goal_metadata_reserved))
+                .ok_or(ContextTooLarge)?
+        };
         Ok(Self {
             history,
             images,
@@ -181,6 +194,7 @@ impl CompiledContext {
                 compactable_bytes: (used - base_bytes) as u32,
                 tool_history_bytes,
             },
+            tool_context_budget_bytes,
         })
     }
 }

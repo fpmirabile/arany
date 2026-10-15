@@ -101,8 +101,6 @@ pub enum EngineError {
     CompactionInputTooLarge,
     #[error("Session is not idle at a committed Run boundary")]
     CompactionNotIdle,
-    #[error("Session compaction limit reached; start a new Session")]
-    CompactionLimit,
     #[error("Run cancellation did not drain within its deadline")]
     CancellationDrainTimeout,
     #[error("Run coordinator failed")]
@@ -148,6 +146,7 @@ pub struct GoalRequest {
     pub id: Option<crate::session::GoalId>,
     pub phase: Option<crate::session::GoalPhase>,
     pub budget: Option<crate::session::GoalBudget>,
+    pub resource_settings: crate::tools::ToolResourceSettings,
     /// Ignored for autonomous Goals, which finish only at a Goal stop condition.
     pub finish_after_run: bool,
     /// Set only by `autonomous`; a resumed Goal keeps the flag it was started with.
@@ -161,6 +160,7 @@ impl GoalRequest {
             id: None,
             phase: Some(phase),
             budget: Some(budget),
+            resource_settings: crate::tools::ToolResourceSettings::default(),
             finish_after_run: true,
             autonomous: false,
         }
@@ -184,6 +184,7 @@ impl GoalRequest {
             id: Some(id),
             phase: None,
             budget: None,
+            resource_settings: crate::tools::ToolResourceSettings::default(),
             finish_after_run,
             autonomous: false,
         }
@@ -286,12 +287,32 @@ struct GoalAdmission {
     phase: GoalPhase,
     budget: GoalBudget,
     autonomous: bool,
+    resource_settings: crate::tools::ToolResourceSettings,
     plan_contract: Option<GoalPlanContract>,
     is_new: bool,
     resume: bool,
     usage: GoalUsage,
+    uncertain_active_ms: u64,
     success_criterion_satisfied: bool,
-    observations_before_run: Vec<crate::tools::ToolObservation>,
+    success_state: crate::session::GoalSuccessState,
+}
+
+fn goal_context_metadata_reservation(
+    budget: &GoalBudget,
+    plan_contract: Option<&GoalPlanContract>,
+) -> Result<usize, EngineError> {
+    let facts = crate::provider::GoalContextFacts::maximum();
+    let serialized = serde_json::to_vec(&(budget, plan_contract, facts))
+        .map_err(|_| EngineError::ContextTooLarge)?
+        .len();
+    serialized
+        .checked_add(if plan_contract.is_none() {
+            crate::session::MAX_GOAL_PLAN_CONTRACT_BYTES
+        } else {
+            0
+        })
+        .and_then(|bytes| bytes.checked_add(64))
+        .ok_or(EngineError::ContextTooLarge)
 }
 
 fn goal_report(
@@ -441,13 +462,40 @@ fn goal_report(
                     if observation.attested_for(&tool.intent) => {}
                 crate::tools::ToolDisposition::Denied
                 | crate::tools::ToolDisposition::Failed
-                | crate::tools::ToolDisposition::Conflict
-                | crate::tools::ToolDisposition::Limit => push_goal_report_item(
+                | crate::tools::ToolDisposition::Conflict => push_goal_report_item(
                     &mut report,
                     GoalReportSection::Unresolved,
                     &format!("{label} failed; its effect was not recorded as successful."),
                     &mut omitted_facts,
                 ),
+                crate::tools::ToolDisposition::Limit => {
+                    let timeout_limit = match call {
+                        crate::tools::ToolCall::Command { .. } => {
+                            let requested = goal
+                                .plan_contract
+                                .as_ref()
+                                .and_then(|contract| contract.command_timeout_ms)
+                                .unwrap_or(goal.resource_settings.default_command_timeout_ms);
+                            (requested > goal.resource_settings.max_command_timeout_ms).then_some((
+                                requested,
+                                goal.resource_settings.max_command_timeout_ms,
+                            ))
+                        }
+                        _ => None,
+                    };
+                    let fact = timeout_limit.map_or_else(
+                        || format!("{label} failed; its effect was not recorded as successful."),
+                        |(requested, maximum)| {
+                            crate::tools::types::command_timeout_limit_message(requested, maximum)
+                        },
+                    );
+                    push_goal_report_item(
+                        &mut report,
+                        GoalReportSection::Unresolved,
+                        &fact,
+                        &mut omitted_facts,
+                    );
+                }
                 crate::tools::ToolDisposition::Uncertain
                 | crate::tools::ToolDisposition::Cancelled => {
                     if observation.cache_update != crate::tools::CacheUpdate::Uncertain {
@@ -589,6 +637,7 @@ mod goal_report_tests {
             intent: command_intent,
             observation: Some(command_observation),
             review_call_index: None,
+            finished_sequence: None,
         }];
         tools.extend((0..15).map(|index| {
             let intent = EffectIntent {
@@ -627,6 +676,7 @@ mod goal_report_tests {
                 intent,
                 observation: Some(observation),
                 review_call_index: None,
+                finished_sequence: None,
             }
         }));
         let run = RunView {
@@ -649,6 +699,8 @@ mod goal_report_tests {
             accepted_sequence: 1,
             finished_sequence: Some(2),
             tools,
+            tool_compaction_summary: None,
+            tool_compaction_covered_count: 0,
             display: Vec::new(),
         };
         let goal = GoalView {
@@ -658,15 +710,20 @@ mod goal_report_tests {
             budget: GoalBudget::default(),
             phase: GoalPhase::Implementation,
             autonomous: false,
+            resource_settings: crate::tools::ToolResourceSettings::default(),
             status: GoalStatus::Running,
             run_ids: vec![run_id],
             active_run: None,
             plan_contract: None,
+            success_state: crate::session::GoalSuccessState::NoContract,
             success_criterion_satisfied: false,
             awaiting_plan_contract: false,
             active_ms: 0,
             uncertain_active_ms: 0,
-            active_time_reservation: None,
+            reserved_active_run: None,
+            reserved_active_ms: None,
+            compaction_call_reserved: None,
+            uncertain_compaction_calls: 0,
             provider_calls: 1,
             unobserved_provider_calls: Vec::new(),
             known_tokens: 0,
@@ -783,8 +840,9 @@ mod goal_report_tests {
             intent: uncertain_intent.clone(),
             observation: Some(uncertain_observation),
             review_call_index: None,
+            finished_sequence: None,
         });
-        assert_eq!(late_run.tools.len(), crate::tools::MAX_TOOL_CALLS - 3);
+        assert_eq!(late_run.tools.len(), 13);
         late_run.agents[0].summary = Some("\u{1}".repeat(2_048));
         let mut late_view = view.clone();
         late_view.runs = vec![late_run.clone()];
@@ -866,8 +924,9 @@ mod goal_report_tests {
             observation: Some(failed_observation),
             intent: failed_intent,
             review_call_index: None,
+            finished_sequence: None,
         });
-        assert_eq!(byte_run.tools.len(), crate::tools::MAX_TOOL_CALLS - 2);
+        assert_eq!(byte_run.tools.len(), 14);
         byte_run.agents[0].summary = Some("x".repeat(1_800));
         let mut byte_view = view.clone();
         byte_view.runs = vec![byte_run.clone()];
@@ -954,9 +1013,9 @@ mod goal_report_tests {
                     observation: Some(observation),
                     intent,
                     review_call_index: None,
+                    finished_sequence: None,
                 });
             }
-            assert!(tools.len() <= crate::tools::MAX_TOOL_CALLS);
             let mut saturation_run = run.clone();
             saturation_run.id = run_id;
             saturation_run.agents[0].id = agent_run_id;
@@ -1002,6 +1061,54 @@ mod goal_report_tests {
             serde_json::to_vec(&saturation_report).unwrap().len()
                 <= crate::session::MAX_GOAL_REPORT_BYTES
         );
+
+        let mut timeout_intent = run.tools[0].intent.clone();
+        timeout_intent.id = Uuid::now_v7();
+        timeout_intent.limits.runtime_ms = 2_000;
+        timeout_intent.limits.cache_bytes = 0;
+        timeout_intent.limits.cache_candidate_bytes = 0;
+        timeout_intent.limits.cache_transfer_ms = 0;
+        let timeout_observation = crate::tools::ToolObservation {
+            intent: timeout_intent.clone(),
+            disposition: ToolDisposition::Limit,
+            output: crate::tools::types::command_timeout_limit_message(2_000, 1_000),
+            guard: None,
+            cache_update: CacheUpdate::NotApplicable,
+        };
+        assert!(timeout_observation.valid());
+        let mut timeout_run = run.clone();
+        timeout_run.tools = vec![ToolView {
+            intent: timeout_intent,
+            observation: Some(timeout_observation),
+            review_call_index: None,
+            finished_sequence: None,
+        }];
+        let mut timeout_goal = goal.clone();
+        timeout_goal.resource_settings.default_command_timeout_ms = 1_000;
+        timeout_goal.resource_settings.max_command_timeout_ms = 1_000;
+        timeout_goal.plan_contract = Some(crate::session::GoalPlanContract {
+            mission: "Run the configured command within pinned limits".into(),
+            paths: Vec::new(),
+            commands: vec!["cargo".into()],
+            resource_class: crate::tools::ToolResourceClass::Default,
+            command_timeout_ms: Some(2_000),
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: crate::session::GoalSuccessCriterion::WorkspaceFileContent {
+                path: "src/main.rs".into(),
+                content: "expected".into(),
+            },
+            budget: GoalBudget::default(),
+        });
+        let mut timeout_view = view.clone();
+        timeout_view.runs = vec![timeout_run.clone()];
+        timeout_view.goals = vec![timeout_goal.clone()];
+        let timeout_report = goal_report(&timeout_view, &timeout_run, &timeout_goal);
+        assert!(timeout_report.unresolved.iter().any(|item| {
+            item.contains("2000 ms")
+                && item.contains("pinned max 1000 ms")
+                && item.contains("Lower request or change /settings")
+        }));
     }
 }
 
@@ -1083,6 +1190,7 @@ mod goal_workspace_lease_tests {
                 budget: GoalBudget::default(),
                 phase: GoalPhase::Implementation,
                 autonomous: false,
+                resource_settings: crate::tools::ToolResourceSettings::default(),
             },
         ));
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -1211,6 +1319,7 @@ mod goal_workspace_lease_tests {
                     budget: GoalBudget::default(),
                     phase: GoalPhase::Implementation,
                     autonomous: false,
+                    resource_settings: crate::tools::ToolResourceSettings::default(),
                 },
             )
             .await
@@ -1235,6 +1344,7 @@ mod goal_workspace_lease_tests {
                 id: Some(goal_id),
                 phase: None,
                 budget: None,
+                resource_settings: crate::tools::ToolResourceSettings::default(),
                 finish_after_run: true,
                 autonomous: false,
             },
@@ -1524,20 +1634,16 @@ fn resolve_goal_admission(
             id,
             objective: goal.objective.clone(),
             phase: goal.phase,
-            budget: goal.budget.clone(),
+            budget: goal.budget,
             autonomous: goal.autonomous,
+            resource_settings: goal.resource_settings,
             plan_contract: goal.plan_contract.clone(),
             is_new: false,
             resume,
             usage: goal.resume_usage(view),
+            uncertain_active_ms: goal.uncertain_active_ms,
             success_criterion_satisfied: goal.success_criterion_satisfied,
-            observations_before_run: view
-                .runs
-                .iter()
-                .filter(|run| goal.run_ids.contains(&run.id))
-                .flat_map(|run| run.tools.iter())
-                .filter_map(|tool| tool.observation.clone())
-                .collect(),
+            success_state: goal.success_state.clone(),
         })
     } else {
         // A paused Goal does not block a new one; the Session lock serializes live Runs.
@@ -1545,12 +1651,9 @@ fn resolve_goal_admission(
             id: GoalId::new(),
             objective: request.objective.clone(),
             phase: request.goal.phase.ok_or(EngineError::InvalidRequest)?,
-            budget: request
-                .goal
-                .budget
-                .clone()
-                .ok_or(EngineError::InvalidRequest)?,
+            budget: request.goal.budget.ok_or(EngineError::InvalidRequest)?,
             autonomous: request.goal.autonomous,
+            resource_settings: request.goal.resource_settings,
             plan_contract: None,
             is_new: true,
             resume: false,
@@ -1561,8 +1664,9 @@ fn resolve_goal_admission(
                 known_tokens: 0,
                 token_usage_unknown: false,
             },
+            uncertain_active_ms: 0,
             success_criterion_satisfied: false,
-            observations_before_run: Vec::new(),
+            success_state: crate::session::GoalSuccessState::NoContract,
         })
     }
 }
@@ -1924,30 +2028,15 @@ impl<P: Provider + 'static> Engine<P> {
             }
             return Err(EngineError::GoalBudgetExhausted);
         }
-        let token_limit = budget.max_tokens;
-        let active_remaining_ms = budget.max_active_ms.saturating_sub(goal.usage.active_ms);
-        let mut event_budget = goal.budget.clone();
-        event_budget.max_provider_calls = budget
-            .max_provider_calls
-            .saturating_sub(goal.usage.provider_calls);
-        event_budget.max_runs = budget
-            .max_runs
-            .saturating_sub(u8::try_from(goal.usage.runs).unwrap_or(u8::MAX));
-        event_budget.max_active_ms = active_remaining_ms;
-        event_budget.max_tokens = token_limit;
-        let event_slots = event_budget
-            .event_slots(
-                request.policy.max_children(),
-                self.tools.is_some(),
-                progress.as_ref().is_some_and(RunProgress::previews_enabled),
-            )
-            .ok_or(EngineError::InvalidRequest)?;
-        self.store
-            .admit_operation(
-                session_id,
-                event_slots.saturating_add(usize::from(request.session_id.is_none())),
-            )
-            .await?;
+        // Run start covers the Goal lifecycle, the first action's envelope and the image message envelope; each later action admits its own.
+        let previews = progress.as_ref().is_some_and(RunProgress::previews_enabled);
+        let event_slots =
+            13 + if previews {
+                crate::session::MAX_DISPLAY_CHUNKS
+            } else {
+                0
+            } + usize::from(request.session_id.is_none());
+        self.store.admit_run_start(session_id, event_slots).await?;
         let provisional_workspace_lock = if goal.phase == crate::session::GoalPhase::Implementation
             && self.tools.as_ref().is_some_and(|(config, _)| config.write)
         {
@@ -1958,7 +2047,7 @@ impl<P: Provider + 'static> Engine<P> {
         if let Some(permissions) = &self.workspace_permissions {
             permissions.verify(&request.workspace)?;
         }
-        let tools = self
+        let mut tools = self
             .tools
             .as_ref()
             .map(|(config, executable)| {
@@ -2001,6 +2090,12 @@ impl<P: Provider + 'static> Engine<P> {
             ensure_session_workspace(view, workspace_device, workspace_inode)?;
         }
         let context_started = SystemTime::now();
+        let goal_metadata_reserved = goal_context_metadata_reservation(
+            goal.plan_contract
+                .as_ref()
+                .map_or(&goal.budget, |plan| &plan.budget),
+            goal.plan_contract.as_ref(),
+        )?;
         let context = CompiledContext::compile(
             history.as_ref(),
             &objective,
@@ -2009,18 +2104,25 @@ impl<P: Provider + 'static> Engine<P> {
             request.policy,
             tools
                 .as_ref()
-                .map_or(0, |_| crate::tools::MAX_TOOL_CONTEXT_BYTES),
+                .map_or(0, |_| crate::tools::types::MIN_TOOL_CONTEXT_BYTES),
+            goal_metadata_reserved,
         )
         .map_err(|_| EngineError::ContextTooLarge)?;
+        if let Some(runtime) = &mut tools {
+            runtime.set_context_limit(context.tool_context_budget_bytes)?;
+        }
         if selection.custom_profile_provenance.is_some() && !context.images.is_empty() {
             return Err(EngineError::ImagesNotAdmitted);
         }
         let context_ended = SystemTime::now();
-        let provider_concurrency = if token_limit.is_some() {
+        let provider_concurrency = if budget.max_tokens.is_some() {
             1
         } else {
             selection.concurrency
         };
+        let compaction_provider_name = selection.name.clone();
+        let compaction_chatgpt_provenance = selection.chatgpt_provenance.clone();
+        let compaction_output_token_bound = selection.output_token_bound;
         let config = RunConfig {
             provider: selection.name,
             model: selection.model.clone(),
@@ -2106,9 +2208,10 @@ impl<P: Provider + 'static> Engine<P> {
                         goal_id: goal.id,
                         objective: objective.clone(),
                         workspace_identity,
-                        budget: goal.budget.clone(),
+                        budget: goal.budget,
                         phase: goal.phase,
                         autonomous: goal.autonomous,
+                        resource_settings: goal.resource_settings,
                     },
                 )
                 .await?;
@@ -2165,24 +2268,6 @@ impl<P: Provider + 'static> Engine<P> {
             Event::RunStarted { run_id, config },
         )
         .await?;
-        let active_segment_ms = active_remaining_ms.min(crate::session::MAX_GOAL_RUN_ACTIVE_MS);
-        let active_reserved_sequence = append_observed(
-            &self.store,
-            publisher.as_ref(),
-            None,
-            session_id,
-            Event::GoalActiveTimeReserved {
-                goal_id: goal.id,
-                run_id,
-                reserved_ms: active_segment_ms,
-            },
-        )
-        .await?;
-        goal_trace.event_committed(
-            active_reserved_sequence,
-            crate::telemetry::TraceEventKind::GoalActiveTimeReserved,
-        );
-        let active_started = tokio::time::Instant::now();
         let trace = self.telemetry.begin_goal_run(
             session_id,
             run_id,
@@ -2229,17 +2314,17 @@ impl<P: Provider + 'static> Engine<P> {
                 .collect(),
             history: context.history,
             context_summary: context.summary,
-            goal_budget: Some(budget.clone()),
+            goal_budget: Some(budget),
             goal_plan_contract: goal.plan_contract.clone(),
+            goal_context_facts: None,
             child_results: Vec::new(),
             max_output_tokens: OUTPUT_TOKEN_CAP,
             tools: tool_context,
         };
         let goal_run_budget = Arc::new(GoalRunBudget::new(
             &goal,
-            &budget,
-            active_segment_ms,
-            active_started,
+            budget.max_provider_calls,
+            budget.max_tokens,
         ));
         RunLoop::new(
             &self.store,
@@ -2254,6 +2339,9 @@ impl<P: Provider + 'static> Engine<P> {
                 policy: request.policy,
                 concurrency: provider_concurrency,
                 goal_phase: goal.phase,
+                provider_name: compaction_provider_name,
+                chatgpt_provenance: compaction_chatgpt_provenance,
+                output_token_bound: compaction_output_token_bound,
                 cancellation,
                 tools: tools.as_ref(),
                 approvals: self.tool_approvals.as_ref(),
@@ -2276,34 +2364,7 @@ impl<P: Provider + 'static> Engine<P> {
             .filter(|run| run.id == run_id)
             .ok_or(EngineError::InvalidHistory)?
             .clone();
-        let reserved_active_ms = view
-            .goal(goal.id)
-            .and_then(|goal| goal.active_time_reservation)
-            .filter(|(reserved_run, _)| *reserved_run == run_id)
-            .map(|(_, reserved_ms)| reserved_ms)
-            .ok_or(EngineError::InvalidHistory)?;
-        let active_ms = goal_run_budget.elapsed_active_ms().min(reserved_active_ms);
-        append_observed(
-            &self.store,
-            None,
-            Some(&trace),
-            session_id,
-            Event::GoalActiveTimeSettled {
-                goal_id: goal.id,
-                run_id,
-                active_ms,
-            },
-        )
-        .await?;
-        // Settlement only moves the reservation into active time, so the settled Goal needs no second replay.
-        let mut goal_view = view
-            .goal(goal.id)
-            .ok_or(EngineError::InvalidHistory)?
-            .clone();
-        goal_view.active_ms = goal_view
-            .active_ms
-            .checked_add(active_ms)
-            .ok_or(EngineError::InvalidHistory)?;
+        let goal_view = view.goal(goal.id).ok_or(EngineError::InvalidHistory)?;
         // Only Run failure or a satisfied/exhausted Goal settles it; a cancelled Run leaves its Goal open to resume.
         let terminal = match run.status {
             crate::session::RunStatus::Finished if goal.autonomous => {
@@ -2325,7 +2386,7 @@ impl<P: Provider + 'static> Engine<P> {
         };
         let mut goal_status = GoalStatus::Running;
         if let Some(status) = terminal {
-            let report = goal_report(&view, &run, &goal_view);
+            let report = goal_report(&view, &run, goal_view);
             append_observed(
                 &self.store,
                 None,
@@ -2349,7 +2410,7 @@ impl<P: Provider + 'static> Engine<P> {
             _ => return Err(EngineError::InvalidHistory),
         };
         trace.finish(trace_outcome);
-        goal_trace.finish(goal_status, trace_outcome, &goal_view);
+        goal_trace.finish(goal_status, trace_outcome, goal_view);
         Ok(RunTurn {
             outcome: RunOutcome {
                 session_id,
@@ -2373,6 +2434,7 @@ impl<P: Provider + 'static> Engine<P> {
                 .as_ref()
                 .is_some_and(|title| title.is_empty() || title.len() > 128)
             || request.policy.validate().is_err()
+            || !request.goal.resource_settings.valid()
             || match (&request.goal.id, &request.goal.budget) {
                 (Some(_), Some(_)) | (None, None) => true,
                 (Some(_), None) => false,

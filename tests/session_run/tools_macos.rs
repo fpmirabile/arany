@@ -106,7 +106,6 @@ fn trace_snapshot(root: &Path) -> serde_json::Value {
                         | "bytes-overflow"
                         | "files-overflow"
                         | "directory-conversion"
-                        | "budget"
                 ) {
                     return None;
                 }
@@ -294,6 +293,8 @@ impl Provider for Journey {
                                 mission: "Complete the bounded native Tool journey".into(),
                                 paths,
                                 commands,
+                                resource_class: arany::ToolResourceClass::Default,
+                                command_timeout_ms: None,
                                 skills,
                                 mcp_tools,
                                 success_criterion,
@@ -784,6 +785,22 @@ int main(int argc, char **argv) {
 struct RuntimeJourney {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
     calls: Vec<ToolCall>,
+    resource_class: arany::ToolResourceClass,
+}
+
+fn build_goal_request() -> arany::GoalRequest {
+    let mut goal = arany::GoalRequest::new(
+        arany::GoalBudget::default(),
+        arany::GoalPhase::Implementation,
+    );
+    goal.resource_settings = arany::ToolResourceSettings {
+        build_memory_bytes: 512 * 1024 * 1024,
+        build_processes: 32,
+        build_project_bytes: 128 * 1024 * 1024,
+        build_cache_bytes: 64 * 1024 * 1024,
+        ..arany::ToolResourceSettings::default()
+    };
+    goal
 }
 
 const RUNTIME_CACHE_CANARY: &str = "ARANY_RUNTIME_CACHE_PERSISTENCE_CANARY";
@@ -830,6 +847,8 @@ impl Provider for RuntimeJourney {
                     mission: "Run the selected runtime commands".into(),
                     paths: Vec::new(),
                     commands: vec![program],
+                    resource_class: self.resource_class,
+                    command_timeout_ms: None,
                     skills: Vec::new(),
                     mcp_tools: Vec::new(),
                     success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
@@ -976,6 +995,7 @@ async fn native_runtime_mount_journey_helper() {
         RuntimeJourney {
             requests: refused_requests.clone(),
             calls: vec![runtime_call.clone()],
+            resource_class: arany::ToolResourceClass::Default,
         },
     )
     .unwrap();
@@ -1080,6 +1100,7 @@ async fn native_runtime_mount_journey_helper() {
         RuntimeJourney {
             requests: seed_requests,
             calls: vec![cache_seed.clone()],
+            resource_class: arany::ToolResourceClass::Default,
         },
     )
     .unwrap();
@@ -1222,6 +1243,7 @@ async fn native_runtime_mount_journey_helper() {
         RuntimeJourney {
             requests: accepted_requests.clone(),
             calls: accepted_calls.clone(),
+            resource_class: arany::ToolResourceClass::Build,
         },
     )
     .unwrap();
@@ -1234,6 +1256,28 @@ async fn native_runtime_mount_journey_helper() {
             approvals,
         )
         .unwrap();
+    for (project_bytes, cache_bytes) in [
+        (128 * 1024 * 1024 + 1, 64 * 1024 * 1024),
+        (128 * 1024 * 1024, 64 * 1024 * 1024 + 1),
+    ] {
+        let mut goal = build_goal_request();
+        goal.resource_settings.build_project_bytes = project_bytes;
+        goal.resource_settings.build_cache_bytes = cache_bytes;
+        let invalid = engine
+            .run(RunRequest {
+                session_id: None,
+                title: Some("Rejected native storage granularity".into()),
+                objective: "The unsupported resource values must not be dispatched".into(),
+                images: Vec::new(),
+                workspace: workspace.clone(),
+                include_paths: Vec::new(),
+                policy: CollaborationPolicy::Single,
+                goal,
+            })
+            .await;
+        assert!(matches!(invalid, Err(arany::EngineError::InvalidRequest)));
+        assert!(accepted_requests.lock().unwrap().is_empty());
+    }
     let run = engine.run(RunRequest {
         session_id: None,
         title: Some("Selected runtime success".into()),
@@ -1243,10 +1287,7 @@ async fn native_runtime_mount_journey_helper() {
         workspace: workspace.clone(),
         include_paths: Vec::new(),
         policy: CollaborationPolicy::Single,
-        goal: arany::GoalRequest::new(
-            arany::GoalBudget::default(),
-            arany::GoalPhase::Implementation,
-        ),
+        goal: build_goal_request(),
     });
     let approve = async {
         for call in &accepted_calls {
@@ -1275,6 +1316,30 @@ async fn native_runtime_mount_journey_helper() {
         crate::safe_run_diagnostics(&accepted.run)
     );
     assert_eq!(accepted.run.tools.len(), 3);
+    for tool in &accepted.run.tools {
+        let observation = tool.observation.as_ref().expect("Build Tool receipt");
+        let limits = &observation.intent.limits;
+        assert_eq!(limits.resource_class, arany::ToolResourceClass::Build);
+        assert_eq!(
+            limits.resource_profile,
+            arany::ToolResourceProfile::MacosSupervised
+        );
+        assert_eq!(limits.runtime_ms, 120_000);
+        assert_eq!(limits.cache_transfer_ms, 120_000);
+        assert_eq!(limits.memory_bytes, 512 * 1024 * 1024);
+        assert_eq!(limits.max_processes, 32);
+        assert_eq!(limits.project_bytes, 128 * 1024 * 1024);
+        assert_eq!(limits.cache_requested_bytes, 64 * 1024 * 1024);
+        assert!(limits.cache_bytes >= 40 * 1024 * 1024);
+        assert!(limits.cache_bytes <= limits.cache_requested_bytes);
+        assert!(limits.cache_candidate_bytes <= limits.cache_bytes);
+        let receipt = observation.guard.as_ref().expect("Build Guard receipt");
+        assert_eq!(receipt.limits, *limits);
+        assert_eq!(
+            receipt.enforcement_digest,
+            observation.intent.enforcement_digest
+        );
+    }
     let accepted_observations = accepted
         .run
         .tools
@@ -1423,6 +1488,7 @@ async fn native_runtime_mount_journey_helper() {
         RuntimeJourney {
             requests: verify_requests,
             calls: vec![verify_cache.clone()],
+            resource_class: arany::ToolResourceClass::Default,
         },
     )
     .unwrap();

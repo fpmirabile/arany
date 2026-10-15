@@ -120,26 +120,7 @@ pub(super) fn product_child_of(shell_pid: u32) -> Pid {
 }
 
 pub(super) fn product_child_of_executable(shell_pid: u32, product: &Path) -> Pid {
-    let children_path = format!("/proc/{shell_pid}/task/{shell_pid}/children");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if let Ok(children) = std::fs::read_to_string(&children_path) {
-            for raw in children.split_ascii_whitespace() {
-                let Ok(raw_pid) = raw.parse::<i32>() else {
-                    continue;
-                };
-                if std::fs::read_link(format!("/proc/{raw_pid}/exe"))
-                    .ok()
-                    .as_deref()
-                    == Some(product)
-                {
-                    return Pid::from_raw(raw_pid).expect("positive product PID");
-                }
-            }
-        }
-        assert!(Instant::now() < deadline, "active product child not found");
-        thread::yield_now();
-    }
+    try_product_child_of_executable(shell_pid, product).expect("active product child not found")
 }
 
 pub(super) fn try_product_child_of_executable(shell_pid: u32, product: &Path) -> Option<Pid> {

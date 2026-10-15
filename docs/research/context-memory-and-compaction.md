@@ -193,35 +193,47 @@ byte preflight is not a reservation against independent writers. The
 [execution contract](../specs/execution.md#admission-persistence-and-recovery)
 owns those public limits.
 
-The existing ignored Linux tmux gate,
+The ignored Linux tmux gate,
 [`active_keyboard_stays_visible_with_near_cap_history`](../../tests/session_run/active_terminal/tmux/history_latency.rs),
-is written to seed one 1,600-Run/9,601-Event Session with 65,528,000 bytes of
-objective and answer text, then exercise resume and row indexing while measuring
-Run submission-to-Provider dispatch and active key response during delegation.
-As currently checked in, however, its seed records `AgentFinished(Finished)`
-without a preceding `ProviderCallRecorded(Finished)`. The
-[current reducer](../../src/session/reducer.rs) requires that observed
-successful call, so it rejects the first Run before the
-fixture reaches its intended history or measurements. On the current baseline,
-recording that required successful Provider call for each of the 1,600 Runs
-alone would increase the seed from 9,601 to 11,201 Events, already above the
-10,000-Event lineage limit; any additional lifecycle or reservation Events
-change that count further. Treat the checked-in counts as intended workload
-only. Once all required lifecycle and reservation Events are accounted for,
-rebalance the Run count and text/Event mix under the final bounds, then
-explicitly assert Event and serialized-payload counts before measuring.
-Even if repaired, this gate does not isolate cold replay duration, assert
-payload across 128 MiB, assert database size or sample RSS. The separate
-named-host
+now encodes 800 Runs across 50 current Goal lifecycles. Each Run includes its
+link, accepted Message, active-time reservation and settlement, Agent spawn,
+Provider-call reservation and successful `ProviderCallRecorded`, finish and
+commit. Its seed count is `1 + 800 × 11 + 50 × 2 = 8,901` Events, leaving 1,099
+below the 10,000 lineage limit. The per-Run objective and answer strings total
+32,764,000 raw bytes, about half the old 65,528,000-byte intent; that is a
+smaller workload, not a same-volume replacement. The fixture asserts the seed
+count, text bytes, serialized payload bytes and SQLite file size, and replays
+the Session with 100 fresh read-only Store instances while reporting nearest-
+rank p50/p95/max `load_view` times. It then resumes one fresh product process
+in tmux, retains the existing input/delegation scenario, and reports resume to
+composer-ready time plus idle/final product RSS and high-water RSS. The replay
+samples start with fresh Store state but do not clear the OS page cache; they
+are not cold-disk evidence. Store replay timing and interactive terminal
+history/input timing are separate observations, with the latter including
+terminal work after the SessionView has been reduced.
+
+The hosted run strictly replayed all 8,901 Events and sampled 100 fresh
+read-only `load_view` calls. It did not reach the resumed composer within the
+unchanged 30-second readiness gate, so the run supplies workload-scoped Store
+replay timing only; it produced no complete resume/input latency or RSS
+evidence. The old
+Classic path synchronously inserted every historical Run before drawing the
+composer. The bounded whole-Run projection now has assertions for its status
+cue and a full-history find into the omitted prefix, but the repaired hosted
+path still needs a rerun. Fresh Store instances do not clear the OS page cache,
+so these timings are not cold-disk evidence. This workload does not establish
+the exact 10,000-Event boundary, the 128 MiB HotSession limit, 256 MiB
+shared-Store quota, near-quota fallback, or prior 65.5 MB text volume. The separate named-host
 `show_replay_latency_on_named_host` gate in
 [`tests/session_run/performance.rs`](../../tests/session_run/performance.rs)
 uses a 100-Event Session. A different ignored
 `database_capacity_is_admitted_before_provider_usage` gate in
 [`tests/engine_run.rs`](../../tests/engine_run.rs) pads a non-Event table near
 the shared file limit to check StorageFull admission and canonical reopen; it
-is not history replay or latency evidence. None of these gates were run for
-this evaluation. The existing named-host owners and remaining evidence gap are
-recorded in [`agents/history.md`](../../agents/history.md) and
+is not history replay or latency evidence. Record sanitized Linux CPU/kernel,
+load and pressure metadata on the named run; neither this metadata nor an
+unexecuted fixture is performance evidence. The remaining evidence gap is
+tracked in [`agents/history.md`](../../agents/history.md) and
 [`NEXT_STEPS.md`](../../NEXT_STEPS.md).
 
 ### Proposed policy, not accepted behavior

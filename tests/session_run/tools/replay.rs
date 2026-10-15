@@ -11,11 +11,11 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     let goal = arany::GoalId::new();
     let run = RunId::new();
     let primary = AgentRunId::new();
-    const AGENT_SPAWNED: usize = 6;
-    const TOOL_STARTED: usize = 10;
-    const TOOL_FINISHED: usize = 11;
-    const NEXT_CALL_RESERVED: usize = 12;
-    const NEXT_CALL_RECORDED: usize = 13;
+    const AGENT_SPAWNED: usize = 5;
+    const TOOL_STARTED: usize = 11;
+    const TOOL_FINISHED: usize = 12;
+    const NEXT_CALL_RESERVED: usize = 14;
+    const NEXT_CALL_RECORDED: usize = 15;
     const COMMAND_STARTED: usize = TOOL_STARTED;
     const COMMAND_FINISHED: usize = TOOL_STARTED + 1;
     const INTEGRATION_STARTED: usize = TOOL_STARTED + 2;
@@ -24,8 +24,6 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     let policy = arany::ToolPolicyReceipt {
         contract_version: 1,
         config_digest: [1; 32],
-        max_tool_calls: 16,
-        max_model_steps: 32,
         max_context_bytes: 65536,
     };
     let config = RunConfig {
@@ -111,6 +109,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             budget: arany::GoalBudget::default(),
             phase: arany::GoalPhase::Implementation,
             autonomous: false,
+            resource_settings: arany::ToolResourceSettings::default(),
         },
         Event::GoalRunLinked {
             goal_id: goal,
@@ -126,11 +125,6 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             run_id: run,
             config,
         },
-        Event::GoalActiveTimeReserved {
-            goal_id: goal,
-            run_id: run,
-            reserved_ms: 30_000,
-        },
         Event::AgentSpawned {
             run_id: run,
             agent_run_id: primary,
@@ -138,12 +132,22 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             ordinal: 0,
             objective: None,
         },
+        Event::GoalActiveTimeReserved {
+            goal_id: goal,
+            run_id: run,
+            reserved_ms: 30_000,
+        },
         Event::GoalProviderCallReserved {
             goal_id: goal,
             run_id: run,
             agent_run_id: primary,
         },
         record(ProviderCallDisposition::ToolRequested),
+        Event::GoalActiveTimeSettled {
+            goal_id: goal,
+            run_id: run,
+            active_ms: 1_000,
+        },
         Event::GoalPlanContractRecorded {
             goal_id: goal,
             run_id: run,
@@ -151,6 +155,8 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 mission: "Verify the bounded command result".into(),
                 paths: vec!["src".into()],
                 commands: vec!["shell".into()],
+                resource_class: arany::ToolResourceClass::Default,
+                command_timeout_ms: None,
                 skills: Vec::new(),
                 mcp_tools: Vec::new(),
                 success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
@@ -159,8 +165,6 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 },
                 budget: arany::GoalBudget::default(),
             },
-            active_ms: 0,
-            reserved_ms: 30_000,
         },
         Event::ToolStarted {
             run_id: run,
@@ -174,12 +178,22 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         },
     ];
     let suffix = vec![
+        Event::GoalActiveTimeReserved {
+            goal_id: goal,
+            run_id: run,
+            reserved_ms: 30_000,
+        },
         Event::GoalProviderCallReserved {
             goal_id: goal,
             run_id: run,
             agent_run_id: primary,
         },
         record(ProviderCallDisposition::Finished),
+        Event::GoalActiveTimeSettled {
+            goal_id: goal,
+            run_id: run,
+            active_ms: 1_000,
+        },
         Event::AgentFinished {
             run_id: run,
             agent_run_id: primary,
@@ -194,11 +208,6 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         Event::RunFinished {
             run_id: run,
             disposition: RunDisposition::Finished,
-        },
-        Event::GoalActiveTimeSettled {
-            goal_id: goal,
-            run_id: run,
-            active_ms: 1_000,
         },
     ];
     let replay = |events: Vec<Event>| {
@@ -267,6 +276,78 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     assert_eq!(
         replay(all.clone()).unwrap().unwrap().runs[0].status,
         RunStatus::Finished
+    );
+    let timeout_refusal = || {
+        let mut row = prefix.to_vec();
+        for event in &mut row {
+            match event {
+                Event::GoalStarted {
+                    resource_settings, ..
+                } => {
+                    resource_settings.default_command_timeout_ms = 1_000;
+                    resource_settings.max_command_timeout_ms = 1_000;
+                }
+                Event::GoalPlanContractRecorded { contract, .. } => {
+                    contract.command_timeout_ms = Some(2_000);
+                }
+                Event::ToolStarted { intent, .. } => {
+                    intent.limits.runtime_ms = 2_000;
+                    intent.limits.cache_bytes = 0;
+                    intent.limits.cache_candidate_bytes = 0;
+                    intent.limits.cache_transfer_ms = 0;
+                }
+                Event::ToolFinished { observation, .. } => {
+                    observation.intent.limits.runtime_ms = 2_000;
+                    observation.intent.limits.cache_bytes = 0;
+                    observation.intent.limits.cache_candidate_bytes = 0;
+                    observation.intent.limits.cache_transfer_ms = 0;
+                    observation.disposition = ToolDisposition::Limit;
+                    observation.output = "Timeout 2000 ms exceeds pinned max 1000 ms. Lower request or change /settings; Goal remains pinned.".into();
+                    observation.guard = None;
+                    observation.cache_update = arany::CacheUpdate::NotApplicable;
+                }
+                _ => {}
+            }
+        }
+        row
+    };
+    let admitted_timeout_refusal = timeout_refusal();
+    assert!(
+        replay(admitted_timeout_refusal.clone()).is_ok(),
+        "over-max command is recorded as a correlated non-dispatched Limit"
+    );
+    let mut dispatched_over_max = admitted_timeout_refusal.clone();
+    if let Event::ToolFinished { observation, .. } = &mut dispatched_over_max[TOOL_FINISHED] {
+        let digest = Sha256::digest(serde_json::to_vec(&observation.intent).unwrap()).into();
+        observation.disposition = ToolDisposition::Succeeded;
+        observation.output = serde_json::json!({
+            "exit_code": 0,
+            "stdout": "",
+            "stderr": "",
+            "changeset": {"files": []}
+        })
+        .to_string();
+        observation.guard = Some(arany::GuardReceipt {
+            contract_version: 1,
+            intent_digest: digest,
+            enforcement_digest: observation.intent.enforcement_digest,
+            limits: observation.intent.limits.clone(),
+        });
+    }
+    assert!(
+        replay(dispatched_over_max).is_err(),
+        "replay rejects a guarded success above the pinned maximum"
+    );
+    let mut mismatched_limit = admitted_timeout_refusal;
+    if let Event::ToolStarted { intent, .. } = &mut mismatched_limit[TOOL_STARTED] {
+        intent.limits.runtime_ms = 1_000;
+    }
+    if let Event::ToolFinished { observation, .. } = &mut mismatched_limit[TOOL_FINISHED] {
+        observation.intent.limits.runtime_ms = 1_000;
+    }
+    assert!(
+        replay(mismatched_limit).is_err(),
+        "replay requires the requested timeout to match the plan and receipt"
     );
     let mut review = record(ProviderCallDisposition::Finished);
     if let Event::ProviderCallRecorded { record, .. } = &mut review {
@@ -443,11 +524,6 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 run_id: run,
                 disposition: RunDisposition::Failed,
             },
-            Event::GoalActiveTimeSettled {
-                goal_id: goal,
-                run_id: run,
-                active_ms: 1_000,
-            },
         ]);
         let view = replay(denied).unwrap().unwrap();
         let feedback = arany::render_run_feedback(&view.runs[0]).unwrap();
@@ -610,11 +686,6 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         Event::RunFinished {
             run_id: run,
             disposition: RunDisposition::Failed,
-        },
-        Event::GoalActiveTimeSettled {
-            goal_id: goal,
-            run_id: run,
-            active_ms: 1_000,
         },
     ]);
     let view = replay(unpublished).unwrap().unwrap();
@@ -781,72 +852,6 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             "integration journal correlation: {case}"
         );
     }
-    for pairs in [8, 9] {
-        let mut rows = prefix[..AGENT_SPAWNED + 1].to_vec();
-        for pair in 0..pairs {
-            let mut command = command_intent.clone();
-            command.id = uuid::Uuid::now_v7();
-            let mut integration = integration_intent.clone();
-            integration.id = uuid::Uuid::now_v7();
-            let ToolCall::ApplyChangeset {
-                source_intent_digest,
-                ..
-            } = &mut integration.call
-            else {
-                unreachable!()
-            };
-            *source_intent_digest = Sha256::digest(serde_json::to_vec(&command).unwrap()).into();
-            rows.push(Event::GoalProviderCallReserved {
-                goal_id: goal,
-                run_id: run,
-                agent_run_id: primary,
-            });
-            rows.push(record(ProviderCallDisposition::ToolRequested));
-            if pair == 0 {
-                rows.push(Event::GoalPlanContractRecorded {
-                    goal_id: goal,
-                    run_id: run,
-                    contract: arany::GoalPlanContract {
-                        mission: "Admit the synthetic command changeset".into(),
-                        paths: vec!["src".into()],
-                        commands: vec!["shell".into()],
-                        skills: Vec::new(),
-                        mcp_tools: Vec::new(),
-                        success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
-                            call: Box::new(command_intent.call.clone()),
-                        },
-                        budget: arany::GoalBudget::default(),
-                    },
-                    active_ms: 0,
-                    reserved_ms: 30_000,
-                });
-            }
-            rows.extend([
-                Event::ToolStarted {
-                    run_id: run,
-                    agent_run_id: primary,
-                    intent: command.clone(),
-                },
-                observed(command, ToolDisposition::Failed, command_result.clone()),
-                Event::ToolStarted {
-                    run_id: run,
-                    agent_run_id: primary,
-                    intent: integration.clone(),
-                },
-                observed(
-                    integration,
-                    ToolDisposition::Succeeded,
-                    "{\"applied\":1}".into(),
-                ),
-            ]);
-        }
-        rows.extend(suffix.clone());
-        assert_eq!(
-            replay(rows).is_ok(),
-            pairs == 8,
-            "integration consumes an effect slot: {pairs}"
-        );
-    }
     let mut out_of_plan_integration = integrated.clone();
     if let Event::ToolFinished { observation, .. } = &mut out_of_plan_integration[COMMAND_FINISHED]
     {
@@ -893,11 +898,6 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             run_id: run,
             disposition: RunDisposition::Failed,
         },
-        Event::GoalActiveTimeSettled {
-            goal_id: goal,
-            run_id: run,
-            active_ms: 1_000,
-        },
     ]);
     let view = replay(out_of_plan_integration.clone()).unwrap().unwrap();
     assert_eq!(view.runs[0].status, RunStatus::Failed);
@@ -928,11 +928,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         replay(forged_out_of_plan_publication).is_err(),
         "an out-of-plan integration cannot carry a dispatched or successful receipt"
     );
-    for (count, output, accepted) in [
-        (16, "", true),
-        (17, "", false),
-        (16, &"x".repeat(8192), false),
-    ] {
+    for (count, accepted) in [(63, true), (64, false)] {
         let mut rows = prefix[..AGENT_SPAWNED + 1].to_vec();
         for call_index in 0..count {
             let mut start = prefix[TOOL_STARTED].clone();
@@ -945,7 +941,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 unreachable!()
             };
             observation.intent = intent.clone();
-            observation.output = output.into();
+            observation.output.clear();
             observation.guard.as_mut().unwrap().intent_digest =
                 Sha256::digest(serde_json::to_vec(intent).unwrap()).into();
             rows.extend([
@@ -1070,6 +1066,8 @@ pub(super) async fn native_command_changeset_corpus(
                                         .into(),
                                     paths,
                                     commands,
+                                    resource_class: arany::ToolResourceClass::Default,
+                                    command_timeout_ms: None,
                                     skills: Vec::new(),
                                     mcp_tools: Vec::new(),
                                     success_criterion:
@@ -1147,7 +1145,6 @@ pub(super) async fn native_command_changeset_corpus(
             "rm src/m-modified; mkdir src/m-modified; printf x > src/m-modified/child",
             Some(ToolDisposition::Denied),
         ),
-        ("budget", "", None),
     ] {
         let case_root = root.join(format!("changeset-{case}"));
         let workspace = case_root.join("workspace");
@@ -1226,12 +1223,6 @@ pub(super) async fn native_command_changeset_corpus(
         };
         let requests = Arc::new(Mutex::new(Vec::new()));
         let mut calls = vec![call.clone()];
-        if case == "budget" {
-            calls.splice(
-                0..0,
-                std::iter::repeat_n(ToolCall::List { path: "src".into() }, 15),
-            );
-        }
         if case == "nonzero" {
             calls.push(ToolCall::Command {
                 program: program.into(),
@@ -1367,7 +1358,7 @@ pub(super) async fn native_command_changeset_corpus(
         });
         engine.close().await.unwrap();
         let human_denied = matches!(case, "deny" | "drop" | "cancel");
-        let stopped = human_denied || matches!(case, "partial" | "budget");
+        let stopped = human_denied || case == "partial";
         let criterion_unmet = matches!(
             case,
             "conflict"
@@ -1406,7 +1397,7 @@ pub(super) async fn native_command_changeset_corpus(
         assert_eq!(
             requests.len(),
             if stopped {
-                if case == "budget" { 16 } else { 1 }
+                1
             } else if case == "nonzero" {
                 3
             } else if case == "ai-approve" {
@@ -1528,46 +1519,6 @@ pub(super) async fn native_command_changeset_corpus(
                 serde_json::to_value(&call).unwrap(),
                 "out-of-plan integration never reaches the AI judge"
             );
-        }
-        if case == "budget" {
-            assert_eq!(
-                tools.len(),
-                15,
-                "command reserves its integration slot before dispatch"
-            );
-            assert!(
-                tools
-                    .iter()
-                    .all(|tool| matches!(tool.intent.call, ToolCall::List { .. })
-                        && tool.observation.as_ref().unwrap().disposition
-                            == ToolDisposition::Succeeded
-                        && tool.observation.as_ref().unwrap().guard.is_some())
-            );
-            assert_eq!(
-                requests
-                    .last()
-                    .unwrap()
-                    .tools
-                    .as_ref()
-                    .unwrap()
-                    .observations
-                    .len(),
-                15
-            );
-            assert!(requests.iter().enumerate().all(|(index, request)| {
-                request.tools.as_ref().unwrap().observations.len() == index
-            }));
-            assert!(view.runs[0].assistant_message.is_none());
-            assert!(!workspace.join("src/a-created").exists());
-            assert_eq!(
-                std::fs::read(workspace.join("src/m-modified")).unwrap(),
-                b"before\n"
-            );
-            assert_eq!(
-                std::fs::read(workspace.join("src/z-deleted")).unwrap(),
-                b"delete\n"
-            );
-            continue;
         }
         assert_eq!(
             tools.len(),

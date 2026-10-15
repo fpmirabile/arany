@@ -209,13 +209,14 @@ impl LinearState {
         instruction: &str,
         notice: Option<&str>,
     ) -> io::Result<()> {
+        let instruction_limit = if step == 3 { 512 } else { 240 };
         self.write_setup_with_limit(
             writer,
             step,
             title,
             instruction,
             notice,
-            (240, matches!(step, 1 | 2 | 3 | 5)),
+            (instruction_limit, matches!(step, 1 | 2 | 3 | 5)),
         )
     }
 
@@ -250,7 +251,7 @@ impl LinearState {
                 if instruction.len() > instruction_limit
                     || !instruction
                         .bytes()
-                        .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+                        .all(|byte| byte.is_ascii_graphic() || matches!(byte, b' ' | b'\n'))
                 {
                     return Err(io::ErrorKind::InvalidInput.into());
                 }
@@ -620,6 +621,8 @@ mod tests {
             accepted_sequence: 2,
             finished_sequence: None,
             tools: Vec::new(),
+            tool_compaction_summary: None,
+            tool_compaction_covered_count: 0,
             display: Vec::new(),
         });
         let mut progress = Vec::new();
