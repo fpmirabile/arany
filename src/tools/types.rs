@@ -878,7 +878,7 @@ fn plan_contract_schema(budget: &crate::session::GoalBudget, call_schema: Option
             "paths": {"type":"array", "description": "Up to 64 distinct Workspace-relative paths in ascending order, each at most 512 bytes. Use \".\" alone for the whole Workspace; nested paths are rejected.", "items":{"type":"string"}},
             "commands": {"type":"array", "description": "Up to 8 distinct admitted command names in ascending order; each uses lowercase letters, digits, '-' or '_', at most 64 bytes.", "items":{"type":"string"}},
             "resource_class": {"type":"string", "enum":["default","build"]},
-            "command_timeout_ms": {"type":["integer","null"], "minimum":1000, "maximum":600000},
+            "command_timeout_ms": {"type":["integer","null"], "description": "Integer 1000 through 600000 inclusive, or null for the pinned default."},
             "skills": {"type":"array", "description": "Up to 64 distinct admitted Skill bindings in ascending name and resource order. Names use lowercase letters, digits, '-' or '_', at most 64 bytes; resource is null for SKILL.md or a relative path of at most 512 bytes.", "items":{
                 "type":"object",
                 "properties": {
