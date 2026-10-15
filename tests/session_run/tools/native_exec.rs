@@ -262,8 +262,9 @@ async fn selected_cache_canary_helper_inner() {
     assert_eq!(user.dir, root.join("account-home"), "private passwd home");
     let account = user.dir.join(".local/state/arany");
     assert_eq!(StateRoot::account_path().unwrap(), account);
-    let mut permissions =
-        arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
+    let mut permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
     let options = permissions.runtime_profile_choices();
     let cache = options
         .iter()
@@ -275,7 +276,9 @@ async fn selected_cache_canary_helper_inner() {
         .remember_profiles(true, arany::ApprovalMode::AutoEdits, &[])
         .unwrap();
     cache_progress("seed-admission-complete");
-    let permissions = arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
+    let permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
 
     let state_path = root.join("state");
     let seed_cache = ToolCall::Command {
@@ -375,8 +378,9 @@ async fn selected_cache_canary_helper_inner() {
     assert_eq!(seed_result["exit_code"], 0);
     cache_progress("seed-complete");
 
-    let mut permissions =
-        arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
+    let mut permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
     permissions
         .remember_profiles(
             true,
@@ -384,7 +388,9 @@ async fn selected_cache_canary_helper_inner() {
             std::slice::from_ref(&cache_token),
         )
         .unwrap();
-    let permissions = arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
+    let permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
     assert!(
         permissions
             .runtime_profile_choices()
@@ -617,12 +623,15 @@ async fn selected_cache_canary_helper_inner() {
     );
     cache_progress("closed-replay-complete");
 
-    let mut permissions =
-        arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
+    let mut permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
     permissions
         .remember_profiles(true, arany::ApprovalMode::AutoEdits, &[])
         .unwrap();
-    let permissions = arany::WorkspacePermissions::open_for_profile_selection(&workspace).unwrap();
+    let permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
     let verify_cache = ToolCall::Command {
         program: "sh".into(),
         args: vec![

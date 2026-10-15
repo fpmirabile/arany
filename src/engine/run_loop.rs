@@ -6,9 +6,10 @@ use crate::provider::{
 };
 use crate::session::{
     AgentDisposition, AgentRunId, CollaborationPolicy, DisplayCategory, DisplayChunk, Event,
-    GoalPhase, MAX_ASSISTANT_MESSAGE_BYTES as MAX_PRIMARY_RESULT_BYTES, MAX_DISPLAY_CHUNK_BYTES,
-    MAX_DISPLAY_CHUNKS, MAX_DISPLAY_COMMENTARY_ITEMS, MAX_DISPLAY_TEXT_BYTES,
-    ProviderCallDisposition, ProviderCallRecord, RunDisposition, RunId, SessionId,
+    GoalBudget, GoalPhase, GoalUsage, MAX_ASSISTANT_MESSAGE_BYTES as MAX_PRIMARY_RESULT_BYTES,
+    MAX_DISPLAY_CHUNK_BYTES, MAX_DISPLAY_CHUNKS, MAX_DISPLAY_COMMENTARY_ITEMS,
+    MAX_DISPLAY_TEXT_BYTES, ProviderCallDisposition, ProviderCallRecord, RunDisposition, RunId,
+    SessionId,
 };
 use crate::store::Store;
 use crate::telemetry::{AgentTrace, ProviderTraceOutcome, RunTrace, TraceFailure, TraceOutcome};
@@ -102,6 +103,9 @@ pub(super) struct RunIdentity {
 }
 
 pub(super) struct GoalRunBudget {
+    autonomous: bool,
+    pinned_budget: GoalBudget,
+    runs_used_before: usize,
     calls_used: AtomicU32,
     calls_limit: AtomicU32,
     known_tokens: AtomicU64,
@@ -116,24 +120,27 @@ pub(super) struct GoalRunBudget {
 }
 
 impl GoalRunBudget {
+    /// `limits` must be the goal's effective budget for this Run.
     pub(super) fn new(
         goal: &super::GoalAdmission,
-        calls_limit: u32,
-        token_limit: Option<u64>,
+        limits: &GoalBudget,
         active_reserved_ms: u64,
         active_started: Instant,
     ) -> Self {
         Self {
-            calls_used: AtomicU32::new(goal.calls_used),
-            calls_limit: AtomicU32::new(calls_limit),
-            known_tokens: AtomicU64::new(goal.known_tokens),
-            token_usage_unknown: AtomicBool::new(goal.token_usage_unknown),
-            token_limit: std::sync::Mutex::new(token_limit),
+            autonomous: goal.autonomous,
+            pinned_budget: goal.budget.clone(),
+            runs_used_before: goal.usage.runs,
+            calls_used: AtomicU32::new(goal.usage.provider_calls),
+            calls_limit: AtomicU32::new(limits.max_provider_calls),
+            known_tokens: AtomicU64::new(goal.usage.known_tokens),
+            token_usage_unknown: AtomicBool::new(goal.usage.token_usage_unknown),
+            token_limit: std::sync::Mutex::new(limits.max_tokens),
             plan_contract: std::sync::Mutex::new(goal.plan_contract.clone()),
             criterion_satisfied: AtomicBool::new(goal.success_criterion_satisfied),
             observations_before_run: goal.observations_before_run.clone(),
             active_started: std::sync::Mutex::new(active_started),
-            active_ms_before: AtomicU64::new(goal.active_ms),
+            active_ms_before: AtomicU64::new(goal.usage.active_ms),
             active_reserved_ms: AtomicU64::new(active_reserved_ms),
         }
     }
@@ -159,11 +166,33 @@ impl GoalRunBudget {
             .saturating_sub(self.calls_used.load(Ordering::Acquire))
     }
 
-    fn set_plan_contract(&self, contract: crate::session::GoalPlanContract) {
-        if let Ok(mut current) = self.plan_contract.lock() {
-            *current = Some(contract);
-            self.criterion_satisfied.store(false, Ordering::Release);
-        }
+    /// Observations that count toward the success criterion: earlier Runs, then this Run.
+    fn observations_with<'a>(
+        &'a self,
+        run_observations: &'a [crate::tools::ToolObservation],
+    ) -> std::iter::Chain<
+        std::slice::Iter<'a, crate::tools::ToolObservation>,
+        std::slice::Iter<'a, crate::tools::ToolObservation>,
+    > {
+        self.observations_before_run
+            .iter()
+            .chain(run_observations.iter())
+    }
+
+    /// Re-evaluates the success criterion over this Goal's earlier Runs and this Run's observations.
+    fn set_plan_contract(
+        &self,
+        contract: crate::session::GoalPlanContract,
+        run_observations: &[crate::tools::ToolObservation],
+    ) -> Result<(), EngineError> {
+        let satisfied = contract.matches_success(self.observations_with(run_observations));
+        let mut current = self
+            .plan_contract
+            .lock()
+            .map_err(|_| EngineError::CoordinatorFailed)?;
+        *current = Some(contract);
+        self.criterion_satisfied.store(satisfied, Ordering::Release);
+        Ok(())
     }
 
     fn allows_tool(&self, call: &crate::tools::ToolCall) -> bool {
@@ -175,17 +204,44 @@ impl GoalRunBudget {
         })
     }
 
-    fn observe_tools(&self, observations: &[crate::tools::ToolObservation]) {
-        if let Ok(plan) = self.plan_contract.lock()
-            && let Some(contract) = plan.as_ref()
-        {
-            let mut all_observations = self.observations_before_run.clone();
-            all_observations.extend_from_slice(observations);
+    fn observe_tools(
+        &self,
+        run_observations: &[crate::tools::ToolObservation],
+    ) -> Result<(), EngineError> {
+        let plan = self
+            .plan_contract
+            .lock()
+            .map_err(|_| EngineError::CoordinatorFailed)?;
+        if let Some(contract) = plan.as_ref() {
             self.criterion_satisfied.store(
-                contract.matches_success(&all_observations),
+                contract.matches_success(self.observations_with(run_observations)),
                 Ordering::Release,
             );
         }
+        Ok(())
+    }
+
+    /// Whether an autonomous Goal can admit another Run after this unsatisfied Run.
+    pub(super) fn allows_next_run(&self) -> bool {
+        if !self.autonomous {
+            return false;
+        }
+        let Ok(plan) = self.plan_contract.lock() else {
+            return false;
+        };
+        let budget = self.pinned_budget.effective(plan.as_ref());
+        drop(plan);
+        budget.admits_next_run(GoalUsage {
+            // This Run is linked, so it counts toward the Goal's Runs.
+            runs: self.runs_used_before + 1,
+            provider_calls: self.calls_used.load(Ordering::Acquire),
+            active_ms: self
+                .active_ms_before
+                .load(Ordering::Acquire)
+                .saturating_add(self.elapsed_active_ms()),
+            known_tokens: self.known_tokens.load(Ordering::Acquire),
+            token_usage_unknown: self.token_usage_unknown.load(Ordering::Acquire),
+        })
     }
 
     fn success_criterion_satisfied(&self) -> bool {
@@ -210,7 +266,9 @@ impl GoalRunBudget {
     }
 
     fn can_narrow(&self, contract: &crate::session::GoalPlanContract) -> bool {
-        contract.budget.max_provider_calls > self.calls_used.load(Ordering::Acquire)
+        // This Run is already linked, so the plan must allow it along with the earlier Runs.
+        usize::from(contract.budget.max_runs) > self.runs_used_before
+            && contract.budget.max_provider_calls > self.calls_used.load(Ordering::Acquire)
             && contract.budget.max_tokens.is_none_or(|limit| {
                 !self.token_usage_unknown.load(Ordering::Acquire)
                     && self.known_tokens.load(Ordering::Acquire) < limit
@@ -360,7 +418,15 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             let first_trace = (step == 0).then(|| primary.begin_first_provider());
             let next_trace = (step != 0)
                 .then(|| primary.begin_provider(AgentPhase::RootPlan, &root_request.model));
-            let first = self.invoke_primary(root_request.clone(), deadline).await?;
+            let Some(first) = self.invoke_primary(root_request.clone(), deadline).await? else {
+                if let Some(first_trace) = first_trace {
+                    first_trace.finish_refused(&primary, &root_request.model);
+                }
+                if let Some(next_trace) = next_trace {
+                    next_trace.finish_refused();
+                }
+                return self.fail_primary(primary).await;
+            };
             let (input_tokens, output_tokens) = call_trace_usage(&first);
             let valid_response = self.controls.goal_budget.tokens_within_limit()
                 && match &first {
@@ -436,30 +502,13 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                     ..
                 }) if valid_response => {
                     if let Some(contract) = plan_contract {
-                        let contract = *contract;
-                        let (active_ms, reserved_ms) = self
-                            .controls
-                            .goal_budget
-                            .active_adjustment(&contract)
-                            .ok_or(EngineError::GoalBudgetExhausted)?;
-                        self.append(Event::GoalPlanContractRecorded {
-                            goal_id: self.goal_id,
-                            run_id: self.run_id,
-                            contract: contract.clone(),
-                            active_ms,
-                            reserved_ms,
-                        })
-                        .await?;
-                        self.controls
-                            .goal_budget
-                            .set_plan_contract(contract.clone());
-                        deadline = deadline.min(self.controls.goal_budget.narrow(
-                            &contract,
-                            active_ms,
-                            reserved_ms,
-                        )?);
-                        root_request.goal_budget = Some(contract.budget.clone());
-                        root_request.goal_plan_contract = Some(contract);
+                        let Some(narrowed) = self
+                            .admit_plan_contract(&mut root_request, *contract, deadline)
+                            .await?
+                        else {
+                            return self.fail_primary(primary).await;
+                        };
+                        deadline = narrowed;
                     }
                     if !self
                         .execute_tool(
@@ -481,12 +530,16 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         self.fail_primary(primary).await
     }
 
+    /// `None` means the Goal budget refused the call before dispatch.
     async fn invoke_primary(
         &self,
         request: ProviderRequest,
         deadline: Instant,
-    ) -> Result<CallResult, EngineError> {
-        self.reserve_provider_call(self.primary_id).await?;
+    ) -> Result<Option<CallResult>, EngineError> {
+        match self.reserve_provider_call(self.primary_id).await {
+            Err(EngineError::GoalBudgetExhausted) => return Ok(None),
+            reserved => reserved?,
+        }
         let context = self
             .progress
             .map(|progress| progress.preview_context(self.primary_id))
@@ -501,7 +554,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             )
             .await;
             self.controls.goal_budget.account_result(&result);
-            return Ok(result);
+            return Ok(Some(result));
         };
         let call_index = context.call_index;
         let (preview, mut receiver) = ResponsePreview::new();
@@ -563,7 +616,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         self.progress
             .expect("preview owner")
             .publish_preview(self.primary_id, call_index, None);
-        Ok(result)
+        Ok(Some(result))
     }
 
     async fn checkpoint(
@@ -810,7 +863,15 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             };
             let tools = request.tools.as_mut().ok_or(EngineError::InvalidRequest)?;
             tools.observations.push(observation);
-            self.controls.goal_budget.observe_tools(&tools.observations);
+            // A refused budget update fails the Run through the caller's terminal records.
+            if self
+                .controls
+                .goal_budget
+                .observe_tools(&tools.observations)
+                .is_err()
+            {
+                return Ok(false);
+            }
             if !serde_json::to_vec(tools)
                 .is_ok_and(|bytes| bytes.len() <= crate::tools::MAX_TOOL_CONTEXT_BYTES)
             {
@@ -847,7 +908,9 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                     && review_allowed
             });
         let required_tail = 1 + u32::from(review_will_run);
-        if self.controls.goal_budget.remaining_calls() < required_tail {
+        if self.controls.goal_budget.remaining_calls() < required_tail
+            || (review_will_run && !self.controls.goal_budget.can_start_provider_call())
+        {
             return Ok((
                 crate::tools::ToolObservation {
                     intent,
@@ -964,7 +1027,10 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             child_results: Vec::new(), tools: None, max_output_tokens: 256,
         };
         let trace = primary.begin_provider(AgentPhase::ToolReview, &review.model);
-        self.reserve_provider_call(self.primary_id).await?;
+        if let Err(error) = self.reserve_provider_call(self.primary_id).await {
+            trace.finish_refused();
+            return Err(error);
+        }
         let result = invoke_bounded(
             self.provider.as_ref(),
             review,
@@ -988,11 +1054,53 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         )
     }
 
+    /// Records an admitted Plan contract and narrows this Run to it. `Ok(None)` means the
+    /// Run cannot be narrowed and must fail through its terminal records.
+    pub(super) async fn admit_plan_contract(
+        &self,
+        root_request: &mut ProviderRequest,
+        contract: crate::session::GoalPlanContract,
+        deadline: Instant,
+    ) -> Result<Option<Instant>, EngineError> {
+        let Some((active_ms, reserved_ms)) = self.controls.goal_budget.active_adjustment(&contract)
+        else {
+            return Ok(None);
+        };
+        self.append(Event::GoalPlanContractRecorded {
+            goal_id: self.goal_id,
+            run_id: self.run_id,
+            contract: contract.clone(),
+            active_ms,
+            reserved_ms,
+        })
+        .await?;
+        if self
+            .controls
+            .goal_budget
+            .set_plan_contract(contract.clone(), run_observations(root_request))
+            .is_err()
+        {
+            return Ok(None);
+        }
+        let Ok(narrowed) = self
+            .controls
+            .goal_budget
+            .narrow(&contract, active_ms, reserved_ms)
+        else {
+            return Ok(None);
+        };
+        root_request.goal_budget = Some(contract.budget.clone());
+        root_request.goal_plan_contract = Some(contract);
+        Ok(Some(deadline.min(narrowed)))
+    }
+
     async fn finish_primary(&self, finish: Finish, primary: AgentTrace) -> Result<(), EngineError> {
         if self.controls.cancellation.is_cancelled() {
             return self.cancel_primary(primary).await;
         }
-        if !self.controls.goal_budget.success_criterion_satisfied() {
+        if !self.controls.goal_budget.success_criterion_satisfied()
+            && !self.controls.goal_budget.allows_next_run()
+        {
             return self.fail_primary(primary).await;
         }
         self.append(Event::AgentFinished {
@@ -1196,6 +1304,13 @@ fn call_record(phase: AgentPhase, result: &CallResult, valid_response: bool) -> 
     }
 }
 
+fn run_observations(request: &ProviderRequest) -> &[crate::tools::ToolObservation] {
+    request
+        .tools
+        .as_ref()
+        .map_or(&[], |tools| tools.observations.as_slice())
+}
+
 fn valid_finish(finish: &Finish, result_limit: usize) -> bool {
     !finish.summary.is_empty()
         && finish.summary.len() <= MAX_SUMMARY_BYTES
@@ -1209,29 +1324,34 @@ fn valid_finish(finish: &Finish, result_limit: usize) -> bool {
 mod goal_budget_tests {
     use super::*;
     use crate::engine::GoalAdmission;
-    use crate::session::{GoalBudget, GoalId, GoalPlanContract, GoalSuccessCriterion};
+    use crate::session::{GoalBudget, GoalId, GoalPhase, GoalPlanContract, GoalSuccessCriterion};
 
     fn admission() -> GoalAdmission {
         GoalAdmission {
             id: GoalId::new(),
+            objective: String::new(),
+            autonomous: false,
+            phase: GoalPhase::Implementation,
             budget: GoalBudget::default(),
             plan_contract: None,
             is_new: true,
             resume: false,
-            calls_used: 0,
-            known_tokens: 0,
-            token_usage_unknown: false,
+            usage: GoalUsage {
+                runs: 0,
+                provider_calls: 0,
+                active_ms: 0,
+                known_tokens: 0,
+                token_usage_unknown: false,
+            },
             success_criterion_satisfied: false,
             observations_before_run: Vec::new(),
-            active_ms: 0,
-            runs_used: 0,
         }
     }
 
     #[test]
     fn plan_append_latency_stays_inside_the_narrowed_active_reservation() {
         let started = Instant::now() - Duration::from_millis(100);
-        let budget = GoalRunBudget::new(&admission(), 64, None, 1_000, started);
+        let budget = GoalRunBudget::new(&admission(), &GoalBudget::default(), 1_000, started);
         let contract = GoalPlanContract {
             mission: "complete the task".into(),
             paths: Vec::new(),
@@ -1264,7 +1384,8 @@ mod goal_budget_tests {
 
     #[test]
     fn finite_token_plan_reduces_parallelism_and_rejects_more_calls_at_the_cap() {
-        let budget = GoalRunBudget::new(&admission(), 64, None, 1_000, Instant::now());
+        let budget =
+            GoalRunBudget::new(&admission(), &GoalBudget::default(), 1_000, Instant::now());
         let contract = GoalPlanContract {
             mission: "complete the task".into(),
             paths: vec!["src".into()],
@@ -1294,5 +1415,88 @@ mod goal_budget_tests {
         );
         assert!(!budget.can_start_provider_call());
         assert!(!budget.reserve_call());
+    }
+
+    fn criterion_contract(path: &str) -> GoalPlanContract {
+        GoalPlanContract {
+            mission: "write the note".into(),
+            paths: vec!["src".into()],
+            commands: Vec::new(),
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: GoalSuccessCriterion::ToolCallSucceeded {
+                call: Box::new(crate::tools::ToolCall::Write {
+                    path: path.into(),
+                    expected_digest: None,
+                    content: "done".into(),
+                }),
+            },
+            budget: GoalBudget::default(),
+        }
+    }
+
+    fn succeeded_write(path: &str) -> crate::tools::ToolObservation {
+        let intent = crate::tools::EffectIntent {
+            id: uuid::Uuid::now_v7(),
+            run_id: RunId::new(),
+            agent_run_id: AgentRunId::new(),
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call: crate::tools::ToolCall::Write {
+                path: path.into(),
+                expected_digest: None,
+                content: "done".into(),
+            },
+            limits: crate::tools::ToolLimits::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        };
+        crate::tools::ToolObservation {
+            guard: Some(crate::tools::GuardReceipt {
+                contract_version: 1,
+                intent_digest: intent.digest(),
+                enforcement_digest: intent.enforcement_digest,
+                limits: intent.limits.clone(),
+            }),
+            intent,
+            disposition: crate::tools::ToolDisposition::Succeeded,
+            output: String::new(),
+            cache_update: crate::tools::CacheUpdate::NotApplicable,
+        }
+    }
+
+    #[test]
+    fn plan_contract_reevaluates_success_over_earlier_run_observations() {
+        let mut goal = admission();
+        goal.observations_before_run = vec![succeeded_write("src/main.rs")];
+        let budget = GoalRunBudget::new(&goal, &GoalBudget::default(), 1_000, Instant::now());
+        budget
+            .set_plan_contract(criterion_contract("src/main.rs"), &[])
+            .expect("plan state is available");
+        assert!(
+            budget.success_criterion_satisfied(),
+            "an earlier Run's matching Write satisfies the newly recorded contract"
+        );
+    }
+
+    #[test]
+    fn poisoned_plan_state_fails_instead_of_being_ignored() {
+        let budget =
+            GoalRunBudget::new(&admission(), &GoalBudget::default(), 1_000, Instant::now());
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = budget.plan_contract.lock().expect("fresh lock");
+            panic!("poison the plan contract lock");
+        }));
+        assert!(poisoned.is_err());
+        assert!(matches!(
+            budget.observe_tools(&[]),
+            Err(EngineError::CoordinatorFailed)
+        ));
+        assert!(matches!(
+            budget.set_plan_contract(criterion_contract("src/main.rs"), &[]),
+            Err(EngineError::CoordinatorFailed)
+        ));
     }
 }

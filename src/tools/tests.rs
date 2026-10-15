@@ -1034,7 +1034,7 @@ fn project_skill_discovery_preserves_grants_and_reports_missing_installation() {
                 observations: Vec::new(),
             };
             assert!(context.model_input()["catalog"].is_object());
-            let branch = context.outcome_branch();
+            let branch = context.outcome_branch_with_plan(false, None).remove(0);
             let skill = branch["properties"]["call"]["anyOf"]
                 .as_array()
                 .unwrap()
@@ -1355,9 +1355,20 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
     let mut encoded = serde_json::to_value(&worker_observation).unwrap();
     encoded.as_object_mut().unwrap().remove("cache_update");
     assert!(serde_json::from_value::<ToolObservation>(encoded).is_err());
-    let mut false_cache_status = uncertain_cache.clone();
-    false_cache_status.disposition = ToolDisposition::Succeeded;
-    assert!(!false_cache_status.valid());
+    let mut succeeded_uncertain_cache = uncertain_cache.clone();
+    succeeded_uncertain_cache.disposition = ToolDisposition::Succeeded;
+    assert!(succeeded_uncertain_cache.valid());
+    assert!(succeeded_uncertain_cache.stops_run());
+    assert_eq!(
+        succeeded_uncertain_cache.disposition,
+        ToolDisposition::Succeeded
+    );
+    let mut unattempted_error = uncertain_cache.clone();
+    unattempted_error.disposition = ToolDisposition::Uncertain;
+    unattempted_error.guard = None;
+    unattempted_error.cache_update = CacheUpdate::NotAttempted;
+    assert!(unattempted_error.valid());
+    assert!(unattempted_error.stops_run());
     let mut widened = intent.clone();
     widened.limits.runtime_ms += 1;
     assert!(!widened.valid());
@@ -1418,4 +1429,176 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
     let mut oversized = observation;
     oversized.output = "x".repeat(MAX_TOOL_RESULT_BYTES + 1);
     assert!(!oversized.valid());
+}
+
+#[test]
+fn guard_error_after_dispatch_marks_only_a_selected_command_cache_not_attempted() {
+    let command = ToolCall::Command {
+        program: "cargo".into(),
+        args: vec!["build".into()],
+        cwd: ".".into(),
+    };
+    assert_eq!(
+        super::guard_error_cache_update(&command, true),
+        CacheUpdate::NotAttempted
+    );
+    assert_eq!(
+        super::guard_error_cache_update(&command, false),
+        CacheUpdate::NotApplicable
+    );
+    assert_eq!(
+        super::guard_error_cache_update(&ToolCall::List { path: "src".into() }, true),
+        CacheUpdate::NotApplicable
+    );
+
+    let intent = EffectIntent {
+        id: uuid::Uuid::now_v7(),
+        run_id: crate::session::RunId::new(),
+        agent_run_id: crate::session::AgentRunId::new(),
+        policy_digest: [1; 32],
+        enforcement_digest: [2; 32],
+        workspace_device: 1,
+        workspace_inode: 2,
+        call: command,
+        limits: ToolLimits::default(),
+        expires_at_ms: 1,
+        use_count: 1,
+    };
+    let observation = super::uncertain_observation(
+        intent,
+        super::ToolError::Operation,
+        CacheUpdate::NotAttempted,
+    );
+    assert!(observation.valid());
+    assert!(observation.stops_run());
+    assert!(observation.guard.is_none());
+    assert_eq!(observation.cache_update, CacheUpdate::NotAttempted);
+}
+
+#[test]
+fn goal_success_criterion_offers_only_admitted_calls() {
+    let context = ToolContext {
+        catalog: json!({
+            "write": false,
+            "commands": [{"name": "cargo"}],
+            "skills": [],
+            "mcp_servers": []
+        })
+        .to_string(),
+        observations: Vec::new(),
+    };
+    let budget = crate::session::GoalBudget::default();
+    let branches = context.outcome_branch_with_plan(true, Some(&budget));
+    let success_calls: Vec<Value> = branches
+        .iter()
+        .filter_map(|branch| {
+            let contract = &branch["properties"]["plan_contract"];
+            let contract = contract
+                .get("properties")
+                .or_else(|| contract["anyOf"][0].get("properties"))?;
+            contract["success_criterion"]["anyOf"][0]["properties"]["call"]["anyOf"].as_array()
+        })
+        .flatten()
+        .cloned()
+        .collect();
+    let operations: Vec<&str> = success_calls
+        .iter()
+        .filter_map(|call| call["properties"]["operation"]["enum"][0].as_str())
+        .collect();
+    assert!(!operations.is_empty());
+    assert!(operations.iter().all(|operation| *operation == "command"));
+    assert!(
+        success_calls
+            .iter()
+            .all(|call| call["properties"]["program"]["enum"] == json!(["cargo"]))
+    );
+}
+
+#[test]
+fn goal_success_criterion_without_admitted_calls_omits_the_call_alternative() {
+    fn assert_no_empty_any_of(value: &Value) {
+        match value {
+            Value::Object(map) => {
+                assert!(
+                    map.get("anyOf").is_none_or(|any_of| any_of
+                        .as_array()
+                        .is_some_and(|alternatives| !alternatives.is_empty())),
+                    "JSON Schema anyOf must list at least one alternative"
+                );
+                map.values().for_each(assert_no_empty_any_of);
+            }
+            Value::Array(items) => items.iter().for_each(assert_no_empty_any_of),
+            _ => {}
+        }
+    }
+
+    let context = ToolContext {
+        catalog: json!({
+            "write": false,
+            "commands": [],
+            "skills": [],
+            "mcp_servers": []
+        })
+        .to_string(),
+        observations: Vec::new(),
+    };
+    let budget = crate::session::GoalBudget::default();
+    let branches = context.outcome_branch_with_plan(true, Some(&budget));
+    assert_no_empty_any_of(&Value::Array(branches.clone()));
+    let criteria: Vec<Value> = branches
+        .iter()
+        .map(|branch| {
+            let contract = &branch["properties"]["plan_contract"];
+            let contract = if contract.get("properties").is_some() {
+                contract
+            } else {
+                &contract["anyOf"][0]
+            };
+            contract["properties"]["success_criterion"].clone()
+        })
+        .collect();
+    assert!(!criteria.is_empty());
+    for criterion in criteria {
+        let kinds: Vec<&str> = criterion["anyOf"]
+            .as_array()
+            .expect("success criterion alternatives")
+            .iter()
+            .filter_map(|alternative| alternative["properties"]["kind"]["enum"][0].as_str())
+            .collect();
+        assert_eq!(kinds, ["workspace_file_digest", "workspace_file_content"]);
+    }
+}
+
+#[test]
+fn goal_without_pinned_budget_offers_only_the_plan_free_prelude() {
+    let context = ToolContext {
+        catalog: json!({
+            "write": true,
+            "commands": [{"name": "cargo"}],
+            "skills": [{"name": "review"}],
+            "mcp_servers": [{"name": "local"}]
+        })
+        .to_string(),
+        observations: Vec::new(),
+    };
+    let branches = context.outcome_branch_with_plan(true, None);
+    assert_eq!(branches.len(), 1);
+    let operations: Vec<&str> = branches[0]["properties"]["call"]["anyOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|call| call["properties"]["operation"]["enum"][0].as_str())
+        .collect();
+    assert!(operations.contains(&"list"));
+    assert!(operations.contains(&"read"));
+    assert!(
+        operations
+            .iter()
+            .all(|operation| ["list", "read", "search", "skill", "mcp_list"].contains(operation)),
+        "{operations:?}"
+    );
+    assert_eq!(
+        branches[0]["properties"]["plan_contract"],
+        json!({"type": "null"})
+    );
 }

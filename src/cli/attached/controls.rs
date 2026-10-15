@@ -1,4 +1,7 @@
-use super::{Admission, load_view, recover_defaults_change, update_defaults};
+use super::{
+    Admission, DefaultsError, LoopError, load_view, open_state, recover_defaults_change,
+    update_defaults,
+};
 use crate::cli::{chatgpt, exec::ProviderArg};
 use arany::{
     AttachedTerminal, CollaborationPolicy, CommandAvailability, CommandParseError,
@@ -7,6 +10,9 @@ use arany::{
     resume_session, validate_native_model_id,
 };
 use std::str::FromStr;
+
+const CACHE_USAGE: &str = "Usage: /cache clear [all]";
+const CACHE_CLEAR_FAILED: &str = "Error: private build cache could not be cleared";
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -305,7 +311,7 @@ pub(super) async fn select_model(
     view: &mut SessionView,
     model: &str,
     effort: Option<Effort>,
-) -> Result<String, String> {
+) -> Result<String, LoopError> {
     let Some(profile) = view.defaults.provider.as_deref() else {
         return Ok("Select /provider first".into());
     };
@@ -313,8 +319,7 @@ pub(super) async fn select_model(
         return Ok("Error: invalid native model".into());
     }
     if let Some(name) = profile.strip_prefix("custom:") {
-        let root = StateRoot::open_existing(&admission.state_dir)
-            .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+        let root = open_state(admission)?;
         let custom = match CustomProfile::load_named(&root, name) {
             Ok(custom) => custom,
             Err(error) => return Ok(format!("Error: {error}")),
@@ -337,21 +342,24 @@ pub(super) async fn select_model(
     let mut defaults = view.defaults.clone();
     defaults.model = Some(model.to_owned());
     defaults.effort = effort;
-    if let Err(error) = update_defaults(admission, session_id, view, defaults).await {
-        return recover_defaults_change(error);
+    let reload_error = match update_defaults(admission, session_id, view, defaults).await {
+        Ok(()) => None,
+        Err(DefaultsError::Reload(error)) => Some(error),
+        Err(error) => return recover_defaults_change(error),
+    };
+    let notice = match &reload_error {
+        Some(error) => super::settings_reload_notice(error),
+        None => format!(
+            "Model: {model} · {}",
+            effort.map_or("default", Effort::as_str)
+        ),
+    };
+    // After a Reload failure, view.defaults still holds the saved selection.
+    let notice = super::remembered_session_notice(admission, view, notice).await;
+    match reload_error {
+        Some(_) => Err(LoopError::Notice(notice)),
+        None => Ok(notice),
     }
-    let notice = format!(
-        "Model: {model} · {}",
-        effort.map_or("default", Effort::as_str)
-    );
-    if let Err(error) =
-        super::models::remember_models(&admission.workspace, &view.defaults, None, true).await
-    {
-        return Ok(format!(
-            "{notice}; Error: {error}; selection kept for this conversation only"
-        ));
-    }
-    Ok(notice)
 }
 
 pub(super) enum ActiveSubmission {
@@ -399,6 +407,10 @@ pub(super) fn handle_active_submission(
             composer.take();
             return ActiveSubmission::OpenHelp;
         }
+        Ok(Submission::Command {
+            command: InteractiveCommand::Goal,
+            argument: Some(_),
+        }) => "Goal changes are locked for this run; /goal shows status".into(),
         Ok(Submission::Command { command, .. }) => {
             active_command_notice(view, command, starting_sequence)
         }
@@ -426,14 +438,6 @@ pub(super) fn validate_idle_command(
         {
             Err("Usage: /resume SESSION_ID")
         }
-        InteractiveCommand::ResumeGoal if argument.is_some() => Err("Usage: /resume-goal"),
-        InteractiveCommand::ResumeGoal
-            if !view
-                .active_goal()
-                .is_some_and(|goal| goal.status == arany::GoalStatus::Interrupted) =>
-        {
-            Err("No interrupted Goal is available to resume")
-        }
         InteractiveCommand::Fork if argument.is_some_and(|id| SessionId::from_str(id).is_err()) => {
             Err("Usage: /fork [SESSION_ID]")
         }
@@ -457,7 +461,7 @@ pub(super) fn validate_idle_command(
             Err("invalid collaboration policy")
         }
         InteractiveCommand::Cache if !matches!(argument, Some("clear" | "clear all")) => {
-            Err("Usage: /cache clear [all]")
+            Err(CACHE_USAGE)
         }
         _ => Ok(()),
     }
@@ -469,7 +473,7 @@ pub(super) async fn handle_command(
     view: &mut SessionView,
     command: InteractiveCommand,
     argument: Option<&str>,
-) -> Result<String, String> {
+) -> Result<String, LoopError> {
     let notice = match command {
         InteractiveCommand::New => {
             let defaults = view.defaults.clone();
@@ -482,8 +486,7 @@ pub(super) async fn handle_command(
             let Some(id) = argument.and_then(|value| SessionId::from_str(value).ok()) else {
                 return Ok("Usage: /resume SESSION_ID".into());
             };
-            let root = StateRoot::open_existing(&admission.state_dir)
-                .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+            let root = open_state(admission)?;
             match resume_session(root, admission.workspace.clone(), id).await {
                 Ok(resumed) => {
                     let resumed =
@@ -507,9 +510,7 @@ pub(super) async fn handle_command(
                 Err(error) => format!("Error: {error}"),
             }
         }
-        InteractiveCommand::ResumeGoal => {
-            "Use /resume-goal while an interrupted Goal is selected".into()
-        }
+        InteractiveCommand::Goal => arany::goal_status(view),
         InteractiveCommand::Fork => {
             if argument.is_none() && view.created_sequence == 0 {
                 return Ok("Send a message before forking this conversation".into());
@@ -521,11 +522,17 @@ pub(super) async fn handle_command(
                 },
                 None => *session_id,
             };
-            let root = StateRoot::open_existing(&admission.state_dir)
-                .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+            let root = open_state(admission)?;
             match fork_session(root, admission.workspace.clone(), source_id, None).await {
                 Ok(id) => {
-                    let forked = load_view(&admission.state_dir, id).await?;
+                    let forked = match load_view(&admission.state_dir, id).await {
+                        Ok(forked) => forked,
+                        Err(error) => {
+                            return Ok(format!(
+                                "Error: Forked Session {id}, but it could not be opened: {error}"
+                            ));
+                        }
+                    };
                     let forked = match super::prepare_resume(
                         admission,
                         forked,
@@ -534,7 +541,11 @@ pub(super) async fn handle_command(
                     .await
                     {
                         Ok(forked) => forked,
-                        Err(error) => return Ok(format!("Error: {error}")),
+                        Err(error) => {
+                            return Ok(format!(
+                                "Error: Forked Session {id}, but it could not be opened: {error}"
+                            ));
+                        }
                     };
                     *session_id = id;
                     *view = forked;
@@ -560,8 +571,7 @@ pub(super) async fn handle_command(
                 view.title_is_explicit = true;
                 return Ok(format!("Renamed conversation: {title}"));
             }
-            let root = StateRoot::open_existing(&admission.state_dir)
-                .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+            let root = open_state(admission)?;
             match rename_session(
                 root,
                 admission.workspace.clone(),
@@ -570,10 +580,15 @@ pub(super) async fn handle_command(
             )
             .await
             {
-                Ok(()) => {
-                    *view = load_view(&admission.state_dir, *session_id).await?;
-                    format!("Renamed Session: {title}")
-                }
+                Ok(()) => match load_view(&admission.state_dir, *session_id).await {
+                    Ok(renamed) => {
+                        *view = renamed;
+                        format!("Renamed Session: {title}")
+                    }
+                    Err(error) => {
+                        format!("Error: Renamed Session, but it could not be reloaded: {error}")
+                    }
+                },
                 Err(error) => format!("Error: {error}"),
             }
         }
@@ -656,28 +671,45 @@ pub(super) async fn handle_command(
         InteractiveCommand::Permissions => {
             if admission.tools {
                 "Tools requested from private tools.json; native protection must be admitted before a Run. File mutation requires the write grant; command changes are discarded. Primary only; commands/MCP have no network, host home or account state. Arany requests: selected Provider; OS TLS checks may connect separately.".into()
+            } else if let Some(access) = admission
+                .workspace_permissions
+                .as_ref()
+                .filter(|access| access.is_trusted())
+            {
+                let profiles = access.selected_runtime_profiles();
+                format!(
+                    "Folder trusted; file Tools use the Workspace. Commands/MCP use a private selected-project copy without network or account state; only these selected read-only toolchains and caches are mounted: {}. Arany requests: selected Provider; OS TLS checks may connect separately.",
+                    if profiles.is_empty() {
+                        "none".into()
+                    } else {
+                        profiles.join("; ")
+                    }
+                )
             } else {
                 "Read-only Workspace; Arany requests: selected Provider; OS TLS checks may connect separately; no Tools or sandbox".into()
             }
         }
         InteractiveCommand::Cache => {
-            let root = StateRoot::open_existing(&admission.state_dir)
-                .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
-            let result = match argument {
-                Some("clear") => root.clear_workspace_build_cache(&admission.workspace),
-                Some("clear all") => root.clear_all_build_caches(),
-                _ => return Ok("Usage: /cache clear [all]".into()),
+            let Ok(root) = StateRoot::open_existing(&admission.state_dir) else {
+                return Ok(CACHE_CLEAR_FAILED.into());
+            };
+            let (result, cleared) = match argument {
+                Some("clear") => (
+                    root.clear_workspace_build_cache(&admission.workspace),
+                    "Cleared this Workspace's private build cache",
+                ),
+                Some("clear all") => (
+                    root.clear_all_build_caches(),
+                    "Cleared all private build caches",
+                ),
+                _ => return Ok(format!("Error: {CACHE_USAGE}")),
             };
             match result {
-                Ok(()) => match argument {
-                    Some("clear") => "Cleared this Workspace's private build cache".into(),
-                    Some("clear all") => "Cleared all private build caches".into(),
-                    _ => unreachable!(),
-                },
+                Ok(()) => cleared.into(),
                 Err(arany::StoreError::BuildCacheBusy) => {
                     "Build cache is in use; retry after its command finishes".into()
                 }
-                Err(_) => "Error: private build cache could not be cleared".into(),
+                Err(_) => CACHE_CLEAR_FAILED.into(),
             }
         }
         _ => "Command is not available in this build".into(),
@@ -720,6 +752,7 @@ pub(super) fn active_command_notice(
             }
             None => "Preparing message · Ctrl+C cancels".into(),
         },
+        InteractiveCommand::Goal => arany::goal_status(view),
         InteractiveCommand::Agents => {
             "Collaboration locked for this run; /agents opens details".into()
         }
@@ -754,7 +787,7 @@ pub(super) fn active_command_notice(
                 .and_then(|run| run.config.as_ref())
                 .is_some_and(|config| config.tool_policy.is_some())
             {
-                "Primary has pinned guarded Tool grants: at most 16 Tool calls with bounded Tool context. Commands/MCP use a private selected-project copy without network or host credentials; their file changes are discarded. Children remain read-only. Arany requests: selected Provider; OS TLS checks may connect separately.".into()
+                "Primary has pinned guarded Tool grants: at most 16 Tool calls with bounded Tool context. Commands/MCP use a private selected-project copy without network or account state; only the selected read-only toolchains and caches from home are mounted, and their file changes are discarded. Children remain read-only. Arany requests: selected Provider; OS TLS checks may connect separately.".into()
             } else {
                 "Read-only Workspace; Arany requests: selected Provider; OS TLS checks may connect separately; no Tools or sandbox".into()
             }
@@ -1217,6 +1250,7 @@ mod tests {
         let admission = Admission {
             telemetry: arany::Telemetry::disabled(),
             state_dir: temp.path().join("state"),
+            explicit_state_dir: false,
             workspace,
             include_paths: Vec::new(),
             tools: false,
@@ -1228,6 +1262,7 @@ mod tests {
             setup_requested: false,
             entry: EntryMode::New,
             prompt: None,
+            resume_goal: None,
         };
         let combined_classic = Preferences {
             completion: CompletionLayout::Combined,
@@ -1327,6 +1362,7 @@ mod tests {
         let mut admission = Admission {
             telemetry: arany::Telemetry::disabled(),
             state_dir: temp.path().join("state"),
+            explicit_state_dir: false,
             workspace,
             include_paths: Vec::new(),
             tools: false,
@@ -1338,6 +1374,7 @@ mod tests {
             setup_requested: false,
             entry: EntryMode::New,
             prompt: None,
+            resume_goal: None,
         };
         let root = StateRoot::admit(&admission.state_dir).expect("state");
         let original_id = create_session(root, admission.workspace.clone(), None)
@@ -1588,7 +1625,7 @@ mod tests {
             let workspace = admission.workspace.clone();
             admission.workspace = temp.path().join("other-workspace");
             std::fs::create_dir(&admission.workspace).expect("other Workspace");
-            assert_eq!(
+            assert!(matches!(
                 handle_command(
                     &admission,
                     &mut session_id,
@@ -1598,8 +1635,8 @@ mod tests {
                 )
                 .await
                 .expect_err("Workspace failure stays fatal"),
-                "Session belongs to a different Workspace"
-            );
+                LoopError::Fatal(error) if error == "Session belongs to a different Workspace"
+            ));
             assert_eq!(view, before);
             admission.workspace = workspace;
             assert_eq!(
@@ -1630,6 +1667,8 @@ mod tests {
                     objective: "Prior accepted objective".into(),
                     workspace_identity,
                     budget: arany::GoalBudget::default(),
+                    phase: arany::GoalPhase::Implementation,
+                    autonomous: false,
                 },
             )
             .await

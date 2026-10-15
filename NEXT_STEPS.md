@@ -10,13 +10,12 @@ history. Implementation status and verified support are separate claims.
 ## Next functional priority
 
 - **Agentic coding teams (Beta 1 scope, current implementation priority).**
-  RPI Goals, command changesets, toolchain profiles and a persistent cache,
-  flexible limits, registry fetch, Git, a
+  Flexible limits, the remaining RPI Goal workflows, registry fetch, Git, a
   narrowing-only Supervisor, per-agent Provider routing and writable team
   workers. The [initiative plan](./planning/agentic-teams/README.md) is
-  self-contained and orders the slices; start at Goal Foundation prerequisites
-  (lifecycle, cancellation, budgets, plan contract and Workspace lock;
-  execution step 3), then A4, dogfooding and the remaining Goal artifacts. The
+  self-contained and orders the slices; Goal Foundation has landed under the
+  [Goal spec](./docs/specs/goals.md), so continue with A4 flexible limits
+  (execution step 4), then dogfooding and the remaining Goal workflows. The
   approved A4 maxima are 4 GiB memory, 8 GiB
   cache, 1 GiB project storage and 256 tasks; the current cache view remains
   64 MiB until A4 enables the build profile. Native build
@@ -28,9 +27,6 @@ history. Implementation status and verified support are separate claims.
   missing and user-deferred behind the [route/authorization gate](./docs/research/subscription-provider-routes-2026-10.md#decision-boundary-for-beta-1).
   Continue unaffected implementation. API-key billing is a separate route;
   another harness's implementation or credentials do not authorize Arany access.
-- **Long-lived history.** Evaluate incremental replay/indexing and a bounded
-  archival/new-Session policy before histories reach existing admission quotas.
-  Preserve canonical Events, fork lineage and append acknowledgement semantics.
 
 ## Terminal continuity evidence
 
@@ -107,8 +103,8 @@ to the user's credential store or clipboard.
 | Native terminal faults and tmux | Run available native tmux and acquisition/output/input-loss owners, including optimized macOS and supported architectures; verify restoration on the exact distributed binary. [Terminal fixture rules](./agents/references/testing-details.md#terminal-process-fixtures), [PTY finding](./docs/security/findings/terminal-pty-hangup-spin.md) |
 | Native stores and clipboard | Finish isolated Linux keyring-backed product setup and native store lifecycle gates; human Keychain dialog and general-pasteboard checks remain in checklist item 8. [Credentials](./docs/specs/credentials.md), [clipboard](./agents/clipboard.md) |
 | Readiness, load and observer faults | Measure cancellation/cleanup and resource enforcement under declared load. [Guard unit rules](./agents/guard-unit.md) |
-| Performance | Measure history/input latency, RSS and telemetry on named hosts. Measure the bounded macOS host-PID scan at its nominal supervision interval before choosing another membership primitive or interval. [Native measurement rules](./agents/references/testing-details.md#native-and-live-evidence) |
-| Distribution and dependency policy | Verify fresh advisories, license/source bundles, exact source/binary pairing, compiler/native provenance and MSRV. Resolve changed notice exceptions and the unreached standard-library gate without weakening pins. [Release review](./docs/security/beta-license-release-review.md#current-result), [dependency inventory](./docs/security/beta-dependency-inventory.md) |
+| Performance | Repair and recheck the ignored Linux history fixture against the full lifecycle contract: its first `AgentFinished(Finished)` lacks the required preceding `ProviderCallRecorded(Finished)`. On the current baseline, adding only that Event per Run would make the 1,600-Run seed 11,201 Events, above the 10,000-Event lineage limit; additional lifecycle or reservation Events change the final count. Once all required Events are accounted for, rebalance Run count and text/Event mix under the final limits, and assert Event and serialized-payload counts before measuring. Then measure history/input latency and RSS on named Linux/macOS hosts through the 128 MiB HotSession boundary and toward quota-near cold replay, recording shared-Store size. The fixture source does not isolate replay duration, assert payload/database size or sample RSS; the separate `show` gate covers 100 Events. Measure telemetry on named hosts. Measure the bounded macOS host-PID scan at its nominal supervision interval before choosing another membership primitive or interval. [History gate](./tests/session_run/active_terminal/tmux/history_latency.rs), [native measurement rules](./agents/references/testing-details.md#native-and-live-evidence) |
+| Distribution and dependency policy | Keep the release-policy workflow passing for the release commit's `Cargo.lock`; verify license/source bundles, exact source/binary pairing, compiler/native provenance and MSRV. Resolve changed notice exceptions and the unreached standard-library gate without weakening pins. The reviewed inventory, MSRV metadata review and notice exceptions still name `jsonschema` 0.56.0 and `unicode-width` 0.2.0; `main` now locks 0.58.6 and 0.2.2, so re-review those packages before updating their pins. [Release review](./docs/security/beta-license-release-review.md#current-result), [dependency inventory](./docs/security/beta-dependency-inventory.md) |
 | Other platforms and enforcers | Dispatch the existing [CI workflow](./.github/workflows/ci.yml) with `linux_arm64=true` against the ref containing this change; the workflow file itself must exist on the default branch. Require both native `ubuntu-24.04-arm` debug and release jobs to pass their `aarch64` host/Rust-target assertions, Linux namespace prerequisites and `--cfg arany_ci` workspace tests; keep this evidence pending until the hosted run completes green. Do not use emulation or skip gates. Separately verify alternative Linux-native enforcement and the Linux build under WSL2 (user namespaces, cgroup v2 and Guard enforcement), and require actual platform behavior evidence before support claims. Native Windows is out of scope. [OS-parity priority](./AGENTS.md#product-and-implementation-priorities), [native CI procedure](./agents/references/testing-details.md#local-verification-and-ci) |
 
 These gates remain unverified until their named procedure completes. Specs and

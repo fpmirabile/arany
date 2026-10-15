@@ -710,7 +710,7 @@ impl Provider for GoalWorkspaceLease {
     not(arany_ci),
     ignore = "native Linux cross-StateRoot Goal Workspace lease"
 )]
-async fn unfinished_implementation_goal_holds_workspace_lease_across_runs() {
+async fn paused_implementation_goal_does_not_hold_the_workspace_writer() {
     if !super::isolation::enter_native_account_isolated_test() {
         return;
     }
@@ -760,18 +760,23 @@ async fn unfinished_implementation_goal_holds_workspace_lease_across_runs() {
     blocked_engine
         .enable_tools(env!("CARGO_BIN_EXE_arany").into())
         .unwrap();
-    assert!(matches!(
-        blocked_engine.run(proposal_request(&workspace)).await,
-        Err(arany::EngineError::WorkspaceBusy)
-    ));
-    assert!(blocked_requests.lock().unwrap().is_empty());
+    // The paused Goal holds no writer lock, so another StateRoot's Goal writes the Workspace.
+    assert_eq!(
+        blocked_engine
+            .run(proposal_request(&workspace))
+            .await
+            .unwrap()
+            .run
+            .status,
+        RunStatus::Finished
+    );
+    assert_eq!(blocked_requests.lock().unwrap().len(), 1);
     blocked_engine.close().await.unwrap();
 
     let mut resumed = proposal_request(&workspace);
     resumed.session_id = Some(initial.session_id);
     resumed.title = None;
-    resumed.goal =
-        arany::GoalRequest::resume(initial.goal_id, arany::GoalPhase::Implementation, true);
+    resumed.goal = arany::GoalRequest::resume(initial.goal_id, true);
     let terminal = first_engine.run(resumed).await.unwrap();
     assert_eq!(terminal.run.status, RunStatus::Finished);
     assert_eq!(first_requests.lock().unwrap().len(), 2);

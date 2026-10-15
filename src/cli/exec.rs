@@ -1,12 +1,13 @@
 use super::{CommandOutput, OutputArg, chatgpt, native_run_key_from_env};
 use arany::{
-    AnthropicProvider, CollaborationPolicy, CustomProvider, Effort, Engine, OpenAiProvider,
-    Provider, RunRequest, RunStatus, SessionId, StateRoot, Store, Telemetry,
+    AnthropicProvider, CollaborationPolicy, CustomProvider, Effort, Engine, EngineError,
+    GoalBudget, GoalId, GoalPhase, GoalRequest, GoalStatus, OpenAiProvider, Provider,
+    RunCancellation, RunOutcome, RunRequest, RunStatus, SessionId, StateRoot, Store, Telemetry,
     native_protection_supported, render_exec, resolve_native_effort_for_run,
     validate_native_model_id,
 };
 use clap::{Args, ValueEnum};
-use std::{path::PathBuf, str::FromStr};
+use std::{path::PathBuf, str::FromStr, time::Duration};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ProviderArg {
@@ -79,6 +80,12 @@ pub(crate) struct ExecArgs {
         help = "Explicitly resume an interrupted Goal in --session-id"
     )]
     pub resume_goal: Option<String>,
+    #[arg(
+        long,
+        conflicts_with_all = ["prompt", "resume_goal"],
+        help = "Run an autonomous Goal on this objective until it is satisfied or stops"
+    )]
+    pub goal: Option<String>,
     #[arg(long, value_enum, default_value_t = OutputArg::Text)]
     pub output: OutputArg,
     #[arg(long, value_enum, default_value_t = CollaborationArg::Auto)]
@@ -89,22 +96,21 @@ pub(crate) struct ExecArgs {
     pub include_paths: Vec<PathBuf>,
     #[arg(long, help = "Enable guarded tools from private tools.json")]
     pub tools: bool,
-    pub prompt: String,
+    /// Objective of a new Run; omitted only with --resume-goal, which continues the pinned objective.
+    pub prompt: Option<String>,
 }
 
 struct Admission {
     state_dir: PathBuf,
     workspace: PathBuf,
     session_id: Option<SessionId>,
-    resume_goal: Option<arany::GoalId>,
+    objective: String,
+    goal: GoalRequest,
     policy: CollaborationPolicy,
 }
 
 impl ExecArgs {
     fn admit(&self) -> Result<Admission, &'static str> {
-        if self.prompt.trim().is_empty() || self.prompt.len() > 8 * 1024 {
-            return Err("invalid objective");
-        }
         if matches!(
             self.provider,
             ProviderArg::Openai | ProviderArg::Anthropic | ProviderArg::Chatgpt
@@ -144,22 +150,39 @@ impl ExecArgs {
             .as_deref()
             .map(SessionId::from_str)
             .transpose()?;
-        if self.resume_goal.is_some() && session_id.is_none() {
-            return Err("--resume-goal requires --session-id");
-        }
         let resume_goal = self
             .resume_goal
             .as_deref()
             .map(arany::GoalId::from_str)
             .transpose()
             .map_err(|_| "invalid Goal ID")?;
+        let resumes_without_text =
+            self.goal.is_none() && self.prompt.is_none() && resume_goal.is_some();
+        let (objective, goal) = match (&self.goal, &self.prompt, resume_goal) {
+            (Some(objective), None, None) => (
+                objective.clone(),
+                GoalRequest::autonomous(GoalBudget::default(), GoalPhase::Implementation),
+            ),
+            (None, Some(prompt), None) => (prompt.clone(), GoalRequest::default()),
+            (None, Some(prompt), Some(id)) => (prompt.clone(), GoalRequest::resume(id, true)),
+            (None, None, Some(id)) => (String::new(), GoalRequest::resume(id, true)),
+            _ => {
+                return Err(
+                    "pass --goal alone, a prompt alone, or --resume-goal with an optional prompt",
+                );
+            }
+        };
+        if !resumes_without_text && (objective.trim().is_empty() || objective.len() > 8 * 1024) {
+            return Err("invalid objective");
+        }
         let (workspace, state_dir) =
             super::admit_workspace(self.workspace.clone(), self.state_dir.clone())?;
         Ok(Admission {
             state_dir,
             workspace,
             session_id,
-            resume_goal,
+            objective,
+            goal,
             policy,
         })
     }
@@ -236,28 +259,43 @@ async fn run_with_provider<P: Provider + 'static>(
             )
             .map_err(|error| error.to_string())?;
     }
-    let goal = admission
-        .resume_goal
-        .map_or_else(arany::GoalRequest::default, |id| {
-            arany::GoalRequest::resume(id, arany::GoalPhase::Implementation, true)
-        });
-    let result = engine
-        .run(RunRequest {
+    let end = run_signalled(
+        &mut engine,
+        RunRequest {
             session_id: admission.session_id,
             title: None,
-            objective: args.prompt,
+            objective: admission.objective,
             images: Vec::new(),
             workspace: admission.workspace,
             include_paths: args.include_paths,
             policy: admission.policy,
-            goal,
-        })
-        .await;
+            goal: admission.goal,
+        },
+    )
+    .await;
     engine
         .close()
         .await
         .map_err(|_| "store shutdown failed".to_owned())?;
-    let outcome = result.map_err(|error| error.to_string())?;
+    let SignalledRun {
+        result,
+        interrupted,
+        forced,
+    } = end?;
+    let stop = result
+        .as_ref()
+        .err()
+        .filter(|error| matches!(error, EngineError::StoppedAfterRun { .. }))
+        .map(ToString::to_string);
+    let outcome = match result {
+        Ok(outcome) => outcome,
+        // The committed answer is still printed; the stop error makes the exit nonzero.
+        Err(EngineError::StoppedAfterRun { run, .. }) => *run,
+        Err(EngineError::CancelledBeforeStart) if interrupted => {
+            return Err("interrupted before a Run started; no Run was recorded".into());
+        }
+        Err(error) => return Err(error.to_string()),
+    };
     let root = StateRoot::open_existing(&admission.state_dir)
         .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
     let store = Store::open_read_only(root).map_err(|_| "state store unavailable".to_owned())?;
@@ -279,7 +317,11 @@ async fn run_with_provider<P: Provider + 'static>(
         .last()
         .filter(|run| **run == outcome.run)
         .ok_or("Run history unavailable or invalid")?;
-    let success = run.status == RunStatus::Finished;
+    let paused = interrupted
+        && view.goal(outcome.goal_id).is_some_and(|goal| {
+            matches!(goal.status, GoalStatus::Running | GoalStatus::Interrupted)
+        });
+    let success = run.status == RunStatus::Finished && !paused;
     if !matches!(
         run.status,
         RunStatus::Finished | RunStatus::Failed | RunStatus::Cancelled
@@ -316,13 +358,154 @@ async fn run_with_provider<P: Provider + 'static>(
             receipt
         }
         OutputArg::Jsonl if success => String::new(),
-        OutputArg::Jsonl => "error: Run failed\n".into(),
+        OutputArg::Jsonl => match run.status {
+            RunStatus::Cancelled => "error: Run cancelled\n".into(),
+            RunStatus::Failed => "error: Run failed\n".into(),
+            // A finished Run that is not a success keeps its Goal paused.
+            _ => "error: Goal paused before completion\n".into(),
+        },
+    };
+    let stderr = if paused {
+        format!(
+            "{stderr}{}",
+            resume_hint(outcome.session_id, outcome.goal_id)
+        )
+    } else {
+        stderr
+    };
+    let stop = forced.map(str::to_owned).or(stop);
+    let stderr = match &stop {
+        Some(message) => format!("{stderr}error: {message}\n"),
+        None => stderr,
     };
     Ok(CommandOutput {
         stdout,
         stderr,
-        success,
+        success: success && stop.is_none(),
     })
+}
+
+/// Grace for the Run's Cancelled receipt after a forced stop; matches the attached terminal.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StopSignal {
+    Interrupt,
+    Hangup,
+    Terminate,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StopStep {
+    /// The first Ctrl+C requests cancellation and keeps waiting for the receipt.
+    Cancel,
+    /// A second Ctrl+C or a termination signal stops waiting after the grace period.
+    Force(&'static str),
+}
+
+fn stop_step(cancelling: bool, signal: StopSignal) -> StopStep {
+    match (signal, cancelling) {
+        (StopSignal::Interrupt, false) => StopStep::Cancel,
+        (StopSignal::Interrupt, true) => StopStep::Force("forced shutdown after second Ctrl+C"),
+        (StopSignal::Hangup, _) => StopStep::Force("terminated by SIGHUP"),
+        (StopSignal::Terminate, _) => StopStep::Force("terminated by SIGTERM"),
+    }
+}
+
+/// Names the command that resumes a Goal left paused by interruption.
+fn resume_hint(session_id: SessionId, goal_id: GoalId) -> String {
+    format!(
+        "Goal paused; resume with arany exec --session-id {session_id} --resume-goal {goal_id}\n"
+    )
+}
+
+#[cfg(unix)]
+struct StopSignals {
+    interrupt: tokio::signal::unix::Signal,
+    hangup: tokio::signal::unix::Signal,
+    terminate: tokio::signal::unix::Signal,
+}
+
+#[cfg(unix)]
+impl StopSignals {
+    fn install() -> std::io::Result<Self> {
+        use tokio::signal::unix::{SignalKind, signal};
+        Ok(Self {
+            interrupt: signal(SignalKind::interrupt())?,
+            hangup: signal(SignalKind::hangup())?,
+            terminate: signal(SignalKind::terminate())?,
+        })
+    }
+
+    async fn next(&mut self) -> StopSignal {
+        tokio::select! {
+            _ = self.interrupt.recv() => StopSignal::Interrupt,
+            _ = self.hangup.recv() => StopSignal::Hangup,
+            _ = self.terminate.recv() => StopSignal::Terminate,
+        }
+    }
+}
+
+#[cfg(not(unix))]
+struct StopSignals;
+
+#[cfg(not(unix))]
+impl StopSignals {
+    fn install() -> std::io::Result<Self> {
+        Ok(Self)
+    }
+
+    async fn next(&mut self) -> StopSignal {
+        std::future::pending().await
+    }
+}
+
+struct SignalledRun {
+    result: Result<RunOutcome, EngineError>,
+    /// A stop signal requested cancellation before the Run's receipt.
+    interrupted: bool,
+    /// Set when a forced stop produced the receipt within the grace period.
+    forced: Option<&'static str>,
+}
+
+/// Drives one Run with stop signals installed only while it is in flight.
+async fn run_signalled<P: Provider + 'static>(
+    engine: &mut Engine<P>,
+    request: RunRequest,
+) -> Result<SignalledRun, String> {
+    let cancellation = RunCancellation::new();
+    let mut signals =
+        StopSignals::install().map_err(|_| "signal handling unavailable".to_owned())?;
+    let run = engine.run_with_cancel(request, cancellation.clone());
+    tokio::pin!(run);
+    let mut interrupted = false;
+    let forced = loop {
+        tokio::select! {
+            result = &mut run => {
+                return Ok(SignalledRun { result, interrupted, forced: None });
+            }
+            signal = signals.next() => match stop_step(interrupted, signal) {
+                StopStep::Cancel => {
+                    interrupted = true;
+                    cancellation.cancel();
+                }
+                StopStep::Force(reason) => {
+                    cancellation.cancel();
+                    break reason;
+                }
+            },
+        }
+    };
+    match tokio::time::timeout(SHUTDOWN_GRACE, &mut run).await {
+        Ok(result) => Ok(SignalledRun {
+            result,
+            interrupted: true,
+            forced: Some(forced),
+        }),
+        Err(_) => Err(format!(
+            "{forced}; Run may be interrupted; check Session history"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -385,28 +568,156 @@ mod tests {
             effort: None,
             session_id: None,
             resume_goal: None,
+            goal: None,
             output: OutputArg::Text,
             collaboration: CollaborationArg::Single,
             max_active_children: None,
             include_paths: Vec::new(),
             tools: false,
-            prompt: prompt.into(),
+            prompt: Some(prompt.into()),
         }
     }
 
     #[test]
-    fn interrupted_goal_resume_requires_an_explicit_session() {
-        let temp = tempfile::tempdir().expect("temporary directory");
-        let mut args = args(
-            temp.path().join("state"),
-            temp.path().join("workspace"),
-            "resume",
-        );
-        args.resume_goal = Some(arany::GoalId::new().to_string());
+    fn stop_signals_cancel_once_then_force() {
+        assert_eq!(stop_step(false, StopSignal::Interrupt), StopStep::Cancel);
         assert_eq!(
-            args.admit().err(),
-            Some("--resume-goal requires --session-id")
+            stop_step(true, StopSignal::Interrupt),
+            StopStep::Force("forced shutdown after second Ctrl+C")
         );
+        assert_eq!(
+            stop_step(false, StopSignal::Terminate),
+            StopStep::Force("terminated by SIGTERM")
+        );
+        assert_eq!(
+            stop_step(true, StopSignal::Hangup),
+            StopStep::Force("terminated by SIGHUP")
+        );
+    }
+
+    #[test]
+    fn resume_hint_names_the_session_and_goal() {
+        let session = SessionId::new();
+        let goal = GoalId::new();
+        assert_eq!(
+            resume_hint(session, goal),
+            format!(
+                "Goal paused; resume with arany exec --session-id {session} --resume-goal {goal}\n"
+            )
+        );
+    }
+
+    #[test]
+    fn interrupted_goal_resume_requires_an_explicit_session() {
+        #[derive(clap::Parser)]
+        struct Probe {
+            #[command(flatten)]
+            exec: ExecArgs,
+        }
+        let goal = arany::GoalId::new().to_string();
+        let error = <Probe as clap::Parser>::try_parse_from([
+            "probe",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.4",
+            "--resume-goal",
+            goal.as_str(),
+            "resume",
+        ])
+        .err()
+        .expect("--resume-goal without --session-id is a usage error");
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
+
+    #[test]
+    fn exec_goal_and_prompt_less_resume_admit_their_objective_shapes() {
+        #[derive(clap::Parser)]
+        struct Probe {
+            #[command(flatten)]
+            exec: ExecArgs,
+        }
+        let temp = tempfile::tempdir().expect("private test root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let state = temp.path().join("state");
+        let (state_arg, workspace_arg) = (
+            state.to_str().expect("UTF-8 state path"),
+            workspace.to_str().expect("UTF-8 workspace path"),
+        );
+        let session = SessionId::default().to_string();
+        let goal_id = arany::GoalId::new().to_string();
+        let parse = |tail: &[&str]| {
+            let mut argv = vec![
+                "probe",
+                "--provider",
+                "openai",
+                "--model",
+                "gpt-5.4",
+                "--state-dir",
+                state_arg,
+                "--workspace",
+                workspace_arg,
+            ];
+            argv.extend_from_slice(tail);
+            <Probe as clap::Parser>::try_parse_from(argv).map(|probe| probe.exec)
+        };
+
+        let admission = parse(&["--goal", "Ship the change"])
+            .expect("--goal needs no positional prompt")
+            .admit()
+            .expect("autonomous objective");
+        assert_eq!(admission.objective, "Ship the change");
+        assert!(admission.goal.autonomous);
+
+        let admission = parse(&["--session-id", &session, "--resume-goal", &goal_id])
+            .expect("resume parses without a prompt")
+            .admit()
+            .expect("prompt-less resume");
+        assert!(admission.objective.is_empty());
+        assert_eq!(
+            admission.goal.id,
+            Some(arany::GoalId::from_str(&goal_id).expect("Goal ID"))
+        );
+
+        let admission = parse(&[
+            "--session-id",
+            &session,
+            "--resume-goal",
+            &goal_id,
+            "Keep going",
+        ])
+        .expect("resume accepts a prompt as its text")
+        .admit()
+        .expect("prompt with resume");
+        assert_eq!(admission.objective, "Keep going");
+        assert_eq!(
+            parse(&[]).expect("parses").admit().err(),
+            Some("pass --goal alone, a prompt alone, or --resume-goal with an optional prompt")
+        );
+        assert_eq!(
+            parse(&["--goal", " "]).expect("parses").admit().err(),
+            Some("invalid objective")
+        );
+        for tail in [
+            vec!["--goal", "Ship the change", "Also a prompt"],
+            vec![
+                "--goal",
+                "Ship the change",
+                "--session-id",
+                &session,
+                "--resume-goal",
+                &goal_id,
+            ],
+        ] {
+            assert_eq!(
+                parse(&tail).err().expect("conflicting shapes").kind(),
+                clap::error::ErrorKind::ArgumentConflict
+            );
+        }
     }
 
     fn scripted(
@@ -417,6 +728,81 @@ mod tests {
             answers: Arc::new(Mutex::new(VecDeque::from([answer]))),
             observed: Arc::clone(observed),
         }
+    }
+
+    #[tokio::test]
+    async fn exec_resume_of_an_exhausted_goal_closes_it_and_names_the_reason() {
+        let temp = tempfile::tempdir().expect("private test root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let state_dir = temp.path().join("state");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let mut engine = Engine::open(
+            StateRoot::admit(&state_dir).expect("state"),
+            scripted(
+                Ok(Finish {
+                    summary: "first summary".into(),
+                    result: "first".into(),
+                }),
+                &observed,
+            ),
+        )
+        .expect("engine");
+        let mut goal = GoalRequest::new(
+            GoalBudget {
+                max_provider_calls: 1,
+                ..GoalBudget::default()
+            },
+            GoalPhase::Implementation,
+        );
+        goal.finish_after_run = false;
+        let paused = engine
+            .run(RunRequest {
+                session_id: None,
+                title: Some("Exhausted".into()),
+                objective: "Use the only Provider call".into(),
+                images: Vec::new(),
+                workspace: workspace.clone(),
+                include_paths: Vec::new(),
+                policy: CollaborationPolicy::Single,
+                goal,
+            })
+            .await
+            .expect("paused Goal Run");
+        engine.close().await.expect("engine shutdown");
+
+        let mut resume = args(state_dir.clone(), workspace.clone(), "unused");
+        resume.prompt = None;
+        resume.session_id = Some(paused.session_id.to_string());
+        resume.resume_goal = Some(paused.goal_id.to_string());
+        let admission = resume.admit().expect("valid resume");
+        let error = run_with_provider(
+            resume,
+            admission,
+            scripted(Err(ProviderError::Unavailable), &observed),
+            Telemetry::disabled(),
+        )
+        .await
+        .err()
+        .expect("an exhausted resume exits unsuccessfully with its reason");
+        assert_eq!(error, "Goal budget is exhausted");
+        assert_eq!(observed.lock().expect("observations").len(), 1);
+
+        let mut again = args(state_dir.clone(), workspace.clone(), "unused");
+        again.prompt = None;
+        again.session_id = Some(paused.session_id.to_string());
+        again.resume_goal = Some(paused.goal_id.to_string());
+        let admission = again.admit().expect("valid resume");
+        let error = run_with_provider(
+            again,
+            admission,
+            scripted(Err(ProviderError::Unavailable), &observed),
+            Telemetry::disabled(),
+        )
+        .await
+        .err()
+        .expect("a closed Goal is not resumable");
+        assert_eq!(error, "Goal is not available for explicit resume");
     }
 
     #[tokio::test]

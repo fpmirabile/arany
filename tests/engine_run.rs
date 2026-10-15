@@ -42,6 +42,8 @@ struct ScriptedProvider {
     capacity: u8,
     responses: Mutex<VecDeque<Result<ProviderOutcome, ProviderError>>>,
     cancel_at_completion: Option<(AgentPhase, RunCancellation)>,
+    before_call: Option<(usize, Box<dyn Fn() + Send + Sync>)>,
+    clock_advance: Option<(usize, Duration)>,
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
     compact_responses: Mutex<VecDeque<Result<CompactionResponse, ProviderError>>>,
     compact_requests: Arc<Mutex<Vec<CompactionRequest>>>,
@@ -59,10 +61,24 @@ impl ScriptedProvider {
             capacity: 3,
             responses: Mutex::new(responses.into_iter().map(Ok).collect()),
             cancel_at_completion: None,
+            before_call: None,
+            clock_advance: None,
             requests: Arc::new(Mutex::new(Vec::new())),
             compact_responses: Mutex::new(VecDeque::new()),
             compact_requests: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Runs `hook` when the zero-based provider call `index` is invoked, before its response is returned.
+    fn with_before_call(mut self, index: usize, hook: impl Fn() + Send + Sync + 'static) -> Self {
+        self.before_call = Some((index, Box::new(hook)));
+        self
+    }
+
+    /// Pauses Tokio time and advances it by `duration` while the zero-based provider call `index` is still in flight.
+    fn with_clock_advance_before_call(mut self, index: usize, duration: Duration) -> Self {
+        self.clock_advance = Some((index, duration));
+        self
     }
 
     fn with_compactions(
@@ -135,7 +151,22 @@ impl Provider for ScriptedProvider {
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         let phase = request.phase;
-        self.requests.lock().expect("requests lock").push(request);
+        let index = {
+            let mut requests = self.requests.lock().expect("requests lock");
+            requests.push(request);
+            requests.len() - 1
+        };
+        if let Some((target, hook)) = &self.before_call
+            && *target == index
+        {
+            hook();
+        }
+        if let Some((target, duration)) = &self.clock_advance
+            && *target == index
+        {
+            tokio::time::pause();
+            tokio::time::advance(*duration).await;
+        }
         let outcome = self
             .responses
             .lock()
@@ -2142,6 +2173,8 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
                     objective: "Unfinished question".into(),
                     workspace_identity,
                     budget: arany::GoalBudget::default(),
+                    phase: arany::GoalPhase::Implementation,
+                    autonomous: false,
                 },
             )
             .await
@@ -2190,7 +2223,7 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
         let mut resumed = request(&workspace, "Finished question");
         resumed.session_id = Some(session_id);
         resumed.title = None;
-        resumed.goal = arany::GoalRequest::resume(goal_id, arany::GoalPhase::Implementation, true);
+        resumed.goal = arany::GoalRequest::resume(goal_id, true);
         engine.run(resumed).await.expect("completed later Run");
         engine
             .compact_session(session_id, workspace.clone())
@@ -4070,23 +4103,34 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                             .finished_sequence
                             .expect("Run terminal sequence")
                     );
+                    // A cancelled Run pauses its Goal: it records no terminal receipt and stays resumable.
                     let expected_goal_status = match outcome.run.status {
-                        RunStatus::Finished => arany::GoalStatus::Completed,
-                        RunStatus::Failed => arany::GoalStatus::Failed,
-                        RunStatus::Cancelled => arany::GoalStatus::Cancelled,
+                        RunStatus::Finished => Some(arany::GoalStatus::Completed),
+                        RunStatus::Failed => Some(arany::GoalStatus::Failed),
+                        RunStatus::Cancelled => None,
                         status => panic!("expected a terminal Run, got {status:?}"),
                     };
-                    assert!(events.last().is_some_and(|event| {
-                        event.sequence > terminal.sequence
-                            && matches!(
-                                event.event,
-                                Event::GoalFinished {
-                                    goal_id,
-                                    status,
-                                    ..
-                                } if goal_id == outcome.goal_id && status == expected_goal_status
-                            )
-                    }));
+                    if let Some(expected_goal_status) = expected_goal_status {
+                        assert!(events.last().is_some_and(|event| {
+                            event.sequence > terminal.sequence
+                                && matches!(
+                                    event.event,
+                                    Event::GoalFinished {
+                                        goal_id,
+                                        status,
+                                        ..
+                                    } if goal_id == outcome.goal_id && status == expected_goal_status
+                                )
+                        }));
+                    } else {
+                        assert!(
+                            !events
+                                .iter()
+                                .any(|event| matches!(event.event, Event::GoalFinished { .. })),
+                            "cancelled Run records no Goal receipt"
+                        );
+                        assert_eq!(replay.goals[0].status, arany::GoalStatus::Interrupted);
+                    }
                     assert_eq!(replay.runs.len(), 1);
                     assert_eq!(replay.runs[0], outcome.run);
                     let jsonl = arany::render_session(&replay, &events, arany::Output::Jsonl);
@@ -5403,7 +5447,7 @@ fn preview_checkpoint_survives_abrupt_process_death() {
         next.include_paths.clear();
         next.session_id = Some(id);
         next.title = None;
-        next.goal = arany::GoalRequest::resume(goal_id, arany::GoalPhase::Implementation, true);
+        next.goal = arany::GoalRequest::resume(goal_id, true);
         assert_eq!(
             engine.run(next).await.unwrap().run.status,
             RunStatus::Finished
