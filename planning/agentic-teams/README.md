@@ -4,7 +4,7 @@
 
 - Status: `In progress`
 - Owner: Fernando Mirabile
-- Last updated: 2026-10-13
+- Last updated: 2026-10-14
 
 ## Outcome
 
@@ -37,7 +37,8 @@ the user-owned checks in [next steps](../../NEXT_STEPS.md).
 ## Terms
 
 - **Goal.** A durable, Engine-owned unit of user intent that spans one or more
-  Runs and ends Completed, Failed or Cancelled with a final report (E11).
+  Runs and ends Completed or Failed with a final report (E11). Cancellation
+  (Ctrl+C) pauses it as Interrupted until `/goal resume`.
 - **RPI.** Research → Plan → Implementation, the default mode (B6).
 - **Plan contract.** An agent's declared scope (paths, command names), success
   criterion and budget; the anchor for every Supervisor signal (B1).
@@ -72,11 +73,16 @@ the user-owned checks in [next steps](../../NEXT_STEPS.md).
   [D-03](../../docs/research/next-step-decision-register.md#d-03--generic-bounded-agent-protocol)).
   This is a fan-out of advisors, not a coding team.
 - Commands return bounded changesets from a private offline snapshot; a separate
-  validated mutation publishes them to the Workspace. Scratch data and build
-  caches do not survive calls
-  ([Tools](../../docs/specs/tools.md#command-changesets)).
-- Folder trust pins only the system `sh`; home-installed toolchains need manual
-  executable pins, and the Linux runtime mount is `/usr` only.
+  validated mutation publishes them to the Workspace. A private per-Workspace
+  StateRoot archive reuses bounded build outputs and dependency data inside each
+  command's quota-backed scratch view. Explicitly selected host registry caches
+  remain read-only and separate from Arany's archive
+  ([Tools](../../docs/specs/tools.md#persistent-workspace-build-cache)).
+- Folder trust pins the system `sh` and can explicitly select exact Rust, Node
+  and Python runtime roots or known host-cache subtrees. Linux uses private
+  mount propagation plus bounded namespace mount-table checks; macOS uses exact
+  Seatbelt grants and native mount-table checks. The owning Tools spec records
+  disclosure, exclusions and the remaining native evidence.
 - Fixed ceilings block real builds: 60 seconds per unit, 300 seconds per Run,
   16 Tool effects per Run, 512 MiB memory, 64 MiB scratch and writable
   project storage, 2,048-entry snapshots and 8 KiB edit strings
@@ -105,19 +111,7 @@ unsupported enforcement fails closed. Child authority remains
 
 ### A. Coding foundation
 
-2. **Toolchain runtime profiles.** Named read-only runtime profiles (`rust`,
-   `node`, `python`) mount exact toolchain subtrees as declared runtime, like
-   `/usr` today, for example `~/.rustup/toolchains/<pinned>` and registry
-   caches. Whole home or tool directories are never mounted: `~/.cargo` holds
-   `credentials.toml`, and `~/.npmrc`/`~/.pypirc` hold tokens. The profile pins
-   toolchain identity (version, path and directory identity) rather than every
-   file digest; identity drift rejects dispatch. Folder trust can enable a
-   detected profile on the same consent screen.
-3. **Persistent build cache.** A private per-Workspace cache directory under
-   StateRoot, outside the Workspace, is mounted writable for build outputs and
-   dependency caches. It never carries credentials, is bounded by quota, and
-   the user can clear it. Its contents are build data, never authority.
-4. **Flexible limits.** Today's ceilings are compile-time constants
+3. **Flexible limits.** Today's ceilings are compile-time constants
    (`MAX_TOOL_CALLS = 16` and a 64 KiB Tool context in
    [src/tools/types.rs](../../src/tools/types.rs), plus the 300-second Run).
    Follow the established harness pattern instead of inventing one:
@@ -125,8 +119,8 @@ unsupported enforcement fails closed. Child authority remains
      Finish, bounded by context compaction, the Goal budget and
      cancellation. Tool observations use the model's admitted context with
      compaction instead of a fixed 64 KiB.
-   - Commands default to a 2-minute timeout and may request up to a
-     user-configurable maximum (default 10 minutes).
+   - Commands default to 120 seconds and may request up to the approved
+     user-configurable maximum of 600 seconds.
    - The plan contract may request a larger resource profile or timeout;
      Plan-gate approval grants it. In Accept edits and Auto, requests within
      the settings maxima are granted without a prompt; beyond them always
@@ -134,12 +128,15 @@ unsupported enforcement fails closed. Child authority remains
    - Runs remain the durable recovery unit, closed at milestone or wave
      boundaries, never because an arbitrary cap was hit.
    - Named, closed resource profiles (current `default` plus a larger
-     `build`) remain bound into intents and receipts, and Guard resource
-     ceilings (CPU, memory, storage, processes) stay finite.
-5. **Typed Git reads.** Read-only `status`, `diff` and `log` operations
+     `build`) remain bound into intents and receipts. The `build` profile uses
+     a Linux CPU quota of 100% of one core; macOS retains per-process CPU
+     supervision with its threshold derived from the admitted command timeout,
+     up to 600 seconds, and makes no aggregate CPU-rate claim. Memory,
+     storage, task and wall-time ceilings stay finite.
+4. **Typed Git reads.** Read-only `status`, `diff` and `log` operations
    implemented in-process over the repository, without executing Git hooks,
    filters or configuration from the project. Commits stay with the user.
-6. **Registry fetch.** Lets an agent add dependencies to the project it works
+5. **Registry fetch.** Lets an agent add dependencies to the project it works
    on (`npm install zod`, `cargo add serde`, `pip install requests`) without
    giving project code the network.
    - **Two phases.** A separate fetch phase reaches only an allowlist of
@@ -196,12 +193,17 @@ a research note verifies its API from primary sources.
   asks the user instead of skipping evaluation.
 
 1. **Plan contract.** The primary declares each worker's mission, direction
-   and scope in its assignment; a worker can only narrow it. Each agent's
-   first Tool outcome carries its scope
-   (paths and command names), success criterion (an explicit check such as a
-   named test command) and budget, without an extra model call. It is
-   mandatory for every agent that performs effects, bounded, validated and journaled.
-   Changing it requires approval under the current approval mode.
+   and scope in its assignment; a worker can only narrow it. Before its plan,
+   an agent may use bounded Workspace List/Read/Search, an admitted Skill read,
+   and configured bounded MCP catalog listing to inspect the task. Before any
+   other Tool, a bounded contract covers paths, command names, exact Skill
+   resources and MCP tools, a typed success criterion and budget, without an
+   extra model call. Catalog listing discovers names only; every MCP tool
+   invocation requires a contract even if the catalog labels it read-only. A
+   contract may accompany pre-plan inspection and is always validated and
+   journaled. A task limited to read-only inspection can finish without
+   inventing effect scope. Contract changes require approval under the current
+   approval mode.
 2. **Deterministic signals.** Each signal has a fixed threshold and response:
 
    | Signal | Detection | Default response |
@@ -266,9 +268,12 @@ a research note verifies its API from primary sources.
        recommendation; answers are journaled Goal facts.
      - A Goal ends Completed when the Finish gate passes and a final report
        (changes, evidence, unresolved items) is committed; otherwise it ends
-       Failed or Cancelled with the same report.
+       Failed with the same report. Cancellation (Ctrl+C) pauses it as
+       Interrupted until `/goal resume`.
      - After a crash or restart, an unfinished Goal resumes at its last phase
-       or Run boundary only after the user confirms.
+       or Run boundary only through an explicit user action: `/goal resume` or
+       `--resume-goal`, with no further confirmation prompt in the Foundation
+       contract. An RPI flow may add its own confirmation step.
    - **Ask** asks before every effect.
    - **Accept edits** integrates typed edits and in-scope changesets without
      prompts; commands and MCP calls ask.
@@ -431,9 +436,12 @@ execution contracts own the resulting behavior.
    the final report. Without the flag it goes straight to Implementation. Goal
    progress and the final report use the existing JSONL channel.
 11. **Every task is a Goal.** RPI adds Research and Plan; Ask, Accept edits and
-    Auto go straight to Implementation with the plan contract in the first
-    outcome. A Session holds at most one active Goal; a prompt while it runs
-    is a steering note, and the next prompt after it ends starts a new Goal.
+    Auto go straight to Implementation. In every mode, bounded read-only
+    inspection may precede the plan contract; every other Tool requires it
+    before dispatch. A Session holds at most one active Goal. Steering a running
+    Goal is deferred beyond the Foundation slice; until then a prompt while it
+    runs is not a steering note, and the next prompt after it ends starts a new
+    Goal.
 12. **Settings.** New settings live in one private, owner-only, versioned
     user settings file edited through `/settings`; per-folder values live with
     the folder-trust record; project files never set them. `tools.json`,
@@ -447,10 +455,11 @@ execution contracts own the resulting behavior.
 
 ## OS impact
 
-- A3–A5, B and D are platform-independent Engine/Guard logic over
-  existing private storage on Linux (tmpfs) and macOS (native images); judge
-  adapters are Provider HTTP.
-- A2 needs native mounts on Linux and Seatbelt read grants on macOS.
+- A4 needs native Linux and macOS resource enforcement and evidence. The
+  approved configurable ceilings do not establish build support.
+- A2's exact runtime roots, private Linux mount bootstrap, namespace topology
+  checks, macOS Seatbelt grants and host-cache disclosure rules are owned by the
+  [Tools spec](../../docs/specs/tools.md).
 - A6 needs network-namespace routing to the proxy on Linux and proxy-only
   Seatbelt network rules on macOS.
 - Native Windows is out of scope; Windows users run the Linux build under
@@ -461,9 +470,13 @@ execution contracts own the resulting behavior.
 Each slice that crosses one of these boundaries runs the
 [security pass](../../agents/security.md#security-pass-triggers) before merge.
 
-- **Runtime mounts and cache (A2, A3).** Toolchain subtrees and the build cache
-  must exclude credential files and never overlap Workspace, StateRoot or
-  account roots; cache contents are data, never authority.
+- **Runtime mounts and cache (A2, A3).** Runtime and cache grants never include
+  parent configuration or credential paths and never overlap Workspace,
+  StateRoot or account roots. Explicitly selected host cache contents may be
+  private data including embedded credential URLs, can be emitted through
+  bounded Tool output and can reach a later Provider request; the consent
+  screen warns and discovery never reads the contents. Arany's writable cache is separately quota-bounded and carries
+  no authority.
 - **Registry fetch (A6).** The only network path from a Tool: allowlisted
   public registries through the Guard-owned proxy, with SSRF rejection,
   install scripts disabled and no credentials.
@@ -490,25 +503,31 @@ Each slice that crosses one of these boundaries runs the
 Each item is one PR with its own contract update, security pass where
 triggered and evidence under [testing rules](../../agents/testing.md).
 
-2. A2–A4 Toolchain profiles, build cache and flexible limits.
-3. **Dogfooding milestone: Arany develops Arany.** Use Arany for this
+4. **A4 Flexible limits.** Replace the Run's fixed tool/model/context ceilings
+   with Finish, compaction, cancellation and Goal-budget bounds; add the
+   agreed command timeout and finite build resource profile settings. Guard
+   resource ceilings remain finite. This slice builds on the landed
+   [Goal Foundation](../../docs/specs/goals.md) and must not make the current
+   fixed Run loop unlimited by itself.
+5. **Dogfooding milestone: Arany develops Arany.** Use Arany for this
    repository's own work from here on. Requires Beta 1 check 7 (live
    validation of the chosen model's strict Tool encoding) in
    [next steps](../../NEXT_STEPS.md#beta-1-final-user-owned-checks). Every
    later slice is exercised through real use, which supplies the shadow-mode
    calibration data B2 needs.
-4. Goal core: E11 every task is a Goal, B1 plan contract, E1–E4 steering,
-   context, Workspace lock and checkpoints, E8 compaction and E10 `exec`
-   integration. Creates the `docs/specs/goals.md` domain spec.
-5. B6 modes including RPI and grilling, E7 Goal view and E12 settings.
-6. B2, B3, B5 and E5 Supervisor signals, escalation, Finish gate and override.
-7. A5 Typed Git reads and E6 Git writes.
-8. A6 Registry fetch.
-9. D1–D5 Provider roster and per-agent routing.
-10. Configurable judges over the roster (agent-capable judges first, then a
-   typed-judge adapter after its API research note).
-11. C1–C3 Writable workers, leases and integrator.
-12. B4 and C4 Review-point review and reviewer role.
+6. **Goal completion.** E1–E4 steering, context reinjection, Workspace
+   checkpoints and rewind, E8 compaction and E10 `exec` integration. This
+   follows dogfooding and extends Goal Foundation with the remaining durable
+   workflows and UI.
+7. B6 modes including RPI and grilling, E7 Goal view and E12 settings.
+8. B2, B3, B5 and E5 Supervisor signals, escalation, Finish gate and override.
+9. A5 Typed Git reads and E6 Git writes.
+10. A6 Registry fetch.
+11. D1–D5 Provider roster and per-agent routing.
+12. Configurable judges over the roster (agent-capable judges first, then a
+    typed-judge adapter after its API research note).
+13. C1–C3 Writable workers, leases and integrator.
+14. B4 and C4 Review-point review and reviewer role.
 
 Observe during dogfooding, without changing the plan unless evidence demands
 it: whether RPI's Plan gate adds friction to small tasks, and whether the
@@ -516,9 +535,17 @@ per-slice specification and evidence cost slows delivery.
 
 E13 telemetry spans land with the slice that introduces each span's subject.
 
-Next action: specify A2–A4 toolchain profiles, build cache and flexible limits
-in the [Tools contract](../../docs/specs/tools.md), including native admission,
-credential exclusion, cache quotas and larger offline build scenarios.
+Next action: A4 flexible limits, then dogfooding before the remaining Goal
+workflows. The A3 per-Workspace cache has a 64 MiB initial
+archive/view limit and shares an 8 GiB StateRoot aggregate; A4 binds the
+effective admitted cache quota to the native build profile. The planned A4 build
+profile proposes 4 GiB memory, 8 GiB requested cache, 1 GiB writable project
+storage and a 256 process/thread ceiling. That ceiling is separate from the
+ordinary command Guard limit of 64 processes/threads in
+[the Tools spec](../../docs/specs/tools.md), which stays in force until A4 admits
+a build profile. These remain finite policy ceilings, not support evidence.
+Native build verification and named-host measurements remain required before
+support claims.
 
 ## Open questions
 
@@ -527,12 +554,13 @@ data-dependent questions remain:
 
 - Default thresholds for loop, probing and disproportion signals. Decided from
   shadow-mode corpus and real Runs before those signals enforce.
-- `build` resource profile values per OS and default settings maxima. Decided
-  from measured builds on named hosts after A2–A4.
+- Native build-resource enforcement and measured builds on named hosts. The
+  approved finite ceilings do not prove a build works or establish support on
+  a named host.
 
 ## Contract owners
 
-- `docs/specs/goals.md` (created in execution step 4): Goal lifecycle, RPI, steering, checkpoints and Goal view facts.
+- `docs/specs/goals.md` (created by Goal Foundation): Goal lifecycle, RPI, steering, checkpoints, budgets and Goal view facts.
 - [Execution](../../docs/specs/execution.md): Run admission, coordination, teams and recovery.
 - [Tools](../../docs/specs/tools.md): grants, effects, changesets, Guard and native differences.
 - [Terminal](../../docs/specs/terminal.md): interaction, Supervisor prompts and accessibility.
@@ -546,8 +574,9 @@ data-dependent questions remain:
 - A team of a primary and writable workers completes a scripted coding task
   (edit, format, build, test, integrate) on Linux and macOS with closed replay.
 - An RPI Goal runs Research → Plan (with grilling) → approved multi-Run
-  Implementation to Completed, and to Failed/Cancelled with a final report;
-  restart resumes only after confirmation.
+  Implementation to Completed, and to Failed with a final report; Ctrl+C
+  pauses it until `/goal resume`, and restart resumes only through the
+  explicit user action in the Goal contract.
 - One Goal mixes at least two Providers across roles; an unadmittable or
   failing profile names itself, pauses its agents or switches to the enabled
   fallback, without re-dispatching uncertain effects.

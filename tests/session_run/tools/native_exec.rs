@@ -1,11 +1,730 @@
 use super::*;
 use crate::{loopback::ChildGuard, process::BoundedOutput};
+use sha2::{Digest, Sha256};
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
+    path::PathBuf,
     process::{Command, Stdio},
     time::Instant,
 };
+
+const CACHE_CANARY: &str = "EXPLICIT_CACHE_OUTPUT_CANARY";
+const PRIVATE_CACHE_CANARY: &str = "ARANY_PRIVATE_CACHE_PERSISTENCE_CANARY";
+
+fn cache_progress(stage: &str) {
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "cache-canary:{stage}").expect("cache fixture progress write");
+    stdout.flush().expect("cache fixture progress flush");
+}
+
+fn cache_public_failure_stage(output: &str) -> &'static str {
+    match output {
+        "Guard admission unavailable before dispatch; no operation was dispatched." => "admission",
+        "Guard pinned input unavailable before dispatch; no operation was dispatched." => {
+            "pinned-input"
+        }
+        "Guard native protection unavailable before dispatch; no operation was dispatched." => {
+            "native-protection"
+        }
+        "Guard resource limit unavailable before dispatch; no operation was dispatched." => {
+            "resource-limit"
+        }
+        "Guard execution unavailable before dispatch; no operation was dispatched." => "execution",
+        "Guard runtime mount topology unavailable before dispatch; no operation was dispatched." => {
+            "runtime-mounts"
+        }
+        "Guard handshake unavailable before dispatch; no operation was dispatched." => "handshake",
+        "Guard receipt unavailable before dispatch; no operation was dispatched." => "receipt",
+        "Guard resource attestation unavailable before dispatch; no operation was dispatched." => {
+            "resource-attestation"
+        }
+        "Guard process cleanup unavailable before dispatch; no operation was dispatched." => {
+            "process-cleanup"
+        }
+        "Guard storage cleanup unavailable before dispatch; no operation was dispatched." => {
+            "storage-cleanup"
+        }
+        "Guard launcher reap unavailable before dispatch; no operation was dispatched." => {
+            "launcher-reap"
+        }
+        "Guard output EOF unavailable before dispatch; no operation was dispatched." => {
+            "output-eof"
+        }
+        "Guard namespace bootstrap unavailable before dispatch; no operation was dispatched." => {
+            "namespace-bootstrap"
+        }
+        "Guard native manager unavailable before dispatch; no operation was dispatched." => {
+            "native-manager"
+        }
+        "Guard control protocol unavailable before dispatch; no operation was dispatched." => {
+            "control-protocol"
+        }
+        "Guard waiting queue is full; retry when capacity is available. No operation was dispatched." => {
+            "queue-full"
+        }
+        _ => "other",
+    }
+}
+
+fn cache_run_return(result: &Result<arany::RunOutcome, arany::EngineError>) -> String {
+    match result {
+        Ok(outcome) => {
+            let receipts = outcome
+                .run
+                .tools
+                .iter()
+                .map(|tool| {
+                    tool.observation.as_ref().map(|observation| {
+                        (
+                            observation.disposition,
+                            observation.guard.is_some(),
+                            observation.cache_update,
+                            cache_public_failure_stage(&observation.output),
+                            observation.output.len(),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            format!(
+                "Run status {:?}; tool receipts {receipts:?}",
+                outcome.run.status
+            )
+        }
+        Err(error) => {
+            let category = match error {
+                arany::EngineError::Store(_) => "store",
+                arany::EngineError::Tool(_) => "tool",
+                arany::EngineError::CoordinatorFailed => "coordinator",
+                arany::EngineError::CancellationDrainTimeout => "cancellation-drain",
+                arany::EngineError::CancelledBeforeStart => "cancelled",
+                arany::EngineError::InvalidHistory => "history",
+                _ => "request-or-state",
+            };
+            format!("EngineError category {category}")
+        }
+    }
+}
+
+struct CacheCanary {
+    requests: std::sync::Arc<std::sync::Mutex<Vec<ProviderRequest>>>,
+    calls: Vec<ToolCall>,
+    stage: &'static str,
+}
+
+impl Provider for CacheCanary {
+    fn profile_name(&self) -> &str {
+        "scripted"
+    }
+
+    fn model_name(&self) -> &str {
+        "cache-canary-model"
+    }
+
+    fn max_concurrent_calls(&self) -> u8 {
+        1
+    }
+
+    async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        let step = {
+            let mut requests = self.requests.lock().unwrap();
+            let step = requests.len();
+            requests.push(request);
+            step
+        };
+        cache_progress(&format!("{}:provider-step-{step}", self.stage));
+        if step > self.calls.len() {
+            return Err(ProviderError::InvalidOutcome);
+        }
+        let outcome = if step < self.calls.len() {
+            let call = self.calls[step].clone();
+            let plan_contract = if step == 0 {
+                let program = match &call {
+                    ToolCall::Command { program, .. } => program.clone(),
+                    _ => return Err(ProviderError::InvalidOutcome),
+                };
+                let success_call = self
+                    .calls
+                    .last()
+                    .cloned()
+                    .ok_or(ProviderError::InvalidOutcome)?;
+                Some(Box::new(arany::GoalPlanContract {
+                    mission: "Use the selected cache through authorized commands".into(),
+                    paths: Vec::new(),
+                    commands: vec![program],
+                    skills: Vec::new(),
+                    mcp_tools: Vec::new(),
+                    success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
+                        call: Box::new(success_call),
+                    },
+                    budget: arany::GoalBudget::default(),
+                }))
+            } else {
+                None
+            };
+            ProviderOutcome::Tool {
+                call,
+                plan_contract,
+            }
+        } else {
+            ProviderOutcome::Finish(Finish {
+                summary: "Selected cache output was explicit".into(),
+                result: "The private build cache persisted between commands, and selected host-cache output appeared only after an explicit read.".into(),
+            })
+        };
+        Ok(ProviderResponse {
+            outcome,
+            response_id: None,
+            input_tokens: None,
+            output_tokens: None,
+            wire_provenance: None,
+        })
+    }
+
+    async fn compact(&self, _: CompactionRequest) -> Result<CompactionResponse, ProviderError> {
+        Err(ProviderError::InvalidOutcome)
+    }
+}
+
+#[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native Linux selected-cache disclosure through an explicit guarded command"
+)]
+fn selected_cache_is_disclosed_only_after_explicit_command_output() {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let _gate = crate::process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::tempdir().unwrap();
+    for name in ["account-home", "home", "state"] {
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(temp.path().join(name))
+            .unwrap();
+    }
+    let home = temp.path().join("home");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let cache = home.join(".cargo/registry/cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    private_file(&cache.join("canary.crate"), CACHE_CANARY.as_bytes());
+    let test_executable = std::env::current_exe().unwrap();
+    let guard_executable = Path::new(env!("CARGO_BIN_EXE_arany"));
+    let mut helper = crate::isolation::native_account_isolated_test_command(
+        temp.path(),
+        &test_executable,
+        guard_executable,
+    );
+    helper
+        .args([
+            "--exact",
+            "tools::native_exec::selected_cache_canary_helper",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env_clear()
+        .current_dir(temp.path());
+    let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let output = helper
+            .bounded_output_for(Duration::from_secs(90), 32 * 1024)
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "selected-cache canary: stdout={:?}; stderr={:?}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        crate::process::assert_single_test_completed(&output.stdout, "selected-cache canary");
+        assert!(output.stderr.is_empty());
+    }));
+    if let Err(error) = checked {
+        let _ = temp.keep();
+        std::panic::resume_unwind(error);
+    }
+}
+
+#[tokio::test]
+#[ignore = "isolated helper owned by selected-cache canary integration"]
+async fn selected_cache_canary_helper() {
+    Box::pin(selected_cache_canary_helper_inner()).await;
+}
+
+async fn selected_cache_canary_helper_inner() {
+    cache_progress("helper-start");
+    let root = std::env::var_os("ARANY_TEST_CACHE_CANARY_ROOT").expect("private fixture root");
+    let root = Path::new(&root);
+    let workspace = root.join("workspace");
+    let user = nix::unistd::User::from_uid(nix::unistd::geteuid())
+        .unwrap()
+        .unwrap();
+    assert_eq!(user.dir, root.join("account-home"), "private passwd home");
+    let account = user.dir.join(".local/state/arany");
+    assert_eq!(StateRoot::account_path().unwrap(), account);
+    let mut permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
+    let options = permissions.runtime_profile_choices();
+    let cache = options
+        .iter()
+        .find(|option| option.label.starts_with("Cargo archive cache"))
+        .expect("metadata-only Cargo cache candidate");
+    assert!(!cache.selected);
+    let cache_token = cache.token.clone();
+    permissions
+        .remember_profiles(true, arany::ApprovalMode::AutoEdits, &[])
+        .unwrap();
+    cache_progress("seed-admission-complete");
+    let permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
+
+    let state_path = root.join("state");
+    let seed_cache = ToolCall::Command {
+        program: "sh".into(),
+        args: vec![
+            "-c".into(),
+            "set -eu; /usr/bin/mkdir -p \"$CARGO_HOME/registry/cache\"; cache=\"$CARGO_HOME/registry/cache/private-bulk.crate\"; : > \"$cache\"; i=0; while test \"$i\" -lt 40; do printf '%1048576s' '' >> \"$cache\"; i=$((i + 1)); done".into(),
+        ],
+        cwd: ".".into(),
+    };
+    let seed_requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut seed_engine = Engine::open(
+        StateRoot::admit(&state_path).unwrap(),
+        CacheCanary {
+            requests: seed_requests.clone(),
+            calls: vec![seed_cache.clone()],
+            stage: "seed",
+        },
+    )
+    .unwrap();
+    let (seed_approvals, mut seed_inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+    seed_engine
+        .enable_trusted_workspace(
+            permissions.clone(),
+            &workspace,
+            PathBuf::from(env!("CARGO_BIN_EXE_arany")),
+            seed_approvals,
+        )
+        .unwrap();
+    let mut seed_run = Box::pin(async {
+        cache_progress("seed-run-start");
+        let outcome = seed_engine
+            .run(RunRequest {
+                session_id: None,
+                title: Some("Private cache seed".into()),
+                objective: "Seed a bounded private cache archive".into(),
+                images: Vec::new(),
+                workspace: workspace.clone(),
+                include_paths: Vec::new(),
+                policy: CollaborationPolicy::Single,
+                goal: arany::GoalRequest::default(),
+            })
+            .await;
+        cache_progress("seed-run-returned");
+        outcome
+    });
+    let seed_outcome = tokio::time::timeout(Duration::from_secs(90), async {
+        cache_progress("seed-approval-waiting");
+        let approval = tokio::select! {
+            result = &mut seed_run => panic!(
+                "cache seed Run returned before approval: {}",
+                cache_run_return(&result),
+            ),
+            approval = seed_inbox.next() => approval.expect("private cache seed approval"),
+        };
+        cache_progress("seed-approval-received");
+        assert_eq!(approval.intent.call, seed_cache);
+        approval.decide(true);
+        seed_run.await
+    })
+    .await
+    .expect("bounded private cache seed");
+    let seed_outcome = seed_outcome.unwrap();
+    seed_engine.close().await.unwrap();
+    let seed_observation = seed_outcome
+        .run
+        .tools
+        .first()
+        .and_then(|tool| tool.observation.as_ref());
+    let seed_result = seed_observation.and_then(|observation| {
+        serde_json::from_str::<serde_json::Value>(&observation.output).ok()
+    });
+    assert_eq!(
+        seed_outcome.run.status,
+        RunStatus::Finished,
+        "cache seed status {:?}; tool disposition {:?}; guard receipt {}; cache update {:?}; exit {:?}; stdout bytes {}; stderr bytes {}",
+        seed_outcome.run.status,
+        seed_observation.map(|observation| observation.disposition),
+        seed_observation.is_some_and(|observation| observation.guard.is_some()),
+        seed_observation.map(|observation| observation.cache_update),
+        seed_result
+            .as_ref()
+            .and_then(|result| result["exit_code"].as_i64()),
+        seed_result
+            .as_ref()
+            .and_then(|result| result["stdout"].as_str())
+            .map_or(0, str::len),
+        seed_result
+            .as_ref()
+            .and_then(|result| result["stderr"].as_str())
+            .map_or(0, str::len),
+    );
+    let seed_observation = seed_observation.unwrap();
+    assert_eq!(seed_observation.disposition, ToolDisposition::Succeeded);
+    assert!(seed_observation.guard.is_some());
+    let seed_result = seed_result.unwrap();
+    assert_eq!(seed_result["exit_code"], 0);
+    cache_progress("seed-complete");
+
+    let mut permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
+    permissions
+        .remember_profiles(
+            true,
+            arany::ApprovalMode::AutoEdits,
+            std::slice::from_ref(&cache_token),
+        )
+        .unwrap();
+    let permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
+    assert!(
+        permissions
+            .runtime_profile_choices()
+            .iter()
+            .any(|option| option.selected && option.label.starts_with("Cargo archive cache"))
+    );
+
+    let state = StateRoot::open_existing(&state_path).unwrap();
+    let write_cache = ToolCall::Command {
+        program: "sh".into(),
+        args: vec![
+            "-c".into(),
+            format!(
+                "/usr/bin/mkdir -p \"$CARGO_TARGET_DIR\"; printf '%s' '{PRIVATE_CACHE_CANARY}' > \"$CARGO_TARGET_DIR/persistent-marker\""
+            ),
+        ],
+        cwd: ".".into(),
+    };
+    let read_caches = ToolCall::Command {
+        program: "sh".into(),
+        args: vec![
+            "-c".into(),
+            format!(
+                "test \"$(/usr/bin/cat \"$CARGO_TARGET_DIR/persistent-marker\")\" = '{PRIVATE_CACHE_CANARY}'; /usr/bin/cat \"$CARGO_TARGET_DIR/persistent-marker\"; printf '\\n'; /usr/bin/cat \"$CARGO_HOME/registry/cache/canary.crate\""
+            ),
+        ],
+        cwd: ".".into(),
+    };
+    let overflow_cache = ToolCall::Command {
+        program: "sh".into(),
+        args: vec![
+            "-c".into(),
+            "set -eu; /usr/bin/mkdir -p \"$CARGO_TARGET_DIR\"; cache=\"$CARGO_TARGET_DIR/overflow-marker\"; : > \"$cache\"; i=0; while test \"$i\" -lt 32; do printf '%1048576s' '' >> \"$cache\"; i=$((i + 1)); done".into(),
+        ],
+        cwd: ".".into(),
+    };
+    let calls = vec![write_cache, read_caches, overflow_cache];
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut engine = Engine::open(
+        state,
+        CacheCanary {
+            requests: requests.clone(),
+            calls: calls.clone(),
+            stage: "selected",
+        },
+    )
+    .unwrap();
+    let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+    engine
+        .enable_trusted_workspace(
+            permissions,
+            &workspace,
+            PathBuf::from(env!("CARGO_BIN_EXE_arany")),
+            approvals,
+        )
+        .unwrap();
+    let mut run = Box::pin(async {
+        cache_progress("selected-run-start");
+        let outcome = engine
+            .run(RunRequest {
+                session_id: None,
+                title: Some("Selected cache canary".into()),
+                objective:
+                    "Persist private build-cache data, then explicitly read the selected host cache"
+                        .into(),
+                images: Vec::new(),
+                workspace: workspace.clone(),
+                include_paths: Vec::new(),
+                policy: CollaborationPolicy::Single,
+                goal: arany::GoalRequest::default(),
+            })
+            .await;
+        cache_progress("selected-run-returned");
+        outcome
+    });
+    let outcome = tokio::time::timeout(Duration::from_secs(90), async {
+        for (index, call) in calls.iter().enumerate() {
+            cache_progress(&format!("selected-approval-waiting-{index}"));
+            let approval = tokio::select! {
+                result = &mut run => panic!(
+                    "selected-cache Run returned before approval {index}: {}",
+                    cache_run_return(&result),
+                ),
+                approval = inbox.next() => approval.expect("approval for a selected-cache command"),
+            };
+            cache_progress(&format!("selected-approval-received-{index}"));
+            assert!(
+                &approval.intent.call == call,
+                "selected-cache approval intent differs"
+            );
+            approval.decide(true);
+        }
+        run.await
+    })
+    .await
+    .expect("bounded selected-cache approval journey");
+    let outcome = outcome.unwrap();
+    engine.close().await.unwrap();
+    assert_eq!(
+        outcome.run.status,
+        RunStatus::Finished,
+        "cache canary Run failed: {}",
+        crate::safe_run_diagnostics(&outcome.run)
+    );
+    assert_eq!(outcome.run.tools.len(), 3);
+    cache_progress("cache-commands-complete");
+    let mut observations = Vec::new();
+    let mut command_results = Vec::new();
+    for tool in &outcome.run.tools {
+        let observation = tool.observation.as_ref().unwrap();
+        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+        assert_eq!(observation.intent, tool.intent);
+        let receipt = observation
+            .guard
+            .as_ref()
+            .expect("successful cache command has a Guard receipt");
+        let expected_digest: [u8; 32] =
+            Sha256::digest(serde_json::to_vec(&observation.intent).unwrap()).into();
+        assert_eq!(receipt.contract_version, 1);
+        assert_eq!(receipt.intent_digest, expected_digest);
+        assert_eq!(
+            receipt.enforcement_digest,
+            observation.intent.enforcement_digest
+        );
+        assert_eq!(receipt.limits, observation.intent.limits);
+        command_results
+            .push(serde_json::from_str::<serde_json::Value>(&observation.output).unwrap());
+        observations.push(observation);
+    }
+    assert_eq!(command_results[0]["exit_code"], 0);
+    assert!(
+        command_results[0]["stderr"]
+            .as_str()
+            .is_some_and(str::is_empty)
+    );
+    assert!(
+        command_results[0]["stdout"]
+            .as_str()
+            .is_some_and(str::is_empty)
+    );
+    assert_eq!(command_results[1]["exit_code"], 0);
+    assert!(
+        command_results[1]["stderr"]
+            .as_str()
+            .is_some_and(str::is_empty)
+    );
+    let expected_stdout = format!("{PRIVATE_CACHE_CANARY}\n{CACHE_CANARY}");
+    assert!(
+        command_results[1]["stdout"]
+            .as_str()
+            .is_some_and(|stdout| stdout == expected_stdout),
+        "explicit selected-cache output differs"
+    );
+    assert!(
+        observations[..2]
+            .iter()
+            .all(|observation| observation.cache_update == arany::CacheUpdate::Published)
+    );
+    assert_eq!(command_results[2]["exit_code"], 0);
+    assert!(
+        command_results[2]["stderr"]
+            .as_str()
+            .is_some_and(str::is_empty)
+    );
+    assert!(
+        command_results[2]["stdout"]
+            .as_str()
+            .is_some_and(str::is_empty)
+    );
+    assert_eq!(observations[2].cache_update, arany::CacheUpdate::Rejected);
+    {
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        let _initial_tools = requests[0]
+            .tools
+            .as_ref()
+            .expect("first cache canary request includes Tool context");
+        let initial = format!("{:?}", requests[0]);
+        assert!(
+            !initial.contains(CACHE_CANARY),
+            "cache canary was present in the initial Provider request"
+        );
+        let first_output = &requests[1].tools.as_ref().unwrap().observations[0].output;
+        let first_command: serde_json::Value = serde_json::from_str(first_output).unwrap();
+        assert!(first_command["stdout"].as_str().is_some_and(str::is_empty));
+        assert!(!first_output.contains(PRIVATE_CACHE_CANARY));
+        assert!(
+            requests[2].tools.as_ref().unwrap().observations[1]
+                .output
+                .contains(PRIVATE_CACHE_CANARY)
+                && requests[2].tools.as_ref().unwrap().observations[1]
+                    .output
+                    .contains(CACHE_CANARY),
+            "explicit cache output missing from the later Provider request"
+        );
+        let overflow_observation = &requests[3].tools.as_ref().unwrap().observations[2];
+        let overflow = overflow_observation.output.as_str();
+        let overflow_result: serde_json::Value = serde_json::from_str(overflow).unwrap();
+        assert_eq!(overflow_result["exit_code"], 0);
+        assert_eq!(
+            overflow_observation.cache_update,
+            arany::CacheUpdate::Rejected
+        );
+    }
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+    cache_progress("closed-replay-start");
+    let events = store.load_session(outcome.session_id).await.unwrap();
+    store.close().await.unwrap();
+    let replay = SessionView::replay(outcome.session_id, &events)
+        .unwrap()
+        .unwrap();
+    assert_eq!(replay.runs.len(), 1);
+    assert!(
+        replay.runs[0] == outcome.run,
+        "closed cache canary replay differs"
+    );
+    let finished = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            arany::Event::ToolFinished { observation, .. } => Some(observation),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(finished.len(), 3);
+    assert!(
+        finished[0] == observations[0]
+            && finished[1] == observations[1]
+            && finished[2] == observations[2],
+        "ToolFinished cache observations differ"
+    );
+    cache_progress("closed-replay-complete");
+
+    let mut permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
+    permissions
+        .remember_profiles(true, arany::ApprovalMode::AutoEdits, &[])
+        .unwrap();
+    let permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
+    let verify_cache = ToolCall::Command {
+        program: "sh".into(),
+        args: vec![
+            "-c".into(),
+            format!(
+                "set -eu; test \"$(/usr/bin/wc -c < \"$CARGO_HOME/registry/cache/private-bulk.crate\")\" -eq 41943040; test \"$(/usr/bin/cat \"$CARGO_TARGET_DIR/persistent-marker\")\" = '{PRIVATE_CACHE_CANARY}'; test ! -e \"$CARGO_TARGET_DIR/overflow-marker\"; printf cache-prior-retained"
+            ),
+        ],
+        cwd: ".".into(),
+    };
+    let verify_requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut verify_engine = Engine::open(
+        StateRoot::open_existing(&state_path).unwrap(),
+        CacheCanary {
+            requests: verify_requests,
+            calls: vec![verify_cache.clone()],
+            stage: "verify",
+        },
+    )
+    .unwrap();
+    let (verify_approvals, mut verify_inbox) =
+        arany::ToolApprovals::new(arany::ApprovalMode::Request);
+    verify_engine
+        .enable_trusted_workspace(
+            permissions,
+            &workspace,
+            PathBuf::from(env!("CARGO_BIN_EXE_arany")),
+            verify_approvals,
+        )
+        .unwrap();
+    let mut verify_run = Box::pin(async {
+        cache_progress("verify-run-start");
+        let outcome = verify_engine
+            .run(RunRequest {
+                session_id: None,
+                title: Some("Cache overflow recovery".into()),
+                objective: "Verify the previous private cache survived a rejected update".into(),
+                images: Vec::new(),
+                workspace,
+                include_paths: Vec::new(),
+                policy: CollaborationPolicy::Single,
+                goal: arany::GoalRequest::default(),
+            })
+            .await;
+        cache_progress("verify-run-returned");
+        outcome
+    });
+    let verified = tokio::time::timeout(Duration::from_secs(90), async {
+        cache_progress("verify-approval-waiting");
+        let approval = tokio::select! {
+            result = &mut verify_run => panic!(
+                "cache recovery Run returned before approval: {}",
+                cache_run_return(&result),
+            ),
+            approval = verify_inbox.next() => approval.expect("cache recovery approval"),
+        };
+        cache_progress("verify-approval-received");
+        assert!(
+            approval.intent.call == verify_cache,
+            "cache recovery approval intent differs"
+        );
+        approval.decide(true);
+        verify_run.await
+    })
+    .await
+    .expect("bounded cache recovery journey");
+    let verified = verified.unwrap();
+    verify_engine.close().await.unwrap();
+    assert_eq!(verified.run.status, RunStatus::Finished);
+    let retained = verified.run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(retained.disposition, ToolDisposition::Succeeded);
+    assert_eq!(retained.cache_update, arany::CacheUpdate::Published);
+    let retained_result: serde_json::Value = serde_json::from_str(&retained.output).unwrap();
+    assert_eq!(retained_result["stdout"], "cache-prior-retained");
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+    let events = store.load_session(verified.session_id).await.unwrap();
+    store.close().await.unwrap();
+    let replay = SessionView::replay(verified.session_id, &events)
+        .unwrap()
+        .unwrap();
+    assert!(
+        replay.runs.as_slice() == std::slice::from_ref(&verified.run),
+        "closed cache recovery replay differs"
+    );
+    let finished = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            arany::Event::ToolFinished { observation, .. } => Some(observation),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(finished.len() == 1 && finished[0] == retained);
+}
 
 fn request(pipe: &mut impl Read) -> Vec<u8> {
     let deadline = Instant::now() + Duration::from_secs(10);

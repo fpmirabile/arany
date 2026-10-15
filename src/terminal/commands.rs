@@ -15,6 +15,7 @@ pub enum InteractiveCommand {
     Status,
     New,
     Resume,
+    Goal,
     Fork,
     Rename,
     Compact,
@@ -22,6 +23,7 @@ pub enum InteractiveCommand {
     Provider,
     Model,
     Permissions,
+    Cache,
     Exit,
 }
 
@@ -41,11 +43,12 @@ impl InteractiveCommand {
             Self::Help | Self::Status | Self::Permissions | Self::Transcript => {
                 CommandAvailability::Available
             }
-            Self::Agents | Self::Provider | Self::Model | Self::Exit | Self::Paste => {
+            Self::Agents | Self::Provider | Self::Model | Self::Exit | Self::Paste | Self::Goal => {
                 CommandAvailability::ViewOnly
             }
             Self::Setup
             | Self::Settings
+            | Self::Cache
             | Self::New
             | Self::Resume
             | Self::Fork
@@ -98,7 +101,7 @@ const fn spec(
     }
 }
 
-const COMMANDS: [CommandSpec; 17] = [
+const COMMANDS: [CommandSpec; 19] = [
     spec("help", InteractiveCommand::Help, None, &[]),
     spec("setup", InteractiveCommand::Setup, None, &[]),
     spec("paste", InteractiveCommand::Paste, None, &[]),
@@ -110,6 +113,12 @@ const COMMANDS: [CommandSpec; 17] = [
         InteractiveCommand::Resume,
         Some("[session-id]"),
         &[],
+    ),
+    spec(
+        "goal",
+        InteractiveCommand::Goal,
+        Some("[resume|objective]"),
+        &["resume"],
     ),
     spec("fork", InteractiveCommand::Fork, Some("[session-id]"), &[]),
     spec("rename", InteractiveCommand::Rename, Some("<title>"), &[]),
@@ -133,6 +142,12 @@ const COMMANDS: [CommandSpec; 17] = [
         &[],
     ),
     spec("permissions", InteractiveCommand::Permissions, None, &[]),
+    spec(
+        "cache",
+        InteractiveCommand::Cache,
+        Some("clear [all]"),
+        &["clear"],
+    ),
     spec("settings", InteractiveCommand::Settings, None, &[]),
     spec("transcript", InteractiveCommand::Transcript, None, &[]),
     spec("exit", InteractiveCommand::Exit, None, &[]),
@@ -160,6 +175,7 @@ pub(super) fn help_entry(index: usize) -> Option<HelpEntry> {
         InteractiveCommand::Status => "Session status",
         InteractiveCommand::New => "New Session",
         InteractiveCommand::Resume => "Resume Session",
+        InteractiveCommand::Goal => "Goal status, resume or autonomous objective",
         InteractiveCommand::Fork => "Fork Session",
         InteractiveCommand::Rename => "Rename Session",
         InteractiveCommand::Compact => "Compact context",
@@ -167,6 +183,7 @@ pub(super) fn help_entry(index: usize) -> Option<HelpEntry> {
         InteractiveCommand::Provider => "Choose Provider",
         InteractiveCommand::Model => "Choose model",
         InteractiveCommand::Permissions => "Folder trust and approval settings",
+        InteractiveCommand::Cache => "Clear private build caches",
         InteractiveCommand::Exit => "Exit Session",
     };
     Some(HelpEntry {
@@ -329,6 +346,16 @@ pub fn parse_submission(line: &str) -> Result<Submission<'_>, CommandParseError>
         if spec.argument.is_none() && argument.is_some() {
             return Err(CommandParseError::UnexpectedArgument { command: spec.name });
         }
+        // `/goal Resume` is the same explicit resume; only the exact word is normalized.
+        let argument = match argument {
+            Some(word)
+                if spec.command == InteractiveCommand::Goal
+                    && word.eq_ignore_ascii_case("resume") =>
+            {
+                Some("resume")
+            }
+            other => other,
+        };
         return Ok(Submission::Command {
             command: spec.command,
             argument,
@@ -343,7 +370,7 @@ pub fn command_completions(prefix: &str) -> Vec<&'static str> {
     let Some(name) = prefix.strip_prefix('/') else {
         return Vec::new();
     };
-    if name.len() > MAX_COMMAND_NAME_BYTES || !name.bytes().all(|byte| byte.is_ascii_lowercase()) {
+    if !valid_command_prefix(name) {
         return Vec::new();
     }
     COMMANDS
@@ -358,6 +385,15 @@ pub(super) fn completion_suffix(draft: &str, choices: &CommandChoices) -> Option
     if let Some(argument) = argument {
         let spec = COMMANDS.iter().find(|spec| spec.name == name)?;
         let argument = argument.trim_start_matches(' ');
+        if spec.command == InteractiveCommand::Cache {
+            return match argument {
+                "c" => Some("lear".to_owned()),
+                "clear" => Some(" ".to_owned()),
+                "clear " => Some("all".to_owned()),
+                "clear a" => Some("ll".to_owned()),
+                _ => None,
+            };
+        }
         if spec.command == InteractiveCommand::Model
             && let Some((model, effort)) = argument.split_once(' ')
         {
@@ -526,8 +562,11 @@ fn command_parts(draft: &str) -> Option<(&str, Option<&str>)> {
     let (name, argument) = control
         .split_once(' ')
         .map_or((control, None), |(name, argument)| (name, Some(argument)));
-    (name.len() <= MAX_COMMAND_NAME_BYTES && name.bytes().all(|byte| byte.is_ascii_lowercase()))
-        .then_some((name, argument))
+    valid_command_prefix(name).then_some((name, argument))
+}
+
+fn valid_command_prefix(name: &str) -> bool {
+    name.len() <= MAX_COMMAND_NAME_BYTES && name.bytes().all(|byte| byte.is_ascii_lowercase())
 }
 
 fn unique_value<'a>(values: impl Iterator<Item = &'a str>, prefix: &str) -> Option<&'a str> {
@@ -569,10 +608,7 @@ fn command_status(spec: &CommandSpec, choices: &CommandChoices) -> String {
 }
 
 fn suggest(name: &str) -> Option<&'static str> {
-    if name.is_empty()
-        || name.len() > MAX_COMMAND_NAME_BYTES
-        || !name.bytes().all(|byte| byte.is_ascii_lowercase())
-    {
+    if name.is_empty() || !valid_command_prefix(name) {
         return None;
     }
     COMMANDS
@@ -606,7 +642,12 @@ mod tests {
 
     #[test]
     fn closed_registry_aliases_completion_and_lifecycle_are_exact() {
-        assert_eq!(COMMANDS.len(), 17);
+        assert_eq!(COMMANDS.len(), 19);
+        assert_eq!(completion_suffix("/c", &CommandChoices::default()), None);
+        assert_eq!(
+            completion_suffix("/ca", &CommandChoices::default()),
+            Some("che ".into())
+        );
         for spec in COMMANDS {
             assert_eq!(
                 parse_submission(&format!("/{}", spec.name)),
@@ -669,6 +710,28 @@ mod tests {
         }
         assert_eq!(parse_submission("/clear"), parse_submission("/new"));
         assert_eq!(
+            parse_submission("/cache clear"),
+            Ok(Submission::Command {
+                command: InteractiveCommand::Cache,
+                argument: Some("clear"),
+            })
+        );
+        assert_eq!(
+            parse_submission("/cache clear all"),
+            Ok(Submission::Command {
+                command: InteractiveCommand::Cache,
+                argument: Some("clear all"),
+            })
+        );
+        assert_eq!(
+            completion_suffix("/cache c", &CommandChoices::default()),
+            Some("lear".into())
+        );
+        assert_eq!(
+            completion_suffix("/cache clear ", &CommandChoices::default()),
+            Some("all".into())
+        );
+        assert_eq!(
             parse_submission("/settings tabs"),
             Err(CommandParseError::UnexpectedArgument {
                 command: "settings"
@@ -685,11 +748,76 @@ mod tests {
         assert_eq!(command_completions("/set"), vec!["setup", "settings"]);
         assert_eq!(command_completions("/pas"), vec!["paste"]);
         assert_eq!(command_completions("/mo"), vec!["model"]);
+        assert_eq!(command_completions("/goa"), vec!["goal"]);
+        assert_eq!(
+            completion_suffix("/goal r", &CommandChoices::default()),
+            Some("esume".into())
+        );
+        assert_eq!(
+            parse_submission("/goal"),
+            Ok(Submission::Command {
+                command: InteractiveCommand::Goal,
+                argument: None,
+            })
+        );
+        assert_eq!(
+            parse_submission("/goal resume"),
+            Ok(Submission::Command {
+                command: InteractiveCommand::Goal,
+                argument: Some("resume"),
+            })
+        );
+        assert_eq!(
+            parse_submission("/goal  Resume "),
+            Ok(Submission::Command {
+                command: InteractiveCommand::Goal,
+                argument: Some("resume"),
+            })
+        );
+        assert_eq!(
+            parse_submission("/goal resume now"),
+            Ok(Submission::Command {
+                command: InteractiveCommand::Goal,
+                argument: Some("resume now"),
+            })
+        );
+        assert_eq!(
+            parse_submission("/goal  finish the migration "),
+            Ok(Submission::Command {
+                command: InteractiveCommand::Goal,
+                argument: Some("finish the migration"),
+            })
+        );
+        assert_eq!(
+            parse_submission("/resume-goal"),
+            Err(CommandParseError::Unknown { suggestion: None })
+        );
+        assert_eq!(
+            InteractiveCommand::Goal.availability(true),
+            CommandAvailability::ViewOnly
+        );
+        let preview = command_preview("/goal", &CommandChoices::default()).unwrap();
+        assert_eq!(
+            (
+                preview.ghost.as_str(),
+                preview.ghost_is_placeholder,
+                preview.status.as_str()
+            ),
+            (
+                " [resume|objective]",
+                true,
+                "Command: /goal [resume|objective]; Tab: resume",
+            )
+        );
         assert_eq!(
             parse_submission("/models"),
             Err(CommandParseError::Unknown {
                 suggestion: Some("model"),
             })
+        );
+        assert_eq!(
+            parse_submission("/resume-goa"),
+            Err(CommandParseError::Unknown { suggestion: None })
         );
         assert!(command_completions("/sessions").is_empty());
         assert_eq!(

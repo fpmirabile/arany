@@ -6,6 +6,8 @@ Load the section named by [testing rules](../testing.md) when its task applies. 
 
 Use the standard checks in [the development guide](../../docs/development.md#verification). The [CI workflow](../../.github/workflows/ci.yml) runs on pull requests and pushes to `main`: formatting and Clippy on Linux, Clippy on macOS, and debug and release default tests on Linux and macOS. Markdown-only pull requests skip these steps after a bounded change-detection job; the five required checks still complete so branch protection permits merging. Detection failure, any non-`.md` path (including the old path of a rename), pushes to `main` and manual dispatch retain the full checks. Setting the default-false manual `release_policy` input to `true` also starts the fresh dependency policy lane described below. CodeQL default setup is managed separately by GitHub and is not controlled by this workflow. CI provisions prerequisites on disposable GitHub-hosted runners. Linux terminal fixtures need Bubblewrap and util-linux `script`, with user and network namespaces enabled. For macOS temporary-root and account-isolation requirements, read [host and account isolation](#host-and-account-isolation).
 
+The separate [focused CI workflow](../../.github/workflows/ci-focused.yml) is dispatched manually with one closed `lane` choice (`linux-debug`, `linux-release`, `macos-debug` or `macos-release`) and runs that single `ci.yml` test lane. Its job names never match required checks. When to use it, and what it does not prove, is owned by [failure and maintenance discipline](../testing.md#failure-and-maintenance-discipline).
+
 Default suites exercise only the scenarios enabled for their native OS. The heavy native Guard, clipboard, credential-helper and database-capacity gates use the activation rules in [testing rules](../testing.md#evidence-lanes). To reproduce CI locally, set `RUSTFLAGS=--cfg arany_ci` for the test invocation; in a POSIX shell:
 
 ```sh
@@ -54,6 +56,11 @@ Manually dispatch the CI workflow with `release_policy=true` to install the lock
   closes it, so parent descriptor drop alone is not immediate unlock evidence.
   Keep the original lock/release assertions and a bounded, exactly-one-test
   helper receipt; serializing or retrying the whole suite does not fix ownership.
+- Linux tests that directly enable write-capable Engine Tools and exercise the
+  account-wide Workspace lock must run through the existing private passwd-home
+  account fixture. `StateRoot::account_path` uses the effective UID's passwd
+  entry; a temporary Session root or `HOME` override alone still targets the
+  host account root.
 - Native macOS Keychain evidence uses the debug-only fixed-file fixture and a privately named synthetic Keychain, with unchanged default/search-list observations. Apple's [Keychain storage owner](https://github.com/apple-oss-distributions/Security/blob/main/OSX/libsecurity_keychain/lib/StorageManager.cpp) adds only login/System Keychains automatically; the fixture must never use those names or change search lists. Optimized fixture rejection is separate evidence, not an optimized Keychain lifecycle claim.
 - Reset an accepted test socket to blocking mode before timeout-bounded reads when its listener uses nonblocking accept. macOS preserves the listener's nonblocking mode on accepted streams, unlike Linux.
 - Keep a fixture's initial socket peer alive until the helper acknowledges its next stage. Darwin rejects `SO_RCVTIMEO` with `EINVAL` on a disconnected Unix socket; closing immediately after sending GO can race the helper's timeout setup. A next-stage connection can supply that acknowledgement without sleeps or retries.
@@ -62,6 +69,17 @@ Manually dispatch the CI workflow with `release_policy=true` to install the lock
 - When a GNU `timeout` supervisor wraps an interactive `script` child, use `--foreground`; its default child process group cannot read from that PTY. Keep a separate bounded parent wait and descendant cleanup, since foreground mode does not time out grandchildren.
 - A full first-run setup PTY must not write the product's fixed default OS credential slot against the user's live Secret Service or Keychain. Isolate the native credential service/account first; a private State directory alone does not isolate that slot.
 - Account tests using `ARANY_TEST_ACCOUNT_ROOT` are debug-only: optimized Arany intentionally rejects that override. Isolate environment-selected Session/preference state too with explicit absolute synthetic `HOME`, `XDG_STATE_HOME` and `XDG_DATA_HOME` beneath the fixture account root's parent; [Store admission](../store.md) rejects an ambient default root when that override is set. Clearing those variables can otherwise fall back to the real passwd home for Session/preference state. Verify both roots stay fixture-owned before state access. Test optimized account behavior with a private passwd home and no-network mount namespace, and first prove the no-leaf control reaches the intended boundary; otherwise an early account-root rejection can make a failure test pass without exercising its fixture.
+- Native Linux Guard account fixtures retain the host user-manager socket,
+  cgroup hierarchy and host-visible `/tmp` seed paths. Their private mount/network
+  namespace uses passwordless `sudo` only for namespace and synthetic passwd-file
+  mount setup,
+  then drops to the original UID/GID with cleared groups, environment and
+  privileges before a deadline-supervised helper. A user namespace around the
+  controller changes root-owned ancestor identities and hides the manager's seed
+  paths; the ordinary offline account wrapper does not prove native execution.
+  Serialize the native parent with `NATIVE_GATE` and retain its private fixture
+  after any failed capture or receipt check; reaping `sudo` alone does not prove
+  that its descendant helper has exited.
 - To prove the no-account composer without a live keyring lookup, use a private default user StateRoot and an admitted test-owned unavailable local credential-bus address. This can prove local rejection and setup cancellation, not saved-account write/reuse or native keyring behavior.
 - Every attached PTY now reaches OS-user folder trust before account/Session work, including with explicit Provider/`--tools` flags. Isolate the account and environment-selected state roots and explicitly answer or dismiss the initial consent; a private Session directory and Provider flag do not isolate trust metadata. Linux fixtures use the private passwd-home command owner, retaining host loopback only for synthetic peers. Tests outside the consent owner use its bounded response pump; the consent owner keeps manual input. Continue selecting an explicit Provider/model with a synthetic cleared-environment credential when setup is not under test, since bare account selection can reach the fixed OS credential slot.
 - Command snapshot-refusal fixtures must use admitted executable identities and

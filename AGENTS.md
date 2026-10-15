@@ -20,6 +20,7 @@ Arany is a Rust-first, CLI-only agent harness. The product and executable are na
 | ChatGPT-plan OAuth, consent, tokens, weaker output bounds | [ChatGPT](./agents/chatgpt.md) |
 | Sessions, resume/fork/compaction, collaboration, topology, context | [Session](./agents/session.md) |
 | SQLite admission, Events, replay | [Store](./agents/store.md) |
+| Persistent Workspace build-cache identity, quota, archive and recovery | [Build cache](./agents/build-cache.md) |
 | Shared private-directory admission and native ACL checks | [Private filesystem](./agents/private-fs.md) |
 | Terminal behavior, output, accessibility, restoration, presentation | [Terminal](./agents/terminal.md) |
 | Ratatui backend, Inline cursor responses and scoped clearing | [Terminal backend](./agents/terminal-backend.md) |
@@ -33,6 +34,7 @@ Arany is a Rust-first, CLI-only agent harness. The product and executable are na
 | Product behavior, fixes, acceptance scenarios, documentation ownership | [Spec workflow](./docs/specs/README.md) and the owning contract |
 | Run coordination, budgets, Provider outcomes | [Engine](./agents/engine.md) |
 | Model-driven Tools, commands, runtime Skills, MCP, Guard | [Tools](./agents/tools.md) |
+| Runtime profile discovery, exact identities and folder-trust selection | [Toolchains](./agents/toolchains.md) |
 | Native Guard launch, sandbox profiles, resources, FFI and process ownership | [Guard](./agents/guard.md) |
 | Shared Guard capacity, FIFO waiting and user settings | [Guard admission](./agents/guard-admission.md) |
 | Native macOS coalition ownership, control transport and resource supervision | [Guard unit](./agents/guard-unit.md) |

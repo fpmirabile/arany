@@ -1,4 +1,4 @@
-use super::{Admission, controls};
+use super::{Admission, LoopError, controls};
 use crate::cli::{bounded_list, chatgpt, credentials};
 use arany::{
     AttachedTerminal, Composer, ComposerEdit, CustomProfile, Effort, ModelCatalogState, ModelEntry,
@@ -368,7 +368,7 @@ pub(super) async fn browse(
     session_id: SessionId,
     view: &mut SessionView,
     composer: &mut Composer,
-) -> Result<ModelBrowse, String> {
+) -> Result<ModelBrowse, LoopError> {
     let Some(profile) = view.defaults.provider.as_deref() else {
         return Ok(ModelBrowse::Notice(super::Feedback::History(
             "Select /provider first".into(),
@@ -436,9 +436,9 @@ pub(super) async fn browse(
         ))),
         Choice::Shutdown(signal) => Ok(ModelBrowse::Shutdown(signal)),
         Choice::Selected { model, effort } => {
-            controls::select_model(admission, session_id, view, &model, effort)
-                .await
-                .map(|notice| ModelBrowse::Notice(super::Feedback::History(notice)))
+            let notice =
+                controls::select_model(admission, session_id, view, &model, effort).await?;
+            Ok(ModelBrowse::Notice(super::Feedback::History(notice)))
         }
     }
 }
