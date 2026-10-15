@@ -208,7 +208,106 @@ impl Provider for Journey {
                     result: "Created and edited synthetic files.".into(),
                 })
             },
-            ProviderOutcome::Tool,
+            |call| {
+                let plan_contract = (step == 0 && !matches!(call, ToolCall::McpList { .. }))
+                    .then(|| {
+                        let success_call = self
+                            .calls
+                            .iter()
+                            .find(|candidate| {
+                                matches!(
+                                    candidate,
+                                    ToolCall::Command { .. }
+                                        | ToolCall::Write { .. }
+                                        | ToolCall::Edit { .. }
+                                        | ToolCall::Mkdir { .. }
+                                        | ToolCall::Skill { .. }
+                                        | ToolCall::McpCall { .. }
+                                )
+                            })
+                            .cloned();
+                        success_call.map(|success_call| {
+                            let mut paths: Vec<_> = catalog["workspace_paths"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|path| path.as_str().map(str::to_owned))
+                                .collect();
+                            paths.sort();
+                            paths.dedup();
+                            let mut commands: Vec<_> = self
+                                .calls
+                                .iter()
+                                .filter_map(|call| match call {
+                                    ToolCall::Command { program, .. } => Some(program.clone()),
+                                    _ => None,
+                                })
+                                .collect();
+                            commands.sort();
+                            commands.dedup();
+                            let mut mcp_tools: Vec<_> = self
+                                .calls
+                                .iter()
+                                .filter_map(|call| match call {
+                                    ToolCall::McpCall { server, tool, .. } => {
+                                        Some(arany::GoalMcpTool {
+                                            server: server.clone(),
+                                            tool: tool.clone(),
+                                        })
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            mcp_tools.sort_by(|left, right| {
+                                (&left.server, &left.tool).cmp(&(&right.server, &right.tool))
+                            });
+                            mcp_tools.dedup();
+                            let mut skills: Vec<_> = self
+                                .calls
+                                .iter()
+                                .filter_map(|call| match call {
+                                    ToolCall::Skill { name, resource } => {
+                                        Some(arany::GoalSkillBinding {
+                                            name: name.clone(),
+                                            resource: if resource.as_deref() == Some("SKILL.md") {
+                                                None
+                                            } else {
+                                                resource.clone()
+                                            },
+                                        })
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            skills.sort_by(|left, right| {
+                                (&left.name, left.resource.as_deref().unwrap_or("SKILL.md")).cmp(&(
+                                    &right.name,
+                                    right.resource.as_deref().unwrap_or("SKILL.md"),
+                                ))
+                            });
+                            skills.dedup();
+                            let success_criterion =
+                                arany::GoalSuccessCriterion::ToolCallSucceeded {
+                                    call: Box::new(success_call),
+                                };
+                            arany::GoalPlanContract {
+                                mission: "Complete the bounded native Tool journey".into(),
+                                paths,
+                                commands,
+                                skills,
+                                mcp_tools,
+                                success_criterion,
+                                budget: arany::GoalBudget::default(),
+                            }
+                        })
+                    })
+                    .flatten()
+                    .map(Box::new);
+                ProviderOutcome::Tool {
+                    call,
+                    plan_contract,
+                }
+            },
         );
         requests.push(request);
         Ok(ProviderResponse {
@@ -444,6 +543,7 @@ async fn native_file_journey_helper() {
             workspace: workspace.clone(),
             include_paths: Vec::new(),
             policy: CollaborationPolicy::Single,
+            goal: arany::GoalRequest::default(),
         })
         .await
         .unwrap();
@@ -599,6 +699,7 @@ async fn native_file_journey_helper() {
             workspace: workspace.clone(),
             include_paths: Vec::new(),
             policy: CollaborationPolicy::Single,
+            goal: arany::GoalRequest::default(),
         })
         .await
         .unwrap();
@@ -711,10 +812,38 @@ impl Provider for RuntimeJourney {
             return Err(ProviderError::InvalidOutcome);
         }
         let outcome = if step < self.calls.len() {
+            let call = self.calls[step].clone();
             if let Some(root) = std::env::var_os("ARANY_TEST_FILE_JOURNEY_ROOT") {
                 reset_tool_trace_stages(Path::new(&root));
             }
-            ProviderOutcome::Tool(self.calls[step].clone())
+            let plan_contract = if step == 0 {
+                let program = match &call {
+                    ToolCall::Command { program, .. } => program.clone(),
+                    _ => return Err(ProviderError::InvalidOutcome),
+                };
+                let success_call = self
+                    .calls
+                    .last()
+                    .cloned()
+                    .ok_or(ProviderError::InvalidOutcome)?;
+                Some(Box::new(arany::GoalPlanContract {
+                    mission: "Run the selected runtime commands".into(),
+                    paths: Vec::new(),
+                    commands: vec![program],
+                    skills: Vec::new(),
+                    mcp_tools: Vec::new(),
+                    success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
+                        call: Box::new(success_call),
+                    },
+                    budget: arany::GoalBudget::default(),
+                }))
+            } else {
+                None
+            };
+            ProviderOutcome::Tool {
+                call,
+                plan_contract,
+            }
         } else {
             ProviderOutcome::Finish(Finish {
                 summary: "Runtime profile checked".into(),
@@ -867,6 +996,10 @@ async fn native_runtime_mount_journey_helper() {
         workspace: workspace.clone(),
         include_paths: Vec::new(),
         policy: CollaborationPolicy::Single,
+        goal: arany::GoalRequest::new(
+            arany::GoalBudget::default(),
+            arany::GoalPhase::Implementation,
+        ),
     });
     let approve = async {
         let approval = inbox
@@ -967,6 +1100,7 @@ async fn native_runtime_mount_journey_helper() {
         workspace: workspace.clone(),
         include_paths: Vec::new(),
         policy: CollaborationPolicy::Single,
+        goal: arany::GoalRequest::default(),
     });
     let approve_seed = async {
         let approval = seed_inbox
@@ -986,7 +1120,12 @@ async fn native_runtime_mount_journey_helper() {
     .expect("bounded private cache seed");
     let seed_outcome = seed_outcome.unwrap();
     seed_engine.close().await.unwrap();
-    assert_eq!(seed_outcome.run.status, RunStatus::Finished);
+    assert_eq!(
+        seed_outcome.run.status,
+        RunStatus::Finished,
+        "cache seed Run failed: {}",
+        crate::safe_run_diagnostics(&seed_outcome.run)
+    );
     let seed_result: serde_json::Value = serde_json::from_str(
         &seed_outcome.run.tools[0]
             .observation
@@ -1104,6 +1243,10 @@ async fn native_runtime_mount_journey_helper() {
         workspace: workspace.clone(),
         include_paths: Vec::new(),
         policy: CollaborationPolicy::Single,
+        goal: arany::GoalRequest::new(
+            arany::GoalBudget::default(),
+            arany::GoalPhase::Implementation,
+        ),
     });
     let approve = async {
         for call in &accepted_calls {
@@ -1224,6 +1367,23 @@ async fn native_runtime_mount_journey_helper() {
         replay.runs[0] == accepted.run,
         "closed cache replay differs"
     );
+    let goal = replay.goals.first().expect("replayed Goal");
+    assert_eq!(goal.status, arany::GoalStatus::Completed);
+    let report = goal.report.as_ref().expect("durable Goal report");
+    assert!(
+        report
+            .evidence
+            .iter()
+            .any(|item| item == "Command sh exited 0."),
+        "successful Command evidence remains in the Goal report: {report:?}"
+    );
+    assert!(
+        report.unresolved.iter().any(|item| {
+            item.contains("build cache update was rejected")
+                && item.contains("previous cache was kept")
+        }),
+        "cache rejection is recorded as unresolved: {report:?}"
+    );
     let finished = events
         .iter()
         .filter_map(|event| match &event.event {
@@ -1284,6 +1444,7 @@ async fn native_runtime_mount_journey_helper() {
         workspace: workspace.clone(),
         include_paths: Vec::new(),
         policy: CollaborationPolicy::Single,
+        goal: arany::GoalRequest::default(),
     });
     let approve_verify = async {
         let approval = verify_inbox.next().await.expect("cache recovery approval");
@@ -1460,6 +1621,7 @@ int main(void) {
                         workspace: workspace.into(),
                         include_paths: Vec::new(),
                         policy: CollaborationPolicy::Single,
+                        goal: arany::GoalRequest::default(),
                     },
                     cancellation,
                     progress.clone()
@@ -1527,19 +1689,21 @@ int main(void) {
             if attested { 2 } else { 1 },
             "no automatic retry: {case}"
         );
+        let expected_run_status = match case {
+            "cancelled" => RunStatus::Cancelled,
+            "mcp-version" => RunStatus::Finished,
+            _ => RunStatus::Failed,
+        };
         assert_eq!(
-            outcome.run.status,
-            if case == "cancelled" {
-                RunStatus::Cancelled
-            } else if attested {
-                RunStatus::Finished
-            } else {
-                RunStatus::Failed
-            },
+            outcome.run.status, expected_run_status,
             "{case}: {:?}",
             outcome.run.tools
         );
-        assert_eq!(outcome.run.assistant_message.is_some(), attested);
+        assert_eq!(
+            outcome.run.assistant_message.is_some(),
+            case == "mcp-version",
+            "{case} assistant answer"
+        );
         assert!(!workspace.join("src/approval-output.txt").exists());
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
         let events = store.load_session(outcome.session_id).await.unwrap();
@@ -1548,6 +1712,75 @@ int main(void) {
             .unwrap()
             .unwrap();
         assert_eq!(replay.runs[0], outcome.run, "closed replay: {case}");
+        assert_eq!(
+            replay.goals[0].status,
+            match case {
+                "cancelled" => arany::GoalStatus::Interrupted,
+                "mcp-version" => arany::GoalStatus::Completed,
+                _ => arany::GoalStatus::Failed,
+            },
+            "closed Goal replay: {case}"
+        );
+        if case == "overflow" {
+            let contract = replay.goals[0]
+                .plan_contract
+                .as_ref()
+                .expect("overflow command has a plan");
+            assert!(matches!(
+                &contract.success_criterion,
+                arany::GoalSuccessCriterion::ToolCallSucceeded { call: planned }
+                    if **planned == call
+            ));
+            assert!(
+                replay.goals[0]
+                    .report
+                    .as_ref()
+                    .unwrap()
+                    .unresolved
+                    .iter()
+                    .any(|item| item.contains("Command shell failed"))
+            );
+        }
+        if case == "mcp-version" {
+            assert!(
+                replay.goals[0].plan_contract.is_none(),
+                "MCP catalog inspection stays in the planless prelude"
+            );
+            assert!(
+                replay.goals[0]
+                    .report
+                    .as_ref()
+                    .unwrap()
+                    .unresolved
+                    .iter()
+                    .any(|item| item.contains("MCP catalog synthetic failed"))
+            );
+        }
+        if case == "receipt-loss" {
+            // A Guard error after dispatch never attempts cache publication; the command outcome stays uncertain.
+            assert_eq!(
+                replay.runs[0].tools[0]
+                    .observation
+                    .as_ref()
+                    .unwrap()
+                    .cache_update,
+                arany::CacheUpdate::NotAttempted,
+                "lost receipt leaves selected cache publication unattempted"
+            );
+            let unresolved = &replay.goals[0].report.as_ref().unwrap().unresolved;
+            assert!(
+                unresolved
+                    .iter()
+                    .any(|item| item.contains("inspect Workspace state")),
+                "uncertain command outcome directs recovery to Workspace state: {unresolved:?}"
+            );
+            assert!(
+                unresolved
+                    .iter()
+                    .all(|item| !item.contains("build cache publication")),
+                "no cache publication was attempted: {unresolved:?}"
+            );
+        }
         let observation = replay.runs[0].tools[0].observation.as_ref().unwrap();
         assert_eq!(
             observation.disposition,

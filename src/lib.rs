@@ -23,13 +23,13 @@ pub use diagnostics::{
     DevelopmentFailure, enable_development_diagnostics, record_development_failure,
 };
 pub use engine::{
-    DisplayUpdate, Engine, EngineError, RunCancellation, RunOutcome, RunPreview, RunProgress,
-    RunRequest, RunUpdate, continue_session, create_session, fork_session, list_sessions,
-    rename_session, resume_session, set_session_defaults, validate_workspace_inputs,
+    DisplayUpdate, Engine, EngineError, GoalRequest, RunCancellation, RunOutcome, RunPreview,
+    RunProgress, RunRequest, RunUpdate, continue_session, create_session, fork_session,
+    list_sessions, rename_session, resume_session, set_session_defaults, validate_workspace_inputs,
 };
 pub use presentation::{
-    Output, escape_terminal, render_cache_update_feedback, render_exec, render_run_feedback,
-    render_session,
+    Output, escape_terminal, goal_status, render_cache_update_feedback, render_exec,
+    render_run_feedback, render_session,
 };
 pub use provider::{
     AgentPhase, AnthropicProvider, ChatGptAdmission, ChatGptProvenance, ChatGptProvider,
@@ -48,9 +48,12 @@ pub use provider::{
 pub use session::{
     AgentDisposition, AgentRole, AgentRunId, AgentStatus, AgentView, CollaborationPolicy,
     CompactionFailure, CompactionRecord, CompactionStatus, CompactionView, ContextUsage,
-    DisplayCategory, DisplayChunk, Event, EventEnvelope, ForkLineage, ProviderCallDisposition,
-    ProviderCallRecord, RunConfig, RunDisposition, RunId, RunStatus, RunView, SessionDefaults,
-    SessionId, SessionListItem, SessionView, ToolView,
+    DisplayCategory, DisplayChunk, Event, EventEnvelope, ForkLineage, GoalBudget, GoalId,
+    GoalMcpTool, GoalPhase, GoalPlanContract, GoalReport, GoalSkillBinding, GoalStatus,
+    GoalSuccessCriterion, GoalView, MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_MCP_TOOLS,
+    MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS,
+    ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition, RunId, RunStatus,
+    RunView, SessionDefaults, SessionId, SessionListItem, SessionView, ToolView,
 };
 pub use store::{HistoryReset, StateRoot, Store, StoreError};
 pub use telemetry::{Telemetry, TelemetryConfigError};

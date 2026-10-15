@@ -1366,7 +1366,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
         (super::super::CompletionLayout::Combined, 64, false, true),
     ] {
         for width in [16, 40, 50, 79, 80, 120] {
-            for height in [8, 24] {
+            for height in [8, 24, 26] {
                 for color in [false, true] {
                     let mut draft = Composer::default();
                     draft.set_completion_layout(layout);
@@ -1438,11 +1438,41 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
                         assert!(labels.iter().any(|row| row.starts_with("> Skill /skill-")));
                     }
                     if width >= 79 && height == 24 && !skills_tab && !last {
+                        let shown = help_len() - 1;
                         assert_eq!(
                             labels.len(),
-                            19,
-                            "large Commands list includes the entire registry"
+                            shown + 1,
+                            "24-row Commands pane clips the registry tail"
                         );
+                        assert!(
+                            labels[0].contains(&format!("1-{shown}/{}", help_len())),
+                            "24-row Commands header omits the visible range: {labels:?}"
+                        );
+                        let hidden = help_entry(help_len() - 1).expect("registered command");
+                        assert!(
+                            !labels
+                                .iter()
+                                .any(|row| row.contains(&format!("/{}", hidden.name))),
+                            "24-row Commands pane shows clipped /{}: {labels:?}",
+                            hidden.name
+                        );
+                    }
+                    if width >= 79 && height == 26 && !skills_tab && !last {
+                        assert_eq!(
+                            labels.len(),
+                            help_len() + 1,
+                            "large Commands pane shows its header and entire registry"
+                        );
+                        for index in 0..help_len() {
+                            let entry = help_entry(index).expect("registered command");
+                            assert!(
+                                labels
+                                    .iter()
+                                    .any(|row| row.contains(&format!("/{}", entry.name))),
+                                "large Commands pane omits /{}: {labels:?}",
+                                entry.name
+                            );
+                        }
                         assert!(
                             labels
                                 .iter()

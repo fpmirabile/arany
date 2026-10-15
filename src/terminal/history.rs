@@ -880,6 +880,7 @@ mod tests {
             lineage: None,
             runs: Vec::new(),
             compactions: Vec::new(),
+            goals: Vec::new(),
         }
     }
 

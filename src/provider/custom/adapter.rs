@@ -208,6 +208,8 @@ mod tests {
                 includes: Vec::new(),
                 history: Vec::new(),
                 context_summary: None,
+                goal_budget: None,
+                goal_plan_contract: None,
                 child_results: Vec::new(),
                 tools,
                 max_output_tokens: 4096,

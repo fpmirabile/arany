@@ -551,6 +551,7 @@ mod tests {
             lineage: None,
             runs: Vec::new(),
             compactions: Vec::new(),
+            goals: Vec::new(),
         };
         let mut linear = LinearState::new("screen-reader");
         let mut output = Vec::new();
@@ -663,6 +664,7 @@ mod tests {
                 "Command: /new; New Session; during Run: locked\n",
                 "Command: /clear; New Session; during Run: locked\n",
                 "Command: /resume [session-id]; Resume Session; during Run: locked\n",
+                "Command: /goal [resume|objective]; Goal status, resume or autonomous objective; during Run: view-only\n",
                 "Command: /fork [session-id]; Fork Session; during Run: locked\n",
                 "Command: /rename <title>; Rename Session; during Run: locked\n",
                 "Command: /compact; Compact context; during Run: locked\n",
