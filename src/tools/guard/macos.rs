@@ -343,7 +343,7 @@ fn command_root(task: &Task) -> Result<PathBuf, ToolError> {
     {
         return Err(ToolError::ChangedInput);
     }
-    storage::verify_storage(&root)?;
+    storage::verify_storage(&root, &task.intent.limits)?;
     Ok(root)
 }
 

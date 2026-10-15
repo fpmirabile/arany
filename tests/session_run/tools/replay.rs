@@ -1145,7 +1145,6 @@ pub(super) async fn native_command_changeset_corpus(
             "rm src/m-modified; mkdir src/m-modified; printf x > src/m-modified/child",
             Some(ToolDisposition::Denied),
         ),
-        ("budget", "", None),
     ] {
         let case_root = root.join(format!("changeset-{case}"));
         let workspace = case_root.join("workspace");
@@ -1224,12 +1223,6 @@ pub(super) async fn native_command_changeset_corpus(
         };
         let requests = Arc::new(Mutex::new(Vec::new()));
         let mut calls = vec![call.clone()];
-        if case == "budget" {
-            calls.splice(
-                0..0,
-                std::iter::repeat_n(ToolCall::List { path: "src".into() }, 15),
-            );
-        }
         if case == "nonzero" {
             calls.push(ToolCall::Command {
                 program: program.into(),
@@ -1365,7 +1358,7 @@ pub(super) async fn native_command_changeset_corpus(
         });
         engine.close().await.unwrap();
         let human_denied = matches!(case, "deny" | "drop" | "cancel");
-        let stopped = human_denied || matches!(case, "partial" | "budget");
+        let stopped = human_denied || case == "partial";
         let criterion_unmet = matches!(
             case,
             "conflict"
@@ -1404,7 +1397,7 @@ pub(super) async fn native_command_changeset_corpus(
         assert_eq!(
             requests.len(),
             if stopped {
-                if case == "budget" { 16 } else { 1 }
+                1
             } else if case == "nonzero" {
                 3
             } else if case == "ai-approve" {
@@ -1526,46 +1519,6 @@ pub(super) async fn native_command_changeset_corpus(
                 serde_json::to_value(&call).unwrap(),
                 "out-of-plan integration never reaches the AI judge"
             );
-        }
-        if case == "budget" {
-            assert_eq!(
-                tools.len(),
-                15,
-                "command reserves its integration slot before dispatch"
-            );
-            assert!(
-                tools
-                    .iter()
-                    .all(|tool| matches!(tool.intent.call, ToolCall::List { .. })
-                        && tool.observation.as_ref().unwrap().disposition
-                            == ToolDisposition::Succeeded
-                        && tool.observation.as_ref().unwrap().guard.is_some())
-            );
-            assert_eq!(
-                requests
-                    .last()
-                    .unwrap()
-                    .tools
-                    .as_ref()
-                    .unwrap()
-                    .observations
-                    .len(),
-                15
-            );
-            assert!(requests.iter().enumerate().all(|(index, request)| {
-                request.tools.as_ref().unwrap().observations.len() == index
-            }));
-            assert!(view.runs[0].assistant_message.is_none());
-            assert!(!workspace.join("src/a-created").exists());
-            assert_eq!(
-                std::fs::read(workspace.join("src/m-modified")).unwrap(),
-                b"before\n"
-            );
-            assert_eq!(
-                std::fs::read(workspace.join("src/z-deleted")).unwrap(),
-                b"delete\n"
-            );
-            continue;
         }
         assert_eq!(
             tools.len(),

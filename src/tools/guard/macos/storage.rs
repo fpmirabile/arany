@@ -17,7 +17,6 @@ use tokio::process::Command;
 pub(super) const STORAGE_BYTES_CAP: u64 = crate::tools::types::SCRATCH_BYTES;
 const BYTES_PER_MEBIBYTE: u64 = 1024 * 1024;
 const _: () = assert!(STORAGE_BYTES_CAP.is_multiple_of(BYTES_PER_MEBIBYTE));
-const DEFAULT_STORAGE_NAMES: [&str; 2] = ["workspace", "scratch"];
 const STORAGE_NAMES: [&str; 3] = ["workspace", "scratch", "cache"];
 pub(super) const STORAGE_PENDING: &str = "storage.pending";
 
@@ -254,16 +253,30 @@ fn verify_volume(
     Ok(())
 }
 
-pub(super) fn verify_storage(root: &Path) -> Result<(), ToolError> {
+fn command_volume_sizes(limits: &crate::tools::types::ToolLimits) -> Vec<(&'static str, u64)> {
+    let mut sizes = vec![
+        ("workspace", limits.project_bytes),
+        ("scratch", limits.scratch_bytes),
+    ];
+    if limits.cache_bytes > 0 {
+        sizes.push(("cache", limits.cache_bytes));
+    }
+    sizes
+}
+
+pub(super) fn verify_storage(
+    root: &Path,
+    limits: &crate::tools::types::ToolLimits,
+) -> Result<(), ToolError> {
     use cap_fs_ext::DirExt;
 
     let directory = crate::tools::fs::open_directory(root)?;
     let parent = crate::tools::fs::identity(&directory)?;
-    for name in DEFAULT_STORAGE_NAMES {
+    for (name, bytes) in command_volume_sizes(limits) {
         let volume = directory
             .open_dir_nofollow(name)
             .map_err(|_| ToolError::Path)?;
-        verify_volume(&volume, parent.0, STORAGE_BYTES_CAP)?;
+        verify_volume(&volume, parent.0, bytes)?;
         if volume.dir_metadata().map_err(|_| ToolError::Path)?.mode() & 0o7777 != 0o700 {
             return Err(ToolError::ProtectionUnavailable);
         }
@@ -287,13 +300,7 @@ pub(super) async fn prepare_command_storage(
         grant.verify_host()?;
     }
     crate::tools::fs::reject_overlap(root, &runtime.workspace)?;
-    let mut sizes = vec![
-        ("workspace", limits.project_bytes),
-        ("scratch", limits.scratch_bytes),
-    ];
-    if limits.cache_bytes > 0 {
-        sizes.push(("cache", limits.cache_bytes));
-    }
+    let sizes = command_volume_sizes(limits);
     let volumes = prepare_storage_with_sizes(root, &sizes).await?;
     let (cache_name, cache_volume) = if limits.cache_bytes > 0 {
         ("cache", volumes.get(2).ok_or(ToolError::Operation)?)

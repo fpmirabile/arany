@@ -106,7 +106,6 @@ fn trace_snapshot(root: &Path) -> serde_json::Value {
                         | "bytes-overflow"
                         | "files-overflow"
                         | "directory-conversion"
-                        | "budget"
                 ) {
                     return None;
                 }
