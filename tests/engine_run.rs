@@ -351,10 +351,16 @@ impl Provider for WaitingProvider {
 
 async fn wait_for_child_finish(store: &Store, session_id: SessionId, objective: &str) {
     loop {
-        let events = store
-            .load_session(session_id)
-            .await
-            .expect("observable Events");
+        // The Engine's journal commit can briefly lock this observer's separate connection.
+        let events = match store.load_session(session_id).await {
+            Err(arany::StoreError::Sqlite(rusqlite::Error::SqliteFailure(error, _)))
+                if error.code == rusqlite::ErrorCode::DatabaseBusy =>
+            {
+                tokio::task::yield_now().await;
+                continue;
+            }
+            events => events.expect("observable Events"),
+        };
         let target = events.iter().find_map(|envelope| match &envelope.event {
             Event::AgentSpawned {
                 agent_run_id,
