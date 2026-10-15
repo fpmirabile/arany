@@ -3091,6 +3091,7 @@ printf 'native command success'
                         },
                         &runtime.config,
                         root,
+                        crate::tools::ToolLimits::default().cache_bytes > 0,
                     ))
                     .unwrap();
                 let catalog: serde_json::Value = serde_json::from_str(&catalog).unwrap();
@@ -3102,7 +3103,12 @@ printf 'native command success'
                     arguments: "{}".into(),
                 };
                 let result = reactor
-                    .block_on(crate::tools::mcp::execute(&call, &runtime.config, root))
+                    .block_on(crate::tools::mcp::execute(
+                        &call,
+                        &runtime.config,
+                        root,
+                        crate::tools::ToolLimits::default().cache_bytes > 0,
+                    ))
                     .unwrap();
                 let result: serde_json::Value = serde_json::from_str(&result).unwrap();
                 assert_eq!(result["content"][0]["text"], "native MCP success");
