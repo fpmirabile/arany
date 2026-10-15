@@ -21,6 +21,9 @@ use uuid::Uuid;
 #[path = "engine_run/performance.rs"]
 mod performance;
 
+#[path = "engine_run/goals.rs"]
+mod goals;
+
 #[cfg(unix)]
 #[path = "common/process.rs"]
 pub mod process;
@@ -39,6 +42,8 @@ struct ScriptedProvider {
     capacity: u8,
     responses: Mutex<VecDeque<Result<ProviderOutcome, ProviderError>>>,
     cancel_at_completion: Option<(AgentPhase, RunCancellation)>,
+    before_call: Option<(usize, Box<dyn Fn() + Send + Sync>)>,
+    clock_advance: Option<(usize, Duration)>,
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
     compact_responses: Mutex<VecDeque<Result<CompactionResponse, ProviderError>>>,
     compact_requests: Arc<Mutex<Vec<CompactionRequest>>>,
@@ -56,10 +61,24 @@ impl ScriptedProvider {
             capacity: 3,
             responses: Mutex::new(responses.into_iter().map(Ok).collect()),
             cancel_at_completion: None,
+            before_call: None,
+            clock_advance: None,
             requests: Arc::new(Mutex::new(Vec::new())),
             compact_responses: Mutex::new(VecDeque::new()),
             compact_requests: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Runs `hook` when the zero-based provider call `index` is invoked, before its response is returned.
+    fn with_before_call(mut self, index: usize, hook: impl Fn() + Send + Sync + 'static) -> Self {
+        self.before_call = Some((index, Box::new(hook)));
+        self
+    }
+
+    /// Pauses Tokio time and advances it by `duration` while the zero-based provider call `index` is still in flight.
+    fn with_clock_advance_before_call(mut self, index: usize, duration: Duration) -> Self {
+        self.clock_advance = Some((index, duration));
+        self
     }
 
     fn with_compactions(
@@ -132,7 +151,22 @@ impl Provider for ScriptedProvider {
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         let phase = request.phase;
-        self.requests.lock().expect("requests lock").push(request);
+        let index = {
+            let mut requests = self.requests.lock().expect("requests lock");
+            requests.push(request);
+            requests.len() - 1
+        };
+        if let Some((target, hook)) = &self.before_call
+            && *target == index
+        {
+            hook();
+        }
+        if let Some((target, duration)) = &self.clock_advance
+            && *target == index
+        {
+            tokio::time::pause();
+            tokio::time::advance(*duration).await;
+        }
         let outcome = self
             .responses
             .lock()
@@ -346,6 +380,7 @@ fn request(workspace: &Path, objective: &str) -> RunRequest {
         workspace: workspace.to_path_buf(),
         include_paths: vec!["notes/facts.txt".into()],
         policy: CollaborationPolicy::Single,
+        goal: arany::GoalRequest::default(),
     }
 }
 
@@ -453,10 +488,15 @@ fn observe_process(
             break status;
         }
         assert!(std::time::Instant::now() < deadline, "process deadline");
+        let stdout_bytes = stdout.metadata().expect("stdout size").len();
+        let stderr_bytes = stderr.metadata().expect("stderr size").len();
         assert!(
-            stdout.metadata().expect("stdout size").len() <= stdout_limit as u64
-                && stderr.metadata().expect("stderr size").len() <= 256 * 1024,
-            "process output bound"
+            stdout_bytes <= stdout_limit as u64,
+            "stdout output bound: {stdout_bytes} bytes exceeds {stdout_limit}"
+        );
+        assert!(
+            stderr_bytes <= 256 * 1024,
+            "stderr output bound: {stderr_bytes} bytes exceeds 262144"
         );
         std::thread::yield_now();
     };
@@ -479,7 +519,11 @@ fn observe_process(
         file.take(limit as u64 + 1)
             .read_to_end(bytes)
             .expect("bounded observation");
-        assert!(bytes.len() <= limit, "process observation bound");
+        assert!(
+            bytes.len() <= limit,
+            "process observation bound: {} bytes exceeds {limit}",
+            bytes.len()
+        );
     }
     output
 }
@@ -594,6 +638,8 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 assert!(call.objective == objective, "exact objective");
                 assert!(call.context_summary.is_none(), "no derived summary");
                 assert!(call.child_results.is_empty(), "no child context");
+                assert_eq!(call.goal_budget, Some(arany::GoalBudget::default()));
+                assert_eq!(call.goal_plan_contract, None);
                 assert_eq!(call.max_output_tokens, 4096);
                 assert_eq!(call.run_id, run.id);
                 assert_eq!(call.agent_run_id, run.agents[0].id);
@@ -628,7 +674,21 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             .load_session(first.session_id)
             .await
             .expect("durable journal");
-        assert_eq!(events.len(), 15);
+        assert_eq!(events.len(), 27);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalStarted { .. }))
+                .count(),
+            2
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalFinished { .. }))
+                .count(),
+            2
+        );
         assert_eq!(
             events
                 .iter()
@@ -740,7 +800,8 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                     objective: objective.into(), images: expected_images, includes: vec![include_data("notes/facts.txt", "Fact two")],
                     history: expected_history,
                     context_summary: (index == 4).then(|| "Image conversation summary".into()),
-                    child_results, max_output_tokens: 4096, tools: None,
+                    child_results, goal_budget: Some(arany::GoalBudget::default()),
+                    goal_plan_contract: None, max_output_tokens: 4096, tools: None,
                 }, "image request {index}");
             }
             assert!(calls[..3].iter().all(|call| call.run_id == third.run.id));
@@ -774,7 +835,49 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         }
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
         let events = store.load_session(first.session_id).await.unwrap();
-        assert_eq!(events.len(), 41);
+        let goal_event_counts = [
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalStarted { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalRunLinked { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalActiveTimeReserved { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalProviderCallReserved { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalActiveTimeSettled { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalFinished { .. }))
+                .count(),
+        ];
+        assert_eq!(goal_event_counts, [5, 5, 5, 7, 5, 5]);
+        let non_goal_events = events
+            .iter()
+            .filter(|event| {
+                !matches!(
+                    event.event,
+                    Event::GoalStarted { .. }
+                        | Event::GoalRunLinked { .. }
+                        | Event::GoalActiveTimeReserved { .. }
+                        | Event::GoalProviderCallReserved { .. }
+                        | Event::GoalActiveTimeSettled { .. }
+                        | Event::GoalFinished { .. }
+                )
+            })
+            .count();
+        assert_eq!(non_goal_events, 41);
+        assert_eq!(events.len(), 73);
         let view = SessionView::replay(first.session_id, &events).unwrap().unwrap();
         for (run_id, phase) in [
             (first.run.id, AgentPhase::RootPlan),
@@ -794,13 +897,21 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         assert_eq!(view.runs[2].objective, "", "image-only objective is not invented text");
         assert_eq!(view.compactions[0].record, compacted);
         for output in ["text", "jsonl"] {
+            let expected = arany::render_session(
+                &view,
+                &events,
+                if output == "text" {
+                    arany::Output::Text
+                } else {
+                    arany::Output::Jsonl
+                },
+            );
             let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_arany"));
             command.env_clear().current_dir(temp.path()).args(["show", "--output", output, "--state-dir"])
                 .arg(&state_path).arg(first.session_id.to_string());
-            let observed = observe_process(&mut command, temp.path(), 512 * 1024);
+            let observed = observe_process(&mut command, temp.path(), expected.len());
             assert!(observed.status.success(), "image show {output} exit");
             assert!(observed.stderr.is_empty(), "image show {output} error channel");
-            let expected = arany::render_session(&view, &events, if output == "text" { arany::Output::Text } else { arany::Output::Jsonl });
             assert!(observed.stdout == expected.as_bytes(), "image show {output} bytes differ");
             if output == "text" {
                 let text = String::from_utf8(observed.stdout).unwrap();
@@ -811,14 +922,14 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 assert_eq!(lines.len(), events.len());
                 let accepted = lines.iter().filter(|line| line["kind"] == "MessageAccepted").collect::<Vec<_>>();
                 assert_eq!(accepted.len(), 5);
-                assert_eq!(accepted[0]["event_version"], 2);
+                assert_eq!(accepted[0]["event_version"], 3);
                 assert_eq!(accepted[0]["payload"]["images"][0]["media_type"], "image/png");
                 assert_eq!(accepted[0]["payload"]["images"][0]["data"], view.runs[0].images[0].base64());
                 assert_eq!(accepted[2]["payload"]["text"], "");
                 assert!(accepted[3]["payload"]["text"].as_str() == Some(maximal_objective.as_str()));
                 let image_payload_bytes = accepted[3]["payload"].to_string().len();
                 assert!((300 * 1024..=320 * 1024).contains(&image_payload_bytes), "maximally escaped image input fits its Event");
-                assert_eq!(accepted[4]["event_version"], 2);
+                assert_eq!(accepted[4]["event_version"], 3);
                 assert!(accepted[4]["payload"]["text"].as_str() == Some(maximal_objective.as_str()));
                 assert_eq!(accepted[4]["payload"].to_string().len(), 6 * 8 * 1024 + 23, "maximally escaped text-only input fits its Event");
                 assert_eq!(accepted[4]["payload"]["images"], serde_json::json!([]), "text-only input retains the current Message shape");
@@ -839,11 +950,11 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         let original: serde_json::Value = serde_json::from_str(&payload).unwrap();
         for fault in ["unsupported version", "unknown version", "missing images", "empty Message", "five images", "aggregate bytes", "non-PNG", "corrupted image", "URL", "extra field", "text overflow", "payload overflow", "agent scope"] {
             let mut invalid = original.clone();
-            let mut version = 2;
+            let mut version = 3;
             let mut agent_scope = None;
             match fault {
                 "unsupported version" => version = 1,
-                "unknown version" => version = 3,
+                "unknown version" => version = 4,
                 "missing images" => { invalid.as_object_mut().unwrap().remove("images"); }
                 "empty Message" => { invalid["text"] = "".into(); invalid["images"] = serde_json::json!([]); },
                 "five images" => invalid["images"] = serde_json::to_value(vec![second_image.clone(); 5]).unwrap(),
@@ -863,7 +974,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             assert!(matches!(store.load_view(first.session_id).await, Err(arany::StoreError::InvalidHistory)), "image replay fault: {fault}");
             store.close().await.unwrap();
         }
-        connection.execute("UPDATE events SET event_version=2, payload=?1, agent_run_id=NULL WHERE sequence=?2", rusqlite::params![payload, sequence]).unwrap();
+        connection.execute("UPDATE events SET event_version=3, payload=?1, agent_run_id=NULL WHERE sequence=?2", rusqlite::params![payload, sequence]).unwrap();
         drop(connection);
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
         assert_eq!(store.load_view(first.session_id).await.unwrap().unwrap(), view);
@@ -1710,7 +1821,14 @@ fn compaction_input_limit_rejects_before_provider_egress() {
             .load_session(session_id)
             .await
             .expect("durable Events");
-        assert_eq!(events.len(), 50);
+        assert_eq!(events.len(), 92);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalStarted { .. }))
+                .count(),
+            7
+        );
         assert_eq!(
             events
                 .iter()
@@ -2040,13 +2158,43 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
         )
         .await
         .expect("pinned Session start");
+        use std::os::unix::fs::MetadataExt;
+        let workspace_metadata = std::fs::metadata(&workspace).expect("Workspace metadata");
+        let workspace_identity = (workspace_metadata.dev(), workspace_metadata.ino());
+        let goal_id = arany::GoalId::new();
+        let interrupted_run_id = arany::RunId::new();
         let store =
             Store::open(StateRoot::admit(&state_path).expect("private state")).expect("store");
         store
             .append(
                 session_id,
+                Event::GoalStarted {
+                    goal_id,
+                    objective: "Unfinished question".into(),
+                    workspace_identity,
+                    budget: arany::GoalBudget::default(),
+                    phase: arany::GoalPhase::Implementation,
+                    autonomous: false,
+                },
+            )
+            .await
+            .expect("Goal start");
+        store
+            .append(
+                session_id,
+                Event::GoalRunLinked {
+                    goal_id,
+                    run_id: interrupted_run_id,
+                    phase: arany::GoalPhase::Implementation,
+                },
+            )
+            .await
+            .expect("interrupted Run link");
+        store
+            .append(
+                session_id,
                 Event::MessageAccepted {
-                    run_id: arany::RunId::new(),
+                    run_id: interrupted_run_id,
                     text: "Unfinished question".into(),
                     images: Vec::new(),
                 },
@@ -2075,6 +2223,7 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
         let mut resumed = request(&workspace, "Finished question");
         resumed.session_id = Some(session_id);
         resumed.title = None;
+        resumed.goal = arany::GoalRequest::resume(goal_id, true);
         engine.run(resumed).await.expect("completed later Run");
         engine
             .compact_session(session_id, workspace.clone())
@@ -2118,16 +2267,18 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(workspace.join("notes")).unwrap();
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").unwrap();
+        // Finite one-Run budgets reserve 77/83/82/141 Events for single/team/Tools/previews.
         for (index, (prefix, policy, admitted, tools, branch, previews)) in [
-            (9995, CollaborationPolicy::Single, false, false, false, false),
-            (9993, CollaborationPolicy::Single, true, false, false, false),
-            (9990, CollaborationPolicy::Team { max_active_children: 1 }, false, false, false, false),
-            (9989, CollaborationPolicy::Team { max_active_children: 1 }, true, false, false, false),
-            (9950, CollaborationPolicy::Single, false, true, false, false),
-            (9993, CollaborationPolicy::Single, false, false, true, false),
-            (9992, CollaborationPolicy::Single, true, false, true, false),
-            (9930, CollaborationPolicy::Single, false, false, false, true),
-            (9929, CollaborationPolicy::Single, true, false, false, true),
+            (9924, CollaborationPolicy::Single, false, false, false, false),
+            (9923, CollaborationPolicy::Single, true, false, false, false),
+            (9918, CollaborationPolicy::Team { max_active_children: 1 }, false, false, false, false),
+            (9917, CollaborationPolicy::Team { max_active_children: 1 }, true, false, false, false),
+            (9919, CollaborationPolicy::Single, false, true, false, false),
+            (9918, CollaborationPolicy::Single, true, true, false, false),
+            (9923, CollaborationPolicy::Single, false, false, true, false),
+            (9922, CollaborationPolicy::Single, true, false, true, false),
+            (9860, CollaborationPolicy::Single, false, false, false, true),
+            (9859, CollaborationPolicy::Single, true, false, false, true),
         ].into_iter().enumerate() {
             let path = temp.path().join(format!("state-{index}"));
             let finish = || ProviderOutcome::Finish(Finish { summary: "done".into(), result: "answer".into() });
@@ -2136,8 +2287,13 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             engine.close().await.unwrap();
             let mut connection = rusqlite::Connection::open(path.join("events.sqlite3")).unwrap();
             let transaction = connection.transaction().unwrap();
-            for sequence in 9..=prefix {
-                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',2,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string()]).unwrap();
+            let first_padding_sequence: i64 = transaction
+                .query_row("SELECT COALESCE(MAX(sequence), 0) + 1 FROM events", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            for sequence in first_padding_sequence..=i64::from(prefix) {
+                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',3,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string()]).unwrap();
             }
             transaction.commit().unwrap();
             drop(connection);
@@ -2155,10 +2311,23 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
                 std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
                 engine.enable_tools(env!("CARGO_BIN_EXE_arany").into()).unwrap();
             }
+            let max_provider_calls = match &policy {
+                CollaborationPolicy::Single => 1,
+                CollaborationPolicy::Auto { max_active_children }
+                | CollaborationPolicy::Team { max_active_children } => {
+                    u32::from(*max_active_children) + 2
+                }
+            };
             let mut next = request(&workspace, "Next");
             next.session_id = Some(id);
             next.title = None;
             next.policy = policy;
+            next.goal.budget = Some(arany::GoalBudget {
+                max_provider_calls,
+                max_tokens: None,
+                max_active_ms: 30 * 60 * 1000,
+                max_runs: 1,
+            });
             let result = if previews {
                 engine.run_with_progress(next, RunCancellation::new(), RunProgress::with_previews()).await
             } else { engine.run(next).await };
@@ -2171,17 +2340,33 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             let phases: Vec<_> = requests.lock().unwrap().iter().map(|request| request.phase).collect();
             assert_eq!(phases, if !admitted { vec![] } else if matches!(policy, CollaborationPolicy::Single) { vec![AgentPhase::RootPlan] } else { vec![AgentPhase::RootPlan, AgentPhase::ChildWork, AgentPhase::RootSynthesis] }, "case {index}");
             let store = Store::open_read_only(StateRoot::open_existing(&path).unwrap()).unwrap();
-            assert_eq!(store.load_session(id).await.unwrap().len(), if branch { if admitted { 8 } else { 1 } } else if admitted { if previews { prefix as usize + 7 } else { 10_000 } } else { prefix as usize });
+            let expected_event_count = if branch {
+                if admitted { 14 } else { 1 }
+            } else if admitted {
+                prefix as usize
+                    + if matches!(policy, CollaborationPolicy::Single) {
+                        13
+                    } else {
+                        19
+                    }
+            } else {
+                prefix as usize
+            };
+            assert_eq!(
+                store.load_session(id).await.unwrap().len(),
+                expected_event_count,
+                "case {index}: exact committed Event count"
+            );
             let view = store.load_view(id).await.unwrap().unwrap();
             assert_eq!(view.runs.len(), if admitted { 2 } else { 1 });
             assert!(view.runs.iter().all(|run| run.status == RunStatus::Finished));
             store.close().await.unwrap();
         }
         for (index, (prefix, prior_forks, admitted)) in [
-            (9999, 0, true),
-            (10_000, 0, false),
-            (8, 7, true),
-            (8, 8, false),
+            (Some(9999), 0, true),
+            (Some(10_000), 0, false),
+            (None, 7, true),
+            (None, 8, false),
         ].into_iter().enumerate() {
             let path = temp.path().join(format!("fork-admission-{index}"));
             let mut engine = Engine::open(StateRoot::admit(&path).unwrap(), ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish { summary: "done".into(), result: "answer".into() })])).unwrap();
@@ -2189,9 +2374,17 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             engine.close().await.unwrap();
             let mut connection = rusqlite::Connection::open(path.join("events.sqlite3")).unwrap();
             let transaction = connection.transaction().unwrap();
-            for sequence in 9..=prefix {
-                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',2,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, root.to_string()]).unwrap();
+            let first_padding_sequence: i64 = transaction
+                .query_row("SELECT COALESCE(MAX(sequence), 0) + 1 FROM events", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            if let Some(prefix) = prefix {
+                for sequence in first_padding_sequence..=prefix {
+                    transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',3,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, root.to_string()]).unwrap();
+                }
             }
+            let event_count_before_forks = prefix.unwrap_or(first_padding_sequence - 1);
             transaction.commit().unwrap();
             drop(connection);
             let provider = ScriptedProvider::new(Vec::new());
@@ -2220,7 +2413,11 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             store.close().await.unwrap();
             let connection = rusqlite::Connection::open_with_flags(path.join("events.sqlite3"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
             let count: i64 = connection.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0)).unwrap();
-            assert_eq!(count, prefix + prior_forks + i64::from(admitted), "fork case {index}: rejected insert must roll back");
+            assert_eq!(
+                count,
+                event_count_before_forks + i64::from(prior_forks) + i64::from(admitted),
+                "fork case {index}: rejected insert must roll back"
+            );
         }
         let path = temp.path().join("compactions");
         let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish { summary: "source".into(), result: "answer".into() }), ProviderOutcome::Finish(Finish { summary: "later".into(), result: "later answer".into() })])
@@ -2333,7 +2530,22 @@ fn database_capacity_is_admitted_before_provider_usage() {
         assert!(compactions.lock().unwrap().is_empty());
         engine.close().await.unwrap();
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
-        assert_eq!(store.load_session(id).await.unwrap().len(), 8);
+        let events = store.load_session(id).await.unwrap();
+        assert_eq!(events.len(), 14);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalStarted { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalFinished { .. }))
+                .count(),
+            1
+        );
         let view = store.load_view(id).await.unwrap().unwrap();
         assert_eq!(view.runs.len(), 1);
         assert_eq!(view.runs[0].status, RunStatus::Finished);
@@ -2392,7 +2604,50 @@ fn database_capacity_is_admitted_before_provider_usage() {
             assert_eq!(requests[0].max_output_tokens, 1024);
         }
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
-        assert_eq!(store.load_session(id).await.unwrap().len(), 16);
+        let events = store.load_session(id).await.unwrap();
+        let goal_event_counts = [
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalStarted { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalRunLinked { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalActiveTimeReserved { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalProviderCallReserved { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalActiveTimeSettled { .. }))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalFinished { .. }))
+                .count(),
+        ];
+        assert_eq!(goal_event_counts, [2; 6]);
+        let non_goal_events = events
+            .iter()
+            .filter(|event| {
+                !matches!(
+                    event.event,
+                    Event::GoalStarted { .. }
+                        | Event::GoalRunLinked { .. }
+                        | Event::GoalActiveTimeReserved { .. }
+                        | Event::GoalProviderCallReserved { .. }
+                        | Event::GoalActiveTimeSettled { .. }
+                        | Event::GoalFinished { .. }
+                )
+            })
+            .count();
+        assert_eq!(non_goal_events, 16);
+        assert_eq!(events.len(), 28);
         let view = store.load_view(id).await.unwrap().unwrap();
         assert_eq!(view.runs.len(), 2);
         assert!(view.runs.iter().all(|run| run.status == RunStatus::Finished));
@@ -2696,8 +2951,26 @@ fn one_child_team_finishes_only_after_child_result_is_committed() {
             .load_session(outcome.session_id)
             .await
             .expect("durable Events");
-        assert_eq!(events.len(), 12);
-        let interrupted = SessionView::replay(outcome.session_id, &events[..5])
+        assert_eq!(events.len(), 20);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalProviderCallReserved { .. }))
+                .count(),
+            3
+        );
+        let delegated_call = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    &event.event,
+                    Event::ProviderCallRecorded { record, .. }
+                        if record.phase == AgentPhase::RootPlan
+                            && record.disposition == ProviderCallDisposition::Delegated
+                )
+            })
+            .expect("committed delegation");
+        let interrupted = SessionView::replay(outcome.session_id, &events[..=delegated_call])
             .expect("valid post-call prefix")
             .expect("Session");
         assert_eq!(interrupted.runs[0].status, RunStatus::Interrupted);
@@ -2706,6 +2979,58 @@ fn one_child_team_finishes_only_after_child_result_is_committed() {
             interrupted.runs[0].agents[0].provider_calls[0].disposition,
             ProviderCallDisposition::Delegated
         );
+        let child_id = outcome.run.agents[1].id;
+        let primary_id = outcome.run.agents[0].id;
+        let child_call = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    &event.event,
+                    Event::ProviderCallRecorded { agent_run_id, record, .. }
+                        if *agent_run_id == child_id && record.phase == AgentPhase::ChildWork
+                )
+            })
+            .expect("committed child call");
+        let synthesis_call = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    &event.event,
+                    Event::ProviderCallRecorded { agent_run_id, record, .. }
+                        if *agent_run_id == primary_id && record.phase == AgentPhase::RootSynthesis
+                )
+            })
+            .expect("committed primary synthesis call");
+        let child_finished = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    &event.event,
+                    Event::AgentFinished {
+                        agent_run_id,
+                        disposition: arany::AgentDisposition::Finished,
+                        ..
+                    } if *agent_run_id == child_id
+                )
+            })
+            .expect("committed child result");
+        let primary_finished = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    &event.event,
+                    Event::AgentFinished {
+                        agent_run_id,
+                        disposition: arany::AgentDisposition::Finished,
+                        ..
+                    } if *agent_run_id == primary_id
+                )
+            })
+            .expect("committed primary result");
+        assert!(delegated_call < child_call);
+        assert!(child_call < child_finished);
+        assert!(child_finished < synthesis_call);
+        assert!(synthesis_call < primary_finished);
         let calls = events
             .iter()
             .filter_map(|event| match &event.event {
@@ -2722,15 +3047,17 @@ fn one_child_team_finishes_only_after_child_result_is_committed() {
             ]
         );
         let mut invalid_phase = events.clone();
-        if let Event::ProviderCallRecorded { record, .. } = &mut invalid_phase[4].event {
+        if let Event::ProviderCallRecorded { record, .. } = &mut invalid_phase[delegated_call].event
+        {
             record.phase = AgentPhase::RootSynthesis;
         } else {
-            panic!("expected primary planning call");
+            panic!("expected committed primary delegation");
         }
         assert!(SessionView::replay(outcome.session_id, &invalid_phase).is_err());
         let mut duplicate_call = events.clone();
-        duplicate_call[5].event = events[4].event.clone();
-        duplicate_call[5].agent_run_id = events[4].agent_run_id;
+        duplicate_call[child_call].event = events[delegated_call].event.clone();
+        duplicate_call[child_call].run_id = events[delegated_call].run_id;
+        duplicate_call[child_call].agent_run_id = events[delegated_call].agent_run_id;
         assert!(SessionView::replay(outcome.session_id, &duplicate_call).is_err());
         let missing_calls: Vec<_> = events
             .iter()
@@ -2738,14 +3065,6 @@ fn one_child_team_finishes_only_after_child_result_is_committed() {
             .cloned()
             .collect();
         assert!(SessionView::replay(outcome.session_id, &missing_calls).is_err());
-        assert!(matches!(
-            events[7].event,
-            arany::Event::AgentFinished { .. }
-        ));
-        assert!(matches!(
-            events[9].event,
-            arany::Event::AgentFinished { .. }
-        ));
         store.close().await.expect("store shutdown");
     });
 }
@@ -3779,8 +4098,39 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                         .expect("Session");
                     assert_eq!(
                         terminal.sequence,
-                        events.last().expect("terminal Event").sequence
+                        outcome
+                            .run
+                            .finished_sequence
+                            .expect("Run terminal sequence")
                     );
+                    // A cancelled Run pauses its Goal: it records no terminal receipt and stays resumable.
+                    let expected_goal_status = match outcome.run.status {
+                        RunStatus::Finished => Some(arany::GoalStatus::Completed),
+                        RunStatus::Failed => Some(arany::GoalStatus::Failed),
+                        RunStatus::Cancelled => None,
+                        status => panic!("expected a terminal Run, got {status:?}"),
+                    };
+                    if let Some(expected_goal_status) = expected_goal_status {
+                        assert!(events.last().is_some_and(|event| {
+                            event.sequence > terminal.sequence
+                                && matches!(
+                                    event.event,
+                                    Event::GoalFinished {
+                                        goal_id,
+                                        status,
+                                        ..
+                                    } if goal_id == outcome.goal_id && status == expected_goal_status
+                                )
+                        }));
+                    } else {
+                        assert!(
+                            !events
+                                .iter()
+                                .any(|event| matches!(event.event, Event::GoalFinished { .. })),
+                            "cancelled Run records no Goal receipt"
+                        );
+                        assert_eq!(replay.goals[0].status, arany::GoalStatus::Interrupted);
+                    }
                     assert_eq!(replay.runs.len(), 1);
                     assert_eq!(replay.runs[0], outcome.run);
                     let jsonl = arany::render_session(&replay, &events, arany::Output::Jsonl);
@@ -3789,7 +4139,7 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                         if let Event::ProviderCallRecorded { record, .. } = &envelope.event {
                             let document: serde_json::Value =
                                 serde_json::from_str(line).expect("canonical JSONL");
-                            assert_eq!(document["event_version"], 2);
+                            assert_eq!(document["event_version"], 3);
                             assert_eq!(document["payload"], serde_json::to_value(record).unwrap());
                         }
                     }
@@ -5081,6 +5431,7 @@ fn preview_checkpoint_survives_abrupt_process_death() {
         assert_eq!(run.display.len(), 1);
         assert_eq!(run.display[0].text.len(), 2048);
         assert!(run.display[0].text.starts_with("DURABLE_CRASH_CANARY:"));
+        let goal_id = view.goals[0].id;
         store.close().await.unwrap();
         let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
             summary: "done".into(),
@@ -5096,6 +5447,7 @@ fn preview_checkpoint_survives_abrupt_process_death() {
         next.include_paths.clear();
         next.session_id = Some(id);
         next.title = None;
+        next.goal = arany::GoalRequest::resume(goal_id, true);
         assert_eq!(
             engine.run(next).await.unwrap().run.status,
             RunStatus::Finished

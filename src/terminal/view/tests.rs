@@ -1366,7 +1366,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
         (super::super::CompletionLayout::Combined, 64, false, true),
     ] {
         for width in [16, 40, 50, 79, 80, 120] {
-            for height in [8, 24] {
+            for height in [8, 24, 26] {
                 for color in [false, true] {
                     let mut draft = Composer::default();
                     draft.set_completion_layout(layout);
@@ -1438,11 +1438,41 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
                         assert!(labels.iter().any(|row| row.starts_with("> Skill /skill-")));
                     }
                     if width >= 79 && height == 24 && !skills_tab && !last {
+                        let shown = help_len() - 1;
                         assert_eq!(
                             labels.len(),
-                            18,
-                            "large Commands list includes the entire registry"
+                            shown + 1,
+                            "24-row Commands pane clips the registry tail"
                         );
+                        assert!(
+                            labels[0].contains(&format!("1-{shown}/{}", help_len())),
+                            "24-row Commands header omits the visible range: {labels:?}"
+                        );
+                        let hidden = help_entry(help_len() - 1).expect("registered command");
+                        assert!(
+                            !labels
+                                .iter()
+                                .any(|row| row.contains(&format!("/{}", hidden.name))),
+                            "24-row Commands pane shows clipped /{}: {labels:?}",
+                            hidden.name
+                        );
+                    }
+                    if width >= 79 && height == 26 && !skills_tab && !last {
+                        assert_eq!(
+                            labels.len(),
+                            help_len() + 1,
+                            "large Commands pane shows its header and entire registry"
+                        );
+                        for index in 0..help_len() {
+                            let entry = help_entry(index).expect("registered command");
+                            assert!(
+                                labels
+                                    .iter()
+                                    .any(|row| row.contains(&format!("/{}", entry.name))),
+                                "large Commands pane omits /{}: {labels:?}",
+                                entry.name
+                            );
+                        }
                         assert!(
                             labels
                                 .iter()
@@ -2279,20 +2309,27 @@ fn permission_choices_are_vertical_and_complete_before_selection() {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         let mut rendered = String::new();
         for page in 0..100 {
-            let mut more = true;
+            let mut progress = PermissionFrameProgress { more: true, page };
             terminal
                 .draw(|frame| {
-                    more = draw_permission_frame(
+                    progress = draw_permission_frame(
                         frame,
                         &lines,
-                        ("Read only", "Trust folder"),
-                        page,
-                        false,
-                        "↑↓ Enter ^C exit",
-                        Palette { color: false },
+                        PermissionFrameState {
+                            choices: ("Read only", "Trust folder"),
+                            page,
+                            allow: false,
+                            profile_start: None,
+                            profile_count: 0,
+                            focused_profile: None,
+                            profile_selection_enabled: None,
+                            footer: Some("↑↓ Enter ^C exit"),
+                            palette: Palette { color: false },
+                        },
                     );
                 })
                 .unwrap();
+            assert_eq!(progress.page, page);
             let buffer = terminal.backend().buffer();
             let panel_width = width
                 .saturating_sub(if width >= 40 { 4 } else { 0 })
@@ -2305,7 +2342,7 @@ fn permission_choices_are_vertical_and_complete_before_selection() {
                         .collect::<String>()
                 })
                 .collect::<Vec<_>>();
-            if more {
+            if progress.more {
                 assert!(
                     !rows
                         .iter()
@@ -2329,7 +2366,7 @@ fn permission_choices_are_vertical_and_complete_before_selection() {
                 }
                 rendered.push_str(row);
             }
-            if !more {
+            if !progress.more {
                 if width == 80 {
                     println!("{}", rows.join("\n"));
                 }

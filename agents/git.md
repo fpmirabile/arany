@@ -33,6 +33,7 @@ Load before running a git command or proposing a git step in a plan.
 
 - On a pushed branch, fetch and merge `origin/main`.
 - Rebase only while the branch is strictly local. When uncertain, merge.
+- When restoring a Git blob through a command wrapper that may compact output, use raw passthrough and verify the resulting blob hash against the source object before continuing. Display output is not file content.
 
 ## Conflicts
 

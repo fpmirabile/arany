@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
-const CHECK_VERSION: &str = "openai-responses-conformance-effort-stream-v8";
+const CHECK_VERSION: &str = "openai-responses-goal-contract-conformance-effort-stream-v11";
 
 pub struct CustomProfileCheck {
     profile_name: String,
@@ -86,6 +86,8 @@ async fn probe(
         includes: Vec::new(),
         history: Vec::new(),
         context_summary: None,
+        goal_budget: None,
+        goal_plan_contract: None,
         child_results: Vec::new(),
         max_output_tokens: profile.max_output_tokens(),
         tools: None,
@@ -115,6 +117,8 @@ async fn probe(
         includes: Vec::new(),
         history: Vec::new(),
         context_summary: None,
+        goal_budget: None,
+        goal_plan_contract: None,
         child_results: Vec::new(),
         max_output_tokens: 128,
         tools: None,
@@ -533,6 +537,8 @@ mod tests {
             includes: Vec::new(),
             history: Vec::new(),
             context_summary: None,
+            goal_budget: None,
+            goal_plan_contract: None,
             child_results: Vec::new(),
             max_output_tokens: 4096,
             tools: None,

@@ -172,6 +172,7 @@ async fn timed_direct_run(
         workspace: workspace.to_path_buf(),
         include_paths: Vec::new(),
         policy: CollaborationPolicy::Single,
+        goal: crate::engine::GoalRequest::default(),
     };
     let started = Instant::now();
     let outcome = tokio::time::timeout(Duration::from_secs(5), engine.run(request))

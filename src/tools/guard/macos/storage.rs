@@ -3,6 +3,7 @@
 use super::super::CAPTURE_BYTES;
 use super::system_program;
 use crate::private_fs::open_directory;
+use crate::tools::toolchains::RuntimeGrant;
 use crate::tools::{ToolError, ToolRuntime};
 use cap_std::fs::MetadataExt as _;
 use core_foundation::{base::CFType, dictionary::CFDictionary, string::CFString};
@@ -247,8 +248,12 @@ pub(super) async fn prepare_command_storage(
     if crate::tools::fs::identity(&workspace)? != runtime.workspace_identity {
         return Err(ToolError::ChangedInput);
     }
+    for grant in &runtime.config.runtime_grants {
+        grant.verify_host()?;
+    }
     crate::tools::fs::reject_overlap(root, &runtime.workspace)?;
     let volumes = prepare_storage(root).await?;
+    prepare_cache_links(root, &volumes[1], &runtime.config.runtime_grants)?;
     let directory = crate::tools::fs::open_directory(root)?;
     let mut builder = cap_std::fs::DirBuilder::new();
     cap_std::fs::DirBuilderExt::mode(&mut builder, 0o700);
@@ -260,6 +265,47 @@ pub(super) async fn prepare_command_storage(
         .map_err(|_| ToolError::Path)?;
     crate::tools::fs::snapshot_into(&workspace, &runtime.config, Some(&volumes[0]), &resources)?;
     Ok(volumes)
+}
+
+fn prepare_cache_links(
+    root: &Path,
+    scratch: &cap_std::fs::Dir,
+    grants: &[RuntimeGrant],
+) -> Result<(), ToolError> {
+    use cap_fs_ext::DirExt;
+
+    let scratch_path = root.join("scratch");
+    for grant in grants.iter().filter(|grant| grant.kind.is_cache()) {
+        crate::tools::fs::reject_overlap(&grant.path, root)?;
+        let relative = grant
+            .kind
+            .sandbox_cache_path()
+            .ok_or(ToolError::Configuration)?;
+        let destination = scratch_path.join(relative);
+        if std::fs::symlink_metadata(&destination).is_ok() {
+            return Err(ToolError::ChangedInput);
+        }
+        let parent = Path::new(relative).parent().ok_or(ToolError::Path)?;
+        let mut current = scratch.try_clone().map_err(|_| ToolError::Path)?;
+        for component in parent.components() {
+            let std::path::Component::Normal(name) = component else {
+                return Err(ToolError::Path);
+            };
+            if current.open_dir(name).is_err() {
+                let mut builder = cap_std::fs::DirBuilder::new();
+                cap_std::fs::DirBuilderExt::mode(&mut builder, 0o700);
+                current
+                    .create_dir_with(name, &builder)
+                    .map_err(|_| ToolError::Operation)?;
+            }
+            current = current
+                .open_dir_nofollow(name)
+                .map_err(|_| ToolError::Path)?;
+        }
+        let leaf = Path::new(relative).file_name().ok_or(ToolError::Path)?;
+        rustix::fs::symlinkat(&grant.path, &current, leaf).map_err(|_| ToolError::Operation)?;
+    }
+    Ok(())
 }
 
 pub(super) fn storage_mounted(root: &Path) -> Result<bool, ToolError> {
