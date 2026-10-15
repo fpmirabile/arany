@@ -68,6 +68,7 @@ fn narrow_classic_history_cue_keeps_ctrl_t_action_visible() {
         activity_lines: Vec::new(),
         setup_required: false,
         draft_action: DraftAction::Retain,
+        empty_chat: false,
     };
     let mut terminal = Terminal::new(TestBackend::new(width, 8)).expect("narrow terminal");
     terminal
@@ -80,7 +81,6 @@ fn narrow_classic_history_cue_keeps_ctrl_t_action_visible() {
                 Palette { color: false },
                 &[],
                 Some(status),
-                true,
             )
         })
         .expect("narrow history status");
