@@ -174,8 +174,8 @@ while read -r name version; do
   copy_selected_package "$name" "$version"
 done < "$stage/selected-packages"
 if ! cmp -s "$stage/missing-root-license" <(printf '%s\n' \
-  'jsonschema-regex 0.56.0' \
-  'jsonschema-value 0.56.0' \
+  'jsonschema-regex 0.58.6' \
+  'jsonschema-value 0.58.6' \
   'opentelemetry 0.33.0' \
   'opentelemetry-http 0.33.0' \
   'opentelemetry-otlp 0.33.0' \
@@ -244,8 +244,8 @@ for name in opentelemetry opentelemetry-http opentelemetry-otlp opentelemetry-pr
 done
 
 for spec in \
-  'jsonschema-regex 0.56.0 1e244c994dd81a1feb7801556a813c6bf2d45dad crates/jsonschema-regex scripts/release-licenses/jsonschema-MIT.txt 117829c3ca21efb132d81a44b55363d395ab8eea18526873bc828da4c0e5f038' \
-  'jsonschema-value 0.56.0 1e244c994dd81a1feb7801556a813c6bf2d45dad crates/jsonschema-value scripts/release-licenses/jsonschema-MIT.txt 117829c3ca21efb132d81a44b55363d395ab8eea18526873bc828da4c0e5f038' \
+  'jsonschema-regex 0.58.6 55ac1664384793c5d3b20745d3f9c169dfe2c06f crates/jsonschema-regex scripts/release-licenses/jsonschema-MIT.txt 117829c3ca21efb132d81a44b55363d395ab8eea18526873bc828da4c0e5f038' \
+  'jsonschema-value 0.58.6 55ac1664384793c5d3b20745d3f9c169dfe2c06f crates/jsonschema-value scripts/release-licenses/jsonschema-MIT.txt 117829c3ca21efb132d81a44b55363d395ab8eea18526873bc828da4c0e5f038' \
   'uuid-simd 0.8.0 d74c030d9dc4f3cae02146d1f497ff62726ef09a crates/uuid-simd scripts/release-licenses/simd-MIT.txt 71674605ec4c087fe9eb534e3e4f9e26eb2e4aabcd76a29fd156c6a844d44b3d' \
   'vsimd 0.8.0 d74c030d9dc4f3cae02146d1f497ff62726ef09a crates/vsimd scripts/release-licenses/simd-MIT.txt 71674605ec4c087fe9eb534e3e4f9e26eb2e4aabcd76a29fd156c6a844d44b3d'; do
   read -r name version revision source_path license_source license_hash <<< "$spec"
@@ -307,12 +307,12 @@ license and attribution materials. It includes the Unicode data/software license
 from regex-syntax and the micromap workflow's copyright/SPDX metadata; the latter
 is attribution metadata, not a separate license text.
 
-The jsonschema-regex 0.56.0 and jsonschema-value 0.56.0 manifests declare MIT.
+The jsonschema-regex 0.58.6 and jsonschema-value 0.58.6 manifests declare MIT.
 Their packaged VCS records pin Stranger6667/jsonschema commit
-1e244c994dd81a1feb7801556a813c6bf2d45dad at crates/jsonschema-regex and
+55ac1664384793c5d3b20745d3f9c169dfe2c06f at crates/jsonschema-regex and
 crates/jsonschema-value. The matching root MIT text is included at
-third-party/jsonschema-regex-0.56.0/UPSTREAM-LICENSE-MIT and
-third-party/jsonschema-value-0.56.0/UPSTREAM-LICENSE-MIT (SHA-256
+third-party/jsonschema-regex-0.58.6/UPSTREAM-LICENSE-MIT and
+third-party/jsonschema-value-0.58.6/UPSTREAM-LICENSE-MIT (SHA-256
 117829c3ca21efb132d81a44b55363d395ab8eea18526873bc828da4c0e5f038).
 The uuid-simd 0.8.0 and vsimd 0.8.0 manifests declare MIT. Their packaged VCS
 records pin Nugine/simd commit d74c030d9dc4f3cae02146d1f497ff62726ef09a

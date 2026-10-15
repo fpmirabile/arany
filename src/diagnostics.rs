@@ -317,6 +317,11 @@ pub(crate) fn engine_failure(error: &crate::engine::EngineError) {
         EngineError::NoSessionForWorkspace => "NoSessionForWorkspace",
         EngineError::TooManySessions => "TooManySessions",
         EngineError::SessionBusy => "SessionBusy",
+        EngineError::WorkspaceBusy => "WorkspaceBusy",
+        EngineError::GoalUnavailable => "GoalUnavailable",
+        EngineError::GoalAdmissionUncertain => "GoalAdmissionUncertain",
+        EngineError::GoalBudgetExhausted => "GoalBudgetExhausted",
+        EngineError::StoppedAfterRun { .. } => "StoppedAfterRun",
         EngineError::SessionNotIdle => "SessionNotIdle",
         EngineError::ForkNotAtRunBoundary => "ForkNotAtRunBoundary",
         EngineError::WorkspaceMismatch => "WorkspaceMismatch",
@@ -537,6 +542,7 @@ mod tests {
                 disposition: crate::tools::ToolDisposition::Uncertain,
                 output: CANARY.into(),
                 guard: None,
+                cache_update: crate::tools::CacheUpdate::NotApplicable,
             },
         });
         event_failure(&crate::session::Event::RunFinished {

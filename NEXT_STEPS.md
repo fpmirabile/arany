@@ -10,12 +10,16 @@ history. Implementation status and verified support are separate claims.
 ## Next functional priority
 
 - **Agentic coding teams (Beta 1 scope, current implementation priority).**
-  RPI Goals, command changesets, toolchain/cache and flexible limits, registry
-  fetch, Git, a
+  Flexible limits, the remaining RPI Goal workflows, registry fetch, Git, a
   narrowing-only Supervisor, per-agent Provider routing and writable team
   workers. The [initiative plan](./planning/agentic-teams/README.md) is
-  self-contained and orders the slices; start at its next action (execution
-  step 2, toolchain profiles, build cache and flexible limits). Remote
+  self-contained and orders the slices; Goal Foundation has landed under the
+  [Goal spec](./docs/specs/goals.md), so continue with A4 flexible limits
+  (execution step 4), then dogfooding and the remaining Goal workflows. The
+  approved A4 maxima are 4 GiB memory, 8 GiB
+  cache, 1 GiB project storage and 256 tasks; the current cache view remains
+  64 MiB until A4 enables the build profile. Native build
+  evidence and named-host measurements still precede support claims. Remote
   MCP/OAuth, interactive/background jobs and other network grants need their
   own Policy/Guard/protocol evidence; retain the existing
   [Tool scope](./docs/specs/tools.md) until each slice lands.
@@ -23,9 +27,6 @@ history. Implementation status and verified support are separate claims.
   missing and user-deferred behind the [route/authorization gate](./docs/research/subscription-provider-routes-2026-10.md#decision-boundary-for-beta-1).
   Continue unaffected implementation. API-key billing is a separate route;
   another harness's implementation or credentials do not authorize Arany access.
-- **Long-lived history.** Evaluate incremental replay/indexing and a bounded
-  archival/new-Session policy before histories reach existing admission quotas.
-  Preserve canonical Events, fork lineage and append acknowledgement semantics.
 
 ## Terminal continuity evidence
 
@@ -94,14 +95,16 @@ to the user's credential store or clipboard.
 
 | Pending gate | Completion condition and owner |
 | --- | --- |
-| Hosted CI and native Linux regression checks | Publish when authorized, verify the pull-request jobs on a hosted runner (format and Clippy, Linux and macOS debug/release tests with `--cfg arany_ci`), and run the native consent, terminal, setup, Session picker, pinned-Skill and Tool owners, including Linux command descendant termination before changeset capture and create/modify/delete publication, rejection, approval and cancellation with closed replay. Native Linux command changeset execution remains unverified on the current macOS host. [Workflow](./.github/workflows/ci.yml), [testing rules](./agents/testing.md) |
+| Hosted CI and native Linux regression checks | Publish when authorized, verify the pull-request jobs on a hosted runner (format and Clippy, Linux and macOS debug/release tests with `--cfg arany_ci`), and run the native consent, terminal, setup, Session picker, pinned-Skill and Tool owners, including the production private-mount bootstrap fixture (shared-source success, pre-existing nested-mount refusal and no late propagation), Linux command descendant termination before changeset capture and create/modify/delete publication, rejection, approval and cancellation with closed replay. This topology fixture is separate from the full systemd Guard journey; the latter is not activated by the ordinary `arany_ci` gate and remains a pending product-level native run. Native Linux command changeset execution remains unverified on the current macOS host. [Workflow](./.github/workflows/ci.yml), [testing rules](./agents/testing.md) |
+| macOS runtime mount topology | Run the native mounted-image refusal and selected-runtime command under Seatbelt on hosted macOS CI; the focused `getfsstat` topology fixture and existing guarded unit command cover adapter behavior, but a full product-level injected-mount Ready/GO journey remains unverified. Do not claim a lifetime mount-isolation guarantee. [Tools spec](./docs/specs/tools.md), [Guard rules](./agents/guard.md) |
+| Native build profile coverage | After A3/A4, run real offline Arany builds on named Linux and macOS hosts. On macOS specifically trace `cc`/`xcrun` delegation to `/Library/Developer/CommandLineTools` and the selected SDK; grant only measured, exact runtime roots if the actual build demonstrates that need. [Tools spec](./docs/specs/tools.md), [native evidence rules](./agents/references/testing-details.md#native-and-live-evidence) |
 | macOS optimized product/account isolation | On a disposable effective-user home, run the full optimized Engine/active-CLI and account setup/refresh/logout/cross-user gates. Changing HOME does not isolate account paths; debug fixtures and override refusal do not prove this gate. [Fixture rules](./agents/references/testing-details.md#host-and-account-isolation) |
 | Native TLS to compiled endpoints | Provide isolated resolution/routing and ordinary trust for a compiled-endpoint HTTPS journey. Generated-anchor chain/name rejection alone does not prove a public trusted chain or production-endpoint success. [Security rules](./agents/security.md) |
 | Native terminal faults and tmux | Run available native tmux and acquisition/output/input-loss owners, including optimized macOS and supported architectures; verify restoration on the exact distributed binary. [Terminal fixture rules](./agents/references/testing-details.md#terminal-process-fixtures), [PTY finding](./docs/security/findings/terminal-pty-hangup-spin.md) |
 | Native stores and clipboard | Finish isolated Linux keyring-backed product setup and native store lifecycle gates; human Keychain dialog and general-pasteboard checks remain in checklist item 8. [Credentials](./docs/specs/credentials.md), [clipboard](./agents/clipboard.md) |
 | Readiness, load and observer faults | Measure cancellation/cleanup and resource enforcement under declared load. [Guard unit rules](./agents/guard-unit.md) |
-| Performance | Measure history/input latency, RSS and telemetry on named hosts. Measure the bounded macOS host-PID scan at its nominal supervision interval before choosing another membership primitive or interval. [Native measurement rules](./agents/references/testing-details.md#native-and-live-evidence) |
-| Distribution and dependency policy | Repeat the default-off fresh advisory lane before release and after lock changes ([first run passed](https://github.com/fpmirabile/arany/actions/runs/38531269709)); run the updated bundle with its exact four upstream-root MIT supplements and six nested license/attribution materials, then verify source/binary pairing, compiler/native provenance and MSRV. Reconcile the unreached standard-library attribution gate without weakening pins. [Release review](./docs/security/beta-license-release-review.md#current-result), [dependency inventory](./docs/security/beta-dependency-inventory.md) |
+| Performance | Repair and recheck the ignored Linux history fixture against the full lifecycle contract: its first `AgentFinished(Finished)` lacks the required preceding `ProviderCallRecorded(Finished)`. On the current baseline, adding only that Event per Run would make the 1,600-Run seed 11,201 Events, above the 10,000-Event lineage limit; additional lifecycle or reservation Events change the final count. Once all required Events are accounted for, rebalance Run count and text/Event mix under the final limits, and assert Event and serialized-payload counts before measuring. Then measure history/input latency and RSS on named Linux/macOS hosts through the 128 MiB HotSession boundary and toward quota-near cold replay, recording shared-Store size. The fixture source does not isolate replay duration, assert payload/database size or sample RSS; the separate `show` gate covers 100 Events. Measure telemetry on named hosts. Measure the bounded macOS host-PID scan at its nominal supervision interval before choosing another membership primitive or interval. [History gate](./tests/session_run/active_terminal/tmux/history_latency.rs), [native measurement rules](./agents/references/testing-details.md#native-and-live-evidence) |
+| Distribution and dependency policy | Keep the release-policy workflow passing for the release commit's `Cargo.lock`; run the updated bundle with its exact four upstream-root MIT supplements and six nested license/attribution materials, then verify source/binary pairing, compiler/native provenance and MSRV. Reconcile the unreached standard-library attribution gate without weakening pins. The bundle pins the `jsonschema` 0.58.6 supplements; the dependency inventory and MSRV metadata review still name `jsonschema` 0.56.0 and `unicode-width` 0.2.0 while `main` locks 0.58.6 and 0.2.2, so re-review those packages there. [Release review](./docs/security/beta-license-release-review.md#current-result), [dependency inventory](./docs/security/beta-dependency-inventory.md) |
 | Other platforms and enforcers | Verify native Linux ARM64, alternative Linux-native enforcement and the Linux build under WSL2 (user namespaces, cgroup v2 and Guard enforcement), and require actual platform behavior evidence before support claims. Native Windows is out of scope. [OS-parity priority](./AGENTS.md#product-and-implementation-priorities) |
 
 These gates remain unverified until their named procedure completes. Specs and

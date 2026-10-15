@@ -1,7 +1,9 @@
 use super::config::Config;
+use super::toolchains::{RuntimeGrant, validate_selection};
 use super::types::*;
 use super::{ToolError, ToolRuntime, now_ms};
 use crate::engine::RunCancellation;
+use crate::store::{BuildCacheIdentity, BuildCacheLease, StoreError};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -55,6 +57,7 @@ pub(super) fn native_system_program(path: &str) -> Result<bool, ToolError> {
 struct Task {
     config: Config,
     intent: EffectIntent,
+    cache: Option<BuildCacheTransfer>,
     #[cfg(target_os = "linux")]
     parent_namespaces: profile::Namespaces,
     #[cfg(target_os = "macos")]
@@ -65,16 +68,154 @@ struct Task {
     system_programs: Option<SystemPrograms>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct BuildCacheTransfer {
+    pub(super) identity: BuildCacheIdentity,
+    pub(super) exclusions: Vec<String>,
+}
+
+pub(super) enum CacheCandidate {
+    Received,
+    Rejected,
+    Failed,
+}
+
+impl BuildCacheTransfer {
+    fn validate(&self, intent: &EffectIntent, config: &Config) -> Result<(), ToolError> {
+        let expected = cache_exclusions(&config.runtime_grants)?;
+        if !matches!(intent.call, ToolCall::Command { .. })
+            || self.identity.device != intent.workspace_device
+            || self.identity.inode != intent.workspace_inode
+            || self.exclusions != expected
+        {
+            return Err(ToolError::Configuration);
+        }
+        Ok(())
+    }
+}
+
+pub(super) struct BuildCacheSession {
+    pub(super) lease: BuildCacheLease,
+    pub(super) transfer: BuildCacheTransfer,
+}
+
+pub(super) fn build_cache_session(
+    runtime: &ToolRuntime,
+    intent: &EffectIntent,
+) -> Result<Option<BuildCacheSession>, ToolError> {
+    if !matches!(intent.call, ToolCall::Command { .. }) {
+        return Ok(None);
+    }
+    let Some(state) = runtime.cache_state.as_ref() else {
+        return Ok(None);
+    };
+    let identity = BuildCacheIdentity::new(
+        &runtime.workspace,
+        intent.workspace_device,
+        intent.workspace_inode,
+    )
+    .map_err(map_cache_error)?;
+    let exclusions = cache_exclusions(&runtime.config.runtime_grants)?;
+    let lease = state
+        .begin_build_cache(identity.clone())
+        .map_err(map_cache_error)?;
+    Ok(Some(BuildCacheSession {
+        lease,
+        transfer: BuildCacheTransfer {
+            identity,
+            exclusions,
+        },
+    }))
+}
+
+fn cache_exclusions(grants: &[RuntimeGrant]) -> Result<Vec<String>, ToolError> {
+    let mut exclusions = Vec::new();
+    for grant in grants.iter().filter(|grant| grant.kind.is_cache()) {
+        let path = grant
+            .kind
+            .sandbox_cache_path()
+            .ok_or(ToolError::Configuration)?;
+        exclusions.push(path.to_owned());
+    }
+    exclusions.sort();
+    exclusions.dedup();
+    Ok(exclusions)
+}
+
+pub(super) fn map_cache_error(error: StoreError) -> ToolError {
+    match error {
+        StoreError::StorageFull => ToolError::Limit,
+        StoreError::BuildCacheBusy => ToolError::QueueFull,
+        StoreError::StateNotPrivate | StoreError::InvalidBuildCache => {
+            ToolError::ProtectionUnavailable
+        }
+        _ => ToolError::Operation,
+    }
+}
+
+pub(super) fn publish_cache_candidate(
+    observation: &mut ToolObservation,
+    candidate: CacheCandidate,
+    cache: Option<&mut BuildCacheSession>,
+) {
+    if observation.disposition != ToolDisposition::Succeeded {
+        return;
+    }
+    let Some(cache) = cache else {
+        return;
+    };
+    let update = match candidate {
+        CacheCandidate::Rejected => CacheUpdate::Rejected,
+        CacheCandidate::Failed => CacheUpdate::Failed,
+        CacheCandidate::Received => match cache.lease.open_candidate().and_then(|mut candidate| {
+            cache
+                .lease
+                .publish(&mut candidate, &cache.transfer.exclusions)
+        }) {
+            Ok(()) => CacheUpdate::Published,
+            Err(StoreError::StorageFull) if !cache.lease.publication_uncertain() => {
+                CacheUpdate::Rejected
+            }
+            Err(_) if cache.lease.publication_uncertain() => CacheUpdate::Uncertain,
+            Err(_) => CacheUpdate::Failed,
+        },
+    };
+    observation.cache_update = update;
+    debug_assert!(observation.valid());
+}
+
 impl Task {
     fn enforcement_digest(&self) -> Result<[u8; 32], ToolError> {
         #[cfg(target_os = "macos")]
-        {
-            macos_enforcement_digest(self.system_programs.as_ref())
+        if !self.intent.call.is_process() && self.system_programs.is_some() {
+            return Err(ToolError::Configuration);
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            enforcement_digest()
+        intent_enforcement_digest(
+            self.intent.call.is_process(),
+            &self.config.runtime_grants,
+            #[cfg(target_os = "macos")]
+            self.system_programs.as_ref(),
+        )
+    }
+}
+
+fn intent_enforcement_digest(
+    is_process: bool,
+    runtime_grants: &[RuntimeGrant],
+    #[cfg(target_os = "macos")] programs: Option<&SystemPrograms>,
+) -> Result<[u8; 32], ToolError> {
+    #[cfg(target_os = "macos")]
+    {
+        if is_process {
+            macos_runtime_enforcement_digest(programs, runtime_grants)
+        } else {
+            enforcement_digest(&[])
         }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        enforcement_digest(if is_process { runtime_grants } else { &[] })
     }
 }
 
@@ -93,6 +234,7 @@ struct Ready {
 enum BootstrapStage {
     Admission,
     Workspace,
+    RuntimeMounts,
     Capabilities,
     Handshake,
     Payload,
@@ -104,6 +246,7 @@ impl BootstrapStage {
         match self {
             Self::Admission => "admission",
             Self::Workspace => "Workspace identity",
+            Self::RuntimeMounts => "runtime mount topology",
             Self::Capabilities => "kernel capability",
             Self::Handshake => "handshake",
             Self::Payload => "payload",
@@ -129,6 +272,7 @@ impl BootstrapFailure {
         match self.stage {
             BootstrapStage::Admission => "admission",
             BootstrapStage::Workspace => "pinned input",
+            BootstrapStage::RuntimeMounts => "runtime mount topology",
             BootstrapStage::Capabilities => "native protection",
             BootstrapStage::Handshake => "handshake",
             BootstrapStage::Payload => "execution",
@@ -186,19 +330,81 @@ pub(super) fn check_available() -> Result<(), ToolError> {
     }
 }
 
-pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
+pub(super) fn enforcement_digest(runtime_grants: &[RuntimeGrant]) -> Result<[u8; 32], ToolError> {
     #[cfg(target_os = "linux")]
     {
-        linux::enforcement_digest()
+        bind_runtime_grants(linux::enforcement_digest()?, runtime_grants)
     }
     #[cfg(target_os = "macos")]
     {
-        macos::enforcement_digest()
+        bind_runtime_grants(macos::enforcement_digest()?, runtime_grants)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         Err(ToolError::ProtectionUnavailable)
     }
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn macos_runtime_enforcement_digest(
+    programs: Option<&SystemPrograms>,
+    runtime_grants: &[RuntimeGrant],
+) -> Result<[u8; 32], ToolError> {
+    bind_runtime_grants(macos_enforcement_digest(programs)?, runtime_grants)
+}
+
+fn bind_runtime_grants(
+    profile: [u8; 32],
+    runtime_grants: &[RuntimeGrant],
+) -> Result<[u8; 32], ToolError> {
+    validate_selection(runtime_grants)?;
+    if runtime_grants.is_empty() {
+        return Ok(profile);
+    }
+    let mut bytes = b"arany-runtime-profile-v2:metadata-detected;exact-versioned-roots;explicit-read-only-cache-grants;bounded-output-may-disclose;no-automatic-cache-load;no-parent-cache-config-or-credentials".to_vec();
+    bytes.extend_from_slice(&profile);
+    bytes.extend_from_slice(
+        &serde_json::to_vec(runtime_grants).map_err(|_| ToolError::Configuration)?,
+    );
+    Ok(digest(&bytes))
+}
+
+fn verify_runtime_grants(config: &Config) -> Result<(), ToolError> {
+    for grant in &config.runtime_grants {
+        #[cfg(target_os = "linux")]
+        grant.verify_at(&grant.mounted_path()?)?;
+        #[cfg(target_os = "macos")]
+        grant.verify_host()?;
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok(())
+}
+
+fn verify_intent_runtime_grants(intent: &EffectIntent, config: &Config) -> Result<(), ToolError> {
+    if intent.call.is_process() {
+        verify_runtime_grants(config)
+    } else {
+        Ok(())
+    }
+}
+
+fn attest_runtime_mounts(
+    call: &ToolCall,
+    grants: &[RuntimeGrant],
+    stage: &mut BootstrapStage,
+) -> Result<(), ToolError> {
+    if !call.is_process() {
+        return Ok(());
+    }
+    *stage = BootstrapStage::RuntimeMounts;
+    #[cfg(target_os = "linux")]
+    linux::verify_runtime_mounts(grants)?;
+    #[cfg(target_os = "macos")]
+    macos::verify_runtime_mounts(grants)?;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    return Err(ToolError::ProtectionUnavailable);
+    Ok(())
 }
 
 pub(super) async fn execute(
@@ -303,10 +509,149 @@ async fn read_observation<R: tokio::io::AsyncBufRead + Unpin>(
     let bytes = read_line_capped(reader, CAPTURE_BYTES).await?;
     let observation: ToolObservation =
         serde_json::from_slice(&bytes).map_err(|_| ToolError::Operation)?;
-    if !observation.attested_for(intent) || !read_capped(&mut *reader, 1).await?.is_empty() {
+    if observation.cache_update != CacheUpdate::NotApplicable
+        || !observation.attested_for(intent)
+        || !read_capped(&mut *reader, 1).await?.is_empty()
+    {
         return Err(ToolError::Operation);
     }
     Ok(observation)
+}
+
+pub(super) async fn read_observation_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    intent: &EffectIntent,
+) -> Result<ToolObservation, ToolError> {
+    let bytes = read_line_capped(reader, CAPTURE_BYTES).await?;
+    let observation: ToolObservation =
+        serde_json::from_slice(&bytes).map_err(|_| ToolError::Operation)?;
+    if observation.cache_update != CacheUpdate::NotAttempted || !observation.attested_for(intent) {
+        return Err(ToolError::Operation);
+    }
+    Ok(observation)
+}
+
+pub(super) async fn send_cache_archive<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    lease: &BuildCacheLease,
+) -> Result<(), ToolError> {
+    use tokio::io::AsyncWriteExt;
+
+    let Some((mut file, size)) = lease.archive().map_err(map_cache_error)? else {
+        writer
+            .write_all(&0u64.to_le_bytes())
+            .await
+            .map_err(|_| ToolError::Operation)?;
+        return Ok(());
+    };
+    if size > crate::store::BUILD_CACHE_ARCHIVE_BYTES {
+        return Err(ToolError::Limit);
+    }
+    writer
+        .write_all(&size.to_le_bytes())
+        .await
+        .map_err(|_| ToolError::Operation)?;
+    let mut remaining = size;
+    let mut buffer = [0; 32 * 1024];
+    while remaining > 0 {
+        let wanted = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
+        let count = file
+            .read(&mut buffer[..wanted])
+            .map_err(|_| ToolError::Operation)?;
+        if count == 0 {
+            return Err(ToolError::Operation);
+        }
+        writer
+            .write_all(&buffer[..count])
+            .await
+            .map_err(|_| ToolError::Operation)?;
+        remaining -= count as u64;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    static CANDIDATE_SYNC_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Makes the next candidate sync on this thread fail once.
+#[cfg(test)]
+fn fail_next_candidate_sync() {
+    CANDIDATE_SYNC_FAULT.with(|fault| fault.set(true));
+}
+
+pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    lease: &BuildCacheLease,
+) -> Result<CacheCandidate, ToolError> {
+    use tokio::io::AsyncReadExt;
+
+    let marker = read_line_capped(reader, 32).await?;
+    if marker == b"CACHE_REJECTED\n" {
+        return Ok(CacheCandidate::Rejected);
+    }
+    if marker == b"CACHE_FAILED\n" {
+        return Ok(CacheCandidate::Failed);
+    }
+    if marker != b"CACHE_CANDIDATE\n" {
+        return Err(ToolError::Operation);
+    }
+    let mut length = [0; 8];
+    reader
+        .read_exact(&mut length)
+        .await
+        .map_err(|_| ToolError::Operation)?;
+    let length = u64::from_le_bytes(length);
+    if length == 0 || length > crate::store::BUILD_CACHE_ARCHIVE_BYTES {
+        return Err(ToolError::Limit);
+    }
+    // A host-side staging failure keeps the command result: stop staging but keep draining
+    // the archive so the protocol stays in sync with the worker's trailing marker.
+    let staged = drain_candidate(reader, length, lease.candidate_writer().ok()).await?;
+    let Some(file) = staged else {
+        return Ok(CacheCandidate::Failed);
+    };
+    #[cfg(test)]
+    let synced = if CANDIDATE_SYNC_FAULT.with(|fault| fault.replace(false)) {
+        Err(std::io::Error::other("injected candidate sync failure"))
+    } else {
+        file.sync_all()
+    };
+    #[cfg(not(test))]
+    let synced = file.sync_all();
+    if synced.is_err() {
+        return Ok(CacheCandidate::Failed);
+    }
+    Ok(CacheCandidate::Received)
+}
+
+/// Consumes exactly `length` archive bytes, writing them while `staged` is present. A write
+/// failure drops the writer but keeps draining so the stream stays aligned.
+async fn drain_candidate<R: tokio::io::AsyncRead + Unpin, W: Write>(
+    reader: &mut R,
+    length: u64,
+    mut staged: Option<W>,
+) -> Result<Option<W>, ToolError> {
+    use tokio::io::AsyncReadExt;
+
+    let mut buffer = [0; 32 * 1024];
+    let mut remaining = length;
+    while remaining > 0 {
+        let wanted = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
+        reader
+            .read_exact(&mut buffer[..wanted])
+            .await
+            .map_err(|_| ToolError::Operation)?;
+        if staged
+            .as_mut()
+            .is_some_and(|file| file.write_all(&buffer[..wanted]).is_err())
+        {
+            staged = None;
+        }
+        remaining -= wanted as u64;
+    }
+    Ok(staged)
 }
 
 /// Reaps a child this process owns. On macOS it closes stdin first and polls `try_wait`
@@ -395,7 +740,7 @@ fn bootstrap_locations(
     stage: &mut BootstrapStage,
 ) -> Result<(std::path::PathBuf, std::path::PathBuf), ToolError> {
     *stage = BootstrapStage::Capabilities;
-    let root = macos::install(task)?;
+    let root = macos::install(task, stage)?;
     let workspace = if task.intent.call.is_process() {
         root.join("workspace")
     } else {
@@ -423,6 +768,10 @@ pub(super) fn helper_main() -> ExitCode {
         let mut stdin = std::io::BufReader::new(std::io::stdin().lock());
         let task = read_task(&mut stdin)?;
         task.config.validate()?;
+        if let Some(cache) = &task.cache {
+            cache.validate(&task.intent, &task.config)?;
+        }
+        verify_intent_runtime_grants(&task.intent, &task.config)?;
         if !task.intent.valid()
             || task.intent.policy_digest != task.config.digest()
             || task.intent.expires_at_ms <= now_ms()
@@ -433,6 +782,34 @@ pub(super) fn helper_main() -> ExitCode {
             return Err(ToolError::Configuration);
         }
         let (root, workspace) = bootstrap_locations(&task, &mut stage)?;
+        attest_runtime_mounts(&task.intent.call, &task.config.runtime_grants, &mut stage)?;
+        #[cfg(target_os = "linux")]
+        if let Some(cache) = &task.cache {
+            let mut stdout = std::io::stdout().lock();
+            stdout
+                .write_all(b"CACHE_READY\n")
+                .and_then(|()| stdout.flush())
+                .map_err(|_| ToolError::Operation)?;
+            let mut length = [0; 8];
+            stdin
+                .read_exact(&mut length)
+                .map_err(|_| ToolError::Operation)?;
+            let length = u64::from_le_bytes(length);
+            if length > crate::store::BUILD_CACHE_ARCHIVE_BYTES {
+                return Err(ToolError::Limit);
+            }
+            if length > 0 {
+                let scratch = super::fs::open_directory(&root.join("scratch"))?;
+                let mut archive = Read::take(&mut stdin, length);
+                crate::store::restore_archive(
+                    &mut archive,
+                    &scratch,
+                    &cache.identity,
+                    &cache.exclusions,
+                )
+                .map_err(map_cache_error)?;
+            }
+        }
         let workspace = workspace.as_path();
         stage = BootstrapStage::Workspace;
         if (matches!(
@@ -488,6 +865,8 @@ pub(super) fn helper_main() -> ExitCode {
         if go != *b"GO\n" || task.intent.expires_at_ms <= now_ms() {
             return Err(ToolError::Configuration);
         }
+        verify_intent_runtime_grants(&task.intent, &task.config)?;
+        attest_runtime_mounts(&task.intent.call, &task.config.runtime_grants, &mut stage)?;
         drop(stdin);
         stage = BootstrapStage::Payload;
         #[cfg(not(target_os = "macos"))]
@@ -509,7 +888,8 @@ pub(super) fn helper_main() -> ExitCode {
                         .ok_or(ToolError::Configuration)?;
                     #[cfg(target_os = "linux")]
                     let before = super::fs::command_snapshot(workspace)?;
-                    let mut command = payload(definition, args, cwd, &root)?;
+                    let mut command =
+                        payload(definition, args, cwd, &root, &task.config.runtime_grants)?;
                     let (status, out, err) = capture(
                         command.spawn().map_err(|_| ToolError::Operation)?,
                         (task.intent.limits.result_bytes as usize / 2).saturating_sub(128),
@@ -597,6 +977,11 @@ pub(super) fn helper_main() -> ExitCode {
             disposition,
             output,
             guard: Some(receipt),
+            cache_update: if task.cache.is_some() {
+                crate::tools::CacheUpdate::NotAttempted
+            } else {
+                crate::tools::CacheUpdate::NotApplicable
+            },
         };
         if !observation.valid() {
             observation.disposition = ToolDisposition::Limit;
@@ -610,6 +995,51 @@ pub(super) fn helper_main() -> ExitCode {
             .write_all(b"\n")
             .and_then(|()| stdout.flush())
             .map_err(|_| ToolError::Operation)?;
+        #[cfg(target_os = "linux")]
+        if let Some(cache) = &task.cache {
+            if observation.disposition != ToolDisposition::Succeeded {
+                stdout
+                    .write_all(b"CACHE_REJECTED\n")
+                    .and_then(|()| stdout.flush())
+                    .map_err(|_| ToolError::Operation)?;
+            } else {
+                let scratch = super::fs::open_directory(&root.join("scratch"))?;
+                match crate::store::archive_size(&scratch, &cache.identity, &cache.exclusions) {
+                    Ok(size) => {
+                        stdout
+                            .write_all(b"CACHE_CANDIDATE\n")
+                            .and_then(|()| stdout.flush())
+                            .map_err(|_| ToolError::Operation)?;
+                        stdout
+                            .write_all(&size.to_le_bytes())
+                            .map_err(|_| ToolError::Operation)?;
+                        let captured = crate::store::capture_archive(
+                            &scratch,
+                            &cache.identity,
+                            &cache.exclusions,
+                            &mut stdout,
+                        )
+                        .map_err(map_cache_error)?;
+                        if captured != size {
+                            return Err(ToolError::Operation);
+                        }
+                        stdout.flush().map_err(|_| ToolError::Operation)?;
+                    }
+                    Err(StoreError::StorageFull) => {
+                        stdout
+                            .write_all(b"CACHE_REJECTED\n")
+                            .and_then(|()| stdout.flush())
+                            .map_err(|_| ToolError::Operation)?;
+                    }
+                    Err(_) => {
+                        stdout
+                            .write_all(b"CACHE_FAILED\n")
+                            .and_then(|()| stdout.flush())
+                            .map_err(|_| ToolError::Operation)?;
+                    }
+                }
+            }
+        }
         Ok(())
     })();
     if result.is_ok() {
@@ -667,11 +1097,26 @@ fn skill_text(name: &str, resource: Option<&str>, bytes: Vec<u8>) -> Result<Stri
     String::from_utf8(bytes).map_err(|_| ToolError::Operation)
 }
 
+/// Toolchain `bin` directories in grant order, then the system bins; both platforms mount toolchains at their host path.
+pub(super) fn runtime_path(runtime_grants: &[RuntimeGrant]) -> Result<String, ToolError> {
+    let mut paths = Vec::new();
+    for grant in runtime_grants
+        .iter()
+        .filter(|grant| grant.kind.is_toolchain())
+    {
+        let bin = grant.path.join("bin");
+        paths.push(bin.to_str().ok_or(ToolError::Path)?.to_owned());
+    }
+    paths.extend(["/usr/bin".into(), "/bin".into()]);
+    Ok(paths.join(":"))
+}
+
 pub(super) fn payload(
     program: &super::config::Program,
     args: &[String],
     cwd: &str,
     root: &Path,
+    runtime_grants: &[RuntimeGrant],
 ) -> Result<Command, ToolError> {
     let resources = if cfg!(target_os = "macos") {
         root.join("runtime")
@@ -692,6 +1137,7 @@ pub(super) fn payload(
     if hex_digest(&bytes) != program.sha256 {
         return Err(ToolError::ChangedInput);
     }
+    let path = runtime_path(runtime_grants)?;
     let mut command = Command::new(executable);
     command
         .args(args.iter().map(|arg| {
@@ -712,11 +1158,13 @@ pub(super) fn payload(
         }))
         .current_dir(workspace.join(cwd))
         .env_clear()
-        .env("PATH", "/usr/bin:/bin")
+        .env("PATH", path)
         .env("HOME", &scratch)
         .env("TMPDIR", &scratch)
         .env("CARGO_HOME", scratch.join("cargo"))
         .env("CARGO_TARGET_DIR", scratch.join("target"))
+        .env("npm_config_cache", scratch.join(".npm"))
+        .env("PIP_CACHE_DIR", scratch.join(".cache/pip"))
         .env("ARANY_TOOL_WORKSPACE", &workspace)
         .env("ARANY_TOOL_INPUTS", resources.join("inputs"))
         .env("ARANY_TOOL_SKILLS", resources.join("skills"))
@@ -726,4 +1174,414 @@ pub(super) fn payload(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     Ok(command)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node_grant(home: &Path) -> RuntimeGrant {
+        RuntimeGrant {
+            kind: super::super::toolchains::RuntimeKind::Node,
+            manager: super::super::toolchains::RuntimeManager::Nvm,
+            version: Some("v22.3.0".into()),
+            path: home.join(".nvm/versions/node/v22.3.0"),
+            device: 1,
+            inode: 2,
+        }
+    }
+
+    fn intent(call: ToolCall) -> EffectIntent {
+        EffectIntent {
+            id: uuid::Uuid::now_v7(),
+            run_id: crate::session::RunId::default(),
+            agent_run_id: crate::session::AgentRunId::default(),
+            policy_digest: [0; 32],
+            enforcement_digest: [0; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call,
+            limits: ToolLimits::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        }
+    }
+
+    fn config(runtime_grants: Vec<RuntimeGrant>) -> Config {
+        Config {
+            version: 1,
+            workspace_paths: vec![".".into()],
+            write: false,
+            commands: Vec::new(),
+            skills: Vec::new(),
+            mcp: Vec::new(),
+            runtime_grants,
+        }
+    }
+
+    #[test]
+    fn runtime_mount_rejection_reports_its_own_bootstrap_stage() {
+        let failure = BootstrapFailure {
+            stage: BootstrapStage::RuntimeMounts,
+        };
+        assert_eq!(failure.failure_stage(), "runtime mount topology");
+        assert_eq!(failure.to_string(), "runtime mount topology");
+    }
+
+    #[test]
+    fn file_profile_digest_excludes_selected_process_runtimes() {
+        let temp = tempfile::tempdir().unwrap();
+        let grants = [node_grant(temp.path())];
+        let file_profile = intent_enforcement_digest(
+            false,
+            &grants,
+            #[cfg(target_os = "macos")]
+            None,
+        )
+        .unwrap();
+        let process_profile = intent_enforcement_digest(
+            true,
+            &grants,
+            #[cfg(target_os = "macos")]
+            None,
+        )
+        .unwrap();
+        assert_eq!(file_profile, enforcement_digest(&[]).unwrap());
+        assert_ne!(file_profile, process_profile);
+    }
+
+    #[test]
+    fn helper_revalidates_runtime_roots_only_for_process_intents() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config(vec![node_grant(temp.path())]);
+        let file = intent(ToolCall::Read {
+            path: "selected.txt".into(),
+            offset: 0,
+            limit: 32,
+        });
+        let process = intent(ToolCall::Command {
+            program: "node".into(),
+            args: Vec::new(),
+            cwd: ".".into(),
+        });
+        assert!(verify_intent_runtime_grants(&file, &config).is_ok());
+        assert!(matches!(
+            verify_intent_runtime_grants(&process, &config),
+            Err(ToolError::ChangedInput)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drifted_runtime_grant_rejects_commands_and_keeps_file_intents() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".nvm/versions/node/v22.3.0");
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let node = root.join("bin/node");
+        std::fs::write(&node, b"synthetic node executable").unwrap();
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (device, inode) =
+            crate::tools::fs::identity(&crate::tools::fs::open_directory(&root).unwrap()).unwrap();
+        let config = config(vec![RuntimeGrant {
+            kind: super::super::toolchains::RuntimeKind::Node,
+            manager: super::super::toolchains::RuntimeManager::Nvm,
+            version: Some("v22.3.0".into()),
+            path: root.clone(),
+            device,
+            inode,
+        }]);
+        let file = intent(ToolCall::Read {
+            path: "selected.txt".into(),
+            offset: 0,
+            limit: 32,
+        });
+        let process = intent(ToolCall::Command {
+            program: "node".into(),
+            args: Vec::new(),
+            cwd: ".".into(),
+        });
+        assert!(verify_intent_runtime_grants(&process, &config).is_ok());
+
+        // Keep the old directory alive while the path is recreated, so the new inode cannot be reused.
+        std::fs::rename(&root, temp.path().join("previous-node")).unwrap();
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        assert!(matches!(
+            verify_intent_runtime_grants(&process, &config),
+            Err(ToolError::ChangedInput)
+        ));
+        assert!(verify_intent_runtime_grants(&file, &config).is_ok());
+    }
+
+    fn cache_fixture(root: &Path) -> (crate::store::StateRoot, BuildCacheIdentity) {
+        use std::os::unix::fs::MetadataExt;
+
+        let workspace = root.join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let metadata = std::fs::metadata(&workspace).unwrap();
+        let identity = BuildCacheIdentity::new(&workspace, metadata.dev(), metadata.ino()).unwrap();
+        let state = crate::store::StateRoot::admit(&root.join("state")).unwrap();
+        (state, identity)
+    }
+
+    fn empty_archive(identity: &BuildCacheIdentity) -> Vec<u8> {
+        let mut bytes = b"ARANYCACHE\0\x01".to_vec();
+        bytes.extend((identity.path.len() as u16).to_le_bytes());
+        bytes.extend(identity.device.to_le_bytes());
+        bytes.extend(identity.inode.to_le_bytes());
+        bytes.extend(identity.path.as_bytes());
+        bytes.extend([0; 12]);
+        bytes
+    }
+
+    fn command_observation() -> ToolObservation {
+        let mut intent = intent(ToolCall::Command {
+            program: "cargo".into(),
+            args: vec!["build".into()],
+            cwd: ".".into(),
+        });
+        intent.policy_digest = [1; 32];
+        intent.enforcement_digest = [2; 32];
+        let guard = GuardReceipt {
+            contract_version: 1,
+            intent_digest: intent.digest(),
+            enforcement_digest: intent.enforcement_digest,
+            limits: intent.limits.clone(),
+        };
+        ToolObservation {
+            intent,
+            disposition: ToolDisposition::Succeeded,
+            output: r#"{"exit_code":0,"stdout":"built","stderr":"","changeset":{"files":[]}}"#
+                .into(),
+            guard: Some(guard),
+            cache_update: CacheUpdate::NotAttempted,
+        }
+    }
+
+    fn cache_session(
+        state: &crate::store::StateRoot,
+        identity: &BuildCacheIdentity,
+    ) -> BuildCacheSession {
+        BuildCacheSession {
+            lease: crate::store::begin_released(state, identity.clone()).unwrap(),
+            transfer: BuildCacheTransfer {
+                identity: identity.clone(),
+                exclusions: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn cache_publication_never_replaces_a_succeeded_command() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, identity) = cache_fixture(temp.path());
+
+        let mut session = cache_session(&state, &identity);
+        let mut corrupt = session.lease.candidate_writer().unwrap();
+        corrupt.write_all(b"not an archive").unwrap();
+        drop(corrupt);
+        let mut observation = command_observation();
+        publish_cache_candidate(
+            &mut observation,
+            CacheCandidate::Received,
+            Some(&mut session),
+        );
+        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+        assert_eq!(observation.cache_update, CacheUpdate::Failed);
+        drop(session);
+
+        let mut session = cache_session(&state, &identity);
+        let mut valid = session.lease.candidate_writer().unwrap();
+        valid.write_all(&empty_archive(&identity)).unwrap();
+        valid.sync_all().unwrap();
+        drop(valid);
+        let mut observation = command_observation();
+        publish_cache_candidate(
+            &mut observation,
+            CacheCandidate::Received,
+            Some(&mut session),
+        );
+        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+        assert_eq!(observation.cache_update, CacheUpdate::Published);
+        assert!(observation.valid());
+    }
+
+    fn captured_archive(root: &Path, identity: &BuildCacheIdentity, marker: &[u8]) -> Vec<u8> {
+        let source = root.join(format!("source-{}", marker.len()));
+        std::fs::create_dir_all(source.join("target")).unwrap();
+        std::fs::write(source.join("target/marker"), marker).unwrap();
+        let source =
+            cap_std::fs::Dir::open_ambient_dir(&source, cap_std::ambient_authority()).unwrap();
+        let mut bytes = Vec::new();
+        crate::store::capture_archive(&source, identity, &[], &mut bytes).unwrap();
+        bytes
+    }
+
+    fn publish_archive(
+        state: &crate::store::StateRoot,
+        identity: &BuildCacheIdentity,
+        bytes: &[u8],
+    ) {
+        let mut session = cache_session(state, identity);
+        let mut candidate = session.lease.candidate_writer().unwrap();
+        candidate.write_all(bytes).unwrap();
+        candidate.sync_all().unwrap();
+        drop(candidate);
+        let mut observation = command_observation();
+        publish_cache_candidate(
+            &mut observation,
+            CacheCandidate::Received,
+            Some(&mut session),
+        );
+        assert_eq!(observation.cache_update, CacheUpdate::Published);
+    }
+
+    fn committed_archive(
+        state: &crate::store::StateRoot,
+        identity: &BuildCacheIdentity,
+    ) -> Vec<u8> {
+        let lease = crate::store::begin_released(state, identity.clone()).unwrap();
+        let (mut file, length) = lease.archive().unwrap().unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(length, bytes.len() as u64);
+        bytes
+    }
+
+    #[test]
+    fn uncertain_commit_marker_keeps_the_command_and_recovers_the_prior_archive() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, identity) = cache_fixture(temp.path());
+        let prior = captured_archive(temp.path(), &identity, b"prior");
+        let candidate = captured_archive(temp.path(), &identity, b"candidate");
+        assert_ne!(prior, candidate);
+        publish_archive(&state, &identity, &prior);
+
+        let mut session = cache_session(&state, &identity);
+        let mut valid = session.lease.candidate_writer().unwrap();
+        valid.write_all(&candidate).unwrap();
+        valid.sync_all().unwrap();
+        drop(valid);
+        crate::store::fail_next_commit_marker();
+        let mut observation = command_observation();
+        publish_cache_candidate(
+            &mut observation,
+            CacheCandidate::Received,
+            Some(&mut session),
+        );
+        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+        assert_eq!(observation.cache_update, CacheUpdate::Uncertain);
+        assert!(observation.valid());
+        assert!(observation.stops_run());
+        assert!(session.lease.publication_uncertain());
+        drop(session);
+
+        // The commit marker never reached disk, so recovery rolls back to the prior archive.
+        assert_eq!(committed_archive(&state, &identity), prior);
+    }
+
+    #[tokio::test]
+    async fn candidate_sync_failure_drains_the_archive_and_keeps_the_prior_archive() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, identity) = cache_fixture(temp.path());
+        let prior = captured_archive(temp.path(), &identity, b"prior");
+        let candidate = captured_archive(temp.path(), &identity, b"candidate");
+        publish_archive(&state, &identity, &prior);
+
+        let lease = crate::store::begin_released(&state, identity.clone()).unwrap();
+        let mut stream = b"CACHE_CANDIDATE\n".to_vec();
+        stream.extend((candidate.len() as u64).to_le_bytes());
+        stream.extend(&candidate);
+        stream.extend(b"CACHE_DONE\n");
+        let mut reader = tokio::io::BufReader::new(stream.as_slice());
+        fail_next_candidate_sync();
+        let outcome = receive_cache_candidate(&mut reader, &lease).await.unwrap();
+        assert!(matches!(outcome, CacheCandidate::Failed));
+        let mut trailer = String::new();
+        reader.read_line(&mut trailer).await.unwrap();
+        assert_eq!(trailer, "CACHE_DONE\n");
+        drop(lease);
+
+        assert_eq!(committed_archive(&state, &identity), prior);
+    }
+
+    /// Accepts `remaining` bytes, then reports zero-length writes so `write_all` fails.
+    struct FailAfter {
+        remaining: usize,
+    }
+
+    impl Write for FailAfter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let accepted = bytes.len().min(self.remaining);
+            self.remaining -= accepted;
+            Ok(accepted)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn candidate_drain_consumes_the_archive_after_a_write_failure() {
+        let archive = b"ARCHIVE\nbytes";
+        let mut stream = archive.to_vec();
+        stream.extend(b"CACHE_DONE\n");
+        let mut reader = tokio::io::BufReader::new(stream.as_slice());
+        let staged = drain_candidate(
+            &mut reader,
+            archive.len() as u64,
+            Some(FailAfter { remaining: 4 }),
+        )
+        .await
+        .unwrap();
+        assert!(staged.is_none());
+        let mut trailer = String::new();
+        reader.read_line(&mut trailer).await.unwrap();
+        assert_eq!(trailer, "CACHE_DONE\n");
+    }
+
+    #[tokio::test]
+    async fn candidate_staging_failure_drains_the_archive_and_keeps_the_prior_archive() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, identity) = cache_fixture(temp.path());
+        let mut session = cache_session(&state, &identity);
+        let mut valid = session.lease.candidate_writer().unwrap();
+        valid.write_all(&empty_archive(&identity)).unwrap();
+        valid.sync_all().unwrap();
+        drop(valid);
+        let mut observation = command_observation();
+        publish_cache_candidate(
+            &mut observation,
+            CacheCandidate::Received,
+            Some(&mut session),
+        );
+        assert_eq!(observation.cache_update, CacheUpdate::Published);
+        drop(session);
+
+        let lease = crate::store::begin_released(&state, identity.clone()).unwrap();
+        // Occupies the candidate name, so the create_new staging step fails.
+        drop(lease.candidate_writer().unwrap());
+
+        let archive = b"ARCHIVE\nbytes";
+        let mut stream = b"CACHE_CANDIDATE\n".to_vec();
+        stream.extend((archive.len() as u64).to_le_bytes());
+        stream.extend(archive);
+        stream.extend(b"CACHE_DONE\n");
+        let mut reader = tokio::io::BufReader::new(stream.as_slice());
+        let candidate = receive_cache_candidate(&mut reader, &lease).await.unwrap();
+        assert!(matches!(candidate, CacheCandidate::Failed));
+        let mut trailer = String::new();
+        reader.read_line(&mut trailer).await.unwrap();
+        assert_eq!(trailer, "CACHE_DONE\n");
+        drop(lease);
+
+        let lease = crate::store::begin_released(&state, identity.clone()).unwrap();
+        let (mut file, length) = lease.archive().unwrap().unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(length, bytes.len() as u64);
+        assert_eq!(bytes, empty_archive(&identity));
+    }
 }

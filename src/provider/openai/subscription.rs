@@ -202,6 +202,8 @@ async fn probe_model_at(
         includes: Vec::new(),
         history: Vec::new(),
         context_summary: None,
+        goal_budget: None,
+        goal_plan_contract: None,
         child_results: Vec::new(),
         max_output_tokens: PROBE_OUTPUT_CAP,
         tools: None,

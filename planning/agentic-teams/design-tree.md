@@ -11,7 +11,7 @@ applied to the plan; this file keeps the decision trail and open nodes.
 | Q1 | Single-agent foundation (A) and Supervisor core before writable teams (C) | Yes | Plan execution order |
 | Q2 | Command writes return as Engine-validated changesets, not a writable Workspace mount | Yes | A1 |
 | Q3 | Supervisor owned by the Engine over journaled Events | Yes, amended: evaluators must be configurable and not tied to Engine-only deterministic rules; typed model judges such as TypeSafe AI's Jev can decide non-deterministic cases | B intro, execution step 4 |
-| Q4 | Plan contract inside the first Tool outcome, mandatory for every Run with effects | Yes | B1 |
+| Q4 | A valid plan contract must precede the first non-prelude Tool; bounded read-only inspection may precede it, and the contract may accompany inspection | Yes, amended by R13-1 | B1 |
 | Q5 | Shadow mode for fuzzy signals; false completion and Finish gate enforce immediately | Yes | B2 |
 | Q6 | Registry fetch with network leaves this plan | Yes | Moved to [next steps](../../NEXT_STEPS.md#next-functional-priority) |
 | Q7 | Toolchains mount exact subtrees read-only with identity pins, never whole home/tool directories | Yes | A2 |
@@ -211,6 +211,20 @@ of time-based arguments.
 | R12-3 | RPI default may add friction to small tasks | Low (~40%): speculative | Observe during dogfooding | Execution note |
 | R12-4 | Per-slice process cost may slow delivery | Low (~35%): agents absorb most of it at the observed pace | Observe during dogfooding | Execution note |
 
+## Round 13 — settled 2026-10-13
+
+| # | Decision | Answer | Applied to |
+|---|---|---|---|
+| R13-1 | Permit a bounded read-only inspection prelude before the B1 Goal plan contract | “Allow read-only inspection first (Recommended)” | B1, E11 |
+
+The selected timing lets inspection inform an honest, exact scope while
+preserving the approved effect boundary. Before a contract is recorded, the
+prelude is limited to Workspace List/Read/Search, an admitted Skill read, and
+the existing configured bounded MCP catalog listing. Catalog listing discovers
+names only; every MCP tool invocation and command still requires the contract.
+Any contract supplied with a prelude call is validated and journaled before
+dispatch. A pure read-only task can finish without fabricated effect scope.
+
 ## User directives after Round 12
 
 | Date | Directive | Applied to |
@@ -218,6 +232,7 @@ of time-based arguments.
 | 2026-10-13 | The whole initiative is Beta 1 scope (reverses R10-8) | Plan outcome, beta plan, next steps |
 | 2026-10-13 | No native Windows: Windows users run the Linux build under WSL2 | AGENTS.md priority 2, README, CONTRIBUTING, planning template, security rules, decision D-17, next steps, plan OS impact |
 | 2026-10-13 | Registry fetch joins Beta 1 as A6 (reverses Q6) | Plan A6, security model, OS impact, execution step 8; removed from next steps as a separate initiative |
+| 2026-10-13 | A3/A4 finite configurable ceilings: 4 GiB memory, 8 GiB cache, 1 GiB writable project storage, 256 tasks; 120-second command default, 600-second maximum | A3/A4 policy defaults; native build evidence and named-host measurement remain separate support gates |
 
 ## Expansion options
 
@@ -235,6 +250,6 @@ nodes below wait on implementation data; they are not silently assumed.
 
 ## Blocked nodes
 
-- After A2 lands: `build` resource profile values per OS and default settings
-  maxima, from measured builds on named hosts.
+- After A3/A4: native build verification and named-host measurements for any
+  build-support claim; approved policy ceilings do not establish support.
 - After shadow-mode data: thresholds for loop, probing and disproportion.

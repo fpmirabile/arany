@@ -68,6 +68,7 @@ flowchart LR
         CLI --> Engine[Deep Engine]
         CLI --> Terminal[Inline terminal or deterministic output]
         Engine --> Session[Session lifecycle + context]
+        Session --> Goal[Durable Goal state]
         Engine --> Loop[Primary coordination loop]
         Loop --> Primary[Primary AgentRun]
         Primary --> Children[Ordered 0..N one-call read-only children]
@@ -96,7 +97,7 @@ flowchart LR
 
     classDef deep fill:#173b34,color:#fff,stroke:#5eead4,stroke-width:2px;
     classDef canonical fill:#2b2346,color:#fff,stroke:#c4b5fd,stroke-width:2px;
-    class Engine,Session,Loop,Primary,Children deep;
+    class Engine,Session,Goal,Loop,Primary,Children deep;
     class Store canonical;
 ```
 
@@ -155,15 +156,17 @@ The lifecycle hierarchy is:
 ```text
 Session
 ├── durable messages, title, fork lineage, defaults, compaction snapshots
-└── Runs[] in committed order
-    └── Run
-        ├── pinned ProviderProfile/model/policies/budgets
-        └── AgentRuns[]
-            ├── one primary
-            └── ordered 0..N direct children
+└── Goals[] in accepted-task order
+    ├── accepted objective, Workspace identity, bounded budgets, plan and terminal report
+    └── Runs[] linked to exactly one Goal
+        └── Run
+            ├── pinned ProviderProfile/model/policies/budgets
+            └── AgentRuns[]
+                ├── one primary
+                └── ordered 0..N direct children
 ```
 
-A Session has at most one active Run in beta. The Engine holds a private per-Session state lock across each Run, source fork, and manual compaction; a brief private namespace lock coordinates file creation and removal while other Sessions can proceed independently during work. At most 65,536 Session lock files may exist, including crash-stranded pre-commit files. Completed, failed, cancelled, and interrupted Runs remain immutable history. Resume reconstructs the same Session; fork creates a new Session with a single `SessionForked` first Event recording source Session, boundary Run, boundary sequence, and canonical Event-prefix digest. Store replay validates bounded source ancestry; the context compiler selects successful inherited turns only through that boundary. Historical children remain inspectable but are never recreated as live work.
+A Session has at most one active Run in beta. Every accepted task is a durable Goal linked to one or more Runs; Goal budgets, the initial plan contract and terminal report are canonical Events projected by Session replay. Write-capable Goals also hold the OS-user Workspace identity lock, so separate Session StateRoots cannot concurrently publish to one Workspace. The Engine holds a private per-Session state lock across each Run, source fork, and manual compaction; a brief private namespace lock coordinates file creation and removal while other Sessions can proceed independently during work. At most 65,536 Session lock files may exist, including crash-stranded pre-commit files. Completed, failed, cancelled, and interrupted Runs remain immutable history. Resume reconstructs the same Session; fork creates a new Session with a single `SessionForked` first Event recording source Session, boundary Run, boundary sequence, and canonical Event-prefix digest. Store replay validates bounded source ancestry; the context compiler selects successful inherited turns only through that boundary. Historical children remain inspectable but are never recreated as live work.
 
 Before each Run, Arany pins one collaboration policy:
 
@@ -246,7 +249,7 @@ The initial vocabulary is intentionally small:
 - `AgentSpawned`, `ProviderCallRecorded`, `AgentFinished`; and
 - `ToolStarted`, `ToolFinished`.
 
-All current Events use payload version 2. Tool Events correlate the exact Run, primary actor, one-use intent, pinned policy/enforcement digest, Workspace identity and finite effective limits. A successful observation requires a matching Guard receipt. Unknown, duplicated, unmatched, over-budget or mismatched transitions reject; uncertainty/cancellation cannot be followed by successful Agent completion. Public typed replay validates payloads as well as SQL loading. A started attempt without a terminal observation remains a past interrupted/uncertain fact, never an approval or retry instruction.
+All current Events use payload version 3. Tool Events correlate the exact Run, primary actor, one-use intent, pinned policy/enforcement digest, Workspace identity and finite effective limits. A successful observation requires a matching Guard receipt. Unknown, duplicated, unmatched, over-budget or mismatched transitions reject; uncertainty/cancellation cannot be followed by successful Agent completion. Public typed replay validates payloads as well as SQL loading. A started attempt without a terminal observation remains a past interrupted/uncertain fact, never an approval or retry instruction.
 
 `SessionStarted` pins the admitted Workspace device and inode atomically with the title, including for an empty Session. Replay rejects a later Run or fork whose identity disagrees with the pinned Session. The SQLite owner admits only schema version 4 and current Event payloads; unsupported formats and missing fields reject without conversion or deletion.
 
