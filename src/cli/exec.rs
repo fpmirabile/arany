@@ -259,6 +259,13 @@ async fn run_with_provider<P: Provider + 'static>(
             )
             .map_err(|error| error.to_string())?;
     }
+    let (goal_budget, resource_settings) =
+        crate::cli::attached::execution_limits(&admission.state_dir).await?;
+    let mut goal = admission.goal;
+    if goal.id.is_none() {
+        goal.budget = Some(goal_budget);
+    }
+    goal.resource_settings = resource_settings;
     let end = run_signalled(
         &mut engine,
         RunRequest {
@@ -269,7 +276,7 @@ async fn run_with_provider<P: Provider + 'static>(
             workspace: admission.workspace,
             include_paths: args.include_paths,
             policy: admission.policy,
-            goal: admission.goal,
+            goal,
         },
     )
     .await;
@@ -750,7 +757,7 @@ mod tests {
         .expect("engine");
         let mut goal = GoalRequest::new(
             GoalBudget {
-                max_provider_calls: 1,
+                max_provider_calls: Some(1),
                 ..GoalBudget::default()
             },
             GoalPhase::Implementation,
@@ -896,14 +903,14 @@ mod tests {
                 "GoalRunLinked",
                 "MessageAccepted",
                 "RunStarted",
-                "GoalActiveTimeReserved",
                 "AgentSpawned",
+                "GoalActiveTimeReserved",
                 "GoalProviderCallReserved",
                 "ProviderCallRecorded",
+                "GoalActiveTimeSettled",
                 "AgentFinished",
                 "MessageCommitted",
                 "RunFinished",
-                "GoalActiveTimeSettled",
                 "GoalFinished",
             ]
         );
@@ -913,7 +920,7 @@ mod tests {
         assert_eq!(lines[7]["payload"]["response_id"], "resp_test");
         assert_eq!(lines[7]["payload"]["input_tokens"], 20);
         assert_eq!(lines[7]["payload"]["output_tokens"], 10);
-        assert_eq!(lines[10]["kind"], "RunFinished");
+        assert_eq!(lines[11]["kind"], "RunFinished");
         assert_eq!(lines[12]["kind"], "GoalFinished");
         assert_eq!(
             lines[0]["payload"]["goal_id"],
@@ -960,7 +967,7 @@ mod tests {
         for (line, event) in run_lines.into_iter().zip(run_events) {
             assert_eq!(line["sequence"], event.sequence);
             assert_eq!(line["created_at_ms"], event.created_at_ms);
-            assert_eq!(line["event_version"], 3);
+            assert_eq!(line["event_version"], 4);
         }
         store.close().await.expect("closed store");
 
@@ -1070,19 +1077,19 @@ mod tests {
                 "GoalRunLinked",
                 "MessageAccepted",
                 "RunStarted",
-                "GoalActiveTimeReserved",
                 "AgentSpawned",
+                "GoalActiveTimeReserved",
                 "GoalProviderCallReserved",
                 "ProviderCallRecorded",
+                "GoalActiveTimeSettled",
                 "AgentFinished",
                 "MessageCommitted",
                 "RunFinished",
-                "GoalActiveTimeSettled",
                 "GoalFinished",
             ]
         );
         assert_eq!(new_lines[3]["payload"]["text"], "//literal new");
-        assert_eq!(new_lines[11]["kind"], "RunFinished");
+        assert_eq!(new_lines[12]["kind"], "RunFinished");
         assert_eq!(new_lines[13]["kind"], "GoalFinished");
         assert_eq!(
             new_lines[1]["payload"]["goal_id"],

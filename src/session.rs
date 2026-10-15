@@ -9,11 +9,10 @@ pub(crate) const MAX_CONTEXT_CONTENT_BYTES: usize = 376 * 1024;
 pub(crate) const MAX_HISTORY_RUNS: usize = 32;
 pub(crate) const MAX_USER_MESSAGE_BYTES: usize = 8 * 1024;
 pub(crate) const MAX_ASSISTANT_MESSAGE_BYTES: usize = 32 * 1024;
-pub(crate) const MAX_COMPACTIONS: usize = 64;
 
 pub(crate) use compaction::{
-    CompactionInputError, MAX_COMPACTION_OUTPUT_TOKENS, PreparedCompaction,
-    validate_compaction_references,
+    CompactionInputError, MAX_COMPACTION_INPUT_BYTES, MAX_COMPACTION_OUTPUT_TOKENS,
+    PreparedCompaction, validate_compaction_references,
 };
 pub(crate) use context::CompiledContext;
 pub use events::{
@@ -23,11 +22,13 @@ pub use events::{
     GoalPlanContract, GoalReport, GoalSkillBinding, GoalStatus, GoalSuccessCriterion,
     MAX_DISPLAY_CHUNK_BYTES, MAX_DISPLAY_CHUNKS, MAX_DISPLAY_COMMENTARY_ITEMS,
     MAX_DISPLAY_TEXT_BYTES, MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_MCP_TOOLS, MAX_GOAL_PLAN_SKILLS,
-    MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUN_ACTIVE_MS, MAX_GOAL_RUNS,
-    ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition, RunId, SessionDefaults,
-    SessionId,
+    MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS, ProviderCallDisposition,
+    ProviderCallRecord, RunConfig, RunDisposition, RunId, SessionDefaults, SessionId,
 };
-pub(crate) use events::{GoalUsage, ReplayError};
+pub(crate) use events::{
+    GoalSuccessState, GoalUsage, MAX_GOAL_ACTION_ACTIVE_MS, MAX_GOAL_PLAN_CONTRACT_BYTES,
+    ReplayError,
+};
 pub(crate) use lineage::prefix_digest;
 pub use reducer::{
     AgentStatus, AgentView, CompactionView, GoalView, RunStatus, RunView, SessionView, ToolView,

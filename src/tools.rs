@@ -72,9 +72,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub use types::{
     CacheUpdate, CommandChangeset, EffectIntent, FileChange, FileVersion, GuardReceipt, MAX_SKILLS,
     NetworkGrant, ToolCall, ToolContext, ToolDisposition, ToolLimits, ToolObservation,
-    ToolPolicyReceipt, ToolResourceProfile,
+    ToolPolicyReceipt, ToolResourceClass, ToolResourceProfile, ToolResourceSettings,
 };
-pub(crate) use types::{MAX_MODEL_STEPS, MAX_TOOL_CALLS, MAX_TOOL_CONTEXT_BYTES};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
@@ -112,10 +111,25 @@ pub(crate) struct ToolRuntime {
     guard_executable: PathBuf,
     enforcement_digest: [u8; 32],
     process_enforcement_digest: [u8; 32],
+    context_limit_bytes: usize,
     queue_progress: Option<tokio::sync::watch::Sender<Option<uuid::Uuid>>>,
+    active_action_gate: Option<tokio::sync::mpsc::Sender<ActiveActionRequest>>,
     cache_state: Option<std::sync::Arc<StateRoot>>,
     #[cfg(target_os = "macos")]
     system_programs: Option<std::sync::Arc<guard::SystemPrograms>>,
+}
+
+pub(crate) type ActiveActionRequest = (
+    tokio::time::Instant,
+    tokio::sync::oneshot::Sender<Result<ActiveToolWindow, ToolError>>,
+);
+
+#[derive(Clone, Copy)]
+pub(crate) struct ActiveToolWindow {
+    pub(crate) preparation_deadline: tokio::time::Instant,
+    pub(crate) go_deadline: tokio::time::Instant,
+    pub(crate) payload_deadline: tokio::time::Instant,
+    pub(crate) completion_deadline: tokio::time::Instant,
 }
 
 impl ToolRuntime {
@@ -128,6 +142,50 @@ impl ToolRuntime {
         runtime
     }
 
+    pub(crate) fn with_active_action_gate(
+        &self,
+        sender: tokio::sync::mpsc::Sender<ActiveActionRequest>,
+    ) -> Self {
+        let mut runtime = self.clone();
+        runtime.active_action_gate = Some(sender);
+        runtime
+    }
+
+    pub(crate) async fn begin_active_action(
+        &self,
+        admitted_at: tokio::time::Instant,
+    ) -> Result<Option<ActiveToolWindow>, ToolError> {
+        let Some(sender) = &self.active_action_gate else {
+            return Ok(None);
+        };
+        let (reply, receipt) = tokio::sync::oneshot::channel();
+        sender
+            .send((admitted_at, reply))
+            .await
+            .map_err(|_| ToolError::Operation)?;
+        receipt
+            .await
+            .map_err(|_| ToolError::Operation)
+            .and_then(|result| result.map(Some))
+    }
+
+    pub(crate) fn before_dispatch(
+        &self,
+        window: Option<ActiveToolWindow>,
+        runtime_ms: u32,
+    ) -> Result<(), ToolError> {
+        if window.is_some_and(|window| {
+            let now = tokio::time::Instant::now();
+            now >= window.go_deadline
+                || now
+                    .checked_add(std::time::Duration::from_millis(u64::from(runtime_ms)))
+                    .is_none_or(|payload_end| payload_end > window.payload_deadline)
+        }) {
+            return Err(ToolError::Limit);
+        }
+        Ok(())
+    }
+
     pub(crate) fn queue_changed(&self, id: uuid::Uuid, queued: bool) {
         if let Some(sender) = &self.queue_progress {
             sender.send_replace(queued.then_some(id));
@@ -135,6 +193,18 @@ impl ToolRuntime {
     }
     pub(crate) fn workspace_identity(&self) -> (u64, u64) {
         self.workspace_identity
+    }
+
+    pub(crate) fn set_context_limit(&mut self, limit: usize) -> Result<(), ToolError> {
+        if !(types::MIN_TOOL_CONTEXT_BYTES..=types::MAX_TOOL_CONTEXT_BYTES).contains(&limit) {
+            return Err(ToolError::Limit);
+        }
+        self.context_limit_bytes = limit;
+        Ok(())
+    }
+
+    pub(crate) fn context_limit_bytes(&self) -> usize {
+        self.context_limit_bytes
     }
     pub(crate) fn allows(&self, call: &ToolCall) -> bool {
         self.config.allows(call)
@@ -172,6 +242,27 @@ impl ToolRuntime {
                 })
             })
     }
+
+    pub(crate) fn effective_cache_bytes(&self, requested: u64) -> Result<(u64, u64), ToolError> {
+        if requested == 0 {
+            return Ok((0, 0));
+        }
+        let Some(state) = self.cache_state.as_ref() else {
+            return Ok((0, 0));
+        };
+        let identity = crate::store::BuildCacheIdentity::new(
+            &self.workspace,
+            self.workspace_identity.0,
+            self.workspace_identity.1,
+        )
+        .map_err(|_| ToolError::Operation)?;
+        match state.effective_build_cache_bytes(&identity, requested) {
+            Ok(limits) => Ok(limits),
+            Err(crate::store::StoreError::StorageFull) => Ok((0, 0)),
+            Err(_) => Err(ToolError::Operation),
+        }
+    }
+
     pub(crate) fn admit(
         mut config: Config,
         workspace: &Path,
@@ -231,6 +322,7 @@ impl ToolRuntime {
         Ok(Self {
             config,
             queue_progress: None,
+            active_action_gate: None,
             cache_state: Some(std::sync::Arc::new(
                 state
                     .try_clone()
@@ -241,13 +333,16 @@ impl ToolRuntime {
             guard_executable,
             enforcement_digest,
             process_enforcement_digest,
+            context_limit_bytes: types::MAX_TOOL_CONTEXT_BYTES,
             #[cfg(target_os = "macos")]
             system_programs,
         })
     }
 
     pub(crate) fn receipt(&self) -> ToolPolicyReceipt {
-        self.config.receipt()
+        let mut receipt = self.config.receipt();
+        receipt.max_context_bytes = self.context_limit_bytes as u32;
+        receipt
     }
 
     pub(crate) fn context(&self) -> Result<ToolContext, ToolError> {
@@ -271,6 +366,7 @@ impl ToolRuntime {
         }
         Ok(ToolContext {
             catalog,
+            history_summary: None,
             observations: Vec::new(),
         })
     }

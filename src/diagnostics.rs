@@ -339,7 +339,6 @@ pub(crate) fn engine_failure(error: &crate::engine::EngineError) {
         EngineError::CompactionInputEmpty => "CompactionInputEmpty",
         EngineError::CompactionInputTooLarge => "CompactionInputTooLarge",
         EngineError::CompactionNotIdle => "CompactionNotIdle",
-        EngineError::CompactionLimit => "CompactionLimit",
         EngineError::CancellationDrainTimeout => "CancellationDrainTimeout",
         EngineError::CoordinatorFailed => "CoordinatorFailed",
         EngineError::CancelledBeforeStart => "CancelledBeforeStart",

@@ -1,4 +1,4 @@
-//! Private unit records and fixed-size disk images for Workspace snapshots and scratch.
+//! Private unit records and quota-backed images for Workspace, scratch and cache.
 
 use super::super::CAPTURE_BYTES;
 use super::system_program;
@@ -17,7 +17,8 @@ use tokio::process::Command;
 pub(super) const STORAGE_BYTES_CAP: u64 = crate::tools::types::SCRATCH_BYTES;
 const BYTES_PER_MEBIBYTE: u64 = 1024 * 1024;
 const _: () = assert!(STORAGE_BYTES_CAP.is_multiple_of(BYTES_PER_MEBIBYTE));
-const STORAGE_NAMES: [&str; 2] = ["workspace", "scratch"];
+const DEFAULT_STORAGE_NAMES: [&str; 2] = ["workspace", "scratch"];
+const STORAGE_NAMES: [&str; 3] = ["workspace", "scratch", "cache"];
 pub(super) const STORAGE_PENDING: &str = "storage.pending";
 
 pub(super) use super::super::admission::{read_record, write_record};
@@ -27,6 +28,7 @@ pub(super) use super::super::admission::{read_record, write_record};
 pub(super) struct ImageIdentity {
     pub(super) device: u64,
     pub(super) inode: u64,
+    pub(super) bytes: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -75,15 +77,44 @@ async fn disk_command(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, ToolEr
     }
 }
 
+#[cfg(test)]
 pub(super) async fn prepare_storage(root: &Path) -> Result<[cap_std::fs::Dir; 2], ToolError> {
+    let volumes = prepare_storage_with_sizes(
+        root,
+        &[
+            ("workspace", STORAGE_BYTES_CAP),
+            ("scratch", STORAGE_BYTES_CAP),
+        ],
+    )
+    .await?;
+    volumes
+        .try_into()
+        .map_err(|_| ToolError::ProtectionUnavailable)
+}
+
+async fn prepare_storage_with_sizes(
+    root: &Path,
+    sizes: &[(&str, u64)],
+) -> Result<Vec<cap_std::fs::Dir>, ToolError> {
     use cap_fs_ext::{DirExt, OpenOptionsFollowExt};
     use cap_std::fs::{OpenOptionsExt, PermissionsExt};
 
+    if sizes.is_empty()
+        || sizes.len() > STORAGE_NAMES.len()
+        || sizes.iter().any(|(name, bytes)| {
+            !STORAGE_NAMES.contains(name)
+                || *bytes == 0
+                || !bytes.is_multiple_of(BYTES_PER_MEBIBYTE)
+                || *bytes > crate::tools::types::MAX_BUILD_CACHE_BYTES
+        })
+    {
+        return Err(ToolError::Configuration);
+    }
     open_directory(root, false).map_err(|_| ToolError::Path)?;
     let directory = crate::tools::fs::open_directory(root)?;
     let parent = crate::tools::fs::identity(&directory)?;
-    let mut volumes = Vec::with_capacity(2);
-    for name in STORAGE_NAMES {
+    let mut volumes = Vec::with_capacity(sizes.len());
+    for (name, bytes) in sizes {
         let image_name = format!("{name}.dmg");
         for entry in [name, image_name.as_str()] {
             match directory.symlink_metadata(entry) {
@@ -100,7 +131,7 @@ pub(super) async fn prepare_storage(root: &Path) -> Result<[cap_std::fs::Dir; 2]
         let mount = root.join(name);
         let image_path = image.to_str().ok_or(ToolError::Path)?;
         let mount_path = mount.to_str().ok_or(ToolError::Path)?;
-        let size = format!("{}m", STORAGE_BYTES_CAP / BYTES_PER_MEBIBYTE);
+        let size = format!("{}m", bytes / BYTES_PER_MEBIBYTE);
         let volume_name = format!(
             "{}-{name}",
             root.file_name()
@@ -140,7 +171,7 @@ pub(super) async fn prepare_storage(root: &Path) -> Result<[cap_std::fs::Dir; 2]
         if !metadata.is_file()
             || metadata.uid() != rustix::process::geteuid().as_raw()
             || metadata.nlink() != 1
-            || metadata.len() != STORAGE_BYTES_CAP
+            || metadata.len() != *bytes
         {
             return Err(ToolError::ProtectionUnavailable);
         }
@@ -153,6 +184,7 @@ pub(super) async fn prepare_storage(root: &Path) -> Result<[cap_std::fs::Dir; 2]
             &ImageIdentity {
                 device: metadata.dev(),
                 inode: metadata.ino(),
+                bytes: *bytes,
             },
         )?;
         write_record(
@@ -160,7 +192,7 @@ pub(super) async fn prepare_storage(root: &Path) -> Result<[cap_std::fs::Dir; 2]
             STORAGE_PENDING,
             &PendingAttachment {
                 version: 1,
-                image: name.to_owned(),
+                image: (*name).to_owned(),
                 boot: super::ffi::boot_session()?,
                 state: AttachmentState::Attaching,
             },
@@ -191,23 +223,25 @@ pub(super) async fn prepare_storage(root: &Path) -> Result<[cap_std::fs::Dir; 2]
         let volume = directory
             .open_dir_nofollow(name)
             .map_err(|_| ToolError::Path)?;
-        verify_volume(&volume, parent.0)?;
+        verify_volume(&volume, parent.0, *bytes)?;
         volume
             .set_permissions(".", cap_std::fs::Permissions::from_mode(0o700))
             .map_err(|_| ToolError::Path)?;
         volumes.push(volume);
     }
-    volumes
-        .try_into()
-        .map_err(|_| ToolError::ProtectionUnavailable)
+    Ok(volumes)
 }
 
-fn verify_volume(volume: &cap_std::fs::Dir, parent_device: u64) -> Result<(), ToolError> {
+fn verify_volume(
+    volume: &cap_std::fs::Dir,
+    parent_device: u64,
+    expected_bytes: u64,
+) -> Result<(), ToolError> {
     let metadata = volume.dir_metadata().map_err(|_| ToolError::Path)?;
     let capacity = rustix::fs::fstatvfs(volume).map_err(|_| ToolError::ProtectionUnavailable)?;
     if metadata.uid() != rustix::process::geteuid().as_raw()
         || metadata.dev() == parent_device
-        || capacity.f_blocks.checked_mul(capacity.f_frsize) != Some(STORAGE_BYTES_CAP)
+        || capacity.f_blocks.checked_mul(capacity.f_frsize) != Some(expected_bytes)
         || !capacity
             .f_flag
             .contains(rustix::fs::StatVfsMountFlags::NOSUID)
@@ -225,11 +259,11 @@ pub(super) fn verify_storage(root: &Path) -> Result<(), ToolError> {
 
     let directory = crate::tools::fs::open_directory(root)?;
     let parent = crate::tools::fs::identity(&directory)?;
-    for name in STORAGE_NAMES {
+    for name in DEFAULT_STORAGE_NAMES {
         let volume = directory
             .open_dir_nofollow(name)
             .map_err(|_| ToolError::Path)?;
-        verify_volume(&volume, parent.0)?;
+        verify_volume(&volume, parent.0, STORAGE_BYTES_CAP)?;
         if volume.dir_metadata().map_err(|_| ToolError::Path)?.mode() & 0o7777 != 0o700 {
             return Err(ToolError::ProtectionUnavailable);
         }
@@ -240,7 +274,8 @@ pub(super) fn verify_storage(root: &Path) -> Result<(), ToolError> {
 pub(super) async fn prepare_command_storage(
     root: &Path,
     runtime: &ToolRuntime,
-) -> Result<[cap_std::fs::Dir; 2], ToolError> {
+    limits: &crate::tools::types::ToolLimits,
+) -> Result<Vec<cap_std::fs::Dir>, ToolError> {
     use cap_fs_ext::DirExt;
 
     runtime.config.validate()?;
@@ -252,8 +287,25 @@ pub(super) async fn prepare_command_storage(
         grant.verify_host()?;
     }
     crate::tools::fs::reject_overlap(root, &runtime.workspace)?;
-    let volumes = prepare_storage(root).await?;
-    prepare_cache_links(root, &volumes[1], &runtime.config.runtime_grants)?;
+    let mut sizes = vec![
+        ("workspace", limits.project_bytes),
+        ("scratch", limits.scratch_bytes),
+    ];
+    if limits.cache_bytes > 0 {
+        sizes.push(("cache", limits.cache_bytes));
+    }
+    let volumes = prepare_storage_with_sizes(root, &sizes).await?;
+    let (cache_name, cache_volume) = if limits.cache_bytes > 0 {
+        ("cache", volumes.get(2).ok_or(ToolError::Operation)?)
+    } else {
+        ("scratch", volumes.get(1).ok_or(ToolError::Operation)?)
+    };
+    prepare_cache_links(
+        root,
+        cache_name,
+        cache_volume,
+        &runtime.config.runtime_grants,
+    )?;
     let directory = crate::tools::fs::open_directory(root)?;
     let mut builder = cap_std::fs::DirBuilder::new();
     cap_std::fs::DirBuilderExt::mode(&mut builder, 0o700);
@@ -269,24 +321,25 @@ pub(super) async fn prepare_command_storage(
 
 fn prepare_cache_links(
     root: &Path,
-    scratch: &cap_std::fs::Dir,
+    volume_name: &str,
+    cache: &cap_std::fs::Dir,
     grants: &[RuntimeGrant],
 ) -> Result<(), ToolError> {
     use cap_fs_ext::DirExt;
 
-    let scratch_path = root.join("scratch");
+    let cache_path = root.join(volume_name);
     for grant in grants.iter().filter(|grant| grant.kind.is_cache()) {
         crate::tools::fs::reject_overlap(&grant.path, root)?;
         let relative = grant
             .kind
             .sandbox_cache_path()
             .ok_or(ToolError::Configuration)?;
-        let destination = scratch_path.join(relative);
+        let destination = cache_path.join(relative);
         if std::fs::symlink_metadata(&destination).is_ok() {
             return Err(ToolError::ChangedInput);
         }
         let parent = Path::new(relative).parent().ok_or(ToolError::Path)?;
-        let mut current = scratch.try_clone().map_err(|_| ToolError::Path)?;
+        let mut current = cache.try_clone().map_err(|_| ToolError::Path)?;
         for component in parent.components() {
             let std::path::Component::Normal(name) = component else {
                 return Err(ToolError::Path);
@@ -483,11 +536,14 @@ fn verify_image(directory: &cap_std::fs::Dir, name: &str) -> Result<(), ToolErro
         )
         .map_err(|_| ToolError::Path)?;
     let metadata = image.metadata().map_err(|_| ToolError::Path)?;
-    if !metadata.is_file()
+    if recorded.bytes == 0
+        || recorded.bytes > crate::tools::types::MAX_BUILD_CACHE_BYTES
+        || !recorded.bytes.is_multiple_of(BYTES_PER_MEBIBYTE)
+        || !metadata.is_file()
         || metadata.uid() != rustix::process::geteuid().as_raw()
         || metadata.nlink() != 1
         || metadata.mode() & 0o7777 != 0o600
-        || metadata.len() != STORAGE_BYTES_CAP
+        || metadata.len() != recorded.bytes
         || metadata.dev() != recorded.device
         || metadata.ino() != recorded.inode
         || crate::private_fs::check_acl(&image, true).is_err()

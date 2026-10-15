@@ -98,31 +98,33 @@ impl FromStr for GoalId {
 
 pub const MAX_GOAL_PROVIDER_CALLS: u32 = 64;
 pub const MAX_GOAL_ACTIVE_MS: u64 = 30 * 60 * 1000;
-/// Largest active-time reservation a single Run may hold.
-pub const MAX_GOAL_RUN_ACTIVE_MS: u64 = 5 * 60 * 1000;
+pub(crate) const MAX_GOAL_ACTION_ACTIVE_MS: u64 = 31 * 60 * 1000;
 pub const MAX_GOAL_RUNS: u8 = 16;
 pub const MAX_GOAL_PLAN_PATHS: usize = 64;
 pub const MAX_GOAL_PLAN_COMMANDS: usize = 8;
 pub const MAX_GOAL_PLAN_MCP_TOOLS: usize = 64;
 pub const MAX_GOAL_PLAN_SKILLS: usize = 64;
+pub const MAX_GOAL_PLAN_CONTRACT_BYTES: usize = 8 * 1024;
 pub const MAX_GOAL_REPORT_BYTES: usize = 8 * 1024;
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GoalBudget {
-    pub max_provider_calls: u32,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub max_provider_calls: Option<u32>,
     #[serde(deserialize_with = "Option::deserialize")]
     pub max_tokens: Option<u64>,
-    pub max_active_ms: u64,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub max_active_ms: Option<u64>,
     pub max_runs: u8,
 }
 
 impl Default for GoalBudget {
     fn default() -> Self {
         Self {
-            max_provider_calls: MAX_GOAL_PROVIDER_CALLS,
+            max_provider_calls: Some(MAX_GOAL_PROVIDER_CALLS),
             max_tokens: None,
-            max_active_ms: MAX_GOAL_ACTIVE_MS,
+            max_active_ms: Some(MAX_GOAL_ACTIVE_MS),
             max_runs: MAX_GOAL_RUNS,
         }
     }
@@ -139,12 +141,14 @@ pub(crate) struct GoalUsage {
 }
 
 impl GoalBudget {
-    pub(crate) fn validate(&self) -> Result<(), ReplayError> {
-        if self.max_provider_calls == 0
-            || self.max_provider_calls > MAX_GOAL_PROVIDER_CALLS
+    pub fn validate(&self) -> Result<(), ReplayError> {
+        if self
+            .max_provider_calls
+            .is_some_and(|calls| calls == 0 || calls > MAX_GOAL_PROVIDER_CALLS)
             || self.max_tokens.is_some_and(|tokens| tokens == 0)
-            || self.max_active_ms == 0
-            || self.max_active_ms > MAX_GOAL_ACTIVE_MS
+            || self
+                .max_active_ms
+                .is_some_and(|ms| ms == 0 || ms > MAX_GOAL_ACTIVE_MS)
             || self.max_runs == 0
             || self.max_runs > MAX_GOAL_RUNS
         {
@@ -156,10 +160,10 @@ impl GoalBudget {
     /// Limits in force once a Plan contract narrows the pinned budget; an absent plan token ceiling keeps the pinned one.
     pub(crate) fn effective(&self, plan: Option<&GoalPlanContract>) -> Self {
         plan.map_or_else(
-            || self.clone(),
+            || *self,
             |plan| Self {
                 max_tokens: plan.budget.max_tokens.or(self.max_tokens),
-                ..plan.budget.clone()
+                ..plan.budget
             },
         )
     }
@@ -167,16 +171,20 @@ impl GoalBudget {
     /// The one admission rule for another Run: every finite dimension must have headroom.
     pub(crate) fn admits_next_run(&self, usage: GoalUsage) -> bool {
         usize::from(self.max_runs) > usage.runs
-            && self.max_provider_calls > usage.provider_calls
-            && self.max_active_ms > usage.active_ms
+            && self
+                .max_provider_calls
+                .is_none_or(|limit| limit > usage.provider_calls)
+            && self
+                .max_active_ms
+                .is_none_or(|limit| limit > usage.active_ms)
             && self
                 .max_tokens
                 .is_none_or(|limit| !usage.token_usage_unknown && usage.known_tokens < limit)
     }
 
     pub(crate) fn is_within(&self, pinned: &Self) -> bool {
-        self.max_provider_calls <= pinned.max_provider_calls
-            && self.max_active_ms <= pinned.max_active_ms
+        limit_is_within(self.max_provider_calls, pinned.max_provider_calls)
+            && limit_is_within(self.max_active_ms, pinned.max_active_ms)
             && self.max_runs <= pinned.max_runs
             && match (self.max_tokens, pinned.max_tokens) {
                 (None, None) | (Some(_), None) => true,
@@ -184,36 +192,13 @@ impl GoalBudget {
                 (None, Some(_)) => false,
             }
     }
+}
 
-    pub(crate) fn event_slots(
-        &self,
-        max_children: u8,
-        tools_enabled: bool,
-        previews_enabled: bool,
-    ) -> Option<usize> {
-        let runs = usize::from(self.max_runs);
-        let providers = usize::try_from(self.max_provider_calls).ok()?;
-        let per_run = 9 + usize::from(max_children).checked_mul(2)?;
-        let lifecycle = runs.checked_mul(per_run)?;
-        let display = if previews_enabled {
-            runs.checked_mul(MAX_DISPLAY_CHUNKS)?
-        } else {
-            0
-        };
-        let tool_events = if tools_enabled {
-            providers.checked_mul(4)?
-        } else {
-            0
-        };
-        lifecycle
-            .checked_add(providers)?
-            .checked_add(providers)?
-            .checked_add(display)?
-            .checked_add(tool_events)?
-            .checked_add(super::MAX_COMPACTIONS)?
-            .checked_add(runs.saturating_sub(1))?
-            .checked_add(usize::from(tools_enabled))?
-            .checked_add(2)
+fn limit_is_within<T: Copy + Ord>(candidate: Option<T>, pinned: Option<T>) -> bool {
+    match (candidate, pinned) {
+        (Some(candidate), Some(pinned)) => candidate <= pinned,
+        (Some(_), None) | (None, None) => true,
+        (None, Some(_)) => false,
     }
 }
 
@@ -252,6 +237,8 @@ pub struct GoalPlanContract {
     pub mission: String,
     pub paths: Vec<String>,
     pub commands: Vec<String>,
+    pub resource_class: crate::tools::ToolResourceClass,
+    pub command_timeout_ms: Option<u32>,
     pub skills: Vec<GoalSkillBinding>,
     pub mcp_tools: Vec<GoalMcpTool>,
     pub success_criterion: GoalSuccessCriterion,
@@ -266,109 +253,185 @@ pub enum GoalSuccessCriterion {
     WorkspaceFileContent { path: String, content: String },
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum GoalSuccessState {
+    NoContract,
+    ToolCall {
+        satisfied: bool,
+        pending_integration: Option<[u8; 32]>,
+    },
+    WorkspaceFile {
+        sha256: Option<String>,
+    },
+}
+
 impl GoalPlanContract {
-    /// `observations` is the goal's Tool observations in commit order.
-    pub(crate) fn matches_success<'a>(
+    pub(crate) fn initial_success_state(&self) -> GoalSuccessState {
+        match &self.success_criterion {
+            GoalSuccessCriterion::ToolCallSucceeded { .. } => GoalSuccessState::ToolCall {
+                satisfied: false,
+                pending_integration: None,
+            },
+            GoalSuccessCriterion::WorkspaceFileDigest { .. }
+            | GoalSuccessCriterion::WorkspaceFileContent { .. } => {
+                GoalSuccessState::WorkspaceFile { sha256: None }
+            }
+        }
+    }
+
+    pub(crate) fn observe_success(
         &self,
-        observations: impl IntoIterator<
-            Item = &'a crate::tools::ToolObservation,
-            IntoIter: DoubleEndedIterator + Clone,
-        >,
-    ) -> bool {
+        state: &mut GoalSuccessState,
+        observation: &crate::tools::ToolObservation,
+    ) {
         use crate::tools::{ToolCall, ToolDisposition};
 
-        let observations = observations.into_iter();
-        match &self.success_criterion {
-            GoalSuccessCriterion::ToolCallSucceeded { call } => {
-                let Some(observation) = observations
-                    .clone()
-                    .rev()
-                    .find(|observation| observation.intent.call == **call)
-                    .filter(|observation| {
-                        observation.disposition == ToolDisposition::Succeeded
-                            && observation.attested_for(&observation.intent)
-                    })
-                else {
-                    return false;
-                };
-                if let ToolCall::Command { .. } = &**call {
-                    let Ok(result) = serde_json::from_str::<crate::tools::types::CommandResult>(
-                        &observation.output,
-                    ) else {
-                        return false;
-                    };
-                    result.valid()
-                        && result.exit_code == Some(0)
-                        && (result.changeset.files.is_empty()
-                            || observations
-                                .clone()
-                                .rev()
-                                .find(|integration| {
-                                    matches!(
-                                        integration.intent.call,
-                                        ToolCall::ApplyChangeset {
-                                            source_intent_digest,
-                                            ..
-                                        } if source_intent_digest == observation.intent.digest()
-                                    )
-                                })
-                                .is_some_and(|integration| {
-                                    integration.disposition == ToolDisposition::Succeeded
-                                        && integration.attested_for(&integration.intent)
-                                }))
-                } else {
-                    true
+        if matches!(state, GoalSuccessState::NoContract)
+            || matches!(
+                (&self.success_criterion, &*state),
+                (
+                    GoalSuccessCriterion::ToolCallSucceeded { .. },
+                    GoalSuccessState::WorkspaceFile { .. }
+                ) | (
+                    GoalSuccessCriterion::WorkspaceFileDigest { .. },
+                    GoalSuccessState::ToolCall { .. }
+                ) | (
+                    GoalSuccessCriterion::WorkspaceFileContent { .. },
+                    GoalSuccessState::ToolCall { .. }
+                )
+            )
+        {
+            *state = self.initial_success_state();
+        }
+
+        match (&self.success_criterion, state) {
+            (
+                GoalSuccessCriterion::ToolCallSucceeded { call },
+                GoalSuccessState::ToolCall {
+                    satisfied,
+                    pending_integration,
+                },
+            ) => {
+                if let ToolCall::ApplyChangeset {
+                    source_intent_digest,
+                    ..
+                } = &observation.intent.call
+                    && *pending_integration == Some(*source_intent_digest)
+                {
+                    *satisfied = observation.disposition == ToolDisposition::Succeeded
+                        && observation.attested_for(&observation.intent);
+                    *pending_integration = None;
+                    return;
+                }
+                if observation.intent.call == **call {
+                    if observation.disposition != ToolDisposition::Succeeded
+                        || !observation.attested_for(&observation.intent)
+                    {
+                        *satisfied = false;
+                        *pending_integration = None;
+                        return;
+                    }
+                    if matches!(&**call, ToolCall::Command { .. }) {
+                        let Ok(result) = serde_json::from_str::<crate::tools::types::CommandResult>(
+                            &observation.output,
+                        ) else {
+                            *satisfied = false;
+                            *pending_integration = None;
+                            return;
+                        };
+                        let command_succeeded = result.valid() && result.exit_code == Some(0);
+                        *satisfied = command_succeeded && result.changeset.files.is_empty();
+                        *pending_integration = (command_succeeded
+                            && !result.changeset.files.is_empty())
+                        .then(|| observation.intent.digest());
+                    } else {
+                        *satisfied = true;
+                        *pending_integration = None;
+                    }
+                    return;
+                }
+                if matches!(&**call, ToolCall::Command { .. })
+                    && *satisfied
+                    && matches!(
+                        &observation.intent.call,
+                        ToolCall::Write { .. }
+                            | ToolCall::Edit { .. }
+                            | ToolCall::ApplyChangeset { .. }
+                            | ToolCall::McpCall { .. }
+                    )
+                {
+                    *satisfied = false;
                 }
             }
-            GoalSuccessCriterion::WorkspaceFileDigest { path, sha256 } => {
-                file_digest_observed(observations.clone(), path).as_deref() == Some(sha256)
+            (
+                GoalSuccessCriterion::WorkspaceFileDigest { path, .. },
+                GoalSuccessState::WorkspaceFile { sha256 },
+            )
+            | (
+                GoalSuccessCriterion::WorkspaceFileContent { path, .. },
+                GoalSuccessState::WorkspaceFile { sha256 },
+            ) => {
+                if let Some(digest) = file_observation_digest(observation, path) {
+                    *sha256 = digest;
+                }
             }
-            GoalSuccessCriterion::WorkspaceFileContent { path, content } => {
+            (_, GoalSuccessState::NoContract) => {}
+            _ => unreachable!("criterion state was normalized before matching"),
+        }
+    }
+
+    pub(crate) fn success_state_satisfied(&self, state: &GoalSuccessState) -> bool {
+        match (&self.success_criterion, state) {
+            (
+                GoalSuccessCriterion::ToolCallSucceeded { .. },
+                GoalSuccessState::ToolCall { satisfied, .. },
+            ) => *satisfied,
+            (
+                GoalSuccessCriterion::WorkspaceFileDigest {
+                    sha256: expected, ..
+                },
+                GoalSuccessState::WorkspaceFile { sha256 },
+            ) => sha256.as_deref() == Some(expected),
+            (
+                GoalSuccessCriterion::WorkspaceFileContent { content, .. },
+                GoalSuccessState::WorkspaceFile { sha256 },
+            ) => {
                 let expected = crate::tools::types::hex_digest(content.as_bytes());
-                file_digest_observed(observations.clone(), path).as_deref() == Some(&expected)
+                sha256.as_deref() == Some(&expected)
             }
+            _ => false,
         }
     }
 }
 
-fn file_digest_observed<'a>(
-    observations: impl DoubleEndedIterator<Item = &'a crate::tools::ToolObservation>,
+fn file_observation_digest(
+    observation: &crate::tools::ToolObservation,
     path: &str,
-) -> Option<String> {
+) -> Option<Option<String>> {
     use crate::tools::{ToolCall, ToolDisposition};
 
-    for observation in observations.rev() {
-        let digest = match &observation.intent.call {
-            ToolCall::Read { path: observed, .. }
-            | ToolCall::Write { path: observed, .. }
-            | ToolCall::Edit { path: observed, .. }
-                if observed == path =>
-            {
-                Some(
-                    serde_json::from_str::<serde_json::Value>(&observation.output)
-                        .ok()?
-                        .get("sha256")?
-                        .as_str()?
-                        .to_owned(),
-                )
-            }
-            ToolCall::ApplyChangeset { changeset, .. } => {
-                let Some(change) = changeset.files.iter().find(|change| change.path == path) else {
-                    continue;
-                };
-                change.after.as_ref().map(|version| version.sha256.clone())
-            }
-            ToolCall::McpCall { .. } => return None,
-            _ => continue,
-        };
-        if observation.disposition != ToolDisposition::Succeeded
-            || !observation.attested_for(&observation.intent)
+    let digest = match &observation.intent.call {
+        ToolCall::Read { path: observed, .. }
+        | ToolCall::Write { path: observed, .. }
+        | ToolCall::Edit { path: observed, .. }
+            if observed == path =>
         {
-            return None;
+            serde_json::from_str::<serde_json::Value>(&observation.output)
+                .ok()
+                .and_then(|value| value.get("sha256")?.as_str().map(str::to_owned))
         }
-        return digest;
-    }
-    None
+        ToolCall::ApplyChangeset { changeset, .. } => changeset
+            .files
+            .iter()
+            .find(|change| change.path == path)
+            .and_then(|change| change.after.as_ref().map(|version| version.sha256.clone())),
+        ToolCall::McpCall { .. } => return Some(None),
+        _ => return None,
+    };
+    Some(digest.filter(|_| {
+        observation.disposition == ToolDisposition::Succeeded
+            && observation.attested_for(&observation.intent)
+    }))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -398,6 +461,17 @@ mod goal_success_tests {
     use crate::tools::{
         EffectIntent, GuardReceipt, ToolCall, ToolDisposition, ToolLimits, ToolObservation,
     };
+
+    fn matches_success<'a>(
+        contract: &GoalPlanContract,
+        observations: impl IntoIterator<Item = &'a ToolObservation>,
+    ) -> bool {
+        let mut state = contract.initial_success_state();
+        for observation in observations {
+            contract.observe_success(&mut state, observation);
+        }
+        contract.success_state_satisfied(&state)
+    }
 
     fn observation(
         call: ToolCall,
@@ -436,11 +510,32 @@ mod goal_success_tests {
             mission: "Verify the requested result".into(),
             paths: Vec::new(),
             commands: Vec::new(),
+            resource_class: crate::tools::ToolResourceClass::Default,
+            command_timeout_ms: None,
             skills: Vec::new(),
             mcp_tools: Vec::new(),
             success_criterion: criterion,
             budget: GoalBudget::default(),
         }
+    }
+
+    #[test]
+    fn bounded_macos_build_reservation_fits_the_action_ceiling() {
+        let goal_id = GoalId::new();
+        let run_id = RunId::new();
+        let reserve = Event::GoalActiveTimeReserved {
+            goal_id,
+            run_id,
+            reserved_ms: 1_850_000,
+        };
+        let settle = Event::GoalActiveTimeSettled {
+            goal_id,
+            run_id,
+            active_ms: 1_850_000,
+        };
+        assert!(reserve.validate().is_ok());
+        assert!(settle.validate().is_ok());
+        assert!(GoalBudget::default().validate().is_ok());
     }
 
     #[test]
@@ -457,7 +552,7 @@ mod goal_success_tests {
             observation(call.clone(), ToolDisposition::Succeeded, "{}".into()),
             observation(call, ToolDisposition::Failed, "".into()),
         ];
-        assert!(!contract.matches_success(&observations));
+        assert!(!matches_success(&contract, &observations));
     }
 
     #[test]
@@ -470,6 +565,8 @@ mod goal_success_tests {
             mission: "Read the requested Skill guidance".into(),
             paths: Vec::new(),
             commands: Vec::new(),
+            resource_class: crate::tools::ToolResourceClass::Default,
+            command_timeout_ms: None,
             skills: vec![GoalSkillBinding {
                 name: "review".into(),
                 resource: None,
@@ -491,11 +588,14 @@ mod goal_success_tests {
             ToolDisposition::Succeeded,
             "review guidance".into(),
         );
-        assert!(contract.matches_success(std::slice::from_ref(&success)));
-        assert!(!contract.matches_success(&[
-            success,
-            observation(call.clone(), ToolDisposition::Failed, "failed".into()),
-        ]));
+        assert!(matches_success(&contract, std::slice::from_ref(&success)));
+        assert!(!matches_success(
+            &contract,
+            &[
+                success,
+                observation(call.clone(), ToolDisposition::Failed, "failed".into()),
+            ]
+        ));
         let resource_call = ToolCall::Skill {
             name: "review".into(),
             resource: Some("references/checklist.md".into()),
@@ -506,11 +606,14 @@ mod goal_success_tests {
             call: Box::new(resource_call.clone()),
         };
         assert!(resource_contract.validate().is_ok());
-        assert!(resource_contract.matches_success(&[observation(
-            resource_call,
-            ToolDisposition::Succeeded,
-            "checklist".into(),
-        )]));
+        assert!(matches_success(
+            &resource_contract,
+            &[observation(
+                resource_call,
+                ToolDisposition::Succeeded,
+                "checklist".into(),
+            )]
+        ));
         let mut missing_resource = serde_json::to_value(&contract).unwrap();
         missing_resource["skills"][0]
             .as_object_mut()
@@ -541,6 +644,8 @@ mod goal_success_tests {
             mission: "Verify a declared result".into(),
             paths: vec!["src".into()],
             commands: vec!["shell".into()],
+            resource_class: crate::tools::ToolResourceClass::Default,
+            command_timeout_ms: None,
             skills: Vec::new(),
             mcp_tools: vec![GoalMcpTool {
                 server: "local".into(),
@@ -610,7 +715,7 @@ mod goal_success_tests {
                 .to_string(),
             ),
         ];
-        assert!(!contract.matches_success(&observations));
+        assert!(!matches_success(&contract, &observations));
     }
 
     #[test]
@@ -621,24 +726,8 @@ mod goal_success_tests {
             run_id,
             reserved_ms,
         };
-        assert!(reserve(5 * 60 * 1000).validate().is_ok());
-        assert!(reserve(5 * 60 * 1000 + 1).validate().is_err());
-
-        let mut contract = criterion(GoalSuccessCriterion::WorkspaceFileContent {
-            path: "src/main.rs".into(),
-            content: "ok".into(),
-        });
-        contract.paths = vec!["src/main.rs".into()];
-        let plan = |active_ms, reserved_ms| Event::GoalPlanContractRecorded {
-            goal_id,
-            run_id,
-            contract: contract.clone(),
-            active_ms,
-            reserved_ms,
-        };
-        assert!(plan(0, 5 * 60 * 1000).validate().is_ok());
-        assert!(plan(0, 5 * 60 * 1000 + 1).validate().is_err());
-        assert!(plan(5 * 60 * 1000 + 1, 1).validate().is_err());
+        assert!(reserve(MAX_GOAL_ACTION_ACTIVE_MS).validate().is_ok());
+        assert!(reserve(MAX_GOAL_ACTION_ACTIVE_MS + 1).validate().is_err());
     }
 
     #[test]
@@ -649,6 +738,8 @@ mod goal_success_tests {
             commands: Vec::new(),
             skills: Vec::new(),
             mcp_tools: Vec::new(),
+            resource_class: crate::tools::ToolResourceClass::Default,
+            command_timeout_ms: None,
             success_criterion: GoalSuccessCriterion::WorkspaceFileContent {
                 path: "src/main.rs".into(),
                 content: "ok".into(),
@@ -886,6 +977,12 @@ impl GoalPlanContract {
             && self.mcp_tools.is_empty()
             || self.paths.len() > MAX_GOAL_PLAN_PATHS
             || self.commands.len() > MAX_GOAL_PLAN_COMMANDS
+            || self.command_timeout_ms.is_some_and(|timeout| {
+                !(1_000..=crate::tools::types::MAX_COMMAND_TIMEOUT_MS).contains(&timeout)
+            })
+            || self.resource_class == crate::tools::ToolResourceClass::Build
+                && self.commands.is_empty()
+            || self.command_timeout_ms.is_some() && self.commands.is_empty()
             || self.paths.windows(2).any(|pair| pair[0] >= pair[1])
             || self.commands.windows(2).any(|pair| pair[0] >= pair[1])
             || self.mcp_tools.len() > MAX_GOAL_PLAN_MCP_TOOLS
@@ -906,7 +1003,8 @@ impl GoalPlanContract {
         {
             return Err(ReplayError::InvalidPayload);
         }
-        if !serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= 8 * 1024) {
+        if !serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_GOAL_PLAN_CONTRACT_BYTES)
+        {
             return Err(ReplayError::InvalidPayload);
         }
         bounded(&self.mission, 2048)?;
@@ -1170,7 +1268,7 @@ mod account_default_tests {
     #[test]
     fn goal_budget_requires_explicit_nullable_token_limit() {
         let budget = GoalBudget::default();
-        let encoded = serde_json::to_value(&budget).unwrap();
+        let encoded = serde_json::to_value(budget).unwrap();
         assert!(encoded["max_tokens"].is_null());
         assert_eq!(
             serde_json::from_value::<GoalBudget>(encoded.clone()).unwrap(),
@@ -1186,6 +1284,12 @@ mod account_default_tests {
             missing.as_object_mut().unwrap().remove(field);
             assert!(serde_json::from_value::<GoalBudget>(missing).is_err());
         }
+        let mut unlimited = encoded;
+        unlimited["max_provider_calls"] = serde_json::Value::Null;
+        unlimited["max_active_ms"] = serde_json::Value::Null;
+        let decoded = serde_json::from_value::<GoalBudget>(unlimited).unwrap();
+        assert_eq!(decoded.max_provider_calls, None);
+        assert_eq!(decoded.max_active_ms, None);
     }
 
     #[test]
@@ -1381,11 +1485,7 @@ impl RunConfig {
         self.context_usage.as_ref().is_some_and(|usage| {
             usage.near_limit()
                 || usage.compactable_bytes as usize
-                    >= if self.tool_policy.is_some() || usage.tool_history_bytes > 0 {
-                        super::compaction::AUTO_TOOL_COMPACTION_HISTORY_BYTES
-                    } else {
-                        super::compaction::AUTO_COMPACTION_HISTORY_BYTES
-                    }
+                    >= super::compaction::AUTO_COMPACTION_HISTORY_BYTES
         }) || self.history_run_ids.len() + 1 >= super::MAX_HISTORY_RUNS * 3 / 4
     }
 
@@ -1451,6 +1551,7 @@ pub enum CompactionFailure {
     ProviderRejected,
     InvalidOutcome,
     TimedOut,
+    Cancelled,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1775,12 +1876,12 @@ mod provider_call_tests {
             record: decoded,
         };
         let payload = event.payload().expect("current payload");
-        assert_eq!(event.version(), 3);
+        assert_eq!(event.version(), 4);
         assert_eq!(
-            Event::decode("ProviderCallRecorded", 3, &payload, run_id, agent_run_id).unwrap(),
+            Event::decode("ProviderCallRecorded", 4, &payload, run_id, agent_run_id).unwrap(),
             event
         );
-        for version in [0, 1, 2, 4] {
+        for version in [0, 1, 2, 3, 5] {
             assert!(
                 Event::decode(
                     "ProviderCallRecorded",
@@ -1859,14 +1960,14 @@ mod provider_call_tests {
                     agent_run_id: agent,
                     record,
                 };
-                let payload = event.payload().expect("v3 payload");
-                assert_eq!(event.version(), 3);
+                let payload = event.payload().expect("v4 payload");
+                assert_eq!(event.version(), 4);
                 assert_eq!(
-                    Event::decode("ProviderCallRecorded", 3, &payload, run_id, agent_run_id)
-                        .expect("v3 replay"),
+                    Event::decode("ProviderCallRecorded", 4, &payload, run_id, agent_run_id)
+                        .expect("v4 replay"),
                     event
                 );
-                for version in [0, 1, 2, 4] {
+                for version in [0, 1, 2, 3, 5] {
                     assert!(
                         Event::decode(
                             "ProviderCallRecorded",
@@ -1881,17 +1982,17 @@ mod provider_call_tests {
                 }
                 for scope in [(None, agent_run_id), (run_id, None)] {
                     assert!(
-                        Event::decode("ProviderCallRecorded", 3, &payload, scope.0, scope.1)
+                        Event::decode("ProviderCallRecorded", 4, &payload, scope.0, scope.1)
                             .is_err()
                     );
                 }
                 let mut invalid: serde_json::Value =
-                    serde_json::from_str(&payload).expect("v3 JSON");
+                    serde_json::from_str(&payload).expect("v4 JSON");
                 invalid["failure_reason"] = "unknown_reason".into();
                 assert!(
                     Event::decode(
                         "ProviderCallRecorded",
-                        3,
+                        4,
                         &invalid.to_string(),
                         run_id,
                         agent_run_id
@@ -1907,7 +2008,7 @@ mod provider_call_tests {
                         run_id,
                         agent_run_id
                     )
-                    .is_ok()
+                    .is_err()
                 );
                 invalid.as_object_mut().unwrap().remove("failure_reason");
                 assert!(
@@ -1942,7 +2043,7 @@ pub enum DisplayCategory {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DisplayChunk {
-    pub call_index: u8,
+    pub call_index: u32,
     pub phase: AgentPhase,
     pub category: DisplayCategory,
     pub item: u8,
@@ -1952,8 +2053,7 @@ pub struct DisplayChunk {
 
 impl DisplayChunk {
     fn validate(&self) -> Result<(), ReplayError> {
-        if self.call_index as usize >= crate::tools::MAX_MODEL_STEPS
-            || !matches!(self.phase, AgentPhase::RootPlan | AgentPhase::RootSynthesis)
+        if !matches!(self.phase, AgentPhase::RootPlan | AgentPhase::RootSynthesis)
             || self.item as usize >= MAX_DISPLAY_COMMENTARY_ITEMS
             || self.category == DisplayCategory::Answer && self.item != 0
             || self.category == DisplayCategory::Limit
@@ -1998,6 +2098,7 @@ pub enum Event {
         phase: GoalPhase,
         /// Engine iterates Runs on the pinned objective until a Goal stop condition.
         autonomous: bool,
+        resource_settings: crate::tools::ToolResourceSettings,
     },
     GoalRunLinked {
         goal_id: GoalId,
@@ -2021,8 +2122,6 @@ pub enum Event {
         goal_id: GoalId,
         run_id: RunId,
         contract: GoalPlanContract,
-        active_ms: u64,
-        reserved_ms: u64,
     },
     GoalFinished {
         goal_id: GoalId,
@@ -2055,6 +2154,16 @@ pub enum Event {
         goal_id: GoalId,
         run_id: RunId,
         agent_run_id: AgentRunId,
+    },
+    GoalCompactionCallReserved {
+        goal_id: GoalId,
+        run_id: RunId,
+    },
+    GoalContextCompacted {
+        goal_id: GoalId,
+        run_id: RunId,
+        covered_tool_count: u32,
+        record: CompactionRecord,
     },
     AssistantDisplayRecorded {
         run_id: RunId,
@@ -2161,6 +2270,7 @@ struct GoalStartedPayload {
     budget: GoalBudget,
     phase: GoalPhase,
     autonomous: bool,
+    resource_settings: crate::tools::ToolResourceSettings,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2184,8 +2294,6 @@ struct GoalIdPayload {
 struct GoalContractPayload {
     goal_id: GoalId,
     contract: GoalPlanContract,
-    active_ms: u64,
-    reserved_ms: u64,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2199,6 +2307,13 @@ struct GoalFinishedPayload {
 #[serde(deny_unknown_fields)]
 struct GoalProviderCallPayload {
     goal_id: GoalId,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoalContextCompactionPayload {
+    goal_id: GoalId,
+    covered_tool_count: u32,
+    record: CompactionRecord,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2234,7 +2349,7 @@ impl Event {
     }
 
     pub(crate) fn version(&self) -> i64 {
-        3
+        4
     }
 
     pub(crate) fn kind(&self) -> &'static str {
@@ -2256,6 +2371,8 @@ impl Event {
             Self::AgentSpawned { .. } => "AgentSpawned",
             Self::ProviderCallRecorded { .. } => "ProviderCallRecorded",
             Self::GoalProviderCallReserved { .. } => "GoalProviderCallReserved",
+            Self::GoalCompactionCallReserved { .. } => "GoalCompactionCallReserved",
+            Self::GoalContextCompacted { .. } => "GoalContextCompacted",
             Self::AssistantDisplayRecorded { .. } => "AssistantDisplayRecorded",
             Self::ToolStarted { .. } => "ToolStarted",
             Self::ToolFinished { .. } => "ToolFinished",
@@ -2279,6 +2396,8 @@ impl Event {
             | Self::GoalActiveTimeReserved { run_id, .. }
             | Self::GoalActiveTimeSettled { run_id, .. }
             | Self::GoalPlanContractRecorded { run_id, .. }
+            | Self::GoalCompactionCallReserved { run_id, .. }
+            | Self::GoalContextCompacted { run_id, .. }
             | Self::MessageAccepted { run_id, .. }
             | Self::RunStarted { run_id, .. }
             | Self::MessageCommitted { run_id, .. }
@@ -2357,14 +2476,16 @@ impl Event {
                 budget,
                 phase,
                 autonomous,
+                resource_settings,
             } => serialize(&GoalStartedPayload {
                 goal_id: *goal_id,
                 objective: objective.clone(),
                 workspace_device: *workspace_device,
                 workspace_inode: *workspace_inode,
-                budget: budget.clone(),
+                budget: *budget,
                 phase: *phase,
                 autonomous: *autonomous,
+                resource_settings: *resource_settings,
             }),
             Self::GoalRunLinked { goal_id, phase, .. } => serialize(&GoalRunPayload {
                 goal_id: *goal_id,
@@ -2386,16 +2507,10 @@ impl Event {
                 active_ms: *active_ms,
             }),
             Self::GoalPlanContractRecorded {
-                goal_id,
-                contract,
-                active_ms,
-                reserved_ms,
-                ..
+                goal_id, contract, ..
             } => serialize(&GoalContractPayload {
                 goal_id: *goal_id,
                 contract: contract.clone(),
-                active_ms: *active_ms,
-                reserved_ms: *reserved_ms,
             }),
             Self::GoalFinished {
                 goal_id,
@@ -2428,6 +2543,19 @@ impl Event {
             Self::GoalProviderCallReserved { goal_id, .. } => {
                 serialize(&GoalProviderCallPayload { goal_id: *goal_id })
             }
+            Self::GoalCompactionCallReserved { goal_id, .. } => {
+                serialize(&GoalIdPayload { goal_id: *goal_id })
+            }
+            Self::GoalContextCompacted {
+                goal_id,
+                covered_tool_count,
+                record,
+                ..
+            } => serialize(&GoalContextCompactionPayload {
+                goal_id: *goal_id,
+                covered_tool_count: *covered_tool_count,
+                record: record.clone(),
+            }),
             Self::AssistantDisplayRecorded { chunk, .. } => serialize(chunk),
             Self::ToolStarted { intent, .. } => serialize(intent),
             Self::ToolFinished { observation, .. } => serialize(observation),
@@ -2454,7 +2582,7 @@ impl Event {
         run_id: Option<RunId>,
         agent_run_id: Option<AgentRunId>,
     ) -> Result<Self, ReplayError> {
-        if version != 3 {
+        if version != 4 {
             return Err(ReplayError::UnknownEvent);
         }
         let event = match kind {
@@ -2499,6 +2627,7 @@ impl Event {
                     budget: data.budget,
                     phase: data.phase,
                     autonomous: data.autonomous,
+                    resource_settings: data.resource_settings,
                 }
             }
             "GoalRunLinked" if run_id.is_some() && agent_run_id.is_none() => {
@@ -2534,8 +2663,6 @@ impl Event {
                     goal_id: data.goal_id,
                     run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
                     contract: data.contract,
-                    active_ms: data.active_ms,
-                    reserved_ms: data.reserved_ms,
                 }
             }
             "GoalFinished" if run_id.is_none() && agent_run_id.is_none() => {
@@ -2593,6 +2720,21 @@ impl Event {
                     agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
                 }
             }
+            "GoalCompactionCallReserved" if run_id.is_some() && agent_run_id.is_none() => {
+                Self::GoalCompactionCallReserved {
+                    goal_id: parse::<GoalIdPayload>(payload)?.goal_id,
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                }
+            }
+            "GoalContextCompacted" if run_id.is_some() && agent_run_id.is_none() => {
+                let data: GoalContextCompactionPayload = parse(payload)?;
+                Self::GoalContextCompacted {
+                    goal_id: data.goal_id,
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    covered_tool_count: data.covered_tool_count,
+                    record: data.record,
+                }
+            }
             "ToolStarted" if run_id.is_some() && agent_run_id.is_some() => Self::ToolStarted {
                 run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
                 agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
@@ -2636,6 +2778,8 @@ impl Event {
             | "RunStarted"
             | "AgentSpawned"
             | "ProviderCallRecorded"
+            | "GoalCompactionCallReserved"
+            | "GoalContextCompacted"
             | "AssistantDisplayRecorded"
             | "ToolStarted"
             | "ToolFinished"
@@ -2658,6 +2802,8 @@ impl Event {
             | Self::GoalActiveTimeReserved { goal_id, .. }
             | Self::GoalActiveTimeSettled { goal_id, .. }
             | Self::GoalPlanContractRecorded { goal_id, .. }
+            | Self::GoalCompactionCallReserved { goal_id, .. }
+            | Self::GoalContextCompacted { goal_id, .. }
             | Self::GoalFinished { goal_id, .. } => goal_id.valid(),
             _ => true,
         };
@@ -2680,50 +2826,48 @@ impl Event {
                 objective,
                 workspace_identity: (_, inode),
                 budget,
+                resource_settings,
                 ..
             } => {
                 if objective.len() > super::MAX_USER_MESSAGE_BYTES || *inode == 0 {
                     return Err(ReplayError::InvalidPayload);
                 }
-                budget.validate()
+                budget.validate()?;
+                if !resource_settings.valid() {
+                    return Err(ReplayError::InvalidPayload);
+                }
+                Ok(())
             }
             Self::GoalRunLinked { .. } | Self::GoalResumed { .. } => Ok(()),
             Self::GoalActiveTimeReserved { reserved_ms, .. } => {
-                if *reserved_ms == 0 || *reserved_ms > MAX_GOAL_RUN_ACTIVE_MS {
+                if *reserved_ms == 0 || *reserved_ms > MAX_GOAL_ACTION_ACTIVE_MS {
                     return Err(ReplayError::InvalidPayload);
                 }
                 Ok(())
             }
             Self::GoalActiveTimeSettled { active_ms, .. } => {
-                if *active_ms > MAX_GOAL_RUN_ACTIVE_MS {
+                if *active_ms > MAX_GOAL_ACTION_ACTIVE_MS {
                     return Err(ReplayError::InvalidPayload);
                 }
                 Ok(())
             }
-            Self::GoalPlanContractRecorded {
-                contract,
-                active_ms,
-                reserved_ms,
+            Self::GoalCompactionCallReserved { .. } => Ok(()),
+            Self::GoalContextCompacted {
+                covered_tool_count,
+                record,
                 ..
             } => {
+                if *covered_tool_count == 0 || record.validate().is_err() {
+                    return Err(ReplayError::InvalidPayload);
+                }
+                Ok(())
+            }
+            Self::GoalPlanContractRecorded { contract, .. } => {
                 contract.validate()?;
-                if *active_ms > MAX_GOAL_RUN_ACTIVE_MS
-                    || *reserved_ms == 0
-                    || *reserved_ms > MAX_GOAL_RUN_ACTIVE_MS
-                {
-                    return Err(ReplayError::InvalidPayload);
-                }
                 Ok(())
             }
-            Self::GoalFinished {
-                status,
-                active_ms,
-                report,
-                ..
-            } => {
-                if !matches!(status, GoalStatus::Completed | GoalStatus::Failed)
-                    || *active_ms > MAX_GOAL_ACTIVE_MS
-                {
+            Self::GoalFinished { status, report, .. } => {
+                if !matches!(status, GoalStatus::Completed | GoalStatus::Failed) {
                     return Err(ReplayError::InvalidPayload);
                 }
                 report.validate()

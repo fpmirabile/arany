@@ -26,6 +26,8 @@ fn journey_plan_contract() -> arany::GoalPlanContract {
         mission: "Update and verify the synthetic Workspace files".into(),
         paths: vec!["src".into()],
         commands: vec!["bash".into()],
+        resource_class: arany::ToolResourceClass::Default,
+        command_timeout_ms: None,
         skills: vec![
             arany::GoalSkillBinding {
                 name: "synthetic".into(),
@@ -55,6 +57,8 @@ fn proposal_plan_contract(call: &ToolCall) -> Option<arany::GoalPlanContract> {
             mission: "Invoke the exact synthetic MCP tool".into(),
             paths: Vec::new(),
             commands: Vec::new(),
+            resource_class: arany::ToolResourceClass::Default,
+            command_timeout_ms: None,
             skills: Vec::new(),
             mcp_tools: vec![arany::GoalMcpTool {
                 server: server.clone(),
@@ -72,6 +76,8 @@ fn proposal_plan_contract(call: &ToolCall) -> Option<arany::GoalPlanContract> {
                 ToolCall::Command { program, .. } => vec![program.clone()],
                 _ => Vec::new(),
             },
+            resource_class: arany::ToolResourceClass::Default,
+            command_timeout_ms: None,
             skills: Vec::new(),
             mcp_tools: Vec::new(),
             success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
@@ -360,6 +366,21 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
                     && observation.guard.is_some()
             )
     );
+    assert!(
+        observations[..13]
+            .iter()
+            .filter(|observation| {
+                !matches!(
+                    &observation.intent.call,
+                    ToolCall::Command { .. } | ToolCall::McpList { .. } | ToolCall::McpCall { .. }
+                )
+            })
+            .all(|observation| {
+                observation.disposition == ToolDisposition::Succeeded
+                    && observation.cache_update == arany::CacheUpdate::NotApplicable
+            }),
+        "ordinary successful Workspace, Skill and MCP observations do not become cache uncertainty"
+    );
     assert_eq!(observations[13].disposition, ToolDisposition::Denied);
     assert!(observations[13].guard.is_none());
     let read: Value = serde_json::from_str(&observations[3].output).unwrap();
@@ -441,6 +462,45 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
             .count(),
         14
     );
+    for observation in &outcome.run.tools {
+        let id = observation.intent.id;
+        let start = events
+            .iter()
+            .position(|event| {
+                matches!(&event.event, arany::Event::ToolStarted { intent, .. } if intent.id == id)
+            })
+            .expect("canonical ToolStarted");
+        let finish = events
+            .iter()
+            .position(|event| {
+                matches!(&event.event, arany::Event::ToolFinished { observation, .. } if observation.intent.id == id)
+            })
+            .expect("canonical ToolFinished");
+        assert!(start < finish);
+        let active_reservations = events[start + 1..finish]
+            .iter()
+            .filter(|event| matches!(event.event, arany::Event::GoalActiveTimeReserved { .. }))
+            .count();
+        if observation
+            .observation
+            .as_ref()
+            .is_some_and(|observation| observation.guard.is_some())
+        {
+            assert_eq!(
+                active_reservations, 1,
+                "an admitted Tool reserves its Goal action after ToolStarted and before Guard setup"
+            );
+            assert!(matches!(
+                events.get(finish + 1).map(|event| &event.event),
+                Some(arany::Event::GoalActiveTimeSettled { run_id, .. }) if *run_id == outcome.run.id
+            ));
+        } else {
+            assert_eq!(
+                active_reservations, 0,
+                "a denied Tool that never reaches Guard has no action reservation"
+            );
+        }
+    }
     store.close().await.unwrap();
 }
 
@@ -545,6 +605,165 @@ fn proposal_request(workspace: &Path) -> RunRequest {
     }
 }
 
+struct OverTimeoutCommand {
+    requests: Arc<Mutex<Vec<ProviderRequest>>>,
+}
+
+impl Provider for OverTimeoutCommand {
+    fn profile_name(&self) -> &str {
+        "scripted"
+    }
+
+    fn model_name(&self) -> &str {
+        "goal-resource-model"
+    }
+
+    fn max_concurrent_calls(&self) -> u8 {
+        1
+    }
+
+    async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        let step = {
+            let mut requests = self.requests.lock().expect("Provider requests");
+            let step = requests.len();
+            requests.push(request);
+            step
+        };
+        let outcome = if step == 0 {
+            let call = ToolCall::Command {
+                program: "bash".into(),
+                args: vec!["-c".into(), "touch src/not-dispatched".into()],
+                cwd: "".into(),
+            };
+            ProviderOutcome::Tool {
+                call: call.clone(),
+                plan_contract: Some(Box::new(arany::GoalPlanContract {
+                    mission: "Run the bounded command only within the saved limit".into(),
+                    paths: vec!["src".into()],
+                    commands: vec!["bash".into()],
+                    resource_class: arany::ToolResourceClass::Default,
+                    command_timeout_ms: Some(2_000),
+                    skills: Vec::new(),
+                    mcp_tools: Vec::new(),
+                    success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
+                        path: "src/current.txt".into(),
+                        content: "current".into(),
+                    },
+                    budget: arany::GoalBudget::default(),
+                })),
+            }
+        } else {
+            ProviderOutcome::Finish(arany::Finish {
+                summary: "The requested command exceeded the pinned timeout".into(),
+                result: "The command was not dispatched".into(),
+            })
+        };
+        Ok(ProviderResponse {
+            outcome,
+            response_id: None,
+            input_tokens: None,
+            output_tokens: None,
+            wire_provenance: None,
+        })
+    }
+
+    async fn compact(&self, _: CompactionRequest) -> Result<CompactionResponse, ProviderError> {
+        Err(ProviderError::InvalidOutcome)
+    }
+}
+
+#[tokio::test]
+async fn over_max_command_is_closed_as_a_non_dispatched_limit() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    private_file(&workspace.join("src/current.txt"), b"current");
+    let state_path = temp.path().join("state");
+    let state = StateRoot::admit(&state_path).unwrap();
+    basic_config(&state_path);
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = Engine::open(
+        state,
+        OverTimeoutCommand {
+            requests: Arc::clone(&requests),
+        },
+    )
+    .unwrap();
+    engine
+        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
+        .unwrap();
+    let mut request = proposal_request(&workspace);
+    request.goal = arany::GoalRequest::new(
+        arany::GoalBudget::default(),
+        arany::GoalPhase::Implementation,
+    );
+    request.goal.resource_settings.default_command_timeout_ms = 1_000;
+    request.goal.resource_settings.max_command_timeout_ms = 1_000;
+    let outcome = engine.run(request).await.unwrap();
+    engine.close().await.unwrap();
+
+    assert_eq!(outcome.run.status, RunStatus::Failed);
+    assert_eq!(outcome.run.tools.len(), 1);
+    let tool = &outcome.run.tools[0];
+    let observation = tool.observation.as_ref().unwrap();
+    assert_eq!(tool.intent.limits.runtime_ms, 2_000);
+    assert_eq!(observation.disposition, ToolDisposition::Limit);
+    assert!(observation.guard.is_none());
+    assert_eq!(observation.cache_update, arany::CacheUpdate::NotApplicable);
+    assert!(
+        observation
+            .output
+            .contains("Lower request or change /settings")
+    );
+    assert!(!workspace.join("src/not-dispatched").exists());
+    assert_eq!(requests.lock().unwrap().len(), 2);
+
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+    let events = store.load_session(outcome.session_id).await.unwrap();
+    let started = events
+        .iter()
+        .position(|event| {
+            matches!(
+                &event.event,
+                arany::Event::ToolStarted { intent, .. } if intent == &tool.intent
+            )
+        })
+        .unwrap();
+    let finished = events
+        .iter()
+        .position(|event| {
+            matches!(
+                &event.event,
+                arany::Event::ToolFinished { observation, .. } if observation.intent == tool.intent
+            )
+        })
+        .unwrap();
+    assert!(started < finished);
+    assert!(matches!(
+        &events[finished].event,
+        arany::Event::ToolFinished { observation, .. }
+            if observation.disposition == ToolDisposition::Limit && observation.guard.is_none()
+    ));
+    assert!(!events[started + 1..finished].iter().any(|event| matches!(
+        &event.event,
+        arany::Event::GoalActiveTimeReserved { run_id, .. } if *run_id == outcome.run.id
+    )));
+    let replay = SessionView::replay(outcome.session_id, &events)
+        .unwrap()
+        .unwrap();
+    assert_eq!(replay.runs[0], outcome.run);
+    assert!(
+        replay.goals[0]
+            .report
+            .as_ref()
+            .unwrap()
+            .unresolved
+            .iter()
+            .any(|item| item.contains("Lower request or change /settings"))
+    );
+    store.close().await.unwrap();
+}
+
 fn assert_goal_provider_request(request: &ProviderRequest, expected_budget: &arany::GoalBudget) {
     assert_eq!(request.phase, AgentPhase::RootPlan);
     assert_eq!(request.collaboration, CollaborationPolicy::Single);
@@ -588,6 +807,8 @@ impl arany::Provider for ExactTokenTool {
                     mission: "Change the exact selected file".into(),
                     paths: vec!["src".into()],
                     commands: Vec::new(),
+                    resource_class: arany::ToolResourceClass::Default,
+                    command_timeout_ms: None,
                     skills: Vec::new(),
                     mcp_tools: Vec::new(),
                     success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
@@ -1019,6 +1240,8 @@ fn bounded_loop_plan() -> arany::GoalPlanContract {
         mission: "Append the stated line after verifying the file".into(),
         paths: vec!["src".into()],
         commands: Vec::new(),
+        resource_class: arany::ToolResourceClass::Default,
+        command_timeout_ms: None,
         skills: Vec::new(),
         mcp_tools: Vec::new(),
         success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
@@ -1092,6 +1315,8 @@ impl Provider for BoundedLoop {
                             .into(),
                         paths: vec!["src".into()],
                         commands: Vec::new(),
+                        resource_class: arany::ToolResourceClass::Default,
+                        command_timeout_ms: None,
                         skills: Vec::new(),
                         mcp_tools: Vec::new(),
                         success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
@@ -1549,6 +1774,11 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
             },
             "case {name}"
         );
+        for tool in &outcome.run.tools {
+            if matches!(tool.intent.call, ToolCall::Read { .. }) {
+                assert_eq!(tool.intent.limits.runtime_ms, 60_000, "case {name}");
+            }
+        }
         assert_proposal_requests(
             &requests.lock().unwrap(),
             if rejected_by_plan {
@@ -1664,6 +1894,7 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
             "case {name}: {:?}",
             outcome.run.tools
         );
+        assert_eq!(outcome.run.tools[0].intent.limits.runtime_ms, 120_000);
         let observation = outcome.run.tools[0].observation.as_ref().unwrap();
         assert_eq!(observation.disposition, expected, "case {name}");
         assert_proposal_requests(&requests.lock().unwrap(), 3);
@@ -2198,6 +2429,8 @@ impl Provider for ApprovalJourney {
                 ToolCall::Command { program, .. } => vec![program.clone()],
                 _ => Vec::new(),
             },
+            resource_class: arany::ToolResourceClass::Default,
+            command_timeout_ms: None,
             skills: Vec::new(),
             mcp_tools: Vec::new(),
             success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
@@ -2433,6 +2666,32 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
             .unwrap();
         assert_eq!(replay.runs[0].status, outcome.run.status);
         assert_eq!(replay.runs[0].tools, outcome.run.tools);
+        if matches!(
+            name,
+            "request-allow" | "request-deny" | "request-drop" | "request-cancel"
+        ) {
+            let id = replay.runs[0].tools[0].intent.id;
+            let start = events
+                .iter()
+                .position(|event| {
+                    matches!(&event.event, arany::Event::ToolStarted { intent, .. } if intent.id == id)
+                })
+                .unwrap();
+            let finish = events
+                .iter()
+                .position(|event| {
+                    matches!(&event.event, arany::Event::ToolFinished { observation, .. } if observation.intent.id == id)
+                })
+                .unwrap();
+            let has_full_action_reservation = events[start + 1..finish].iter().any(|event| {
+                matches!(&event.event, arany::Event::GoalActiveTimeReserved { reserved_ms, .. } if *reserved_ms > 20_000)
+            });
+            assert_eq!(
+                has_full_action_reservation,
+                name == "request-allow",
+                "{name}: approval wait/cancellation has only a pause reservation; the full Tool action is reserved only after approval and Guard admission"
+            );
+        }
         let calls = &replay.runs[0].agents[0].provider_calls;
         assert_eq!(calls.len(), 1 + review_count + usize::from(allowed));
         if review_count == 1 {
