@@ -28,8 +28,8 @@ pub use engine::{
     list_sessions, rename_session, resume_session, set_session_defaults, validate_workspace_inputs,
 };
 pub use presentation::{
-    Output, escape_terminal, render_cache_update_feedback, render_exec, render_run_feedback,
-    render_session,
+    Output, escape_terminal, goal_status, render_cache_update_feedback, render_exec,
+    render_run_feedback, render_session,
 };
 pub use provider::{
     AgentPhase, AnthropicProvider, ChatGptAdmission, ChatGptProvenance, ChatGptProvider,
@@ -59,9 +59,9 @@ pub use store::{HistoryReset, StateRoot, Store, StoreError};
 pub use telemetry::{Telemetry, TelemetryConfigError};
 pub use terminal::{
     AttachedTerminal, CommandAvailability, CommandParseError, CompletionLayout, Composer,
-    ComposerEdit, InteractiveCommand, ModelCatalogState, ModelPicker, ShutdownSignal, Submission,
-    TerminalError, TerminalInput, TerminalMode, TerminalNotice, command_completions,
-    parse_submission,
+    ComposerEdit, InteractiveCommand, ModelCatalogState, ModelPicker, ProfileSelection,
+    ShutdownSignal, Submission, TerminalError, TerminalInput, TerminalMode, TerminalNotice,
+    command_completions, parse_submission,
 };
 pub use tools::{
     ApprovalInbox, ApprovalMode, CacheUpdate, CommandChangeset, EffectIntent, FileChange,

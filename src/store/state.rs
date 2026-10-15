@@ -7,12 +7,16 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 mod build_cache;
 mod lock;
+#[cfg(any(target_os = "linux", test))]
+pub(crate) use build_cache::capture_archive;
+#[cfg(target_os = "linux")]
+pub(crate) use build_cache::restore_archive;
 pub(crate) use build_cache::{
     BuildCacheIdentity, BuildCacheLease, MAX_ARCHIVE_BYTES as BUILD_CACHE_ARCHIVE_BYTES,
     archive_size,
 };
-#[cfg(target_os = "linux")]
-pub(crate) use build_cache::{capture_archive, restore_archive};
+#[cfg(test)]
+pub(crate) use build_cache::{begin_released, fail_next_commit_marker};
 #[cfg(target_os = "macos")]
 pub(crate) use build_cache::{capture_archive_async, restore_archive_async};
 pub(crate) use lock::{SessionRunLock, WorkspaceRunLock};

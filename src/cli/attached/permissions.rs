@@ -1,13 +1,14 @@
 use super::setup::SetupError;
 use arany::{
-    ApprovalMode, AttachedTerminal, Composer, TerminalInput, WorkspacePermissions,
-    native_protection_supported,
+    ApprovalMode, AttachedTerminal, Composer, ProfileSelection, TerminalInput,
+    WorkspacePermissions, native_protection_supported,
 };
 use std::path::Path;
 
 pub(super) enum PermissionChoice {
     Selected(WorkspacePermissions),
     Closed(WorkspacePermissions),
+    Rejected(WorkspacePermissions, String),
     Exit,
 }
 
@@ -76,20 +77,16 @@ pub(super) async fn admit(
         SetupError::Recoverable(format!("Could not load folder trust: {error}"))
     })?;
     if access.is_trusted() {
-        access.verify_runtime_grants().map_err(|error| {
-            SetupError::Recoverable(format!(
-                "Could not validate folder runtime profiles: {error}"
-            ))
-        })?;
         composer.set_approval_mode(native_protection_supported().then_some(access.mode()));
         Ok(PermissionChoice::Selected(access))
     } else {
-        let access = access.prepare_profile_selection().map_err(|error| {
-            SetupError::Recoverable(format!(
-                "Could not prepare folder permission choices: {error}"
-            ))
-        })?;
-        choose(terminal, access, composer, configured).await
+        choose(
+            terminal,
+            access.prepare_profile_selection(),
+            composer,
+            configured,
+        )
+        .await
     }
 }
 
@@ -113,8 +110,14 @@ pub(super) async fn choose(
     loop {
         let (more, visible_page) = terminal.draw_workspace_permissions(
             id,
-            &permissions,
-            (&selected_profiles, focused_profile, explanation_pages_seen),
+            permissions.path(),
+            ProfileSelection {
+                options: &options,
+                selected: &selected_profiles,
+                focused: focused_profile,
+                enabled: explanation_pages_seen,
+                discovery_error: permissions.discovery_error(),
+            },
             page,
             selected == 1,
             configured,
@@ -149,7 +152,7 @@ pub(super) async fn choose(
             TerminalInput::Tab if explanation_pages_seen && !more => selected = (selected + 1) % 2,
             TerminalInput::Character(' ') if !terminal.is_linear() => {
                 if let Some(index) = focused_profile {
-                    selected_profiles[index] = !selected_profiles[index];
+                    toggle_profile(&mut selected_profiles, &options, index);
                     selected = 1;
                 }
             }
@@ -167,7 +170,7 @@ pub(super) async fn choose(
             }
             TerminalInput::Submit if explanation_pages_seen && focused_profile.is_some() => {
                 let index = focused_profile.expect("matched selected profile");
-                selected_profiles[index] = !selected_profiles[index];
+                toggle_profile(&mut selected_profiles, &options, index);
                 selected = 1;
             }
             TerminalInput::Submit if more => page += 1,
@@ -191,11 +194,17 @@ pub(super) async fn choose(
                     .filter(|(_, selected)| *selected)
                     .map(|(option, _)| option.token.clone())
                     .collect::<Vec<_>>();
-                permissions
-                    .remember_profiles(selected == 1, ApprovalMode::AutoEdits, &selected_tokens)
-                    .map_err(|error| {
-                        SetupError::Recoverable(format!("Could not remember folder trust: {error}"))
-                    })?;
+                if let Err(error) = permissions.remember_profiles(
+                    selected == 1,
+                    ApprovalMode::AutoEdits,
+                    &selected_tokens,
+                ) {
+                    terminal.restore_draft_input(composer.text().len())?;
+                    return Ok(PermissionChoice::Rejected(
+                        permissions,
+                        format!("Could not remember folder trust: {error}"),
+                    ));
+                }
                 composer.set_approval_mode(
                     (native_protection_supported() && permissions.is_trusted())
                         .then_some(permissions.mode()),
@@ -230,27 +239,35 @@ fn parse_linear_selection(
     options: &[arany::RuntimeProfileOption],
     current: &[bool],
 ) -> Option<(usize, Vec<bool>)> {
-    let mut words = input.split_whitespace();
-    let choice = words.next().unwrap_or_default().to_ascii_lowercase();
-    let rest = words.collect::<Vec<_>>();
-    match choice.as_str() {
-        "read" if rest == ["only"] => Some((0, vec![false; options.len()])),
-        "" | "1" | "read" | "read-only" | "no" | "config" | "use-config" => {
-            rest.is_empty().then(|| (0, vec![false; options.len()]))
-        }
-        "2" | "trust" | "yes" => {
-            if rest.is_empty() {
-                return Some((1, current.to_vec()));
-            }
+    let mut words = input
+        .split_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    if words
+        .first()
+        .and_then(|word| word.parse::<usize>().ok())
+        .is_some_and(|number| number >= 3)
+    {
+        words.insert(0, "trust".into());
+    }
+    let words = words.iter().map(String::as_str).collect::<Vec<_>>();
+    match words.as_slice() {
+        []
+        | ["1" | "read" | "read-only" | "no" | "config" | "use-config"]
+        | ["read", "only"]
+        | ["use", "config"] => Some((0, vec![false; options.len()])),
+        ["2" | "trust" | "yes"] => Some((1, current.to_vec())),
+        ["2" | "trust" | "yes", "none"] => Some((1, vec![false; options.len()])),
+        ["2" | "trust" | "yes", numbers @ ..] => {
             let mut selected = vec![false; options.len()];
-            if rest == ["none"] {
-                return Some((1, selected));
-            }
-            let mut seen = std::collections::BTreeSet::new();
-            for word in rest {
-                let number = word.parse::<usize>().ok()?;
-                let index = number.checked_sub(3)?;
-                if index >= options.len() || !seen.insert(index) {
+            for number in numbers {
+                let index = number.parse::<usize>().ok()?.checked_sub(3)?;
+                let option = options.get(index)?;
+                if selected
+                    .iter()
+                    .zip(options)
+                    .any(|(chosen, other)| *chosen && other.group == option.group)
+                {
                     return None;
                 }
                 selected[index] = true;
@@ -259,6 +276,18 @@ fn parse_linear_selection(
         }
         _ => None,
     }
+}
+
+/// Keeps at most one profile per runtime kind; a checked profile replaces its siblings.
+fn toggle_profile(selected: &mut [bool], options: &[arany::RuntimeProfileOption], index: usize) {
+    let check = !selected[index];
+    let group = options[index].group;
+    for (chosen, option) in selected.iter_mut().zip(options) {
+        if option.group == group {
+            *chosen = false;
+        }
+    }
+    selected[index] = check;
 }
 
 pub(super) fn cycle(composer: &mut Composer) -> String {
@@ -279,15 +308,111 @@ pub(super) fn cycle(composer: &mut Composer) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_linear_selection;
+    use super::{parse_linear_selection, toggle_profile};
+
+    #[cfg(all(unix, debug_assertions))]
+    #[test]
+    fn rejected_save_keeps_the_trust_record_and_reports_the_error() {
+        use super::{PermissionChoice, choose};
+        use arany::{AttachedTerminal, Composer, TerminalMode, WorkspacePermissions};
+        use std::io::Write;
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+        use std::time::Duration;
+
+        const FIXTURE: &str = "ARANY_TEST_PERMISSION_REJECTION_ROOT";
+        const TEST: &str = "cli::attached::permissions::tests::rejected_save_keeps_the_trust_record_and_reports_the_error";
+        let Some(root) = std::env::var_os(FIXTURE) else {
+            let temp = tempfile::tempdir().unwrap();
+            // The only candidate is the cache under HOME, which is also the workspace: saving it overlaps.
+            std::fs::create_dir_all(temp.path().join("home/.cargo/registry/cache")).unwrap();
+            let (master, slave) = crate::test_process::cloexec_pty(None);
+            let mut input = master.try_clone().unwrap();
+            let mut answered = false;
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .env_clear()
+                .env(FIXTURE, temp.path())
+                .env("HOME", temp.path().join("home"))
+                .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account"))
+                .env("TERM", "dumb")
+                .current_dir(temp.path())
+                .args(["--exact", TEST, "--nocapture"])
+                .process_group(0)
+                .stdin(Stdio::from(slave.try_clone().unwrap()))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::from(slave));
+            let mut child = command.spawn().unwrap();
+            drop(command);
+            let output = crate::test_process::capture_terminal(
+                &mut child,
+                master,
+                Duration::from_secs(30),
+                64 * 1024,
+                |bytes| {
+                    if !answered
+                        && String::from_utf8_lossy(bytes)
+                            .replace("\r\n", "\n")
+                            .contains(crate::test_process::READ_ONLY_CONSENT_PROMPT)
+                    {
+                        input.write_all(b"trust 3\r").unwrap();
+                        answered = true;
+                    }
+                },
+            );
+            assert!(
+                output.status.success(),
+                "rejected save child: {:?}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            assert!(answered, "linear consent prompt was not shown");
+            crate::test_process::assert_single_test_completed(&output.stdout, "rejected save");
+            return;
+        };
+        let root = std::path::PathBuf::from(root);
+        let workspace = root.join("home");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut terminal =
+                AttachedTerminal::acquire_with_mode(true, TerminalMode::default()).unwrap();
+            let mut composer = Composer::default();
+            let access = WorkspacePermissions::open(&workspace)
+                .unwrap()
+                .prepare_profile_selection();
+            let choice = match choose(&mut terminal, access, &mut composer, false).await {
+                Ok(choice) => choice,
+                Err(_) => panic!("a failed save must not abort the chooser"),
+            };
+            let PermissionChoice::Rejected(permissions, message) = choice else {
+                panic!("a failed save must return Rejected");
+            };
+            assert!(
+                message.contains("Could not remember folder trust"),
+                "{message}"
+            );
+            assert!(!permissions.is_trusted());
+            assert!(
+                !root.join("account/workspace-permissions.json").exists(),
+                "a rejected save must not write the trust record"
+            );
+        });
+    }
+
+    fn option(token: &str, group: &'static str) -> arany::RuntimeProfileOption {
+        arany::RuntimeProfileOption {
+            token: token.into(),
+            label: token.into(),
+            group,
+            selected: false,
+        }
+    }
 
     #[test]
     fn linear_permission_read_only_phrase_is_exact_and_clears_profiles() {
-        let options = [arany::RuntimeProfileOption {
-            token: "rust-example".into(),
-            label: "Rust example".into(),
-            selected: false,
-        }];
+        let options = [option("rust-example", "Rust")];
         let selected = [true];
 
         assert_eq!(
@@ -301,5 +426,59 @@ mod tests {
             parse_linear_selection("trust 3", &options, &selected),
             Some((1, vec![true]))
         );
+    }
+
+    #[test]
+    fn linear_permission_accepts_config_phrase_and_bare_profile_numbers() {
+        let options = [option("node-a", "Node"), option("rust", "Rust")];
+        let none = [false, false];
+
+        assert_eq!(
+            parse_linear_selection("use config", &options, &none),
+            Some((0, vec![false; 2]))
+        );
+        assert_eq!(
+            parse_linear_selection("4", &options, &none),
+            Some((1, vec![false, true]))
+        );
+        assert_eq!(
+            parse_linear_selection("trust", &options, &[true, false]),
+            Some((1, vec![true, false]))
+        );
+        assert_eq!(parse_linear_selection("trust 6", &options, &none), None);
+    }
+
+    #[test]
+    fn linear_permission_rejects_two_profiles_of_one_runtime_kind() {
+        let options = [
+            option("node-v20", "Node"),
+            option("node-v22", "Node"),
+            option("rust", "Rust"),
+        ];
+        let none = [false; 3];
+
+        assert_eq!(parse_linear_selection("trust 3 4", &options, &none), None);
+        assert_eq!(
+            parse_linear_selection("trust 4 5", &options, &none),
+            Some((1, vec![false, true, true]))
+        );
+    }
+
+    #[test]
+    fn inline_profile_toggle_replaces_sibling_of_the_same_runtime_kind() {
+        let options = [
+            option("node-v20", "Node"),
+            option("node-v22", "Node"),
+            option("rust", "Rust"),
+        ];
+        let mut selected = [false; 3];
+
+        toggle_profile(&mut selected, &options, 0);
+        toggle_profile(&mut selected, &options, 1);
+        assert_eq!(selected, [false, true, false]);
+        toggle_profile(&mut selected, &options, 2);
+        assert_eq!(selected, [false, true, true]);
+        toggle_profile(&mut selected, &options, 1);
+        assert_eq!(selected, [false, false, true]);
     }
 }

@@ -550,11 +550,36 @@ mod tests {
                 Some("A build cache update failed; inspect Tool history for details.")
             );
             let observation = run.tools[0].observation.as_mut().unwrap();
-            observation.disposition = crate::tools::ToolDisposition::Uncertain;
+            observation.disposition = crate::tools::ToolDisposition::Succeeded;
             observation.cache_update = crate::tools::CacheUpdate::Uncertain;
+            assert!(
+                crate::presentation::tool_summary(&run.tools[0])
+                    .contains("succeeded · cache outcome uncertain")
+            );
             assert_eq!(
                 crate::presentation::render_cache_update_feedback(run),
                 Some("Build cache outcome is uncertain; inspect Session history before retrying.")
+            );
+            let mut finished = run.clone();
+            finished.status = RunStatus::Finished;
+            assert_eq!(
+                render_run_feedback(&finished).as_deref(),
+                Some("Build cache outcome is uncertain; inspect Session history before retrying.")
+            );
+            finished.status = RunStatus::Failed;
+            assert_eq!(
+                render_run_feedback(&finished).as_deref(),
+                Some(
+                    "Error: The command succeeded but its build cache update is uncertain; the Run stopped without retrying. No answer was committed."
+                )
+            );
+            finished.tools[0].observation.as_mut().unwrap().disposition =
+                crate::tools::ToolDisposition::Uncertain;
+            assert_eq!(
+                render_run_feedback(&finished).as_deref(),
+                Some(
+                    "Error: Tool completion is uncertain. Files or effects may have changed; inspect them before retrying. No answer was committed."
+                )
             );
             let observation = run.tools[0].observation.as_mut().unwrap();
             observation.disposition = crate::tools::ToolDisposition::Succeeded;
