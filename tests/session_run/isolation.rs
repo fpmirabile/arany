@@ -277,6 +277,12 @@ fn account_command(
     if std::path::Path::new("/etc/ssl").is_dir() {
         command.args(["--ro-bind", "/etc/ssl", "/etc/ssl"]);
     }
+    // /etc/ssl bundle entries may be symlinks into this read-only trust store (Arch-style hosts).
+    command.args([
+        "--ro-bind-try",
+        "/etc/ca-certificates",
+        "/etc/ca-certificates",
+    ]);
     command.args([
         "--", "/usr/bin/sh", "-c",
         "HOME=${HOME:-\"$1\"}; XDG_STATE_HOME=${XDG_STATE_HOME:-\"$1/fixture-state\"}; XDG_DATA_HOME=${XDG_DATA_HOME:-\"$1/fixture-data\"}; export HOME XDG_STATE_HOME XDG_DATA_HOME; shift; exec \"$@\"",
