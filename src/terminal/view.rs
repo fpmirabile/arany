@@ -808,6 +808,7 @@ pub(super) fn draw_frame_with_history(
     }
     if history_rows.is_empty()
         && history_status.is_none()
+        && model.empty_chat
         && model.activity_lines.is_empty()
         && menu_height == 0
     {
@@ -986,9 +987,18 @@ pub(super) fn draw_frame_with_history(
         .flatten();
     let status_y = area.bottom() - 1;
     if status_y < area.bottom() {
-        let wide_history_status = history_status
-            .filter(|_| area.width >= 80)
-            .map(|status| format!("{status} · {}", model.status_line));
+        // The state leads; the history cue keeps its room even when the state is long.
+        let wide_history_status = history_status.filter(|_| area.width >= 80).map(|status| {
+            let separator = UnicodeWidthStr::width(" · ");
+            let state_room =
+                usize::from(area.width).saturating_sub(UnicodeWidthStr::width(status) + separator);
+            let state = safe_truncate(&model.status_line, state_room);
+            if state.is_empty() {
+                status.to_owned()
+            } else {
+                format!("{state} · {status}")
+            }
+        });
         let status_notice = notice;
         let status = status_notice
             .or(wide_history_status.as_deref())
