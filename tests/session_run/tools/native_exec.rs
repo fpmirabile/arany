@@ -1012,9 +1012,11 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                         lower_header.contains("authorization: bearer synthetic-native-key\r\n")
                     );
                 } else {
-                    assert!(lower_header.contains("x-api-key: synthetic-native-key\r\n"));
+                    assert!(
+                        lower_header.contains("authorization: bearer synthetic-native-key\r\n")
+                    );
                     assert!(lower_header.contains("anthropic-version: 2023-06-01\r\n"));
-                    assert!(!lower_header.contains("authorization:"));
+                    assert!(!lower_header.contains("x-api-key:"));
                 }
                 let body: Value = serde_json::from_slice(&bytes[end..]).unwrap();
                 assert_eq!(body["model"], model);
