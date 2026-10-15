@@ -1559,7 +1559,11 @@ done
             .enable_all()
             .build()
             .unwrap();
-        let storage = reactor.block_on(prepare_command_storage(&root, &runtime));
+        let storage = reactor.block_on(prepare_command_storage(
+            &root,
+            &runtime,
+            &ToolLimits::default(),
+        ));
         assert!(matches!(storage, Err(ToolError::ChangedInput)));
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
     }

@@ -114,20 +114,25 @@ fn valid_identity_path(path: &Path) -> bool {
     normalized == value
 }
 
+// Publication runs on a blocking thread, so the fault is keyed by cache identity, not thread.
 #[cfg(test)]
-thread_local! {
-    static COMMIT_MARKER_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+static COMMIT_MARKER_FAULT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Makes the next committed-marker write for this identity fail once.
+#[cfg(test)]
+pub(crate) fn fail_next_commit_marker(identity: &BuildCacheIdentity) {
+    *COMMIT_MARKER_FAULT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(identity.token());
 }
 
-/// Makes the next committed-marker write on this thread fail once.
 #[cfg(test)]
-pub(crate) fn fail_next_commit_marker() {
-    COMMIT_MARKER_FAULT.with(|fault| fault.set(true));
-}
-
-#[cfg(test)]
-fn commit_marker_fault() -> io::Result<()> {
-    if COMMIT_MARKER_FAULT.with(|fault| fault.replace(false)) {
+fn commit_marker_fault(token: &str) -> io::Result<()> {
+    let mut fault = COMMIT_MARKER_FAULT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if fault.as_deref() == Some(token) {
+        *fault = None;
         return Err(io::Error::other("injected commit marker failure"));
     }
     Ok(())
@@ -345,7 +350,7 @@ impl BuildCacheLease {
             sync_directory(&self.dir)?;
             commit_marker_attempted = true;
             #[cfg(test)]
-            commit_marker_fault()?;
+            commit_marker_fault(&self.token)?;
             write_transaction(
                 &self.dir,
                 &self.token,
@@ -380,7 +385,6 @@ impl BuildCacheLease {
         if self.candidate_limit == 0 {
             return Err(StoreError::StorageFull);
         }
-        let _aggregate = lock_file(&self.dir, AGGREGATE_LOCK, true)?;
         create_private_file(&self.dir, &candidate_name(&self.token))
     }
 

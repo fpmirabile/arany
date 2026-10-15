@@ -1261,15 +1261,10 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         use_count: 1,
     };
     assert!(intent.valid());
-    let mut limits = json!({
-        "result_bytes": MAX_TOOL_RESULT_BYTES,
-        "runtime_ms": 60_000,
-        "memory_bytes": MEMORY_BYTES,
-        "max_processes": MAX_PROCESSES_OR_THREADS,
-        "scratch_bytes": SCRATCH_BYTES,
-        "network": "none"
-    });
-    assert!(serde_json::from_value::<ToolLimits>(limits.clone()).is_err());
+    let mut limits = serde_json::to_value(&intent.limits).unwrap();
+    let mut partial = limits.clone();
+    partial.as_object_mut().unwrap().remove("cache_transfer_ms");
+    assert!(serde_json::from_value::<ToolLimits>(partial).is_err());
     let mut native = intent.clone();
     native.limits.resource_profile = ToolResourceProfile::LinuxKernel;
     let linux_intent = native.digest();
@@ -1629,6 +1624,8 @@ async fn cache_receipt_states_preserve_success_without_publication_uncertainty()
             use_count: 1,
         };
         intent.limits.cache_requested_bytes = cache_requested_bytes;
+        intent.limits.cache_bytes = cache_requested_bytes;
+        intent.limits.cache_candidate_bytes = 0;
         let guard = GuardReceipt {
             contract_version: 1,
             intent_digest: intent.digest(),
@@ -1691,7 +1688,7 @@ async fn cache_receipt_states_preserve_success_without_publication_uncertainty()
             super::guard::CacheCandidate::Uncertain,
             1,
             CacheUpdate::Uncertain,
-            ToolDisposition::Uncertain,
+            ToolDisposition::Succeeded,
         ),
     ] {
         let call = ToolCall::Command {
@@ -1712,7 +1709,7 @@ async fn cache_receipt_states_preserve_success_without_publication_uncertainty()
         assert!(observation.valid());
         assert_eq!(
             observation.stops_run(),
-            expected_disposition == ToolDisposition::Uncertain
+            expected_update == CacheUpdate::Uncertain
         );
     }
 }

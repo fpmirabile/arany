@@ -31,29 +31,6 @@ const TOOL_PREPARATION_OVERHEAD: Duration = Duration::from_secs(5);
 #[cfg(target_os = "macos")]
 const TOOL_PREPARATION_OVERHEAD: Duration = Duration::from_secs(35);
 
-/// Compare-exchange update returning the previous value; `None` from `update` fails without writing.
-fn update_u32(counter: &AtomicU32, mut update: impl FnMut(u32) -> Option<u32>) -> Result<u32, u32> {
-    let mut current = counter.load(Ordering::Acquire);
-    loop {
-        let next = update(current).ok_or(current)?;
-        match counter.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire) {
-            Ok(_) => return Ok(current),
-            Err(actual) => current = actual,
-        }
-    }
-}
-
-fn update_u64(counter: &AtomicU64, mut update: impl FnMut(u64) -> Option<u64>) -> Result<u64, u64> {
-    let mut current = counter.load(Ordering::Acquire);
-    loop {
-        let next = update(current).ok_or(current)?;
-        match counter.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire) {
-            Ok(_) => return Ok(current),
-            Err(actual) => current = actual,
-        }
-    }
-}
-
 fn compaction_context_input(
     request: &ProviderRequest,
     facts: crate::provider::GoalContextFacts,
@@ -237,16 +214,17 @@ impl GoalRunBudget {
         if !self.can_start_provider_call() {
             return false;
         }
-        update_u32(&self.calls_used, |used| {
-            self.calls_limit.lock().ok().and_then(|limit| {
-                if limit.is_none_or(|limit| used < limit) {
-                    used.checked_add(1)
-                } else {
-                    None
-                }
+        self.calls_used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                self.calls_limit.lock().ok().and_then(|limit| {
+                    if limit.is_none_or(|limit| used < limit) {
+                        used.checked_add(1)
+                    } else {
+                        None
+                    }
+                })
             })
-        })
-        .is_ok()
+            .is_ok()
     }
 
     fn remaining_calls(&self) -> Option<u32> {
@@ -259,7 +237,10 @@ impl GoalRunBudget {
     }
 
     fn child_call_finished(&self) -> Result<(), EngineError> {
-        update_u32(&self.in_flight_children, |pending| pending.checked_sub(1))
+        self.in_flight_children
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+                pending.checked_sub(1)
+            })
             .map_err(|_| EngineError::CoordinatorFailed)?;
         Ok(())
     }
@@ -434,10 +415,11 @@ impl GoalRunBudget {
     }
 
     fn active_segment_reserved(&self, reserved_ms: u64) -> Result<(), EngineError> {
-        update_u64(&self.reserved_active_ms, |reserved| {
-            reserved.checked_add(reserved_ms)
-        })
-        .map_err(|_| EngineError::GoalBudgetExhausted)?;
+        self.reserved_active_ms
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |reserved| {
+                reserved.checked_add(reserved_ms)
+            })
+            .map_err(|_| EngineError::GoalBudgetExhausted)?;
         *self
             .active_origin
             .lock()
@@ -454,12 +436,16 @@ impl GoalRunBudget {
         if active_ms > crate::session::MAX_GOAL_ACTION_ACTIVE_MS {
             return Err(EngineError::GoalBudgetExhausted);
         }
-        update_u64(&self.active_ms, |used| used.checked_add(active_ms))
+        self.active_ms
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(active_ms)
+            })
             .map_err(|_| EngineError::GoalBudgetExhausted)?;
-        update_u64(&self.reserved_active_ms, |reserved| {
-            reserved.checked_sub(reserved_ms)
-        })
-        .map_err(|_| EngineError::CoordinatorFailed)?;
+        self.reserved_active_ms
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |reserved| {
+                reserved.checked_sub(reserved_ms)
+            })
+            .map_err(|_| EngineError::CoordinatorFailed)?;
         *self
             .active_origin
             .lock()
@@ -569,7 +555,11 @@ impl GoalRunBudget {
 
     fn account_usage(&self, input: Option<u32>, output: Option<u32>) {
         let known = u64::from(input.unwrap_or_default()) + u64::from(output.unwrap_or_default());
-        let _ = update_u64(&self.known_tokens, |used| Some(used.saturating_add(known)));
+        let _ = self
+            .known_tokens
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                Some(used.saturating_add(known))
+            });
         if input.is_none() || output.is_none() {
             self.token_usage_unknown.store(true, Ordering::Release);
         }
@@ -873,10 +863,13 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         })
         .await?;
         if child_call {
-            update_u32(&self.controls.goal_budget.in_flight_children, |pending| {
-                pending.checked_add(1)
-            })
-            .map_err(|_| EngineError::GoalBudgetExhausted)?;
+            self.controls
+                .goal_budget
+                .in_flight_children
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+                    pending.checked_add(1)
+                })
+                .map_err(|_| EngineError::GoalBudgetExhausted)?;
         }
         Ok(())
     }

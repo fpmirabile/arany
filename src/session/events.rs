@@ -2012,7 +2012,7 @@ mod provider_call_tests {
                         run_id,
                         agent_run_id
                     )
-                    .is_ok()
+                    .is_err()
                 );
                 invalid.as_object_mut().unwrap().remove("failure_reason");
                 assert!(

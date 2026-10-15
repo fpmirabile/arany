@@ -242,9 +242,6 @@ pub(super) async fn publish_cache_candidate(
         }
     };
     observation.cache_update = update;
-    if update == CacheUpdate::Uncertain {
-        observation.disposition = ToolDisposition::Uncertain;
-    }
     if !observation.valid() {
         observation.cache_update = CacheUpdate::Uncertain;
         observation.disposition = ToolDisposition::Uncertain;
@@ -1567,7 +1564,7 @@ mod tests {
         valid.write_all(&candidate).unwrap();
         valid.sync_all().unwrap();
         drop(valid);
-        crate::store::fail_next_commit_marker();
+        crate::store::fail_next_commit_marker(&identity);
         let mut observation = command_observation();
         publish_cache_candidate(
             &mut observation,

@@ -162,14 +162,12 @@ impl SessionView {
             .last()
             .is_some_and(|compaction| compaction.record.covered_run_id == *run_id);
         let goal = current_goal_mut(self, *goal_id)?;
-        let reserved = goal
-            .reserved_active_ms
+        goal.reserved_active_ms
             .ok_or(ReplayError::InvalidTransition)?;
         let total = goal
             .active_ms
             .checked_add(*active_ms)
             .ok_or(ReplayError::InvalidTransition)?;
-        let active_limit = goal.effective_budget().max_active_ms;
         let settles_active_run =
             goal.active_run == Some(*run_id) && run_status == RunStatus::Active;
         let settles_finished_run = goal.active_run.is_none()
@@ -180,8 +178,6 @@ impl SessionView {
         if goal.status != GoalStatus::Running
             || !(settles_active_run || settles_finished_run)
             || goal.reserved_active_run != Some(*run_id)
-            || *active_ms > reserved
-            || active_limit.is_some_and(|limit| total > limit)
         {
             return Err(ReplayError::InvalidTransition);
         }
@@ -414,7 +410,8 @@ impl SessionView {
             && goal.reserved_active_ms.is_none()
             && goal.compaction_call_reserved.is_none()
             && *active_ms == goal.active_ms
-            && active_limit.is_none_or(|limit| *active_ms <= limit)
+            && (*status != GoalStatus::Completed
+                || active_limit.is_none_or(|limit| *active_ms <= limit))
             && !(*status == GoalStatus::Completed
                 && goal.plan_contract.is_some()
                 && !goal.success_criterion_satisfied);
