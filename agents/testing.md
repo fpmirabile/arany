@@ -70,6 +70,7 @@ consistency, not measured agent quality or runtime/platform support.
 
 ## Failure and maintenance discipline
 
+- After a hosted CI failure, consolidate the confirmed failures and review findings from that exact head before correcting. Dispatch a [focused CI lane](./references/testing-details.md#local-verification-and-ci) only after diagnosis identifies the OS and profile; its pass is diagnostic, not verification. Before marking a change ready, require the complete `ci.yml` workflow on the exact final head: an automatic PR/push run or a manual dispatch of that workflow.
 - Focused Cargo and test-binary invocations must report their intended nonzero test count. A self-spawned helper filtered with `--exact` must assert exactly one completed test and have a bounded parent wait/output plus kill/reap cleanup. Helper-only tests are explicitly ignored by default and require their parent's private fixture when activated; returning early without assertions is not a default passing test. Zero-test or ignored-child success provides no evidence.
 - Failure output names the scenario and case, expected and observed exit, bounded escaped stdout/stderr, semantic Event difference, and safe fixture identifier. It never dumps secrets, raw hostile controls, provider bodies, or database payloads.
 - Every test runs independently and owns its directories, files, ports, runtime, database, and processes. Do not mutate shared process environment from parallel tests.

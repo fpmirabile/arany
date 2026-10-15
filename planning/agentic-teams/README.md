@@ -503,22 +503,12 @@ Each slice that crosses one of these boundaries runs the
 Each item is one PR with its own contract update, security pass where
 triggered and evidence under [testing rules](../../agents/testing.md).
 
-3. **Goal Foundation and budgets.** E11 every task is a Goal, B1 plan contract
-   after bounded read-only inspection, typed success receipts, bounded reports,
-   explicit recovery, Goal budgets and cross-StateRoot Workspace writer
-   exclusion. Creates the `docs/specs/goals.md` domain spec and supplies the
-   lifecycle, cancellation, context and budget owner required by A4. The
-   follow-on steering, checkpoint, rewind and RPI workflows remain in Goal
-   completion. Delivered in this slice: the autonomous `/goal OBJECTIVE` loop,
-   owned by the Engine, which starts Runs until the success criterion is met or
-   the budget, a failure or cancellation stops it. A cancelled loop leaves the
-   Goal Interrupted for `/goal resume`. Prompts typed during a loop are retained
-   as drafts; steering stays deferred. See [the Goal spec](../../docs/specs/goals.md).
 4. **A4 Flexible limits.** Replace the Run's fixed tool/model/context ceilings
    with Finish, compaction, cancellation and Goal-budget bounds; add the
    agreed command timeout and finite build resource profile settings. Guard
-   resource ceilings remain finite. This slice depends on Goal Foundation and
-   must not make the current fixed Run loop unlimited by itself.
+   resource ceilings remain finite. This slice builds on the landed
+   [Goal Foundation](../../docs/specs/goals.md) and must not make the current
+   fixed Run loop unlimited by itself.
 5. **Dogfooding milestone: Arany develops Arany.** Use Arany for this
    repository's own work from here on. Requires Beta 1 check 7 (live
    validation of the chosen model's strict Tool encoding) in
@@ -545,8 +535,8 @@ per-slice specification and evidence cost slows delivery.
 
 E13 telemetry spans land with the slice that introduces each span's subject.
 
-Next action: complete Goal Foundation, then A4 and dogfooding before the
-remaining Goal workflows. The A3 per-Workspace cache has a 64 MiB initial
+Next action: A4 flexible limits, then dogfooding before the remaining Goal
+workflows. The A3 per-Workspace cache has a 64 MiB initial
 archive/view limit and shares an 8 GiB StateRoot aggregate; A4 binds the
 effective admitted cache quota to the native build profile. The planned A4 build
 profile proposes 4 GiB memory, 8 GiB requested cache, 1 GiB writable project
@@ -570,7 +560,7 @@ data-dependent questions remain:
 
 ## Contract owners
 
-- `docs/specs/goals.md` (created in execution step 3): Goal lifecycle, RPI, steering, checkpoints, budgets and Goal view facts.
+- `docs/specs/goals.md` (created by Goal Foundation): Goal lifecycle, RPI, steering, checkpoints, budgets and Goal view facts.
 - [Execution](../../docs/specs/execution.md): Run admission, coordination, teams and recovery.
 - [Tools](../../docs/specs/tools.md): grants, effects, changesets, Guard and native differences.
 - [Terminal](../../docs/specs/terminal.md): interaction, Supervisor prompts and accessibility.
