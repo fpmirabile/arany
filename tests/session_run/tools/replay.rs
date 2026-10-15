@@ -852,7 +852,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             "integration journal correlation: {case}"
         );
     }
-    for pairs in [8, 9] {
+    for pairs in [8, 63, 64] {
         let mut rows = prefix[..AGENT_SPAWNED + 1].to_vec();
         for pair in 0..pairs {
             let mut command = command_intent.clone();
@@ -914,7 +914,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         rows.extend(suffix.clone());
         assert_eq!(
             replay(rows).is_ok(),
-            pairs == 8,
+            pairs <= 63,
             "integration consumes an effect slot: {pairs}"
         );
     }
@@ -994,11 +994,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         replay(forged_out_of_plan_publication).is_err(),
         "an out-of-plan integration cannot carry a dispatched or successful receipt"
     );
-    for (count, output, accepted) in [
-        (16, "", true),
-        (17, "", false),
-        (16, &"x".repeat(8192), false),
-    ] {
+    for (count, output, accepted) in [(63, "", true), (64, "", false)] {
         let mut rows = prefix[..AGENT_SPAWNED + 1].to_vec();
         for call_index in 0..count {
             let mut start = prefix[TOOL_STARTED].clone();

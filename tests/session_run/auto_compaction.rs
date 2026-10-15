@@ -157,7 +157,7 @@ fn synthetic_server(
                 assert_eq!(input["objective"], "second");
                 assert_eq!(
                     input["history"][0]["assistant"].as_str().unwrap().len(),
-                    32 * 1024
+                    24 * 1024
                 );
             }
             _ => {
@@ -212,7 +212,7 @@ fn synthetic_server(
             1 => serde_json::json!({"outcome":{"type":"delegate","children":["synthetic child"]}}),
             2 => serde_json::json!({"summary":"synthetic summary"}),
             3 => {
-                serde_json::json!({"outcome":{"type":"finish","summary":"first summary","result":"A".repeat(32 * 1024)}})
+                serde_json::json!({"outcome":{"type":"finish","summary":"first summary","result":"A".repeat(24 * 1024)}})
             }
             4 => {
                 let result = if matches!(case, CompactionCase::Success) {

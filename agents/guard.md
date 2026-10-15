@@ -100,9 +100,11 @@ limits and compatibility.
   filter and explicit Darwin syscall numbers support only reviewed 64-bit ABIs.
 - Linux toolchains mount at their exact host paths; host-cache grants mount
   under `/cache`, a separate quota-backed volume sized by the build-cache limit,
-  when a cache view is admitted, and under private `/scratch` otherwise. Both
-  Linux and macOS use `sandbox_cache_root` and the same base for the payload's
-  `CARGO_HOME`, `npm_config_cache` and `PIP_CACHE_DIR`. A toolchain target that equals, lies under or contains a path the
+  when a cache view is admitted, and under private `/scratch` otherwise. Linux
+  uses `sandbox_cache_root`; macOS links the same cache grants from its cache
+  storage volume (`prepare_cache_links`), or from `scratch` when no cache limit
+  is configured. Both use the same base for the payload's `CARGO_HOME`,
+  `npm_config_cache` and `PIP_CACHE_DIR`. A toolchain target that equals, lies under or contains a path the
   profile mounts or creates is rejected before seed creation. Keep Linux
   `/lib` targeting `/usr/lib` and `/lib64` targeting `/usr/lib64`: mapping both to
   `/usr/lib` hides the x86-64 ELF loader even when the ARM64 native gates pass.

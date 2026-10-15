@@ -474,8 +474,8 @@ impl GoalRunBudget {
     }
 
     fn can_narrow(&self, contract: &crate::session::GoalPlanContract) -> bool {
-        // This Run is already linked, so the plan must allow it along with the earlier Runs. The in-flight
-        // reservation is an upper bound for this call, so only its elapsed time counts against the plan.
+        // This Run is already linked, so the plan must allow it along with the earlier Runs. Only settled
+        // usage counts here; a caller while an active segment is reserved must add that segment's elapsed time.
         self.admission_usage(self.runs_used_before)
             .is_some_and(|usage| {
                 let reserved = self.reserved_active_ms.load(Ordering::Acquire);
@@ -887,6 +887,9 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         root_request: &mut ProviderRequest,
         contract: crate::session::GoalPlanContract,
     ) -> Result<bool, EngineError> {
+        if !self.controls.goal_budget.can_narrow(&contract) {
+            return Ok(false);
+        }
         self.store.admit_operation(self.session_id, 5).await?;
         self.append(Event::GoalPlanContractRecorded {
             goal_id: self.goal_id,
@@ -1073,7 +1076,13 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         &self,
         mut request: ProviderRequest,
     ) -> Result<(CallResult, ActiveSegment), EngineError> {
-        let active_segment = self.reserve_active_segment(CALL_DEADLINE).await?;
+        let previews = self
+            .progress
+            .is_some_and(|progress| progress.previews_enabled());
+        let event_tail = 8 + if previews { MAX_DISPLAY_CHUNKS } else { 0 };
+        let active_segment = self
+            .reserve_active_segment_with_tail(CALL_DEADLINE, event_tail)
+            .await?;
         let deadline = active_segment
             .deadline()
             .checked_sub(STORE_ACTION_OVERHEAD)

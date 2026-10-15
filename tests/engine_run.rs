@@ -893,7 +893,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 .filter(|event| matches!(event.event, Event::GoalFinished { .. }))
                 .count(),
         ];
-        // Each Provider call reserves and settles its own active time; the Run lifecycle carries one reservation per Run.
+        // Each Provider call reserves and settles its own active time; the Run lifecycle reserves its own tail once at Run start.
         assert_eq!(goal_event_counts, [5, 5, 7, 7, 7, 5]);
         let non_goal_events = events
             .iter()
@@ -2388,7 +2388,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             let store = Store::open_read_only(StateRoot::open_existing(&path).unwrap()).unwrap();
             let expected_event_count = if branch {
                 // The fork's own Event plus the Single Run's admitted or refused prefix.
-                if admitted { 14 } else { 6 }
+                if admitted { 14 } else { 1 }
             } else if admitted {
                 prefix as usize
                     + if matches!(policy, CollaborationPolicy::Single) {
@@ -2397,12 +2397,12 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
                         23
                     }
             } else {
-                // A refused Run keeps the committed prefix its admission allowed before the refused action.
+                // A Single Run refused at Run start commits nothing; a Team refused at its child wave keeps its
+                // Run start and root plan but no child AgentSpawned.
                 prefix as usize
                     + match policy {
-                        CollaborationPolicy::Single if previews => 6,
-                        CollaborationPolicy::Single => 5,
-                        _ => 11,
+                        CollaborationPolicy::Single => 0,
+                        _ => 9,
                     }
             };
             assert_eq!(
@@ -2411,10 +2411,13 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
                 "case {index}: exact committed Event count"
             );
             let view = store.load_view(id).await.unwrap().unwrap();
-            assert_eq!(view.runs.len(), 2, "case {index}: the refused Run keeps its committed start");
+            let linked = if admitted || !matches!(policy, CollaborationPolicy::Single) { 2 } else { 1 };
+            assert_eq!(view.runs.len(), linked, "case {index}: a refused Single Run is never linked");
             assert_eq!(view.runs[0].status, RunStatus::Finished);
-            // A refused Run is an interrupted prefix: replay labels it interrupted, never Finished.
-            assert_eq!(view.runs[1].status == RunStatus::Finished, admitted, "case {index}");
+            if linked == 2 {
+                // A refused Run is an interrupted prefix: replay labels it interrupted, never Finished.
+                assert_eq!(view.runs[1].status == RunStatus::Finished, admitted, "case {index}");
+            }
             store.close().await.unwrap();
         }
         for (index, (prefix, prior_forks, admitted)) in [

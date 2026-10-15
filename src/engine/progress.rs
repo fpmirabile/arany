@@ -53,6 +53,10 @@ pub struct RunUpdate {
 }
 
 impl RunProgress {
+    pub(super) fn previews_enabled(&self) -> bool {
+        self.previews_enabled
+    }
+
     #[must_use]
     pub fn new() -> Self {
         let (sender, receiver) = watch::channel(None);
@@ -132,7 +136,7 @@ pub(super) struct ProgressPublisher {
 
 impl ProgressPublisher {
     pub(super) fn previews_enabled(&self) -> bool {
-        self.progress.previews_enabled
+        self.progress.previews_enabled()
     }
 
     pub(super) fn tool_queue(&self) -> watch::Sender<Option<uuid::Uuid>> {

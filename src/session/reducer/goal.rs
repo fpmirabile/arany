@@ -458,9 +458,11 @@ impl SessionView {
             run_status
         };
         // A paused Goal is one whose last Run was cancelled or interrupted, or whose non-autonomous Run
-        // finished without finishing the Goal; an autonomous Finished Run is settled by its own rules.
+        // finished without finishing the Goal. A Finished autonomous Run is paused only when a crash left
+        // its between-Run compaction call open.
         let paused = matches!(run_status, RunStatus::Cancelled | RunStatus::Interrupted)
-            || (run_status == RunStatus::Finished && !goal.autonomous);
+            || (run_status == RunStatus::Finished
+                && (!goal.autonomous || goal.compaction_call_reserved.is_some()));
         if !paused {
             return Err(ReplayError::InvalidTransition);
         }

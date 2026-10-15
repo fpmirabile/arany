@@ -2349,6 +2349,41 @@ async fn plan_with_fewer_runs_than_linked_is_refused_as_an_invalid_plan() {
 }
 
 #[tokio::test]
+async fn plan_active_limit_below_elapsed_call_time_fails_the_run() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let mut plan = facts_plan(facts_digest("v2"));
+    plan.budget.max_active_ms = Some(1);
+    // The plan-bearing call runs longer than the plan's active-time limit, so the plan cannot narrow the Goal.
+    let provider = ScriptedProvider::new(vec![ProviderOutcome::Tool {
+        call: facts_read(),
+        plan_contract: Some(Box::new(plan)),
+    }])
+    .with_before_call(0, || {
+        std::thread::sleep(std::time::Duration::from_millis(20))
+    });
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    let outcome = engine
+        .run(autonomous_input(&workspace))
+        .await
+        .expect("an unnarrowable plan is a Failed Run, not a Store error");
+    assert_eq!(outcome.run.status, RunStatus::Failed);
+    engine.close().await.expect("engine shutdown");
+
+    let (_, view) = replayed(&state_path, outcome.session_id).await;
+    let goal = view.goal(outcome.goal_id).expect("Goal");
+    assert!(
+        goal.plan_contract.is_none(),
+        "the refused plan is not recorded"
+    );
+}
+
+#[tokio::test]
 async fn cancelled_autonomous_segment_exports_its_run_outcome() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "v1");

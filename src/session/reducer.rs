@@ -2019,6 +2019,82 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn exhausted_autonomous_goal_closes_over_a_crash_left_compaction_call() {
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let budget = GoalBudget {
+            max_provider_calls: Some(2),
+            ..GoalBudget::default()
+        };
+        let mut events = vec![Event::GoalStarted {
+            goal_id,
+            objective: GOAL_OBJECTIVE.into(),
+            workspace_identity: (1, 2),
+            budget,
+            resource_settings: crate::tools::ToolResourceSettings::default(),
+            phase: GoalPhase::Implementation,
+            autonomous: true,
+        }];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.push(Event::GoalProviderCallReserved {
+            goal_id,
+            run_id,
+            agent_run_id,
+        });
+        events.push(Event::ProviderCallRecorded {
+            run_id,
+            agent_run_id,
+            record: record(
+                AgentPhase::RootPlan,
+                ProviderCallDisposition::Finished,
+                None,
+            ),
+        });
+        events.extend([
+            Event::AgentFinished {
+                run_id,
+                agent_run_id,
+                disposition: AgentDisposition::Finished,
+                summary: Some("done".into()),
+                result: Some("done".into()),
+            },
+            Event::MessageCommitted {
+                run_id,
+                text: "done".into(),
+            },
+            Event::RunFinished {
+                run_id,
+                disposition: RunDisposition::Finished,
+            },
+        ]);
+        // The Run finished, but its between-Run compaction call never committed: the Goal is paused.
+        events.push(Event::GoalCompactionCallReserved { goal_id, run_id });
+        events.push(Event::GoalFinished {
+            goal_id,
+            status: GoalStatus::Failed,
+            active_ms: 0,
+            report: GoalReport {
+                summary: "Goal budget is exhausted.".into(),
+                changes: Vec::new(),
+                evidence: Vec::new(),
+                unresolved: Vec::new(),
+            },
+        });
+
+        let session = SessionId::new();
+        let view = SessionView::replay_open(session, &session_with(session, events))
+            .expect("an exhausted autonomous Goal closes over its crash-left compaction call")
+            .expect("Session exists");
+        let goal = view.goal(goal_id).expect("Goal");
+        assert_eq!(goal.status, GoalStatus::Failed);
+        assert_eq!(goal.uncertain_compaction_calls, 1);
+    }
+
+    #[test]
     fn resumed_orphaned_provider_reservation_settles_as_uncertain() {
         let session_id = SessionId::new();
         let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());

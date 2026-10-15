@@ -2028,8 +2028,14 @@ impl<P: Provider + 'static> Engine<P> {
             }
             return Err(EngineError::GoalBudgetExhausted);
         }
-        // Goal lifecycle tail; each Provider call and effect is admitted when it dispatches.
-        let event_slots = 10 + usize::from(request.session_id.is_none());
+        // Run start covers the Goal lifecycle and the first action's envelope; each later action admits its own.
+        let previews = progress.as_ref().is_some_and(RunProgress::previews_enabled);
+        let event_slots =
+            13 + if previews {
+                crate::session::MAX_DISPLAY_CHUNKS
+            } else {
+                0
+            } + usize::from(request.session_id.is_none());
         self.store.admit_operation(session_id, event_slots).await?;
         let provisional_workspace_lock = if goal.phase == crate::session::GoalPhase::Implementation
             && self.tools.as_ref().is_some_and(|(config, _)| config.write)
