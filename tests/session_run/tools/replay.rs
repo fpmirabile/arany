@@ -11,11 +11,11 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     let goal = arany::GoalId::new();
     let run = RunId::new();
     let primary = AgentRunId::new();
-    const AGENT_SPAWNED: usize = 6;
-    const TOOL_STARTED: usize = 10;
-    const TOOL_FINISHED: usize = 11;
-    const NEXT_CALL_RESERVED: usize = 12;
-    const NEXT_CALL_RECORDED: usize = 13;
+    const AGENT_SPAWNED: usize = 5;
+    const TOOL_STARTED: usize = 11;
+    const TOOL_FINISHED: usize = 12;
+    const NEXT_CALL_RESERVED: usize = 14;
+    const NEXT_CALL_RECORDED: usize = 15;
     const COMMAND_STARTED: usize = TOOL_STARTED;
     const COMMAND_FINISHED: usize = TOOL_STARTED + 1;
     const INTEGRATION_STARTED: usize = TOOL_STARTED + 2;
@@ -125,11 +125,6 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             run_id: run,
             config,
         },
-        Event::GoalActiveTimeReserved {
-            goal_id: goal,
-            run_id: run,
-            reserved_ms: 30_000,
-        },
         Event::AgentSpawned {
             run_id: run,
             agent_run_id: primary,
@@ -137,12 +132,22 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             ordinal: 0,
             objective: None,
         },
+        Event::GoalActiveTimeReserved {
+            goal_id: goal,
+            run_id: run,
+            reserved_ms: 30_000,
+        },
         Event::GoalProviderCallReserved {
             goal_id: goal,
             run_id: run,
             agent_run_id: primary,
         },
         record(ProviderCallDisposition::ToolRequested),
+        Event::GoalActiveTimeSettled {
+            goal_id: goal,
+            run_id: run,
+            active_ms: 1_000,
+        },
         Event::GoalPlanContractRecorded {
             goal_id: goal,
             run_id: run,
@@ -173,12 +178,22 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         },
     ];
     let suffix = vec![
+        Event::GoalActiveTimeReserved {
+            goal_id: goal,
+            run_id: run,
+            reserved_ms: 30_000,
+        },
         Event::GoalProviderCallReserved {
             goal_id: goal,
             run_id: run,
             agent_run_id: primary,
         },
         record(ProviderCallDisposition::Finished),
+        Event::GoalActiveTimeSettled {
+            goal_id: goal,
+            run_id: run,
+            active_ms: 1_000,
+        },
         Event::AgentFinished {
             run_id: run,
             agent_run_id: primary,
@@ -193,11 +208,6 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         Event::RunFinished {
             run_id: run,
             disposition: RunDisposition::Finished,
-        },
-        Event::GoalActiveTimeSettled {
-            goal_id: goal,
-            run_id: run,
-            active_ms: 1_000,
         },
     ];
     let replay = |events: Vec<Event>| {
@@ -514,11 +524,6 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 run_id: run,
                 disposition: RunDisposition::Failed,
             },
-            Event::GoalActiveTimeSettled {
-                goal_id: goal,
-                run_id: run,
-                active_ms: 1_000,
-            },
         ]);
         let view = replay(denied).unwrap().unwrap();
         let feedback = arany::render_run_feedback(&view.runs[0]).unwrap();
@@ -681,11 +686,6 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         Event::RunFinished {
             run_id: run,
             disposition: RunDisposition::Failed,
-        },
-        Event::GoalActiveTimeSettled {
-            goal_id: goal,
-            run_id: run,
-            active_ms: 1_000,
         },
     ]);
     let view = replay(unpublished).unwrap().unwrap();
@@ -963,11 +963,6 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         Event::RunFinished {
             run_id: run,
             disposition: RunDisposition::Failed,
-        },
-        Event::GoalActiveTimeSettled {
-            goal_id: goal,
-            run_id: run,
-            active_ms: 1_000,
         },
     ]);
     let view = replay(out_of_plan_integration.clone()).unwrap().unwrap();

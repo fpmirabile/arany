@@ -547,6 +547,14 @@ async fn goal_call_budget_blocks_a_later_run_before_provider_dispatch() {
         _ => panic!("active compaction reservation"),
     };
     let settled_ms = reserved_ms.checked_add(1).unwrap();
+    let Event::GoalActiveTimeSettled {
+        active_ms: original_ms,
+        ..
+    } = &events[compaction_call + 3].event
+    else {
+        panic!("active compaction settlement");
+    };
+    let original_ms = *original_ms;
     let mut delayed_ack = events.clone();
     let Event::GoalActiveTimeSettled { active_ms, .. } =
         &mut delayed_ack[compaction_call + 3].event
@@ -554,11 +562,22 @@ async fn goal_call_budget_blocks_a_later_run_before_provider_dispatch() {
         panic!("active compaction settlement");
     };
     *active_ms = settled_ms;
+    // The terminal receipt records the Goal total, which the overrun shifts by the same delta.
+    let total_ms = match &mut delayed_ack.last_mut().expect("terminal Goal receipt").event {
+        Event::GoalFinished { active_ms, .. } => {
+            *active_ms = active_ms
+                .checked_sub(original_ms)
+                .and_then(|prior| prior.checked_add(settled_ms))
+                .unwrap();
+            *active_ms
+        }
+        _ => panic!("terminal Goal receipt"),
+    };
     let replay = SessionView::replay(initial.session_id, &delayed_ack)
         .expect("bounded acknowledged compaction overrun is settled rather than left reserved")
         .expect("Session");
     assert_eq!(replay.goals[0].reserved_active_ms, None);
-    assert_eq!(replay.goals[0].active_ms, settled_ms);
+    assert_eq!(replay.goals[0].active_ms, total_ms);
     store.close().await.expect("Store shutdown");
 }
 

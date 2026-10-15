@@ -1160,6 +1160,19 @@ mod goal_status_tests {
         view.goals[0].active_ms = view.goals[0].effective_budget().max_active_ms.unwrap_or(0);
         let spent = goal_status(&view);
         assert!(spent.ends_with(" · out of budget"), "{spent}");
+
+        // An unsettled active-time reservation that resume would settle as spent is counted.
+        let mut view = session_with_goal(true);
+        view.goals[0].status = GoalStatus::Interrupted;
+        let limit = view.goals[0]
+            .effective_budget()
+            .max_active_ms
+            .expect("finite active limit");
+        view.goals[0].active_ms = limit - 1;
+        view.goals[0].reserved_active_run = Some(crate::session::RunId::new());
+        view.goals[0].reserved_active_ms = Some(1);
+        let reserved = goal_status(&view);
+        assert!(reserved.ends_with(" · out of budget"), "{reserved}");
     }
 
     #[test]

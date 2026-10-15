@@ -2358,11 +2358,6 @@ impl<P: Provider + 'static> Engine<P> {
             .filter(|run| run.id == run_id)
             .ok_or(EngineError::InvalidHistory)?
             .clone();
-        let view = self
-            .store
-            .load_view(session_id)
-            .await?
-            .ok_or(EngineError::InvalidHistory)?;
         let goal_view = view.goal(goal.id).ok_or(EngineError::InvalidHistory)?;
         // Only Run failure or a satisfied/exhausted Goal settles it; a cancelled Run leaves its Goal open to resume.
         let terminal = match run.status {

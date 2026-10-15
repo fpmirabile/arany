@@ -903,14 +903,14 @@ mod tests {
                 "GoalRunLinked",
                 "MessageAccepted",
                 "RunStarted",
-                "GoalActiveTimeReserved",
                 "AgentSpawned",
+                "GoalActiveTimeReserved",
                 "GoalProviderCallReserved",
                 "ProviderCallRecorded",
+                "GoalActiveTimeSettled",
                 "AgentFinished",
                 "MessageCommitted",
                 "RunFinished",
-                "GoalActiveTimeSettled",
                 "GoalFinished",
             ]
         );
@@ -920,7 +920,7 @@ mod tests {
         assert_eq!(lines[7]["payload"]["response_id"], "resp_test");
         assert_eq!(lines[7]["payload"]["input_tokens"], 20);
         assert_eq!(lines[7]["payload"]["output_tokens"], 10);
-        assert_eq!(lines[10]["kind"], "RunFinished");
+        assert_eq!(lines[11]["kind"], "RunFinished");
         assert_eq!(lines[12]["kind"], "GoalFinished");
         assert_eq!(
             lines[0]["payload"]["goal_id"],
@@ -1077,19 +1077,19 @@ mod tests {
                 "GoalRunLinked",
                 "MessageAccepted",
                 "RunStarted",
-                "GoalActiveTimeReserved",
                 "AgentSpawned",
+                "GoalActiveTimeReserved",
                 "GoalProviderCallReserved",
                 "ProviderCallRecorded",
+                "GoalActiveTimeSettled",
                 "AgentFinished",
                 "MessageCommitted",
                 "RunFinished",
-                "GoalActiveTimeSettled",
                 "GoalFinished",
             ]
         );
         assert_eq!(new_lines[3]["payload"]["text"], "//literal new");
-        assert_eq!(new_lines[11]["kind"], "RunFinished");
+        assert_eq!(new_lines[12]["kind"], "RunFinished");
         assert_eq!(new_lines[13]["kind"], "GoalFinished");
         assert_eq!(
             new_lines[1]["payload"]["goal_id"],

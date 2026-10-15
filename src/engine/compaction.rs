@@ -67,7 +67,12 @@ impl<P: Provider + 'static> Engine<P> {
             return Err(EngineError::CompactionNotIdle);
         }
         let covered_run_id = last_run.id;
-        let goal = view.goals.last().filter(|goal| {
+        let open_view = self
+            .store
+            .load_open_view(session_id)
+            .await?
+            .ok_or(EngineError::MissingSession)?;
+        let goal = open_view.goals.iter().find(|goal| {
             goal.status == crate::session::GoalStatus::Running
                 && goal.run_ids.last() == Some(&covered_run_id)
         });

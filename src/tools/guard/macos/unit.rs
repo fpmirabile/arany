@@ -1801,6 +1801,7 @@ done
             super::super::super::attest_runtime_mounts(
                 &call,
                 std::slice::from_ref(&grant),
+                false,
                 &mut stage,
             ),
             Err(ToolError::ProtectionUnavailable)

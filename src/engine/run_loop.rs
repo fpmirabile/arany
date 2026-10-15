@@ -474,9 +474,16 @@ impl GoalRunBudget {
     }
 
     fn can_narrow(&self, contract: &crate::session::GoalPlanContract) -> bool {
-        // This Run is already linked, so the plan must allow it along with the earlier Runs.
+        // This Run is already linked, so the plan must allow it along with the earlier Runs. The in-flight
+        // reservation is an upper bound for this call, so only its elapsed time counts against the plan.
         self.admission_usage(self.runs_used_before)
-            .is_some_and(|usage| contract.budget.admits_next_run(usage))
+            .is_some_and(|usage| {
+                let reserved = self.reserved_active_ms.load(Ordering::Acquire);
+                contract.budget.admits_next_run(GoalUsage {
+                    active_ms: usage.active_ms.saturating_sub(reserved),
+                    ..usage
+                })
+            })
     }
 
     fn active_time_exhausted(&self) -> bool {
@@ -649,7 +656,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
     async fn fail_known_budget_exhaustion(&self, primary: AgentTrace) -> Result<(), EngineError> {
         let view = self
             .store
-            .load_view(self.session_id)
+            .load_open_view(self.session_id)
             .await?
             .ok_or(EngineError::InvalidHistory)?;
         let goal = view.goal(self.goal_id).ok_or(EngineError::InvalidHistory)?;
@@ -889,15 +896,13 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         .await?;
         let success_state = self
             .store
-            .load_view(self.session_id)
+            .load_open_view(self.session_id)
             .await?
-            .and_then(|view| {
-                view.goals
-                    .last()
-                    .filter(|goal| goal.id == self.goal_id)
-                    .map(|goal| goal.success_state.clone())
-            })
-            .ok_or(EngineError::InvalidHistory)?;
+            .ok_or(EngineError::InvalidHistory)?
+            .goal(self.goal_id)
+            .ok_or(EngineError::InvalidHistory)?
+            .success_state
+            .clone();
         if self
             .controls
             .goal_budget

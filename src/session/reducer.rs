@@ -669,8 +669,8 @@ impl SessionView {
             && !matches!(&envelope.event, Event::GoalStarted { .. })
             && !matches!(
                 &envelope.event,
-                Event::GoalActiveTimeSettled { goal_id, run_id, .. }
-                    if current.goals.last().is_some_and(|goal| goal.id == *goal_id && goal.active_run == Some(*run_id))
+                Event::GoalActiveTimeReserved { goal_id, .. } | Event::GoalActiveTimeSettled { goal_id, .. }
+                    if *goal_id == awaiting
             )
             && !closes_run_without_plan(&envelope.event)
         {
@@ -703,11 +703,16 @@ impl SessionView {
                 phase,
                 autonomous,
             } => {
-                current.start_goal(goal_id, objective, workspace_identity, budget, phase, prior)?;
-                if let Some(goal) = current.goals.last_mut() {
-                    goal.autonomous = *autonomous;
-                    goal.resource_settings = *resource_settings;
-                }
+                current.start_goal(
+                    goal_id,
+                    objective,
+                    workspace_identity,
+                    budget,
+                    resource_settings,
+                    phase,
+                    *autonomous,
+                    prior,
+                )?;
             }
             Event::GoalRunLinked {
                 goal_id,
@@ -757,9 +762,7 @@ impl SessionView {
                 record,
             } => {
                 let goal = current
-                    .goals
-                    .last()
-                    .filter(|goal| goal.id == *goal_id)
+                    .goal(*goal_id)
                     .ok_or(ReplayError::InvalidTransition)?;
                 let run = current
                     .runs
@@ -820,10 +823,10 @@ impl SessionView {
                 if boundary != Some((record.covered_run_id, record.covered_sequence)) {
                     return Err(ReplayError::InvalidSnapshot);
                 }
-                if let Some(goal) = current.goals.last_mut()
-                    && goal.status == GoalStatus::Running
-                    && goal.run_ids.last() == Some(&record.covered_run_id)
-                {
+                if let Some(goal) = current.goals.iter_mut().find(|goal| {
+                    goal.status == GoalStatus::Running
+                        && goal.run_ids.last() == Some(&record.covered_run_id)
+                }) {
                     if goal.compaction_call_reserved != Some(record.covered_run_id) {
                         return Err(ReplayError::InvalidTransition);
                     }
@@ -1948,6 +1951,71 @@ mod goal_replay_tests {
             SessionView::replay_open(session, &session_with(session, admissible)).is_err(),
             "a crash-left Goal that still admits a Run cannot close as Failed"
         );
+    }
+
+    #[test]
+    fn resumed_crash_left_compaction_call_settles_as_uncertain() {
+        let session_id = SessionId::new();
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let mut events = vec![goal_started(goal_id, GoalBudget::default())];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.extend(cancel_run(run_id, agent_run_id));
+        // The process died after the compaction call was reserved, before its outcome was journaled.
+        events.push(Event::GoalCompactionCallReserved { goal_id, run_id });
+        events.push(Event::GoalResumed { goal_id });
+
+        let view = SessionView::replay_open(session_id, &session_with(session_id, events))
+            .expect("resumed Goal replays")
+            .expect("Session exists");
+        let goal = view.goal(goal_id).expect("Goal");
+        assert_eq!(goal.status, GoalStatus::Running);
+        assert_eq!(goal.compaction_call_reserved, None);
+        assert_eq!(goal.uncertain_compaction_calls, 1);
+        assert!(goal.token_usage_unknown);
+    }
+
+    #[test]
+    fn exhausted_goal_closes_over_a_crash_left_compaction_call() {
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let budget = GoalBudget {
+            max_provider_calls: Some(1),
+            ..GoalBudget::default()
+        };
+        let mut events = vec![goal_started(goal_id, budget)];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.extend(cancel_run(run_id, agent_run_id));
+        // The only admitted call is the compaction call, whose outcome never committed.
+        events.push(Event::GoalCompactionCallReserved { goal_id, run_id });
+        events.push(Event::GoalFinished {
+            goal_id,
+            status: GoalStatus::Failed,
+            active_ms: 0,
+            report: GoalReport {
+                summary: "Goal budget is exhausted.".into(),
+                changes: Vec::new(),
+                evidence: Vec::new(),
+                unresolved: Vec::new(),
+            },
+        });
+
+        let session = SessionId::new();
+        let view = SessionView::replay_open(session, &session_with(session, events))
+            .expect("an exhausted Goal closes over its crash-left compaction call")
+            .expect("Session exists");
+        let goal = view.goal(goal_id).expect("Goal");
+        assert_eq!(goal.status, GoalStatus::Failed);
+        assert_eq!(goal.compaction_call_reserved, None);
+        assert_eq!(goal.uncertain_compaction_calls, 1);
     }
 
     #[test]

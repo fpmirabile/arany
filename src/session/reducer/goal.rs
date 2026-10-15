@@ -9,13 +9,17 @@ use crate::session::events::{
 };
 
 impl SessionView {
+    // The event's fields plus the replay prior; a struct would only forward them.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn start_goal(
         &mut self,
         goal_id: &GoalId,
         objective: &str,
         workspace_identity: &(u64, u64),
         budget: &GoalBudget,
+        resource_settings: &crate::tools::ToolResourceSettings,
         phase: &GoalPhase,
+        autonomous: bool,
         prior: u64,
     ) -> Result<(), ReplayError> {
         if self.goals.iter().any(|goal| goal.id == *goal_id)
@@ -39,9 +43,9 @@ impl SessionView {
             objective: objective.to_owned(),
             workspace_identity: *workspace_identity,
             budget: *budget,
-            resource_settings: crate::tools::ToolResourceSettings::default(),
+            resource_settings: *resource_settings,
             phase: *phase,
-            autonomous: false,
+            autonomous,
             status: GoalStatus::Running,
             run_ids: Vec::new(),
             active_run: None,

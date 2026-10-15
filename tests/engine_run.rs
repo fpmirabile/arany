@@ -384,6 +384,26 @@ fn request(workspace: &Path, objective: &str) -> RunRequest {
     }
 }
 
+/// Context bytes the Engine reserves for an unplanned Goal's metadata: pinned budget, maximum facts, plan allowance and framing.
+fn unplanned_goal_metadata_bytes() -> u32 {
+    let facts = arany::GoalContextFacts {
+        provider_calls: u32::MAX,
+        known_tokens: u64::MAX,
+        token_usage_unknown: true,
+        active_ms: u64::MAX,
+        reserved_active_ms: u64::MAX,
+        uncertain_active_ms: u64::MAX,
+        success_criterion_satisfied: Some(true),
+    };
+    let encoded = serde_json::to_vec(&(
+        arany::GoalBudget::default(),
+        None::<arany::GoalPlanContract>,
+        facts,
+    ))
+    .expect("Goal metadata");
+    u32::try_from(encoded.len() + 8 * 1024 + 64).expect("bounded Goal metadata")
+}
+
 fn include_data(path: &str, text: &str) -> String {
     let digest: String = Sha256::digest(text.as_bytes())
         .iter()
@@ -825,7 +845,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             assert_eq!(compact.max_output_tokens, 1024);
             assert!(compact.previous_summary.is_none());
             assert_eq!(compact.items.len(), 4);
-            let mut source_bytes = 0;
+            let mut source_items = Vec::new();
             for (item, (objective, answer, image)) in compact.items.iter().zip([
                 ("First question", "First result", &first_image),
                 ("Second question", "Second result", &second_image),
@@ -836,9 +856,14 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 let user = format!("{objective}\nImage 1: PNG 1x1, {} bytes, SHA-256 {digest}", image.byte_len());
                 assert_eq!(item, &CompactionItem::Completed(arany::HistoryTurn { user: user.clone(), assistant: answer.into() }));
                 assert!(!user.contains(image.base64()), "compaction excludes image bytes");
-                source_bytes += user.len() + answer.len() + 64;
+                source_items.push(serde_json::json!({"status": "completed", "user": user, "assistant": answer}));
             }
-            assert_eq!(compacted.source_bytes as usize, source_bytes);
+            // The recorded source is the serialized compaction input: no previous summary, then the completed items.
+            let source = serde_json::json!({"previous_derived_summary": null, "items": source_items});
+            assert_eq!(
+                compacted.source_bytes as usize,
+                serde_json::to_vec(&source).unwrap().len()
+            );
         }
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
         let events = store.load_session(first.session_id).await.unwrap();
@@ -868,7 +893,8 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 .filter(|event| matches!(event.event, Event::GoalFinished { .. }))
                 .count(),
         ];
-        assert_eq!(goal_event_counts, [5, 5, 5, 7, 5, 5]);
+        // Each Provider call reserves and settles its own active time; the Run lifecycle carries one reservation per Run.
+        assert_eq!(goal_event_counts, [5, 5, 7, 7, 7, 5]);
         let non_goal_events = events
             .iter()
             .filter(|event| {
@@ -884,7 +910,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             })
             .count();
         assert_eq!(non_goal_events, 41);
-        assert_eq!(events.len(), 73);
+        assert_eq!(events.len(), 77);
         let view = SessionView::replay(first.session_id, &events).unwrap().unwrap();
         for (run_id, phase) in [
             (first.run.id, AgentPhase::RootPlan),
@@ -1339,7 +1365,7 @@ fn compaction_is_derived_durable_context_and_failure_keeps_the_prior_summary() {
                 used_bytes: ("Question two".len()
                     + include_data("notes/facts.txt", "Fact").len()
                     + 86) as u32,
-                budget_bytes: 376 * 1024,
+                budget_bytes: 376 * 1024 - unplanned_goal_metadata_bytes(),
                 compactable_bytes: 86,
                 tool_history_bytes: 0,
             })
@@ -1369,7 +1395,7 @@ fn compaction_is_derived_durable_context_and_failure_keeps_the_prior_summary() {
         pressure.context_usage = None;
         assert!(!pressure.auto_compaction_due(), "unknown footprint");
         for (tool_history, bytes, due) in
-            [(1, 43_903, false), (1, 43_904, true), (0, 43_904, false)]
+            [(1, 179_071, false), (1, 179_072, true), (0, 179_072, true)]
         {
             pressure.context_usage = Some(ContextUsage {
                 used_bytes: bytes,
@@ -1377,7 +1403,11 @@ fn compaction_is_derived_durable_context_and_failure_keeps_the_prior_summary() {
                 compactable_bytes: bytes,
                 tool_history_bytes: tool_history,
             });
-            assert_eq!(pressure.auto_compaction_due(), due, "Tool source headroom");
+            assert_eq!(
+                pressure.auto_compaction_due(),
+                due,
+                "Tool history shares the compaction threshold"
+            );
         }
         pressure.context_usage = None;
         pressure.history_run_ids = vec![RunId::new(); 22];
@@ -2275,18 +2305,19 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(workspace.join("notes")).unwrap();
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").unwrap();
-        // Finite one-Run budgets reserve 77/83/82/205 Events for single/team/Tools/previews.
+        // Each admitted action reserves its worst-case Event envelope before dispatch; the boundary is the
+        // largest prefix that still admits the Run: 13 Events for a single plain Run, 23 for one Team child.
         for (index, (prefix, policy, admitted, tools, branch, previews)) in [
-            (9924, CollaborationPolicy::Single, false, false, false, false),
-            (9923, CollaborationPolicy::Single, true, false, false, false),
-            (9918, CollaborationPolicy::Team { max_active_children: 1 }, false, false, false, false),
-            (9917, CollaborationPolicy::Team { max_active_children: 1 }, true, false, false, false),
-            (9919, CollaborationPolicy::Single, false, true, false, false),
-            (9918, CollaborationPolicy::Single, true, true, false, false),
-            (9923, CollaborationPolicy::Single, false, false, true, false),
-            (9922, CollaborationPolicy::Single, true, false, true, false),
-            (9796, CollaborationPolicy::Single, false, false, false, true),
-            (9795, CollaborationPolicy::Single, true, false, false, true),
+            (9988, CollaborationPolicy::Single, false, false, false, false),
+            (9987, CollaborationPolicy::Single, true, false, false, false),
+            (9978, CollaborationPolicy::Team { max_active_children: 1 }, false, false, false, false),
+            (9977, CollaborationPolicy::Team { max_active_children: 1 }, true, false, false, false),
+            (9988, CollaborationPolicy::Single, false, true, false, false),
+            (9987, CollaborationPolicy::Single, true, true, false, false),
+            (9987, CollaborationPolicy::Single, false, false, true, false),
+            (9986, CollaborationPolicy::Single, true, false, true, false),
+            (9924, CollaborationPolicy::Single, false, false, false, true),
+            (9923, CollaborationPolicy::Single, true, false, false, true),
         ].into_iter().enumerate() {
             let path = temp.path().join(format!("state-{index}"));
             let finish = || ProviderOutcome::Finish(Finish { summary: "done".into(), result: "answer".into() });
@@ -2346,19 +2377,33 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             }
             engine.close().await.unwrap();
             let phases: Vec<_> = requests.lock().unwrap().iter().map(|request| request.phase).collect();
-            assert_eq!(phases, if !admitted { vec![] } else if matches!(policy, CollaborationPolicy::Single) { vec![AgentPhase::RootPlan] } else { vec![AgentPhase::RootPlan, AgentPhase::ChildWork, AgentPhase::RootSynthesis] }, "case {index}");
+            // Each action is admitted before its own dispatch: a Team refused at its child wave has already dispatched the root plan.
+            let expected_phases = match (admitted, policy) {
+                (true, CollaborationPolicy::Single) => vec![AgentPhase::RootPlan],
+                (true, _) => vec![AgentPhase::RootPlan, AgentPhase::ChildWork, AgentPhase::RootSynthesis],
+                (false, CollaborationPolicy::Single) => vec![],
+                (false, _) => vec![AgentPhase::RootPlan],
+            };
+            assert_eq!(phases, expected_phases, "case {index}");
             let store = Store::open_read_only(StateRoot::open_existing(&path).unwrap()).unwrap();
             let expected_event_count = if branch {
-                if admitted { 14 } else { 1 }
+                // The fork's own Event plus the Single Run's admitted or refused prefix.
+                if admitted { 14 } else { 6 }
             } else if admitted {
                 prefix as usize
                     + if matches!(policy, CollaborationPolicy::Single) {
                         13
                     } else {
-                        19
+                        23
                     }
             } else {
+                // A refused Run keeps the committed prefix its admission allowed before the refused action.
                 prefix as usize
+                    + match policy {
+                        CollaborationPolicy::Single if previews => 6,
+                        CollaborationPolicy::Single => 5,
+                        _ => 11,
+                    }
             };
             assert_eq!(
                 store.load_session(id).await.unwrap().len(),
@@ -2366,8 +2411,10 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
                 "case {index}: exact committed Event count"
             );
             let view = store.load_view(id).await.unwrap().unwrap();
-            assert_eq!(view.runs.len(), if admitted { 2 } else { 1 });
-            assert!(view.runs.iter().all(|run| run.status == RunStatus::Finished));
+            assert_eq!(view.runs.len(), 2, "case {index}: the refused Run keeps its committed start");
+            assert_eq!(view.runs[0].status, RunStatus::Finished);
+            // A refused Run is an interrupted prefix: replay labels it interrupted, never Finished.
+            assert_eq!(view.runs[1].status == RunStatus::Finished, admitted, "case {index}");
             store.close().await.unwrap();
         }
         for (index, (prefix, prior_forks, admitted)) in [
@@ -2429,7 +2476,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
         }
         let path = temp.path().join("compactions");
         let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish { summary: "source".into(), result: "answer".into() }), ProviderOutcome::Finish(Finish { summary: "later".into(), result: "later answer".into() })])
-            .with_compactions((0..65).map(|_| Err(ProviderError::RemoteHttp(403))).collect());
+            .with_compactions((0..66).map(|_| Err(ProviderError::RemoteHttp(403))).collect());
         let calls = provider.compact_requests.clone();
         let mut engine = Engine::open(StateRoot::admit(&path).unwrap(), provider).unwrap();
         let id = engine.run(request(&workspace, "Source")).await.unwrap().session_id;
@@ -2442,7 +2489,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
         later.title = None;
         engine.run(later).await.unwrap();
         let branch = engine.fork_session(id, workspace.clone(), None).await.unwrap();
-        assert!(matches!(engine.compact_session(branch, workspace.clone()).await.unwrap().status, CompactionStatus::Failed { .. }), "inherited compactions do not consume the fork's direct quota");
+        assert!(matches!(engine.compact_session(branch, workspace.clone()).await.unwrap().status, CompactionStatus::Failed { .. }), "inherited compactions do not block the fork's own compaction attempt");
         assert_eq!(calls.lock().unwrap().len(), 66);
         engine.close().await.unwrap();
         let store = Store::open_read_only(StateRoot::open_existing(&path).unwrap()).unwrap();
@@ -2931,7 +2978,7 @@ fn one_child_team_finishes_only_after_child_result_is_committed() {
             Some(ContextUsage {
                 used_bytes: ("Question".len() + include_data("notes/facts.txt", "Fact").len())
                     as u32,
-                budget_bytes: 376 * 1024 - (20 * 1024 + 64),
+                budget_bytes: 376 * 1024 - (20 * 1024 + 64) - unplanned_goal_metadata_bytes(),
                 compactable_bytes: 0,
                 tool_history_bytes: 0,
             })
@@ -2958,7 +3005,8 @@ fn one_child_team_finishes_only_after_child_result_is_committed() {
             .load_session(outcome.session_id)
             .await
             .expect("durable Events");
-        assert_eq!(events.len(), 20);
+        // Each action reserves and settles its own active time: primary, child wave and synthesis.
+        assert_eq!(events.len(), 24);
         assert_eq!(
             events
                 .iter()

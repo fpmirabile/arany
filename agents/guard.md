@@ -60,14 +60,15 @@ limits and compatibility.
   Both scans reject whole hostile/over-limit snapshots without reading excluded
   content. Engine owns command-receipt linkage; Guard independently validates
   the integration's whole batch and file preconditions.
-- The persistent Workspace cache is imported into the existing quota-backed
-  scratch view before Ready/GO and is never backed by a StateRoot mount or a
+- The persistent Workspace cache is imported into a separate quota-backed cache
+  view before Ready/GO (Linux `/cache`; macOS cache volume, or the private scratch
+  volume when no cache is admitted) and is never backed by a StateRoot mount or a
   host parent grant. Capture its candidate only after positive payload-descendant
   termination, but retain no publication authority in the worker: the controller
   streams bounded candidate data to Store only after native seed/unit cleanup is
   positively confirmed. Input overflow rejects before GO; candidate overflow
   rejects publication after command execution and preserves the last committed
-  cache. On macOS, read/capture the mounted scratch volume while its checked
+  cache. On macOS, read/capture the mounted cache or scratch volume while its checked
   handle is live, then positively empty the coalition and detach storage before
   Store publication. An explicitly selected read-only host-cache subtree takes
   precedence: exclude that exact relative root before private archive traversal,
@@ -97,8 +98,11 @@ limits and compatibility.
   retain C string lifetimes through each call and free native error allocations
   once. Never parse or print arbitrary native diagnostics. The syscall-number
   filter and explicit Darwin syscall numbers support only reviewed 64-bit ABIs.
-- Linux toolchains mount at their exact host paths; caches mount under
-  `/cache`, a separate quota-backed volume sized by the build-cache limit. A toolchain target that equals, lies under or contains a path the
+- Linux toolchains mount at their exact host paths; host-cache grants mount
+  under `/cache`, a separate quota-backed volume sized by the build-cache limit,
+  when a cache view is admitted, and under private `/scratch` otherwise. Both
+  Linux and macOS use `sandbox_cache_root` and the same base for the payload's
+  `CARGO_HOME`, `npm_config_cache` and `PIP_CACHE_DIR`. A toolchain target that equals, lies under or contains a path the
   profile mounts or creates is rejected before seed creation. Keep Linux
   `/lib` targeting `/usr/lib` and `/lib64` targeting `/usr/lib64`: mapping both to
   `/usr/lib` hides the x86-64 ELF loader even when the ARM64 native gates pass.

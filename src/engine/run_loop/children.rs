@@ -121,6 +121,24 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         {
             return self.fail_known_budget_exhaustion(primary).await;
         }
+        let parallel = self.controls.goal_budget.provider_concurrency(
+            usize::from(self.controls.concurrency)
+                .min(usize::from(self.controls.policy.max_children())),
+        );
+        let waves = objectives.len().div_ceil(parallel.max(1));
+        let active_bound =
+            super::CALL_DEADLINE.saturating_mul(u32::try_from(waves).unwrap_or(u32::MAX));
+        let active_event_tail = 10_usize.saturating_add(objectives.len().saturating_mul(3));
+        let active_segment = match self
+            .reserve_active_segment_with_tail(active_bound, active_event_tail)
+            .await
+        {
+            Ok(segment) => segment,
+            Err(EngineError::GoalBudgetExhausted) => {
+                return self.fail_known_budget_exhaustion(primary).await;
+            }
+            Err(error) => return Err(error),
+        };
         let mut children = Vec::with_capacity(objectives.len());
         for (index, objective) in objectives.into_iter().enumerate() {
             if self.controls.cancellation.is_cancelled() {
@@ -142,6 +160,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
             });
         }
         if self.controls.cancellation.is_cancelled() {
+            self.settle_active_segment(active_segment).await?;
             for mut child in children {
                 self.finish_child(child.agent_run_id, AgentDisposition::Cancelled, None, false)
                     .await?;
@@ -155,34 +174,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         }
 
         let mut results = vec![None; children.len()];
-        let parallel = self.controls.goal_budget.provider_concurrency(
-            usize::from(self.controls.concurrency)
-                .min(usize::from(self.controls.policy.max_children())),
-        );
         let mut queue = ChildQueue::new(children.len(), parallel);
-        let waves = children.len().div_ceil(parallel.max(1));
-        let active_bound =
-            super::CALL_DEADLINE.saturating_mul(u32::try_from(waves).unwrap_or(u32::MAX));
-        let active_event_tail = 10_usize.saturating_add(children.len().saturating_mul(3));
-        let active_segment = match self
-            .reserve_active_segment_with_tail(active_bound, active_event_tail)
-            .await
-        {
-            Ok(segment) => segment,
-            Err(EngineError::GoalBudgetExhausted) => {
-                for child in &mut children {
-                    self.finish_child(child.agent_run_id, AgentDisposition::Cancelled, None, false)
-                        .await?;
-                    child
-                        .trace
-                        .take()
-                        .expect("child trace exists")
-                        .finish(TraceOutcome::Cancelled);
-                }
-                return self.fail_known_budget_exhaustion(primary).await;
-            }
-            Err(error) => return Err(error),
-        };
         let deadline = active_segment.deadline();
         if let Err(error) = self
             .fill_slots(&mut queue, &children, root_request, deadline)

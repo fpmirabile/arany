@@ -553,11 +553,6 @@ mod goal_success_tests {
             observation(call, ToolDisposition::Failed, "".into()),
         ];
         assert!(!matches_success(&contract, &observations));
-        let mut state = contract.initial_success_state();
-        for observation in &observations {
-            contract.observe_success(&mut state, observation);
-        }
-        assert!(!contract.success_state_satisfied(&state));
     }
 
     #[test]
@@ -721,11 +716,6 @@ mod goal_success_tests {
             ),
         ];
         assert!(!matches_success(&contract, &observations));
-        let mut state = contract.initial_success_state();
-        for observation in &observations {
-            contract.observe_success(&mut state, observation);
-        }
-        assert!(!contract.success_state_satisfied(&state));
     }
 
     #[test]
@@ -1294,6 +1284,12 @@ mod account_default_tests {
             missing.as_object_mut().unwrap().remove(field);
             assert!(serde_json::from_value::<GoalBudget>(missing).is_err());
         }
+        let mut unlimited = encoded;
+        unlimited["max_provider_calls"] = serde_json::Value::Null;
+        unlimited["max_active_ms"] = serde_json::Value::Null;
+        let decoded = serde_json::from_value::<GoalBudget>(unlimited).unwrap();
+        assert_eq!(decoded.max_provider_calls, None);
+        assert_eq!(decoded.max_active_ms, None);
     }
 
     #[test]

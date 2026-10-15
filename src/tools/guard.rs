@@ -433,10 +433,13 @@ fn bind_runtime_grants(
     Ok(digest(&bytes))
 }
 
-fn verify_runtime_grants(config: &Config) -> Result<(), ToolError> {
+fn verify_runtime_grants(
+    config: &Config,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] cache_enabled: bool,
+) -> Result<(), ToolError> {
     for grant in &config.runtime_grants {
         #[cfg(target_os = "linux")]
-        grant.verify_at(&grant.mounted_path()?)?;
+        grant.verify_at(&grant.mounted_path(cache_enabled)?)?;
         #[cfg(target_os = "macos")]
         grant.verify_host()?;
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -447,7 +450,7 @@ fn verify_runtime_grants(config: &Config) -> Result<(), ToolError> {
 
 fn verify_intent_runtime_grants(intent: &EffectIntent, config: &Config) -> Result<(), ToolError> {
     if intent.call.is_process() {
-        verify_runtime_grants(config)
+        verify_runtime_grants(config, intent.limits.cache_bytes > 0)
     } else {
         Ok(())
     }
@@ -456,6 +459,7 @@ fn verify_intent_runtime_grants(intent: &EffectIntent, config: &Config) -> Resul
 fn attest_runtime_mounts(
     call: &ToolCall,
     grants: &[RuntimeGrant],
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] cache_enabled: bool,
     stage: &mut BootstrapStage,
 ) -> Result<(), ToolError> {
     if !call.is_process() {
@@ -463,7 +467,7 @@ fn attest_runtime_mounts(
     }
     *stage = BootstrapStage::RuntimeMounts;
     #[cfg(target_os = "linux")]
-    linux::verify_runtime_mounts(grants)?;
+    linux::verify_runtime_mounts(grants, cache_enabled)?;
     #[cfg(target_os = "macos")]
     macos::verify_runtime_mounts(grants)?;
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -848,7 +852,12 @@ pub(super) fn helper_main() -> ExitCode {
             return Err(ToolError::Configuration);
         }
         let (root, workspace) = bootstrap_locations(&task, &mut stage)?;
-        attest_runtime_mounts(&task.intent.call, &task.config.runtime_grants, &mut stage)?;
+        attest_runtime_mounts(
+            &task.intent.call,
+            &task.config.runtime_grants,
+            task.intent.limits.cache_bytes > 0,
+            &mut stage,
+        )?;
         #[cfg(target_os = "linux")]
         if let Some(cache) = &task.cache {
             let mut stdout = std::io::stdout().lock();
@@ -933,7 +942,12 @@ pub(super) fn helper_main() -> ExitCode {
             return Err(ToolError::Configuration);
         }
         verify_intent_runtime_grants(&task.intent, &task.config)?;
-        attest_runtime_mounts(&task.intent.call, &task.config.runtime_grants, &mut stage)?;
+        attest_runtime_mounts(
+            &task.intent.call,
+            &task.config.runtime_grants,
+            task.intent.limits.cache_bytes > 0,
+            &mut stage,
+        )?;
         drop(stdin);
         stage = BootstrapStage::Payload;
         #[cfg(not(target_os = "macos"))]
@@ -993,7 +1007,13 @@ pub(super) fn helper_main() -> ExitCode {
                     skill.ok_or(ToolError::Configuration)?,
                 ),
                 ToolCall::McpList { .. } | ToolCall::McpCall { .. } => {
-                    super::mcp::execute(&task.intent.call, &task.config, &root).await
+                    super::mcp::execute(
+                        &task.intent.call,
+                        &task.config,
+                        &root,
+                        task.intent.limits.cache_bytes > 0,
+                    )
+                    .await
                 }
                 call => super::fs::native(workspace, call, &task.config),
             }

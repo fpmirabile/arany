@@ -150,6 +150,7 @@ pub(super) async fn execute(
     call: &ToolCall,
     config: &Config,
     root: &Path,
+    cache_enabled: bool,
 ) -> Result<String, ToolError> {
     let name = match call {
         ToolCall::McpList { server } | ToolCall::McpCall { server, .. } => server,
@@ -166,7 +167,7 @@ pub(super) async fn execute(
         "",
         root,
         &config.runtime_grants,
-        false,
+        cache_enabled,
     )?;
     command.stdin(Stdio::piped());
     let mut child = command.spawn().map_err(|_| ToolError::Operation)?;

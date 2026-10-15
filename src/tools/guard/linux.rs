@@ -587,7 +587,8 @@ pub(super) async fn execute_inner(
     } else {
         &[]
     };
-    let (runtime_directories, mounts) = runtime_mounts(runtime_grants)?;
+    let (runtime_directories, mounts) =
+        runtime_mounts(runtime_grants, intent.limits.cache_bytes > 0)?;
     let runtime_path = super::runtime_path(runtime_grants)?;
     let workspace = crate::tools::fs::open_directory(&runtime.workspace)?;
     let mut cache = super::build_cache_session(runtime, intent)?;
@@ -879,19 +880,18 @@ type RuntimeMounts = (Vec<PathBuf>, Vec<(PathBuf, PathBuf)>);
 /// Verifies every grant before any seed exists; a rejected grant leaves no state behind.
 fn runtime_mounts(
     grants: &[super::super::toolchains::RuntimeGrant],
+    cache_enabled: bool,
 ) -> Result<RuntimeMounts, ToolError> {
     let mut directories = Vec::new();
     let mut mounts = Vec::new();
     for grant in grants {
         grant.verify_host()?;
-        let target = grant.mounted_path()?;
+        let target = grant.mounted_path(cache_enabled)?;
         let root = if grant.kind.is_toolchain() {
             reject_profile_overlap(&target)?;
             Path::new("/")
-        } else if grant.kind.is_cache() {
-            Path::new("/cache")
         } else {
-            Path::new("/scratch")
+            Path::new(super::super::toolchains::sandbox_cache_root(cache_enabled))
         };
         directories.extend(mount_directories(&target, root));
         mounts.push((grant.path.clone(), target));
@@ -987,6 +987,7 @@ fn profile_arguments(
 
 pub(super) fn verify_runtime_mounts(
     grants: &[super::super::toolchains::RuntimeGrant],
+    cache_enabled: bool,
 ) -> Result<(), ToolError> {
     use std::io::Read;
 
@@ -1002,7 +1003,7 @@ pub(super) fn verify_runtime_mounts(
     let mounts = parse_mountinfo(&bytes)?;
     let targets = grants
         .iter()
-        .map(super::super::toolchains::RuntimeGrant::mounted_path)
+        .map(|grant| grant.mounted_path(cache_enabled))
         .collect::<Result<Vec<_>, _>>()?;
     verify_mount_entries(&mounts, &targets)
 }
@@ -1370,13 +1371,31 @@ mod tests {
             command_path,
             format!(
                 "{}:/usr/bin:/bin",
-                node.grant.mounted_path().unwrap().join("bin").display()
+                node.grant
+                    .mounted_path(false)
+                    .unwrap()
+                    .join("bin")
+                    .display()
             )
         );
         assert_eq!(
-            cache.grant.mounted_path().unwrap(),
+            cache.grant.mounted_path(true).unwrap(),
             Path::new("/cache/cargo/registry/cache")
         );
+        assert_eq!(
+            cache.grant.mounted_path(false).unwrap(),
+            Path::new("/scratch/cargo/registry/cache")
+        );
+        let (directories, mounts) =
+            runtime_mounts(std::slice::from_ref(&cache.grant), false).unwrap();
+        assert_eq!(
+            mounts,
+            [(
+                cache.grant.path.clone(),
+                PathBuf::from("/scratch/cargo/registry/cache")
+            )]
+        );
+        assert!(directories.iter().all(|path| path.starts_with("/scratch")));
         assert!(node.grant.verify_host().is_ok() && cache.grant.verify_host().is_ok());
     }
 
@@ -1864,7 +1883,7 @@ mod tests {
             let grant: RuntimeGrant =
                 serde_json::from_slice(&std::fs::read(grant_path).expect("fixture grant"))
                     .expect("fixture grant schema");
-            let target = grant.mounted_path().unwrap();
+            let target = grant.mounted_path(false).unwrap();
             grant.verify_at(&target).expect("runtime alias identity");
             let call = ToolCall::Command {
                 program: "node".into(),
@@ -1873,7 +1892,7 @@ mod tests {
             };
             let grants = std::slice::from_ref(&grant);
             let mut stage = super::super::BootstrapStage::Workspace;
-            if super::super::attest_runtime_mounts(&call, grants, &mut stage).is_err() {
+            if super::super::attest_runtime_mounts(&call, grants, false, &mut stage).is_err() {
                 let failure = super::super::BootstrapFailure { stage };
                 std::fs::write(
                     result_path,
@@ -1889,7 +1908,7 @@ mod tests {
                     assert!(std::time::Instant::now() < deadline, "fixture GO deadline");
                     std::thread::sleep(Duration::from_millis(10));
                 }
-                super::super::attest_runtime_mounts(&call, grants, &mut stage)
+                super::super::attest_runtime_mounts(&call, grants, false, &mut stage)
                     .expect("late shared-source mount must not propagate");
             }
             std::fs::write(result_path, b"PASS").expect("fixture success result");
@@ -1924,7 +1943,7 @@ mod tests {
         };
         grant.validate_shape().unwrap();
         let grant_path = fixture.path().join("grant.json");
-        let target = grant.mounted_path().unwrap();
+        let target = grant.mounted_path(false).unwrap();
         let result_path = fixture.path().join("result");
         let test_binary = std::env::current_exe().unwrap();
         std::fs::write(fixture.path().join("arany-test-bin"), b"placeholder").unwrap();
