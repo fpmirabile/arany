@@ -1,6 +1,7 @@
 use super::{TmuxServer, capture_pane, decline_initial_consent, redacted_tail};
 use crate::loopback::{
-    check_profile_with_binary, read_request, send_response, wait_product, write_profile,
+    check_profile_with_binary, read_request, send_response, send_response_for, wait_product,
+    write_profile,
 };
 use arany::{
     AgentDisposition, AgentPhase, AgentRole, AgentRunId, CollaborationPolicy, Event, GoalBudget,
@@ -43,8 +44,8 @@ fn resumed_tail_layout(screen: &[u8]) -> bool {
             .get(rows.len().saturating_sub(2))
             .is_some_and(|row| row.contains("Enter sends") && row.contains("Ctrl+O newline"))
         && rows.last().is_some_and(|row| {
-            row.trim()
-                .starts_with("More history · Ctrl+T history · ready · custom:local/model-1")
+            row.trim().starts_with("ready · custom:local/model-1")
+                && row.trim_end().ends_with("More history · Ctrl+T history")
         })
 }
 
@@ -416,10 +417,11 @@ async fn run_history_fixture() {
                 release_ready
                     .recv_timeout(Duration::from_secs(60))
                     .expect("release primary response");
-                send_response(
+                send_response_for(
                     &mut stream,
                     index,
                     serde_json::json!({"outcome":{"type":"delegate","children":["child"]}}),
+                    true,
                 );
             } else {
                 read_request(&mut stream);
@@ -741,9 +743,9 @@ async fn run_history_fixture() {
             );
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
-                if capture_pane(&server)
-                    .is_some_and(|screen| String::from_utf8_lossy(&screen).contains("History"))
-                {
+                if capture_pane(&server).is_some_and(|screen| {
+                    String::from_utf8_lossy(&screen).contains("New text · Ctrl+L live")
+                }) {
                     break;
                 }
                 assert!(Instant::now() < deadline, "history navigation not visible");
@@ -757,7 +759,7 @@ async fn run_history_fixture() {
             loop {
                 if capture_pane(&server).is_some_and(|screen| {
                     let text = String::from_utf8_lossy(&screen);
-                    text.contains("History")
+                    text.contains("New text · Ctrl+L live")
                         && text.contains("QWERT")
                         && text.contains("child 1 · active")
                 }) {
