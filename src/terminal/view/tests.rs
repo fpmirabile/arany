@@ -486,6 +486,7 @@ fn empty_session_has_a_quiet_welcome_without_obscuring_the_composer() {
                         matched: false,
                     }],
                     None,
+                    false,
                 );
             })
             .expect("history frame");
@@ -766,6 +767,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
                 Palette { color: false },
                 &rows,
                 Some("History · Ctrl+L live"),
+                false,
             );
         })
         .expect("history frame");
@@ -820,6 +822,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
                 Palette { color },
                 &rows,
                 Some("History · Ctrl+L live"),
+                false,
             );
         })
         .expect("wide history frame");
@@ -827,7 +830,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
             .map(|x| wide.backend().buffer()[(x, 11)].symbol())
             .collect::<String>();
         assert!(
-            status.contains("History · Ctrl+L live · working · openai/model · Safe conversation"),
+            status.contains("working · openai/model · Safe conversation · History · Ctrl+L live"),
             "{status}"
         );
 
@@ -840,6 +843,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
                 Palette { color },
                 &feedback_rows,
                 Some("History · Ctrl+L live"),
+                false,
             );
         })
         .expect("wide error frame");
@@ -847,7 +851,8 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
             .map(|x| wide.backend().buffer()[(x, 11)].symbol())
             .collect::<String>();
         assert!(
-            status.starts_with("History · Ctrl+L live · working"),
+            status
+                .starts_with("working · openai/model · Safe conversation · History · Ctrl+L live"),
             "{status}"
         );
         let buffer = wide.backend().buffer();
@@ -871,6 +876,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
                 Palette { color: true },
                 &rows,
                 None,
+                false,
             );
         })
         .expect("colored history frame");
@@ -893,6 +899,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
                         Palette { color },
                         &rows,
                         None,
+                        false,
                     );
                 })
                 .expect("narrow history frame");
@@ -950,6 +957,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
                         Palette { color },
                         &conversation,
                         None,
+                        false,
                     );
                 })
                 .expect("conversation frame");

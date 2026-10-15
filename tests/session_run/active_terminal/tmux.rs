@@ -4,7 +4,8 @@ use super::{
     tty_settings, wait_stopped,
 };
 use crate::loopback::{
-    ChildGuard, check_profile_with_binary, read_request, send_response, wait_product, write_profile,
+    ChildGuard, check_profile_with_binary, read_request, send_response_for, wait_product,
+    write_profile,
 };
 use arany::{StateRoot, list_sessions, resume_session};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
@@ -120,7 +121,7 @@ fn live_tail_layout(screen: &[u8], width: usize) -> bool {
     let Ok(screen) = std::str::from_utf8(screen) else {
         return false;
     };
-    // Structural check: the status row is truncated and mode-prefixed by width, so its state is asserted at startup.
+    // Structural check: the status row keeps state and model first; its secondary hints are truncated by width.
     let rows: Vec<_> = screen.lines().collect();
     let Some(composer) = rows.iter().position(|row| row.contains("Ask Arany")) else {
         return false;
@@ -129,6 +130,7 @@ fn live_tail_layout(screen: &[u8], width: usize) -> bool {
         return false;
     };
     rows.iter().all(|row| row.chars().count() <= width)
+        && rows[composer].chars().count() == width
         && !status.trim().is_empty()
         && rows[composer + 4..].iter().all(|row| row.trim().is_empty())
 }
@@ -349,7 +351,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
             .lines()
             .rev()
             .find(|row| !row.trim().is_empty())
-            .is_some_and(|row| row.contains("· ready · ") && row.contains("gpt-5.4")),
+            .is_some_and(|row| row.trim_start().starts_with("ready · ") && row.contains("gpt-5.4")),
         "startup status prioritizes state and model"
     );
     let styled = server.run(&["capture-pane", "-p", "-e", "-t", "arany-test:0.0"]);
@@ -820,29 +822,6 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
         );
         wait_unicode_frame(text, caret);
     }
-    // The 8-row viewport keeps the banner at the top of history, so the copy hint would sit below it; check it at 40x24.
-    assert!(
-        server
-            .run(&[
-                "resize-window",
-                "-x",
-                "40",
-                "-y",
-                "24",
-                "-t",
-                "arany-test:0"
-            ])
-            .status
-            .success()
-    );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| live_tail_layout(&screen, 40)) {
-            break;
-        }
-        assert!(Instant::now() < deadline, "composer before copy guidance");
-        thread::yield_now();
-    }
     assert!(
         server
             .run(&["send-keys", "-t", "arany-test:0.0", "C-c"])
@@ -851,9 +830,9 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let screen = capture_pane(&server).expect("live pane after first empty Ctrl+C");
+        let screen = capture_scrollback(&server).expect("scrollback after first empty Ctrl+C");
         let text = String::from_utf8_lossy(&screen);
-        if text.contains("Ctrl+Shift+C") {
+        if text.contains("Arany · notice:\n  Ctrl+Shift+C c\n  opies. Ctrl+C\n  again exits.") {
             break;
         }
         assert!(
@@ -863,6 +842,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
         );
         thread::yield_now();
     }
+    wait_unicode_frame("> Message Arany", "2,5\n");
     assert!(
         server
             .run(&[
@@ -977,15 +957,10 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
             workspace.clone(),
         ))
         .expect("committed Sessions");
-    assert_eq!(sessions.len(), 1, "one empty Session");
-    let view = runtime
-        .block_on(resume_session(
-            StateRoot::open_existing(&state).expect("read-only State"),
-            workspace,
-            sessions[0].id,
-        ))
-        .expect("strict Session replay");
-    assert!(view.runs.is_empty(), "no Provider Run from /exit");
+    assert!(
+        sessions.is_empty(),
+        "exit before a first task saves no Session"
+    );
 
     let _ = server.run(&["kill-server"]);
     let remaining = server.run(&["list-sessions"]);
@@ -1065,7 +1040,8 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
                     serde_json::json!({"summary":"derived summary"})
                 }
             };
-            send_response(&mut stream, index, text);
+            // Run requests (0, 1, 3) stream; summary requests (2, 4) return plain JSON.
+            send_response_for(&mut stream, index, text, matches!(index, 0 | 1 | 3));
         }
     });
     check_profile_with_binary(&workspace, &state, &executable);
@@ -1218,7 +1194,7 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     loop {
         if capture_pane(&server).is_some_and(|screen| {
             let text = String::from_utf8_lossy(&screen);
-            text.contains("> /setup") && text.contains("Tab/Enter")
+            text.contains("> Cmd /setup") && text.contains("Tab/Enter")
         }) {
             break;
         }
@@ -1349,7 +1325,7 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     loop {
         if capture_pane(&server).is_some_and(|screen| {
             let text = String::from_utf8_lossy(&screen);
-            text.contains("Commands · 16 local controls")
+            text.contains("Commands · 19 local controls")
                 && text.contains("> /help")
                 && text.contains("Enter/Esc close")
         }) {
@@ -1706,7 +1682,7 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
             let rows: Vec<_> = text.lines().collect();
             rows.len() == 24
                 && rows[23].starts_with("ready")
-                && rows[23].trim_end().ends_with("· ok")
+                && rows[23].contains("· ok")
                 && !rows[23].contains("New Session")
                 && text.contains("Arany:")
                 && text.contains("pending")
@@ -1714,7 +1690,13 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
         }) {
             break;
         }
-        assert!(Instant::now() < deadline, "live answer and draft missing");
+        assert!(
+            Instant::now() < deadline,
+            "live answer and draft missing:\n{}",
+            capture_pane(&server)
+                .map(|s| String::from_utf8_lossy(&s).into_owned())
+                .unwrap_or_default()
+        );
         thread::yield_now();
     }
     let pane = capture_pane(&server).expect("visible history pane");
@@ -1734,8 +1716,9 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     let scrollback = capture_scrollback(&server).expect("native tmux scrollback");
     let scrollback = String::from_utf8(scrollback).expect("scrollback UTF-8");
     assert!(
-        scrollback.contains("Answer:"),
-        "confirmed stdout answer remains available after restoration"
+        scrollback.contains("Arany:\n  done"),
+        "confirmed answer remains in native scrollback: {}",
+        redacted_tail(scrollback.as_bytes())
     );
     assert!(
         server
