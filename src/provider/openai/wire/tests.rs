@@ -87,6 +87,19 @@ fn function_names(body: &Value) -> Vec<String> {
 fn outbound_documents_pin_privacy_schema_and_scope() {
     let request = read_only_request(MODEL);
     let rendered = body(&request);
+    assert_eq!(rendered["prompt_cache_key"], request.session_id.to_string());
+    let mut next_run = request.clone();
+    next_run.run_id = RunId::new();
+    next_run.agent_run_id = crate::session::AgentRunId::new();
+    assert_eq!(
+        body(&next_run)["prompt_cache_key"],
+        rendered["prompt_cache_key"]
+    );
+    next_run.session_id = SessionId::new();
+    assert_ne!(
+        body(&next_run)["prompt_cache_key"],
+        rendered["prompt_cache_key"]
+    );
     assert_eq!(rendered["model"], MODEL);
     assert_eq!(rendered["store"], false);
     assert_eq!(rendered["truncation"], "disabled");
@@ -198,7 +211,7 @@ fn outbound_documents_pin_privacy_schema_and_scope() {
     }
 
     let compact = CompactionRequest {
-        session_id: SessionId::new(),
+        session_id: request.session_id,
         covered_run_id: request.run_id,
         model: request.model,
         previous_summary: Some("prior derived canary".into()),
@@ -218,6 +231,10 @@ fn outbound_documents_pin_privacy_schema_and_scope() {
     let compact_input: Value =
         serde_json::from_str(compact_body["input"].as_str().unwrap()).unwrap();
     assert_eq!(compact_body["store"], false);
+    assert_eq!(
+        compact_body["prompt_cache_key"],
+        rendered["prompt_cache_key"]
+    );
     assert_eq!(
         compact_body["prompt_cache_key"],
         compact.session_id.to_string()
@@ -663,7 +680,7 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
                 "{policy:?}: {field}"
             );
         }
-        assert_eq!(planning["prompt_cache_key"], request.run_id.to_string());
+        assert_eq!(planning["prompt_cache_key"], request.session_id.to_string());
         let allowed = |body: &Value, name: &str| {
             body["tool_choice"]["tools"]
                 .as_array()

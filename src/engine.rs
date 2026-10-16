@@ -2448,6 +2448,7 @@ impl Engine {
             PromptRole::ReadOnly
         };
         let provider_request = ProviderRequest {
+            session_id,
             run_id,
             agent_run_id,
             phase: AgentPhase::RootPlan,

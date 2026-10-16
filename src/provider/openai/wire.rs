@@ -42,32 +42,30 @@ impl<'a> RunScope<'a> {
             model: &request.model,
             output_cap: request.max_output_tokens,
             secret,
-            functions: allowed_functions(request, conversation),
+            functions: conversation
+                .tools
+                .as_ref()
+                .map(|tools| allowed_functions(request, tools, &conversation.outcome)),
         }
     }
 }
 
-fn allowed_functions(
+pub(super) fn allowed_functions(
     request: &ProviderRequest,
-    conversation: &Conversation,
-) -> Option<Vec<String>> {
+    tools: &[ToolSpec],
+    outcome: &Value,
+) -> Vec<String> {
     let exhausted = request
         .input
         .tools
         .as_ref()
         .is_some_and(ToolContext::finish_only);
-    conversation.tools.as_ref().map(|tools| {
-        tools
-            .iter()
-            .filter(|_| !exhausted)
-            .map(|spec| spec.name.clone())
-            .chain(
-                outcome_specs(&conversation.outcome)
-                    .into_iter()
-                    .map(|spec| spec.name),
-            )
-            .collect()
-    })
+    tools
+        .iter()
+        .filter(|_| !exhausted)
+        .map(|spec| spec.name.clone())
+        .chain(outcome_specs(outcome).into_iter().map(|spec| spec.name))
+        .collect()
 }
 
 pub(crate) fn decode_run(
@@ -331,24 +329,16 @@ fn run_body_inner(
         "arany_outcome",
         conversation.outcome.clone(),
     );
-    body["prompt_cache_key"] = json!(request.run_id.to_string());
+    body["prompt_cache_key"] = json!(request.session_id.to_string());
     if let Some(tools) = &conversation.tools {
         body.as_object_mut().expect("request object").remove("text");
         body["tools"] = tools
             .iter()
             .cloned()
-            .chain(
-                outcome_specs(&crate::provider::outcome_schema())
-                    .into_iter()
-                    .filter(|spec| {
-                        spec.name != "arany_delegate"
-                            || (request.input.role == crate::provider::PromptRole::Primary
-                                && request.collaboration.max_children() > 0)
-                    }),
-            )
+            .chain(outcome_specs(&crate::provider::run_outcome_schema(request)))
             .map(function_json)
             .collect();
-        let allowed = allowed_functions(request, conversation).expect("native functions");
+        let allowed = allowed_functions(request, tools, &conversation.outcome);
         body["tool_choice"] = json!({
             "type": "allowed_tools",
             "mode": "required",

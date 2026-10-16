@@ -189,7 +189,7 @@ fn outbound_tool_choice_is_auto_without_parallel() {
     assert_eq!(outcome_types(&tool_body), ["finish"]);
     let plain = body(&read_only_request(MODEL), Effort::Low);
     assert!(plain.get("tools").is_none() && plain.get("tool_choice").is_none());
-    assert_eq!(plain.to_string().matches("\"cache_control\":").count(), 2);
+    assert_eq!(plain.to_string().matches("\"cache_control\":").count(), 1);
 }
 
 #[test]
@@ -788,7 +788,12 @@ fn outbound_messages_pin_schema_cap_and_disclosure_scope() {
             .to_string()
             .matches("\"cache_control\":")
             .count(),
-        2
+        1
+    );
+    assert!(
+        compact_body["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none()
     );
     assert_eq!(compact_body["max_tokens"], 1024);
     assert_eq!(compact_body["output_config"]["effort"], "low");
@@ -1081,14 +1086,21 @@ fn child_research_request_offers_only_read_only_tools_and_finish() {
     exhausted.input.tools = Some(tool_context(spent));
     let spent_body = body(&exhausted, Effort::Low);
     assert_eq!(tool_names(&spent_body), tool_names(&rendered));
-    assert_eq!(spent_body["tool_choice"], rendered["tool_choice"]);
+    assert_eq!(spent_body["tool_choice"], json!({"type": "none"}));
+    assert_eq!(
+        spent_body.to_string().matches("\"cache_control\":").count(),
+        2
+    );
     assert_eq!(spent_body["system"], rendered["system"]);
     assert_eq!(spent_body["tools"], rendered["tools"]);
+    assert_eq!(
+        spent_body["messages"].as_array().unwrap().len(),
+        rendered["messages"].as_array().unwrap().len()
+    );
     assert!(
-        spent_body["messages"].as_array().unwrap().last().unwrap()["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("Finish now")
+        !spent_body["messages"]
+            .to_string()
+            .contains("No Tool calls remain")
     );
     assert_eq!(rendered["tool_choice"]["type"], "auto");
     assert_eq!(outcome_types(&spent_body), ["finish"]);
@@ -1185,9 +1197,16 @@ fn thinking_tool_reply(id: &str) -> Value {
 fn assert_extends(earlier: &Value, later: &Value) {
     assert_eq!(earlier["system"], later["system"]);
     assert_eq!(earlier["tools"], later["tools"]);
-    assert_eq!(earlier["tool_choice"], later["tool_choice"]);
     for body in [earlier, later] {
-        assert_eq!(body.to_string().matches("\"cache_control\":").count(), 3);
+        let markers = if body["tool_choice"]["type"] == "none" {
+            2
+        } else {
+            3
+        };
+        assert_eq!(
+            body.to_string().matches("\"cache_control\":").count(),
+            markers
+        );
     }
     let mut earlier = earlier["messages"].as_array().unwrap().clone();
     earlier.last_mut().unwrap()["content"]
@@ -1218,6 +1237,11 @@ fn researcher_requests_extend_each_other_across_calls() {
     for pair in bodies.windows(2) {
         assert_extends(&pair[0], &pair[1]);
     }
+    assert_eq!(
+        bodies[3]["tool_choice"],
+        json!({"type":"auto", "disable_parallel_tool_use":true})
+    );
+    assert_eq!(bodies[4]["tool_choice"], json!({"type":"none"}));
     assert!(
         bodies[3]["messages"]
             .to_string()

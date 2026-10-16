@@ -8,6 +8,7 @@ use crate::provider::{
     ProviderWireProvenance, ToolUseId, Usage,
 };
 use crate::provider::{compaction_input, summary_schema};
+use crate::tools::ToolContext;
 use crate::tools::types::MAX_TOOL_ARGUMENT_BYTES;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -403,18 +404,27 @@ pub(super) fn run_body(
     });
     // Tool definitions are not strict: the plan-contract unions would exceed the strict-schema
     // complexity limit, and the Engine validates every call. Only the outcome format is strict.
+    let exhausted = request
+        .input
+        .tools
+        .as_ref()
+        .is_some_and(ToolContext::finish_only);
     if let Some(tools) = &conversation.tools {
         body["tools"] = tools
             .iter()
             .map(|tool| json!({"name": tool.name, "description": tool.description, "input_schema": tool.parameters}))
             .collect();
-        body["tool_choice"] = json!({"type": "auto", "disable_parallel_tool_use": true});
+        body["tool_choice"] = if exhausted {
+            json!({"type": "none"})
+        } else {
+            json!({"type": "auto", "disable_parallel_tool_use": true})
+        };
     }
-    cache_breakpoints(&mut body);
+    cache_breakpoints(&mut body, conversation.tools.is_some() && !exhausted);
     Ok(body)
 }
 
-fn cache_breakpoints(body: &mut Value) {
+fn cache_breakpoints(body: &mut Value, cache_tail: bool) {
     for key in ["tools", "system"] {
         if let Some(last) = body
             .get_mut(key)
@@ -424,11 +434,12 @@ fn cache_breakpoints(body: &mut Value) {
             last["cache_control"] = json!({"type": "ephemeral"});
         }
     }
-    if let Some(last) = body["messages"]
-        .as_array_mut()
-        .and_then(|messages| messages.last_mut())
-        .and_then(|message| message["content"].as_array_mut())
-        .and_then(|blocks| blocks.last_mut())
+    if cache_tail
+        && let Some(last) = body["messages"]
+            .as_array_mut()
+            .and_then(|messages| messages.last_mut())
+            .and_then(|message| message["content"].as_array_mut())
+            .and_then(|blocks| blocks.last_mut())
     {
         last["cache_control"] = json!({"type": "ephemeral"});
     }
@@ -490,7 +501,7 @@ pub(super) fn compaction_body(request: &CompactionRequest, effort: Effort) -> Va
         "output_config": {"format": {"type": "json_schema", "schema": summary_schema()}, "effort": effort.as_str()},
         "stream": false,
     });
-    cache_breakpoints(&mut body);
+    cache_breakpoints(&mut body, false);
     body
 }
 
