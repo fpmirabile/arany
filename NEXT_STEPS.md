@@ -25,6 +25,7 @@ history. Implementation status and verified support are separate claims.
   MCP/OAuth, interactive/background jobs and other network grants need their
   own Policy/Guard/protocol evidence; retain the existing
   [Tool scope](./docs/specs/tools.md) until each slice lands.
+- **Architecture refactor (parallel lane, Draft).** Fourteen behavior-preserving PRs that make the Engine, Tools and crate shape deep enough for roadmap items 3-8; [initiative plan](./planning/architecture-refactor/README.md). Caching never waits for it.
 - **Deferred Anthropic consumer subscriptions.** Native Claude-plan access is
   missing and user-deferred behind the [route/authorization gate](./docs/research/subscription-provider-routes-2026-10.md#decision-boundary-for-beta-1).
   Continue unaffected implementation. API-key billing is a separate route;
