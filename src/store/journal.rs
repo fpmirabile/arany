@@ -1,5 +1,5 @@
-//! Every current Event uses payload version 6; a new or removed field bumps the version and the
-//! replay corpus, with no compatibility reader. `MessageAccepted` and `GoalStarted` limits derive
+//! A new or removed Event field bumps the payload version and the replay corpus, with no
+//! compatibility reader. `MessageAccepted` and `GoalStarted` limits derive
 //! from the objective and image caps at six escaped bytes per byte; keep that derivation when
 //! changing caps or encoding. Whole-operation admission resolves the lineage inside an immediate
 //! transaction and counts requested slots against the replay quota; byte preflight is conservative,

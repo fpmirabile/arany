@@ -741,7 +741,7 @@ async fn drain_candidate<R: tokio::io::AsyncRead + Unpin, W: Write>(
 /// at the supervision interval, because Seatbelt blocks Tokio's signal wake socket;
 /// elsewhere it awaits exit.
 ///
-/// Stop PID observation immediately after reap.
+/// Retain the exact owned child until reap, then stop PID observation immediately.
 pub(super) async fn reap_owned_child(
     child: &mut Child,
 ) -> std::io::Result<std::process::ExitStatus> {

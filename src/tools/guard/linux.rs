@@ -566,6 +566,8 @@ pub(super) async fn hold_seed_unit(permit: &super::admission::Permit, seed: &Pat
     panic!("native seed controller must be killed by its parent");
 }
 
+/// Linux `ro-bind` imports source submounts recursively, so admitted mount sources must be checked
+/// with that import in mind, not as a single mount.
 pub(super) async fn execute_inner(
     runtime: &ToolRuntime,
     intent: &EffectIntent,

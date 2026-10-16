@@ -1,6 +1,5 @@
-//! Canonical Event payloads. Never persist terminal focus, panel state, hover, picker selection or
-//! native scroll position. Explicit nullable fields reject when missing; a new field bumps the
-//! payload version.
+//! Canonical Event payloads. Keep presentation state out of them; a new field bumps the payload
+//! version.
 use crate::provider::AgentPhase;
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path, str::FromStr};

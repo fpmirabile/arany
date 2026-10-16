@@ -60,12 +60,14 @@ pub(super) fn unit_main() -> std::process::ExitCode {
 
 const CPU_LIMIT: Duration = Duration::from_secs(15);
 const SYSTEM_PROGRAMS_CAP: usize = 2048;
+/// Retain this cap and every independent deny when the profile composition changes.
 const PROFILE_BYTES_CAP: usize = 96 * 1024;
 pub(super) const SUPERVISION_INTERVAL: Duration = Duration::from_millis(10);
 pub(super) const PREPARATION_DEADLINE: Duration = Duration::from_secs(30);
 /// The preparation deadline plus slack for the handshake that follows it.
 pub(crate) const PREPARATION_OVERHEAD: Duration =
     Duration::from_secs(PREPARATION_DEADLINE.as_secs() + 5);
+/// Shared descriptor and core limits are installed at bootstrap, before the profile applies.
 const PROCESS_LIMITS: &[(rustix::process::Resource, u64)] = &[
     (rustix::process::Resource::Nofile, 64),
     (rustix::process::Resource::Core, 0),
@@ -180,6 +182,8 @@ const PROFILE: &str = "(allow file-read-metadata (literal \"/\") (literal \"/Sys
 (allow file-read* (literal \"/dev/random\") (literal \"/dev/urandom\"))
 ";
 
+/// Both command profiles deny fork and spawn dynamically for actors holding coalition-spawn or
+/// persona-management authority after exec.
 const COMMAND_PROFILE: &str = "(allow file-read-metadata (literal \"/\") (literal \"/System\") (literal \"/usr\") (literal \"/dev\"))
 (allow file-read-metadata (literal \"/System/Cryptexes\") (literal \"/System/Cryptexes/OS\") (literal \"/var\") (literal \"/etc\") (literal \"/private/var\") (literal \"/private/var/select\") (literal \"/private/var/select/sh\"))
 (allow file-read* file-map-executable (subpath \"/System/Library\") (subpath \"/usr/lib\"))

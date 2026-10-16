@@ -393,6 +393,8 @@ pub(super) fn storage_mounted(root: &Path) -> Result<bool, ToolError> {
     Ok(false)
 }
 
+/// The changeset scan must finish before images detach; never accept a worker-local scan while
+/// descendants can still write.
 pub(super) async fn cleanup_storage(root: &Path) -> Result<(), ToolError> {
     let directory = crate::tools::fs::open_directory(root)?;
     let parent = crate::tools::fs::identity(&directory)?;
