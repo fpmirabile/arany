@@ -4,7 +4,7 @@
 
 Extract a function when its name explains a meaningful operation, isolates a tricky invariant or centralizes a decision that must change consistently. A single caller can justify a helper; similar-looking expressions can stay separate when they are independent decisions.
 
-Thresholds are prompts, and Clippy enforces two of them: `too_many_arguments` (7, warn by default) and pedantic `too_many_lines` (100). A function over either is a cohesive state machine or transition table, in which case say so in `#[expect(clippy::too_many_lines, reason = "one transition table")]`, or it is split. Seven parameters usually means a missing struct: group the ones that travel together.
+Thresholds are prompts, and Clippy enforces two of them: `too_many_arguments` (fires above 7 parameters, warn by default) and pedantic `too_many_lines` (100). A function over either is a cohesive state machine or transition table, in which case say so in `#[expect(clippy::too_many_lines, reason = "one transition table")]`, or it is split. Seven parameters usually means a missing struct: group the ones that travel together.
 
 Keep a cohesive flow together when splitting makes the reader chase state through helpers. Local mutation is often the clearest algorithm; effects at meaningful boundaries help tests, but do not wrap every operation in a trait or layer.
 
@@ -49,7 +49,7 @@ A good error type (C-GOOD-ERR) implements `std::error::Error + Send + Sync + 'st
 pub enum StoreError {
     #[error("state storage is full")]
     StorageFull,
-    #[error("Session {0} has an active operation")]
+    #[error("session {0} has an active operation")]
     SessionBusy(SessionId),
     #[error("could not open journal at {path}")]
     Open { path: PathBuf, #[source] source: std::io::Error },

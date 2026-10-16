@@ -50,7 +50,7 @@ Allocation is the usual hidden cost in Rust code that looks clean. The Performan
 - `Vec::with_capacity(n)` or `reserve` when the size is known; growth from empty reallocates several times.
 - Reuse a buffer across iterations (`buf.clear()` then refill; `read_line(&mut line)` over `lines()`), and pass `&mut Vec<T>` into a producer rather than returning many small `Vec`s to concatenate.
 - `format!` allocates a `String`; `write!(buf, ...)` into an existing buffer does not. A `&'static str` literal costs nothing.
-- `clone_from` reuses the destination's allocation; `to_owned()`/`to_string()`/`clone()` on `&str` all allocate; `inefficient_to_string` catches `to_string` on a `&&str`.
+- `clone_from` reuses the destination's allocation; `to_owned()`/`to_string()` on `&str` allocate; `clone()` allocates only on the owned `String`; `inefficient_to_string` catches `to_string` on a `&&str`.
 - `Box<[T]>` and `Box<str>` are the right shape for a fixed-size result stored for a long time; `Vec` carries a spare capacity word.
 - `Arc<str>`/`Arc<[T]>` share immutable data across tasks without copying; cloning them is a refcount increment, not an allocation.
 - A small enum with one huge variant makes every value huge (`large_enum_variant`); box the big one.
@@ -59,7 +59,7 @@ Measure before going further ([performance claims](verification-and-concurrency.
 
 ## Pointer semantics
 
-`Box<T>` owns a heap allocation: recursive types, type erasure, an intentional layout or a large value moved cheaply. `&T` is a shared reference, not a promise of immutability: `Cell<T>` (`Copy` values), `RefCell<T>` (runtime-checked borrows, panics on conflict; `try_borrow` for a fallible path) and the atomics mutate through `&T`.
+`Box<T>` owns a heap allocation: recursive types, type erasure, an intentional layout or a large value moved cheaply. `&T` is a shared reference, not a promise of immutability: `Cell<T>` (`get` needs `Copy`; `take`/`replace`/`set` work for any `T`), `RefCell<T>` (runtime-checked borrows, panics on conflict; `try_borrow` for a fallible path) and the atomics mutate through `&T`.
 
 Thread-safety follows the contents: `&T: Send` when `T: Sync`; `&mut T: Send` when `T: Send`; `Arc<T>: Send + Sync` when `T: Send + Sync`. `Arc<Mutex<T>>` protects `T` across threads; `Arc<T>` alone protects only the reference count. `Rc`, `RefCell` and raw pointers remove `Send`/`Sync`; `std::sync::MutexGuard` is `!Send`, which is why holding one across `.await` fails to compile in a spawned task. The compiler and the exact type's documented impls are the authority.
 

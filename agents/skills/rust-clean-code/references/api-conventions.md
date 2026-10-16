@@ -26,7 +26,7 @@ Conversions encode cost and ownership in the prefix:
 - Collections expose `iter` (`&self`), `iter_mut` (`&mut self`) and `into_iter` (`self`); their iterator types are `Iter`, `IterMut`, `IntoIter`.
 - Constructors are associated functions: `new` (with or without arguments), `with_<detail>` for a secondary constructor, `from_<source>` for a conversion that needs extra arguments or can fail or be `unsafe`; I/O resources use their verb (`open`, `connect`, `bind`). `new()` with no arguments and `Default::default()` behave identically.
 - Predicates read as questions: `is_empty`, `has_children`, `can_retry`. A `bool` parameter that changes a mode at the call site becomes an enum (C-CUSTOM-TYPE).
-- Features avoid filler: `serde`, `std`, `test-support`; never `use-serde` or `no-std` (features are additive, C-FEATURE).
+- Features avoid filler: `serde`, `std`, `test-support`; never `use-serde` or `no-std` (C-FEATURE). Features are additive ([Cargo features](https://doc.rust-lang.org/cargo/reference/features.html)).
 
 ## Derives and standard traits (C-COMMON-TRAITS, C-DEBUG, C-SERDE, C-SEND-SYNC, C-STRUCT-BOUNDS)
 
@@ -71,7 +71,7 @@ Comments default to none. Names, types and tests carry the intent; behavior and 
 
 - One short `//` comment where the reason is non-obvious: a workaround for a platform bug, an ordering constraint, a `ponytail:` ceiling. The comment states *why*, never what the next line does.
 - `// SAFETY:` before every `unsafe` block, stating the obligations that make it sound ([unsafe](verification-and-concurrency.md#unsafe-code-requires-a-proof)).
-- No `///` or `//!` doc comments and no multi-line comment blocks in internal code. An implementation invariant is pinned by a test; if its reason is non-obvious, one short `//` line is the limit. Behavior and limits live in [`docs/specs/`](../../../../docs/specs/README.md).
+- No `///` or `//!` doc comments and no multi-line comment blocks in internal code. An implementation invariant is pinned by a test; if its reason is non-obvious, one short `//` line is the limit. `// SAFETY:` is the one exception: a single line stating the obligations, spilling to a second `//` line only when a distinct obligation needs it. Behavior and limits live in [`docs/specs/`](../../../../docs/specs/README.md).
 - Published-library rustdoc only, not for this internal crate: `# Errors`, `# Panics`, `# Safety` and `# Examples` sections (C-FAILURE, C-EXAMPLE), a one-sentence summary line and intra-doc links such as `` [`Type`] ``. Keep Clippy's `missing_errors_doc`/`missing_panics_doc` allowed here. If a crate is split out and published, document its `pub` surface with these then.
 
 Sources: [API Guidelines naming](https://rust-lang.github.io/api-guidelines/naming.html), [interoperability](https://rust-lang.github.io/api-guidelines/interoperability.html), [predictability](https://rust-lang.github.io/api-guidelines/predictability.html), [future proofing](https://rust-lang.github.io/api-guidelines/future-proofing.html), [Book ch. 7 modules](https://doc.rust-lang.org/book/ch07-00-managing-growing-projects-with-packages-crates-and-modules.html), [`must_use` and lint attributes](https://doc.rust-lang.org/reference/attributes/diagnostics.html), [`non_exhaustive`](https://doc.rust-lang.org/reference/attributes/type_system.html), [rustdoc conventions](https://doc.rust-lang.org/rustdoc/how-to-write-documentation.html), [Effective Rust items 10, 22, 23, 27](https://www.lurklurk.org/effective-rust/).

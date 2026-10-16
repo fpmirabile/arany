@@ -30,7 +30,7 @@ Apply to the diff, not the whole file. Each line is a yes/no check; a "no" is a 
 
 ## Casts and arithmetic
 
-- [ ] Narrowing and sign changes use `try_from`/`try_into` (or a named saturation on a declared bound); `as` only widens.
+- [ ] Narrowing and sign changes use `try_from`/`try_into` (or a named saturation on a declared bound); `as` only widens (plus the two documented exceptions in the cast table: saturating float-to-int and fieldless-enum discriminants).
 - [ ] Arithmetic on externally supplied numbers is checked or saturating with a named bound.
 
 ## Bounds and resources
@@ -49,7 +49,7 @@ Apply to the diff, not the whole file. Each line is a yes/no check; a "no" is a 
 
 ## Unsafe
 
-- [ ] Each `unsafe` block is minimal, preceded by `// SAFETY:` naming every obligation, and wrapped in a safe interface whose callers cannot break the invariant.
+- [ ] Each `unsafe` block is minimal, preceded by a `// SAFETY:` comment naming every obligation (one line; a second `//` line only for a distinct obligation), and wrapped in a safe interface whose callers cannot break the invariant.
 - [ ] Fields the invariant depends on are private to the module that upholds it.
 - [ ] Platform or FFI calls have the vendor contract cited and a test per obligation.
 
@@ -58,11 +58,11 @@ Apply to the diff, not the whole file. Each line is a yes/no check; a "no" is a 
 - [ ] Each new test names the claim and the defect it catches; an existing owner (table, corpus, journey) was extended first.
 - [ ] No wall sleeps, retries, random order or shared process environment; concurrency uses gates and paused time.
 - [ ] Error paths assert the variant; output contracts assert exact bytes; durability asserts a reopened store, not memory.
-- [ ] Test-only hooks on production types sit behind the `test-support` feature, not `#[cfg(test)]`.
+- [ ] New test-only hooks on production types sit behind the `test-support` feature, not `#[cfg(test)]`; this is not a mandate to migrate existing `#[cfg(test)]` hooks.
 
 ## Lints and comments
 
 - [ ] Clippy clean under the project's configuration; every suppression is `#[expect(..., reason = "...")]` with an intentional design behind it.
 - [ ] A function over Clippy's length or argument threshold is a declared state machine or was split.
-- [ ] No new comments that narrate code; at most one short `//` where the reason is non-obvious; no `///` or `//!` doc comments in internal code, per the repository rule.
+- [ ] No new comments that narrate code; at most one short `//` where the reason is non-obvious; no `///` or `//!` doc comments in internal code, per the repository rule. `// SAFETY:` is the one exception: a single line stating the obligations, spilling to a second `//` line only when a distinct obligation needs it.
 - [ ] No `dbg!`, `todo!`, `unimplemented!`, `println!` debugging, or commented-out code.

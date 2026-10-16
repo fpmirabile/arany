@@ -147,7 +147,7 @@
     "rust-clean-code": {
       "source": "./agents/skills/rust-clean-code",
       "sourceType": "local",
-      "computedHash": "eac0a6468adffedc3ffe04e23f7cfe43a2f670e882bba72b7e890b0267534edc"
+      "computedHash": "06d151cf8a6a839d9100c5e2fdfa1b3ccb94aa6d18472ba845e3830a0bc29371"
     },
     "scaffold-exercises": {
       "source": "mattpocock/skills",
