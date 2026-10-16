@@ -16,9 +16,7 @@ The [terminal owner](../../../src/terminal.rs) now clears the fullscreen backend
 
 ## Evidence
 
-On 2026-10-06, Ubuntu CI reproduced the active-loss socket timeout with a running product and wait channel zero. A bounded local investigation restricted four concurrent invocations to two CPUs and reproduced the same failure in all four workers before the repair. Debugger attachment was denied by the host's ptrace policy; no failure-time stack is claimed.
-
-The existing [active terminal corpus](../../../tests/session_run/active_terminal.rs) now rejects a cursor query during signal restoration. Before the repair, its inline SIGTERM case observed two queries instead of the single acquisition query; after the repair it passes, preserving exact terminal settings and cancelled replay. The same finite four-worker, two-CPU investigation passed all 300 active-PTY-loss invocations after the repair. No deadline was raised and no test was disabled or given automatic retries.
+Tests: [`tests/session_run/active_terminal.rs::inline_sigterm_restores_raw_mode_during_active_run`](../../../tests/session_run/active_terminal.rs); [`tests/session_run/active_terminal.rs::lost_pty_during_provider_call_cancels_without_answer`](../../../tests/session_run/active_terminal.rs). Signal restoration permits only the acquisition cursor query and preserves terminal settings and cancelled replay; PTY loss must close the active local Provider socket without fabricating an answer.
 
 The idle, setup and active Linux loss owners remain enabled in [acquisition](../../../tests/session_run/active_terminal/acquisition.rs) and [active terminal](../../../tests/session_run/active_terminal.rs). They bound product exit, cancel the active synthetic local Provider socket, reject a fabricated answer and independently guard the exact test-owned product PID. These observations prove those Linux paths, not remote generation/billing cessation, arbitrary cursor-acquisition faults or native macOS behavior.
 

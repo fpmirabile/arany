@@ -91,17 +91,19 @@ The schema is created only in an empty version-zero database; any other existing
 
 ## Acceptance scenarios and evidence owners
 
-| Scenario | Required outcome | Owner |
-|---|---|---|
-| Single, bounded auto and team, failed or cancelled children | Policy admission, ordered synthesis, complete draining and closed replay agree. Run progress ends at `RunFinished`, and Goal settlement follows. | [Engine Run corpus](../../tests/engine_run.rs), [child coordination](../../src/engine/run_loop/children.rs) |
-| Routine edit guidance and historical agent inspection | Shared prompts discourage unnecessary delegation. Inspection separates the current Run from history counts. | [Shared Provider requests](../../src/provider.rs), [terminal frames](../../src/terminal/view.rs), [slash journey](../../tests/session_run/slash_completion.rs) |
-| Strict outcomes and usage caps | Malformed, ambiguous or oversized outcomes reject. Exactly one admitted result persists. | [Native wire corpus](../../src/provider/openai/wire/tests.rs), [Engine Run corpus](../../tests/engine_run.rs) |
-| Goal prelude and first effect timing | Both encodings offer only the bounded prelude without a contract. The first other Tool is rejected without a journaled contract. | [OpenAI wire corpus](../../src/provider/openai/wire/tests.rs), [Anthropic wire corpus](../../src/provider/anthropic/wire/tests.rs), [Tool journeys](../../tests/session_run/tools.rs) |
-| Sparse and full SSE completion, invalid closure | Only complete matching items reconcile. Failure publishes no partial answer. | [Offline ChatGPT journey](../../tests/session_run/setup/offline_https/chatgpt/checked_turn.rs) |
-| Current format only | Old journal versions and missing fields reject, and refused database bytes stay unchanged. | [Journal admission corpus](../../tests/session_run.rs), [Event payload corpus](../../src/session/events.rs) |
-| Headroom, fork quota and compaction exhaustion | Rejection precedes disclosure, usage or a partial target, and previous history and summary stay readable. The 256 MiB database gate runs in CI job `Linux Tests (debug|release)`. | [Store](../../src/store.rs), [Engine Run corpus](../../tests/engine_run.rs) |
-| Goal loops, per-action admission and context preservation | Work continues only while Goal budgets and each action's Event and byte tail fit. Racing children cannot consume one final slot, and overlapping actions charge wall time once. A failed compaction keeps history, a later success summarizes only an acknowledged prefix, and tampered digests reject. | [Goal Run corpus](../../tests/engine_run/goals.rs), [Engine Run corpus](../../tests/engine_run.rs), [automatic compaction journey](../../tests/session_run/auto_compaction.rs) |
-| Read-only researcher children | Reports reach synthesis in assignment order and never satisfy the Goal criterion. Out-of-plan reads are Denied without dispatch, MCP calls and writes are refused, and a crash-left child Tool blocks resume. Each route offers only read-only operations and Finish. | [Goal Run corpus](../../tests/engine_run/goals.rs), [reducer replay corpus](../../src/session/reducer.rs), [Tool corpus](../../src/tools/tests.rs) |
-| Sequential effects and interrupted or resumed history | Correlated bounded facts persist, and fresh work never redispatches a historical effect. | [Real native Tool journeys](../../tests/session_run/tools.rs), [Tool corpus](../../src/tools/tests.rs) |
+Tests: [`tests/engine_run.rs::scripted_runs_snapshot_workspace_and_replay_across_process_exit`](../../tests/engine_run.rs); [`tests/engine_run.rs::failed_child_cancels_and_drains_siblings_without_a_final_message`](../../tests/engine_run.rs); [`tests/engine_run.rs::database_capacity_is_admitted_before_provider_usage`](../../tests/engine_run.rs); [`tests/engine_run/goals.rs::read_only_child_reads_the_workspace_and_its_report_reaches_synthesis`](../../tests/engine_run/goals.rs).
 
-These are evidence owners, not claims that every native platform or live model passed. Completed results belong in the handoff and Git/CI history; [next steps](../../NEXT_STEPS.md) owns remaining checks, and scoped security and review records retain necessary reasoning.
+| Scenario | Required outcome |
+|---|---|
+| Single, bounded auto and team, failed or cancelled children | Policy admission, ordered synthesis, complete draining and closed replay agree. Run progress ends at `RunFinished`, and Goal settlement follows. |
+| Routine edit guidance and historical agent inspection | Shared prompts discourage unnecessary delegation. Inspection separates the current Run from history counts. |
+| Strict outcomes and usage caps | Malformed, ambiguous or oversized outcomes reject. Exactly one admitted result persists. |
+| Goal prelude and first effect timing | Both encodings offer only the bounded prelude without a contract. The first other Tool is rejected without a journaled contract. |
+| Sparse and full SSE completion, invalid closure | Only complete matching items reconcile. Failure publishes no partial answer. |
+| Current format only | Old journal versions and missing fields reject, and refused database bytes stay unchanged. |
+| Headroom, fork quota and compaction exhaustion | Rejection precedes disclosure, usage or a partial target, and previous history and summary stay readable. |
+| Goal loops, per-action admission and context preservation | Work continues only while Goal budgets and each action's Event and byte tail fit. Racing children cannot consume one final slot, and overlapping actions charge wall time once. A failed compaction keeps history, a later success summarizes only an acknowledged prefix, and tampered digests reject. |
+| Read-only researcher children | Reports reach synthesis in assignment order and never satisfy the Goal criterion. Out-of-plan reads are Denied without dispatch, MCP calls and writes are refused, and a crash-left child Tool blocks resume. Each route offers only read-only operations and Finish. |
+| Sequential effects and interrupted or resumed history | Correlated bounded facts persist, and fresh work never redispatches a historical effect. |
+
+[Next steps](../../NEXT_STEPS.md) owns remaining native and live checks.

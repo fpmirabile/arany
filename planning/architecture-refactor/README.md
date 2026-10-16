@@ -25,7 +25,7 @@
 - `provider/streaming.rs` `feed`, the SQLite thread, Provider conformance checks, and a hand-written schema replaced by a derive. See [Not refactored yet](#not-refactored-yet).
 - Typed Git reads moving in-process (decided, see [Decisions](#decisions)).
 - The per-command unguarded fallback after a sandbox failure. It is decided separately and tracked in [NEXT_STEPS.md](../../NEXT_STEPS.md).
-- `serve --stdio` itself (roadmap item 8). This plan only prepares its seams.
+- `serve --stdio` itself (roadmap item 7). This plan only prepares its seams.
 
 **Lifecycle.** This folder is execution coordination. When the work lands, accepted behavior moves into the owning specs, unfinished defects go to [NEXT_STEPS.md](../../NEXT_STEPS.md), and this folder is deleted under the [planning lifecycle](../README.md#lifecycle).
 
@@ -101,13 +101,13 @@ Apply Ponytail (`.agents/skills/ponytail/SKILL.md`, installed per [project skill
 - One `ProviderIdentity` replaces seven getters.
 - One `RecordKind` table replaces 25 methods.
 
-No new trait is introduced in this plan except the one hook seam in roadmap item 6 (see [Traits, enums and functions](#traits-enums-and-functions-for-the-other-reuse-points)).
+No new trait is introduced in this plan except the one hook seam in roadmap item 5 (see [Traits, enums and functions](#traits-enums-and-functions-for-the-other-reuse-points)).
 
 ### Target architecture
 
 The target shape is three crates at the end. Diagrams are in [diagrams.md §5](./diagrams.md#5-target-crates-modules-and-dependency-direction-after-pr14).
 
-- **`arany-cli`** (binary `arany`): `cli/attached` (interactive flows), `cli/exec`, `terminal`, `presentation`, and `accounts` (today `cli/chatgpt` and `cli/credentials`). It takes `serve` in roadmap item 8.
+- **`arany-cli`** (binary `arany`): `cli/attached` (interactive flows), `cli/exec`, `terminal`, `presentation`, and `accounts` (today `cli/chatgpt` and `cli/credentials`). It takes `serve` in roadmap item 7.
 - **`arany`** (library, name kept so `use arany::` in the corpora stays valid): `engine` (with `ledger`, `step`, `run_loop`, `children`, `compaction`, `lifecycle`), `journal` (the bounded tap), `provider`, `tools` (with `catalog`, `dispatch`, families, `guard`), `store` (SQLite thread and `StateRoot`), `telemetry`, `diagnostics`, `private_fs`.
 - **`arany-journal`** (PR14, conditional): `events`, `reducer`, `views`, the vocabulary (`ToolCall`, `OperationFacts`, `EffectIntent`, `ToolObservation`, `Attestation`, `ProviderIdentity`, `Usage`, `ImageAttachment`) and `replay`. Its dependencies are serde, serde_json, sha2, uuid and thiserror only.
 
@@ -115,7 +115,7 @@ The target shape is three crates at the end. Diagrams are in [diagrams.md §5](.
 
 1. `terminal` and `presentation` have no library consumer. Moving them to the binary costs the library nothing and removes ratatui, crossterm and keyring from the library build.
 2. The journal vocabulary is the real hub. A split that keeps `tools` whole in an engine crate drags bwrap and Seatbelt into every consumer of `Event`.
-3. Crate creation needs measured pressure ([AGENTS.md](../../AGENTS.md#module-boundaries)). The binary split has compile pressure today (a reducer test rebuilds the macOS FFI, the systemd launcher and the OTLP exporter). The journal crate has release and ownership pressure only when `serve --stdio` starts, so PR14 waits for roadmap item 8.
+3. Crate creation needs measured pressure ([AGENTS.md](../../AGENTS.md#module-boundaries)). The binary split has compile pressure today (a reducer test rebuilds the macOS FFI, the systemd launcher and the OTLP exporter). The journal crate has release and ownership pressure only when `serve --stdio` starts, so PR14 waits for roadmap item 7.
 
 **Naming (approved).** The library keeps `arany`. The binary package is `arany-cli` with `[[bin]] name = "arany"`. The roadmap's `arany-engine` name is not used. `cli/chatgpt` and `cli/credentials` become `accounts`, because they never construct an Engine.
 
@@ -164,7 +164,7 @@ Leverage: the reducer, approval, resource settings, `tool_specs`, the Guard help
 | Place | Adapters today | Shape | Reason |
 |---|---|---|---|
 | Provider | 5 (OpenAI, ChatGPT subscription, Anthropic, Custom, Scripted), chosen at runtime | `Arc<dyn Provider>` (exists since A2), four methods after PR3 | Runtime-selected and open to a sixth; one vtable call per network round trip is nil |
-| Hooks (roadmap item 6) | 3 on day one: human approval, AI review, external command | `Vec<Box<dyn Hook>>` with a closed `Verdict` enum | The only new `dyn` seam in the plan: an open, user-configured list. Verdicts stay closed so journaling and "only narrow" are exhaustive. PR10 prepares the call site |
+| Hooks (roadmap item 5) | 3 on day one: human approval, AI review, external command | `Vec<Box<dyn Hook>>` with a closed `Verdict` enum | The only new `dyn` seam in the plan: an open, user-configured list. Verdicts stay closed so journaling and "only narrow" are exhaustive. PR10 prepares the call site |
 | Guard platform | 2 (`linux.rs`, `macos.rs`) | `cfg`-selected functions (as today) | The kernel chooses the adapter, never a runtime; a trait would be hypothetical |
 | Tool execution site | 2 (in-process, Guard) | enum and `if` in `ToolRuntime::execute` | Site is a property of the operation, not configuration; a fake Guard would let Engine tests pass against enforcement that never ran |
 | Journal observers | 3 (progress, telemetry, diagnostics) | `broadcast::Receiver<Arc<EventEnvelope>>`, no trait | The interface is a channel; a trait would re-invent `Receiver` |
@@ -220,14 +220,14 @@ Each row names the trigger that reopens it.
 
 | Area | Why not now | Revisit when |
 |---|---|---|
-| `AttachedTerminal` toolbox to screen objects; `cli/attached.rs run` (821 lines), `active.rs submit_objective` (523) | Roadmap item 8 makes the TUI a client of `serve --stdio`; those flows are rewritten against `RunHandle` then. PR13 does the free physical move only | Item 8 starts; adopt screens flow by flow as each is rewritten as a client |
+| `AttachedTerminal` toolbox to screen objects; `cli/attached.rs run` (821 lines), `active.rs submit_objective` (523) | Roadmap item 7 makes the TUI a client of `serve --stdio`; those flows are rewritten against `RunHandle` then. PR13 does the free physical move only | Item 7 starts; adopt screens flow by flow as each is rewritten as a client |
 | `provider/streaming.rs feed` (540 lines) | One cohesive SSE state machine with a large corpus; no roadmap item touches its framing | A second framing (for example WebSocket) appears |
 | macOS Guard (`macos/unit.rs`, 3,184 lines; two `helper_main`s) | Frozen until C2; needs a Mac for evidence. PR6 already removes the dispatch duplication | The freeze lifts; then do the two NEXT_STEPS items (one Seatbelt profile builder, one executable-identity table) |
 | Build cache (`store/state/build_cache.rs`, 2,795 lines) | Frozen; correct; no consumer pressure before a real build is measured | After native build evidence |
 | ChatGPT OAuth and credential internals | Deep internally; PR13 moves them to `accounts` unchanged | A second OAuth route lands |
 | `apply_committed` rules | The transition table is the product's safety property; rewriting rules is a behavior change | Only through the spec workflow, rule by rule |
 | Store SQLite thread and `Request` enum (19 variants) | One adapter, deep and correct; PR4 trims six variants; a trait would be hypothetical | A second backend or a daemon (actor Engine) |
-| Provider conformance checks (`native_check.rs`, `custom/check.rs`) | Large but a leaf; a breadth liability, not a shape problem | Routing (item 9) adds routes |
+| Provider conformance checks (`native_check.rs`, `custom/check.rs`) | Large but a leaf; a breadth liability, not a shape problem | Routing (item 8) adds routes |
 | Hand-written JSON Schema replaced by `schemars` | The schemas carry model-facing descriptions and byte-stable ordering a derive cannot guarantee; the cached prefix depends on the bytes | Caching has landed and a snapshot pins the bytes |
 
 ## Security and resource model
@@ -240,7 +240,7 @@ Each row names the trigger that reopens it.
 - Symlink policy is identical. Disclosure does not widen: the same `workspace_paths` scope applies.
 - The reducer rejects an `InProcess` attestation for any operation whose `site` is not `InProcess`, so a read receipt cannot authorize a write.
 - `SystemBlock` stays a closed enum, so untrusted text cannot become system text by construction. `ProviderTurn` stays opaque and is never journaled.
-- Approvals remain an `mpsc(1)` channel. Hook verdicts (roadmap item 6) stay a closed enum.
+- Approvals remain an `mpsc(1)` channel. Hook verdicts (roadmap item 5) stay a closed enum.
 - Credential storage does not change: the account-root and `StateRoot` records and the OS keyring keep their current owners, and the credential helper stays the same binary under supervision. The library drops its keyring dependency.
 
 **Bounds and backpressure.**
@@ -305,7 +305,7 @@ Sizes: S is at most 2 days, M is at most 2 weeks, L is more than 2 weeks. Every 
 | 3-4 | PR7 (needs PR5, PR6) | PR8 (needs PR2, PR3) | Caching, no dependency |
 | 5-6 | PR10 with B (needs PR7, PR8) | PR9 | PR13 scaffolding (workspace, lints, CI paths) |
 | 7-8 | PR11 | PR12 | PR13 documentation migration |
-| 9 | PR13 move (one coder) | Hooks (roadmap 6) on `execute_step` | PR14 when item 8 starts |
+| 9 | PR13 move (one coder) | Hooks (roadmap 5) on `execute_step` | PR14 when item 7 starts |
 
 **Shared hot spots.** `src/engine/run_loop.rs` (PR7 deadlines, PR8 budget calls, PR10 deletion), `src/session/events.rs` (PR5, PR7, PR9), `src/lib.rs` (PR3, PR12, PR13). Everything else is disjoint by lane.
 
@@ -365,7 +365,7 @@ Each entry gives the PR, lane, size, risk, dependencies and verification. Behavi
 - `crates/arany` (library) and `crates/arany-cli` (`[[bin]] name = "arany"`, with `cli/`, `terminal/`, `presentation/`, `accounts/`). Test corpora move as in [Test corpora per crate](#test-corpora-per-crate-approved). `tests/common` moves behind `test-support`. Guard helper entry points stay reachable from the binary's `main.rs`. Workspace-level `[workspace.lints]` carries the Clippy settings from the readability bounds. `ci.yml` test paths update in the same PR. Documentation: correct [system overview](../../docs/architecture/system-overview.md) §2 and the AGENTS.md routing table (F12). Nothing in the Engine changes.
 - Verification: `cargo test -p arany` and `cargo test -p arany-cli`. New: `cargo tree -p arany -e normal` has no `ratatui`, `crossterm` or `keyring`, asserted in CI. Manual native lanes run once.
 
-**PR14. `arany-journal` vocabulary crate (conditional).** Lane Shape. Size S to M. Risk low (code motion). Depends on PR13. Starts only when roadmap item 8 starts.
+**PR14. `arany-journal` vocabulary crate (conditional).** Lane Shape. Size S to M. Risk low (code motion). Depends on PR13. Starts only when roadmap item 7 starts.
 - Move `events`, `reducer`, `views`, `tools::types` and `tools::catalog` vocabulary, `provider::{ProviderIdentity, Usage, ImageAttachment, AgentPhase, OutputTokenBound}`, `tools::cancel` and `replay` into `crates/arany-journal`. The SQLite thread stays in `arany`. `arany` re-exports them, so callers do not change.
 - Verification: full corpus. New: `cargo tree -p arany-journal` has no `tokio`, `reqwest` or `rusqlite`; the reducer and cold-replay tests live in its `tests/`.
 
@@ -400,17 +400,17 @@ Each roadmap item lands on a named PR, and the refactor removes the duplication 
 | Prompt caching (separate work) | `provider/render`, wire adapters | Nothing to wait for; runs in parallel. PR3 shrinks the ScriptedProvider the cache tests use |
 | 2 In-process reads | PR7, on PR6's `facts().site` and PR1's cycle cut | Without PR6, the in-process path would be a tenth hand-written match |
 | 3 Engine hygiene, event stream | PR11 (`Journal` tap) and PR12 (`RunHandle`) | `exec --output jsonl` and telemetry become receivers of one stream |
-| 4 Spec diet | Documentation changes in PR13 | `agents/<module>.md` behavior moves to specs and invariants to tests; `agents/` keeps general practice only |
-| 5 Ledger diet | PR8, then PR9 | Tail literals and `GoalRunBudget` are gone before the Event shape changes |
-| 6 Hooks and permission modes | PR10's `before_dispatch` | Hook adapters replace two inline branches instead of being threaded through two Tool paths |
-| 8 `serve --stdio` | PR12 (`submit`, `RunHandle.events`), PR13 (binary hosts `serve`), PR14 (vocabulary for `generate-schema`) | No per-submission Engine and no coalescing `watch` |
-| 9 Routing, 10 Multi-call | PR3 (`ProviderIdentity` per role), PR10 (`execute_step` over a request slice) | `RunControls` no longer carries ChatGPT fields |
-| 11 C2 workers | PR10's `Grant::Worker` and PR7's attestation | A third Tool path is never written |
-| 13 ACP, crate split | PR13, PR14 | The vocabulary crate exists |
+| Spec diet | Documentation changes in PR13 | `agents/<module>.md` behavior moves to specs and invariants to tests; `agents/` keeps general practice only |
+| 4 Ledger diet | PR8, then PR9 | Tail literals and `GoalRunBudget` are gone before the Event shape changes |
+| 5 Hooks and permission modes | PR10's `before_dispatch` | Hook adapters replace two inline branches instead of being threaded through two Tool paths |
+| 7 `serve --stdio` | PR12 (`submit`, `RunHandle.events`), PR13 (binary hosts `serve`), PR14 (vocabulary for `generate-schema`) | No per-submission Engine and no coalescing `watch` |
+| 8 Routing, 9 Multi-call | PR3 (`ProviderIdentity` per role), PR10 (`execute_step` over a request slice) | `RunControls` no longer carries ChatGPT fields |
+| 10 C2 workers | PR10's `Grant::Worker` and PR7's attestation | A third Tool path is never written |
+| 12 ACP, crate split | PR13, PR14 | The vocabulary crate exists |
 
 ## Open questions
 
-- **When PR14 starts.** It is gated on roadmap item 8 (`serve --stdio`). Until item 8 starts, the journal crate is a seam with one consumer. Owner: `fpmirabile`.
+- **When PR14 starts.** It is gated on roadmap item 7 (`serve --stdio`). Until item 7 starts, the journal crate is a seam with one consumer. Owner: `fpmirabile`.
 
 ## Exit criteria
 

@@ -95,16 +95,16 @@ Cancellation drops any buffered streaming tail instead of flushing it.
 
 ## Acceptance scenarios and evidence owners
 
-These owners define verification scope, not gate results. Native and live gates run in CI or stay listed in [next steps](../../NEXT_STEPS.md).
+Tests: [`src/provider/openai/wire/tests.rs::native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes`](../../src/provider/openai/wire/tests.rs); [`src/provider/anthropic/wire/tests.rs::outbound_messages_pin_schema_cap_and_disclosure_scope`](../../src/provider/anthropic/wire/tests.rs); [`src/provider/openai/subscription/tests.rs::chatgpt_keeps_phase_specific_functions_until_probe_p3`](../../src/provider/openai/subscription/tests.rs); [`tests/session_run/custom.rs::custom_profile_process_gate_proves_conformance_and_durable_runs`](../../tests/session_run/custom.rs).
 
-| Scenario | Required outcome | Existing evidence owner |
-|---|---|---|
-| Native model, effort and credential admission | Exact IDs admit with their reviewed effort sets. Malformed IDs, unsupported combinations and mismatched saved-account or workspace scope reject before credential or Workspace input. | [OpenAI wire corpus](../../src/provider/openai/wire/tests.rs), [Anthropic wire corpus](../../src/provider/anthropic/wire/tests.rs), [scoped Anthropic journey](../../tests/session_run/setup/offline_https/anthropic.rs) |
-| Structured outcome encodings | Exactly one admitted call or structured text outcome persists. Missing, duplicate, truncated, refused or schema-mismatched outcomes fail without an alternate encoding. | [OpenAI wire corpus](../../src/provider/openai/wire/tests.rs), [Anthropic wire corpus](../../src/provider/anthropic/wire/tests.rs) |
-| Custom profile conformance | Unverified profiles reject Run and Workspace use. Fresh evidence for the exact origin, model, effort list and cap admits; stale or changed evidence refuses before the key is read. | [Custom checker](../../src/provider/custom/check.rs), [custom journey](../../tests/session_run/custom.rs) |
-| Destination and address admission | Redirects, proxies, drift, reserved or unallocated IPv6 addresses and non-HTTPS domains reject before any credential is sent. | [Custom checker](../../src/provider/custom/check.rs), [custom journey](../../tests/session_run/custom.rs) |
-| Catalog bounds | Model listing returns the complete result or fails closed beyond its page, count or media-type bounds. | [Model catalog journey](../../tests/session_run/model_catalog.rs) |
-| Usage and reflection | Unknown usage stays unknown. A selected key reflected in a response, including JSON-escaped echoes, rejects before any Event. | [OpenAI wire corpus](../../src/provider/openai/wire/tests.rs), [Anthropic wire corpus](../../src/provider/anthropic/wire/tests.rs) |
-| Prompt cache prefixes and accounting | Anthropic sends at most three markers. OpenAI API keeps the function list stable while restricting allowed functions by phase; ChatGPT retains phase-dependent lists pending P3. Both use the Session cache key. Cache-read counters survive bounded decoding and Goal replay; malformed counters reject. | [OpenAI wire corpus](../../src/provider/openai/wire/tests.rs), [Anthropic wire corpus](../../src/provider/anthropic/wire/tests.rs), [subscription corpus](../../src/provider/openai/subscription/tests.rs), [Goal journey](../../tests/engine_run/goals.rs) |
-| Streaming preview bounds | Credentials split across fragments are never displayed. Over-bound frames and media switches reject without accepted partial text. | [Streaming framing](../../src/provider/streaming.rs), [custom journey](../../tests/session_run/custom.rs) |
-| Native check diagnostics | Only complete strict probes publish evidence; a failed check clears prior evidence and grants no Run authority. | [Custom checker](../../src/provider/custom/check.rs) |
+| Scenario | Required outcome |
+|---|---|
+| Native model, effort and credential admission | Exact IDs admit with their reviewed effort sets. Malformed IDs, unsupported combinations and mismatched saved-account or workspace scope reject before credential or Workspace input. |
+| Structured outcome encodings | Exactly one admitted call or structured text outcome persists. Missing, duplicate, truncated, refused or schema-mismatched outcomes fail without an alternate encoding. |
+| Custom profile conformance | Unverified profiles reject Run and Workspace use. Fresh evidence for the exact origin, model, effort list and cap admits; stale or changed evidence refuses before the key is read. |
+| Destination and address admission | Redirects, proxies, drift, reserved or unallocated IPv6 addresses and non-HTTPS domains reject before any credential is sent. |
+| Catalog bounds | Model listing returns the complete result or fails closed beyond its page, count or media-type bounds. |
+| Usage and reflection | Unknown usage stays unknown. A selected key reflected in a response, including JSON-escaped echoes, rejects before any Event. |
+| Prompt cache prefixes and accounting | Anthropic sends at most three markers. OpenAI API keeps the function list stable while restricting allowed functions by phase; ChatGPT retains phase-dependent lists pending P3. Both use the Session cache key. Cache-read counters survive bounded decoding and Goal replay; malformed counters reject. |
+| Streaming preview bounds | Credentials split across fragments are never displayed. Over-bound frames and media switches reject without accepted partial text. |
+| Native check diagnostics | Only complete strict probes publish evidence; a failed check clears prior evidence and grants no Run authority. |
