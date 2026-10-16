@@ -1,8 +1,9 @@
 name: CI
 
 on:
+  # Every pull request, including stacked ones whose base is another branch.
+  # The merge ref tests the head merged into its base, so a stacked head is checked as a whole.
   pull_request:
-    branches: [main]
   push:
     branches: [main]
   workflow_dispatch:
