@@ -606,6 +606,7 @@ impl RunLoop<'_> {
             let researcher = children[index].tools.is_some();
             let root = &root_request.input;
             let request = ProviderRequest {
+                session_id: self.session_id,
                 run_id: self.run_id,
                 agent_run_id: children[index].agent_run_id,
                 phase: AgentPhase::ChildWork,

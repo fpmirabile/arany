@@ -42,22 +42,9 @@ The source captured five seconds later shows that the historical `wait_product` 
 
 The Linux owner at the time of this investigation, `setup::stalled_credential_bus_does_not_strand_unconfigured_start` in [setup.rs](../../tests/session_run/setup.rs), deliberately accepted a Unix socket connection and never answered D-Bus authentication. It exercised four credential waits: first startup and three resumed/preparation cases, including an unlinked running executable. Its total duration was therefore approximately twenty seconds; that was not one twenty-second credential operation. The first phase had a seven-second outer guard, and the shared process observer had a ten-second exit/output-EOF deadline per capture. These bounds had different owners from the helper's five-second operation deadline.
 
-The focused owner passed exactly one test in 20.56 seconds with:
+Test: [`tests/session_run/setup.rs::stalled_credential_bus_does_not_strand_unconfigured_start`](../../tests/session_run/setup.rs).
 
-```sh
-rtk proxy cargo test --locked --offline --test session_run setup::stalled_credential_bus_does_not_strand_unconfigured_start -- --exact --nocapture
-```
-
-A separate bounded observer of the same debug test process measured four helper lifetimes of 4.974, 4.991, 4.991 and 4.978 seconds; the entire owner passed in 20.574 seconds. Observation used only test-owned descendant process identity, state, wait channel and timestamps, without reading process environments or credential payloads. No helper exceeded its deadline in this run. These are observations on this host, not timing assertions or a load-independent guarantee.
-
-Two further isolated comparisons narrowed the current behavior:
-
-| Comparison | Observed result | What it establishes |
-|---|---|---|
-| Invoke the optimized internal helper directly against a silent synthetic peer; then change only the peer to close the connection | The silent peer received `AUTH EXTERNAL`; the diagnostic killed/reaped the direct helper after one second. Closing the peer made the helper exit with failure in 0.002 seconds. | This fixture stalls during D-Bus authentication, before Secret Service collection or item operations. Direct internal invocation omits the production parent supervisor; its continued wait is not a failure of that supervisor. |
-| Run optimized attached startup with null stdin, then piped interactive stdin, then interactive stdin with GNU `timeout --foreground` | All three cases reached the composer in 5.009–5.018 seconds and exited successfully in 5.038–5.128 seconds. Interactive cases explicitly submitted `/quit`. | Neither stdin EOF nor the timeout process-group variation reproduced the historical miss in these isolated cases. |
-
-A final controlled-contention comparison pinned the freshly rebuilt debug owner and three bounded CPU-only contenders to one allowed CPU. The owner passed exactly one test in 22.00 seconds, with observed helper lifetimes of 4.990, 4.976, 4.998 and 4.978 seconds. The diagnostic parent retained its separate forty-second bound and killed/reaped all owned contenders; product and test deadlines were unchanged. This did not reproduce the miss. It neither recreates the historical host's full load nor rules out scheduler delay under other conditions.
+A direct optimized helper reached `AUTH EXTERNAL` against a silent peer and exited when the peer closed; that invocation omitted the production supervisor. Isolated startup, stdin/timeout variations and controlled CPU contention did not reproduce the historical parent miss. They neither recreate its full host load nor establish a load-independent timing guarantee.
 
 The direct-helper probe and PTY comparisons used private homes, synthetic slots, test-owned Unix sockets, bounded captures and parent kill/reap cleanup. They did not contact the user's Secret Service. The pinned [zbus authentication handshake](https://github.com/dbus2/zbus/blob/zbus-5.19.0/zbus/src/connection/handshake/client.rs) waits for the authentication reply before method calls; its [method-call timeout](https://docs.rs/zbus/5.19.0/zbus/connection/struct.Builder.html#method.method_timeout) does not bound that phase. This explains why the synthetic peer needs Arany's external supervisor, not why the historical observer missed its deadline.
 
@@ -77,4 +64,4 @@ For user recovery, retain explicit informed file-backend selection before a back
 
 ## Scope and limits
 
-Public source was downloaded and inspected at the listed commit hashes; branches can move. Claude evidence is documentation-only. No upstream binaries were executed, native stores unlocked or queried, real credentials read, or provider calls made. This research changes no product behavior or acceptance contract. Current synthetic supervision passes; Arany's historical observer miss still requires failure-stage evidence to identify its cause.
+Public source was downloaded and inspected at the listed commit hashes; branches can move. Claude evidence is documentation-only. No upstream binaries were executed, native stores unlocked or queried, real credentials read, or provider calls made. This research changes no product behavior or acceptance contract. Arany's historical observer miss still requires failure-stage evidence to identify its cause.

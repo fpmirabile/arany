@@ -24,6 +24,7 @@ pub(crate) fn tool_context(catalog: Value) -> ToolContext {
 
 fn request(model: &str, phase: AgentPhase, input: RunInput) -> ProviderRequest {
     ProviderRequest {
+        session_id: crate::session::SessionId::new(),
         run_id: RunId::new(),
         agent_run_id: AgentRunId::new(),
         phase,
