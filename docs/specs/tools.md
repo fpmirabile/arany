@@ -66,7 +66,7 @@ The cause carries no path, filename, contents or native diagnostic text. Its siz
 | Platform | Reliable attribution in this profile | Reports no cause |
 |---|---|---|
 | Linux | Protected-path and set-ID entry refusals inside command snapshot capture | Bubblewrap startup failures, namespace-hidden paths, read-only mounts and seccomp-returned errno have no trusted per-operation denial channel. The current seccomp profile returns `EPERM` (and `ENOSYS` for `clone3`), rather than notification records; Arany uses no Landlock/audit attribution channel. A blocked socket/connect, `EACCES`, `EPERM`, `EROFS`, missing file or signal alone cannot establish Guard causation. |
-| macOS | The same command snapshot refusals in the supervisor | Seatbelt violations are not collected through a trusted, invocation-correlated report channel. Program errno, stderr, exit status and unrelated system sandbox reports cannot establish attribution. |
+| macOS | Post-run command snapshot refusals in the supervisor; a pre-launch snapshot refusal is a bootstrap failure and reports no cause | Seatbelt violations are not collected through a trusted, invocation-correlated report channel. Program errno, stderr, exit status and unrelated system sandbox reports cannot establish attribution. |
 
 `null` means no attributable cause, not permission or proof that enforcement was uninvolved. No network or process cause is claimed without a trusted evidence source. This applies equally to commands and local MCP servers; `isError`, server-provided cause fields and text remain ordinary program data. Skill loading is data-only; Skill scripts use ordinary guarded commands and the same classification.
 

@@ -660,7 +660,7 @@ pub enum EnforcementCause {
 impl EnforcementCause {
     pub(crate) fn diagnostic(self) -> &'static str {
         match self {
-            Self::FilesystemDenied => "Guard enforcement: filesystem boundary denied",
+            Self::FilesystemDenied => "Guard enforcement: protected path or set-ID entry refused",
         }
     }
 }

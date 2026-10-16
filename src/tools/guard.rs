@@ -1282,7 +1282,7 @@ mod tests {
         let projected = model_observation(&observation);
         assert_eq!(
             projected["enforcement_cause"],
-            "Guard enforcement: filesystem boundary denied"
+            "Guard enforcement: protected path or set-ID entry refused"
         );
         let tool = crate::session::ToolView {
             intent: observation.intent.clone(),
@@ -1292,7 +1292,7 @@ mod tests {
         };
         assert!(
             crate::presentation::tool_summary(&tool)
-                .ends_with(" · Guard enforcement: filesystem boundary denied")
+                .ends_with(" · Guard enforcement: protected path or set-ID entry refused")
         );
     }
 
