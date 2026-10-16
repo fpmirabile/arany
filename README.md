@@ -85,14 +85,7 @@ commands and native prerequisites.
 
 ## Contribute
 
-Bug reports, focused fixes, documentation improvements and native platform testing are welcome.
-
-1. Describe the problem or proposed behavior; include the OS and terminal for platform-specific issues.
-2. Fork the repository and create a focused branch from `main`.
-3. Implement the change, run the applicable checks and update the owning documentation.
-4. Open a pull request explaining what changed, why, and how you verified it.
-
-Use English for repository content. Prefer the simplest complete change while preserving safety, accessibility and verification. The [contribution guide](./CONTRIBUTING.md) covers the full workflow.
+Bug reports, focused fixes, documentation improvements and native platform testing are welcome; the [contribution guide](./CONTRIBUTING.md) covers the workflow from issue to pull request.
 
 ## Documentation
 
