@@ -2345,7 +2345,7 @@ fn accept_provider_request(
 }
 
 // The chat view selects the screen the product owns: Classic keeps the primary screen, Fullscreen its alternate one.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, Debug)]
 enum ChatView {
     Classic,
     Fullscreen,
@@ -2361,7 +2361,7 @@ impl ChatView {
     }
 
     fn alternate_screen(self) -> bool {
-        self == Self::Fullscreen
+        matches!(self, Self::Fullscreen)
     }
 }
 
@@ -2561,10 +2561,24 @@ fn steering_note_and_pause_in_tmux(view: ChatView) {
         decline_initial_consent(&server, screen, &mut declined);
         idle_composer(screen)
     });
+    // Positive controls while the pane is alive: the expected screen, the cursor and mouse reporting
+    // are observable here, so the post-exit values below prove restoration rather than an unset flag.
+    // Fullscreen enables mouse capture on draw; Classic enables it only for pickers and the transcript.
+    let alternate = view.alternate_screen();
     assert_eq!(
-        pane_flag(&server, "#{alternate_on}") == "1",
-        view.alternate_screen(),
+        pane_flag(&server, "#{alternate_on}"),
+        if alternate { "1" } else { "0" },
         "{view:?} chat view owns the expected screen"
+    );
+    assert_eq!(
+        pane_flag(&server, "#{mouse_any_flag}"),
+        if alternate { "1" } else { "0" },
+        "{view:?} chat view mouse reporting while idle"
+    );
+    assert_eq!(
+        pane_flag(&server, "#{cursor_flag}"),
+        "1",
+        "{view:?} cursor visible while idle"
     );
 
     // Step 1: a note stays in the composer until the Engine records it for the next primary call.
@@ -2721,7 +2735,8 @@ fn steering_note_and_pause_in_tmux(view: ChatView) {
         thread::yield_now();
     }
     // The exited product must leave the alternate screen and disable mouse reporting. tmux
-    // reports cursor_flag 0 on a dead pane even when the cursor was shown, so it is not asserted.
+    // reports cursor_flag 0 on a dead pane even while the cursor was shown, so cursor restoration
+    // is covered only by the raw-byte PTY tests, not here.
     let deadline = Instant::now() + Duration::from_secs(10);
     while pane_flag(&server, "#{pane_dead}") != "1" {
         assert!(Instant::now() < deadline, "tmux pane not marked dead");
