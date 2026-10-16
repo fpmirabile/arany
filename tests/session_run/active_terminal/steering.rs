@@ -398,3 +398,145 @@ fn pause_during_attached_run_waits_for_the_call_and_pauses_the_goal() {
         1
     );
 }
+
+#[test]
+fn held_linear_draft_yields_to_controls_and_returns_at_run_end() {
+    let temp = tempfile::tempdir().expect("private test root");
+    let (workspace, state) = fixture_root(&temp);
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback Provider");
+    write_profile(
+        &state,
+        listener.local_addr().expect("Provider address").port(),
+    );
+    let note = "a".repeat(4000);
+    let expected_note = note.clone();
+    let (child_ready_sender, child_ready) = mpsc::channel();
+    let (release_child_sender, release_child) = mpsc::channel::<()>();
+    let (release_synthesis_sender, release_synthesis) = mpsc::channel::<()>();
+    // Calls 0-2 are the provider check; then 3 primary Delegate, 4 held child, 5 held synthesis.
+    let server = thread::spawn(move || {
+        for index in 0..6 {
+            let mut stream = accept_within(&listener);
+            let input = semantic_input(&mut stream);
+            if index < 3 {
+                answer_provider_check(&mut stream, index);
+                continue;
+            }
+            match index {
+                3 => {
+                    assert_eq!(input["objective"], "steer");
+                    send_response_for(
+                        &mut stream,
+                        index,
+                        serde_json::from_str(DELEGATE).expect("Delegate JSON"),
+                        false,
+                    );
+                }
+                4 => {
+                    child_ready_sender.send(()).expect("held child gate");
+                    release_child
+                        .recv_timeout(Duration::from_secs(10))
+                        .expect("release held child");
+                    send_response_for(
+                        &mut stream,
+                        index,
+                        serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"child result"}}),
+                        false,
+                    );
+                }
+                _ => {
+                    assert_eq!(input["steering_notes"], serde_json::json!([expected_note]));
+                    release_synthesis
+                        .recv_timeout(Duration::from_secs(10))
+                        .expect("release held synthesis");
+                    send_response_for(
+                        &mut stream,
+                        index,
+                        serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"synthesized"}}),
+                        false,
+                    );
+                }
+            }
+        }
+    });
+    check_profile(&workspace, &state);
+
+    let mut attached = spawn_linear_run(
+        &state,
+        &workspace,
+        "steer",
+        &[
+            b"SHELL_PID:",
+            b"Agent: primary; state: active",
+            b"Steering note waits for the agent's next step",
+            b"Steering note sent to the agent",
+            b"No room for more steering notes this Run",
+            b"Notice: Working",
+            b"A draft is already retained; line not kept",
+            b"A draft is already retained; line not kept",
+            b"Draft retained: 4200 characters; Enter submits",
+            b"Input:",
+            b"Input:",
+        ],
+    );
+    let shell_text =
+        String::from_utf8_lossy(&stage(&attached.stages, 0, "shell PID stage")).into_owned();
+    let shell_pid = transcript_field(&shell_text, "SHELL_PID:")
+        .parse::<u32>()
+        .expect("shell PID");
+    let product_pid = product_child_of(shell_pid);
+    let _product = ProductGuard::new(product_pid, state.clone());
+    stage(&attached.stages, 1, "active Run stage");
+    child_ready
+        .recv_timeout(Duration::from_secs(10))
+        .expect("child call reached the Provider");
+    write_input(&attached.input, format!("{note}\n").as_bytes());
+    stage(&attached.stages, 2, "steering offer notice");
+    release_child_sender.send(()).expect("release child call");
+    stage(
+        &attached.stages,
+        3,
+        "steering confirmation while synthesis is held",
+    );
+    // The 4000-byte note fills most of the Run's 8 KiB, so 4200 more characters are refused.
+    let mut draft = vec![b'b'; 3000];
+    draft.push(0x04);
+    write_input(&attached.input, &draft);
+    let mut line = vec![b'b'; 1200];
+    line.push(b'\n');
+    write_input(&attached.input, &line);
+    stage(&attached.stages, 4, "RunFull refusal keeps the draft aside");
+    write_input(&attached.input, b"/status\n");
+    stage(&attached.stages, 5, "status runs while the draft is held");
+    write_input(&attached.input, b"x\n");
+    stage(&attached.stages, 6, "text line is not kept");
+    let mut continued = vec![b'c'; 4000];
+    continued.push(0x04);
+    write_input(&attached.input, &continued);
+    stage(&attached.stages, 7, "continued text is not kept");
+    release_synthesis_sender
+        .send(())
+        .expect("release synthesis call");
+    stage(&attached.stages, 8, "held draft returned at Run end");
+    stage(&attached.stages, 9, "idle prompt after Run");
+    // Idle Ctrl+C clears the retained draft so the exit line is not appended to it.
+    write_input(&attached.input, b"\x03");
+    stage(&attached.stages, 10, "idle prompt after clearing draft");
+    write_input(&attached.input, b"/exit\n");
+    let result = wait_product(attached.process.take());
+    let _ = attached.reader.join().expect("PTY output reader");
+    assert!(result.status.success(), "attached exit after held draft");
+    server.join().expect("synthetic Provider conversation");
+
+    let (events, view) = replayed(&state, &workspace);
+    assert_eq!(view.runs.len(), 1);
+    assert_eq!(view.runs[0].status, RunStatus::Finished);
+    assert_eq!(view.runs[0].steering_notes, [note.as_str()]);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, Event::GoalSteeringNoteRecorded { .. }))
+            .count(),
+        1
+    );
+}

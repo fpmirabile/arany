@@ -4,8 +4,9 @@ use super::{
 use crate::cli::chatgpt;
 use arany::{
     AttachedTerminal, CompactionFailure, CompactionRecord, CompactionStatus, Composer,
-    ComposerEdit, RunCancellation, RunOutcome, RunProgress, RunRequest, RunSteering, SessionView,
-    ShutdownSignal, SteeringRefused, TerminalError, TerminalInput, TerminalNotice,
+    ComposerEdit, ImageAttachment, RunCancellation, RunOutcome, RunProgress, RunRequest,
+    RunSteering, SessionView, ShutdownSignal, SteeringRefused, TerminalError, TerminalInput,
+    TerminalNotice,
 };
 use std::time::Duration;
 
@@ -136,6 +137,47 @@ fn settle_recorded_note(
         composer.take();
     }
     true
+}
+
+/// A linear draft kept aside during a Run, where the composer is not drawn.
+type HeldDraft = (String, Vec<ImageAttachment>);
+
+/// Moves a refused linear draft out of the composer so later lines cannot be appended to it.
+fn hold_draft(composer: &mut Composer) -> Option<HeldDraft> {
+    if composer.is_empty() {
+        return None;
+    }
+    Some((composer.take(), composer.take_images()))
+}
+
+/// Returns a held draft at Run end, ahead of newer text. If both do not fit, the newer draft stays and this returns false.
+fn release_held_draft(composer: &mut Composer, (text, images): HeldDraft) -> bool {
+    let typed = composer.take();
+    let typed_images = composer.take_images();
+    let joined = if typed.is_empty() {
+        text
+    } else {
+        format!("{text}\n{typed}")
+    };
+    let fits = matches!(
+        composer.insert_paste(&joined),
+        Ok(ComposerEdit::Changed | ComposerEdit::Unchanged)
+    ) && images
+        .into_iter()
+        .chain(typed_images.iter().cloned())
+        .all(|image| composer.attach_image(image).is_ok());
+    if !fits {
+        composer.clear();
+        composer
+            .insert_paste(&typed)
+            .expect("newer draft came from this composer");
+        for image in typed_images {
+            composer
+                .attach_image(image)
+                .expect("newer images came from this composer");
+        }
+    }
+    fits
 }
 
 /// Checks an idle run before any Session or Goal state is created. Returns the notice to show.
@@ -275,6 +317,7 @@ pub(super) async fn submit_objective(
     let mut stop = ActiveStop::Running;
     let mut user_recorded = false;
     let mut offered: Option<String> = None;
+    let mut held: Option<HeldDraft> = None;
     let mut seen_delivered = 0u64;
     let shutdown_reason = loop {
         let approval_more = match &pending {
@@ -302,6 +345,9 @@ pub(super) async fn submit_objective(
                 // An undelivered note ends the Run as an ordinary retained draft.
                 let had_offer = offered.is_some();
                 let sent = settle_recorded_note(steering.delivered_notes(), &mut seen_delivered, &mut offered, composer);
+                // A held draft returns before the undelivered note, so a newer draft wins over the note.
+                let had_held = held.is_some();
+                let restored = held.take().is_none_or(|draft| release_held_draft(composer, draft));
                 // Linear offers leave the composer empty, so the undelivered text returns to it here.
                 let mut withdrawn = false;
                 if let Some(text) = offered.take() {
@@ -314,10 +360,23 @@ pub(super) async fn submit_objective(
                         }
                     }
                 }
-                if (result.is_err() || had_offer || sent)
+                if (result.is_err() || had_offer || sent || had_held)
                     && terminal.restore_draft_input(composer.text().len()).is_err()
                 {
                     return Ok(RunSubmission::Shutdown("terminal input cleanup failed".into()));
+                }
+                if !restored
+                    && draw_active_snapshot(
+                        terminal,
+                        view,
+                        composer,
+                        user_recorded,
+                        stop,
+                        Some(TerminalNotice::History("Retained draft and newer text exceed the draft limit; newer text kept")),
+                    )
+                    .is_err()
+                {
+                    return Ok(RunSubmission::Shutdown("terminal rendering failed".into()));
                 }
                 let ended_notice = if sent {
                     Some(STEERING_SENT)
@@ -521,13 +580,20 @@ pub(super) async fn submit_objective(
                     TerminalInput::LineRejected => {
                         Some(Feedback::History("Error: invalid or overlong terminal line; draft unchanged".into()))
                     }
+                    TerminalInput::LineContinued if held.is_some() => {
+                        composer.take();
+                        if terminal.restore_draft_input(0).is_err() {
+                            break "terminal input failed".to_owned();
+                        }
+                        Some(Feedback::Transient("A draft is already retained; line not kept".into()))
+                    }
                     TerminalInput::LineContinued => {
                         Some(Feedback::History(format!("Draft: {} characters; Enter offers it as a steering note", composer.character_count())))
                     }
                     TerminalInput::QuickActions => {
                         Some(Feedback::History("Quick actions are unavailable during a Run; /agents opens details".into()))
                     }
-                    TerminalInput::Submit if terminal.clipboard_loading() => {
+                    TerminalInput::Submit if terminal.clipboard_loading() && !terminal.is_linear() => {
                         if terminal.restore_draft_input(composer.text().len()).is_err() {
                             break "terminal input failed".to_owned();
                         }
@@ -543,7 +609,11 @@ pub(super) async fn submit_objective(
                     TerminalInput::Submit => {
                         match super::controls::handle_active_submission(composer, view, starting_sequence) {
                             ActiveSubmission::SteeringNote(text) => {
-                                let feedback = if !composer.images().is_empty() {
+                                let feedback = if terminal.is_linear() && held.is_some() {
+                                    composer.take();
+                                    composer.take_images();
+                                    Feedback::Transient("A draft is already retained; line not kept".into())
+                                } else if !composer.images().is_empty() {
                                     Feedback::Transient("Steering notes are text only; draft retained".into())
                                 } else if offered.is_some() {
                                     if terminal.is_linear() {
@@ -566,6 +636,12 @@ pub(super) async fn submit_objective(
                                         Err(refused) => Feedback::Transient(steering_refusal(refused, autonomous)),
                                     }
                                 };
+                                // A linear draft kept by a refusal is invisible, so it waits aside until the Run ends.
+                                if terminal.is_linear()
+                                    && let Some(draft) = hold_draft(composer)
+                                {
+                                    held = Some(draft);
+                                }
                                 if terminal.restore_draft_input(composer.text().len()).is_err() {
                                     break "terminal input failed".to_owned();
                                 }
@@ -639,7 +715,7 @@ pub(super) async fn submit_objective(
                         }
                         None
                     }
-                    TerminalInput::EndOfInput if !composer.is_empty() => {
+                    TerminalInput::EndOfInput if !composer.is_empty() || held.is_some() => {
                         Some(Feedback::Transient(draft_retained_notice(autonomous).into()))
                     }
                     _ => None,
@@ -1202,6 +1278,40 @@ mod goal_request_tests {
             &mut composer
         ));
         assert_eq!(composer.text(), "second!");
+    }
+
+    #[test]
+    fn held_linear_draft_waits_aside_and_returns_before_later_text() {
+        let mut composer = Composer::default();
+        for character in "kept".chars() {
+            composer.apply(TerminalInput::Character(character));
+        }
+        let held = hold_draft(&mut composer).expect("refused draft is held");
+        assert!(
+            composer.is_empty(),
+            "the invisible draft leaves the composer"
+        );
+        assert!(hold_draft(&mut composer).is_none());
+
+        for character in "later".chars() {
+            composer.apply(TerminalInput::Character(character));
+        }
+        assert!(release_held_draft(&mut composer, held));
+        assert_eq!(composer.text(), "kept\nlater");
+    }
+
+    #[test]
+    fn overflowing_release_keeps_the_newer_draft() {
+        let mut composer = Composer::default();
+        for character in std::iter::repeat_n('a', 5000) {
+            composer.apply(TerminalInput::Character(character));
+        }
+        let held = hold_draft(&mut composer).expect("refused draft is held");
+        for character in std::iter::repeat_n('b', 4000) {
+            composer.apply(TerminalInput::Character(character));
+        }
+        assert!(!release_held_draft(&mut composer, held));
+        assert_eq!(composer.text(), "b".repeat(4000));
     }
 
     #[test]
