@@ -85,6 +85,10 @@ mod tools;
 #[path = "session_run/tools_macos_git.rs"]
 mod tools_git;
 
+#[cfg(target_os = "macos")]
+#[path = "session_run/tools_macos_researcher.rs"]
+mod tools_researcher;
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "session_run/tools/replay.rs"]
 mod tool_replay;
