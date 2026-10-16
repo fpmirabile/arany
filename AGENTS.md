@@ -1,10 +1,10 @@
 # Arany
 
-Arany is a Rust-first, CLI-only agent harness. The product and executable are named Arany and `arany`; the repository directory name is not part of the public contract. This file guides agents developing Arany. [Documentation map](./docs/README.md) locates contracts and their owners.
+Arany is a Rust-first, CLI-only harness for multi-agent coding teams that can be trusted to work autonomously. The product and executable are named Arany and `arany`; the repository directory name is not part of the public contract. This file guides agents developing Arany. [Documentation map](./docs/README.md) locates contracts and their owners.
 
-## Mission
+## Non-negotiable guarantees
 
-Arany is the specialist harness for multi-agent coding teams that can be trusted to work autonomously. Teams are the product; trust is what makes them usable unattended. Five guarantees are non-negotiable; never weaken them for speed, convenience or parity with another harness, and treat any of them costing more than a peer's unguarded path as a defect to fix, not a price to accept:
+Multi-agent coordination builds on five guarantees. Never weaken them for speed, convenience or parity with another harness, and treat any of them costing more than a peer's unguarded path as a defect to fix, not a price to accept:
 
 - **Journal-first durability.** Every Provider call, Tool intent, effect, approval verdict and team transition (spawn, lease, handover, integration) is a committed Event before the next step; the reducer validates every transition; strict replay never re-executes.
 - **Honest uncertainty.** An effect with an unknown outcome is Uncertain: it stops its continuation, is reported as unknown, and never retries itself.

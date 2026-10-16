@@ -9,7 +9,7 @@ history. Implementation status and verified support are separate claims.
 
 ## Next functional priority
 
-Mission: the specialist harness for multi-agent coding teams that can be trusted to work autonomously (see [AGENTS.md](./AGENTS.md#mission)). Every item below either makes a non-negotiable guarantee cheaper, exposes it to more callers, or builds the team on top of it. Nothing below weakens a guarantee. Loop shape, wire formats, defaults, permission modes, hooks, agent definitions and embedding surfaces copy the named peer mechanism. The [initiative plan](./planning/agentic-teams/README.md) orders the team slices (C1-C3); Goal Foundation, A3 cache and A2 (message-native Provider request, #56) have landed.
+Arany is a harness for multi-agent coding teams that can be trusted to work autonomously; its [non-negotiable guarantees](./AGENTS.md#non-negotiable-guarantees) bound every item below. Every item below either makes a non-negotiable guarantee cheaper, exposes it to more callers, or builds the team on top of it. Nothing below weakens a guarantee. Loop shape, wire formats, defaults, permission modes, hooks, agent definitions and embedding surfaces copy the named peer mechanism. The [initiative plan](./planning/agentic-teams/README.md) orders the team slices (C1-C3); Goal Foundation, A3 cache and A2 (message-native Provider request, #56) have landed.
 
 ### Pursue, in order
 
