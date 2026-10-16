@@ -39,6 +39,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         cache_state: None,
         config,
         workspace: PathBuf::new(),
+        reads: None,
         workspace_identity: (1, 2),
         guard_executable: PathBuf::new(),
         enforcement_digest: [1; 32],
@@ -1225,7 +1226,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         ToolCall::Read {
             path: "src/main.rs".into(),
             offset: 0,
-            limit: 4097,
+            limit: 65537,
         },
         ToolCall::Search {
             path: "src".into(),
@@ -1257,7 +1258,9 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         enforcement_digest: [2; 32],
         workspace_device: 1,
         workspace_inode: 2,
-        call: ToolCall::List { path: "src".into() },
+        call: ToolCall::Mkdir {
+            path: "src/new".into(),
+        },
         limits: ToolLimits::default(),
         expires_at_ms: 1,
         use_count: 1,
@@ -1300,17 +1303,15 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         intent: intent.clone(),
         disposition: ToolDisposition::Succeeded,
         output: "observed".into(),
-        guard: Some(guard),
+        attestation: Some(Attestation::Guard(guard)),
         cache_update: crate::tools::CacheUpdate::NotApplicable,
     };
     assert!(observation.valid());
     let mut profile_mismatch = observation.clone();
-    profile_mismatch
-        .guard
-        .as_mut()
-        .unwrap()
-        .limits
-        .resource_profile =
+    let Some(Attestation::Guard(receipt)) = &mut profile_mismatch.attestation else {
+        unreachable!()
+    };
+    receipt.limits.resource_profile =
         if intent.limits.resource_profile == ToolResourceProfile::MacosSupervised {
             ToolResourceProfile::LinuxKernel
         } else {
@@ -1321,10 +1322,13 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         "receipt cannot relabel resource guarantees"
     );
     let mut missing = observation.clone();
-    missing.guard = None;
+    missing.attestation = None;
     assert!(!missing.valid());
     let mut mismatched = observation.clone();
-    mismatched.guard.as_mut().unwrap().limits.max_processes += 1;
+    let Some(Attestation::Guard(receipt)) = &mut mismatched.attestation else {
+        unreachable!()
+    };
+    receipt.limits.max_processes += 1;
     assert!(!mismatched.valid());
     let mut command_intent = observation.intent.clone();
     command_intent.call = ToolCall::Command {
@@ -1343,7 +1347,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         disposition: ToolDisposition::Uncertain,
         output: r#"{"exit_code":0,"stdout":"build complete","stderr":"","changeset":{"files":[]}}"#
             .into(),
-        guard: Some(command_guard),
+        attestation: Some(Attestation::Guard(command_guard)),
         cache_update: CacheUpdate::Uncertain,
     };
     assert!(uncertain_cache.valid());
@@ -1368,7 +1372,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
     );
     let mut unattempted_error = uncertain_cache.clone();
     unattempted_error.disposition = ToolDisposition::Uncertain;
-    unattempted_error.guard = None;
+    unattempted_error.attestation = None;
     unattempted_error.cache_update = CacheUpdate::NotAttempted;
     assert!(unattempted_error.valid());
     assert!(unattempted_error.stops_run());
@@ -1425,7 +1429,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         let uncertain =
             super::uncertain_observation(reserved, error, crate::tools::CacheUpdate::NotApplicable);
         assert_eq!(uncertain.disposition, ToolDisposition::Uncertain);
-        assert!(uncertain.guard.is_none());
+        assert!(uncertain.attestation.is_none());
         assert!(uncertain.valid(), "minimum-budget uncertainty receipt");
         assert!(uncertain.output.ends_with("Do not retry automatically."));
     }
@@ -1474,7 +1478,7 @@ fn guard_error_after_dispatch_marks_only_a_selected_command_cache_not_attempted(
     );
     assert!(observation.valid());
     assert!(observation.stops_run());
-    assert!(observation.guard.is_none());
+    assert!(observation.attestation.is_none());
     assert_eq!(observation.cache_update, CacheUpdate::NotAttempted);
 }
 
@@ -1557,17 +1561,11 @@ async fn cache_receipt_states_preserve_success_without_publication_uncertainty()
         intent.limits.cache_requested_bytes = cache_requested_bytes;
         intent.limits.cache_bytes = cache_requested_bytes;
         intent.limits.cache_candidate_bytes = 0;
-        let guard = GuardReceipt {
-            contract_version: 1,
-            intent_digest: intent.digest(),
-            enforcement_digest: intent.enforcement_digest,
-            limits: intent.limits.clone(),
-        };
         ToolObservation {
+            attestation: Some(Attestation::for_site(&intent)),
             intent,
             disposition: ToolDisposition::Succeeded,
             output: "{}".into(),
-            guard: Some(guard),
             cache_update: CacheUpdate::NotAttempted,
         }
     }
@@ -1899,6 +1897,7 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
         cache_state: None,
         config,
         workspace: PathBuf::new(),
+        reads: None,
         workspace_identity: (1, 2),
         guard_executable: PathBuf::new(),
         enforcement_digest: [1; 32],
@@ -2000,6 +1999,7 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
         cache_state: None,
         config: serde_json::from_value(value).unwrap(),
         workspace: PathBuf::new(),
+        reads: None,
         workspace_identity: (1, 2),
         guard_executable: PathBuf::new(),
         enforcement_digest: [1; 32],
@@ -2041,4 +2041,267 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
         include_str!("snapshots/catalog_prose.json")
     };
     assert!(rendered == expected, "{rendered}");
+}
+
+fn in_process_runtime(workspace: &std::path::Path, config: Value) -> super::ToolRuntime {
+    let root = super::fs::open_directory(workspace).unwrap();
+    super::ToolRuntime {
+        context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
+        cache_state: None,
+        config: serde_json::from_value(config).unwrap(),
+        workspace: workspace.to_owned(),
+        workspace_identity: super::fs::identity(&root).unwrap(),
+        reads: Some(super::InProcessReads {
+            root: std::sync::Arc::new(root),
+            slots: std::sync::Arc::new(tokio::sync::Semaphore::new(super::MAX_IN_PROCESS_READS)),
+        }),
+        guard_executable: std::path::PathBuf::new(),
+        enforcement_digest: [1; 32],
+        queue_progress: None,
+        active_action_gate: None,
+        #[cfg(target_os = "macos")]
+        system_programs: None,
+        process_enforcement_digest: [1; 32],
+    }
+}
+
+async fn run_in_process(runtime: &super::ToolRuntime, call: ToolCall) -> ToolObservation {
+    let intent = runtime.intent(
+        crate::session::RunId::new(),
+        crate::session::AgentRunId::new(),
+        call,
+    );
+    runtime.execute(intent, super::Cancellation::new()).await
+}
+
+#[tokio::test]
+async fn in_process_reads_attest_and_refuse_secrets_links_and_a_replaced_workspace() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    std::fs::write(workspace.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(workspace.join("src/.env"), "TOKEN=secret-canary\n").unwrap();
+    std::fs::write(temp.path().join("outside.txt"), "outside-canary").unwrap();
+    let runtime = in_process_runtime(
+        &workspace,
+        json!({"version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}),
+    );
+    let read = |path: &str| ToolCall::Read {
+        path: path.into(),
+        offset: 0,
+        limit: MAX_READ_PAGE_BYTES,
+    };
+
+    let observation = run_in_process(&runtime, read("src/main.rs")).await;
+    assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+    assert!(observation.valid());
+    assert!(matches!(
+        observation.attestation,
+        Some(Attestation::InProcess { workspace_device, workspace_inode, .. })
+            if (workspace_device, workspace_inode) == runtime.workspace_identity
+    ));
+    assert_eq!(
+        serde_json::from_str::<Value>(&observation.output).unwrap()["text"],
+        "fn main() {}\n"
+    );
+    assert_eq!(
+        runtime.reservation_overhead(&read("src/main.rs")),
+        std::time::Duration::ZERO
+    );
+    assert!(
+        runtime.reservation_overhead(&ToolCall::Mkdir {
+            path: "src/new".into()
+        }) > std::time::Duration::ZERO
+    );
+
+    let secret = run_in_process(&runtime, read("src/.env")).await;
+    assert_eq!(secret.disposition, ToolDisposition::Denied);
+    assert!(secret.attestation.is_none());
+    for listing in [
+        ToolCall::List { path: "src".into() },
+        ToolCall::Search {
+            path: "src".into(),
+            query: "canary".into(),
+        },
+    ] {
+        let observation = run_in_process(&runtime, listing).await;
+        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+        assert!(
+            !observation.output.contains(".env"),
+            "{}",
+            observation.output
+        );
+        assert!(
+            !observation.output.contains("canary"),
+            "{}",
+            observation.output
+        );
+    }
+
+    std::os::unix::fs::symlink(
+        temp.path().join("outside.txt"),
+        workspace.join("src/escape"),
+    )
+    .unwrap();
+    let escape = run_in_process(&runtime, read("src/escape")).await;
+    assert_eq!(escape.disposition, ToolDisposition::Denied);
+    assert!(!escape.output.contains("outside-canary"));
+    assert!(escape.valid());
+
+    std::fs::rename(&workspace, temp.path().join("moved")).unwrap();
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    std::fs::write(workspace.join("src/main.rs"), "replacement").unwrap();
+    let replaced = run_in_process(&runtime, read("src/main.rs")).await;
+    assert_eq!(replaced.disposition, ToolDisposition::Failed);
+    assert!(replaced.attestation.is_none());
+    assert!(replaced.stops_run());
+    assert!(
+        replaced.output.contains("pinned input"),
+        "{}",
+        replaced.output
+    );
+    assert!(!replaced.output.contains("replacement"));
+
+    let mut expired_intent = runtime.intent(
+        crate::session::RunId::new(),
+        crate::session::AgentRunId::new(),
+        read("src/main.rs"),
+    );
+    expired_intent.expires_at_ms = 1;
+    let expired = runtime
+        .execute(expired_intent, super::Cancellation::new())
+        .await;
+    assert_eq!(expired.disposition, ToolDisposition::Failed);
+    assert!(expired.attestation.is_none());
+}
+
+#[tokio::test]
+async fn in_process_results_fit_their_budget_before_serialization() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    let text = "\"quoted\\line\"\n".repeat(16 * 1024);
+    std::fs::write(workspace.join("src/big.txt"), &text).unwrap();
+    let runtime = in_process_runtime(
+        &workspace,
+        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+    );
+    for result_bytes in [256, 4096, MAX_TOOL_RESULT_BYTES as u32] {
+        let mut intent = runtime.intent(
+            crate::session::RunId::new(),
+            crate::session::AgentRunId::new(),
+            ToolCall::Read {
+                path: "src/big.txt".into(),
+                offset: 0,
+                limit: MAX_READ_PAGE_BYTES,
+            },
+        );
+        intent.limits.result_bytes = result_bytes;
+        let observation = runtime.execute(intent, super::Cancellation::new()).await;
+        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+        assert!(observation.output.len() <= result_bytes as usize);
+        let page: Value = serde_json::from_str(&observation.output).unwrap();
+        let next = page["next_offset"].as_u64().unwrap() as usize;
+        assert!(next > 0 && next < text.len());
+        assert_eq!(page["truncated"], true);
+        assert_eq!(page["text"], text[..next]);
+    }
+    let mut intent = runtime.intent(
+        crate::session::RunId::new(),
+        crate::session::AgentRunId::new(),
+        ToolCall::Search {
+            path: "src".into(),
+            query: "quoted".into(),
+        },
+    );
+    intent.limits.result_bytes = 1024;
+    let observation = runtime.execute(intent, super::Cancellation::new()).await;
+    assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+    assert!(observation.output.len() <= 1024);
+    let rows: Value = serde_json::from_str(&observation.output).unwrap();
+    assert_eq!(rows["may_be_truncated"], true);
+    assert!(!rows["entries"].as_array().unwrap().is_empty());
+    let mut intent = runtime.intent(
+        crate::session::RunId::new(),
+        crate::session::AgentRunId::new(),
+        ToolCall::Read {
+            path: "src/big.txt".into(),
+            offset: 0,
+            limit: 1,
+        },
+    );
+    intent.limits.result_bytes = 128;
+    let observation = runtime.execute(intent, super::Cancellation::new()).await;
+    assert_eq!(observation.disposition, ToolDisposition::Limit);
+}
+
+#[test]
+fn the_primary_prompt_states_the_read_page_limit() {
+    assert!(
+        include_str!("../provider/prompts/primary.txt")
+            .contains(&format!("a limit from 1 to {MAX_READ_PAGE_BYTES}."))
+    );
+}
+
+#[tokio::test]
+async fn in_process_read_p95_stays_within_fifty_milliseconds() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    std::fs::write(workspace.join("src/main.rs"), "fn main() {}\n".repeat(4096)).unwrap();
+    let runtime = in_process_runtime(
+        &workspace,
+        json!({"version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}),
+    );
+    let mut elapsed = Vec::new();
+    for _ in 0..40 {
+        let started = std::time::Instant::now();
+        let observation = run_in_process(
+            &runtime,
+            ToolCall::Read {
+                path: "src/main.rs".into(),
+                offset: 0,
+                limit: MAX_READ_PAGE_BYTES,
+            },
+        )
+        .await;
+        elapsed.push(started.elapsed());
+        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+    }
+    elapsed.sort_unstable();
+    let p95 = elapsed[(elapsed.len() * 95).div_ceil(100) - 1];
+    assert!(
+        p95 <= std::time::Duration::from_millis(50),
+        "Read p95 {p95:?}"
+    );
+}
+
+#[tokio::test]
+async fn in_process_reads_are_refused_before_dispatch_when_every_slot_is_held() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    std::fs::write(workspace.join("src/main.rs"), "fn main() {}\n").unwrap();
+    let runtime = in_process_runtime(
+        &workspace,
+        json!({"version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}),
+    );
+    let slots = std::sync::Arc::clone(&runtime.reads.as_ref().unwrap().slots);
+    let held = slots
+        .try_acquire_many_owned(super::MAX_IN_PROCESS_READS as u32)
+        .unwrap();
+    let refused = run_in_process(
+        &runtime,
+        ToolCall::Read {
+            path: "src/main.rs".into(),
+            offset: 0,
+            limit: 16,
+        },
+    )
+    .await;
+    drop(held);
+    assert_eq!(refused.disposition, ToolDisposition::Limit);
+    assert!(refused.attestation.is_none());
+    assert!(!refused.stops_run());
+    assert!(!refused.output.contains("fn main"));
 }

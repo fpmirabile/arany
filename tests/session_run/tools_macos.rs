@@ -644,13 +644,34 @@ async fn native_file_journey_helper() {
             observation.intent.limits.resource_profile,
             ToolResourceProfile::MacosSupervised
         );
-        let receipt = observation.guard.as_ref().unwrap();
-        assert_eq!(receipt.contract_version, 1);
-        assert_eq!(
-            receipt.enforcement_digest,
-            observation.intent.enforcement_digest
-        );
-        assert_eq!(receipt.limits, observation.intent.limits);
+        match observation.attestation.as_ref().unwrap() {
+            arany::Attestation::InProcess {
+                policy_digest,
+                workspace_device,
+                workspace_inode,
+            } => {
+                assert!(matches!(
+                    observation.intent.call,
+                    ToolCall::Read { .. } | ToolCall::List { .. } | ToolCall::Search { .. }
+                ));
+                assert_eq!(*policy_digest, observation.intent.policy_digest);
+                assert_eq!(
+                    (*workspace_device, *workspace_inode),
+                    (
+                        observation.intent.workspace_device,
+                        observation.intent.workspace_inode
+                    )
+                );
+            }
+            arany::Attestation::Guard(receipt) => {
+                assert_eq!(receipt.contract_version, 1);
+                assert_eq!(
+                    receipt.enforcement_digest,
+                    observation.intent.enforcement_digest
+                );
+                assert_eq!(receipt.limits, observation.intent.limits);
+            }
+        }
     }
     let command: serde_json::Value =
         serde_json::from_str(&run.tools[9].observation.as_ref().unwrap().output).unwrap();
@@ -1044,7 +1065,7 @@ async fn native_runtime_mount_journey_helper() {
     assert_eq!(refused_requests.lock().unwrap().len(), 1);
     let refused_observation = refused.run.tools[0].observation.as_ref().unwrap();
     assert_eq!(refused_observation.disposition, ToolDisposition::Failed);
-    assert!(refused_observation.guard.is_none());
+    assert!(refused_observation.attestation.is_none());
     assert!(
         refused_observation
             .output
@@ -1170,7 +1191,7 @@ async fn native_runtime_mount_journey_helper() {
         0,
         "cache seed disposition {:?}; Guard receipt {}; cache update {:?}; stdout bytes {}; stderr bytes {}; stderr stage {}; no space {}; permission denied {}; operation denied {}; missing command {}; trace {:?}",
         seed_observation.disposition,
-        seed_observation.guard.is_some(),
+        seed_observation.attestation.is_some(),
         seed_observation.cache_update,
         seed_result["stdout"].as_str().map_or(0, str::len),
         seed_stderr.len(),
@@ -1332,7 +1353,11 @@ async fn native_runtime_mount_journey_helper() {
         assert!(limits.cache_bytes >= 40 * 1024 * 1024);
         assert!(limits.cache_bytes <= limits.cache_requested_bytes);
         assert!(limits.cache_candidate_bytes <= limits.cache_bytes);
-        let receipt = observation.guard.as_ref().expect("Build Guard receipt");
+        let receipt = observation
+            .attestation
+            .as_ref()
+            .and_then(arany::Attestation::guard)
+            .expect("Build Guard receipt");
         assert_eq!(receipt.limits, *limits);
         assert_eq!(
             receipt.enforcement_digest,
@@ -1872,7 +1897,7 @@ int main(void) {
             },
             "{case}"
         );
-        assert_eq!(observation.guard.is_some(), attested, "{case}");
+        assert_eq!(observation.attestation.is_some(), attested, "{case}");
     }
 }
 

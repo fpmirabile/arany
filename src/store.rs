@@ -41,6 +41,7 @@ const MAX_ESCAPED_OBJECTIVE_BYTES: usize = 6 * crate::session::MAX_USER_MESSAGE_
 const MAX_GOAL_STARTED_BYTES: usize = MAX_ESCAPED_OBJECTIVE_BYTES + 16 * 1024;
 const MAX_MESSAGE_ACCEPTED_BYTES: usize =
     MAX_ESCAPED_OBJECTIVE_BYTES + crate::provider::MAX_IMAGE_BYTES.div_ceil(3) * 4 + 16 * 1024;
+const MAX_TOOL_FINISHED_BYTES: usize = crate::tools::types::MAX_TOOL_OBSERVATION_BYTES;
 /// Run start writes one `GoalStarted` and one `MessageAccepted` beyond the per-slot bound.
 const RUN_START_EXTRA_BYTES: usize =
     MAX_GOAL_STARTED_BYTES + MAX_MESSAGE_ACCEPTED_BYTES - 2 * MAX_EVENT_BYTES;
@@ -48,6 +49,7 @@ fn event_payload_limit(kind: &str, version: i64) -> usize {
     match kind {
         "MessageAccepted" if payload_version(kind) == Some(version) => MAX_MESSAGE_ACCEPTED_BYTES,
         "GoalStarted" if payload_version(kind) == Some(version) => MAX_GOAL_STARTED_BYTES,
+        "ToolFinished" if payload_version(kind) == Some(version) => MAX_TOOL_FINISHED_BYTES,
         _ => MAX_EVENT_BYTES,
     }
 }
@@ -129,6 +131,7 @@ enum Request {
     AdmitOperation {
         session_id: SessionId,
         event_slots: usize,
+        tool_observations: usize,
         run_start: bool,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
@@ -220,6 +223,7 @@ impl Store {
                         Request::AdmitOperation {
                             session_id,
                             event_slots,
+                            tool_observations,
                             run_start,
                             reply,
                         } => {
@@ -230,6 +234,7 @@ impl Store {
                                     &mut connection,
                                     session_id,
                                     event_slots,
+                                    tool_observations,
                                     run_start,
                                 )
                             };
@@ -421,12 +426,15 @@ impl Store {
         self.call(|reply| Request::Load { session_id, reply }).await
     }
 
+    /// Admits `event_slots` Events, of which up to `tool_observations` are `ToolFinished`.
     pub(crate) async fn admit_operation(
         &self,
         session_id: SessionId,
         event_slots: usize,
+        tool_observations: usize,
     ) -> Result<(), StoreError> {
-        self.admit(session_id, event_slots, false).await
+        self.admit(session_id, event_slots, tool_observations, false)
+            .await
     }
 
     /// Admits the Run start, the only operation that precedes `GoalStarted` and `MessageAccepted`, so it reserves their objective and image envelopes.
@@ -435,18 +443,20 @@ impl Store {
         session_id: SessionId,
         event_slots: usize,
     ) -> Result<(), StoreError> {
-        self.admit(session_id, event_slots, true).await
+        self.admit(session_id, event_slots, 0, true).await
     }
 
     async fn admit(
         &self,
         session_id: SessionId,
         event_slots: usize,
+        tool_observations: usize,
         run_start: bool,
     ) -> Result<(), StoreError> {
         self.call(|reply| Request::AdmitOperation {
             session_id,
             event_slots,
+            tool_observations,
             run_start,
             reply,
         })

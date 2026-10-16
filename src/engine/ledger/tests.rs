@@ -250,3 +250,43 @@ fn staged_bounds_never_exceed_the_first_admission() {
     assert_eq!(call.checkpointed_events(), call.max_events() + 2);
     assert_eq!(Action::Tool.remaining(usize::MAX), 0);
 }
+
+#[test]
+fn tool_observation_slots_fit_within_each_action_bound() {
+    for action in [
+        Action::ProviderCall {
+            previews: false,
+            steering: false,
+        },
+        Action::Child { in_flight: 7 },
+        Action::Tool,
+        Action::Review,
+        Action::Compaction,
+        Action::BoundaryCompaction { goal: true },
+        Action::Pause,
+        Action::Stop,
+        Action::Delegation {
+            children: 8,
+            research: true,
+        },
+        Action::Delegation {
+            children: 8,
+            research: false,
+        },
+    ] {
+        assert!(
+            action.tool_observations() <= action.max_events(),
+            "{action:?}"
+        );
+    }
+    assert_eq!(
+        Action::Delegation {
+            children: 3,
+            research: true
+        }
+        .tool_observations(),
+        3 * MAX_CHILD_TOOL_CALLS
+    );
+    assert_eq!(Action::Tool.tool_observations(), 2);
+    assert_eq!(Action::Compaction.tool_observations(), 0);
+}

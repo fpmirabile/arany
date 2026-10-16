@@ -1,4 +1,4 @@
-use super::catalog::Family;
+use super::catalog::{Family, Site};
 use super::config::Config;
 use super::toolchains::{RuntimeGrant, validate_selection};
 use super::types::*;
@@ -51,19 +51,10 @@ pub(super) fn native_system_program(path: &str) -> Result<bool, ToolError> {
     }
 }
 
-impl ToolRuntime {
-    /// Native preparation and handshake time the Engine adds to a Tool's action deadline.
-    pub(crate) fn reservation_overhead(&self, _call: &ToolCall) -> Duration {
-        #[cfg(target_os = "macos")]
-        {
-            macos::PREPARATION_DEADLINE.saturating_add(Duration::from_secs(5))
-        }
-        #[cfg(target_os = "linux")]
-        {
-            Duration::from_secs(5)
-        }
-    }
-}
+#[cfg(target_os = "linux")]
+pub(super) use linux::RESERVATION_OVERHEAD;
+#[cfg(target_os = "macos")]
+pub(super) use macos::RESERVATION_OVERHEAD;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -588,7 +579,7 @@ async fn read_observation<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
     intent: &EffectIntent,
 ) -> Result<ToolObservation, ToolError> {
-    let bytes = read_line_capped(reader, CAPTURE_BYTES).await?;
+    let bytes = read_line_capped(reader, MAX_TOOL_OBSERVATION_BYTES).await?;
     let observation: ToolObservation =
         serde_json::from_slice(&bytes).map_err(|_| ToolError::Operation)?;
     if observation.cache_update != CacheUpdate::NotApplicable
@@ -604,7 +595,7 @@ pub(super) async fn read_observation_line<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
     intent: &EffectIntent,
 ) -> Result<ToolObservation, ToolError> {
-    let bytes = read_line_capped(reader, CAPTURE_BYTES).await?;
+    let bytes = read_line_capped(reader, MAX_TOOL_OBSERVATION_BYTES).await?;
     let observation: ToolObservation =
         serde_json::from_slice(&bytes).map_err(|_| ToolError::Operation)?;
     if observation.cache_update != CacheUpdate::NotAttempted || !observation.attested_for(intent) {
@@ -860,6 +851,7 @@ pub(super) fn helper_main() -> ExitCode {
         }
         verify_intent_runtime_grants(&task.intent, &task.config)?;
         if !task.intent.valid()
+            || task.intent.call.facts().site != Site::Guard
             || task.intent.policy_digest != task.config.digest()
             || task.intent.expires_at_ms <= now_ms()
             || !task.config.allows(&task.intent.call)
@@ -978,40 +970,7 @@ pub(super) fn helper_main() -> ExitCode {
             parent_namespaces: &task.parent_namespaces,
         };
         let result = runtime.block_on(super::dispatch::run(&site));
-        let (disposition, output) = match result {
-            Ok(output) if output.len() <= task.intent.limits.result_bytes as usize => {
-                let failed = super::dispatch::failed(&task.intent.call, &output);
-                (
-                    if failed {
-                        ToolDisposition::Failed
-                    } else {
-                        ToolDisposition::Succeeded
-                    },
-                    output,
-                )
-            }
-            Ok(_) | Err(ToolError::Limit) => (
-                ToolDisposition::Limit,
-                "Tool result or resource limit reached".into(),
-            ),
-            Err(ToolError::Conflict) => (
-                ToolDisposition::Conflict,
-                "File changed or edit did not match exactly once; read it again".into(),
-            ),
-            Err(ToolError::Path) => (
-                ToolDisposition::Denied,
-                "File path is unavailable or outside the admitted regular-file boundary".into(),
-            ),
-            Err(ToolError::Uncertain) => (
-                ToolDisposition::Uncertain,
-                "Filesystem change may have occurred; inspect current state before another attempt"
-                    .into(),
-            ),
-            Err(_) => (
-                ToolDisposition::Failed,
-                "Tool operation failed; no automatic retry".into(),
-            ),
-        };
+        let (disposition, output) = super::dispatch::outcome(&task.intent, result);
         stage = BootstrapStage::Receipt;
         let receipt = GuardReceipt {
             contract_version: 1,
@@ -1023,7 +982,7 @@ pub(super) fn helper_main() -> ExitCode {
             intent: task.intent,
             disposition,
             output,
-            guard: Some(receipt),
+            attestation: Some(Attestation::Guard(receipt)),
             cache_update: if task.cache.is_some() {
                 crate::tools::CacheUpdate::NotAttempted
             } else {
@@ -1410,7 +1369,7 @@ mod tests {
             disposition: ToolDisposition::Succeeded,
             output: r#"{"exit_code":0,"stdout":"built","stderr":"","changeset":{"files":[]}}"#
                 .into(),
-            guard: Some(guard),
+            attestation: Some(Attestation::Guard(guard)),
             cache_update: CacheUpdate::NotAttempted,
         }
     }

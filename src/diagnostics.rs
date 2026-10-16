@@ -288,7 +288,7 @@ pub(crate) fn event_failure(event: &crate::session::Event) {
                 "tool operation={} disposition={:?} receipt={} stops_run={}",
                 observation.intent.call.label(),
                 observation.disposition,
-                observation.guard.is_some(),
+                observation.attestation.is_some(),
                 observation.stops_run()
             );
         }
@@ -353,12 +353,18 @@ pub(crate) fn engine_failure(error: &crate::engine::EngineError) {
     record_local(record);
 }
 
-pub(crate) fn guard_failure(error: &crate::tools::ToolError) {
+/// `site` is the compiled label `Guard` or `Read`.
+pub(crate) fn tool_failure(site: &'static str, error: &crate::tools::ToolError) {
     if !cfg!(debug_assertions) {
         return;
     }
     let mut record = BoundedRecord(String::new());
-    let _ = writeln!(record, "guard stage={}", crate::tools::failure_stage(error));
+    let _ = writeln!(
+        record,
+        "{} stage={}",
+        site.to_ascii_lowercase(),
+        crate::tools::failure_stage(error)
+    );
     record_local(record);
 }
 
@@ -507,7 +513,7 @@ mod tests {
         engine_failure(&crate::engine::EngineError::Store(
             crate::store::StoreError::Io(std::io::Error::other(CANARY)),
         ));
-        guard_failure(&crate::tools::ToolError::Operation);
+        tool_failure("Guard", &crate::tools::ToolError::Operation);
         event_failure(&crate::session::Event::ProviderCallRecorded {
             run_id: Default::default(),
             agent_run_id: Default::default(),
@@ -543,7 +549,7 @@ mod tests {
                 },
                 disposition: crate::tools::ToolDisposition::Uncertain,
                 output: CANARY.into(),
-                guard: None,
+                attestation: None,
                 cache_update: crate::tools::CacheUpdate::NotApplicable,
             },
         });

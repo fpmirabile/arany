@@ -125,19 +125,15 @@ fn intent(call: crate::tools::ToolCall) -> crate::tools::EffectIntent {
     }
 }
 
-/// A Guard-attested successful observation of `call`.
+/// A successful observation of `call`, attested by the site its operation runs at.
 pub(crate) fn observation(
     call: crate::tools::ToolCall,
     output: &str,
 ) -> crate::tools::ToolObservation {
     let intent = intent(call);
+    let attestation = crate::tools::Attestation::for_site(&intent);
     crate::tools::ToolObservation {
-        guard: Some(crate::tools::GuardReceipt {
-            contract_version: 1,
-            intent_digest: intent.digest(),
-            enforcement_digest: intent.enforcement_digest,
-            limits: intent.limits.clone(),
-        }),
+        attestation: Some(attestation),
         intent,
         disposition: crate::tools::ToolDisposition::Succeeded,
         output: output.into(),

@@ -3630,7 +3630,7 @@ async fn child_reads_stay_inside_the_plan_and_never_satisfy_the_goal_criterion()
         denied.output,
         "The effect is outside the active Goal plan; no operation was dispatched"
     );
-    assert!(denied.guard.is_none());
+    assert!(denied.attestation.is_none());
     assert!(!format!("{:?}", requests.lock().expect("requests")).contains("OTHER-CANARY"));
     assert!(!format!("{events:?}").contains("OTHER-CANARY"));
     assert!(!view.goals[0].success_criterion_satisfied);

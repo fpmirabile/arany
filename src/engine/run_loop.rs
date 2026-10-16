@@ -256,7 +256,7 @@ impl<'a> RunLoop<'a> {
         if !cancelled && !actions_acknowledged {
             return Err(EngineError::GoalBudgetExhausted);
         }
-        self.checkpoint_pending_active_time(Action::Stop.max_events())
+        self.checkpoint_pending_active_time(Action::Stop.max_events(), 0)
             .await?;
         if cancelled {
             self.cancel_primary(primary).await
@@ -265,12 +265,16 @@ impl<'a> RunLoop<'a> {
         }
     }
 
-    async fn checkpoint_pending_active_time(&self, event_tail: usize) -> Result<(), EngineError> {
+    async fn checkpoint_pending_active_time(
+        &self,
+        event_tail: usize,
+        tool_observations: usize,
+    ) -> Result<(), EngineError> {
         let Some((started, reserved_ms)) = self.ledger().pending_active_reservation()? else {
             return Ok(());
         };
         self.store
-            .admit_operation(self.session_id, event_tail)
+            .admit_operation(self.session_id, event_tail, tool_observations)
             .await?;
         self.append(Event::GoalActiveTimeReserved {
             goal_id: self.goal_id,
@@ -294,12 +298,15 @@ impl<'a> RunLoop<'a> {
         let event_tail = action.max_events();
         let action_ms = duration_ms(action_bound);
         if self.ledger().needs_carried_time_checkpoint(action_ms)? {
-            self.checkpoint_pending_active_time(action.checkpointed_events())
-                .await?;
+            self.checkpoint_pending_active_time(
+                action.checkpointed_events(),
+                action.tool_observations(),
+            )
+            .await?;
         }
         let (started, reserved_ms) = self.ledger().active_reservation(action_ms)?;
         self.store
-            .admit_operation(self.session_id, event_tail)
+            .admit_operation(self.session_id, event_tail, action.tool_observations())
             .await?;
         self.append(Event::GoalActiveTimeReserved {
             goal_id: self.goal_id,
@@ -367,7 +374,11 @@ impl<'a> RunLoop<'a> {
         // A primary or review call follows its active-time reservation.
         let appended = usize::from(!matches!(action, Action::Child { .. }));
         self.store
-            .admit_operation(self.session_id, action.remaining(appended))
+            .admit_operation(
+                self.session_id,
+                action.remaining(appended),
+                action.tool_observations(),
+            )
             .await?;
         self.append(Event::GoalProviderCallReserved {
             goal_id: self.goal_id,
@@ -446,7 +457,11 @@ impl<'a> RunLoop<'a> {
             return Ok(false);
         }
         self.store
-            .admit_operation(self.session_id, Action::Tool.remaining(0))
+            .admit_operation(
+                self.session_id,
+                Action::Tool.remaining(0),
+                Action::Tool.tool_observations(),
+            )
             .await?;
         self.append(Event::GoalPlanContractRecorded {
             goal_id: self.goal_id,
@@ -994,12 +1009,14 @@ impl<'a> RunLoop<'a> {
                     intent: intent.clone(),
                     disposition: crate::tools::ToolDisposition::Succeeded,
                     output: String::new(),
-                    guard: Some(crate::tools::GuardReceipt {
-                        contract_version: 1,
-                        intent_digest: intent.digest(),
-                        enforcement_digest: intent.enforcement_digest,
-                        limits: intent.limits.clone(),
-                    }),
+                    attestation: Some(crate::tools::Attestation::Guard(
+                        crate::tools::GuardReceipt {
+                            contract_version: 1,
+                            intent_digest: intent.digest(),
+                            enforcement_digest: intent.enforcement_digest,
+                            limits: intent.limits.clone(),
+                        },
+                    )),
                     cache_update: crate::tools::CacheUpdate::NotApplicable,
                 });
             if command {
@@ -1014,12 +1031,14 @@ impl<'a> RunLoop<'a> {
                 reserved_step
                     .observations
                     .push(crate::tools::ToolObservation {
-                        guard: Some(crate::tools::GuardReceipt {
-                            contract_version: 1,
-                            intent_digest: integration.digest(),
-                            enforcement_digest: integration.enforcement_digest,
-                            limits: integration.limits.clone(),
-                        }),
+                        attestation: Some(crate::tools::Attestation::Guard(
+                            crate::tools::GuardReceipt {
+                                contract_version: 1,
+                                intent_digest: integration.digest(),
+                                enforcement_digest: integration.enforcement_digest,
+                                limits: integration.limits.clone(),
+                            },
+                        )),
                         intent: integration,
                         disposition: crate::tools::ToolDisposition::Succeeded,
                         output: String::new(),
@@ -1055,7 +1074,7 @@ impl<'a> RunLoop<'a> {
                 return Ok(false);
             }
             let changeset = if command
-                && observation.guard.is_some()
+                && observation.attestation.is_some()
                 && matches!(
                     observation.disposition,
                     crate::tools::ToolDisposition::Succeeded
@@ -1279,7 +1298,7 @@ impl<'a> RunLoop<'a> {
             )
             .await?;
         self.store
-            .admit_operation(self.session_id, Action::Compaction.remaining(1))
+            .admit_operation(self.session_id, Action::Compaction.remaining(1), 0)
             .await?;
         self.append(Event::GoalCompactionCallReserved {
             goal_id: self.goal_id,
@@ -1414,7 +1433,7 @@ impl<'a> RunLoop<'a> {
             status,
         };
         self.store
-            .admit_operation(self.session_id, Action::Compaction.remaining(2))
+            .admit_operation(self.session_id, Action::Compaction.remaining(2), 0)
             .await?;
         let sequence = append_scoped(
             self.store,
@@ -1484,14 +1503,18 @@ impl<'a> RunLoop<'a> {
                     disposition: crate::tools::ToolDisposition::Denied,
                     output: "Goal Provider-call budget exhausted; no operation was dispatched"
                         .into(),
-                    guard: None,
+                    attestation: None,
                     cache_update: crate::tools::CacheUpdate::NotApplicable,
                 },
                 false,
             ));
         }
         self.store
-            .admit_operation(self.session_id, Action::Tool.remaining(1))
+            .admit_operation(
+                self.session_id,
+                Action::Tool.remaining(1),
+                Action::Tool.tool_observations(),
+            )
             .await?;
         self.append(Event::ToolStarted {
             run_id: self.run_id,
@@ -1504,7 +1527,7 @@ impl<'a> RunLoop<'a> {
                 intent,
                 disposition: crate::tools::ToolDisposition::Limit,
                 output: crate::tools::types::command_timeout_limit_message(requested, maximum),
-                guard: None,
+                attestation: None,
                 cache_update: crate::tools::CacheUpdate::NotApplicable,
             };
             self.append(Event::ToolFinished {
@@ -1557,7 +1580,10 @@ impl<'a> RunLoop<'a> {
                 }
             }
         }
+        // An in-process read waits for no Guard capacity, so it reserves its action directly.
+        let guard_site = intent.call.facts().site == crate::tools::catalog::Site::Guard;
         let mut queue_pause = if approved
+            && guard_site
             && goal_allows
             && !active_time_exhausted
             && self.ledger().can_start_provider_call()
@@ -1584,7 +1610,7 @@ impl<'a> RunLoop<'a> {
                     output:
                         "The effect is outside the active Goal plan; no operation was dispatched"
                             .into(),
-                    guard: None,
+                    attestation: None,
                     cache_update: crate::tools::CacheUpdate::NotApplicable,
                 },
                 None,
@@ -1600,7 +1626,7 @@ impl<'a> RunLoop<'a> {
                     intent,
                     disposition: crate::tools::ToolDisposition::Denied,
                     output: "Goal paused before this operation; no operation was dispatched".into(),
-                    guard: None,
+                    attestation: None,
                     cache_update: crate::tools::CacheUpdate::NotApplicable,
                 },
                 None,
@@ -1611,13 +1637,45 @@ impl<'a> RunLoop<'a> {
                     intent,
                     disposition: crate::tools::ToolDisposition::Limit,
                     output: "Goal token budget exhausted; no operation was dispatched".into(),
-                    guard: None,
+                    attestation: None,
                     cache_update: crate::tools::CacheUpdate::NotApplicable,
                 },
                 None,
             )
+        } else if approved && !guard_site {
+            let action_bound = runtime
+                .reservation_overhead(&intent.call)
+                .saturating_add(Duration::from_millis(u64::from(intent.limits.runtime_ms)))
+                .saturating_add(TOOL_CLEANUP_OVERHEAD);
+            match self
+                .reserve_active_segment(action_bound, Action::Tool)
+                .await
+            {
+                Ok(segment) => {
+                    let worker_cancellation = RunCancellation::new();
+                    let mut run_cancellation = self.controls.cancellation.clone();
+                    let execution = runtime.execute(intent.clone(), worker_cancellation.clone());
+                    tokio::pin!(execution);
+                    let observation = tokio::select! {
+                        biased;
+                        () = run_cancellation.cancelled() => {
+                            worker_cancellation.cancel();
+                            execution.await
+                        }
+                        observation = &mut execution => observation,
+                    };
+                    (observation, Some(segment))
+                }
+                Err(EngineError::GoalBudgetExhausted) => {
+                    active_time_exhausted = true;
+                    (active_time_limit_observation(intent.clone()), None)
+                }
+                Err(error) => return Err(error),
+            }
         } else if approved {
-            let mut queue_pause = Some(queue_pause.ok_or(EngineError::CoordinatorFailed)?);
+            if queue_pause.is_none() {
+                return Err(EngineError::CoordinatorFailed);
+            }
             let runtime =
                 runtime.with_queue_progress(self.progress.map(ProgressPublisher::tool_queue));
             let (active_sender, mut active_receiver) =
@@ -1719,7 +1777,7 @@ impl<'a> RunLoop<'a> {
                     intent,
                     disposition: crate::tools::ToolDisposition::Denied,
                     output: "Approval was not granted; no operation was dispatched".into(),
-                    guard: None,
+                    attestation: None,
                     cache_update: crate::tools::CacheUpdate::NotApplicable,
                 },
                 None,
@@ -2046,7 +2104,7 @@ fn active_time_limit_observation(
         intent,
         disposition: crate::tools::ToolDisposition::Limit,
         output: "Goal active-time budget exhausted; no operation was dispatched".into(),
-        guard: None,
+        attestation: None,
         cache_update: crate::tools::CacheUpdate::NotApplicable,
     }
 }

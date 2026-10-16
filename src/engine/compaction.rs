@@ -133,6 +133,7 @@ impl Engine {
                     goal: goal_id.is_some(),
                 }
                 .max_events(),
+                0,
             )
             .await?;
         let source_digest =

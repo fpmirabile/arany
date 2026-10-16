@@ -14,7 +14,7 @@ pub(super) fn valid(call: &ToolCall) -> bool {
     match call {
         ToolCall::List { path } => valid_relative(path, true),
         ToolCall::Read { path, limit, .. } => {
-            valid_relative(path, false) && (1..=4096).contains(limit)
+            valid_relative(path, false) && (1..=MAX_READ_PAGE_BYTES).contains(limit)
         }
         ToolCall::Search { path, query } => {
             valid_relative(path, true) && !query.is_empty() && query.len() <= 512
@@ -62,7 +62,7 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
             ),
             (
                 "limit",
-                json!({"type":"integer", "description":"Number of UTF-8 bytes to read: integer 1 through 4096 inclusive. Use 4096 for a normal page; never request the whole file with a larger limit."}),
+                json!({"type":"integer", "description":"Number of UTF-8 bytes to read: integer 1 through 65536 inclusive. Use 65536 for a normal page; never request the whole file with a larger limit."}),
             ),
         ],
         "search" => vec![path, ("query", string())],
@@ -308,7 +308,7 @@ pub(super) fn open_file(root: &Dir, path: &str) -> Result<File, ToolError> {
         let fd = openat2(
             root,
             path,
-            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::NOCTTY,
             Mode::empty(),
             ResolveFlags::BENEATH
                 | ResolveFlags::NO_SYMLINKS
@@ -335,7 +335,11 @@ pub(super) fn open_file(root: &Dir, path: &str) -> Result<File, ToolError> {
                 openat(
                     &file,
                     component,
-                    OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
+                    OFlags::RDONLY
+                        | OFlags::CLOEXEC
+                        | OFlags::NONBLOCK
+                        | OFlags::NOFOLLOW
+                        | OFlags::NOCTTY,
                     Mode::empty(),
                 )
                 .map_err(|_| ToolError::Path)?,
@@ -709,6 +713,10 @@ pub(crate) fn workspace_entries(
     folder: &str,
     prefix: &str,
 ) -> Result<Vec<String>, ToolError> {
+    entries(&open_directory(workspace)?, folder, prefix)
+}
+
+fn entries(root: &Dir, folder: &str, prefix: &str) -> Result<Vec<String>, ToolError> {
     let folder = if folder == "." { "" } else { folder };
     if !valid_relative(folder, true)
         || folder.split('/').count() > 16
@@ -716,11 +724,10 @@ pub(crate) fn workspace_entries(
     {
         return Err(ToolError::Path);
     }
-    let root = open_directory(workspace)?;
     if !prefix.is_empty() {
         let mut matches = Vec::new();
         find_entries(
-            &root,
+            root,
             folder,
             &prefix.to_lowercase(),
             &mut ScanBudget::default(),
@@ -731,7 +738,7 @@ pub(crate) fn workspace_entries(
     let directory = if folder.is_empty() {
         root.try_clone().map_err(|_| ToolError::Path)?
     } else {
-        Dir::from_std_file(open_file(&root, folder)?)
+        Dir::from_std_file(open_file(root, folder)?)
     };
     let mut names = Vec::new();
     for (index, entry) in directory
@@ -758,7 +765,7 @@ pub(crate) fn workspace_entries(
         #[cfg(unix)]
         {
             use cap_std::fs::MetadataExt;
-            if metadata.dev() != identity(&root)?.0 || metadata.is_file() && metadata.nlink() != 1 {
+            if metadata.dev() != identity(root)?.0 || metadata.is_file() && metadata.nlink() != 1 {
                 continue;
             }
         }
@@ -886,48 +893,75 @@ pub(super) fn copy_seed() -> Result<(), ToolError> {
     Ok(())
 }
 
-pub(super) fn native(
-    workspace: &Path,
+/// Runs one in-process read under the admitted Workspace handle; output fits `result_bytes`
+/// before it is serialized.
+pub(super) fn inspect(
+    root: &Dir,
     call: &ToolCall,
     config: &Config,
+    result_bytes: usize,
 ) -> Result<String, ToolError> {
-    let root = open_directory(workspace)?;
     match call {
         ToolCall::Read {
             path,
             offset,
             limit,
         } => {
-            let bytes = read_regular(open_file(&root, path)?, MAX_FILE_BYTES)?;
+            let bytes = read_regular(open_file(root, path)?, MAX_FILE_BYTES)?;
             let text = std::str::from_utf8(&bytes).map_err(|_| ToolError::Operation)?;
             let start = *offset as usize;
             if start > text.len() || !text.is_char_boundary(start) {
                 return Err(ToolError::Path);
             }
-            let mut end = start.saturating_add(*limit as usize).min(text.len());
-            while !text.is_char_boundary(end) {
-                end -= 1;
+            let sha256 = hex_digest(&bytes);
+            let page = |end: usize| {
+                json!({"sha256":sha256,"offset":start,"next_offset":end,"truncated":end<bytes.len(),"text":&text[start..end]}).to_string()
+            };
+            // The longest envelope: the largest next offset, `false` and no text.
+            let envelope = json!({"sha256":sha256,"offset":start,"next_offset":text.len(),"truncated":false,"text":""}).to_string().len();
+            let budget = result_bytes.checked_sub(envelope).ok_or(ToolError::Limit)?;
+            let mut end = start;
+            let mut escaped = 0;
+            for (index, character) in text[start..].char_indices() {
+                let next = index + character.len_utf8();
+                if next > *limit as usize {
+                    break;
+                }
+                escaped += escaped_len(character);
+                if escaped > budget {
+                    if end == start {
+                        return Err(ToolError::Limit);
+                    }
+                    break;
+                }
+                end = start + next;
             }
-            Ok(json!({"sha256":hex_digest(&bytes),"offset":start,"next_offset":end,"truncated":end<bytes.len(),"text":&text[start..end]}).to_string())
+            let output = page(end);
+            if output.len() > result_bytes {
+                return Err(ToolError::Limit);
+            }
+            Ok(output)
         }
         ToolCall::List { path } | ToolCall::Search { path, .. } => {
             let path = if path == "." { "" } else { path.as_str() };
             if config.workspace_paths == ["."] && matches!(call, ToolCall::List { .. }) {
-                let rows = workspace_entries(workspace, path, "")?;
-                return Ok(
-                    json!({"entries":rows,"limit":64,"may_be_truncated":rows.len()>=64})
-                        .to_string(),
+                let rows = entries(root, path, "")?;
+                let truncated = rows.len() >= 64;
+                return fit_rows(
+                    rows.into_iter().map(Value::from).collect(),
+                    truncated,
+                    result_bytes,
                 );
             }
             let mut files = Vec::new();
             let mut budget = ScanBudget::default();
             for selected in &config.workspace_paths {
                 if selected == "." {
-                    collect_root(&root, path, &mut files, &mut budget)?;
+                    collect_root(root, path, &mut files, &mut budget)?;
                 } else if path.is_empty() || Path::new(selected).starts_with(path) {
-                    collect(&root, selected, &mut files, &mut budget)?;
+                    collect(root, selected, &mut files, &mut budget)?;
                 } else if Path::new(path).starts_with(selected) {
-                    collect(&root, path, &mut files, &mut budget)?;
+                    collect(root, path, &mut files, &mut budget)?;
                 }
             }
             let mut rows = Vec::new();
@@ -960,8 +994,45 @@ pub(super) fn native(
                     break;
                 }
             }
-            Ok(json!({"entries":rows,"limit":64,"may_be_truncated":rows.len()>=64}).to_string())
+            let truncated = rows.len() >= 64;
+            fit_rows(rows, truncated, result_bytes)
         }
+        _ => Err(ToolError::Operation),
+    }
+}
+
+/// Bytes `character` occupies inside a serialized JSON string.
+fn escaped_len(character: char) -> usize {
+    match character {
+        '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+        '\0'..='\u{1f}' => 6,
+        _ => character.len_utf8(),
+    }
+}
+
+/// Drops trailing rows until the listing fits `result_bytes`, marking it possibly truncated.
+fn fit_rows(
+    mut rows: Vec<Value>,
+    mut truncated: bool,
+    result_bytes: usize,
+) -> Result<String, ToolError> {
+    loop {
+        let output = json!({"entries":rows,"limit":64,"may_be_truncated":truncated}).to_string();
+        if output.len() <= result_bytes {
+            return Ok(output);
+        }
+        rows.pop().ok_or(ToolError::Limit)?;
+        truncated = true;
+    }
+}
+
+pub(super) fn native(
+    workspace: &Path,
+    call: &ToolCall,
+    config: &Config,
+) -> Result<String, ToolError> {
+    let root = open_directory(workspace)?;
+    match call {
         ToolCall::Write {
             path,
             expected_digest,
