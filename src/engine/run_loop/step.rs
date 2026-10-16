@@ -78,7 +78,7 @@ enum Verdict {
 /// An intent's observation and what the step settles once it is journaled.
 struct Answer {
     observation: ToolObservation,
-    /// Approval was not granted: the agent stops after this observation.
+    /// Not approved to dispatch: the agent stops.
     refused: bool,
     /// The primary's active-time segment and exhaustion; `None` settles nothing.
     active_time: Option<ActiveTime>,
