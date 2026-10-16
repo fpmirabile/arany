@@ -32,6 +32,8 @@ Dogfooding starts after item 3; the owner leads it when that point is reached. E
 
 Teams today are read-only researcher children (C1); writable teams arrive with item 12. Native build evidence and named-host measurements still precede Build-profile support claims (finite approved maxima: 4 GiB memory, 8 GiB requested cache, 1 GiB project storage, 256 tasks; effective cache capacity derives from StateRoot headroom and is not guaranteed). Remote MCP/OAuth, interactive/background jobs and other network grants need their own Policy/Guard/protocol evidence; retain the existing [Tool scope](./docs/specs/tools.md) until each slice lands.
 
+- **Architecture refactor (parallel lane, Draft).** Fourteen behavior-preserving PRs that make the Engine, Tools and crate shape deep enough for roadmap items 3-8; [initiative plan](./planning/architecture-refactor/README.md). Caching never waits for it.
+
 ### Freeze until item 12 lands
 
 CI stays green; no new features, spec sections or evidence gates for: terminal views and tmux evidence beyond dogfooding; macOS Guard features beyond parity probes; build cache; ChatGPT OAuth and subscription routes; A6 registry fetch; E4 checkpoints and rewind; the Supervisor as loop code; the Anthropic consumer-subscription gate; new typed Tools other than the in-process read set.
