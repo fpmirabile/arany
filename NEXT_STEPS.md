@@ -16,8 +16,8 @@ history. Implementation status and verified support are separate claims.
   self-contained and orders the slices; Goal Foundation has landed under the
   [Goal spec](./docs/specs/goals.md), and A3 cache is in place. A4 flexible
   limits (execution step 4) is implemented on its branch and awaits full review
-  and hosted CI. Once those pass, authorized dogfooding is next, followed by the
-  remaining Goal workflows. The Build profile has finite approved maxima of
+  and hosted CI. Once those pass, authorized dogfooding is next, then staged team
+  delivery (C1–C3), then the remaining Goal workflows. The Build profile has finite approved maxima of
   4 GiB memory, 8 GiB requested cache, 1 GiB project storage and 256 tasks;
   effective cache capacity is derived from StateRoot headroom, so the requested
   maximum is not guaranteed usable capacity. Native build evidence and
