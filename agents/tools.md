@@ -6,7 +6,7 @@ Load for model-driven file operations, command execution, runtime Skills, local 
 - Runtime candidate discovery and user selection follow the narrow [runtime profile rules](./toolchains.md); keep Policy/Guard dispatch and enforcement at their existing boundaries.
 - Whole-project Search must accept named regular files just as explicit selected roots do. Reuse the checked opened handle for file collection; directory enumeration is not a file-content reader.
 - One private router normalizes each typed proposal, reserves aggregate capacity, evaluates restrict-only Policy, journals the digest-bound one-use intent, invokes the separate Guard and journals its bounded observation before another model call.
-- The primary alone may mutate/invoke commands/MCP in this base; children retain read-only reasoning. Provider encoding contains semantics, not SDK/process objects.
+- The primary alone may mutate or invoke commands and MCP tools; children of a Tool-enabled Run may only list, read, search, read admitted Skills and list MCP catalogs. Provider encoding contains semantics, not SDK/process objects.
 - Mutation requires no-follow pinned handles and an expected digest/create precondition. Publish a fresh regular inode atomically; do not truncate an admitted existing file or integrate unvalidated subprocess-created paths.
 - Command output and publication are separate facts. Only Engine generates
   internal changeset intents from the immediately preceding attested command
