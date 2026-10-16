@@ -19,7 +19,7 @@
       "computedHash": "43a71462e5ad089e652133fe6f8c3c3835688a143e0ad973d6c5b803d1dbafe7"
     },
     "clean-architecture-review": {
-      "source": "./agents/skills",
+      "source": "./agents/skills/clean-architecture-review",
       "sourceType": "local",
       "computedHash": "c68577f77a774f0ce6f7e372fd5ab5b26e355a225751d0b8c4044b1032b05270"
     },
@@ -145,7 +145,7 @@
       "computedHash": "b8d55851a2909e26c2dbb2e8563719c87b3b700559f604e4df344f8c27e21047"
     },
     "rust-clean-code": {
-      "source": "./agents/skills",
+      "source": "./agents/skills/rust-clean-code",
       "sourceType": "local",
       "computedHash": "eac0a6468adffedc3ffe04e23f7cfe43a2f670e882bba72b7e890b0267534edc"
     },
@@ -225,7 +225,7 @@
       "source": "mattpocock/skills",
       "sourceType": "github",
       "skillPath": "skills/engineering/wizard/SKILL.md",
-      "computedHash": "3642db2041d66efa88407e958792268c5cace9e286ad0a93ae218bffc8aae448"
+      "computedHash": "49298bed80e7f722b071ad5d64798c75eb705bbbe0635b9bbffd08cd6fb81647"
     },
     "writing-beats": {
       "source": "mattpocock/skills",
