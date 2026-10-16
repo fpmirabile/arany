@@ -58,7 +58,7 @@ claimed until each lands.
 - **One executable-identity table.** Platform root, shell and executable magic for trusted system executables are spread across `git.rs`, `config.rs`, `workspace.rs` and `macos.rs::system_file`; a single per-platform table makes a second Git root (for example Xcode.app) a one-row change.
 - **Researcher children with Tools.** They still have no native macOS owner.
 - **Native Git profile probe hardening (needs a Mac).** Add a service-specific Mach-lookup denial with an unsandboxed success baseline to the Seatbelt Git probe. A direct lookup needs new test-only `unsafe` FFI, which requires the dedicated review in [AGENTS.md](./AGENTS.md#global-rules) rule 7.
-- **Linux Git journey denial parity.** `typed_git_reads_run_in_the_guard_without_repository_code` does not assert that exec of other binaries, writes outside the Git view and reads of a host gitconfig are denied, as the macOS probe now does; extend its execution fixture to assert them.
+- **Linux Git journey isolation assertions.** `typed_git_reads_run_in_the_guard_without_repository_code` should assert what the Linux contract guarantees for Git reads: the Workspace stays read-only (a write attempt from repository config changes nothing) and no host home or gitconfig is visible in the namespace. Restricting Linux Git reads to exec only the pinned `git` (as macOS does) is not in the Linux contract; it would be a separate enforcement and [Tools spec](./docs/specs/tools.md) decision.
 
 ## Terminal continuity evidence
 
