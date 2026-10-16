@@ -1,6 +1,6 @@
 <!--
-Lead with the point; 1–3 short bullets per section. Write "N/A — <reason>"
-only where a section does not apply. Never include secrets, personal data or
+Lead with the point; 1–3 short bullets per section. Summary and Verification
+are required; omit Notes when nothing applies. Never include secrets, personal data or
 raw private prompts/payloads. Agents: follow AGENTS.md even when publishing
 through the CLI or API.
 -->
