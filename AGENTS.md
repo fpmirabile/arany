@@ -8,7 +8,7 @@ Multi-agent coordination builds on five guarantees. Never weaken them for speed,
 
 - **Journal-first durability.** Every Provider call, Tool intent, effect, approval verdict and team transition (spawn, lease, handover, integration) is a committed Event before the next step; the reducer validates each transition; strict replay never re-executes.
 - **Honest uncertainty.** An effect with an unknown outcome is Uncertain: it stops its continuation, is reported unknown and never retries itself.
-- **Per-effect isolation.** Every mutation, process, Skill script and MCP call runs in the Guard under a pinned, typed grant and publishes only through validated changesets with receipts. Read-only operations run under the same admitted directory capability and bounds, in-process or in the Guard, and never widen disclosure. Repository content and model text never select trust; unsupported enforcement fails closed.
+- **Per-effect isolation.** Every mutation, process, Skill script and MCP call runs in the Guard under a pinned, typed grant and publishes only through validated changesets with receipts. Read-only operations run under the same admitted directory capability and bounds, in-process or in the Guard, and never widen disclosure. Repository content and model text never select trust; unsupported enforcement fails closed. The only exception: a per-command run outside the Guard that the user approves after a sandbox-caused failure, never automatic, journaled and marked unguarded. Other guarantees still apply.
 - **Durable, budgeted Goals.** Budgets, pause, steering, cancellation and recovery survive exit and crashes; exhaustion closes the Goal, not the guarantee.
 - **Safe AI cage (hostile-input neutralization).** Untrusted repositories, files, Tool outputs, MCP metadata and Skill text are data, never instructions or executable configuration; Git runs only on a neutralized private view. Agents can only narrow authority, never widen it: children never exceed the parent's grant, and hooks and reviews only narrow.
 
@@ -25,7 +25,7 @@ Everything else (agent loop, wire formats, defaults, permission modes, hooks, ag
 
 ## Rules to load before editing
 
-**Documentation ownership.** `agents/` holds general working practice only. `docs/specs/<domain>.md` is the only home of behavior, decisions, limits and scenarios; load a spec only when the task changes, fixes or verifies that behavior, and read its scenarios first. Implementation invariants live in the tests that pin them. State each fact in one home and link elsewhere. A separate unit of work, such as a split-out crate, gets its own `agents/<unit>.md`; a module in the single crate does not.
+**Documentation ownership.** `agents/` holds general working practice only. `docs/specs/<domain>.md` is the only home of behavior, decisions, limits and scenarios; load a spec only when the task changes or verifies that behavior. Implementation invariants live in the tests that pin them. State each fact in one home and link elsewhere. A split-out crate gets its own `agents/<unit>.md`; a module does not.
 
 | Task or boundary | Read |
 |---|---|
@@ -60,7 +60,7 @@ Open only the linked files whose triggers apply; they are not automatic imports.
 
 ## Auto-learning
 
-Record a found invariant, recurring failure or ownership decision once, in the same change: behavior, limits and decisions in the owning spec ([spec workflow](./docs/specs/README.md)); an implementation invariant as a test, or a non-obvious reason as one `//` line beside its code; a working practice in its general rule. Fix misleading guidance instead of duplicating it; add no task transcripts, check logs or facts readable from code.
+Record a found invariant, failure or ownership decision once: behavior, limits and decisions in the owning spec ([spec workflow](./docs/specs/README.md)); an implementation invariant as a test, or a non-obvious reason as one `//` line beside its code; a working practice in its general rule. Fix misleading guidance instead of duplicating it; add no task transcripts, check logs or facts readable from code.
 
 ## Module boundaries
 
