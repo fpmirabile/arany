@@ -171,7 +171,8 @@ impl RunLoop<'_> {
                 .min(usize::from(self.controls.policy.max_children())),
         );
         let waves = objectives.len().div_ceil(parallel.max(1));
-        let active_bound = delegation_active_bound(research, self.provider.call_deadline(), waves);
+        let active_bound =
+            delegation_active_bound(research, self.provider.identity().limits.deadline, waves);
         // Covers every child's calls, Tools and terminal facts plus the largest later admission, so a refusal precedes AgentSpawned.
         let active_event_tail = if research {
             objectives.len() * (4 * MAX_CHILD_TOOL_CALLS + 4) + 10

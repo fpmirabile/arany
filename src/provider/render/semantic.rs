@@ -1,6 +1,3 @@
-//! Rebuilds the semantic request fields from a rendered Responses request, so loopback servers can
-//! assert on what the model was shown without depending on the message layout.
-
 use serde_json::{Value, json};
 
 fn parts(wire: &Value) -> Vec<String> {
@@ -106,7 +103,6 @@ pub fn input(wire: &Value) -> Value {
     semantic
 }
 
-#[allow(dead_code)]
 /// The model-facing projection of every Tool result in the request, in order, for either route.
 pub fn tool_results(wire: &Value) -> Vec<Value> {
     if let Some(messages) = wire["messages"].as_array() {
@@ -124,4 +120,41 @@ pub fn tool_results(wire: &Value) -> Vec<Value> {
         .filter(|item| item["type"] == "function_call_output")
         .map(|item| serde_json::from_str(item["output"].as_str().unwrap()).unwrap())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::{Effort, openai::wire, render, test_support};
+
+    #[test]
+    fn semantic_inverts_render() {
+        let request = test_support::read_only_request("gpt-5.4");
+        let conversation = render::conversation(&request).unwrap();
+        let body = wire::run_body_with_effort(&request, &conversation, Effort::High).unwrap();
+        let input = &request.input;
+        let expected = json!({
+            "objective": input.objective,
+            "history": input
+                .history
+                .iter()
+                .map(|turn| json!({"user": turn.user, "assistant": turn.assistant}))
+                .collect::<Vec<_>>(),
+            "includes": input.includes,
+            "workspace_guidance": input.workspace_guidance,
+            "derived_context_summary": input.context_summary,
+            "child_results": input
+                .child_results
+                .iter()
+                .map(|item| json!({
+                    "objective": item.objective,
+                    "summary": item.summary,
+                    "result": item.result,
+                }))
+                .collect::<Vec<_>>(),
+            "phase": "root_synthesis",
+            "collaboration": request.collaboration,
+        });
+        assert_eq!(super::input(&body), expected);
+    }
 }

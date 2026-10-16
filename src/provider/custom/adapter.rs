@@ -3,17 +3,13 @@ use super::{
     transport::TransportError,
 };
 use crate::provider::{
-    CompactionRequest, CompactionResponse, CustomProfileProvenance, Effort, Provider,
-    ProviderError, ProviderRequest, ProviderResponse,
+    CompactionRequest, CompactionResponse, CustomProfileProvenance, Effort, Provenance, Provider,
+    ProviderError, ProviderIdentity, ProviderRequest, ProviderResponse,
 };
 use crate::store::{StateRoot, Store};
 
 pub struct CustomProvider {
-    profile_label: String,
-    model: String,
-    endpoint: String,
-    evidence_digest: [u8; 32],
-    evidence_version: u32,
+    identity: ProviderIdentity,
     effort: Option<Effort>,
     transport: CustomTransport,
 }
@@ -52,12 +48,16 @@ impl CustomProvider {
         let key = std::env::var(profile.credential_env())
             .map_err(|_| CustomProfileError::CredentialUnavailable)?;
         let transport = CustomTransport::new(&destination, key)?;
-        Ok(Self {
-            profile_label: format!("custom:{}", profile.name()),
-            model: profile.model().to_owned(),
+        let mut identity =
+            ProviderIdentity::native(format!("custom:{}", profile.name()), profile.model());
+        identity.effort = selected_effort;
+        identity.provenance = Provenance::Custom(CustomProfileProvenance {
             endpoint: profile.endpoint().to_owned(),
             evidence_digest: expected_digest,
-            evidence_version: profile.capability_evidence_version(),
+            capability_evidence_version: profile.capability_evidence_version(),
+        });
+        Ok(Self {
+            identity,
             effort: selected_effort,
             transport,
         })
@@ -66,35 +66,15 @@ impl CustomProvider {
 
 #[async_trait::async_trait]
 impl Provider for CustomProvider {
-    fn profile_name(&self) -> &str {
-        &self.profile_label
-    }
-
-    fn model_name(&self) -> &str {
-        &self.model
-    }
-
-    fn max_concurrent_calls(&self) -> u8 {
-        1
-    }
-
-    fn reasoning_effort(&self) -> Option<Effort> {
-        self.effort
-    }
-
-    fn custom_profile_provenance(&self) -> Option<CustomProfileProvenance> {
-        Some(CustomProfileProvenance {
-            endpoint: self.endpoint.clone(),
-            evidence_digest: self.evidence_digest,
-            capability_evidence_version: self.evidence_version,
-        })
+    fn identity(&self) -> &ProviderIdentity {
+        &self.identity
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         request.validate_scope()?;
         if request.input.tools.is_some()
             || !request.input.images.is_empty()
-            || request.model != self.model
+            || request.model != self.identity.model
             || !(1..=super::OUTPUT_CAP).contains(&request.max_output_tokens)
         {
             return Err(ProviderError::Rejected);
@@ -113,7 +93,7 @@ impl Provider for CustomProvider {
         request.validate_scope()?;
         if request.input.tools.is_some()
             || !request.input.images.is_empty()
-            || request.model != self.model
+            || request.model != self.identity.model
             || !(1..=super::OUTPUT_CAP).contains(&request.max_output_tokens)
         {
             return Err(ProviderError::Rejected);
@@ -128,7 +108,8 @@ impl Provider for CustomProvider {
         &self,
         request: CompactionRequest,
     ) -> Result<CompactionResponse, ProviderError> {
-        if request.model != self.model || !(1..=1024).contains(&request.max_output_tokens) {
+        if request.model != self.identity.model || !(1..=1024).contains(&request.max_output_tokens)
+        {
             return Err(ProviderError::Rejected);
         }
         self.transport
@@ -165,16 +146,19 @@ mod tests {
         };
         let destination = profile.resolve_destination().await.unwrap();
         let provider = CustomProvider {
-            profile_label: "custom:local".into(),
-            model: "model-1".into(),
-            endpoint: profile.endpoint().into(),
-            evidence_digest: fingerprint(&profile),
-            evidence_version: 2,
+            identity: ProviderIdentity {
+                provenance: Provenance::Custom(CustomProfileProvenance {
+                    endpoint: profile.endpoint().into(),
+                    evidence_digest: fingerprint(&profile),
+                    capability_evidence_version: 2,
+                }),
+                ..ProviderIdentity::native("custom:local", "model-1")
+            },
             effort: None,
             transport: CustomTransport::new(&destination, "synthetic-key".into()).unwrap(),
         };
         assert_eq!(
-            provider.call_deadline(),
+            provider.identity().limits.deadline,
             std::time::Duration::from_secs(120)
         );
         for (phase, collaboration, tools) in [

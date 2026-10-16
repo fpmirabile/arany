@@ -235,8 +235,8 @@ async fn run_with_provider<P: Provider + 'static>(
     provider: P,
     telemetry: Telemetry,
 ) -> Result<CommandOutput, String> {
-    if provider.profile_name() != args.provider.profile_label()
-        || provider.model_name() != args.model
+    if provider.identity().profile != args.provider.profile_label()
+        || provider.identity().model != args.model
     {
         return Err("selected Provider changed before Workspace admission".into());
     }
@@ -532,16 +532,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Provider for Scripted {
-        fn profile_name(&self) -> &str {
-            "openai"
-        }
-
-        fn model_name(&self) -> &str {
-            "gpt-5.4"
-        }
-
-        fn max_concurrent_calls(&self) -> u8 {
-            1
+        fn identity(&self) -> &arany::ProviderIdentity {
+            static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
+                std::sync::LazyLock::new(|| arany::ProviderIdentity::native("openai", "gpt-5.4"));
+            &IDENTITY
         }
 
         async fn invoke(

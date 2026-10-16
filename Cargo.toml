@@ -8,6 +8,9 @@ description = "A durable, CLI-only agent harness"
 repository = "https://github.com/fpmirabile/arany"
 include = ["src/**", "tests/**", "scripts/**", "Cargo.toml", "Cargo.lock", "/LICENSE", "/NOTICE"]
 
+[features]
+test-support = []
+
 [dependencies]
 async-trait = "=0.1.92"
 aws-lc-rs = { version = "=1.18.1", default-features = false }
@@ -51,6 +54,7 @@ core-foundation = { version = "=0.10.1", default-features = false, features = ["
 security-framework = "=3.7.0"
 
 [dev-dependencies]
+arany = { path = ".", features = ["test-support"] }
 opentelemetry-proto = { version = "=0.33.0", default-features = false, features = ["trace", "gen-tonic-messages"] }
 opentelemetry_sdk = { version = "=0.33.0", default-features = false, features = ["trace", "testing"] }
 prost = "=0.14.4"

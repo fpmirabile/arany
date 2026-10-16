@@ -999,15 +999,14 @@ pub(super) async fn native_command_changeset_corpus(
     }
     #[async_trait::async_trait]
     impl Provider for CommandJourney {
-        fn profile_name(&self) -> &str {
-            "scripted"
+        fn identity(&self) -> &arany::ProviderIdentity {
+            static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
+                std::sync::LazyLock::new(|| {
+                    arany::ProviderIdentity::native("scripted", "changeset-model")
+                });
+            &IDENTITY
         }
-        fn model_name(&self) -> &str {
-            "changeset-model"
-        }
-        fn max_concurrent_calls(&self) -> u8 {
-            1
-        }
+
         async fn invoke(
             &self,
             request: ProviderRequest,

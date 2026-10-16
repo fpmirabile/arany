@@ -323,7 +323,7 @@ async fn run_with_provider<P: Provider + 'static>(
     steering: RunSteering,
 ) -> Result<RunOutcome, RunAttemptError> {
     let trusted_tools =
-        !tools.configured && super::permissions::supports_tools(Some(provider.profile_name()));
+        !tools.configured && super::permissions::supports_tools(Some(&provider.identity().profile));
     let root = StateRoot::admit(state_dir)
         .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
     let mut engine = Engine::open_with_telemetry(root, provider, telemetry.clone())
@@ -403,8 +403,8 @@ mod tests {
     #[cfg(target_os = "macos")]
     use arany::{
         AgentPhase, ApprovalMode, AttachedTerminal, ChatGptAdmission, ChatGptProvenance,
-        CollaborationPolicy, Composer, Finish, OutputTokenBound, ProviderError, ProviderOutcome,
-        ProviderRequest, ProviderResponse, RunStatus,
+        CollaborationPolicy, Composer, Finish, OutputTokenBound, Provenance, ProviderError,
+        ProviderIdentity, ProviderOutcome, ProviderRequest, ProviderResponse, RunStatus,
     };
     use arany::{SessionView, Store};
     #[cfg(target_os = "macos")]
@@ -1240,39 +1240,36 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     struct Greeting {
-        profile: &'static str,
-        account_id: Uuid,
+        identity: ProviderIdentity,
         observed: Arc<Mutex<Vec<ProviderRequest>>>,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Greeting {
+        fn new(
+            profile: &'static str,
+            account_id: Uuid,
+            observed: Arc<Mutex<Vec<ProviderRequest>>>,
+        ) -> Self {
+            let mut identity = ProviderIdentity::native(profile, "synthetic-model");
+            identity.effort = Some(Effort::Low);
+            if profile == "chatgpt" {
+                identity.provenance = Provenance::ChatGpt(ChatGptProvenance {
+                    account_id,
+                    evidence_fingerprint: [1; 32],
+                    admission: ChatGptAdmission::AccountConsent,
+                });
+                identity.limits.output_token_bound = OutputTokenBound::LocalAcceptanceOnly;
+            }
+            Self { identity, observed }
+        }
     }
 
     #[cfg(target_os = "macos")]
     #[async_trait::async_trait]
     impl Provider for Greeting {
-        fn profile_name(&self) -> &str {
-            self.profile
-        }
-        fn model_name(&self) -> &str {
-            "synthetic-model"
-        }
-        fn reasoning_effort(&self) -> Option<Effort> {
-            Some(Effort::Low)
-        }
-        fn max_concurrent_calls(&self) -> u8 {
-            1
-        }
-        fn chatgpt_provenance(&self) -> Option<ChatGptProvenance> {
-            (self.profile == "chatgpt").then_some(ChatGptProvenance {
-                account_id: self.account_id,
-                evidence_fingerprint: [1; 32],
-                admission: ChatGptAdmission::AccountConsent,
-            })
-        }
-        fn output_token_bound(&self) -> OutputTokenBound {
-            if self.profile == "chatgpt" {
-                OutputTokenBound::LocalAcceptanceOnly
-            } else {
-                OutputTokenBound::ProviderEnforced
-            }
+        fn identity(&self) -> &ProviderIdentity {
+            &self.identity
         }
         async fn invoke(
             &self,
@@ -1399,11 +1396,7 @@ mod tests {
                 let outcome = run_with_provider(
                     &state,
                     &Telemetry::disabled(),
-                    Greeting {
-                        profile,
-                        account_id,
-                        observed: observed.clone(),
-                    },
+                    Greeting::new(profile, account_id, observed.clone()),
                     RunRequest {
                         session_id: session,
                         title: None,
@@ -1472,11 +1465,7 @@ mod tests {
             let error = run_with_provider(
                 &state,
                 &Telemetry::disabled(),
-                Greeting {
-                    profile,
-                    account_id,
-                    observed: observed.clone(),
-                },
+                Greeting::new(profile, account_id, observed.clone()),
                 RunRequest {
                     session_id: session,
                     title: None,

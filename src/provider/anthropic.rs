@@ -1,9 +1,9 @@
 use super::conversation::Conversation;
 use super::{
-    CompactionRequest, CompactionResponse, Effort, MAX_RESPONSE_BYTES, NativeApiCredentials,
-    Provider, ProviderError, ProviderRequest, ProviderResponse, raw_reflects_secret, render,
-    resolve_native_effort, resolve_native_effort_for_run, valid_saved_api_account_id,
-    validate_native_api_key,
+    CallLimits, CompactionRequest, CompactionResponse, Effort, MAX_RESPONSE_BYTES,
+    NativeApiCredentials, Provenance, Provider, ProviderError, ProviderIdentity, ProviderRequest,
+    ProviderResponse, raw_reflects_secret, render, resolve_native_effort,
+    resolve_native_effort_for_run, valid_saved_api_account_id, validate_native_api_key,
 };
 use reqwest::Client;
 use serde_json::Value;
@@ -17,12 +17,10 @@ const DEADLINE: Duration = Duration::from_secs(600);
 
 pub struct AnthropicProvider {
     client: Client,
-    model: String,
+    identity: ProviderIdentity,
     effort: Effort,
     key: String,
     workspace_id: Option<String>,
-    saved_api_account_id: Option<Uuid>,
-    max_concurrent_calls: u8,
 }
 
 impl AnthropicProvider {
@@ -76,7 +74,9 @@ impl AnthropicProvider {
             return Err(ProviderError::Rejected);
         }
         let mut provider = Self::from_api_key_with_effort(model, selected_effort, key)?;
-        provider.saved_api_account_id = Some(account_id);
+        provider.identity.provenance = Provenance::Native {
+            saved_api_account_id: Some(account_id),
+        };
         Ok(provider)
     }
 
@@ -92,7 +92,9 @@ impl AnthropicProvider {
             return Err(ProviderError::Rejected);
         }
         let mut provider = Self::with_resolved_effort(model, effort, credentials)?;
-        provider.saved_api_account_id = saved_api_account_id;
+        provider.identity.provenance = Provenance::Native {
+            saved_api_account_id,
+        };
         Ok(provider)
     }
 
@@ -137,8 +139,10 @@ impl AnthropicProvider {
         )
         .await?;
         let mut provider = Self::with_resolved_effort(model, effort, credentials)?;
-        provider.saved_api_account_id = saved_api_account_id;
-        provider.max_concurrent_calls = 1;
+        provider.identity.provenance = Provenance::Native {
+            saved_api_account_id,
+        };
+        provider.identity.limits.concurrency = 1;
         Ok(provider)
     }
 
@@ -171,14 +175,20 @@ impl AnthropicProvider {
             } else {
                 1
             };
+        let mut identity = ProviderIdentity::native("anthropic", model);
+        identity.effort = Some(effort);
+        identity.limits = CallLimits {
+            concurrency: max_concurrent_calls,
+            max_output_tokens: super::MAX_OUTPUT_TOKEN_CAP,
+            deadline: DEADLINE,
+            ..CallLimits::default()
+        };
         Ok(Self {
             client,
-            model,
+            identity,
             effort,
             key: credentials.key,
             workspace_id: credentials.anthropic_workspace_id,
-            saved_api_account_id: None,
-            max_concurrent_calls,
         })
     }
 
@@ -231,7 +241,7 @@ impl AnthropicProvider {
         let response = wire::decode_run(
             bytes,
             &wire::RunScope {
-                model: &self.model,
+                model: &self.identity.model,
                 output_cap: request.max_output_tokens,
                 secret: &self.key,
                 offered: conversation.tools.as_deref().unwrap_or_default(),
@@ -248,7 +258,7 @@ impl AnthropicProvider {
         bytes: &[u8],
         output_cap: u32,
     ) -> Result<CompactionResponse, ProviderError> {
-        let response = wire::decode_compaction(bytes, &self.model, output_cap)?;
+        let response = wire::decode_compaction(bytes, &self.identity.model, output_cap)?;
         if response.reflects_secret(&self.key) {
             return Err(ProviderError::InvalidOutcome);
         }
@@ -258,39 +268,15 @@ impl AnthropicProvider {
 
 #[async_trait::async_trait]
 impl Provider for AnthropicProvider {
-    fn profile_name(&self) -> &str {
-        "anthropic"
-    }
-
-    fn model_name(&self) -> &str {
-        &self.model
-    }
-
-    fn reasoning_effort(&self) -> Option<Effort> {
-        Some(self.effort)
-    }
-
-    fn max_concurrent_calls(&self) -> u8 {
-        self.max_concurrent_calls
-    }
-
-    fn saved_api_account_id(&self) -> Option<Uuid> {
-        self.saved_api_account_id
-    }
-
-    fn max_output_tokens(&self) -> u32 {
-        super::MAX_OUTPUT_TOKEN_CAP
-    }
-
-    fn call_deadline(&self) -> Duration {
-        DEADLINE
+    fn identity(&self) -> &ProviderIdentity {
+        &self.identity
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         request.validate_scope()?;
         super::image::validate_images(&request)?;
-        if request.model != self.model
-            || !(1..=self.max_output_tokens()).contains(&request.max_output_tokens)
+        if request.model != self.identity.model
+            || !(1..=self.identity.limits.max_output_tokens).contains(&request.max_output_tokens)
         {
             return Err(ProviderError::Rejected);
         }
@@ -307,8 +293,8 @@ impl Provider for AnthropicProvider {
     ) -> Result<ProviderResponse, ProviderError> {
         request.validate_scope()?;
         super::image::validate_images(&request)?;
-        if request.model != self.model
-            || !(1..=self.max_output_tokens()).contains(&request.max_output_tokens)
+        if request.model != self.identity.model
+            || !(1..=self.identity.limits.max_output_tokens).contains(&request.max_output_tokens)
         {
             return Err(ProviderError::Rejected);
         }
@@ -333,7 +319,7 @@ impl Provider for AnthropicProvider {
             );
         }
         super::streaming::validate_stream_response(&response)?;
-        let mut decoder = wire::MessageStream::new(&self.key, &self.model, preview);
+        let mut decoder = wire::MessageStream::new(&self.key, &self.identity.model, preview);
         while let Some(chunk) = response
             .chunk()
             .await
@@ -350,8 +336,8 @@ impl Provider for AnthropicProvider {
         &self,
         request: CompactionRequest,
     ) -> Result<CompactionResponse, ProviderError> {
-        if request.model != self.model
-            || !(1..=self.max_output_tokens()).contains(&request.max_output_tokens)
+        if request.model != self.identity.model
+            || !(1..=self.identity.limits.max_output_tokens).contains(&request.max_output_tokens)
         {
             return Err(ProviderError::Rejected);
         }
@@ -389,12 +375,15 @@ mod tests {
             "synthetic-anthropic-key".into(),
         )
         .expect("selected API key");
-        assert_eq!(provider.model_name(), "claude-sonnet-5");
-        assert_eq!(provider.reasoning_effort(), Some(Effort::Max));
+        assert_eq!(provider.identity().model, "claude-sonnet-5");
+        assert_eq!(provider.identity().effort, Some(Effort::Max));
         assert_eq!(provider.key, "synthetic-anthropic-key");
-        assert_eq!(provider.saved_api_account_id(), None);
-        assert_eq!(provider.max_output_tokens(), 16_384);
-        assert_eq!(provider.call_deadline(), Duration::from_secs(600));
+        assert_eq!(provider.identity().saved_api_account_id(), None);
+        assert_eq!(provider.identity().limits.max_output_tokens, 16_384);
+        assert_eq!(
+            provider.identity().limits.deadline,
+            Duration::from_secs(600)
+        );
         assert!(
             !provider
                 .request(serde_json::json!({}))
@@ -438,7 +427,7 @@ mod tests {
             account_id,
         )
         .expect("saved API account");
-        assert_eq!(saved.saved_api_account_id(), Some(account_id));
+        assert_eq!(saved.identity().saved_api_account_id(), Some(account_id));
         for effort in Effort::ALL {
             let selected = AnthropicProvider::from_credentials_with_effort(
                 "future-model".into(),
@@ -452,9 +441,9 @@ mod tests {
                 Some(account_id),
             )
             .expect("explicit native choice needs no synthetic check");
-            assert_eq!(selected.reasoning_effort(), Some(effort));
-            assert_eq!(selected.saved_api_account_id(), Some(account_id));
-            assert_eq!(selected.max_concurrent_calls(), 1);
+            assert_eq!(selected.identity().effort, Some(effort));
+            assert_eq!(selected.identity().saved_api_account_id(), Some(account_id));
+            assert_eq!(selected.identity().limits.concurrency, 1);
             assert_eq!(selected.workspace_id.as_deref(), Some("wrkspc_Fixture"));
         }
         assert!(matches!(
