@@ -1696,6 +1696,7 @@ done
                     tools: vec!["echo".into()],
                 }],
                 runtime_grants: runtime_grants.clone(),
+                git: None,
             },
             workspace: workspace.to_path_buf(),
             workspace_identity: crate::tools::fs::identity(&directory).unwrap(),

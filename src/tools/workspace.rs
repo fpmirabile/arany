@@ -397,6 +397,7 @@ impl WorkspacePermissions {
             skills: Vec::new(),
             mcp: Vec::new(),
             runtime_grants: self.runtime_grants.clone(),
+            git: None,
         };
         config.validate()?;
         Ok(config)

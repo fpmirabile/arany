@@ -1097,6 +1097,7 @@ mod tests {
             skills: Vec::new(),
             mcp: Vec::new(),
             runtime_grants: Vec::new(),
+            git: None,
         }
     }
 

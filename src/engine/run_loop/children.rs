@@ -658,7 +658,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
             && child.tools.is_some()
             && child.tool_calls_remaining > 0
             && call.valid()
-            && call.is_goal_plan_prelude()
+            && call.is_child_research()
             && self.controls.goal_budget.can_start_provider_call()
             && self
                 .controls

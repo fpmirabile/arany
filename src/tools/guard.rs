@@ -897,7 +897,8 @@ pub(super) fn helper_main() -> ExitCode {
                 | ToolCall::Edit { .. }
                 | ToolCall::Mkdir { .. }
                 | ToolCall::ApplyChangeset { .. }
-        ) || cfg!(target_os = "macos") && matches!(task.intent.call, ToolCall::Skill { .. }))
+        ) || task.intent.call.is_git_read()
+            || cfg!(target_os = "macos") && matches!(task.intent.call, ToolCall::Skill { .. }))
             && super::fs::identity(&super::fs::open_directory(workspace)?)?
                 != (task.intent.workspace_device, task.intent.workspace_inode)
         {
@@ -1014,6 +1015,9 @@ pub(super) fn helper_main() -> ExitCode {
                         task.intent.limits.cache_bytes > 0,
                     )
                     .await
+                }
+                ToolCall::GitStatus { .. } | ToolCall::GitDiff { .. } | ToolCall::GitLog { .. } => {
+                    Err(ToolError::ProtectionUnavailable)
                 }
                 call => super::fs::native(workspace, call, &task.config),
             }
@@ -1324,6 +1328,7 @@ mod tests {
             skills: Vec::new(),
             mcp: Vec::new(),
             runtime_grants,
+            git: None,
         }
     }
 

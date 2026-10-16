@@ -373,6 +373,11 @@ impl ToolRuntime {
             },
             "skills": self.skill_rows(),
             "mcp_servers": self.config.mcp.iter().map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":"2025-11-25 stdio; use mcp_list before mcp_call"})).collect::<Vec<_>>(),
+            "git": if self.config.git_available() {
+                serde_json::json!({"operations":["git_status","git_diff","git_log"],"scope":"Read-only status, diff and log of the Workspace-root repository under Git defaults; paths are Workspace-relative and \".\" is the whole repository."})
+            } else {
+                serde_json::json!("unavailable")
+            },
         }).to_string();
         if catalog.len() > types::MAX_TOOL_CATALOG_BYTES {
             return Err(ToolError::Limit);

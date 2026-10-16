@@ -828,7 +828,8 @@ fn provider_bound_schemas_carry_no_validation_keywords() {
             "write": true,
             "commands": [{"name":"bash"}],
             "skills": [{"name":"sample"}],
-            "mcp_servers": [{"name":"local"}]
+            "mcp_servers": [{"name":"local"}],
+            "git": {"operations": ["git_status", "git_diff", "git_log"]}
         })
         .to_string(),
         history_summary: None,
@@ -919,4 +920,75 @@ fn child_research_request_offers_only_read_only_calls_and_finish() {
         .filter_map(|branch| branch["properties"]["type"]["enum"][0].as_str())
         .collect();
     assert_eq!(types, ["finish"]);
+}
+
+#[test]
+fn git_reads_join_the_structured_prelude_when_cataloged() {
+    let mut request = run_request();
+    request.collaboration = crate::session::CollaborationPolicy::Single;
+    request.phase = AgentPhase::RootPlan;
+    request.goal_budget = Some(crate::session::GoalBudget::default());
+    let catalog = |git: Value| crate::tools::ToolContext {
+        catalog: json!({
+            "write": false,
+            "commands": [],
+            "skills": [],
+            "mcp_servers": [],
+            "git": git
+        })
+        .to_string(),
+        history_summary: None,
+        observations: Vec::new(),
+    };
+    let tool_branches = |request: &ProviderRequest| -> Vec<Value> {
+        run_body(request, Effort::Low)["output_config"]["format"]["schema"]["properties"]["outcome"]
+            ["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|branch| branch["properties"]["type"]["enum"][0] == "tool")
+            .cloned()
+            .collect()
+    };
+    let operations = |branch: &Value| -> Vec<String> {
+        branch["properties"]["call"]["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|call| call["properties"]["operation"]["enum"][0].as_str())
+            .map(str::to_owned)
+            .collect()
+    };
+
+    request.tools = Some(catalog(
+        json!({"operations": ["git_status", "git_diff", "git_log"]}),
+    ));
+    let branches = tool_branches(&request);
+    assert_eq!(branches.len(), 1);
+    assert_eq!(
+        operations(&branches[0]),
+        [
+            "list",
+            "read",
+            "search",
+            "git_status",
+            "git_diff",
+            "git_log"
+        ]
+    );
+    assert!(
+        branches[0]["properties"]["plan_contract"]["anyOf"]
+            .as_array()
+            .unwrap()
+            .contains(&json!({"type": "null"}))
+    );
+
+    request.tools = Some(catalog(json!("unavailable")));
+    for branch in tool_branches(&request) {
+        assert!(
+            operations(&branch)
+                .iter()
+                .all(|name| !name.starts_with("git_"))
+        );
+    }
 }

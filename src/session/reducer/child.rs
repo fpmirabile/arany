@@ -66,7 +66,7 @@ fn child_tool_is_admissible(
             .is_some_and(|policy| policy.config_digest == intent.policy_digest)
         && intent.workspace_device == config.workspace_device
         && intent.workspace_inode == config.workspace_inode
-        && intent.call.is_goal_plan_prelude()
+        && intent.call.is_child_research()
         && run
             .tools
             .iter()

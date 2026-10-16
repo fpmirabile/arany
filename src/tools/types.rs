@@ -186,6 +186,23 @@ pub enum ToolCall {
         schema_digest: String,
         arguments: String,
     },
+    GitStatus {
+        path: String,
+    },
+    GitDiff {
+        path: String,
+        #[serde(deserialize_with = "required_nullable")]
+        base: Option<String>,
+        #[serde(deserialize_with = "required_nullable")]
+        head: Option<String>,
+        staged: bool,
+    },
+    GitLog {
+        path: String,
+        #[serde(deserialize_with = "required_nullable")]
+        revision: Option<String>,
+        max_count: u32,
+    },
 }
 
 fn required_nullable<'de, D: serde::Deserializer<'de>>(
@@ -209,6 +226,18 @@ impl ToolCall {
             self,
             Self::Command { .. } | Self::McpList { .. } | Self::McpCall { .. }
         )
+    }
+
+    pub(crate) fn is_git_read(&self) -> bool {
+        matches!(
+            self,
+            Self::GitStatus { .. } | Self::GitDiff { .. } | Self::GitLog { .. }
+        )
+    }
+
+    /// Read-only calls a researcher child may make; Git reads stay with the primary (R7-8).
+    pub(crate) fn is_child_research(&self) -> bool {
+        self.is_goal_plan_prelude() && !self.is_git_read()
     }
     pub(crate) fn valid(&self) -> bool {
         if !serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_ARGUMENT_BYTES) {
@@ -279,6 +308,27 @@ impl ToolCall {
                     && tool.chars().all(|ch| !ch.is_control())
                     && parse_mcp_arguments(arguments).is_ok()
             }
+            Self::GitStatus { path } => valid_relative(path, true),
+            Self::GitDiff {
+                path,
+                base,
+                head,
+                staged,
+            } => {
+                valid_relative(path, true)
+                    && base.as_deref().is_none_or(valid_revision)
+                    && head.as_deref().is_none_or(valid_revision)
+                    && (head.is_none() || base.is_some() && !staged)
+            }
+            Self::GitLog {
+                path,
+                revision,
+                max_count,
+            } => {
+                valid_relative(path, true)
+                    && revision.as_deref().is_none_or(valid_revision)
+                    && (1..=MAX_GIT_LOG_COMMITS).contains(max_count)
+            }
         }
     }
 
@@ -309,12 +359,61 @@ impl ToolCall {
             Self::Skill { .. } => "skill",
             Self::McpList { .. } => "mcp_list",
             Self::McpCall { .. } => "mcp_call",
+            Self::GitStatus { .. } => "git_status",
+            Self::GitDiff { .. } => "git_diff",
+            Self::GitLog { .. } => "git_log",
         }
     }
 }
 
+pub(crate) const MAX_GIT_LOG_COMMITS: u32 = 50;
+const MAX_REVISION_BYTES: usize = 128;
+
+/// Path components no Tool reads; Git reads also exclude them through pathspecs.
+pub(crate) const FORBIDDEN_NAMES: [&str; 7] = [
+    ".git", ".aws", ".ssh", ".gnupg", ".env", ".npmrc", ".pypirc",
+];
+
 /// Operations allowed before a Goal plan contract; each name is the wire `operation` and `label()`.
-const GOAL_PLAN_PRELUDE_OPERATIONS: [&str; 5] = ["list", "read", "search", "skill", "mcp_list"];
+const GOAL_PLAN_PRELUDE_OPERATIONS: [&str; 8] = [
+    "list",
+    "read",
+    "search",
+    "skill",
+    "mcp_list",
+    "git_status",
+    "git_diff",
+    "git_log",
+];
+
+/// `HEAD`, a ref name or an object name with at most four `~N`/`^N` steps; no ranges, `:`, `@{` or options.
+pub(crate) fn valid_revision(value: &str) -> bool {
+    if value.is_empty() || value.len() > MAX_REVISION_BYTES {
+        return false;
+    }
+    let (name, mut suffix) = value.split_at(value.find(['~', '^']).unwrap_or(value.len()));
+    let name_valid = !name.is_empty()
+        && !name.contains("..")
+        && name.split('/').all(|part| {
+            !part.is_empty()
+                && !part.starts_with(['.', '-'])
+                && !part.ends_with('.')
+                && !part.ends_with(".lock")
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        });
+    let mut steps = 0;
+    while let Some(rest) = suffix.strip_prefix(['~', '^']) {
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        if digits > 4 {
+            return false;
+        }
+        suffix = &rest[digits..];
+        steps += 1;
+    }
+    name_valid && suffix.is_empty() && steps <= 4
+}
 
 pub(crate) fn valid_relative(value: &str, root: bool) -> bool {
     if value.is_empty() || value == "." {
@@ -331,11 +430,8 @@ pub(crate) fn valid_relative(value: &str, root: bool) -> bool {
             .all(|part| matches!(part, Component::Normal(_)))
 }
 
-fn forbidden(value: &str) -> bool {
-    matches!(
-        value,
-        ".git" | ".aws" | ".ssh" | ".gnupg" | ".env" | ".npmrc" | ".pypirc"
-    ) || value.starts_with(".env.")
+pub(crate) fn forbidden(value: &str) -> bool {
+    FORBIDDEN_NAMES.contains(&value) || value.starts_with(".env.")
 }
 
 pub(crate) fn valid_name(value: &str) -> bool {
@@ -718,7 +814,10 @@ impl ToolContext {
                 calls.retain(|call| {
                     call["properties"]["operation"]["enum"][0]
                         .as_str()
-                        .is_some_and(|operation| GOAL_PLAN_PRELUDE_OPERATIONS.contains(&operation))
+                        .is_some_and(|operation| {
+                            GOAL_PLAN_PRELUDE_OPERATIONS.contains(&operation)
+                                && !operation.starts_with("git_")
+                        })
                 });
             }
         }
@@ -742,6 +841,9 @@ impl ToolContext {
                     Some("command") => ("commands", "program", 8),
                     Some("skill") => ("skills", "name", MAX_SKILLS),
                     Some("mcp_list" | "mcp_call") => ("mcp_servers", "server", 4),
+                    Some("git_status" | "git_diff" | "git_log") => {
+                        return catalog["git"].is_object();
+                    }
                     _ => return true,
                 };
                 let names: Vec<_> = catalog[key]
@@ -957,6 +1059,8 @@ fn goal_success_call_schema(branch: &Value) -> Option<Value> {
 pub(crate) fn outcome_branch() -> Value {
     let string = json!({"type": "string"});
     let nullable = json!({"type": ["string", "null"]});
+    let git_path = json!({"type":"string", "description":"Workspace-relative path that limits the result; \".\" for the whole repository."});
+    let revision = json!({"type":["string","null"], "description":"null, or HEAD, a branch or tag name, or a 7-64 character hex commit name, with at most four ~N or ^N ancestry steps (N at most 9999). No ranges, ':' or '@{'. At most 128 bytes."});
     let definitions = [
         ("list", vec![("path", string.clone())]),
         ("mkdir", vec![("path", string.clone())]),
@@ -1024,6 +1128,30 @@ pub(crate) fn outcome_branch() -> Value {
                 ("tool", string.clone()),
                 ("schema_digest", string.clone()),
                 ("arguments", string),
+            ],
+        ),
+        ("git_status", vec![("path", git_path.clone())]),
+        (
+            "git_diff",
+            vec![
+                ("path", git_path.clone()),
+                ("base", revision.clone()),
+                ("head", revision.clone()),
+                (
+                    "staged",
+                    json!({"type":"boolean", "description":"true compares the index with base, or HEAD when base is null; head must then be null. false compares the working tree with the index (no revisions), with base, or compares base with head."}),
+                ),
+            ],
+        ),
+        (
+            "git_log",
+            vec![
+                ("path", git_path),
+                ("revision", revision),
+                (
+                    "max_count",
+                    json!({"type":"integer", "description":"Number of commits: integer 1 through 50 inclusive."}),
+                ),
             ],
         ),
     ];

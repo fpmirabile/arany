@@ -676,11 +676,72 @@ mod goal_success_tests {
             ToolCall::McpList {
                 server: "local".into(),
             },
+            ToolCall::GitStatus { path: "src".into() },
+            ToolCall::GitDiff {
+                path: "src".into(),
+                base: None,
+                head: None,
+                staged: false,
+            },
+            ToolCall::GitLog {
+                path: "src".into(),
+                revision: None,
+                max_count: 1,
+            },
         ] {
             contract.success_criterion = GoalSuccessCriterion::ToolCallSucceeded {
                 call: Box::new(call),
             };
             assert!(contract.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn plan_contract_scopes_git_reads_by_path() {
+        use crate::tools::ToolCall;
+        let contract = |paths: Vec<&str>| GoalPlanContract {
+            mission: "Inspect Git state".into(),
+            paths: paths.into_iter().map(str::to_owned).collect(),
+            commands: Vec::new(),
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            resource_class: crate::tools::ToolResourceClass::Default,
+            command_timeout_ms: None,
+            success_criterion: GoalSuccessCriterion::WorkspaceFileContent {
+                path: "src/main.rs".into(),
+                content: "ok".into(),
+            },
+            budget: GoalBudget::default(),
+        };
+        let calls = |path: &str| {
+            [
+                ToolCall::GitStatus { path: path.into() },
+                ToolCall::GitDiff {
+                    path: path.into(),
+                    base: None,
+                    head: None,
+                    staged: false,
+                },
+                ToolCall::GitLog {
+                    path: path.into(),
+                    revision: None,
+                    max_count: 1,
+                },
+            ]
+        };
+        let scoped = contract(vec!["src"]);
+        for path in ["src", "src/lib.rs"] {
+            for call in calls(path) {
+                assert!(scoped.allows_call(&call), "{call:?}");
+            }
+        }
+        for path in [".", "docs", ""] {
+            for call in calls(path) {
+                assert!(!scoped.allows_call(&call), "{call:?}");
+            }
+        }
+        for call in calls(".") {
+            assert!(contract(vec!["."]).allows_call(&call), "{call:?}");
         }
     }
 
@@ -996,7 +1057,10 @@ impl GoalPlanContract {
             | ToolCall::Search { path, .. }
             | ToolCall::Mkdir { path }
             | ToolCall::Write { path, .. }
-            | ToolCall::Edit { path, .. } => self.allows_path(path),
+            | ToolCall::Edit { path, .. }
+            | ToolCall::GitStatus { path }
+            | ToolCall::GitDiff { path, .. }
+            | ToolCall::GitLog { path, .. } => self.allows_path(path),
             ToolCall::Command { program, .. } => self.commands.contains(program),
             ToolCall::ApplyChangeset { changeset, .. } => changeset
                 .files
@@ -1071,6 +1135,9 @@ impl GoalPlanContract {
                             | crate::tools::ToolCall::Search { .. }
                             | crate::tools::ToolCall::ApplyChangeset { .. }
                             | crate::tools::ToolCall::McpList { .. }
+                            | crate::tools::ToolCall::GitStatus { .. }
+                            | crate::tools::ToolCall::GitDiff { .. }
+                            | crate::tools::ToolCall::GitLog { .. }
                     )
                 {
                     return Err(ReplayError::InvalidPayload);

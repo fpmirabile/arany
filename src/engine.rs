@@ -1660,6 +1660,9 @@ fn goal_report_call_label(call: &crate::tools::ToolCall) -> String {
         crate::tools::ToolCall::Skill { name, .. } => format!("Skill {name}"),
         crate::tools::ToolCall::McpList { server } => format!("MCP catalog {server}"),
         crate::tools::ToolCall::McpCall { server, tool, .. } => format!("MCP {server}.{tool}"),
+        crate::tools::ToolCall::GitStatus { path } => format!("Git status {path}"),
+        crate::tools::ToolCall::GitDiff { path, .. } => format!("Git diff {path}"),
+        crate::tools::ToolCall::GitLog { path, .. } => format!("Git log {path}"),
     }
 }
 
