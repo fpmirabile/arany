@@ -118,9 +118,7 @@ fn synthetic_server(
                 _ => 1024,
             }
         );
-        let input: serde_json::Value =
-            serde_json::from_str(wire["input"].as_str().expect("input text"))
-                .expect("semantic input");
+        let input: serde_json::Value = crate::semantic::input(&wire);
         match index {
             0..=2 => {
                 assert!(

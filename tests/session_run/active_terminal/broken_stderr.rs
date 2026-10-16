@@ -85,9 +85,7 @@ fn run_broken_stderr_case(compaction: bool) {
                 if compaction {
                     let wire: serde_json::Value =
                         serde_json::from_slice(&body).expect("compaction request");
-                    let input: serde_json::Value =
-                        serde_json::from_str(wire["input"].as_str().expect("input text"))
-                            .expect("semantic compaction input");
+                    let input: serde_json::Value = crate::semantic::input(&wire);
                     assert_eq!(wire["max_output_tokens"], 1024);
                     assert_eq!(input["items"].as_array().expect("history items").len(), 1);
                     assert!(input.get("workspace_guidance").is_none());

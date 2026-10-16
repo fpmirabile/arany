@@ -7,6 +7,18 @@ use arany::{
 use process::BoundedOutput;
 use std::process::Command;
 
+/// A scripted one-request Tool step; the id only has to be unique within its step.
+fn tool_outcome(
+    call: arany::ToolCall,
+    plan_contract: Option<Box<arany::GoalPlanContract>>,
+) -> arany::ProviderOutcome {
+    arany::ProviderOutcome::Tools(vec![arany::ToolRequest {
+        id: arany::ToolUseId::new("call_1").expect("scripted Tool id"),
+        call,
+        plan_contract,
+    }])
+}
+
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn safe_run_diagnostics(run: &arany::RunView) -> String {
     let agents = run
@@ -47,6 +59,9 @@ fn safe_run_diagnostics(run: &arany::RunView) -> String {
         .collect::<Vec<_>>();
     format!("agents={agents:?}; tools={tools:?}")
 }
+
+#[path = "common/semantic.rs"]
+mod semantic;
 
 #[path = "common/process.rs"]
 pub mod process;
@@ -2514,6 +2529,7 @@ struct HeldProvider {
 }
 
 #[cfg(unix)]
+#[async_trait::async_trait]
 impl arany::Provider for HeldProvider {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -2527,29 +2543,37 @@ impl arany::Provider for HeldProvider {
         1
     }
 
-    fn invoke(
+    async fn invoke(
         &self,
         request: arany::ProviderRequest,
-    ) -> impl std::future::Future<Output = Result<arany::ProviderResponse, arany::ProviderError>> + Send
-    {
+    ) -> Result<arany::ProviderResponse, arany::ProviderError> {
         let ready_path = self.ready_path.clone();
-        async move {
+        {
             assert_eq!(
                 request.phase,
                 arany::AgentPhase::RootPlan,
                 "holder call phase"
             );
             assert!(request.model == "held-model", "holder call model");
-            assert!(request.images.is_empty(), "holder call images");
+            assert!(request.input.images.is_empty(), "holder call images");
             assert!(
-                request.objective == "Held in another process",
+                request.input.objective == "Held in another process",
                 "holder call objective"
             );
-            assert!(request.instructions.is_none(), "holder call instructions");
-            assert!(request.includes.is_empty(), "holder call includes");
-            assert!(request.history.is_empty(), "holder call history");
-            assert!(request.context_summary.is_none(), "holder call summary");
-            assert!(request.child_results.is_empty(), "holder call children");
+            assert!(
+                request.input.workspace_guidance.is_none(),
+                "holder call instructions"
+            );
+            assert!(request.input.includes.is_empty(), "holder call includes");
+            assert!(request.input.history.is_empty(), "holder call history");
+            assert!(
+                request.input.context_summary.is_none(),
+                "holder call summary"
+            );
+            assert!(
+                request.input.child_results.is_empty(),
+                "holder call children"
+            );
             assert_eq!(request.max_output_tokens, 4096, "holder call output cap");
             std::fs::write(ready_path, b"ready").expect("Provider readiness marker");
             std::future::pending().await

@@ -1,7 +1,6 @@
 use super::{Engine, EngineError, STORE_ACTION_OVERHEAD, ensure_session_workspace};
 use crate::provider::{
-    CompactionRequest, CompactionResponse, MAX_REPORTED_INPUT_TOKENS, Provider,
-    ProviderFailureClass, Usage,
+    CompactionRequest, CompactionResponse, MAX_REPORTED_INPUT_TOKENS, ProviderFailureClass, Usage,
 };
 use crate::session::input::WorkspaceInputs;
 use crate::session::{
@@ -16,7 +15,7 @@ use std::time::{Duration, Instant};
 
 pub(super) const COMPACTION_CALL_DEADLINE: Duration = Duration::from_secs(120);
 
-impl<P: Provider + 'static> Engine<P> {
+impl Engine {
     /// Returns a committed success or failure record; admission and storage errors remain errors.
     pub async fn compact_session(
         &mut self,

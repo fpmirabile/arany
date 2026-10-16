@@ -165,13 +165,15 @@ async fn compact_read_only_goal_prefix(objective: &str) {
     let state_path = temp.path().join("state");
 
     let mut outcomes = (0..READS)
-        .map(|page| ProviderOutcome::Tool {
-            call: arany::ToolCall::Read {
-                path: "notes/data.txt".into(),
-                offset: u32::try_from(page * PAGE_BYTES).expect("bounded file offset"),
-                limit: u32::try_from(PAGE_BYTES).expect("bounded page size"),
-            },
-            plan_contract: None,
+        .map(|page| {
+            crate::tool_outcome(
+                arany::ToolCall::Read {
+                    path: "notes/data.txt".into(),
+                    offset: u32::try_from(page * PAGE_BYTES).expect("bounded file offset"),
+                    limit: u32::try_from(PAGE_BYTES).expect("bounded page size"),
+                },
+                None,
+            )
         })
         .collect::<Vec<_>>();
     outcomes.push(ProviderOutcome::Finish(Finish {
@@ -243,6 +245,7 @@ async fn compact_read_only_goal_prefix(objective: &str) {
         let provider_requests = requests.lock().expect("Provider requests");
         assert!(
             provider_requests.iter().any(|request| request
+                .input
                 .tools
                 .as_ref()
                 .is_some_and(|context| context.history_summary.is_some())),
@@ -251,7 +254,7 @@ async fn compact_read_only_goal_prefix(objective: &str) {
         assert!(
             provider_requests
                 .iter()
-                .filter_map(|request| request.goal_context_facts)
+                .filter_map(call_facts)
                 .any(|facts| {
                     facts.provider_calls > 1
                         && facts.known_tokens > 0
@@ -782,6 +785,7 @@ struct FiniteTokenTeam {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
 }
 
+#[async_trait::async_trait]
 impl Provider for FiniteTokenTeam {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -824,6 +828,7 @@ impl Provider for FiniteTokenTeam {
             _ => return Err(ProviderError::InvalidOutcome),
         };
         Ok(ProviderResponse {
+            turn: arany::ProviderTurn::scripted(),
             outcome,
             response_id: None,
             usage: arany::Usage {
@@ -1234,6 +1239,7 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
 
 struct ExactCapToolReview;
 
+#[async_trait::async_trait]
 impl Provider for ExactCapToolReview {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -1250,13 +1256,13 @@ impl Provider for ExactCapToolReview {
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         let (outcome, input_tokens, output_tokens) = match request.phase {
             AgentPhase::RootPlan => (
-                ProviderOutcome::Tool {
-                    call: arany::ToolCall::Write {
+                crate::tool_outcome(
+                    arany::ToolCall::Write {
                         path: "notes/a.txt".into(),
                         expected_digest: None,
                         content: "x".into(),
                     },
-                    plan_contract: Some(Box::new(arany::GoalPlanContract {
+                    Some(Box::new(arany::GoalPlanContract {
                         mission: "Write one note".into(),
                         resource_class: arany::ToolResourceClass::Default,
                         command_timeout_ms: None,
@@ -1273,7 +1279,7 @@ impl Provider for ExactCapToolReview {
                             ..arany::GoalBudget::default()
                         },
                     })),
-                },
+                ),
                 3,
                 2,
             ),
@@ -1288,6 +1294,7 @@ impl Provider for ExactCapToolReview {
             _ => return Err(ProviderError::InvalidOutcome),
         };
         Ok(ProviderResponse {
+            turn: arany::ProviderTurn::scripted(),
             outcome,
             response_id: None,
             usage: arany::Usage {
@@ -1375,6 +1382,7 @@ impl Drop for InFlightCall {
     }
 }
 
+#[async_trait::async_trait]
 impl Provider for PendingChildren {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -1391,6 +1399,7 @@ impl Provider for PendingChildren {
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         match request.phase {
             AgentPhase::RootPlan => Ok(ProviderResponse {
+                turn: arany::ProviderTurn::scripted(),
                 outcome: ProviderOutcome::Delegate(Delegate {
                     children: vec!["First child".into(), "Second child".into()],
                 }),
@@ -1528,6 +1537,35 @@ async fn resumed_goal_keeps_its_stored_phase() {
 
 const AUTONOMOUS_OBJECTIVE: &str = "Verify the facts file";
 
+/// The Goal facts one call carries: on its newest step, or in the request head when it has none.
+fn call_facts(request: &arany::ProviderRequest) -> Option<arany::GoalContextFacts> {
+    request
+        .input
+        .tools
+        .as_ref()
+        .and_then(|tools| tools.steps.last())
+        .and_then(|step| step.facts)
+        .or(request.input.goal_context_facts)
+}
+
+/// Every steering note one call carries, in the order they were recorded.
+fn call_steering_notes(request: &arany::ProviderRequest) -> Vec<String> {
+    request
+        .input
+        .steering_notes
+        .iter()
+        .cloned()
+        .chain(
+            request
+                .input
+                .tools
+                .iter()
+                .flat_map(|tools| &tools.steps)
+                .flat_map(|step| step.steering_notes.iter().cloned()),
+        )
+        .collect()
+}
+
 fn finish_with(text: &str) -> ProviderOutcome {
     ProviderOutcome::Finish(Finish {
         summary: text.into(),
@@ -1581,11 +1619,7 @@ fn write_facts(workspace: &Path, text: &'static str) -> impl Fn() + Send + Sync 
 }
 
 /// Opens the Engine with Guard-backed Read access to `notes/facts.txt`.
-fn facts_engine<P: Provider + 'static>(
-    state: StateRoot,
-    state_path: &Path,
-    provider: P,
-) -> Engine<P> {
+fn facts_engine<P: Provider + 'static>(state: StateRoot, state_path: &Path, provider: P) -> Engine {
     facts_engine_with_telemetry(state, state_path, provider, arany::Telemetry::disabled())
 }
 
@@ -1594,7 +1628,7 @@ fn facts_engine_with_telemetry<P: Provider + 'static>(
     state_path: &Path,
     provider: P,
     telemetry: arany::Telemetry,
-) -> Engine<P> {
+) -> Engine {
     use std::os::unix::fs::PermissionsExt;
     let mut engine = Engine::open_with_telemetry(state, provider, telemetry).expect("engine");
     let config = state_path.join("tools.json");
@@ -1643,10 +1677,7 @@ async fn interrupted_autonomous_goal(
     let cancellation = RunCancellation::new();
     let cancel = cancellation.clone();
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: Some(Box::new(facts_plan(facts_digest("v2")))),
-        },
+        crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v2"))))),
         finish_with("first pass"),
         finish_with("interrupted pass"),
     ])
@@ -1671,15 +1702,9 @@ async fn autonomous_goal_iterates_until_its_success_criterion_is_satisfied() {
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: Some(Box::new(facts_plan(facts_digest("v2")))),
-        },
+        crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v2"))))),
         finish_with("first pass"),
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: None,
-        },
+        crate::tool_outcome(facts_read(), None),
         finish_with("verified"),
     ])
     .with_before_call(2, write_facts(&workspace, "v2"));
@@ -1698,7 +1723,7 @@ async fn autonomous_goal_iterates_until_its_success_criterion_is_satisfied() {
         let calls = requests.lock().expect("Provider requests");
         assert_eq!(calls.len(), 4, "two Runs, each a Read then a Finish");
         assert_eq!(
-            calls[2].objective, AUTONOMOUS_OBJECTIVE,
+            calls[2].input.objective, AUTONOMOUS_OBJECTIVE,
             "the next Run takes the pinned objective and no new text"
         );
     }
@@ -1724,10 +1749,7 @@ async fn autonomous_goal_stops_at_its_run_budget_and_fails_with_a_report() {
     let mut plan = facts_plan(facts_digest("v2"));
     plan.budget.max_runs = 2;
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: Some(Box::new(plan)),
-        },
+        crate::tool_outcome(facts_read(), Some(Box::new(plan))),
         finish_with("first pass"),
         finish_with("second pass"),
         finish_with("never requested"),
@@ -1774,10 +1796,7 @@ async fn autonomous_goal_call_cap_at_its_boundary_fails_the_goal_with_a_report()
     let mut plan = facts_plan(facts_digest("v2"));
     plan.budget = budget;
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: Some(Box::new(plan)),
-        },
+        crate::tool_outcome(facts_read(), Some(Box::new(plan))),
         finish_with("first pass"),
         finish_with("second pass"),
         finish_with("never requested"),
@@ -1813,6 +1832,7 @@ struct MeteredProvider {
     responses: std::sync::Mutex<VecDeque<ProviderOutcome>>,
 }
 
+#[async_trait::async_trait]
 impl Provider for MeteredProvider {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -1834,6 +1854,7 @@ impl Provider for MeteredProvider {
             .pop_front()
             .ok_or(ProviderError::InvalidOutcome)?;
         Ok(ProviderResponse {
+            turn: arany::ProviderTurn::scripted(),
             outcome,
             response_id: None,
             usage: arany::Usage {
@@ -1865,10 +1886,7 @@ async fn autonomous_goal_token_cap_at_its_boundary_fails_the_goal_with_a_report(
     let provider = MeteredProvider {
         tokens: 5,
         responses: std::sync::Mutex::new(VecDeque::from([
-            ProviderOutcome::Tool {
-                call: facts_read(),
-                plan_contract: Some(Box::new(plan)),
-            },
+            crate::tool_outcome(facts_read(), Some(Box::new(plan))),
             finish_with("first pass"),
             finish_with("never requested"),
         ])),
@@ -1924,15 +1942,9 @@ async fn resumed_autonomous_goal_continues_with_its_pinned_objective_and_no_new_
     let (session_id, goal_id) = interrupted_autonomous_goal(&state_path, &workspace).await;
 
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: None,
-        },
+        crate::tool_outcome(facts_read(), None),
         finish_with("resumed, still unverified"),
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: None,
-        },
+        crate::tool_outcome(facts_read(), None),
         finish_with("verified"),
     ])
     .with_before_call(2, write_facts(&workspace, "v2"));
@@ -1956,8 +1968,8 @@ async fn resumed_autonomous_goal_continues_with_its_pinned_objective_and_no_new_
             4,
             "the resumed loop runs two Runs and no replayed call"
         );
-        assert_eq!(calls[0].objective, AUTONOMOUS_OBJECTIVE);
-        assert_eq!(calls[2].objective, AUTONOMOUS_OBJECTIVE);
+        assert_eq!(calls[0].input.objective, AUTONOMOUS_OBJECTIVE);
+        assert_eq!(calls[2].input.objective, AUTONOMOUS_OBJECTIVE);
     }
     engine.close().await.expect("engine shutdown");
 
@@ -1985,10 +1997,7 @@ async fn plain_prompt_is_one_run_even_when_its_criterion_is_unsatisfied() {
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: Some(Box::new(facts_plan(facts_digest("v2")))),
-        },
+        crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v2"))))),
         finish_with("first pass"),
         finish_with("never requested"),
     ]);
@@ -2018,7 +2027,7 @@ enum AfterFinish {
 
 /// Drives an admitted Run and applies `after` as soon as its Finished Run becomes visible.
 async fn run_observing_finish(
-    engine: &mut Engine<ScriptedProvider>,
+    engine: &mut Engine,
     input: RunRequest,
     after: AfterFinish,
 ) -> Result<arany::RunOutcome, EngineError> {
@@ -2052,10 +2061,7 @@ async fn autonomous_goal_cancelled_after_a_finished_run_keeps_that_outcome_and_s
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: Some(Box::new(facts_plan(facts_digest("v2")))),
-        },
+        crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v2"))))),
         finish_with("first pass"),
         finish_with("never requested"),
     ]);
@@ -2106,10 +2112,7 @@ async fn autonomous_goal_active_time_spent_by_a_finish_fails_the_goal_with_its_r
     let mut plan = facts_plan(facts_digest("v2"));
     plan.budget = budget;
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: Some(Box::new(plan)),
-        },
+        crate::tool_outcome(facts_read(), Some(Box::new(plan))),
         finish_with("first pass"),
         finish_with("never requested"),
     ])
@@ -2260,10 +2263,7 @@ async fn exhausted_autonomous_segment_exports_its_failed_status() {
     let mut plan = facts_plan(facts_digest("v2"));
     plan.budget = budget;
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: Some(Box::new(plan)),
-        },
+        crate::tool_outcome(facts_read(), Some(Box::new(plan))),
         finish_with("first pass"),
         finish_with("never requested"),
     ])
@@ -2308,15 +2308,9 @@ async fn progress_snapshots_carry_the_goal_through_each_iteration() {
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: Some(Box::new(facts_plan(facts_digest("v2")))),
-        },
+        crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v2"))))),
         finish_with("first pass"),
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: None,
-        },
+        crate::tool_outcome(facts_read(), None),
         finish_with("verified"),
     ])
     .with_before_call(2, write_facts(&workspace, "v2"));
@@ -2382,10 +2376,10 @@ async fn plan_with_fewer_runs_than_linked_is_refused_as_an_invalid_plan() {
     // Resuming links a second Run, so a plan allowing one Run is invalid for this Goal.
     let mut plan = facts_plan(facts_digest("v2"));
     plan.budget.max_runs = 1;
-    let provider = ScriptedProvider::new(vec![ProviderOutcome::Tool {
-        call: facts_read(),
-        plan_contract: Some(Box::new(plan)),
-    }]);
+    let provider = ScriptedProvider::new(vec![crate::tool_outcome(
+        facts_read(),
+        Some(Box::new(plan)),
+    )]);
     let mut engine = facts_engine(
         StateRoot::open_existing(&state_path).expect("state"),
         &state_path,
@@ -2420,10 +2414,10 @@ async fn plan_active_limit_below_elapsed_call_time_fails_the_run() {
     let mut plan = facts_plan(facts_digest("v2"));
     plan.budget.max_active_ms = Some(1);
     // The plan-bearing call runs longer than the plan's active-time limit, so the plan cannot narrow the Goal.
-    let provider = ScriptedProvider::new(vec![ProviderOutcome::Tool {
-        call: facts_read(),
-        plan_contract: Some(Box::new(plan)),
-    }])
+    let provider = ScriptedProvider::new(vec![crate::tool_outcome(
+        facts_read(),
+        Some(Box::new(plan)),
+    )])
     .with_before_call(0, || {
         std::thread::sleep(std::time::Duration::from_millis(20))
     });
@@ -2469,10 +2463,7 @@ async fn cancelled_autonomous_segment_exports_its_run_outcome() {
     let cancellation = RunCancellation::new();
     let cancel = cancellation.clone();
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: Some(Box::new(facts_plan(facts_digest("v2")))),
-        },
+        crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v2"))))),
         finish_with("first pass"),
         finish_with("cancelled pass"),
     ])
@@ -2520,10 +2511,7 @@ async fn autonomous_goal_stopped_by_a_failed_admission_returns_the_committed_run
     // Removing the Workspace after the first Run finishes makes the next admission fail.
     let removed = workspace.clone();
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: Some(Box::new(facts_plan(facts_digest("v2")))),
-        },
+        crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v2"))))),
         finish_with("first pass"),
     ])
     .with_before_call(1, move || {
@@ -2754,10 +2742,7 @@ async fn steering_note_reaches_the_next_primary_call_and_is_journaled_once() {
     let steering = RunSteering::new();
     let offer = steering.clone();
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: None,
-        },
+        crate::tool_outcome(facts_read(), None),
         finish_with("noted"),
     ])
     .with_before_call(0, move || {
@@ -2778,8 +2763,8 @@ async fn steering_note_reaches_the_next_primary_call_and_is_journaled_once() {
 
     let calls = requests.lock().expect("requests").clone();
     assert_eq!(calls.len(), 2);
-    assert!(calls[0].steering_notes.is_empty());
-    assert_eq!(calls[1].steering_notes, ["use the smaller fixture"]);
+    assert!(call_steering_notes(&calls[0]).is_empty());
+    assert_eq!(call_steering_notes(&calls[1]), ["use the smaller fixture"]);
     assert_eq!(steering.delivered_notes(), 1);
     let (events, view) = replayed(&state_path, outcome.session_id).await;
     assert_eq!(view.runs[0].steering_notes, ["use the smaller fixture"]);
@@ -2800,10 +2785,7 @@ async fn steering_notes_offered_before_delivery_reach_one_primary_call_as_one_no
     let steering = RunSteering::new();
     let offer = steering.clone();
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: None,
-        },
+        crate::tool_outcome(facts_read(), None),
         finish_with("noted"),
     ])
     .with_before_call(0, move || {
@@ -2825,7 +2807,7 @@ async fn steering_notes_offered_before_delivery_reach_one_primary_call_as_one_no
 
     let calls = requests.lock().expect("requests").clone();
     assert_eq!(
-        calls[1].steering_notes,
+        call_steering_notes(&calls[1]),
         ["use the smaller fixture\n\nand keep the old name"]
     );
     assert_eq!(steering.delivered_notes(), 1);
@@ -2879,9 +2861,9 @@ async fn steering_note_never_reaches_children_and_is_kept_for_synthesis() {
     let calls = requests.lock().expect("requests").clone();
     assert_eq!(calls.len(), 3);
     assert_eq!(calls[1].phase, AgentPhase::ChildWork);
-    assert!(calls[1].steering_notes.is_empty());
+    assert!(call_steering_notes(&calls[1]).is_empty());
     assert_eq!(calls[2].phase, AgentPhase::RootSynthesis);
-    assert_eq!(calls[2].steering_notes, ["keep this for synthesis"]);
+    assert_eq!(call_steering_notes(&calls[2]), ["keep this for synthesis"]);
 }
 
 #[tokio::test]
@@ -2928,10 +2910,7 @@ async fn steering_note_is_history_for_a_later_run_and_never_redelivered() {
     let steering = RunSteering::new();
     let offer = steering.clone();
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: None,
-        },
+        crate::tool_outcome(facts_read(), None),
         finish_with("first answer"),
         finish_with("second answer"),
     ])
@@ -2960,10 +2939,10 @@ async fn steering_note_is_history_for_a_later_run_and_never_redelivered() {
     let calls = requests.lock().expect("requests").clone();
     assert_eq!(calls.len(), 3);
     assert_eq!(
-        calls[2].history[0].user,
+        calls[2].input.history[0].user,
         "Read the facts\n\nSteering notes the user sent during this Run:\n[1] use the smaller fixture"
     );
-    assert!(calls[2].steering_notes.is_empty());
+    assert!(call_steering_notes(&calls[2]).is_empty());
     assert_eq!(steering.delivered_notes(), 1);
     let (events, _) = replayed(&state_path, second_outcome.session_id).await;
     assert_eq!(
@@ -2983,10 +2962,7 @@ async fn pause_waits_for_the_in_flight_call_and_pauses_before_its_tool() {
     let steering = RunSteering::new();
     let pause = steering.clone();
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: None,
-        },
+        crate::tool_outcome(facts_read(), None),
         finish_with("never reached"),
     ])
     .with_before_call(0, move || assert!(pause.pause(), "first pause"));
@@ -3060,10 +3036,7 @@ async fn pause_between_autonomous_runs_starts_no_next_run() {
     let pause = steering.clone();
     // The first Run's Finish is unsatisfied against the planned digest, so the Goal would continue.
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: Some(Box::new(facts_plan(facts_digest("v2")))),
-        },
+        crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v2"))))),
         finish_with("first pass"),
         finish_with("never started"),
     ])
@@ -3101,13 +3074,13 @@ async fn pause_during_approval_wait_dispatches_no_tool() {
     let steering = RunSteering::new();
     let pause = steering.clone();
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Tool {
-            call: arany::ToolCall::Write {
+        crate::tool_outcome(
+            arany::ToolCall::Write {
                 path: "notes/facts.txt".into(),
                 expected_digest: None,
                 content: "changed".into(),
             },
-            plan_contract: Some(Box::new(arany::GoalPlanContract {
+            Some(Box::new(arany::GoalPlanContract {
                 mission: "Change the facts".into(),
                 resource_class: arany::ToolResourceClass::Default,
                 command_timeout_ms: None,
@@ -3121,7 +3094,7 @@ async fn pause_during_approval_wait_dispatches_no_tool() {
                 },
                 budget: arany::GoalBudget::default(),
             })),
-        },
+        ),
         finish_with("never reached"),
     ]);
     let requests = provider.requests.clone();
@@ -3185,13 +3158,13 @@ async fn pause_during_tool_review_skips_the_prompt_and_dispatches_no_tool() {
     let steering = RunSteering::new();
     let pause = steering.clone();
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Tool {
-            call: arany::ToolCall::Write {
+        crate::tool_outcome(
+            arany::ToolCall::Write {
                 path: "notes/facts.txt".into(),
                 expected_digest: None,
                 content: "changed".into(),
             },
-            plan_contract: Some(Box::new(arany::GoalPlanContract {
+            Some(Box::new(arany::GoalPlanContract {
                 mission: "Change the facts".into(),
                 resource_class: arany::ToolResourceClass::Default,
                 command_timeout_ms: None,
@@ -3205,7 +3178,7 @@ async fn pause_during_tool_review_skips_the_prompt_and_dispatches_no_tool() {
                 },
                 budget: arany::GoalBudget::default(),
             })),
-        },
+        ),
         ProviderOutcome::Finish(Finish {
             summary: "Ask the user".into(),
             result: "ask".into(),
@@ -3364,10 +3337,7 @@ async fn steering_note_waits_for_the_next_autonomous_run_primary_call() {
     let mut plan = facts_plan(facts_digest("v2"));
     plan.budget.max_runs = 2;
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: Some(Box::new(plan)),
-        },
+        crate::tool_outcome(facts_read(), Some(Box::new(plan))),
         finish_with("first pass"),
         finish_with("second pass"),
     ])
@@ -3394,8 +3364,11 @@ async fn steering_note_waits_for_the_next_autonomous_run_primary_call() {
 
     let calls = requests.lock().expect("requests").clone();
     assert_eq!(calls.len(), 3);
-    assert!(calls[1].steering_notes.is_empty());
-    assert_eq!(calls[2].steering_notes, ["carry this into the next Run"]);
+    assert!(call_steering_notes(&calls[1]).is_empty());
+    assert_eq!(
+        call_steering_notes(&calls[2]),
+        ["carry this into the next Run"]
+    );
     assert_eq!(steering.delivered_notes(), 1);
     let (_, view) = replayed(&state_path, outcome.session_id).await;
     assert_eq!(view.runs.len(), 2);
@@ -3409,7 +3382,7 @@ async fn steering_note_waits_for_the_next_autonomous_run_primary_call() {
 
 /// Parses the catalog a child Tool request carried; the catalog is pinned JSON data.
 fn child_catalog(request: &arany::ProviderRequest) -> serde_json::Value {
-    let tools = request.tools.as_ref().expect("research catalog");
+    let tools = request.input.tools.as_ref().expect("research catalog");
     serde_json::from_str(&tools.catalog).expect("catalog JSON")
 }
 
@@ -3434,10 +3407,7 @@ async fn read_only_child_reads_the_workspace_and_its_report_reaches_synthesis() 
         ProviderOutcome::Delegate(Delegate {
             children: vec!["Inspect facts".into()],
         }),
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: None,
-        },
+        crate::tool_outcome(facts_read(), None),
         finish_with("facts say v1"),
         finish_with("synthesized"),
     ]);
@@ -3464,31 +3434,40 @@ async fn read_only_child_reads_the_workspace_and_its_report_reaches_synthesis() 
     assert_eq!(calls.len(), 4);
     assert_eq!(calls[1].phase, AgentPhase::ChildWork);
     assert_eq!(calls[1].collaboration, CollaborationPolicy::Single);
-    assert!(calls[1].steering_notes.is_empty());
-    assert!(calls[1].goal_context_facts.is_none());
+    assert!(call_steering_notes(&calls[1]).is_empty());
+    assert!(call_facts(&calls[1]).is_none());
     let first = child_catalog(&calls[1]);
     assert_eq!(first["write"], false);
     assert_eq!(first["commands"], serde_json::json!([]));
     assert_eq!(first["tool_calls_remaining"], 2);
-    let second = child_catalog(&calls[2]);
-    assert_eq!(second["tool_calls_remaining"], 1);
+    assert_eq!(
+        child_catalog(&calls[2]),
+        first,
+        "the child catalog is frozen at spawn"
+    );
+    let remaining =
+        |call: &arany::ProviderRequest| call.input.tools.as_ref().unwrap().calls_remaining();
+    assert_eq!(remaining(&calls[1]), Some(2));
+    assert_eq!(remaining(&calls[2]), Some(1));
     let observations = &calls[2]
+        .input
         .tools
         .as_ref()
         .expect("child observations")
-        .observations;
+        .observations();
     assert_eq!(observations.len(), 1);
     assert_eq!(
         observations[0].disposition,
         arany::ToolDisposition::Succeeded
     );
     assert_eq!(calls[3].phase, AgentPhase::RootSynthesis);
-    assert_eq!(calls[3].child_results[0].result, "facts say v1");
+    assert_eq!(calls[3].input.child_results[0].result, "facts say v1");
     assert!(
         calls[3]
+            .input
             .tools
             .as_ref()
-            .is_none_or(|tools| tools.observations.is_empty())
+            .is_none_or(|tools| tools.observations().is_empty())
     );
     assert!(!format!("{:?}", calls[3]).contains(&facts_digest("v1")));
 
@@ -3527,10 +3506,7 @@ async fn child_mcp_call_or_write_is_rejected_before_dispatch() {
             ProviderOutcome::Delegate(Delegate {
                 children: vec!["Inspect facts".into()],
             }),
-            ProviderOutcome::Tool {
-                call,
-                plan_contract: None,
-            },
+            crate::tool_outcome(call, None),
             finish_with("never reached"),
         ]);
         let requests = provider.requests.clone();
@@ -3577,28 +3553,25 @@ async fn child_reads_stay_inside_the_plan_and_never_satisfy_the_goal_criterion()
     std::fs::write(workspace.join("notes/other.txt"), "OTHER-CANARY").expect("other file");
     let state_path = temp.path().join("state");
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Tool {
-            call: arany::ToolCall::Search {
+        crate::tool_outcome(
+            arany::ToolCall::Search {
                 path: "notes/facts.txt".into(),
                 query: "v".into(),
             },
-            plan_contract: Some(Box::new(facts_plan(facts_digest("v1")))),
-        },
+            Some(Box::new(facts_plan(facts_digest("v1")))),
+        ),
         ProviderOutcome::Delegate(Delegate {
             children: vec!["Inspect notes".into()],
         }),
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: None,
-        },
-        ProviderOutcome::Tool {
-            call: arany::ToolCall::Read {
+        crate::tool_outcome(facts_read(), None),
+        crate::tool_outcome(
+            arany::ToolCall::Read {
                 path: "notes/other.txt".into(),
                 offset: 0,
                 limit: 4096,
             },
-            plan_contract: None,
-        },
+            None,
+        ),
         finish_with("report"),
         finish_with("done"),
     ]);
@@ -3659,15 +3632,9 @@ async fn child_tool_bound_offers_only_finish_and_rejects_a_further_tool() {
         let mut outcomes = vec![ProviderOutcome::Delegate(Delegate {
             children: vec!["Inspect facts".into()],
         })];
-        outcomes.extend((0..16).map(|_| ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: None,
-        }));
+        outcomes.extend((0..16).map(|_| crate::tool_outcome(facts_read(), None)));
         if further_tool {
-            outcomes.push(ProviderOutcome::Tool {
-                call: facts_read(),
-                plan_contract: None,
-            });
+            outcomes.push(crate::tool_outcome(facts_read(), None));
         } else {
             outcomes.push(finish_with("report"));
         }
@@ -3701,7 +3668,10 @@ async fn child_tool_bound_offers_only_finish_and_rejects_a_further_tool() {
             )));
         } else {
             assert_eq!(outcome.run.status, RunStatus::Finished);
-            assert_eq!(child_catalog(&calls[17])["tool_calls_remaining"], 0);
+            assert_eq!(
+                calls[17].input.tools.as_ref().unwrap().calls_remaining(),
+                Some(0)
+            );
             assert_eq!(calls[17].phase, AgentPhase::ChildWork);
         }
     }
@@ -3718,10 +3688,7 @@ async fn pause_during_research_finishes_the_child_call_and_dispatches_no_child_t
         ProviderOutcome::Delegate(Delegate {
             children: vec!["Inspect facts".into()],
         }),
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: None,
-        },
+        crate::tool_outcome(facts_read(), None),
         finish_with("never reached"),
     ])
     .with_before_call(1, move || assert!(pause.pause(), "first pause"));
@@ -3754,10 +3721,7 @@ async fn cancellation_after_a_child_tool_request_dispatches_no_child_tool() {
         ProviderOutcome::Delegate(Delegate {
             children: vec!["Inspect facts".into()],
         }),
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: None,
-        },
+        crate::tool_outcome(facts_read(), None),
         finish_with("never reached"),
     ]);
     provider.cancel_at_completion = Some((AgentPhase::ChildWork, cancellation.clone()));
@@ -3791,10 +3755,7 @@ async fn child_read_request_at_an_exhausted_goal_budget_stops_as_budget_not_fail
         ProviderOutcome::Delegate(Delegate {
             children: vec!["Inspect facts".into()],
         }),
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: None,
-        },
+        crate::tool_outcome(facts_read(), None),
         finish_with("never reached"),
     ])
     .with_known_input_tokens();
@@ -3867,10 +3828,7 @@ async fn near_deadline_child_tool_stops_before_tool_started() {
         ProviderOutcome::Delegate(Delegate {
             children: vec!["Inspect facts".into()],
         }),
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: None,
-        },
+        crate::tool_outcome(facts_read(), None),
         finish_with("never reached"),
     ]);
     let requests = provider.requests.clone();
@@ -3920,10 +3878,7 @@ async fn pause_before_queued_children_start_cancels_them_without_failing_the_run
         ProviderOutcome::Delegate(Delegate {
             children: vec!["Inspect facts".into(), "Inspect facts again".into()],
         }),
-        ProviderOutcome::Tool {
-            call: facts_read(),
-            plan_contract: None,
-        },
+        crate::tool_outcome(facts_read(), None),
         finish_with("never reached"),
     ])
     .with_before_call(1, move || assert!(pause.pause(), "first pause"));
@@ -3965,5 +3920,333 @@ async fn pause_before_queued_children_start_cancels_them_without_failing_the_run
     assert_eq!(
         view.goal(outcome.goal_id).expect("Goal").status,
         arany::GoalStatus::Interrupted
+    );
+}
+
+#[tokio::test]
+async fn tool_step_journals_requested_tools_one_and_replays() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let provider = ScriptedProvider::new(vec![
+        crate::tool_outcome(facts_read(), None),
+        crate::tool_outcome(facts_read(), None),
+        finish_with("done"),
+    ]);
+    let requests = provider.requests.clone();
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    let mut input = request(&workspace, "Read twice");
+    input.include_paths.clear();
+    let outcome = engine.run(input).await.expect("Run");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    engine.close().await.expect("engine shutdown");
+
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    let requested: Vec<u8> = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            Event::ProviderCallRecorded { record, .. } => Some(record.requested_tools),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(requested, [1, 1, 0]);
+    assert_eq!(
+        view.runs[0], outcome.run,
+        "cold replay equals the live view"
+    );
+    let calls = requests.lock().expect("requests").clone();
+    assert_eq!(calls.len(), 3);
+    for (index, call) in calls.iter().enumerate() {
+        let steps = &call.input.tools.as_ref().expect("Tool context").steps;
+        assert_eq!(steps.len(), index);
+        assert!(steps.iter().all(|step| step.requests.len() == 1
+            && step.observations.len() == 1
+            && step.observations[0].intent.call == step.requests[0].call));
+    }
+}
+
+#[tokio::test]
+async fn delegation_turn_is_replayed_before_synthesis() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Delegate(Delegate {
+            children: vec!["Inspect facts".into()],
+        }),
+        finish_with("facts say v1"),
+        finish_with("synthesized"),
+    ]);
+    let requests = provider.requests.clone();
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    let mut input = request(&workspace, "Check the facts");
+    input.include_paths.clear();
+    input.policy = CollaborationPolicy::Auto {
+        max_active_children: 1,
+    };
+    let outcome = engine.run(input).await.expect("Run");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    engine.close().await.expect("engine shutdown");
+
+    let calls = requests.lock().expect("requests").clone();
+    assert_eq!(calls.len(), 3);
+    assert!(
+        calls[0]
+            .input
+            .tools
+            .as_ref()
+            .is_some_and(|tools| tools.steps.is_empty())
+    );
+    let steps = &calls[2].input.tools.as_ref().expect("Tool context").steps;
+    assert_eq!(steps.len(), 1, "the delegating turn precedes synthesis");
+    assert!(steps[0].requests.is_empty() && steps[0].observations.is_empty());
+    assert_eq!(steps[0].turn, arany::ProviderTurn::scripted());
+    assert_eq!(calls[2].input.child_results[0].result, "facts say v1");
+    assert!(
+        calls[1]
+            .input
+            .tools
+            .as_ref()
+            .is_some_and(|tools| tools.steps.is_empty()),
+        "children never inherit the primary's turns"
+    );
+}
+
+#[tokio::test]
+async fn interrupted_prefix_replays_and_a_new_run_starts_without_steps() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let provider = ScriptedProvider::new(vec![
+        crate::tool_outcome(facts_read(), None),
+        finish_with("first"),
+        finish_with("retry"),
+    ]);
+    let requests = provider.requests.clone();
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    let mut input = request(&workspace, "Read once");
+    input.include_paths.clear();
+    let first = engine.run(input).await.expect("Run");
+
+    let (events, _) = replayed(&state_path, first.session_id).await;
+    let started = events
+        .iter()
+        .position(|event| matches!(event.event, Event::ToolStarted { .. }))
+        .expect("started Tool");
+    let crashed = SessionView::replay(first.session_id, &events[..=started])
+        .expect("valid prefix")
+        .expect("Session");
+    assert_eq!(
+        crashed.runs[0].status,
+        RunStatus::Interrupted,
+        "no replayed turn can resurrect a lost Run"
+    );
+
+    let mut retry = request(&workspace, "Read again");
+    retry.include_paths.clear();
+    retry.session_id = Some(first.session_id);
+    retry.title = None;
+    engine.run(retry).await.expect("retry Run");
+    engine.close().await.expect("engine shutdown");
+    let calls = requests.lock().expect("requests").clone();
+    let steps = &calls[2].input.tools.as_ref().expect("Tool context").steps;
+    assert!(steps.is_empty(), "a retry is a new Run with no steps");
+}
+
+#[tokio::test]
+async fn step_facts_and_notes_are_written_before_render() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let steering = RunSteering::new();
+    let offer = steering.clone();
+    let provider = ScriptedProvider::new(vec![
+        crate::tool_outcome(facts_read(), None),
+        crate::tool_outcome(facts_read(), None),
+        finish_with("noted"),
+    ])
+    .with_before_call(1, move || steering_note_at(&offer, "mid-run note"));
+    let requests = provider.requests.clone();
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    engine.set_steering(steering);
+    let mut input = request(&workspace, "Read twice");
+    input.include_paths.clear();
+    engine.run(input).await.expect("Run");
+    engine.close().await.expect("engine shutdown");
+
+    let calls = requests.lock().expect("requests").clone();
+    assert!(call_facts(&calls[0]).is_some());
+    for call in &calls[1..] {
+        let steps = &call.input.tools.as_ref().expect("Tool context").steps;
+        let last = steps.last().expect("a step");
+        assert!(
+            last.facts.is_some(),
+            "facts exist before the request is built"
+        );
+        assert!(
+            steps[..steps.len() - 1]
+                .iter()
+                .all(|step| step.facts.is_some()),
+            "earlier steps keep the facts they were rendered with"
+        );
+    }
+    let provider_calls: Vec<_> = calls
+        .iter()
+        .map(|call| call_facts(call).unwrap().provider_calls)
+        .collect();
+    assert!(provider_calls.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(call_steering_notes(&calls[1]), Vec::<String>::new());
+    assert_eq!(call_steering_notes(&calls[2]), ["mid-run note"]);
+    let late = &calls[2].input.tools.as_ref().expect("Tool context").steps;
+    assert_eq!(
+        late[1].steering_notes,
+        ["mid-run note"],
+        "the note rides the newest step"
+    );
+}
+
+#[tokio::test]
+async fn restating_the_recorded_plan_contract_is_a_no_op_and_a_different_one_is_refused() {
+    for (restated_plan, expected) in [
+        (facts_plan(facts_digest("v1")), RunStatus::Finished),
+        (
+            arany::GoalPlanContract {
+                mission: "A different mission".into(),
+                ..facts_plan(facts_digest("v1"))
+            },
+            RunStatus::Failed,
+        ),
+    ] {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = facts_workspace(temp.path(), "v1");
+        let state_path = temp.path().join("state");
+        let provider = ScriptedProvider::new(vec![
+            crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v1"))))),
+            crate::tool_outcome(facts_read(), Some(Box::new(restated_plan))),
+            finish_with("done"),
+        ]);
+        let mut engine = facts_engine(
+            StateRoot::admit(&state_path).expect("state"),
+            &state_path,
+            provider,
+        );
+        let mut input = request(&workspace, "Read twice");
+        input.include_paths.clear();
+        let outcome = engine.run(input).await.expect("Run");
+        assert_eq!(outcome.run.status, expected);
+        engine.close().await.expect("engine shutdown");
+        let (events, _) = replayed(&state_path, outcome.session_id).await;
+        let recorded = events
+            .iter()
+            .filter(|event| matches!(event.event, Event::GoalPlanContractRecorded { .. }))
+            .count();
+        assert_eq!(recorded, 1, "the contract is journaled once");
+    }
+}
+
+#[tokio::test]
+async fn plan_contract_recorded_mid_run_survives_compaction() {
+    const PAGE_BYTES: usize = 4096;
+    const READS: usize = 104;
+
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
+    let content = "x".repeat(PAGE_BYTES * READS);
+    std::fs::write(workspace.join("notes/data.txt"), &content).expect("bounded fixture file");
+    let state_path = temp.path().join("state");
+    let budget = arany::GoalBudget {
+        max_provider_calls: None,
+        max_tokens: None,
+        max_active_ms: Some(30 * 60 * 1000),
+        max_runs: 1,
+    };
+    let plan = arany::GoalPlanContract {
+        mission: "Inspect the bounded file".into(),
+        resource_class: arany::ToolResourceClass::Default,
+        command_timeout_ms: None,
+        paths: vec!["notes/data.txt".into()],
+        commands: Vec::new(),
+        skills: Vec::new(),
+        mcp_tools: Vec::new(),
+        success_criterion: arany::GoalSuccessCriterion::WorkspaceFileDigest {
+            path: "notes/data.txt".into(),
+            sha256: facts_digest(&content),
+        },
+        budget,
+    };
+    let mut outcomes: Vec<_> = (0..READS)
+        .map(|page| {
+            crate::tool_outcome(
+                arany::ToolCall::Read {
+                    path: "notes/data.txt".into(),
+                    offset: u32::try_from(page * PAGE_BYTES).expect("bounded file offset"),
+                    limit: u32::try_from(PAGE_BYTES).expect("bounded page size"),
+                },
+                (page == 0).then(|| Box::new(plan.clone())),
+            )
+        })
+        .collect();
+    outcomes.push(finish_with("inspected"));
+    let compaction = || {
+        Ok(CompactionResponse {
+            summary: "Earlier pages were read.".into(),
+            response_id: None,
+            usage: arany::Usage {
+                input_tokens: Some(32),
+                output_tokens: Some(12),
+                ..Default::default()
+            },
+            wire_provenance: None,
+        })
+    };
+    let provider =
+        ScriptedProvider::new(outcomes).with_compactions((0..16).map(|_| compaction()).collect());
+    let requests = Arc::clone(&provider.requests);
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    let mut input = request(&workspace, "Inspect the bounded file in pages");
+    input.include_paths.clear();
+    input.goal.budget = Some(budget);
+    let outcome = engine.run(input).await.expect("Goal");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    engine.close().await.expect("engine shutdown");
+
+    let calls = requests.lock().expect("requests").clone();
+    assert!(calls[0].input.goal_plan_contract.is_none());
+    let compacted: Vec<_> = calls
+        .iter()
+        .filter(|call| {
+            call.input
+                .tools
+                .as_ref()
+                .is_some_and(|tools| tools.history_summary.is_some())
+        })
+        .collect();
+    assert!(!compacted.is_empty(), "the Run compacts");
+    assert!(
+        compacted
+            .iter()
+            .all(|call| call.input.goal_plan_contract.as_ref() == Some(&plan)),
+        "the recorded contract is re-introduced when its step is compacted away"
     );
 }

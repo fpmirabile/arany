@@ -49,6 +49,13 @@ claimed until each lands.
 - Native Linux linear-mode PTY journeys ([steering](tests/session_run/active_terminal/steering.rs)) show a steering note reaching synthesis, controls running while a note waits, and `/goal pause` pausing at the next boundary. Native Linux tmux journeys ([steering and pause](tests/session_run/active_terminal/tmux.rs), `classic_steering_note_and_pause_in_tmux` and `fullscreen_steering_note_and_pause_in_tmux`) cover the same behavior in a real pane for Classic and Fullscreen. macOS attached journeys remain unverified; their evidence is the Engine corpus, reducer tests and terminal unit tests.
 - Check `--screen-reader`, `/transcript`, monochrome labels and managed following with real assistive technology. These usability claims remain unverified.
 
+## Message-native Provider request: owner-run live probes
+
+- **P1: Anthropic native Tools with structured Finish/Delegate.** With explicit usage consent, send one request on the selected model with the full Tool catalog (non-strict definitions, each with a required-but-nullable `plan_contract`), strict `output_config.format` for Finish/Delegate, `tool_choice: {"type":"auto","disable_parallel_tool_use":true}` and thinking on. Confirm the request is accepted, a `tool_use` stop and an `end_turn` JSON stop both occur, and a replayed thinking block is accepted on the next call. Measure how well the model follows the now non-strict Tool schemas, in particular the required-but-nullable fields `expected_digest`, `resource` and Git `revision`/`base`, and `plan_contract: null`. No `cache_control` is sent before Stage C, so a cache read is not expected. Offline wire corpora prove only the encoding.
+- **P2: Anthropic parallel Tool use.** Before enabling more than one Tool call per step, confirm with `disable_parallel_tool_use: false` that the model respects the four-call cap in practice; an over-cap response fails the Run without retry.
+- **P3: ChatGPT/Codex `allowed_tools`.** Confirm the ChatGPT route accepts `tool_choice: {"type":"allowed_tools",...}` for a zero-budget researcher. Until it passes, that route lists only `arany_finish` for such a call.
+- **Stage C: constant OpenAI function list.** The Finish/Delegate functions follow the phase, so the OpenAI `tools` array changes at the synthesis switch. Keep one constant function list and restrict it by phase with `allowed_tools` when prompt caching lands.
+
 ## Beta 1: final user-owned checks
 
 Perform these after implementation handoff with deliberate consent for usage.

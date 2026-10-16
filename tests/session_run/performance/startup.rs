@@ -104,9 +104,7 @@ fn startup_upper_bound_two_files_on_named_host() {
             let wire: serde_json::Value =
                 serde_json::from_slice(&body).expect("synthetic Responses request");
             assert_eq!(wire["model"], "model-1");
-            let input: serde_json::Value =
-                serde_json::from_str(wire["input"].as_str().expect("semantic input"))
-                    .expect("semantic request");
+            let input: serde_json::Value = crate::semantic::input(&wire);
             let text = if index < 3 {
                 match index {
                     0 => {

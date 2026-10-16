@@ -159,7 +159,7 @@ pub(super) fn reset_tool_trace_stages(root: &Path) {
         }
     }
 }
-
+#[async_trait::async_trait]
 impl Provider for Journey {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -175,6 +175,7 @@ impl Provider for Journey {
         let mut requests = self.requests.lock().unwrap();
         let step = requests.len();
         let context = request
+            .input
             .tools
             .as_ref()
             .ok_or(ProviderError::InvalidOutcome)?;
@@ -183,7 +184,7 @@ impl Provider for Journey {
         assert_eq!(catalog["mcp_servers"][0]["name"], "synthetic");
         assert_eq!(
             context
-                .observations
+                .observations()
                 .iter()
                 .filter(|observation| !matches!(
                     observation.intent.call,
@@ -307,14 +308,12 @@ impl Provider for Journey {
                     })
                     .flatten()
                     .map(Box::new);
-                ProviderOutcome::Tool {
-                    call,
-                    plan_contract,
-                }
+                crate::tool_outcome(call, plan_contract)
             },
         );
         requests.push(request);
         Ok(ProviderResponse {
+            turn: arany::ProviderTurn::scripted(),
             outcome,
             response_id: None,
             usage: arany::Usage::default(),
@@ -574,16 +573,16 @@ async fn native_file_journey_helper() {
             assert_eq!(request.phase, arany::AgentPhase::RootPlan);
             assert_eq!(request.model, "file-tool-model");
             assert_eq!(
-                request.objective,
+                request.input.objective,
                 "Complete the synthetic native file journey"
             );
             assert!(
-                request.instructions.is_none()
-                    && request.includes.is_empty()
-                    && request.history.is_empty()
-                    && request.context_summary.is_none()
-                    && request.images.is_empty()
-                    && request.child_results.is_empty()
+                request.input.workspace_guidance.is_none()
+                    && request.input.includes.is_empty()
+                    && request.input.history.is_empty()
+                    && request.input.context_summary.is_none()
+                    && request.input.images.is_empty()
+                    && request.input.child_results.is_empty()
             );
         }
     }
@@ -806,7 +805,7 @@ fn build_goal_request() -> arany::GoalRequest {
 }
 
 const RUNTIME_CACHE_CANARY: &str = "ARANY_RUNTIME_CACHE_PERSISTENCE_CANARY";
-
+#[async_trait::async_trait]
 impl Provider for RuntimeJourney {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -861,10 +860,7 @@ impl Provider for RuntimeJourney {
             } else {
                 None
             };
-            ProviderOutcome::Tool {
-                call,
-                plan_contract,
-            }
+            crate::tool_outcome(call, plan_contract)
         } else {
             ProviderOutcome::Finish(Finish {
                 summary: "Runtime profile checked".into(),
@@ -872,6 +868,7 @@ impl Provider for RuntimeJourney {
             })
         };
         Ok(ProviderResponse {
+            turn: arany::ProviderTurn::scripted(),
             outcome,
             response_id: None,
             usage: arany::Usage::default(),
@@ -1055,10 +1052,11 @@ async fn native_runtime_mount_journey_helper() {
     );
     assert_eq!(
         refused_requests.lock().unwrap()[0]
+            .input
             .tools
             .as_ref()
             .unwrap()
-            .observations
+            .observations()
             .len(),
         0
     );
@@ -1386,16 +1384,28 @@ async fn native_runtime_mount_journey_helper() {
         assert_eq!(accepted_requests.len(), 4);
         assert!(
             accepted_requests[0]
+                .input
                 .tools
                 .as_ref()
                 .unwrap()
-                .observations
+                .observations()
                 .is_empty()
         );
-        let first_output = &accepted_requests[1].tools.as_ref().unwrap().observations[0].output;
+        let first_output = &accepted_requests[1]
+            .input
+            .tools
+            .as_ref()
+            .unwrap()
+            .observations()[0]
+            .output;
         let first_command: serde_json::Value = serde_json::from_str(first_output).unwrap();
         assert!(first_command["stdout"].as_str().is_some_and(str::is_empty));
-        let overflow_observation = &accepted_requests[3].tools.as_ref().unwrap().observations[2];
+        let overflow_observation = &accepted_requests[3]
+            .input
+            .tools
+            .as_ref()
+            .unwrap()
+            .observations()[2];
         let overflow_output = &overflow_observation.output;
         let overflow_result: serde_json::Value = serde_json::from_str(overflow_output).unwrap();
         assert_eq!(overflow_result["exit_code"], 0);
@@ -1403,11 +1413,13 @@ async fn native_runtime_mount_journey_helper() {
             overflow_observation.cache_update,
             arany::CacheUpdate::Rejected
         );
-        let provider_observation = accepted_requests[2]
+        let provider_observations = accepted_requests[2]
+            .input
             .tools
             .as_ref()
             .unwrap()
-            .observations
+            .observations();
+        let provider_observation = provider_observations
             .get(1)
             .expect("Provider request after explicit selected-cache read");
         assert_eq!(provider_observation.intent.call, accepted_calls[1]);
@@ -1968,6 +1980,7 @@ struct GitJourney {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
 }
 
+#[async_trait::async_trait]
 impl Provider for GitJourney {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -1984,35 +1997,32 @@ impl Provider for GitJourney {
         let step = requests.len();
         requests.push(request);
         let outcome = match step {
-            0 => ProviderOutcome::Tool {
-                call: ToolCall::GitStatus { path: ".".into() },
-                plan_contract: None,
-            },
-            1 => ProviderOutcome::Tool {
-                call: ToolCall::GitDiff {
+            0 => crate::tool_outcome(ToolCall::GitStatus { path: ".".into() }, None),
+            1 => crate::tool_outcome(
+                ToolCall::GitDiff {
                     path: "src".into(),
                     base: None,
                     head: None,
                     staged: false,
                 },
-                plan_contract: None,
-            },
-            2 => ProviderOutcome::Tool {
-                call: ToolCall::GitLog {
+                None,
+            ),
+            2 => crate::tool_outcome(
+                ToolCall::GitLog {
                     path: ".".into(),
                     revision: None,
                     max_count: 5,
                 },
-                plan_contract: None,
-            },
-            3 => ProviderOutcome::Tool {
-                call: ToolCall::GitLog {
+                None,
+            ),
+            3 => crate::tool_outcome(
+                ToolCall::GitLog {
                     path: ".".into(),
                     revision: Some("missing-branch".into()),
                     max_count: 1,
                 },
-                plan_contract: None,
-            },
+                None,
+            ),
             4 => ProviderOutcome::Finish(Finish {
                 summary: "Inspected".into(),
                 result: "Git state observed".into(),
@@ -2021,6 +2031,7 @@ impl Provider for GitJourney {
         };
         Ok(ProviderResponse {
             outcome,
+            turn: arany::ProviderTurn::scripted(),
             response_id: None,
             usage: arany::Usage {
                 input_tokens: Some(1),
@@ -2185,7 +2196,7 @@ async fn native_git_journey_helper() {
 
     let requests = requests.lock().unwrap().clone();
     let catalog: serde_json::Value =
-        serde_json::from_str(&requests[0].tools.as_ref().unwrap().catalog).unwrap();
+        serde_json::from_str(&requests[0].input.tools.as_ref().unwrap().catalog).unwrap();
     assert_eq!(
         catalog["git"]["operations"],
         json!(["git_status", "git_diff", "git_log"])

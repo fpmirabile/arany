@@ -86,12 +86,7 @@ pub(super) fn respond(input: &mut impl Write, output: &mut impl Read) {
             if index < 4 { "low" } else { "high" }
         );
         assert_eq!(body["output_config"]["format"]["type"], "json_schema");
-        let content: Value = serde_json::from_str(
-            body["messages"][0]["content"]
-                .as_str()
-                .expect("structured input"),
-        )
-        .expect("input JSON");
+        let content = crate::semantic::input(&body);
         match index {
             2 | 4 => assert_eq!(content["objective"], OBJECTIVE),
             3 => {

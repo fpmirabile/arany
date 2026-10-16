@@ -1,13 +1,19 @@
+use crate::provider::conversation::{Block, Conversation, Role};
+use crate::provider::decode::{structured_outcome, tool_request, tools_outcome};
 use crate::provider::prompts::COMPACTION_INSTRUCTIONS;
+use crate::provider::tool_specs::{NAME_PREFIX, ToolSpec};
 use crate::provider::{
-    CompactionRequest, CompactionResponse, Delegate, Effort, Finish, MAX_REPORTED_INPUT_TOKENS,
-    MAX_RESPONSE_BYTES, ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse,
-    ProviderWireProvenance, Usage,
+    CompactionRequest, CompactionResponse, Effort, MAX_REPORTED_INPUT_TOKENS, MAX_RESPONSE_BYTES,
+    ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse, ProviderTurn,
+    ProviderWireProvenance, ToolUseId, Usage,
 };
-use crate::provider::{compaction_input, outcome_schema, run_input, summary_schema};
+use crate::provider::{compaction_input, summary_schema};
+use crate::tools::ToolContext;
+use crate::tools::types::MAX_TOOL_ARGUMENT_BYTES;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+const ADAPTER: &str = "anthropic";
 const MAX_REQUEST_BYTES: usize = crate::provider::MAX_PROVIDER_REQUEST_BYTES;
 const MAX_CONTENT_BLOCKS: usize = 16;
 
@@ -21,6 +27,9 @@ pub(super) struct MessageStream<'a> {
     closed: Vec<bool>,
     delta_seen: bool,
     stopped: bool,
+    /// Tool input fragments of the open `tool_use` block; never previewed.
+    tool_input: String,
+    preview_failed: bool,
 }
 
 impl<'a> MessageStream<'a> {
@@ -39,6 +48,8 @@ impl<'a> MessageStream<'a> {
             closed: Vec::new(),
             delta_seen: false,
             stopped: false,
+            tool_input: String::new(),
+            preview_failed: false,
         }
     }
 
@@ -52,6 +63,25 @@ impl<'a> MessageStream<'a> {
             }
         }
         Ok(None)
+    }
+
+    /// Text beside a Tool call need not be the structured answer, so a preview that cannot decode
+    /// it stops previewing. The assembled message is still scanned for the credential at its end.
+    fn publish_preview(&mut self, fragment: &str) {
+        if self.preview_failed {
+            return;
+        }
+        let published = self
+            .result
+            .feed(fragment, self.secret)
+            .map(str::to_owned)
+            .and_then(|answer| {
+                self.preview.publish(crate::provider::PreviewText {
+                    answer,
+                    ..Default::default()
+                })
+            });
+        self.preview_failed = published.is_err();
     }
 
     fn event(&mut self, event: Value) -> Result<Option<Vec<u8>>, ProviderError> {
@@ -103,18 +133,22 @@ impl<'a> MessageStream<'a> {
                     .and_then(|message| message.get_mut("content"))
                     .and_then(Value::as_array_mut)
                     .ok_or_else(invalid)?;
+                if block.get("type").and_then(Value::as_str) == Some("tool_use")
+                    && block.get("input").is_some_and(|input| {
+                        input.as_object().is_none_or(|fields| !fields.is_empty())
+                    })
+                {
+                    return Err(ProviderError::InvalidStream);
+                }
                 content.push(block.clone());
                 self.closed.push(false);
+                self.tool_input.clear();
                 if block.get("type").and_then(Value::as_str) == Some("text") {
                     let initial = block
                         .get("text")
                         .and_then(Value::as_str)
                         .ok_or_else(invalid)?;
-                    let answer = self.result.feed(initial, self.secret)?.to_owned();
-                    self.preview.publish(crate::provider::PreviewText {
-                        answer,
-                        ..Default::default()
-                    })?;
+                    self.publish_preview(initial);
                 }
             }
             "content_block_delta" => {
@@ -140,6 +174,19 @@ impl<'a> MessageStream<'a> {
                     .and_then(Value::as_array_mut)
                     .and_then(|content| content.get_mut(index))
                     .ok_or_else(invalid)?;
+                if kind == "input_json_delta" {
+                    let fragment = delta
+                        .get("partial_json")
+                        .and_then(Value::as_str)
+                        .ok_or_else(invalid)?;
+                    if block.get("type").and_then(Value::as_str) != Some("tool_use")
+                        || self.tool_input.len() + fragment.len() > MAX_TOOL_ARGUMENT_BYTES
+                    {
+                        return Err(ProviderError::InvalidStream);
+                    }
+                    self.tool_input.push_str(fragment);
+                    return Ok(None);
+                }
                 let (field, expected) = match kind {
                     "text_delta" => ("text", "text"),
                     "thinking_delta" => ("thinking", "thinking"),
@@ -164,11 +211,7 @@ impl<'a> MessageStream<'a> {
                 }
                 current.push_str(fragment);
                 if kind == "text_delta" {
-                    let answer = self.result.feed(fragment, self.secret)?.to_owned();
-                    self.preview.publish(crate::provider::PreviewText {
-                        answer,
-                        ..Default::default()
-                    })?;
+                    self.publish_preview(fragment);
                 }
             }
             "content_block_stop" => {
@@ -182,6 +225,29 @@ impl<'a> MessageStream<'a> {
                     return Err(ProviderError::InvalidStream);
                 }
                 *closed = true;
+                let block = self
+                    .response
+                    .as_mut()
+                    .and_then(|message| message.get_mut("content"))
+                    .and_then(Value::as_array_mut)
+                    .and_then(|content| content.get_mut(index))
+                    .ok_or_else(invalid)?;
+                if block.get("type").and_then(Value::as_str) == Some("tool_use") {
+                    let input = if self.tool_input.is_empty() {
+                        json!({})
+                    } else {
+                        crate::tools::parse_json(
+                            self.tool_input.as_bytes(),
+                            MAX_TOOL_ARGUMENT_BYTES,
+                        )
+                        .map_err(|_| ProviderError::InvalidStream)?
+                    };
+                    if !input.is_object() {
+                        return Err(ProviderError::InvalidStream);
+                    }
+                    block["input"] = input;
+                    self.tool_input.clear();
+                }
             }
             "message_delta" => {
                 if self.closed.is_empty() || self.closed.iter().any(|closed| !closed) {
@@ -254,37 +320,45 @@ pub(super) fn encode_request(request: &Value) -> Result<Vec<u8>, ProviderError> 
     Ok(body)
 }
 
+/// What a response must satisfy before any outcome is read from it.
+pub(super) struct RunScope<'a> {
+    pub(super) model: &'a str,
+    pub(super) output_cap: u32,
+    pub(super) secret: &'a str,
+    /// The native Tools this request offered.
+    pub(super) offered: &'a [ToolSpec],
+}
+
 pub(super) fn decode_run(
     bytes: &[u8],
-    model: &str,
-    output_cap: u32,
+    scope: &RunScope,
 ) -> Result<ProviderResponse, ProviderError> {
     let response: WireResponse =
         serde_json::from_slice(bytes).map_err(|_| ProviderError::InvalidOutcome)?;
-    let (response_id, usage, text) = response.completed_text(model, output_cap)?;
-    let envelope: OutcomeEnvelope =
-        serde_json::from_str(&text).map_err(|_| ProviderError::InvalidOutcome)?;
-    let outcome = match envelope.outcome {
-        WireOutcome::Finish { summary, result } => {
-            ProviderOutcome::Finish(Finish { summary, result })
-        }
-        WireOutcome::Delegate { children } => ProviderOutcome::Delegate(Delegate { children }),
-        WireOutcome::Tool {
-            call,
-            plan_contract,
-        } if call.valid() && !matches!(call, crate::tools::ToolCall::ApplyChangeset { .. }) => {
-            ProviderOutcome::Tool {
-                call,
-                plan_contract,
-            }
-        }
-        WireOutcome::Tool { .. } => return Err(ProviderError::InvalidOutcome),
+    let raw: Value = serde_json::from_slice(bytes).map_err(|_| ProviderError::InvalidOutcome)?;
+    let turn = ProviderTurn::new(
+        ADAPTER,
+        &raw["content"].to_string(),
+        scope.secret,
+        scope.output_cap,
+    )?;
+    let admitted = response.admit(scope.model, scope.output_cap)?;
+    let (outcome, provenance) = match admitted.stop {
+        Stop::EndTurn => (
+            structured_outcome(&admitted.single_text()?)?,
+            ProviderWireProvenance::MessagesEndTurnStorageUnspecified,
+        ),
+        Stop::ToolUse => (
+            admitted.tool_requests(scope.offered)?,
+            ProviderWireProvenance::MessagesToolUseStorageUnspecified,
+        ),
     };
     Ok(ProviderResponse {
         outcome,
-        response_id: Some(response_id),
-        usage,
-        wire_provenance: Some(ProviderWireProvenance::MessagesEndTurnStorageUnspecified),
+        turn,
+        response_id: Some(admitted.id),
+        usage: admitted.usage,
+        wire_provenance: Some(provenance),
     })
 }
 
@@ -295,76 +369,114 @@ pub(super) fn decode_compaction(
 ) -> Result<CompactionResponse, ProviderError> {
     let response: WireResponse =
         serde_json::from_slice(bytes).map_err(|_| ProviderError::InvalidOutcome)?;
-    let (response_id, usage, text) = response.completed_text(model, output_cap)?;
-    let summary: SummaryEnvelope =
-        serde_json::from_str(&text).map_err(|_| ProviderError::InvalidOutcome)?;
+    let admitted = response.admit(model, output_cap)?;
+    if admitted.stop != Stop::EndTurn {
+        return Err(ProviderError::InvalidOutcome);
+    }
+    let summary: SummaryEnvelope = serde_json::from_str(&admitted.single_text()?)
+        .map_err(|_| ProviderError::InvalidOutcome)?;
     Ok(CompactionResponse {
         summary: summary.summary,
-        response_id: Some(response_id),
-        usage,
+        response_id: Some(admitted.id),
+        usage: admitted.usage,
         wire_provenance: Some(ProviderWireProvenance::MessagesEndTurnStorageUnspecified),
     })
 }
 
-pub(super) fn run_body(request: &ProviderRequest, effort: Effort) -> Value {
-    let input = run_input(request);
-    let schema = crate::provider::restrict_outcome_schema(outcome_schema(), request);
-    let instructions = crate::provider::run_instructions(
-        crate::provider::instruction_base(
-            request,
-            crate::provider::prompts::ANTHROPIC_TOOL_INSTRUCTIONS,
-        ),
-        request,
-    );
-    let mut body = message_body(
-        &request.model,
-        &instructions,
-        input,
-        request.max_output_tokens,
-        effort,
-        schema,
-    );
-    if !request.images.is_empty() {
-        let mut content = Vec::with_capacity(request.images.len() * 2 + 1);
-        for (index, value) in request.images.iter().enumerate() {
-            content.push(json!({"type": "text", "text": value.label(index)}));
-            content.push(json!({
-                "type": "image",
-                "source": {"type": "base64", "media_type": "image/png", "data": value.image.base64()},
-            }));
-        }
-        content.push(json!({"type": "text", "text": body["messages"][0]["content"].take()}));
-        body["messages"][0]["content"] = json!(content);
+/// The request body: Tools first, then system, then messages, so every earlier request is a prefix.
+pub(super) fn run_body(
+    request: &ProviderRequest,
+    conversation: &Conversation,
+    effort: Effort,
+) -> Result<Value, ProviderError> {
+    let system: Vec<Value> = conversation
+        .system
+        .iter()
+        .map(|block| json!({"type": "text", "text": block.text()}))
+        .collect();
+    let mut body = json!({
+        "model": request.model,
+        "max_tokens": request.max_output_tokens,
+        "system": system,
+        "messages": messages(conversation)?,
+        "output_config": {"format": {"type": "json_schema", "schema": conversation.outcome}, "effort": effort.as_str()},
+        "stream": false,
+    });
+    // Tool definitions are not strict: the plan-contract unions would exceed the strict-schema
+    // complexity limit, and the Engine validates every call. Only the outcome format is strict.
+    if let Some(tools) = &conversation.tools {
+        body["tools"] = tools
+            .iter()
+            .map(|tool| json!({"name": tool.name, "description": tool.description, "input_schema": tool.parameters}))
+            .collect();
+        let exhausted = request
+            .input
+            .tools
+            .as_ref()
+            .is_some_and(ToolContext::finish_only);
+        body["tool_choice"] = if exhausted {
+            json!({"type": "none"})
+        } else {
+            json!({"type": "auto", "disable_parallel_tool_use": true})
+        };
     }
-    body
+    Ok(body)
+}
+
+fn messages(conversation: &Conversation) -> Result<Vec<Value>, ProviderError> {
+    conversation
+        .messages
+        .iter()
+        .map(|message| match message.role {
+            Role::User => Ok(json!({
+                "role": "user",
+                "content": message.blocks.iter().map(user_blocks).collect::<Result<Vec<_>, _>>()?.concat(),
+            })),
+            Role::Assistant => {
+                let [Block::AssistantTurn(turn)] = message.blocks.as_slice() else {
+                    return Err(ProviderError::Rejected);
+                };
+                Ok(json!({
+                    "role": "assistant",
+                    "content": turn.items(ADAPTER).ok_or(ProviderError::Rejected)?,
+                }))
+            }
+        })
+        .collect()
+}
+
+fn user_blocks(block: &Block) -> Result<Vec<Value>, ProviderError> {
+    Ok(match block {
+        Block::Text(text) if text.is_empty() => Vec::new(),
+        Block::Text(text) => vec![json!({"type": "text", "text": text})],
+        Block::Image { label, image } => vec![
+            json!({"type": "text", "text": label}),
+            json!({
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": image.base64()},
+            }),
+        ],
+        Block::ToolResult {
+            id,
+            output,
+            is_error,
+        } => vec![json!({
+            "type": "tool_result",
+            "tool_use_id": id.as_str(),
+            "content": output.to_string(),
+            "is_error": is_error,
+        })],
+        Block::AssistantTurn(_) => return Err(ProviderError::Rejected),
+    })
 }
 
 pub(super) fn compaction_body(request: &CompactionRequest, effort: Effort) -> Value {
-    let input = compaction_input(request);
-    message_body(
-        &request.model,
-        COMPACTION_INSTRUCTIONS,
-        input,
-        request.max_output_tokens,
-        effort,
-        summary_schema(),
-    )
-}
-
-fn message_body(
-    model: &str,
-    system: &str,
-    input: Value,
-    max_tokens: u32,
-    effort: Effort,
-    schema: Value,
-) -> Value {
     json!({
-        "model": model,
-        "max_tokens": max_tokens,
-        "system": system,
-        "messages": [{"role": "user", "content": input.to_string()}],
-        "output_config": {"format": {"type": "json_schema", "schema": schema}, "effort": effort.as_str()},
+        "model": request.model,
+        "max_tokens": request.max_output_tokens,
+        "system": COMPACTION_INSTRUCTIONS,
+        "messages": [{"role": "user", "content": compaction_input(request).to_string()}],
+        "output_config": {"format": {"type": "json_schema", "schema": summary_schema()}, "effort": effort.as_str()},
         "stream": false,
     })
 }
@@ -393,6 +505,9 @@ struct WireContent {
     signature: Option<String>,
     data: Option<String>,
     citations: Option<Value>,
+    id: Option<String>,
+    name: Option<String>,
+    input: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -403,12 +518,71 @@ struct WireUsage {
     output_tokens: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Stop {
+    EndTurn,
+    ToolUse,
+}
+
+/// A response that passed envelope, usage and stop-reason checks; any other stop reason is rejected.
+struct Admitted {
+    id: String,
+    usage: Usage,
+    stop: Stop,
+    content: Vec<WireContent>,
+}
+
+impl WireContent {
+    fn is_thinking(&self) -> bool {
+        match self.kind.as_str() {
+            "thinking" => {
+                self.text.is_none()
+                    && self.data.is_none()
+                    && self.citations.is_none()
+                    && self.id.is_none()
+                    && self.name.is_none()
+                    && self.input.is_none()
+            }
+            "redacted_thinking" => {
+                self.text.is_none()
+                    && self.thinking.is_none()
+                    && self.signature.is_none()
+                    && self.citations.is_none()
+                    && self.id.is_none()
+                    && self.name.is_none()
+                    && self.input.is_none()
+            }
+            _ => false,
+        }
+    }
+
+    fn is_text(&self) -> bool {
+        self.kind == "text"
+            && self.text.is_some()
+            && self.thinking.is_none()
+            && self.signature.is_none()
+            && self.data.is_none()
+            && self.citations.is_none()
+            && self.id.is_none()
+            && self.name.is_none()
+            && self.input.is_none()
+    }
+
+    fn is_tool_use(&self) -> bool {
+        self.kind == "tool_use"
+            && self.id.is_some()
+            && self.name.is_some()
+            && self.input.is_some()
+            && self.text.is_none()
+            && self.thinking.is_none()
+            && self.signature.is_none()
+            && self.data.is_none()
+            && self.citations.is_none()
+    }
+}
+
 impl WireResponse {
-    fn completed_text(
-        self,
-        model: &str,
-        output_cap: u32,
-    ) -> Result<(String, Usage, String), ProviderError> {
+    fn admit(self, model: &str, output_cap: u32) -> Result<Admitted, ProviderError> {
         // Messages reports cache counts beside `input_tokens`; the record total keeps the billed sum.
         let total_input_tokens = self
             .usage
@@ -416,9 +590,13 @@ impl WireResponse {
             .checked_add(self.usage.cache_creation_input_tokens.unwrap_or(0))
             .and_then(|total| total.checked_add(self.usage.cache_read_input_tokens.unwrap_or(0)))
             .ok_or(ProviderError::InvalidOutcome)?;
+        let stop = match self.stop_reason.as_str() {
+            "end_turn" => Stop::EndTurn,
+            "tool_use" => Stop::ToolUse,
+            _ => return Err(ProviderError::InvalidOutcome),
+        };
         if self.kind != "message"
             || self.role != "assistant"
-            || self.stop_reason != "end_turn"
             || self.stop_details.is_some()
             || self.stop_sequence.is_some()
             || self.model != model
@@ -432,66 +610,56 @@ impl WireResponse {
         {
             return Err(ProviderError::InvalidOutcome);
         }
-        let mut text = None;
-        for block in self.content {
-            match block.kind.as_str() {
-                "thinking"
-                    if text.is_none()
-                        && block.text.is_none()
-                        && block.data.is_none()
-                        && block.citations.is_none() => {}
-                "redacted_thinking"
-                    if text.is_none()
-                        && block.text.is_none()
-                        && block.thinking.is_none()
-                        && block.signature.is_none()
-                        && block.citations.is_none() => {}
-                "text"
-                    if text.is_none()
-                        && block.thinking.is_none()
-                        && block.signature.is_none()
-                        && block.data.is_none()
-                        && block.citations.is_none() =>
-                {
-                    text = Some(block.text.ok_or(ProviderError::InvalidOutcome)?);
-                }
-                _ => return Err(ProviderError::InvalidOutcome),
-            }
-        }
-        Ok((
-            self.id,
-            Usage {
+        Ok(Admitted {
+            id: self.id,
+            usage: Usage {
                 input_tokens: Some(total_input_tokens),
                 output_tokens: Some(self.usage.output_tokens),
                 cache_read_input_tokens: self.usage.cache_read_input_tokens,
                 cache_creation_input_tokens: self.usage.cache_creation_input_tokens,
             },
-            text.ok_or(ProviderError::InvalidOutcome)?,
-        ))
+            stop,
+            content: self.content,
+        })
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OutcomeEnvelope {
-    outcome: WireOutcome,
-}
+impl Admitted {
+    /// The one text block of an `end_turn` answer, which may follow thinking blocks only.
+    fn single_text(&self) -> Result<String, ProviderError> {
+        let mut text = None;
+        for block in &self.content {
+            if block.is_text() && text.is_none() {
+                text = block.text.clone();
+            } else if !block.is_thinking() || text.is_some() {
+                return Err(ProviderError::InvalidOutcome);
+            }
+        }
+        text.ok_or(ProviderError::InvalidOutcome)
+    }
 
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
-enum WireOutcome {
-    Finish {
-        summary: String,
-        result: String,
-    },
-    Delegate {
-        children: Vec<String>,
-    },
-    Tool {
-        call: crate::tools::ToolCall,
-        #[serde(default)]
-        plan_contract: Option<Box<crate::session::GoalPlanContract>>,
-    },
+    /// The `tool_use` blocks of a Tool stop, in model order. Text and thinking stay in the replayed
+    /// turn and are never parsed.
+    fn tool_requests(&self, offered: &[ToolSpec]) -> Result<ProviderOutcome, ProviderError> {
+        let mut requests = Vec::new();
+        for block in &self.content {
+            if block.is_tool_use() {
+                let name = block.name.as_deref().unwrap_or_default();
+                let operation = name
+                    .strip_prefix(NAME_PREFIX)
+                    .filter(|_| offered.iter().any(|spec| spec.name == name))
+                    .ok_or(ProviderError::InvalidOutcome)?;
+                requests.push(tool_request(
+                    ToolUseId::new(block.id.clone().unwrap_or_default())?,
+                    operation,
+                    block.input.clone().unwrap_or_default(),
+                )?);
+            } else if !block.is_thinking() && !block.is_text() {
+                return Err(ProviderError::InvalidOutcome);
+            }
+        }
+        tools_outcome(requests)
+    }
 }
 
 #[derive(Deserialize)]

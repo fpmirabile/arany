@@ -131,6 +131,7 @@ fn percentiles(samples: &mut [Duration]) -> (Duration, Duration, Duration) {
 
 struct FastProvider;
 
+#[async_trait::async_trait]
 impl Provider for FastProvider {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -147,6 +148,7 @@ impl Provider for FastProvider {
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         assert!(matches!(request.phase, AgentPhase::RootPlan));
         Ok(ProviderResponse {
+            turn: crate::provider::ProviderTurn::scripted(),
             outcome: ProviderOutcome::Finish(Finish {
                 summary: "done".into(),
                 result: "synthetic answer".into(),
@@ -162,11 +164,7 @@ impl Provider for FastProvider {
     }
 }
 
-async fn timed_direct_run(
-    engine: &mut Engine<FastProvider>,
-    observer: &Store,
-    workspace: &Path,
-) -> Duration {
+async fn timed_direct_run(engine: &mut Engine, observer: &Store, workspace: &Path) -> Duration {
     let request = RunRequest {
         session_id: None,
         title: None,
