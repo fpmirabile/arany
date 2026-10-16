@@ -14,7 +14,7 @@ pub use check::{CustomProfileCheck, check_custom_profile};
 use destination::PinnedDestination;
 
 const MAX_PROFILES: usize = 32;
-const OUTPUT_CAP: u32 = 4096;
+const OUTPUT_CAP: u32 = crate::provider::DEFAULT_OUTPUT_TOKEN_CAP;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CustomProfile {

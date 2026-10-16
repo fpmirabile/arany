@@ -7,6 +7,7 @@ use std::collections::HashMap;
 pub(crate) const MAX_COMPACTION_INPUT_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_COMPACTION_TURNS: usize = 256;
 pub(crate) const MAX_COMPACTION_OUTPUT_TOKENS: u32 = 1024;
+pub(crate) const MAX_COMPACTION_SUMMARY_BYTES: usize = 8 * 1024;
 // The pre-reply footprint needs headroom for this turn and the previous unchecked turn.
 pub(crate) const AUTO_COMPACTION_HISTORY_BYTES: usize = MAX_COMPACTION_INPUT_BYTES
     - 2 * (super::MAX_USER_MESSAGE_BYTES

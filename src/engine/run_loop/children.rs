@@ -1,9 +1,8 @@
 use super::{
-    CallFailure, CallResult, MAX_PRIMARY_RESULT_BYTES, RunLoop, STORE_ACTION_OVERHEAD,
-    TOOL_CLEANUP_OVERHEAD, call_record, call_trace_result, call_trace_usage, duration_ms,
-    invoke_bounded, valid_finish,
+    CallFailure, CallResult, MAX_PRIMARY_RESULT_BYTES, RunLoop, TOOL_CLEANUP_OVERHEAD, call_record,
+    call_trace_result, call_trace_usage, duration_ms, invoke_bounded, valid_finish,
 };
-use crate::engine::{EngineError, OUTPUT_TOKEN_CAP, RunCancellation};
+use crate::engine::{CHILD_OUTPUT_TOKEN_CAP, EngineError, RunCancellation, STORE_ACTION_OVERHEAD};
 use crate::provider::{
     AgentPhase, ChildResult, Finish, Provider, ProviderOutcome, ProviderRequest, ProviderResponse,
 };
@@ -26,8 +25,8 @@ use tokio::time::Instant;
 const MAX_CHILD_OBJECTIVE_BYTES: usize = 2 * 1024;
 const MAX_CHILD_RESULT_BYTES: usize = 16 * 1024;
 const CANCELLATION_DRAIN: Duration = Duration::from_secs(2);
-/// Wall-clock bound of one delegation whose children may use read-only Tools.
-const RESEARCH_DELEGATION_DEADLINE: Duration = Duration::from_secs(20 * 60);
+/// Wall-clock bound of one delegation, with or without read-only Tools.
+const MAX_DELEGATION_DEADLINE: Duration = Duration::from_secs(20 * 60);
 /// Free context kept for the next child Tool intent.
 const CHILD_INTENT_RESERVE_BYTES: usize = 4 * 1024;
 /// A full 4 KiB Read page plus metadata; with less room a child is offered only Finish.
@@ -138,7 +137,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 remaining < u32::try_from(objectives.len().saturating_add(1)).unwrap_or(u32::MAX)
             })
         {
-            return self.fail_known_budget_exhaustion(primary).await;
+            return self.settle_stopped_primary(primary).await;
         }
         let research = self.controls.tools.is_some();
         let tool_allowance = if research {
@@ -170,11 +169,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 .min(usize::from(self.controls.policy.max_children())),
         );
         let waves = objectives.len().div_ceil(parallel.max(1));
-        let active_bound = if research {
-            RESEARCH_DELEGATION_DEADLINE
-        } else {
-            super::CALL_DEADLINE.saturating_mul(u32::try_from(waves).unwrap_or(u32::MAX))
-        };
+        let active_bound = delegation_active_bound(research, self.provider.call_deadline(), waves);
         // Covers every child's calls, Tools and terminal facts plus the largest later admission, so a refusal precedes AgentSpawned.
         let active_event_tail = if research {
             objectives.len() * (4 * MAX_CHILD_TOOL_CALLS + 4) + 10
@@ -187,7 +182,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         {
             Ok(segment) => segment,
             Err(EngineError::GoalBudgetExhausted) => {
-                return self.fail_known_budget_exhaustion(primary).await;
+                return self.settle_stopped_primary(primary).await;
             }
             Err(error) => return Err(error),
         };
@@ -225,7 +220,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                     .expect("child trace exists")
                     .finish(TraceOutcome::Cancelled);
             }
-            return self.fail_known_budget_exhaustion(primary).await;
+            return self.settle_stopped_primary(primary).await;
         }
 
         let mut results = vec![None; children.len()];
@@ -445,16 +440,16 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
             }
             return match reason {
                 AbortReason::Failed if self.controls.goal_budget.active_time_exhausted() => {
-                    self.fail_known_budget_exhaustion(primary).await
+                    self.settle_stopped_primary(primary).await
                 }
                 AbortReason::Failed => self.fail_primary(primary).await,
-                AbortReason::Budget => self.fail_known_budget_exhaustion(primary).await,
-                AbortReason::Cancelled => self.fail_known_budget_exhaustion(primary).await,
-                AbortReason::Paused => self.fail_known_budget_exhaustion(primary).await,
+                AbortReason::Budget | AbortReason::Cancelled | AbortReason::Paused => {
+                    self.settle_stopped_primary(primary).await
+                }
             };
         }
         if !self.controls.goal_budget.can_start_provider_call() {
-            return self.fail_known_budget_exhaustion(primary).await;
+            return self.settle_stopped_primary(primary).await;
         }
         root_request.phase = AgentPhase::RootSynthesis;
         root_request.child_results = results
@@ -463,7 +458,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
             .ok_or(EngineError::CoordinatorFailed)?;
         loop {
             if self.pause_at_boundary() {
-                return self.fail_known_budget_exhaustion(primary).await;
+                return self.settle_stopped_primary(primary).await;
             }
             let synthesis_trace =
                 primary.begin_provider(AgentPhase::RootSynthesis, &root_request.model);
@@ -471,7 +466,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 Ok(result) => result,
                 Err(EngineError::GoalBudgetExhausted) => {
                     synthesis_trace.finish_refused();
-                    return self.fail_known_budget_exhaustion(primary).await;
+                    return self.settle_stopped_primary(primary).await;
                 }
                 Err(error) => return Err(error),
             };
@@ -497,13 +492,13 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
             .await?;
             self.settle_active_segment(active_segment).await?;
             if self.controls.cancellation.is_cancelled() {
-                return self.fail_known_budget_exhaustion(primary).await;
+                return self.settle_stopped_primary(primary).await;
             }
             if matches!(&synthesis, CallResult::Cancelled) {
                 return self.cancel_primary(primary).await;
             }
             if self.controls.goal_budget.active_time_exhausted() {
-                return self.fail_known_budget_exhaustion(primary).await;
+                return self.settle_stopped_primary(primary).await;
             }
             match synthesis {
                 CallResult::Response(ProviderResponse {
@@ -519,7 +514,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                     ..
                 }) if valid_response => {
                     if self.pause_at_boundary() {
-                        return self.fail_known_budget_exhaustion(primary).await;
+                        return self.settle_stopped_primary(primary).await;
                     }
                     if let Some(contract) = plan_contract
                         && !self.admit_plan_contract(root_request, *contract).await?
@@ -529,19 +524,14 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                     match self.execute_tool(root_request, call, false, &primary).await {
                         Ok(true) => {}
                         Ok(false) if self.controls.cancellation.is_cancelled() => {
-                            return self.fail_known_budget_exhaustion(primary).await;
+                            return self.settle_stopped_primary(primary).await;
                         }
                         Ok(false) if self.controls.goal_budget.active_time_exhausted() => {
-                            return self.fail_known_budget_exhaustion(primary).await;
+                            return self.settle_stopped_primary(primary).await;
                         }
                         Ok(false) => return self.fail_primary(primary).await,
-                        Err(EngineError::GoalBudgetExhausted)
-                            if self.controls.cancellation.is_cancelled() =>
-                        {
-                            return self.fail_known_budget_exhaustion(primary).await;
-                        }
                         Err(EngineError::GoalBudgetExhausted) => {
-                            return self.fail_known_budget_exhaustion(primary).await;
+                            return self.settle_stopped_primary(primary).await;
                         }
                         Err(error) => return Err(error),
                     }
@@ -627,7 +617,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 goal_context_facts: None,
                 child_results: Vec::new(),
                 steering_notes: Vec::new(),
-                max_output_tokens: OUTPUT_TOKEN_CAP,
+                max_output_tokens: CHILD_OUTPUT_TOKEN_CAP.min(root_request.max_output_tokens),
                 tools: children[index].tools.clone(),
             };
             self.reserve_provider_call(children[index].agent_run_id)
@@ -824,4 +814,42 @@ fn valid_child_response(result: &CallResult) -> bool {
             ..
         }) if valid_finish(finish, MAX_CHILD_RESULT_BYTES)
     )
+}
+
+/// Researcher delegations use the fixed bound; a tool-free delegation runs one call per wave.
+fn delegation_active_bound(research: bool, call_deadline: Duration, waves: usize) -> Duration {
+    if research {
+        MAX_DELEGATION_DEADLINE
+    } else {
+        call_deadline
+            .saturating_mul(u32::try_from(waves).unwrap_or(u32::MAX))
+            .min(MAX_DELEGATION_DEADLINE)
+    }
+}
+
+#[cfg(test)]
+mod delegation_bound_tests {
+    use super::*;
+
+    #[test]
+    fn tool_free_delegation_is_capped_at_the_delegation_deadline() {
+        let call = Duration::from_secs(600);
+        assert_eq!(
+            delegation_active_bound(false, call, 1),
+            Duration::from_secs(600)
+        );
+        assert_eq!(
+            delegation_active_bound(false, call, 2),
+            MAX_DELEGATION_DEADLINE
+        );
+        assert_eq!(
+            delegation_active_bound(false, call, 4),
+            MAX_DELEGATION_DEADLINE
+        );
+        assert_eq!(
+            delegation_active_bound(true, Duration::from_secs(120), 1),
+            MAX_DELEGATION_DEADLINE
+        );
+        assert_eq!(MAX_DELEGATION_DEADLINE, Duration::from_secs(20 * 60));
+    }
 }
