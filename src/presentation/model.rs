@@ -96,54 +96,57 @@ impl PresentationModel {
         let mut activity_lines = run
             .filter(|run| run.status == RunStatus::Active)
             .map(|run| {
-                let mut lines: Vec<_> = run
-                    .agents
-                    .iter()
-                    .take(MAX_VISIBLE_AGENTS)
-                    .map(|agent| {
-                        let role = match agent.role {
-                            AgentRole::Primary => "primary".to_owned(),
-                            AgentRole::Child => format!("child {}", agent.ordinal),
-                        };
-                        let status = if agent.role == AgentRole::Primary
-                            && agent.status == AgentStatus::Active
-                        {
-                            "working"
-                        } else {
-                            agent_state_label(agent.status)
-                        };
-                        let prefix = format!("{role} · {status}");
-                        let tool = run.tools.last().filter(|tool| {
-                            tool.intent.agent_run_id == agent.id && tool.observation.is_none()
-                        });
-                        let detail = tool
-                            .map(|tool| tool.intent.call.label())
-                            .or(agent.summary.as_deref())
-                            .or_else(|| {
-                                (agent.status == AgentStatus::Active).then_some(
-                                    if agent.role == AgentRole::Child {
-                                        "Queued or awaiting response; Ctrl+C cancels"
+                let mut lines: Vec<_> =
+                    run.agents
+                        .iter()
+                        .take(MAX_VISIBLE_AGENTS)
+                        .map(|agent| {
+                            let role = match agent.role {
+                                AgentRole::Primary => "primary".to_owned(),
+                                AgentRole::Child => format!("child {}", agent.ordinal),
+                            };
+                            let status = if agent.role == AgentRole::Primary
+                                && agent.status == AgentStatus::Active
+                            {
+                                "working"
+                            } else {
+                                agent_state_label(agent.status)
+                            };
+                            let prefix = format!("{role} · {status}");
+                            let tool = run.tools.last().into_iter().chain(agent.tools.last()).find(
+                                |tool| {
+                                    tool.intent.agent_run_id == agent.id
+                                        && tool.observation.is_none()
+                                },
+                            );
+                            let detail = tool
+                                .map(|tool| tool.intent.call.label())
+                                .or(agent.summary.as_deref())
+                                .or_else(|| {
+                                    (agent.status == AgentStatus::Active).then_some(
+                                        if agent.role == AgentRole::Child {
+                                            "Queued or awaiting response; Ctrl+C cancels"
+                                        } else {
+                                            "Waiting for response; Ctrl+C cancels"
+                                        },
+                                    )
+                                })
+                                .or(agent.objective.as_deref());
+                            match detail {
+                                Some(detail) if !detail.is_empty() => {
+                                    let prefix = format!("{prefix} · ");
+                                    let remaining = width
+                                        .saturating_sub(UnicodeWidthStr::width(prefix.as_str()));
+                                    if remaining == 0 {
+                                        safe_truncate(&format!("{prefix}…"), width)
                                     } else {
-                                        "Waiting for response; Ctrl+C cancels"
-                                    },
-                                )
-                            })
-                            .or(agent.objective.as_deref());
-                        match detail {
-                            Some(detail) if !detail.is_empty() => {
-                                let prefix = format!("{prefix} · ");
-                                let remaining =
-                                    width.saturating_sub(UnicodeWidthStr::width(prefix.as_str()));
-                                if remaining == 0 {
-                                    safe_truncate(&format!("{prefix}…"), width)
-                                } else {
-                                    format!("{prefix}{}", safe_truncate(detail, remaining))
+                                        format!("{prefix}{}", safe_truncate(detail, remaining))
+                                    }
                                 }
+                                _ => safe_truncate(&prefix, width),
                             }
-                            _ => safe_truncate(&prefix, width),
-                        }
-                    })
-                    .collect();
+                        })
+                        .collect();
                 if run.agents.len() > MAX_VISIBLE_AGENTS {
                     lines.push(safe_truncate(
                         &format!(
@@ -651,6 +654,32 @@ mod tests {
         assert!(model.activity_lines[0].starts_with("primary · working"));
         assert!(model.activity_lines[1].starts_with("child 1 · failed"));
         assert_eq!(model.activity_lines[3], "+3 more agents (use /agents)");
+        let run = view.runs.last_mut().unwrap();
+        let child_read = crate::tools::EffectIntent {
+            id: uuid::Uuid::now_v7(),
+            run_id: run.id,
+            agent_run_id: run.agents[2].id,
+            policy_digest: [1; 32],
+            enforcement_digest: [1; 32],
+            workspace_device: 1,
+            workspace_inode: 1,
+            call: crate::tools::ToolCall::Read {
+                path: "notes/facts.txt".into(),
+                offset: 0,
+                limit: 4096,
+            },
+            limits: Default::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        };
+        run.agents[2].tools.push(crate::session::ToolView {
+            intent: child_read,
+            observation: None,
+            review_call_index: None,
+            finished_sequence: None,
+        });
+        let model = PresentationModel::from_session(&view, 80);
+        assert!(model.activity_lines[2].contains("read"));
         let linear = linear_session_lines(&view);
         assert!(linear.contains(&"State: working".to_owned()));
         assert!(linear.contains(&"Provider: anthropic".to_owned()));
