@@ -92,14 +92,20 @@ pub(super) fn discover() -> Option<Program> {
     Some(program)
 }
 
-/// Builds the private repository view; `Ok(Err(message))` reports an unsupported repository without running Git.
-fn prepare_view(workspace: &Path, view: &Path) -> Result<Result<(), &'static str>, ToolError> {
+enum Prepared {
+    Ready,
+    /// The repository is not supported; the message is reported without running Git.
+    Unsupported(&'static str),
+}
+
+/// Builds the private repository view for `workspace`.
+fn prepare_view(workspace: &Path, view: &Path) -> Result<Prepared, ToolError> {
     let root = super::fs::open_directory(workspace)?;
     match root.symlink_metadata(".git") {
         Ok(metadata) if metadata.is_dir() => {}
-        Ok(_) => return Ok(Err(UNSUPPORTED_LAYOUT)),
+        Ok(_) => return Ok(Prepared::Unsupported(UNSUPPORTED_LAYOUT)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Err(NO_REPOSITORY));
+            return Ok(Prepared::Unsupported(NO_REPOSITORY));
         }
         Err(_) => return Err(ToolError::Path),
     }
@@ -109,16 +115,22 @@ fn prepare_view(workspace: &Path, view: &Path) -> Result<Result<(), &'static str
     // An oversized, linked, multi-link or special HEAD/config is an unsupported layout, not a Tool fault.
     let head = match read_optional(&git_dir, "HEAD", HEAD_BYTES) {
         Ok(Some(head)) => head,
-        Ok(None) | Err(ToolError::Limit | ToolError::Path) => return Ok(Err(UNSUPPORTED_LAYOUT)),
+        Ok(None) | Err(ToolError::Limit | ToolError::Path) => {
+            return Ok(Prepared::Unsupported(UNSUPPORTED_LAYOUT));
+        }
         Err(error) => return Err(error),
     };
     if !valid_head(&head) {
-        return Ok(Err(UNSUPPORTED_FORMAT));
+        return Ok(Prepared::Unsupported(UNSUPPORTED_FORMAT));
     }
     match read_optional(&git_dir, "config", CONFIG_BYTES) {
-        Ok(Some(config)) if uses_extensions(&config) => return Ok(Err(UNSUPPORTED_FORMAT)),
+        Ok(Some(config)) if uses_extensions(&config) => {
+            return Ok(Prepared::Unsupported(UNSUPPORTED_FORMAT));
+        }
         Ok(_) => {}
-        Err(ToolError::Limit | ToolError::Path) => return Ok(Err(UNSUPPORTED_LAYOUT)),
+        Err(ToolError::Limit | ToolError::Path) => {
+            return Ok(Prepared::Unsupported(UNSUPPORTED_LAYOUT));
+        }
         Err(error) => return Err(error),
     }
     let mut links = Vec::with_capacity(LINKED.len());
@@ -130,7 +142,7 @@ fn prepare_view(workspace: &Path, view: &Path) -> Result<Result<(), &'static str
                 links.push(name);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && !required => {}
-            _ => return Ok(Err(UNSUPPORTED_LAYOUT)),
+            _ => return Ok(Prepared::Unsupported(UNSUPPORTED_LAYOUT)),
         }
     }
     std::fs::create_dir(view).map_err(|_| ToolError::Operation)?;
@@ -140,7 +152,7 @@ fn prepare_view(workspace: &Path, view: &Path) -> Result<Result<(), &'static str
         std::os::unix::fs::symlink(workspace.join(".git").join(name), view.join(name))
             .map_err(|_| ToolError::Operation)?;
     }
-    Ok(Ok(()))
+    Ok(Prepared::Ready)
 }
 
 fn read_optional(git_dir: &Dir, name: &str, cap: usize) -> Result<Option<Vec<u8>>, ToolError> {
@@ -168,11 +180,14 @@ fn valid_head(head: &[u8]) -> bool {
 }
 
 fn uses_extensions(config: &[u8]) -> bool {
-    String::from_utf8_lossy(config).lines().any(|line| {
-        line.trim_start()
-            .to_ascii_lowercase()
-            .starts_with("[extensions")
-    })
+    String::from_utf8_lossy(config)
+        .trim_start_matches('\u{feff}')
+        .lines()
+        .any(|line| {
+            line.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("[extensions")
+        })
 }
 
 /// A positive literal pathspec for `path` (none for the root), then exclusions for every secret component.
@@ -197,6 +212,7 @@ fn invocations(call: &ToolCall) -> Result<Vec<Vec<String>>, ToolError> {
     let mut runs = Vec::new();
     match call {
         ToolCall::GitStatus { path } => {
+            // No revisions are passed here, and `--` already ends options, so there is no `--end-of-options`.
             let mut argv = owned(&[
                 "--no-pager",
                 "--no-optional-locks",
@@ -369,7 +385,7 @@ pub(super) async fn execute(
     let deadline = tokio::time::Instant::now() + runtime.min(MAX_GIT_RUNTIME);
     verify_pin(git)?;
     let view = scratch.join(VIEW);
-    if let Err(message) = prepare_view(workspace, &view)? {
+    if let Prepared::Unsupported(message) = prepare_view(workspace, &view)? {
         return Ok(failure(message, &[], max_bytes));
     }
     let env = environment(&view, workspace, scratch);
@@ -433,9 +449,10 @@ fn failure(message: &str, stderr: &[u8], max_bytes: usize) -> String {
     }
 }
 
+/// Splits on everything outside a file-name alphabet, so `(.env)`, `.env,` and `path=.env` all match.
 fn mentions_forbidden(line: &str) -> bool {
     line.split(|character: char| {
-        character == '/' || character.is_whitespace() || matches!(character, '\'' | '"' | ':' | '`')
+        !(character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-'))
     })
     .any(forbidden)
 }
@@ -572,7 +589,17 @@ fn diff_output(numstat: &Captured, patch: &Captured, budget: usize) -> Result<Va
     }
     let mut remaining = budget - rows.used;
     let mut text = String::new();
+    let mut hidden = false;
     for line in String::from_utf8_lossy(&patch.stdout).split_inclusive('\n') {
+        if let Some(header) = line.strip_prefix("diff --git ") {
+            // The new-side path follows the last " b/"; an unparseable header hides its hunk (fail closed).
+            hidden = header
+                .rfind(" b/")
+                .is_none_or(|at| excluded(header[at + 3..].trim_end()));
+        }
+        if hidden {
+            continue;
+        }
         let size = serde_json::to_string(line)
             .map_err(|_| ToolError::Operation)?
             .len()
@@ -679,6 +706,7 @@ mod tests {
         std::fs::write(workspace.join("src/a.txt"), "alpha\n").unwrap();
         std::fs::write(workspace.join("notes.md"), "notes\n").unwrap();
         std::fs::write(workspace.join(".env"), "SECRET_CANARY=1\n").unwrap();
+        std::fs::write(workspace.join(".env.local"), "SECRET_CANARY=4\n").unwrap();
         std::fs::write(workspace.join("cfg/.ssh/id"), "SECRET_CANARY key\n").unwrap();
         let big: String = (0..40_000).map(|n| format!("line-{n:05}\n")).collect();
         std::fs::write(workspace.join("src/big.txt"), big).unwrap();
@@ -689,6 +717,7 @@ mod tests {
         host_git(&workspace, &home, &["commit", "-q", "-am", "second commit"]);
         std::fs::write(workspace.join("src/a.txt"), "delta\n").unwrap();
         std::fs::write(workspace.join(".env"), "SECRET_CANARY=3\n").unwrap();
+        std::fs::write(workspace.join(".env.local"), "SECRET_CANARY=5\n").unwrap();
         let rewritten: String = (0..40_000).map(|n| format!("LINE-{n:05}\n")).collect();
         std::fs::write(workspace.join("src/big.txt"), rewritten).unwrap();
         std::fs::write(workspace.join("src/new.txt"), "new\n").unwrap();
@@ -720,10 +749,22 @@ mod tests {
         script(scripts.join("textconv"), "exec /usr/bin/cat \"$1\"");
         script(scripts.join("clean"), "exec /usr/bin/cat");
         script(scripts.join("external"), "exit 0");
+        // pager, gpg and credential have no plain-Git control; they are defense in depth only.
         script(scripts.join("pager"), "exec /usr/bin/cat");
         script(scripts.join("gpg"), "exit 1");
         script(scripts.join("credential"), "exit 0");
+        // Reached only with core.hooksPath unset; the config below shadows it, and the control proves the hooksPath route.
         script(hooks.join("post-index-change"), "");
+        let git_hook = workspace.join(".git/hooks/post-index-change");
+        std::fs::write(
+            &git_hook,
+            format!(
+                "#!/bin/sh\n/usr/bin/touch {}/git-dir-hook\n",
+                markers.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&git_hook, std::fs::Permissions::from_mode(0o700)).unwrap();
         let included = temp.join("included.config");
         std::fs::write(
             &included,
@@ -1006,6 +1047,7 @@ mod tests {
         let value = |key: &str| env.iter().find(|(name, _)| *name == key).unwrap().1.clone();
         assert_eq!(value("GIT_DIR"), OsString::from("/s/git-view"));
         assert_eq!(value("GIT_CONFIG_GLOBAL"), OsString::from("/dev/null"));
+        assert_eq!(value("GIT_NO_REPLACE_OBJECTS"), OsString::from("1"));
         assert_eq!(value("PATH"), OsString::from("/usr/bin:/bin"));
     }
 
@@ -1124,7 +1166,10 @@ mod tests {
         arm_hostile(temp.path(), &workspace);
         let view = temp.path().join("scratch").join(VIEW);
         std::fs::create_dir_all(view.parent().unwrap()).unwrap();
-        assert!(matches!(prepare_view(&workspace, &view), Ok(Ok(()))));
+        assert!(matches!(
+            prepare_view(&workspace, &view),
+            Ok(Prepared::Ready)
+        ));
 
         let mut names: Vec<String> = std::fs::read_dir(&view)
             .unwrap()
@@ -1255,7 +1300,15 @@ mod tests {
         for args in [&["status"][..], &["diff"], &["diff", "--no-ext-diff"]] {
             host_git_output(&workspace, &home, args);
         }
-        for name in ["include-fsmonitor", "external", "textconv", "clean"] {
+        // An intent-to-add entry writes the index, which fires post-index-change through core.hooksPath.
+        host_git_output(&workspace, &home, &["add", "-N", "src/new.txt"]);
+        for name in [
+            "include-fsmonitor",
+            "external",
+            "textconv",
+            "clean",
+            "post-index-change",
+        ] {
             assert!(
                 markers.join(name).exists(),
                 "{name} did not execute under plain Git"
@@ -1384,5 +1437,81 @@ mod tests {
         }
         assert_eq!(std::fs::read_dir(&markers).unwrap().count(), 0);
         assert_eq!(tree(&workspace.join(".git")), before);
+    }
+
+    #[test]
+    fn stale_stat_status_never_writes_repository_or_view_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = fixture(temp.path());
+        let markers = arm_hostile(temp.path(), &workspace);
+        // A stale stat on an unchanged tracked file makes status want to refresh the index.
+        std::fs::File::options()
+            .write(true)
+            .open(workspace.join("notes.md"))
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1))
+            .unwrap();
+        let before = tree(&workspace.join(".git"));
+        let view_scratch = scratch(temp.path(), 0);
+        let status = run_call(
+            &workspace,
+            &view_scratch,
+            &ToolCall::GitStatus { path: ".".into() },
+        );
+        assert!(status.get("failed").is_none(), "{status}");
+        // A write would rename a private file over the view's index symlink.
+        assert!(
+            std::fs::symlink_metadata(view_scratch.join(VIEW).join("index"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(tree(&workspace.join(".git")), before);
+        assert_eq!(std::fs::read_dir(markers).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn stderr_lines_naming_secret_components_are_filtered() {
+        for line in [
+            "fatal: (.env)",
+            "error: .env,",
+            "option path=.env",
+            "fatal: cannot read cfg/.ssh/id",
+            "warning: `.env.local`",
+            "x\"'.npmrc'",
+        ] {
+            assert!(mentions_forbidden(line), "{line}");
+        }
+        assert!(!mentions_forbidden("warning: other"));
+        assert!(!mentions_forbidden("fatal: environment.txt"));
+    }
+
+    #[test]
+    fn extensions_are_detected_after_a_byte_order_mark() {
+        assert!(uses_extensions(
+            b"\xef\xbb\xbf[extensions]\n\tobjectFormat = sha256\n"
+        ));
+        assert!(uses_extensions(b"[Extensions]\n"));
+        assert!(!uses_extensions(b"[core]\n\tbare = false\n"));
+    }
+
+    #[test]
+    fn numstat_rows_and_patch_hunks_drop_secret_paths() {
+        let numstat = captured(
+            b"1\t1\tsrc/ok.rs\x000\t3\t.env.local\x000\t1\tcfg/.ssh/id\x00",
+            false,
+        );
+        let patch = captured(
+            b"diff --git a/.env.local b/.env.local\n+SECRET_CANARY=1\ndiff --git a/src/ok.rs b/src/ok.rs\n+ok\n",
+            false,
+        );
+        let value = diff_output(&numstat, &patch, 4096).unwrap();
+        assert_eq!(
+            value["files"],
+            json!([{"path": "src/ok.rs", "added": 1, "deleted": 1}])
+        );
+        let text = value["patch"].as_str().unwrap();
+        assert!(text.contains("+ok"));
+        assert!(!text.contains("SECRET_CANARY"));
     }
 }

@@ -237,7 +237,7 @@ impl ToolCall {
 
     /// Read-only calls a researcher child may make; Git reads stay with the primary (R7-8).
     pub(crate) fn is_child_research(&self) -> bool {
-        self.is_goal_plan_prelude() && !self.is_git_read()
+        child_research_operation(self.label())
     }
     pub(crate) fn valid(&self) -> bool {
         if !serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_ARGUMENT_BYTES) {
@@ -364,6 +364,11 @@ impl ToolCall {
             Self::GitLog { .. } => "git_log",
         }
     }
+}
+
+/// The single predicate for read-only researcher children, by wire operation name.
+pub(crate) fn child_research_operation(operation: &str) -> bool {
+    GOAL_PLAN_PRELUDE_OPERATIONS.contains(&operation) && !operation.starts_with("git_")
 }
 
 pub(crate) const MAX_GIT_LOG_COMMITS: u32 = 50;
@@ -814,10 +819,7 @@ impl ToolContext {
                 calls.retain(|call| {
                     call["properties"]["operation"]["enum"][0]
                         .as_str()
-                        .is_some_and(|operation| {
-                            GOAL_PLAN_PRELUDE_OPERATIONS.contains(&operation)
-                                && !operation.starts_with("git_")
-                        })
+                        .is_some_and(child_research_operation)
                 });
             }
         }
