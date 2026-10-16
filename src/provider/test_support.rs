@@ -164,3 +164,15 @@ pub(crate) fn observed_step(
         calls_remaining: None,
     }
 }
+
+pub(crate) fn tool_surface_requests(model: &str) -> Vec<(&'static str, ProviderRequest)> {
+    let mut read_only = primary_request(model);
+    read_only.input.tools = Some(tool_context(json!({
+        "write": false, "commands": [], "skills": [], "mcp_servers": [], "git": "unavailable",
+    })));
+    vec![
+        ("primary", primary_request(model)),
+        ("primary_read_only", read_only),
+        ("researcher", researcher_request(model)),
+    ]
+}

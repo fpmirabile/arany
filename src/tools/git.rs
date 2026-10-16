@@ -1,6 +1,10 @@
 use super::ToolError;
 use super::config::Program;
-use super::types::{FORBIDDEN_NAMES, MAX_SNAPSHOT_BYTES, ToolCall, forbidden, hex_digest};
+use super::guard::GuardContext;
+use super::types::{
+    FORBIDDEN_NAMES, MAX_GIT_LOG_COMMITS, MAX_SNAPSHOT_BYTES, ToolCall, forbidden, hex_digest,
+    valid_relative, valid_revision,
+};
 use cap_fs_ext::DirExt;
 use cap_std::fs::Dir;
 use serde_json::{Value, json};
@@ -10,6 +14,62 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
+
+pub(super) fn valid(call: &ToolCall) -> bool {
+    match call {
+        ToolCall::GitStatus { path } => valid_relative(path, true),
+        ToolCall::GitDiff {
+            path,
+            base,
+            head,
+            staged,
+        } => {
+            valid_relative(path, true)
+                && base.as_deref().is_none_or(valid_revision)
+                && head.as_deref().is_none_or(valid_revision)
+                && (head.is_none() || base.is_some() && !staged)
+        }
+        ToolCall::GitLog {
+            path,
+            revision,
+            max_count,
+        } => {
+            valid_relative(path, true)
+                && revision.as_deref().is_none_or(valid_revision)
+                && (1..=MAX_GIT_LOG_COMMITS).contains(max_count)
+        }
+        _ => false,
+    }
+}
+
+pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
+    let path = (
+        "path",
+        json!({"type":"string", "description":"Workspace-relative path that limits the result; \".\" for the whole repository."}),
+    );
+    let revision = json!({"type":["string","null"], "description":"null, or HEAD, a branch or tag name, or a 7-64 character hex commit name, with at most four ~N or ^N ancestry steps (N at most 9999). No ranges, ':' or '@{'. At most 128 bytes."});
+    Some(match operation {
+        "git_status" => vec![path],
+        "git_diff" => vec![
+            path,
+            ("base", revision.clone()),
+            ("head", revision),
+            (
+                "staged",
+                json!({"type":"boolean", "description":"true compares the index with base, or HEAD when base is null; head must then be null. false compares the working tree with the index (no revisions), with base, or compares base with head."}),
+            ),
+        ],
+        "git_log" => vec![
+            path,
+            ("revision", revision),
+            (
+                "max_count",
+                json!({"type":"integer", "description":"Number of commits: integer 1 through 50 inclusive."}),
+            ),
+        ],
+        _ => return None,
+    })
+}
 
 const CAPTURE_BYTES: usize = 256 * 1024;
 const STDERR_BYTES: usize = 4 * 1024;
@@ -350,7 +410,7 @@ async fn read_prefix(
     Ok((bytes, overflow))
 }
 
-async fn run(
+async fn spawn_git(
     git: &Path,
     argv: &[String],
     env: &[(&'static str, OsString)],
@@ -401,6 +461,26 @@ async fn run(
 }
 
 /// Runs one typed Git read; Git failures and unsupported repositories return `{"failed": ..}` output.
+pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
+    let git = site.config.git.as_ref().ok_or(ToolError::Configuration)?;
+    #[cfg(target_os = "linux")]
+    let scratch = Path::new("/scratch");
+    #[cfg(not(target_os = "linux"))]
+    let scratch = site.root;
+    let output = execute(
+        site.workspace,
+        scratch,
+        git,
+        &site.intent.call,
+        site.intent.limits.result_bytes as usize,
+        Duration::from_millis(u64::from(site.intent.limits.runtime_ms)),
+    )
+    .await;
+    #[cfg(target_os = "linux")]
+    site.stop_descendants().await?;
+    output
+}
+
 pub(super) async fn execute(
     workspace: &Path,
     scratch: &Path,
@@ -418,7 +498,8 @@ pub(super) async fn execute(
     let env = environment(&view, workspace, scratch);
     let mut outputs = Vec::new();
     for argv in invocations(call)? {
-        let captured = run(Path::new(&git.executable), &argv, &env, workspace, deadline).await?;
+        let captured =
+            spawn_git(Path::new(&git.executable), &argv, &env, workspace, deadline).await?;
         if !captured.overflow && captured.status != Some(0) {
             let message = captured.status.map_or_else(
                 || "git terminated by a signal".to_owned(),

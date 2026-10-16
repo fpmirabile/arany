@@ -1,3 +1,4 @@
+use super::catalog::Family;
 use crate::session::{AgentRunId, RunId};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -222,153 +223,42 @@ pub(crate) fn parse_mcp_arguments(arguments: &str) -> Result<Value, super::ToolE
 
 impl ToolCall {
     pub(crate) fn is_process(&self) -> bool {
-        matches!(
-            self,
-            Self::Command { .. } | Self::McpList { .. } | Self::McpCall { .. }
-        )
+        self.facts().spawns_process
     }
 
     pub(crate) fn is_git_read(&self) -> bool {
-        matches!(
-            self,
-            Self::GitStatus { .. } | Self::GitDiff { .. } | Self::GitLog { .. }
-        )
+        self.facts().family == Family::Git
     }
 
     /// Read-only calls a researcher child may make; Git reads stay with the primary (R7-8).
     pub(crate) fn is_child_research(&self) -> bool {
-        child_research_operation(self.label())
+        self.facts().researcher
     }
+
     pub(crate) fn valid(&self) -> bool {
         if !serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_ARGUMENT_BYTES) {
             return false;
         }
-        match self {
-            Self::List { path } => valid_relative(path, true),
-            Self::Read { path, limit, .. } => {
-                valid_relative(path, false) && (1..=4096).contains(limit)
-            }
-            Self::Search { path, query } => {
-                valid_relative(path, true) && !query.is_empty() && query.len() <= 512
-            }
-            Self::Mkdir { path } => valid_relative(path, false),
-            Self::Write {
-                path,
-                expected_digest,
-                content,
-            } => {
-                valid_relative(path, false)
-                    && content.len() <= 8 * 1024
-                    && expected_digest
-                        .as_ref()
-                        .is_none_or(|digest| valid_digest(digest))
-            }
-            Self::Edit {
-                path,
-                expected_digest,
-                old,
-                new,
-            } => {
-                valid_relative(path, false)
-                    && valid_digest(expected_digest)
-                    && !old.is_empty()
-                    && old.len() + new.len() <= 8 * 1024
-            }
-            Self::Command { program, args, cwd } => {
-                valid_name(program)
-                    && valid_relative(cwd, true)
-                    && args.len() <= 64
-                    && args
-                        .iter()
-                        .all(|arg| arg.len() <= 4096 && !arg.contains('\0'))
-            }
-            Self::ApplyChangeset {
-                source_intent_digest,
-                changeset,
-            } => {
-                *source_intent_digest != [0; 32] && !changeset.files.is_empty() && changeset.valid()
-            }
-            Self::Skill { name, resource } => {
-                valid_name(name)
-                    && resource
-                        .as_ref()
-                        .is_none_or(|path| valid_relative(path, false))
-            }
-            Self::McpList { server } => valid_name(server),
-            Self::McpCall {
-                server,
-                tool,
-                schema_digest,
-                arguments,
-            } => {
-                valid_name(server)
-                    && valid_digest(schema_digest)
-                    && !tool.is_empty()
-                    && tool.len() <= 128
-                    && tool.chars().all(|ch| !ch.is_control())
-                    && parse_mcp_arguments(arguments).is_ok()
-            }
-            Self::GitStatus { path } => valid_relative(path, true),
-            Self::GitDiff {
-                path,
-                base,
-                head,
-                staged,
-            } => {
-                valid_relative(path, true)
-                    && base.as_deref().is_none_or(valid_revision)
-                    && head.as_deref().is_none_or(valid_revision)
-                    && (head.is_none() || base.is_some() && !staged)
-            }
-            Self::GitLog {
-                path,
-                revision,
-                max_count,
-            } => {
-                valid_relative(path, true)
-                    && revision.as_deref().is_none_or(valid_revision)
-                    && (1..=MAX_GIT_LOG_COMMITS).contains(max_count)
-            }
+        match self.facts().family {
+            Family::File => super::fs::valid(self),
+            Family::Process => super::process::valid(self),
+            Family::Skill => super::skills::valid(self),
+            Family::Mcp => super::mcp::valid(self),
+            Family::Git => super::git::valid(self),
         }
     }
 
     pub(crate) fn mutates(&self) -> bool {
-        matches!(
-            self,
-            Self::Write { .. }
-                | Self::Edit { .. }
-                | Self::Mkdir { .. }
-                | Self::ApplyChangeset { .. }
-        )
+        self.facts().mutates
     }
 
     pub(crate) fn is_goal_plan_prelude(&self) -> bool {
-        GOAL_PLAN_PRELUDE_OPERATIONS.contains(&self.label())
+        self.facts().prelude
     }
 
     pub(crate) fn label(&self) -> &'static str {
-        match self {
-            Self::List { .. } => "list",
-            Self::Read { .. } => "read",
-            Self::Search { .. } => "search",
-            Self::Mkdir { .. } => "mkdir",
-            Self::Write { .. } => "write",
-            Self::Edit { .. } => "edit",
-            Self::Command { .. } => "command",
-            Self::ApplyChangeset { .. } => "apply_changeset",
-            Self::Skill { .. } => "skill",
-            Self::McpList { .. } => "mcp_list",
-            Self::McpCall { .. } => "mcp_call",
-            Self::GitStatus { .. } => "git_status",
-            Self::GitDiff { .. } => "git_diff",
-            Self::GitLog { .. } => "git_log",
-        }
+        self.facts().name
     }
-}
-
-/// The single predicate for read-only researcher children, by wire operation name.
-pub(crate) fn child_research_operation(operation: &str) -> bool {
-    GOAL_PLAN_PRELUDE_OPERATIONS.contains(&operation) && !operation.starts_with("git_")
 }
 
 pub(crate) const MAX_GIT_LOG_COMMITS: u32 = 50;
@@ -377,18 +267,6 @@ const MAX_REVISION_BYTES: usize = 128;
 /// Path components no Tool reads; Git reads also exclude them through pathspecs.
 pub(crate) const FORBIDDEN_NAMES: [&str; 7] = [
     ".git", ".aws", ".ssh", ".gnupg", ".env", ".npmrc", ".pypirc",
-];
-
-/// Operations allowed before a Goal plan contract; each name is the wire `operation` and `label()`.
-const GOAL_PLAN_PRELUDE_OPERATIONS: [&str; 8] = [
-    "list",
-    "read",
-    "search",
-    "skill",
-    "mcp_list",
-    "git_status",
-    "git_diff",
-    "git_log",
 ];
 
 /// `HEAD`, a ref name or an object name with at most four `~N`/`^N` steps; no ranges, `:`, `@{` or options.
@@ -895,268 +773,6 @@ pub(crate) fn model_observation(observation: &ToolObservation) -> Value {
     let call = model_call(&observation.intent.call);
     json!({"call":call,"disposition":observation.disposition,"output":output,"workspace_effect":effect,"cache_update":observation.cache_update})
 }
-
-/// Typed call schemas the catalog admits, in the fixed order every request offers them.
-pub(crate) fn catalog_call_schemas(catalog: &Value) -> Vec<Value> {
-    let mut calls = call_schemas();
-    calls.retain_mut(|call| {
-        let (key, field, cap) = match call["properties"]["operation"]["enum"][0].as_str() {
-            Some("write" | "edit" | "mkdir") => return catalog["write"] == true,
-            Some("command") => ("commands", "program", 8),
-            Some("skill") => ("skills", "name", MAX_SKILLS),
-            Some("mcp_list" | "mcp_call") => ("mcp_servers", "server", 4),
-            Some("git_status" | "git_diff" | "git_log") => return catalog["git"].is_object(),
-            _ => return true,
-        };
-        let names: Vec<_> = catalog[key]
-            .as_array()
-            .filter(|rows| rows.len() <= cap)
-            .into_iter()
-            .flatten()
-            .filter_map(|row| row["name"].as_str())
-            .filter(|name| valid_name(name))
-            .collect();
-        if names.is_empty() {
-            return false;
-        }
-        call["properties"][field]["enum"] = json!(names);
-        true
-    });
-    calls
-}
-
-/// Schema of the optional Goal plan contract that Primary Tools carry; `null` when no contract is proposed.
-pub(crate) fn plan_contract_property(calls: &[Value]) -> Value {
-    json!({"anyOf":[plan_contract_schema(goal_success_call_schema(calls).as_ref()), {"type":"null"}]})
-}
-
-/// Calls that can satisfy a Goal success criterion, taken from the catalog-restricted set.
-/// `None` when the catalog admits none, because JSON Schema `anyOf` must not be empty.
-fn goal_success_call_schema(calls: &[Value]) -> Option<Value> {
-    let calls: Vec<_> = calls
-        .iter()
-        .filter(|call| {
-            matches!(
-                call["properties"]["operation"]["enum"][0].as_str(),
-                Some("mkdir" | "write" | "edit" | "command" | "skill" | "mcp_call")
-            )
-        })
-        .cloned()
-        .collect();
-    (!calls.is_empty()).then(|| json!({"anyOf": calls}))
-}
-
-fn plan_contract_schema(call_schema: Option<&Value>) -> Value {
-    let path = "Workspace-relative file path, at most 512 bytes; paths must cover it.";
-    let calls = json!({"type":["integer","null"], "description": "Positive integer within goal_budget.max_provider_calls; null only when the pinned Goal budget sets no provider-call ceiling."});
-    let tokens = json!({"type":["integer","null"], "description": "Positive integer within goal_budget.max_tokens; null only when the pinned Goal budget sets no token ceiling."});
-    let active_ms = json!({"type":["integer","null"], "description": "Positive integer within goal_budget.max_active_ms; null only when the pinned Goal budget sets no active-time ceiling."});
-    let mut criteria = Vec::with_capacity(3);
-    if let Some(call_schema) = call_schema {
-        criteria.push(json!({
-            "type":"object",
-            "properties":{
-                "kind":{"type":"string","enum":["tool_call_succeeded"]},
-                "call":call_schema.clone()
-            },
-            "required":["kind","call"],
-            "additionalProperties":false
-        }));
-    }
-    criteria.push(json!({
-        "type":"object",
-        "properties":{
-            "kind":{"type":"string","enum":["workspace_file_digest"]},
-            "path":{"type":"string", "description": path},
-            "sha256":{"type":"string", "description": "Exact lowercase 64-character SHA-256."}
-        },
-        "required":["kind","path","sha256"],
-        "additionalProperties":false
-    }));
-    criteria.push(json!({
-        "type":"object",
-        "properties":{
-            "kind":{"type":"string","enum":["workspace_file_content"]},
-            "path":{"type":"string", "description": path},
-            "content":{"type":"string", "description": "UTF-8 text, at most 8192 bytes; the whole plan contract must serialize within 8 KiB."}
-        },
-        "required":["kind","path","content"],
-        "additionalProperties":false
-    }));
-    json!({
-        "type": "object",
-        "properties": {
-            "mission": {"type":"string", "description": "Non-empty UTF-8 Goal mission, at most 2048 bytes."},
-            "paths": {"type":"array", "description": "Up to 64 distinct Workspace-relative paths in ascending order, each at most 512 bytes. Use \".\" alone for the whole Workspace; nested paths are rejected.", "items":{"type":"string"}},
-            "commands": {"type":"array", "description": "Up to 8 distinct admitted command names in ascending order; each uses lowercase letters, digits, '-' or '_', at most 64 bytes.", "items":{"type":"string"}},
-            "resource_class": {"type":"string", "enum":["default","build"]},
-            "command_timeout_ms": {"type":["integer","null"], "description": "Integer 1000 through 600000 inclusive, or null for the pinned default."},
-            "skills": {"type":"array", "description": "Up to 64 distinct admitted Skill bindings in ascending name and resource order. Names use lowercase letters, digits, '-' or '_', at most 64 bytes; resource is null for SKILL.md or a relative path of at most 512 bytes.", "items":{
-                "type":"object",
-                "properties": {
-                    "name":{"type":"string"},
-                    "resource":{"type":["string", "null"]}
-                },
-                "required":["name","resource"],
-                "additionalProperties":false
-            }},
-            "mcp_tools": {"type":"array", "description": "Up to 64 distinct admitted MCP bindings in ascending server and tool order. Server names are at most 64 bytes and tool names at most 128 bytes, each using lowercase letters, digits, '-' or '_'.", "items":{
-                "type":"object",
-                "properties": {
-                    "server":{"type":"string"},
-                    "tool":{"type":"string"}
-                },
-                "required":["server","tool"],
-                "additionalProperties":false
-            }},
-            "success_criterion": {"anyOf": criteria},
-            "budget": {
-                "type":"object",
-                "properties": {
-                    "max_provider_calls": calls,
-                    "max_tokens": tokens,
-                    "max_active_ms": active_ms,
-                    "max_runs": {"type":"integer", "description": "Integer 1 through goal_budget.max_runs inclusive."}
-                },
-                "required":["max_provider_calls","max_tokens","max_active_ms","max_runs"],
-                "additionalProperties":false
-            }
-        },
-        "required":["mission","paths","commands","resource_class","command_timeout_ms","skills","mcp_tools","success_criterion","budget"],
-        "additionalProperties":false
-    })
-}
-
-pub(crate) fn call_schemas() -> Vec<Value> {
-    let string = json!({"type": "string"});
-    let nullable = json!({"type": ["string", "null"]});
-    let git_path = json!({"type":"string", "description":"Workspace-relative path that limits the result; \".\" for the whole repository."});
-    let revision = json!({"type":["string","null"], "description":"null, or HEAD, a branch or tag name, or a 7-64 character hex commit name, with at most four ~N or ^N ancestry steps (N at most 9999). No ranges, ':' or '@{'. At most 128 bytes."});
-    let definitions = [
-        ("list", vec![("path", string.clone())]),
-        ("mkdir", vec![("path", string.clone())]),
-        (
-            "read",
-            vec![
-                ("path", string.clone()),
-                (
-                    "offset",
-                    json!({"type":"integer", "description":"Zero-based byte offset, 0 through 4294967295. Start at 0; page using the returned next offset."}),
-                ),
-                (
-                    "limit",
-                    json!({"type":"integer", "description":"Number of UTF-8 bytes to read: integer 1 through 4096 inclusive. Use 4096 for a normal page; never request the whole file with a larger limit."}),
-                ),
-            ],
-        ),
-        (
-            "search",
-            vec![("path", string.clone()), ("query", string.clone())],
-        ),
-        (
-            "write",
-            vec![
-                ("path", string.clone()),
-                ("expected_digest", nullable.clone()),
-                ("content", string.clone()),
-            ],
-        ),
-        (
-            "edit",
-            vec![
-                ("path", string.clone()),
-                (
-                    "expected_digest",
-                    json!({"type":"string", "description":"Exact lowercase 64-character SHA-256 from the file include or a successful Read. Never invent it."}),
-                ),
-                (
-                    "old",
-                    json!({"type":"string", "description":"Non-empty exact literal text occurring once in the current file. To append, select a unique ending and include that ending plus the appended text in new."}),
-                ),
-                (
-                    "new",
-                    json!({"type":"string", "description":"Replacement literal text. Combined old and new UTF-8 size must be at most 8192 bytes."}),
-                ),
-            ],
-        ),
-        (
-            "command",
-            vec![
-                ("program", string.clone()),
-                ("args", json!({"type":"array", "items": {"type":"string"}})),
-                ("cwd", string.clone()),
-            ],
-        ),
-        (
-            "skill",
-            vec![("name", string.clone()), ("resource", nullable)],
-        ),
-        ("mcp_list", vec![("server", string.clone())]),
-        (
-            "mcp_call",
-            vec![
-                ("server", string.clone()),
-                ("tool", string.clone()),
-                ("schema_digest", string.clone()),
-                ("arguments", string),
-            ],
-        ),
-        ("git_status", vec![("path", git_path.clone())]),
-        (
-            "git_diff",
-            vec![
-                ("path", git_path.clone()),
-                ("base", revision.clone()),
-                ("head", revision.clone()),
-                (
-                    "staged",
-                    json!({"type":"boolean", "description":"true compares the index with base, or HEAD when base is null; head must then be null. false compares the working tree with the index (no revisions), with base, or compares base with head."}),
-                ),
-            ],
-        ),
-        (
-            "git_log",
-            vec![
-                ("path", git_path),
-                ("revision", revision),
-                (
-                    "max_count",
-                    json!({"type":"integer", "description":"Number of commits: integer 1 through 50 inclusive."}),
-                ),
-            ],
-        ),
-    ];
-    let mut calls: Vec<Value> = definitions.into_iter().map(|(operation, fields)| {
-        let mut properties = serde_json::Map::new();
-        properties.insert("operation".into(), json!({"type":"string", "enum":[operation]}));
-        let mut required = vec!["operation"];
-        for (name, schema) in fields { properties.insert(name.into(), schema); required.push(name); }
-        json!({"type":"object", "properties":properties, "required":required, "additionalProperties":false})
-    }).collect();
-    calls.sort_by_key(|call| {
-        CALL_ORDER
-            .iter()
-            .position(|name| call["properties"]["operation"]["enum"][0] == *name)
-    });
-    calls
-}
-
-/// Offered order of the model Tools; identical for every request so the Tool prefix stays byte-stable.
-const CALL_ORDER: [&str; 13] = [
-    "list",
-    "read",
-    "search",
-    "git_status",
-    "git_diff",
-    "git_log",
-    "skill",
-    "mcp_list",
-    "mkdir",
-    "write",
-    "edit",
-    "command",
-    "mcp_call",
-];
 
 #[cfg(test)]
 mod model_call_tests {

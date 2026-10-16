@@ -29,9 +29,8 @@ impl ApprovalMode {
     }
 
     pub(crate) fn asks(self, call: &ToolCall) -> bool {
-        let effect =
-            call.mutates() || matches!(call, ToolCall::Command { .. } | ToolCall::McpCall { .. });
-        effect && (self != Self::AutoEdits || !call.mutates())
+        let facts = call.facts();
+        facts.asks_approval && (self != Self::AutoEdits || !facts.mutates)
     }
 }
 

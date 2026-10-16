@@ -1,8 +1,11 @@
 use super::ToolError;
+use super::catalog::string;
 use super::config::Config;
 use super::guard::{drain_stderr, payload, read_capped, read_line_capped, reap_owned_child};
 use super::skills::parse_json;
-use super::types::{MAX_TOOL_RESULT_BYTES, ToolCall, hex_digest, parse_mcp_arguments};
+use super::types::{
+    MAX_TOOL_RESULT_BYTES, ToolCall, hex_digest, parse_mcp_arguments, valid_digest, valid_name,
+};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -10,6 +13,39 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
+
+pub(super) fn valid(call: &ToolCall) -> bool {
+    match call {
+        ToolCall::McpList { server } => valid_name(server),
+        ToolCall::McpCall {
+            server,
+            tool,
+            schema_digest,
+            arguments,
+        } => {
+            valid_name(server)
+                && valid_digest(schema_digest)
+                && !tool.is_empty()
+                && tool.len() <= 128
+                && tool.chars().all(|ch| !ch.is_control())
+                && parse_mcp_arguments(arguments).is_ok()
+        }
+        _ => false,
+    }
+}
+
+pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
+    Some(match operation {
+        "mcp_list" => vec![("server", string())],
+        "mcp_call" => vec![
+            ("server", string()),
+            ("tool", string()),
+            ("schema_digest", string()),
+            ("arguments", string()),
+        ],
+        _ => return None,
+    })
+}
 
 const FRAME_BYTES: usize = 128 * 1024;
 const VERSION: &str = "2025-11-25";
@@ -111,9 +147,9 @@ impl Connection {
                 if tools.contains_key(name) {
                     return Err(ToolError::Operation);
                 }
-                schema(&tool["inputSchema"])?;
+                compile_schema(&tool["inputSchema"])?;
                 if let Some(output) = tool.get("outputSchema") {
-                    schema(output)?;
+                    compile_schema(output)?;
                 }
                 let mut admitted = json!({"name":name,"inputSchema":tool["inputSchema"],"sha256":hex_digest(&serde_json::to_vec(tool).map_err(|_| ToolError::Operation)?)});
                 if let Some(description) = tool["description"].as_str() {
@@ -196,7 +232,7 @@ pub(super) async fn execute(
         let definition = tools.get(tool).ok_or(ToolError::Configuration)?;
         if definition["sha256"].as_str() != Some(schema_digest) { return Err(ToolError::ChangedInput); }
         let arguments = parse_mcp_arguments(arguments)?;
-        if !schema(&definition["inputSchema"])?.is_valid(&arguments) { return Err(ToolError::Configuration); }
+        if !compile_schema(&definition["inputSchema"])?.is_valid(&arguments) { return Err(ToolError::Configuration); }
         let reply = connection.request("tools/call", json!({"name":tool,"arguments":arguments})).await?;
         let is_error = match reply.get("isError") { None => false, Some(value) => value.as_bool().ok_or(ToolError::Operation)? };
         let content = reply["content"].as_array().filter(|items| items.len() <= 64).ok_or(ToolError::Operation)?;
@@ -214,7 +250,7 @@ pub(super) async fn execute(
         let structured = reply.get("structuredContent");
         if structured.is_some_and(|value| !value.is_object()) { return Err(ToolError::Operation); }
         if !is_error && let Some(output) = definition.get("outputSchema")
-            && !structured.is_some_and(|value| schema(output).is_ok_and(|validator| validator.is_valid(value))) { return Err(ToolError::Operation); }
+            && !structured.is_some_and(|value| compile_schema(output).is_ok_and(|validator| validator.is_valid(value))) { return Err(ToolError::Operation); }
         let result = json!({"server":name,"tool":tool,"schema_digest":definition["sha256"],"is_error":is_error,"content":normalized,"structured_content":structured}).to_string();
         if result.len() > MAX_TOOL_RESULT_BYTES { return Err(ToolError::Limit); }
         Ok(result)
@@ -233,7 +269,7 @@ pub(super) async fn execute(
     result
 }
 
-fn schema(value: &Value) -> Result<jsonschema::Validator, ToolError> {
+fn compile_schema(value: &Value) -> Result<jsonschema::Validator, ToolError> {
     let bytes = serde_json::to_vec(value).map_err(|_| ToolError::Operation)?;
     if bytes.len() > 32 * 1024 || !value.is_object() {
         return Err(ToolError::Limit);

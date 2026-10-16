@@ -1,3 +1,4 @@
+use super::catalog::{call_schemas, catalog_call_schemas, plan_contract_property};
 use super::config::Config;
 use super::skills::parse_json;
 use super::types::*;
@@ -1979,4 +1980,65 @@ fn child_research_excludes_git_reads() {
     ] {
         assert!(!call.is_child_research(), "{call:?}");
     }
+}
+
+#[test]
+fn model_catalog_prose_matches_the_checked_in_snapshot() {
+    use super::ToolRuntime;
+    use std::path::PathBuf;
+
+    let program = json!({"name":"git","executable":"/usr/bin/git","sha256":"0".repeat(64),"interpreter":false,"inputs":[]});
+    let value = json!({
+        "version":1,"workspace_paths":["src","Cargo.toml"],"write":true,
+        "commands":[{"name":"bash","executable":"/bin/bash","sha256":"1".repeat(64),"interpreter":true,"inputs":[]}],
+        "skills":[{"name":"review","description":"Review guidance","directory":"/tmp/skills/review","files":{"SKILL.md":"2".repeat(64)}}],
+        "mcp":[{"name":"local","program":program,"args":[],"tools":["probe"]}],
+        "git": program,
+    });
+    let runtime = ToolRuntime {
+        context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
+        cache_state: None,
+        config: serde_json::from_value(value).unwrap(),
+        workspace: PathBuf::new(),
+        workspace_identity: (1, 2),
+        guard_executable: PathBuf::new(),
+        enforcement_digest: [1; 32],
+        queue_progress: None,
+        active_action_gate: None,
+        #[cfg(target_os = "macos")]
+        system_programs: None,
+        process_enforcement_digest: [1; 32],
+    };
+    let render = |catalog: String| {
+        let mut value: Value = serde_json::from_str(&catalog).unwrap();
+        value["host_clock"]["unix_ms"] = json!(0);
+        value
+    };
+    let rendered = json!({
+        "primary": render(runtime.context().unwrap().catalog),
+        "researcher": render(runtime.research_context(3).unwrap().catalog),
+    });
+    let rendered = serde_json::to_string_pretty(&rendered).unwrap() + "\n";
+    // Regenerate with ARANY_UPDATE_SNAPSHOTS=1 (per OS), then review the diff.
+    if std::env::var_os("ARANY_UPDATE_SNAPSHOTS").is_some() {
+        let file = if cfg!(target_os = "macos") {
+            "catalog_prose_macos"
+        } else {
+            "catalog_prose"
+        };
+        std::fs::write(
+            format!(
+                "{}/src/tools/snapshots/{file}.json",
+                env!("CARGO_MANIFEST_DIR")
+            ),
+            &rendered,
+        )
+        .unwrap();
+    }
+    let expected = if cfg!(target_os = "macos") {
+        include_str!("snapshots/catalog_prose_macos.json")
+    } else {
+        include_str!("snapshots/catalog_prose.json")
+    };
+    assert!(rendered == expected, "{rendered}");
 }

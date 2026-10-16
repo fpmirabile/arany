@@ -1170,19 +1170,7 @@ impl GoalPlanContract {
         bounded(&self.mission, 2048)?;
         match &self.success_criterion {
             GoalSuccessCriterion::ToolCallSucceeded { call } => {
-                if !call.valid()
-                    || matches!(
-                        call.as_ref(),
-                        crate::tools::ToolCall::List { .. }
-                            | crate::tools::ToolCall::Read { .. }
-                            | crate::tools::ToolCall::Search { .. }
-                            | crate::tools::ToolCall::ApplyChangeset { .. }
-                            | crate::tools::ToolCall::McpList { .. }
-                            | crate::tools::ToolCall::GitStatus { .. }
-                            | crate::tools::ToolCall::GitDiff { .. }
-                            | crate::tools::ToolCall::GitLog { .. }
-                    )
-                {
+                if !call.valid() || !call.facts().goal_success {
                     return Err(ReplayError::InvalidPayload);
                 }
             }
