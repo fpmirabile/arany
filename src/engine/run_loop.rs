@@ -2012,6 +2012,10 @@ impl<'a> RunLoop<'a> {
             for step in &mut context.steps {
                 step.turn.without_thinking();
             }
+            // The goal block was frozen when the Run began; the rewrite re-introduces the contract
+            // and budget in force, which a compacted step may have been the only carrier of.
+            input.goal_plan_contract = self.controls.goal_budget.plan_contract()?;
+            input.goal_budget = Some(self.controls.goal_budget.effective_budget()?);
         }
         self.settle_active_segment(active_segment).await?;
         if self.controls.goal_budget.active_time_exhausted() {

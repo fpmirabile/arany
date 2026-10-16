@@ -1104,32 +1104,6 @@ fn full_catalog_request_stays_within_the_strict_schema_limits() {
         max_active_children: 3,
     };
     let rendered = body(&request, Effort::Low);
-    let strict: Vec<&Value> = rendered["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|tool| tool["strict"] == true)
-        .map(|tool| &tool["input_schema"])
-        .chain([&rendered["output_config"]["format"]["schema"]])
-        .collect();
-    assert!(
-        strict.len() <= 21,
-        "at most 20 strict tools plus the format"
-    );
-    assert!(
-        strict
-            .iter()
-            .map(|schema| count_unions(schema))
-            .sum::<usize>()
-            <= 16
-    );
-    assert!(
-        strict
-            .iter()
-            .map(|schema| count_optional(schema))
-            .sum::<usize>()
-            <= 24
-    );
     assert!(
         rendered["tools"]
             .as_array()
@@ -1138,6 +1112,9 @@ fn full_catalog_request_stays_within_the_strict_schema_limits() {
             .all(|tool| tool.get("strict").is_none()),
         "the plan-contract unions keep Tool definitions non-strict"
     );
+    let format = &rendered["output_config"]["format"]["schema"];
+    assert!(count_unions(format) <= 16);
+    assert!(count_optional(format) <= 24);
 }
 
 fn thinking_tool_reply(id: &str) -> Value {

@@ -39,8 +39,10 @@ history. Implementation status and verified support are separate claims.
 
 ## Message-native Provider request: owner-run live probes
 
-- **P1: Anthropic native Tools with structured Finish/Delegate.** With explicit usage consent, send one request on the selected model with the full Tool catalog (non-strict definitions with the optional nested `plan_contract`), `output_config.format` set to the Finish/Delegate schema, `tool_choice: {"type":"auto","disable_parallel_tool_use":true}` and thinking on. Confirm the request is accepted, a `tool_use` stop and an `end_turn` JSON stop both occur, a replayed thinking block is accepted on the next call, and `usage.cache_read_input_tokens` appears on a second call. Offline wire corpora prove only the encoding.
+- **P1: Anthropic native Tools with structured Finish/Delegate.** With explicit usage consent, send one request on the selected model with the full Tool catalog (non-strict definitions, each with a required-but-nullable `plan_contract`), strict `output_config.format` for Finish/Delegate, `tool_choice: {"type":"auto","disable_parallel_tool_use":true}` and thinking on. Confirm the request is accepted, a `tool_use` stop and an `end_turn` JSON stop both occur, and a replayed thinking block is accepted on the next call. Measure how well the model follows the now non-strict Tool schemas, in particular the required-but-nullable fields `expected_digest`, `resource` and Git `revision`/`base`, and `plan_contract: null`. No `cache_control` is sent before Stage C, so a cache read is not expected. Offline wire corpora prove only the encoding.
 - **P2: Anthropic parallel Tool use.** Before enabling more than one Tool call per step, confirm with `disable_parallel_tool_use: false` that the model respects the four-call cap in practice; an over-cap response fails the Run without retry.
+- **P3: ChatGPT/Codex `allowed_tools`.** Confirm the ChatGPT route accepts `tool_choice: {"type":"allowed_tools",...}` for a zero-budget researcher. Until it passes, that route lists only `arany_finish` for such a call.
+- **Stage C: constant OpenAI function list.** The Finish/Delegate functions follow the phase, so the OpenAI `tools` array changes at the synthesis switch. Keep one constant function list and restrict it by phase with `allowed_tools` when prompt caching lands.
 
 ## Beta 1: final user-owned checks
 

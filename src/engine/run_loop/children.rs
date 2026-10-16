@@ -717,6 +717,7 @@ impl RunLoop<'_> {
             }],
             facts: None,
             steering_notes: Vec::new(),
+            // Only sizes the reservation; `fill_slots` rewrites the count before the next render.
             calls_remaining: Some(child.tool_calls_remaining.saturating_sub(1)),
         });
         let overhead = reserved.rendered_len();

@@ -8,6 +8,7 @@ use crate::provider::{
     ProviderWireProvenance, ToolUseId, Usage,
 };
 use crate::provider::{compaction_input, summary_schema};
+use crate::tools::ToolContext;
 use crate::tools::types::MAX_TOOL_ARGUMENT_BYTES;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -413,8 +414,7 @@ pub(super) fn run_body(
             .input
             .tools
             .as_ref()
-            .and_then(|context| context.calls_remaining())
-            == Some(0);
+            .is_some_and(ToolContext::finish_only);
         body["tool_choice"] = if exhausted {
             json!({"type": "none"})
         } else {

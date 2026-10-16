@@ -4148,3 +4148,94 @@ async fn restating_the_recorded_plan_contract_is_a_no_op_and_a_different_one_is_
         assert_eq!(recorded, 1, "the contract is journaled once");
     }
 }
+
+#[tokio::test]
+async fn plan_contract_recorded_mid_run_survives_compaction() {
+    const PAGE_BYTES: usize = 4096;
+    const READS: usize = 104;
+
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
+    let content = "x".repeat(PAGE_BYTES * READS);
+    std::fs::write(workspace.join("notes/data.txt"), &content).expect("bounded fixture file");
+    let state_path = temp.path().join("state");
+    let budget = arany::GoalBudget {
+        max_provider_calls: None,
+        max_tokens: None,
+        max_active_ms: Some(30 * 60 * 1000),
+        max_runs: 1,
+    };
+    let plan = arany::GoalPlanContract {
+        mission: "Inspect the bounded file".into(),
+        resource_class: arany::ToolResourceClass::Default,
+        command_timeout_ms: None,
+        paths: vec!["notes/data.txt".into()],
+        commands: Vec::new(),
+        skills: Vec::new(),
+        mcp_tools: Vec::new(),
+        success_criterion: arany::GoalSuccessCriterion::WorkspaceFileDigest {
+            path: "notes/data.txt".into(),
+            sha256: facts_digest(&content),
+        },
+        budget,
+    };
+    let mut outcomes: Vec<_> = (0..READS)
+        .map(|page| {
+            crate::tool_outcome(
+                arany::ToolCall::Read {
+                    path: "notes/data.txt".into(),
+                    offset: u32::try_from(page * PAGE_BYTES).expect("bounded file offset"),
+                    limit: u32::try_from(PAGE_BYTES).expect("bounded page size"),
+                },
+                (page == 0).then(|| Box::new(plan.clone())),
+            )
+        })
+        .collect();
+    outcomes.push(finish_with("inspected"));
+    let compaction = || {
+        Ok(CompactionResponse {
+            summary: "Earlier pages were read.".into(),
+            response_id: None,
+            usage: arany::Usage {
+                input_tokens: Some(32),
+                output_tokens: Some(12),
+                ..Default::default()
+            },
+            wire_provenance: None,
+        })
+    };
+    let provider =
+        ScriptedProvider::new(outcomes).with_compactions((0..16).map(|_| compaction()).collect());
+    let requests = Arc::clone(&provider.requests);
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    let mut input = request(&workspace, "Inspect the bounded file in pages");
+    input.include_paths.clear();
+    input.goal.budget = Some(budget);
+    let outcome = engine.run(input).await.expect("Goal");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    engine.close().await.expect("engine shutdown");
+
+    let calls = requests.lock().expect("requests").clone();
+    assert!(calls[0].input.goal_plan_contract.is_none());
+    let compacted: Vec<_> = calls
+        .iter()
+        .filter(|call| {
+            call.input
+                .tools
+                .as_ref()
+                .is_some_and(|tools| tools.history_summary.is_some())
+        })
+        .collect();
+    assert!(!compacted.is_empty(), "the Run compacts");
+    assert!(
+        compacted
+            .iter()
+            .all(|call| call.input.goal_plan_contract.as_ref() == Some(&plan)),
+        "the recorded contract is re-introduced when its step is compacted away"
+    );
+}

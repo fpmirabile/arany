@@ -1234,3 +1234,21 @@ fn chatgpt_replay_drops_item_ids_and_keeps_ciphertext() {
     assert_eq!(reasoning["encrypted_content"], "CIPHERTEXT==");
     assert_eq!(call["call_id"], "call_1");
 }
+
+#[test]
+fn chatgpt_spent_researcher_is_offered_finish_alone() {
+    let mut spent = crate::provider::test_support::catalog();
+    spent["tool_calls_remaining"] = json!(0);
+    let mut researcher = crate::provider::test_support::researcher_request("model-a");
+    researcher.input.tools = Some(crate::provider::test_support::tool_context(spent));
+    let value: Value =
+        serde_json::from_slice(&body_for(&researcher, Effort::Low).unwrap()).unwrap();
+    let names: Vec<_> = value["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["arany_finish"]);
+    assert_eq!(value["tool_choice"], "required");
+}

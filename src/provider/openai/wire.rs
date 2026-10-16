@@ -7,6 +7,7 @@ use crate::provider::{
     ProviderResponse, ProviderTurn, ProviderWireProvenance, ToolUseId, Usage,
 };
 use crate::provider::{compaction_input, summary_schema};
+use crate::tools::ToolContext;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
@@ -294,8 +295,9 @@ pub(crate) fn run_body_with_effort(
     run_body_inner(request, conversation, Some(effort))
 }
 
-/// Tools lead the request and the outcome functions follow them, because only the outcomes change
-/// with the phase; every Tool and previous item is replayed unchanged ahead of the new ones.
+/// Tools lead the request and the outcome functions follow them. The outcome functions change with
+/// the phase, so the function list is not prefix-stable across a synthesis switch; keeping a
+/// constant list and restricting it with `allowed_tools` is Stage C cache work.
 fn run_body_inner(
     request: &ProviderRequest,
     conversation: &Conversation,
@@ -328,8 +330,7 @@ fn run_body_inner(
             .input
             .tools
             .as_ref()
-            .and_then(|context| context.calls_remaining())
-            == Some(0);
+            .is_some_and(ToolContext::finish_only);
         body["tool_choice"] = if exhausted {
             json!({"type": "allowed_tools", "mode": "required", "tools": [{"type": "function", "name": "arany_finish"}]})
         } else {

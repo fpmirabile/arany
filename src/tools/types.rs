@@ -813,6 +813,11 @@ impl ToolContext {
         }
     }
 
+    /// A researcher with no Tool calls left may only Finish.
+    pub fn finish_only(&self) -> bool {
+        self.calls_remaining() == Some(0)
+    }
+
     /// Every observation of the live steps, in order.
     pub fn observations(&self) -> Vec<&ToolObservation> {
         self.steps
