@@ -169,14 +169,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 .min(usize::from(self.controls.policy.max_children())),
         );
         let waves = objectives.len().div_ceil(parallel.max(1));
-        let active_bound = if research {
-            MAX_DELEGATION_DEADLINE
-        } else {
-            self.provider
-                .call_deadline()
-                .saturating_mul(u32::try_from(waves).unwrap_or(u32::MAX))
-                .min(MAX_DELEGATION_DEADLINE)
-        };
+        let active_bound = delegation_active_bound(research, self.provider.call_deadline(), waves);
         // Covers every child's calls, Tools and terminal facts plus the largest later admission, so a refusal precedes AgentSpawned.
         let active_event_tail = if research {
             objectives.len() * (4 * MAX_CHILD_TOOL_CALLS + 4) + 10
@@ -823,4 +816,42 @@ fn valid_child_response(result: &CallResult) -> bool {
             ..
         }) if valid_finish(finish, MAX_CHILD_RESULT_BYTES)
     )
+}
+
+/// Researcher delegations use the fixed bound; a tool-free delegation runs one call per wave.
+fn delegation_active_bound(research: bool, call_deadline: Duration, waves: usize) -> Duration {
+    if research {
+        MAX_DELEGATION_DEADLINE
+    } else {
+        call_deadline
+            .saturating_mul(u32::try_from(waves).unwrap_or(u32::MAX))
+            .min(MAX_DELEGATION_DEADLINE)
+    }
+}
+
+#[cfg(test)]
+mod delegation_bound_tests {
+    use super::*;
+
+    #[test]
+    fn tool_free_delegation_is_capped_at_the_delegation_deadline() {
+        let call = Duration::from_secs(600);
+        assert_eq!(
+            delegation_active_bound(false, call, 1),
+            Duration::from_secs(600)
+        );
+        assert_eq!(
+            delegation_active_bound(false, call, 2),
+            MAX_DELEGATION_DEADLINE
+        );
+        assert_eq!(
+            delegation_active_bound(false, call, 4),
+            MAX_DELEGATION_DEADLINE
+        );
+        assert_eq!(
+            delegation_active_bound(true, Duration::from_secs(120), 1),
+            MAX_DELEGATION_DEADLINE
+        );
+        assert_eq!(MAX_DELEGATION_DEADLINE, Duration::from_secs(20 * 60));
+    }
 }

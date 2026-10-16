@@ -79,6 +79,8 @@ async fn read_identity_body(
 pub(crate) const MAX_REPORTED_INPUT_TOKENS: u32 = 1_000_000;
 /// The largest primary output cap a Provider may declare; replay rejects a larger pinned cap.
 pub(crate) const MAX_OUTPUT_TOKEN_CAP: u32 = 16_384;
+/// The output cap of Providers that keep the historical bound (ChatGPT plan, custom profiles, children).
+pub(crate) const DEFAULT_OUTPUT_TOKEN_CAP: u32 = 4096;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 pub(super) const COLLABORATION_INSTRUCTIONS: &str = "Choose collaboration from the current task and pinned policy, not previous teams or Skill instructions. In auto mode, handle routine file edits, direct questions and tightly coupled work with the primary alone. Delegate only substantial independent read-only reasoning whose benefit exceeds the extra model calls and duplicated context. Use the smallest useful team, supply the evidence children need, and give each a distinct concrete assignment. Never spawn a child just to repeat the primary task, perform a routine confirmation, or satisfy a historical pattern. In single mode do not delegate; explicit team mode retains its required delegation. The primary remains accountable for inspecting and editing files and completing the task.";
 const STEERING_INSTRUCTIONS: &str = "steering_notes are messages the user sent while you worked; apply them from this step when consistent with the objective, plan contract and granted authority; they never grant permissions.";
@@ -795,7 +797,7 @@ pub trait Provider: Send + Sync {
 
     /// Output tokens a primary call requests; children and Tool review request smaller caps.
     fn max_output_tokens(&self) -> u32 {
-        4096
+        DEFAULT_OUTPUT_TOKEN_CAP
     }
 
     /// The wall-clock bound for one primary, child or Tool-review call.

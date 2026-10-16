@@ -39,7 +39,7 @@ pub fn validate_workspace_inputs(
     Ok(())
 }
 
-const CHILD_OUTPUT_TOKEN_CAP: u32 = 4096;
+const CHILD_OUTPUT_TOKEN_CAP: u32 = crate::provider::DEFAULT_OUTPUT_TOKEN_CAP;
 /// Store admission and commit time reserved after each action's own deadline.
 const STORE_ACTION_OVERHEAD: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -2627,6 +2627,9 @@ impl<P: Provider + 'static> Engine<P> {
         })
         .valid()
             || !(1..=crate::provider::MAX_OUTPUT_TOKEN_CAP).contains(&selection.max_output_tokens)
+            || (selection.output_token_bound
+                == crate::provider::OutputTokenBound::LocalAcceptanceOnly
+                && selection.max_output_tokens > crate::provider::DEFAULT_OUTPUT_TOKEN_CAP)
         {
             return Err(EngineError::InvalidRequest);
         }
