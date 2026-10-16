@@ -4804,20 +4804,44 @@ fn provider_declared_output_cap_reaches_the_primary_and_caps_children() {
         ));
         oversized.close().await.expect("engine shutdown");
 
-        let mut local_only = Engine::open(
+        // A local-only ChatGPT route admits its cap and refuses anything above the 4,096 bound.
+        let chatgpt = |cap: u32, responses: Vec<ProviderOutcome>| {
+            ScriptedProvider::new(responses)
+                .with_chatgpt_account(Uuid::now_v7(), [1; 32])
+                .with_max_output_tokens(cap)
+        };
+        let mut local_over = Engine::open(
             StateRoot::admit(&temp.path().join("state")).expect("state readmission"),
-            {
-                let mut provider = ScriptedProvider::new(Vec::new()).with_max_output_tokens(16_384);
-                provider.output_token_bound = OutputTokenBound::LocalAcceptanceOnly;
-                provider
-            },
+            chatgpt(4097, Vec::new()),
         )
         .expect("engine");
         assert!(matches!(
-            local_only.run(request(&workspace, "Question")).await,
+            local_over.run(request(&workspace, "Question")).await,
             Err(EngineError::InvalidRequest)
         ));
-        local_only.close().await.expect("engine shutdown");
+        local_over.close().await.expect("engine shutdown");
+
+        let mut local_cap = Engine::open(
+            StateRoot::admit(&temp.path().join("state")).expect("state readmission"),
+            chatgpt(
+                4096,
+                vec![ProviderOutcome::Finish(Finish {
+                    summary: "done".into(),
+                    result: "ok".into(),
+                })],
+            ),
+        )
+        .expect("engine");
+        assert_eq!(
+            local_cap
+                .run(request(&workspace, "Question"))
+                .await
+                .expect("a 4,096 local-only Run is admitted")
+                .run
+                .status,
+            RunStatus::Finished
+        );
+        local_cap.close().await.expect("engine shutdown");
     });
 }
 

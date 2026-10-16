@@ -172,6 +172,10 @@ mod tests {
             effort: None,
             transport: CustomTransport::new(&destination, "synthetic-key".into()).unwrap(),
         };
+        assert_eq!(
+            provider.call_deadline(),
+            std::time::Duration::from_secs(120)
+        );
         for (phase, collaboration, tools) in [
             (
                 AgentPhase::RootPlan,
