@@ -1,4 +1,4 @@
-use super::{Engine, EngineError, ensure_session_workspace};
+use super::{Engine, EngineError, STORE_ACTION_OVERHEAD, ensure_session_workspace};
 use crate::provider::{
     CompactionRequest, CompactionResponse, MAX_REPORTED_INPUT_TOKENS, Provider,
     ProviderFailureClass, Usage,
@@ -6,7 +6,8 @@ use crate::provider::{
 use crate::session::input::WorkspaceInputs;
 use crate::session::{
     CompactionFailure, CompactionInputError, CompactionRecord, CompactionStatus, Event,
-    MAX_COMPACTION_OUTPUT_TOKENS, PreparedCompaction, RunStatus, SessionId, prefix_digest,
+    MAX_COMPACTION_OUTPUT_TOKENS, MAX_COMPACTION_SUMMARY_BYTES, PreparedCompaction, RunStatus,
+    SessionId, prefix_digest,
 };
 use crate::telemetry::{ProviderTraceOutcome, TraceFailure, TraceOutcome, TraceProvider};
 use sha2::{Digest, Sha256};
@@ -14,8 +15,6 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 pub(super) const COMPACTION_CALL_DEADLINE: Duration = Duration::from_secs(120);
-const MAX_SUMMARY_BYTES: usize = 8 * 1024;
-const STORE_ACTION_OVERHEAD: Duration = Duration::from_secs(5);
 
 impl<P: Provider + 'static> Engine<P> {
     /// Returns a committed success or failure record; admission and storage errors remain errors.
@@ -354,7 +353,7 @@ pub(super) fn classify_response(
         .output_tokens
         .is_none_or(|count| count <= 1_000_000);
     let valid_summary = !response.summary.is_empty()
-        && response.summary.len() <= MAX_SUMMARY_BYTES
+        && response.summary.len() <= MAX_COMPACTION_SUMMARY_BYTES
         && reported
             .output_tokens
             .is_none_or(|count| count <= MAX_COMPACTION_OUTPUT_TOKENS);

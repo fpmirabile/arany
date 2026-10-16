@@ -1,9 +1,9 @@
 use super::{
-    CallFailure, CallResult, MAX_PRIMARY_RESULT_BYTES, RunLoop, STORE_ACTION_OVERHEAD,
-    TOOL_CLEANUP_OVERHEAD, TOOL_PREPARATION_OVERHEAD, call_record, call_trace_result,
-    call_trace_usage, duration_ms, invoke_bounded, valid_finish,
+    CallFailure, CallResult, MAX_PRIMARY_RESULT_BYTES, RunLoop, TOOL_CLEANUP_OVERHEAD,
+    TOOL_PREPARATION_OVERHEAD, call_record, call_trace_result, call_trace_usage, duration_ms,
+    invoke_bounded, valid_finish,
 };
-use crate::engine::{EngineError, OUTPUT_TOKEN_CAP, RunCancellation};
+use crate::engine::{EngineError, OUTPUT_TOKEN_CAP, RunCancellation, STORE_ACTION_OVERHEAD};
 use crate::provider::{
     AgentPhase, ChildResult, Finish, Provider, ProviderOutcome, ProviderRequest, ProviderResponse,
 };
@@ -137,7 +137,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 remaining < u32::try_from(objectives.len().saturating_add(1)).unwrap_or(u32::MAX)
             })
         {
-            return self.fail_known_budget_exhaustion(primary).await;
+            return self.settle_stopped_primary(primary).await;
         }
         let research = self.controls.tools.is_some();
         let tool_allowance = if research {
@@ -186,7 +186,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         {
             Ok(segment) => segment,
             Err(EngineError::GoalBudgetExhausted) => {
-                return self.fail_known_budget_exhaustion(primary).await;
+                return self.settle_stopped_primary(primary).await;
             }
             Err(error) => return Err(error),
         };
@@ -224,7 +224,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                     .expect("child trace exists")
                     .finish(TraceOutcome::Cancelled);
             }
-            return self.fail_known_budget_exhaustion(primary).await;
+            return self.settle_stopped_primary(primary).await;
         }
 
         let mut results = vec![None; children.len()];
@@ -444,16 +444,16 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
             }
             return match reason {
                 AbortReason::Failed if self.controls.goal_budget.active_time_exhausted() => {
-                    self.fail_known_budget_exhaustion(primary).await
+                    self.settle_stopped_primary(primary).await
                 }
                 AbortReason::Failed => self.fail_primary(primary).await,
-                AbortReason::Budget => self.fail_known_budget_exhaustion(primary).await,
-                AbortReason::Cancelled => self.fail_known_budget_exhaustion(primary).await,
-                AbortReason::Paused => self.fail_known_budget_exhaustion(primary).await,
+                AbortReason::Budget | AbortReason::Cancelled | AbortReason::Paused => {
+                    self.settle_stopped_primary(primary).await
+                }
             };
         }
         if !self.controls.goal_budget.can_start_provider_call() {
-            return self.fail_known_budget_exhaustion(primary).await;
+            return self.settle_stopped_primary(primary).await;
         }
         root_request.phase = AgentPhase::RootSynthesis;
         root_request.child_results = results
@@ -462,7 +462,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
             .ok_or(EngineError::CoordinatorFailed)?;
         loop {
             if self.pause_at_boundary() {
-                return self.fail_known_budget_exhaustion(primary).await;
+                return self.settle_stopped_primary(primary).await;
             }
             let synthesis_trace =
                 primary.begin_provider(AgentPhase::RootSynthesis, &root_request.model);
@@ -470,7 +470,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 Ok(result) => result,
                 Err(EngineError::GoalBudgetExhausted) => {
                     synthesis_trace.finish_refused();
-                    return self.fail_known_budget_exhaustion(primary).await;
+                    return self.settle_stopped_primary(primary).await;
                 }
                 Err(error) => return Err(error),
             };
@@ -496,13 +496,13 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
             .await?;
             self.settle_active_segment(active_segment).await?;
             if self.controls.cancellation.is_cancelled() {
-                return self.fail_known_budget_exhaustion(primary).await;
+                return self.settle_stopped_primary(primary).await;
             }
             if matches!(&synthesis, CallResult::Cancelled) {
                 return self.cancel_primary(primary).await;
             }
             if self.controls.goal_budget.active_time_exhausted() {
-                return self.fail_known_budget_exhaustion(primary).await;
+                return self.settle_stopped_primary(primary).await;
             }
             match synthesis {
                 CallResult::Response(ProviderResponse {
@@ -518,7 +518,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                     ..
                 }) if valid_response => {
                     if self.pause_at_boundary() {
-                        return self.fail_known_budget_exhaustion(primary).await;
+                        return self.settle_stopped_primary(primary).await;
                     }
                     if let Some(contract) = plan_contract
                         && !self.admit_plan_contract(root_request, *contract).await?
@@ -528,19 +528,14 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                     match self.execute_tool(root_request, call, false, &primary).await {
                         Ok(true) => {}
                         Ok(false) if self.controls.cancellation.is_cancelled() => {
-                            return self.fail_known_budget_exhaustion(primary).await;
+                            return self.settle_stopped_primary(primary).await;
                         }
                         Ok(false) if self.controls.goal_budget.active_time_exhausted() => {
-                            return self.fail_known_budget_exhaustion(primary).await;
+                            return self.settle_stopped_primary(primary).await;
                         }
                         Ok(false) => return self.fail_primary(primary).await,
-                        Err(EngineError::GoalBudgetExhausted)
-                            if self.controls.cancellation.is_cancelled() =>
-                        {
-                            return self.fail_known_budget_exhaustion(primary).await;
-                        }
                         Err(EngineError::GoalBudgetExhausted) => {
-                            return self.fail_known_budget_exhaustion(primary).await;
+                            return self.settle_stopped_primary(primary).await;
                         }
                         Err(error) => return Err(error),
                     }
