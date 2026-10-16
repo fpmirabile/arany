@@ -23,7 +23,7 @@ class CodeChanges(unittest.TestCase):
             b"skills-lock.json", b"docs/spaces and\nnewlines.txt", b"docs/non-utf8-\xff",
         ]
         code = [
-            b"src/main.rs", b"src/provider/prompts/primary.txt", b"tests/test.rs",
+            b"src/main.rs", b"src/provider/prompts/primary.txt", b"tests/test.rs", b"src/x.md", b"tests/fixtures/x.md", b"scripts/notes.md",
             b"crates/new/Cargo.toml", b"Cargo.toml", b"Cargo.lock", b"build.rs",
             b"rust-toolchain.toml", b".cargo/config.toml", b"scripts/check.sh",
             b"fixtures/input.json", b"tests/fixtures/tool-calls.json", b"deny.toml",
