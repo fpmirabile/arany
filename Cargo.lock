@@ -150,6 +150,7 @@ dependencies = [
  "opentelemetry_sdk",
  "prost",
  "ratatui",
+ "regex",
  "reqwest",
  "rusqlite",
  "rustix",
