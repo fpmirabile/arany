@@ -3719,6 +3719,56 @@ async fn cancellation_after_a_child_tool_request_dispatches_no_child_tool() {
     assert_paused_child_stopped(&state_path, outcome.session_id, outcome.goal_id).await;
 }
 
+#[tokio::test]
+async fn child_read_request_at_an_exhausted_goal_budget_stops_as_budget_not_failure() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Delegate(Delegate {
+            children: vec!["Inspect facts".into()],
+        }),
+        ProviderOutcome::Tool {
+            call: facts_read(),
+            plan_contract: None,
+        },
+        finish_with("never reached"),
+    ])
+    .with_known_input_tokens();
+    let requests = provider.requests.clone();
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    let mut input = request(&workspace, "Check the facts");
+    input.include_paths.clear();
+    input.policy = CollaborationPolicy::Auto {
+        max_active_children: 1,
+    };
+    // The primary call spends 8 tokens; the child's call spends the last 8 and exhausts the budget.
+    input.goal.budget = Some(arany::GoalBudget {
+        max_tokens: Some(16),
+        ..arany::GoalBudget::default()
+    });
+    let outcome = engine.run(input).await.expect("budget-exhausted Run");
+    assert_eq!(outcome.run.status, RunStatus::Failed);
+    engine.close().await.expect("engine shutdown");
+    assert_eq!(requests.lock().expect("requests").len(), 2);
+
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    let child = view.runs[0].agents[1].id;
+    assert_eq!(child_tool_starts(&events, child), 0);
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        Event::AgentFinished { agent_run_id, disposition, .. }
+            if *agent_run_id == child && *disposition == arany::AgentDisposition::Cancelled
+    )));
+    let goal = view.goal(outcome.goal_id).expect("Goal");
+    assert_eq!(goal.status, arany::GoalStatus::Failed);
+    assert!(goal.report.is_some());
+}
+
 /// The child's last call is its observed Tool request; no Tool starts and the Goal is interrupted.
 async fn assert_paused_child_stopped(
     state_path: &Path,

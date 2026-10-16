@@ -44,6 +44,7 @@ struct ScriptedProvider {
     cancel_at_completion: Option<(AgentPhase, RunCancellation)>,
     before_call: Option<(usize, Box<dyn Fn() + Send + Sync>)>,
     clock_advance: Option<(usize, Duration)>,
+    known_input_tokens: bool,
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
     compact_responses: Mutex<VecDeque<Result<CompactionResponse, ProviderError>>>,
     compact_requests: Arc<Mutex<Vec<CompactionRequest>>>,
@@ -63,6 +64,7 @@ impl ScriptedProvider {
             cancel_at_completion: None,
             before_call: None,
             clock_advance: None,
+            known_input_tokens: false,
             requests: Arc::new(Mutex::new(Vec::new())),
             compact_responses: Mutex::new(VecDeque::new()),
             compact_requests: Arc::new(Mutex::new(Vec::new())),
@@ -78,6 +80,12 @@ impl ScriptedProvider {
     /// Pauses Tokio time and advances it by `duration` while the zero-based provider call `index` is still in flight.
     fn with_clock_advance_before_call(mut self, index: usize, duration: Duration) -> Self {
         self.clock_advance = Some((index, duration));
+        self
+    }
+
+    /// Reports known input usage (zero tokens) so a finite Goal token budget counts every call.
+    fn with_known_input_tokens(mut self) -> Self {
+        self.known_input_tokens = true;
         self
     }
 
@@ -181,7 +189,7 @@ impl Provider for ScriptedProvider {
         Ok(ProviderResponse {
             outcome: outcome?,
             response_id: None,
-            input_tokens: None,
+            input_tokens: self.known_input_tokens.then_some(0),
             output_tokens: Some(8),
             wire_provenance: None,
         })

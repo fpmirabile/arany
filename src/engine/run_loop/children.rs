@@ -315,6 +315,12 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                     if let Err(error) = self.controls.goal_budget.child_call_finished() {
                         return Err(queue.abort_with(error).await);
                     }
+                    // An exhausted Goal budget stops the child before its Tool starts, like a pause.
+                    let budget_spent = !self.controls.goal_budget.can_start_provider_call()
+                        || self.controls.goal_budget.remaining_calls() == Some(0);
+                    if budget_spent && abort_reason.is_none() {
+                        abort_reason = Some(AbortReason::Budget);
+                    }
                     let skipped = self.controls.cancellation.is_cancelled()
                         || self.pause_requested()
                         || abort_reason.is_some();
@@ -659,12 +665,6 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
             && child.tool_calls_remaining > 0
             && call.valid()
             && call.is_child_research()
-            && self.controls.goal_budget.can_start_provider_call()
-            && self
-                .controls
-                .goal_budget
-                .remaining_calls()
-                .is_none_or(|remaining| remaining > 0)
     }
 
     /// Runs one read-only child Tool inside the delegation's active segment; `false` stops the child.
