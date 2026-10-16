@@ -1713,3 +1713,35 @@ async fn cache_receipt_states_preserve_success_without_publication_uncertainty()
         );
     }
 }
+
+#[test]
+fn research_branches_offer_only_read_only_operations_until_exhausted() {
+    let context = |remaining: Option<u64>| {
+        let mut catalog = json!({
+            "write": true,
+            "commands": [{"name": "cargo"}],
+            "skills": [{"name": "guide"}],
+            "mcp_servers": [{"name": "local", "tools": ["probe"]}]
+        });
+        if let Some(remaining) = remaining {
+            catalog["tool_calls_remaining"] = json!(remaining);
+        }
+        ToolContext {
+            catalog: catalog.to_string(),
+            history_summary: None,
+            observations: Vec::new(),
+        }
+    };
+    let branches = context(Some(2)).research_branches();
+    assert_eq!(branches.len(), 1);
+    let operations: Vec<&str> = branches[0]["properties"]["call"]["anyOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|call| call["properties"]["operation"]["enum"][0].as_str())
+        .collect();
+    assert_eq!(operations, ["list", "read", "search", "skill", "mcp_list"]);
+    assert!(branches[0]["properties"].get("plan_contract").is_none());
+    assert!(context(Some(0)).research_branches().is_empty());
+    assert!(context(None).research_branches().is_empty());
+}
