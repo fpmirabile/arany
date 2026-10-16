@@ -87,6 +87,16 @@ fn capture_pane(server: &TmuxServer) -> Option<Vec<u8>> {
     Some(result.stdout)
 }
 
+// Reads one tmux pane format value, such as `#{alternate_on}`, trimmed of its newline.
+fn pane_flag(server: &TmuxServer, format: &str) -> String {
+    let result = server.run(&["display-message", "-p", "-t", "arany-test:0.0", format]);
+    assert!(result.status.success(), "tmux pane format {format}");
+    String::from_utf8(result.stdout)
+        .expect("tmux format UTF-8")
+        .trim()
+        .to_owned()
+}
+
 fn decline_initial_consent(server: &TmuxServer, screen: &[u8], declined: &mut bool) {
     if *declined {
         return;
@@ -2334,9 +2344,40 @@ fn accept_provider_request(
     (stream, input)
 }
 
+// The chat view selects the screen the product owns: Classic keeps the primary screen, Fullscreen its alternate one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ChatView {
+    Classic,
+    Fullscreen,
+}
+
+impl ChatView {
+    // No flag selects the saved chat view, which defaults to Fullscreen for an empty State.
+    fn launch_flag(self) -> &'static str {
+        match self {
+            Self::Classic => "--classic ",
+            Self::Fullscreen => "",
+        }
+    }
+
+    fn alternate_screen(self) -> bool {
+        self == Self::Fullscreen
+    }
+}
+
 #[test]
 #[ignore = "native Linux tmux steering gate; requires /usr/bin/tmux"]
 fn classic_steering_note_and_pause_in_tmux() {
+    steering_note_and_pause_in_tmux(ChatView::Classic);
+}
+
+#[test]
+#[ignore = "native Linux tmux Fullscreen steering gate; requires /usr/bin/tmux"]
+fn fullscreen_steering_note_and_pause_in_tmux() {
+    steering_note_and_pause_in_tmux(ChatView::Fullscreen);
+}
+
+fn steering_note_and_pause_in_tmux(view: ChatView) {
     const NOTE: &str = "use the smaller fixture";
     let executable = test_product_executable();
     let temp = tempfile::tempdir().expect("private test root");
@@ -2436,7 +2477,10 @@ fn classic_steering_note_and_pause_in_tmux() {
     let wrapper = temp.path().join("tmux-pane.sh");
     std::fs::write(
         &wrapper,
-        "#!/bin/sh\n\"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 --no-color\nresult=$?\nprintf '%s\\n' \"$result\" > \"$ARANY_TEST_EXIT\"\nexit \"$result\"\n",
+        format!(
+            "#!/bin/sh\n\"$ARANY_TEST_EXE\" {}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 --no-color\nresult=$?\nprintf '%s\\n' \"$result\" > \"$ARANY_TEST_EXIT\"\nexit \"$result\"\n",
+            view.launch_flag()
+        ),
     )
     .expect("tmux pane wrapper");
     std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))
@@ -2480,6 +2524,20 @@ fn classic_steering_note_and_pause_in_tmux() {
         .stderr(Stdio::piped());
     let started = wait_product(start.spawn().expect("tmux server start"));
     assert!(started.status.success(), "tmux pane started");
+    // Keeps the pane after exit so its restored primary screen and modes can be read.
+    assert!(
+        server
+            .run(&[
+                "set-option",
+                "-w",
+                "-t",
+                "arany-test:0",
+                "remain-on-exit",
+                "on"
+            ])
+            .status
+            .success()
+    );
     let pane_pid = server.run(&[
         "display-message",
         "-p",
@@ -2501,8 +2559,13 @@ fn classic_steering_note_and_pause_in_tmux() {
     let mut declined = false;
     wait_screen(&server, "idle composer missing", |screen| {
         decline_initial_consent(&server, screen, &mut declined);
-        classic_idle(screen)
+        idle_composer(screen)
     });
+    assert_eq!(
+        pane_flag(&server, "#{alternate_on}") == "1",
+        view.alternate_screen(),
+        "{view:?} chat view owns the expected screen"
+    );
 
     // Step 1: a note stays in the composer until the Engine records it for the next primary call.
     assert!(
@@ -2544,7 +2607,7 @@ fn classic_steering_note_and_pause_in_tmux() {
         let text = String::from_utf8_lossy(screen);
         text.contains("Steering note sent to the agent") && !text.contains(NOTE)
     });
-    wait_screen(&server, "idle prompt after first Run", classic_idle);
+    wait_screen(&server, "idle prompt after first Run", idle_composer);
 
     // Step 2: a held primary call pauses at its boundary and starts no further Provider request.
     assert!(
@@ -2581,7 +2644,7 @@ fn classic_steering_note_and_pause_in_tmux() {
     wait_screen(
         &server,
         "Escape did not close only the slash menu",
-        |screen| !String::from_utf8_lossy(screen).contains("Commands") && !classic_idle(screen),
+        |screen| !String::from_utf8_lossy(screen).contains("Commands") && !idle_composer(screen),
     );
     assert!(
         server
@@ -2610,11 +2673,39 @@ fn classic_steering_note_and_pause_in_tmux() {
         String::from_utf8_lossy(screen).contains("Goal paused; use /goal resume to continue.")
     });
     wait_screen(&server, "idle prompt after pause", |screen| {
-        classic_idle(screen) && !status_row(screen).contains("Pausing at the next step")
+        idle_composer(screen) && !status_row(screen).contains("Pausing at the next step")
     });
+    // Step 3: /goal reads the paused Goal back as resumable, without starting a Run.
     assert!(
         server
-            .run(&["send-keys", "-t", "arany-test:0.0", "/exit", "Enter"])
+            .run(&["send-keys", "-l", "-t", "arany-test:0.0", "/goal"])
+            .status
+            .success()
+    );
+    assert!(
+        server
+            .run(&["send-keys", "-t", "arany-test:0.0", "Enter"])
+            .status
+            .success()
+    );
+    // The 80-column pane wraps the status line, so compare without whitespace.
+    wait_screen(&server, "paused Goal not shown as resumable", |screen| {
+        let text: String = String::from_utf8_lossy(screen)
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        text.contains("interrupted") && text.contains("Use/goalresumetocontinue")
+    });
+    wait_screen(&server, "idle prompt after /goal", idle_composer);
+    assert!(
+        server
+            .run(&["send-keys", "-l", "-t", "arany-test:0.0", "/exit"])
+            .status
+            .success()
+    );
+    assert!(
+        server
+            .run(&["send-keys", "-t", "arany-test:0.0", "Enter"])
             .status
             .success()
     );
@@ -2629,6 +2720,29 @@ fn classic_steering_note_and_pause_in_tmux() {
         assert!(Instant::now() < deadline, "tmux pane did not exit");
         thread::yield_now();
     }
+    // The exited product must leave the alternate screen and disable mouse reporting. tmux
+    // reports cursor_flag 0 on a dead pane even when the cursor was shown, so it is not asserted.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while pane_flag(&server, "#{pane_dead}") != "1" {
+        assert!(Instant::now() < deadline, "tmux pane not marked dead");
+        thread::yield_now();
+    }
+    assert_eq!(
+        pane_flag(&server, "#{alternate_on}"),
+        "0",
+        "alternate screen left"
+    );
+    assert_eq!(
+        pane_flag(&server, "#{mouse_any_flag}"),
+        "0",
+        "mouse reporting restored"
+    );
+    let shell_screen =
+        String::from_utf8_lossy(&capture_pane(&server).expect("restored pane")).into_owned();
+    assert!(
+        !shell_screen.contains("Ask Arany"),
+        "composer left on the restored screen"
+    );
     stop_sender.send(()).expect("stop Provider observation");
     assert!(
         provider.join().expect("synthetic Provider conversation"),
@@ -2674,7 +2788,7 @@ fn status_row(screen: &[u8]) -> String {
 }
 
 // The composer placeholder shows only when it is empty; a busy Run labels its status row "working".
-fn classic_idle(screen: &[u8]) -> bool {
+fn idle_composer(screen: &[u8]) -> bool {
     let text = String::from_utf8_lossy(screen);
     text.contains("Ask Arany") && !text.to_lowercase().contains("working")
 }

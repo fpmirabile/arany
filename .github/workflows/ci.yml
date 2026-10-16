@@ -251,6 +251,7 @@ jobs:
           run_exact_parent active_terminal::tmux::inline_composer_restores_tmux_pane_and_replays_empty_session || result=1
           run_exact_parent active_terminal::tmux::active_shelf_stays_above_retained_draft_in_tmux || result=1
           run_exact_parent active_terminal::tmux::classic_steering_note_and_pause_in_tmux || result=1
+          run_exact_parent active_terminal::tmux::fullscreen_steering_note_and_pause_in_tmux || result=1
           exit "$result"
 
   macos-tests:
