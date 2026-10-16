@@ -12,7 +12,6 @@ use crate::session::{
     MAX_CHILD_TOOL_CALLS,
 };
 use crate::telemetry::{AgentTrace, ProviderTrace, TraceOutcome};
-use crate::tools::PREPARATION_OVERHEAD;
 use crate::tools::{
     CacheUpdate, GuardReceipt, ToolContext, ToolDisposition, ToolObservation, ToolRequest, ToolStep,
 };
@@ -686,7 +685,11 @@ impl RunLoop<'_> {
         let mut intent = runtime.intent(self.run_id, agent_run_id, request.call.clone());
         let available = deadline
             .saturating_duration_since(Instant::now())
-            .saturating_sub(PREPARATION_OVERHEAD + TOOL_CLEANUP_OVERHEAD + STORE_ACTION_OVERHEAD);
+            .saturating_sub(
+                runtime.reservation_overhead(&intent.call)
+                    + TOOL_CLEANUP_OVERHEAD
+                    + STORE_ACTION_OVERHEAD,
+            );
         // Half for the Guard capacity wait (it ends at `expires_at_ms`), half for the run itself.
         let runtime_ms = intent
             .limits

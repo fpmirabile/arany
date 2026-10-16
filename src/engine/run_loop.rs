@@ -16,7 +16,6 @@ use crate::session::{
 };
 use crate::store::Store;
 use crate::telemetry::{AgentTrace, ProviderTraceOutcome, RunTrace, TraceFailure, TraceOutcome};
-use crate::tools::PREPARATION_OVERHEAD;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
@@ -1482,7 +1481,8 @@ impl<'a> RunLoop<'a> {
                 }
             }
             let fixed_overhead_ms = duration_ms(
-                PREPARATION_OVERHEAD
+                runtime
+                    .reservation_overhead(&intent.call)
                     .saturating_add(TOOL_CLEANUP_OVERHEAD)
                     .saturating_add(STORE_ACTION_OVERHEAD),
             );
@@ -2213,7 +2213,8 @@ impl<'a> RunLoop<'a> {
                             let cache_transfer = Duration::from_millis(u64::from(
                                 intent.limits.cache_transfer_ms,
                             ));
-                            let action_bound = PREPARATION_OVERHEAD
+                            let action_bound = runtime
+                                .reservation_overhead(&intent.call)
                                 .saturating_add(cache_transfer.saturating_mul(2))
                                 .saturating_add(Duration::from_millis(u64::from(intent.limits.runtime_ms)))
                                 .saturating_add(TOOL_CLEANUP_OVERHEAD);

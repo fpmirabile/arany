@@ -1,9 +1,9 @@
 mod approval;
+mod cancel;
 pub(crate) mod config;
 mod fs;
 mod git;
 mod guard;
-pub(crate) use guard::PREPARATION_OVERHEAD;
 mod mcp;
 mod skills;
 pub(crate) mod toolchains;
@@ -13,10 +13,10 @@ mod workspace;
 #[cfg(test)]
 mod tests;
 
-use crate::engine::RunCancellation;
 use crate::session::{AgentRunId, RunId};
 use crate::store::StateRoot;
 pub use approval::{ApprovalInbox, ApprovalMode, ToolApproval, ToolApprovals};
+pub use cancel::Cancellation;
 use config::Config;
 pub(crate) use skills::parse_json;
 pub use skills::{ProjectSkills, project_skills};
@@ -450,7 +450,7 @@ impl ToolRuntime {
     pub(crate) async fn execute(
         &self,
         intent: EffectIntent,
-        cancellation: RunCancellation,
+        cancellation: Cancellation,
     ) -> ToolObservation {
         if !self.config.allows(&intent.call) {
             return ToolObservation {

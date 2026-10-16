@@ -2,7 +2,7 @@ use super::{
     CAPTURE_BYTES, GuardStage, RUNTIME_ROOT, Task, bootstrap_failure, capture, drain_stderr,
     encode_task, parse_ready, profile, read_capped, read_line_capped, read_observation,
 };
-use crate::engine::RunCancellation;
+use crate::tools::Cancellation;
 use crate::tools::types::{
     EffectIntent, MAX_BUILD_PROCESSES_OR_THREADS, MAX_CHANGESET_BYTES, MAX_CHANGESET_FILES,
     ToolCall, ToolLimits, ToolObservation, ToolResourceClass, digest,
@@ -15,8 +15,6 @@ use std::time::Duration;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
-/// Native preparation and handshake time the Engine adds to a Tool's action deadline.
-pub(crate) const PREPARATION_OVERHEAD: Duration = Duration::from_secs(5);
 const MANAGER_DEADLINE: Duration = Duration::from_secs(4);
 const MOUNTINFO_BYTES_CAP: usize = 1024 * 1024;
 const MOUNTINFO_ENTRIES_CAP: usize = 4096;
@@ -558,7 +556,7 @@ pub(super) async fn hold_seed_unit(permit: &super::admission::Permit, seed: &Pat
 pub(super) async fn execute_inner(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
-    mut cancellation: RunCancellation,
+    mut cancellation: Cancellation,
     dispatched: &mut bool,
 ) -> Result<ToolObservation, ToolError> {
     let permit = tokio::select! {
