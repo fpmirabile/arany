@@ -162,7 +162,8 @@ fn subscription_body_is_streaming_and_omits_unsupported_remote_cap() {
     });
     let coding: Value =
         serde_json::from_slice(&body_for(&coding, Effort::Medium).unwrap()).unwrap();
-    assert_eq!(coding["tool_choice"], "required");
+    assert_eq!(coding["tool_choice"]["type"], "allowed_tools");
+    assert_eq!(coding["tool_choice"]["mode"], "required");
     assert_eq!(coding["parallel_tool_calls"], false);
     assert!(coding.get("text").is_none());
     assert!(
@@ -648,7 +649,7 @@ async fn streaming_transport_accepts_only_final_usage_within_local_cap() {
         history_summary: None,
         steps: Vec::new(),
     });
-    let response = json!({"id":"resp_function","status":"completed","model":"model-a","output":[{"type":"reasoning","id":"rs_function","summary":[],"encrypted_content":"CIPHERTEXT=="},{"type":"function_call","id":"fc_function","call_id":"call_function","name":"arany_read","arguments":json!({"path":"README.md","offset":0,"limit":4096,"plan_contract":null}).to_string(),"status":"completed"}],"usage":{"input_tokens":12,"output_tokens":12}});
+    let response = json!({"id":"resp_function","status":"completed","model":"model-a","output":[{"type":"reasoning","id":"rs_function","summary":[],"encrypted_content":"CIPHERTEXT=="},{"type":"function_call","id":"fc_function","call_id":"call_function","name":"arany_read","arguments":json!({"path":"README.md","offset":0,"limit":4096,"plan_contract":null}).to_string(),"status":"completed"}],"usage":{"input_tokens":12,"output_tokens":12,"input_tokens_details":{"cached_tokens":7}}});
     let stream = format!(
         "data: {}\n\n",
         json!({"type":"response.completed","response":response})
@@ -670,9 +671,11 @@ async fn streaming_transport_accepts_only_final_usage_within_local_cap() {
         )
     ));
     assert_eq!(decoded.turn.items("openai").unwrap().len(), 2);
+    assert_eq!(decoded.usage.cache_read_input_tokens, Some(7));
     let wire_request = server.await.unwrap();
     let body: Value = serde_json::from_str(wire_request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
-    assert_eq!(body["tool_choice"], "required");
+    assert_eq!(body["tool_choice"]["type"], "allowed_tools");
+    assert_eq!(body["tool_choice"]["mode"], "required");
     assert_eq!(body["parallel_tool_calls"], false);
     assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
     let stream = String::from_utf8(completed(Some(12)))
@@ -1236,19 +1239,47 @@ fn chatgpt_replay_drops_item_ids_and_keeps_ciphertext() {
 }
 
 #[test]
-fn chatgpt_spent_researcher_is_offered_finish_alone() {
+fn chatgpt_keeps_functions_stable_and_allows_only_finish_for_spent_researchers() {
+    let mut researcher = crate::provider::test_support::researcher_request("model-a");
+    let active: Value =
+        serde_json::from_slice(&body_for(&researcher, Effort::Low).unwrap()).unwrap();
     let mut spent = crate::provider::test_support::catalog();
     spent["tool_calls_remaining"] = json!(0);
-    let mut researcher = crate::provider::test_support::researcher_request("model-a");
     researcher.input.tools = Some(crate::provider::test_support::tool_context(spent));
     let value: Value =
         serde_json::from_slice(&body_for(&researcher, Effort::Low).unwrap()).unwrap();
-    let names: Vec<_> = value["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|tool| tool["name"].as_str().unwrap())
-        .collect();
-    assert_eq!(names, ["arany_finish"]);
-    assert_eq!(value["tool_choice"], "required");
+    for field in ["tools", "instructions", "prompt_cache_key"] {
+        assert_eq!(value[field], active[field], "{field}");
+    }
+    assert_eq!(value["prompt_cache_key"], researcher.run_id.to_string());
+    assert_eq!(
+        value["tool_choice"],
+        json!({"type":"allowed_tools", "mode":"required", "tools":[{"type":"function", "name":"arany_finish"}]})
+    );
+    let mut primary = crate::provider::test_support::primary_request("model-a");
+    primary.collaboration = crate::session::CollaborationPolicy::Team {
+        max_active_children: 2,
+    };
+    let planning: Value =
+        serde_json::from_slice(&body_for(&primary, Effort::Low).unwrap()).unwrap();
+    primary.phase = AgentPhase::RootSynthesis;
+    let synthesis: Value =
+        serde_json::from_slice(&body_for(&primary, Effort::Low).unwrap()).unwrap();
+    for field in ["tools", "instructions", "prompt_cache_key"] {
+        assert_eq!(planning[field], synthesis[field], "{field}");
+    }
+    assert!(
+        planning["tool_choice"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "arany_delegate")
+    );
+    assert!(
+        !synthesis["tool_choice"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "arany_delegate")
+    );
 }

@@ -29,6 +29,12 @@ pub(crate) fn conversation(request: &ProviderRequest) -> Result<Conversation, Pr
     messages.push(current_message(request, catalog.as_ref(), delegate_step));
     if let Some(tools) = &input.tools {
         append_steps(&mut messages, tools, request)?;
+        if input.role == PromptRole::Researcher && tools.finish_only() {
+            messages.push(user(vec![Block::Text(
+                "No Tool calls remain. Finish now with your observed findings; do not call Tools."
+                    .into(),
+            )]));
+        }
     }
     Ok(Conversation {
         system: system_blocks(request),

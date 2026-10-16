@@ -42,16 +42,32 @@ impl<'a> RunScope<'a> {
             model: &request.model,
             output_cap: request.max_output_tokens,
             secret,
-            functions: conversation.tools.as_ref().map(|tools| {
-                tools
-                    .iter()
-                    .cloned()
-                    .chain(outcome_specs(&conversation.outcome))
-                    .map(|spec| spec.name)
-                    .collect()
-            }),
+            functions: allowed_functions(request, conversation),
         }
     }
+}
+
+fn allowed_functions(
+    request: &ProviderRequest,
+    conversation: &Conversation,
+) -> Option<Vec<String>> {
+    let exhausted = request
+        .input
+        .tools
+        .as_ref()
+        .is_some_and(ToolContext::finish_only);
+    conversation.tools.as_ref().map(|tools| {
+        tools
+            .iter()
+            .filter(|_| !exhausted)
+            .map(|spec| spec.name.clone())
+            .chain(
+                outcome_specs(&conversation.outcome)
+                    .into_iter()
+                    .map(|spec| spec.name),
+            )
+            .collect()
+    })
 }
 
 pub(crate) fn decode_run(
@@ -295,9 +311,6 @@ pub(crate) fn run_body_with_effort(
     run_body_inner(request, conversation, Some(effort))
 }
 
-/// Tools lead the request and the outcome functions follow them. The outcome functions change with
-/// the phase, so the function list is not prefix-stable across a synthesis switch; keeping a
-/// constant list and restricting it with `allowed_tools` is Stage C cache work.
 fn run_body_inner(
     request: &ProviderRequest,
     conversation: &Conversation,
@@ -318,24 +331,29 @@ fn run_body_inner(
         "arany_outcome",
         conversation.outcome.clone(),
     );
+    body["prompt_cache_key"] = json!(request.run_id.to_string());
     if let Some(tools) = &conversation.tools {
         body.as_object_mut().expect("request object").remove("text");
         body["tools"] = tools
             .iter()
             .cloned()
-            .chain(outcome_specs(&conversation.outcome))
+            .chain(
+                outcome_specs(&crate::provider::outcome_schema())
+                    .into_iter()
+                    .filter(|spec| {
+                        spec.name != "arany_delegate"
+                            || (request.input.role == crate::provider::PromptRole::Primary
+                                && request.collaboration.max_children() > 0)
+                    }),
+            )
             .map(function_json)
             .collect();
-        let exhausted = request
-            .input
-            .tools
-            .as_ref()
-            .is_some_and(ToolContext::finish_only);
-        body["tool_choice"] = if exhausted {
-            json!({"type": "allowed_tools", "mode": "required", "tools": [{"type": "function", "name": "arany_finish"}]})
-        } else {
-            json!("required")
-        };
+        let allowed = allowed_functions(request, conversation).expect("native functions");
+        body["tool_choice"] = json!({
+            "type": "allowed_tools",
+            "mode": "required",
+            "tools": allowed.into_iter().map(|name| json!({"type": "function", "name": name})).collect::<Vec<_>>(),
+        });
         body["parallel_tool_calls"] = json!(false);
         body["include"] = json!(["reasoning.encrypted_content"]);
     }
@@ -419,7 +437,7 @@ pub(crate) fn compaction_body_with_effort(request: &CompactionRequest, effort: E
 
 fn compaction_body_inner(request: &CompactionRequest, effort: Option<Effort>) -> Value {
     let input = compaction_input(request);
-    response_body(
+    let mut body = response_body(
         &request.model,
         COMPACTION_INSTRUCTIONS,
         json!(input.to_string()),
@@ -427,7 +445,9 @@ fn compaction_body_inner(request: &CompactionRequest, effort: Option<Effort>) ->
         effort,
         "arany_compaction",
         summary_schema(),
-    )
+    );
+    body["prompt_cache_key"] = json!(request.session_id.to_string());
+    body
 }
 
 fn response_body(

@@ -20,8 +20,8 @@ use uuid::{Uuid, Variant, Version};
 const MAX_ACCOUNTS: usize = 8;
 const MAX_MODEL_CHECKS: usize = 64;
 const MODEL_CHECK_AGE_SECONDS: u64 = 24 * 60 * 60;
-const MODEL_CHECK_VERSION: &str = "chatgpt-goal-contract-strict-stream-conformance-v11";
-const ACCOUNT_ADMISSION_VERSION: &str = "chatgpt-consented-account-admission-v13";
+const MODEL_CHECK_VERSION: &str = "chatgpt-goal-contract-strict-stream-conformance-v12";
+const ACCOUNT_ADMISSION_VERSION: &str = "chatgpt-consented-account-admission-v14";
 const REFRESH_EARLY_SECONDS: u64 = 300;
 pub(crate) const MAX_TOKEN_RECORD_BYTES: usize = 64 * 1024;
 

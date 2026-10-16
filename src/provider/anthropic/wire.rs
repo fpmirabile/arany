@@ -8,7 +8,6 @@ use crate::provider::{
     ProviderWireProvenance, ToolUseId, Usage,
 };
 use crate::provider::{compaction_input, summary_schema};
-use crate::tools::ToolContext;
 use crate::tools::types::MAX_TOOL_ARGUMENT_BYTES;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -409,18 +408,30 @@ pub(super) fn run_body(
             .iter()
             .map(|tool| json!({"name": tool.name, "description": tool.description, "input_schema": tool.parameters}))
             .collect();
-        let exhausted = request
-            .input
-            .tools
-            .as_ref()
-            .is_some_and(ToolContext::finish_only);
-        body["tool_choice"] = if exhausted {
-            json!({"type": "none"})
-        } else {
-            json!({"type": "auto", "disable_parallel_tool_use": true})
-        };
+        body["tool_choice"] = json!({"type": "auto", "disable_parallel_tool_use": true});
     }
+    cache_breakpoints(&mut body);
     Ok(body)
+}
+
+fn cache_breakpoints(body: &mut Value) {
+    for key in ["tools", "system"] {
+        if let Some(last) = body
+            .get_mut(key)
+            .and_then(Value::as_array_mut)
+            .and_then(|blocks| blocks.last_mut())
+        {
+            last["cache_control"] = json!({"type": "ephemeral"});
+        }
+    }
+    if let Some(last) = body["messages"]
+        .as_array_mut()
+        .and_then(|messages| messages.last_mut())
+        .and_then(|message| message["content"].as_array_mut())
+        .and_then(|blocks| blocks.last_mut())
+    {
+        last["cache_control"] = json!({"type": "ephemeral"});
+    }
 }
 
 fn messages(conversation: &Conversation) -> Result<Vec<Value>, ProviderError> {
@@ -471,14 +482,16 @@ fn user_blocks(block: &Block) -> Result<Vec<Value>, ProviderError> {
 }
 
 pub(super) fn compaction_body(request: &CompactionRequest, effort: Effort) -> Value {
-    json!({
+    let mut body = json!({
         "model": request.model,
         "max_tokens": request.max_output_tokens,
-        "system": COMPACTION_INSTRUCTIONS,
-        "messages": [{"role": "user", "content": compaction_input(request).to_string()}],
+        "system": [{"type": "text", "text": COMPACTION_INSTRUCTIONS}],
+        "messages": [{"role": "user", "content": [{"type": "text", "text": compaction_input(request).to_string()}]}],
         "output_config": {"format": {"type": "json_schema", "schema": summary_schema()}, "effort": effort.as_str()},
         "stream": false,
-    })
+    });
+    cache_breakpoints(&mut body);
+    body
 }
 
 #[derive(Deserialize)]

@@ -552,18 +552,6 @@ fn subscription_body(
             fields.remove("id");
         }
     }
-    // `allowed_tools` is unproven on this route (probe P3), so a spent researcher is offered Finish alone.
-    if request
-        .input
-        .tools
-        .as_ref()
-        .is_some_and(crate::tools::ToolContext::finish_only)
-    {
-        if let Some(tools) = body["tools"].as_array_mut() {
-            tools.retain(|tool| tool["name"] == "arany_finish");
-        }
-        body["tool_choice"] = json!("required");
-    }
     streaming_body(body)
 }
 

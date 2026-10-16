@@ -161,6 +161,21 @@ fn outbound_conversation_renders_system_tools_and_native_tool_results() {
             .contains("goal_context_facts")
     );
     assert!(encode_request(&body).is_ok());
+    assert_eq!(body.to_string().matches("\"cache_control\":").count(), 3);
+    let marker = json!({"type": "ephemeral"});
+    assert_eq!(
+        body["tools"].as_array().unwrap().last().unwrap()["cache_control"],
+        marker
+    );
+    assert_eq!(system.last().unwrap()["cache_control"], marker);
+    assert_eq!(results.last().unwrap()["cache_control"], marker);
+    assert!(
+        messages[0]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|block| block.get("cache_control").is_none())
+    );
 }
 
 #[test]
@@ -174,6 +189,7 @@ fn outbound_tool_choice_is_auto_without_parallel() {
     assert_eq!(outcome_types(&tool_body), ["finish"]);
     let plain = body(&read_only_request(MODEL), Effort::Low);
     assert!(plain.get("tools").is_none() && plain.get("tool_choice").is_none());
+    assert_eq!(plain.to_string().matches("\"cache_control\":").count(), 2);
 }
 
 #[test]
@@ -435,6 +451,22 @@ fn anthropic_usage_reports_cache_read_and_creation_separately() {
     assert_eq!(answer.usage.cache_creation_input_tokens, Some(3));
     assert_eq!(answer.usage.output_tokens, Some(8));
     assert!(answer.usage.cache_consistent());
+    for field in ["cache_read_input_tokens", "cache_creation_input_tokens"] {
+        for invalid in [
+            json!(-1),
+            json!(1.5),
+            json!("4"),
+            json!(u64::from(u32::MAX) + 1),
+            json!(u32::MAX),
+        ] {
+            let mut malformed = response("end_turn", json!([text_block(finish_text())]));
+            malformed["usage"][field] = invalid;
+            assert!(
+                decode(&read_only_request(MODEL), &malformed).is_err(),
+                "{field}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -745,9 +777,19 @@ fn outbound_messages_pin_schema_cap_and_disclosure_scope() {
         max_output_tokens: 1024,
     };
     let compact_body = compaction_body(&compact, Effort::Low);
-    let compact_input: Value =
-        serde_json::from_str(compact_body["messages"][0]["content"].as_str().unwrap())
-            .expect("typed compaction data");
+    let compact_input: Value = serde_json::from_str(
+        compact_body["messages"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .expect("typed compaction data");
+    assert_eq!(
+        compact_body
+            .to_string()
+            .matches("\"cache_control\":")
+            .count(),
+        2
+    );
     assert_eq!(compact_body["max_tokens"], 1024);
     assert_eq!(compact_body["output_config"]["effort"], "low");
     assert_eq!(compact_input["items"][1]["status"], "interrupted");
@@ -786,7 +828,7 @@ fn run_stream(
 }
 
 fn message_start() -> Value {
-    json!({"type":"message_start","message":{"id":"msg_stream","type":"message","role":"assistant","model":"model-1","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":12,"output_tokens":0}}})
+    json!({"type":"message_start","message":{"id":"msg_stream","type":"message","role":"assistant","model":"model-1","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":12,"cache_read_input_tokens":4,"cache_creation_input_tokens":3,"output_tokens":0}}})
 }
 
 #[test]
@@ -832,6 +874,9 @@ fn streamed_messages_require_closed_blocks_and_exclude_thinking_from_preview() {
     assert!(
         matches!(accepted.outcome, ProviderOutcome::Finish(Finish { result, .. }) if result == "line one\nline two 🚀")
     );
+    assert_eq!(accepted.usage.input_tokens, Some(19));
+    assert_eq!(accepted.usage.cache_read_input_tokens, Some(4));
+    assert_eq!(accepted.usage.cache_creation_input_tokens, Some(3));
     for invalid in [
         json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"unsafe"}}),
         json!({"type":"message_stop"}),
@@ -1036,7 +1081,15 @@ fn child_research_request_offers_only_read_only_tools_and_finish() {
     exhausted.input.tools = Some(tool_context(spent));
     let spent_body = body(&exhausted, Effort::Low);
     assert_eq!(tool_names(&spent_body), tool_names(&rendered));
-    assert_eq!(spent_body["tool_choice"], json!({"type": "none"}));
+    assert_eq!(spent_body["tool_choice"], rendered["tool_choice"]);
+    assert_eq!(spent_body["system"], rendered["system"]);
+    assert_eq!(spent_body["tools"], rendered["tools"]);
+    assert!(
+        spent_body["messages"].as_array().unwrap().last().unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Finish now")
+    );
     assert_eq!(rendered["tool_choice"]["type"], "auto");
     assert_eq!(outcome_types(&spent_body), ["finish"]);
 }
@@ -1132,10 +1185,20 @@ fn thinking_tool_reply(id: &str) -> Value {
 fn assert_extends(earlier: &Value, later: &Value) {
     assert_eq!(earlier["system"], later["system"]);
     assert_eq!(earlier["tools"], later["tools"]);
-    let (earlier, later) = (
-        earlier["messages"].as_array().unwrap(),
-        later["messages"].as_array().unwrap(),
-    );
+    assert_eq!(earlier["tool_choice"], later["tool_choice"]);
+    for body in [earlier, later] {
+        assert_eq!(body.to_string().matches("\"cache_control\":").count(), 3);
+    }
+    let mut earlier = earlier["messages"].as_array().unwrap().clone();
+    earlier.last_mut().unwrap()["content"]
+        .as_array_mut()
+        .unwrap()
+        .last_mut()
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .remove("cache_control");
+    let later = later["messages"].as_array().unwrap();
     assert!(later.len() > earlier.len());
     assert_eq!(earlier[..], later[..earlier.len()]);
 }
@@ -1144,7 +1207,7 @@ fn assert_extends(earlier: &Value, later: &Value) {
 fn researcher_requests_extend_each_other_across_calls() {
     let mut request = researcher_request(MODEL);
     let mut bodies = vec![body(&request, Effort::Low)];
-    for (index, remaining) in [(1, 3), (2, 2), (3, 1)] {
+    for (index, remaining) in [(1, 3), (2, 2), (3, 1), (4, 0)] {
         let reply = thinking_tool_reply(&format!("toolu_{index}"));
         let mut step = observed_step(decode(&request, &reply).unwrap(), "{}");
         step.facts = None;
