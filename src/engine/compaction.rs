@@ -1,3 +1,4 @@
+use super::ledger::{Action, duration_ms};
 use super::{Engine, EngineError, STORE_ACTION_OVERHEAD, ensure_session_workspace};
 use crate::provider::{
     CompactionRequest, CompactionResponse, MAX_REPORTED_INPUT_TOKENS, ProviderFailureClass, Usage,
@@ -126,7 +127,13 @@ impl Engine {
             return Ok(None);
         }
         self.store
-            .admit_operation(session_id, if goal_id.is_some() { 4 } else { 1 })
+            .admit_operation(
+                session_id,
+                Action::BoundaryCompaction {
+                    goal: goal_id.is_some(),
+                }
+                .max_events(),
+            )
             .await?;
         let source_digest =
             prefix_digest(&events, covered_sequence).map_err(|_| EngineError::InvalidHistory)?;
@@ -327,10 +334,6 @@ impl Engine {
         trace.finish(trace_outcome);
         Ok(Some(record))
     }
-}
-
-fn duration_ms(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 pub(super) fn classify_response(

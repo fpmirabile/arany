@@ -4,7 +4,7 @@ use crate::provider::{
 use crate::session::input::{InputError, WorkspaceInputs};
 use crate::session::{
     AgentRole, AgentRunId, CollaborationPolicy, CompiledContext, Event, GoalBudget, GoalId,
-    GoalPhase, GoalPlanContract, GoalReport, GoalStatus, GoalUsage, MAX_STEERING_CONTEXT_BYTES,
+    GoalPhase, GoalPlanContract, GoalStatus, GoalUsage, MAX_STEERING_CONTEXT_BYTES,
     MAX_STEERING_LABEL_BYTES, MAX_STEERING_NOTE_BYTES, MAX_USER_MESSAGE_BYTES, RunConfig, RunId,
     RunView, SessionId,
 };
@@ -17,18 +17,23 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
 
 mod compaction;
+mod ledger;
 mod lifecycle;
 mod progress;
+mod report;
 mod run_loop;
 pub use crate::tools::Cancellation as RunCancellation;
+pub use ledger::Action;
+use ledger::GoalLedger;
 pub use lifecycle::{
     continue_session, create_session, fork_session, list_sessions, rename_session, resume_session,
     set_session_defaults,
 };
 use lifecycle::{ensure_session_workspace, fork_with_store, lock_session};
 pub use progress::{DisplayUpdate, RunPreview, RunProgress, RunUpdate};
-use progress::{ProgressPublisher, append_observed};
-use run_loop::{GoalRunBudget, RunControls, RunIdentity, RunLoop};
+use progress::{ProgressPublisher, RunScope, append_observed, append_scoped};
+use report::goal_report;
+use run_loop::{RunControls, RunIdentity, RunLoop};
 
 /// Checks bounded Workspace input before an attached draft becomes a saved Session.
 /// Run admission reads and validates the inputs again before disclosure.
@@ -43,6 +48,9 @@ pub fn validate_workspace_inputs(
 
 const CHILD_OUTPUT_TOKEN_CAP: u32 = crate::provider::DEFAULT_OUTPUT_TOKEN_CAP;
 /// Store admission and commit time reserved after each action's own deadline.
+// GoalStarted or GoalResumed, GoalRunLinked, MessageAccepted, RunStarted and AgentSpawned.
+const RUN_START_EVENTS: usize = 5;
+
 const STORE_ACTION_OVERHEAD: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
@@ -213,6 +221,39 @@ pub struct RunOutcome {
     pub run: RunView,
 }
 
+struct AdmittedTurn {
+    session_id: SessionId,
+    workspace_identity: (u64, u64),
+    session_lock: SessionRunLock,
+    _lineage_locks: Vec<SessionRunLock>,
+    history: Option<crate::session::SessionView>,
+    goal: GoalAdmission,
+    objective: String,
+    budget: GoalBudget,
+    provisional_workspace_lock: Option<WorkspaceRunLock>,
+}
+
+struct PreparedTurn {
+    tools: Option<crate::tools::ToolRuntime>,
+    tool_context: Option<crate::tools::ToolContext>,
+    inputs: WorkspaceInputs,
+    images: Vec<crate::provider::ProviderImage>,
+    history: Vec<crate::provider::HistoryTurn>,
+    summary: Option<String>,
+    config: RunConfig,
+    context_started: SystemTime,
+    context_ended: SystemTime,
+    provider_concurrency: u8,
+}
+
+struct StartedRun<'a> {
+    session_id: SessionId,
+    run_id: RunId,
+    goal: &'a GoalAdmission,
+    finish_after_run: bool,
+    workspace_identity: (u64, u64),
+}
+
 /// One admitted Run and the Goal state it left behind.
 struct RunTurn {
     outcome: RunOutcome,
@@ -357,9 +398,6 @@ struct GoalAdmission {
     is_new: bool,
     resume: bool,
     usage: GoalUsage,
-    uncertain_active_ms: u64,
-    success_criterion_satisfied: bool,
-    success_state: crate::session::GoalSuccessState,
 }
 
 fn goal_context_metadata_reservation(
@@ -378,803 +416,6 @@ fn goal_context_metadata_reservation(
         })
         .and_then(|bytes| bytes.checked_add(64))
         .ok_or(EngineError::ContextTooLarge)
-}
-
-fn goal_report(
-    view: &crate::session::SessionView,
-    run: &RunView,
-    goal: &crate::session::GoalView,
-) -> GoalReport {
-    let raw_summary = run
-        .primary()
-        .and_then(|primary| primary.summary.as_deref())
-        .filter(|summary| !summary.is_empty())
-        .unwrap_or(match run.status {
-            crate::session::RunStatus::Finished => "Goal completed.",
-            crate::session::RunStatus::Failed => "Goal failed before completion.",
-            _ => "Goal did not reach a terminal Run boundary.",
-        });
-    let mut report = GoalReport {
-        summary: String::new(),
-        changes: Vec::new(),
-        evidence: Vec::new(),
-        unresolved: Vec::new(),
-        cached_input_tokens: goal.known_cached_tokens,
-    };
-    let mut omitted_facts = false;
-    let uncertain_calls = goal.unobserved_provider_calls.len();
-    if uncertain_calls > 0 {
-        push_goal_report_item(
-            &mut report,
-            GoalReportSection::Unresolved,
-            &format!(
-                "{} reserved Provider call(s) have no committed outcome; their usage remains unknown and charged.",
-                uncertain_calls
-            ),
-            &mut omitted_facts,
-        );
-    }
-    if goal.token_usage_unknown {
-        push_goal_report_item(
-            &mut report,
-            GoalReportSection::Unresolved,
-            "Provider token usage is incomplete.",
-            &mut omitted_facts,
-        );
-    }
-    if goal.uncertain_active_ms > 0 {
-        push_goal_report_item(
-            &mut report,
-            GoalReportSection::Unresolved,
-            &format!(
-                "{} ms of active time were conservatively charged after interruption.",
-                goal.uncertain_active_ms
-            ),
-            &mut omitted_facts,
-        );
-    }
-    let mut cache_rejected = false;
-    let mut cache_failed = false;
-    let mut cache_uncertain = false;
-    for task_run in view
-        .runs
-        .iter()
-        .filter(|task_run| goal.run_ids.contains(&task_run.id))
-    {
-        for tool in &task_run.tools {
-            if let Some(observation) = tool.observation.as_ref() {
-                match observation.cache_update {
-                    crate::tools::CacheUpdate::Rejected => cache_rejected = true,
-                    crate::tools::CacheUpdate::Failed => cache_failed = true,
-                    crate::tools::CacheUpdate::Uncertain => cache_uncertain = true,
-                    crate::tools::CacheUpdate::NotApplicable
-                    | crate::tools::CacheUpdate::NotAttempted
-                    | crate::tools::CacheUpdate::Published => {}
-                }
-            }
-        }
-    }
-    if cache_rejected {
-        push_goal_report_item(
-            &mut report,
-            GoalReportSection::Unresolved,
-            "One or more Commands completed, but the build cache update was rejected; the previous cache was kept.",
-            &mut omitted_facts,
-        );
-    }
-    if cache_failed {
-        push_goal_report_item(
-            &mut report,
-            GoalReportSection::Unresolved,
-            "One or more Commands completed, but the build cache update failed; the previous cache was kept.",
-            &mut omitted_facts,
-        );
-    }
-    if cache_uncertain {
-        push_goal_report_item(
-            &mut report,
-            GoalReportSection::Unresolved,
-            "One or more Commands have an uncertain build cache publication; inspect Session history before retrying.",
-            &mut omitted_facts,
-        );
-    }
-    // The serialized-size loop below is the only truncation; it starts from the full summary.
-    let mut summary_bytes = raw_summary.len();
-    let mut summary_notice_added = false;
-    report.summary = raw_summary.to_owned();
-    while !goal_report_fits_with_omission(&mut report) {
-        summary_bytes = summary_bytes.saturating_sub(128);
-        if summary_bytes < raw_summary.len() && !summary_notice_added {
-            let summary = std::mem::take(&mut report.summary);
-            push_goal_report_item(
-                &mut report,
-                GoalReportSection::Unresolved,
-                "The primary summary was shortened to fit the durable Goal report.",
-                &mut omitted_facts,
-            );
-            report.summary = summary;
-            summary_notice_added = true;
-        }
-        report.summary = truncate_utf8(raw_summary, summary_bytes).to_owned();
-        assert!(summary_bytes > 0 || goal_report_fits_with_omission(&mut report));
-    }
-    let protected_unresolved_count = report.unresolved.len();
-    for task_run in view
-        .runs
-        .iter()
-        .filter(|task_run| goal.run_ids.contains(&task_run.id))
-    {
-        for tool in &task_run.tools {
-            let call = &tool.intent.call;
-            let label = goal_report_call_label(call);
-            let Some(observation) = tool.observation.as_ref() else {
-                if matches!(
-                    task_run.status,
-                    crate::session::RunStatus::Cancelled
-                        | crate::session::RunStatus::Failed
-                        | crate::session::RunStatus::Interrupted
-                ) {
-                    push_goal_report_item(
-                        &mut report,
-                        GoalReportSection::Unresolved,
-                        &format!("{label} has no committed Tool outcome."),
-                        &mut omitted_facts,
-                    );
-                }
-                continue;
-            };
-            match observation.disposition {
-                crate::tools::ToolDisposition::Succeeded
-                    if observation.attested_for(&tool.intent) => {}
-                crate::tools::ToolDisposition::Denied
-                | crate::tools::ToolDisposition::Failed
-                | crate::tools::ToolDisposition::Conflict => push_goal_report_item(
-                    &mut report,
-                    GoalReportSection::Unresolved,
-                    &format!("{label} failed; its effect was not recorded as successful."),
-                    &mut omitted_facts,
-                ),
-                crate::tools::ToolDisposition::Limit => {
-                    let timeout_limit = match call {
-                        crate::tools::ToolCall::Command { .. } => {
-                            let requested = goal
-                                .plan_contract
-                                .as_ref()
-                                .and_then(|contract| contract.command_timeout_ms)
-                                .unwrap_or(goal.resource_settings.default_command_timeout_ms);
-                            (requested > goal.resource_settings.max_command_timeout_ms).then_some((
-                                requested,
-                                goal.resource_settings.max_command_timeout_ms,
-                            ))
-                        }
-                        _ => None,
-                    };
-                    let fact = timeout_limit.map_or_else(
-                        || format!("{label} failed; its effect was not recorded as successful."),
-                        |(requested, maximum)| {
-                            crate::tools::types::command_timeout_limit_message(requested, maximum)
-                        },
-                    );
-                    push_goal_report_item(
-                        &mut report,
-                        GoalReportSection::Unresolved,
-                        &fact,
-                        &mut omitted_facts,
-                    );
-                }
-                crate::tools::ToolDisposition::Uncertain
-                | crate::tools::ToolDisposition::Cancelled => {
-                    if observation.cache_update != crate::tools::CacheUpdate::Uncertain {
-                        push_goal_report_item(
-                            &mut report,
-                            GoalReportSection::Unresolved,
-                            &format!(
-                                "{label} has an uncertain or cancelled outcome; inspect Workspace state before retrying."
-                            ),
-                            &mut omitted_facts,
-                        );
-                    }
-                }
-                crate::tools::ToolDisposition::Succeeded => push_goal_report_item(
-                    &mut report,
-                    GoalReportSection::Unresolved,
-                    &format!("{label} reported success without a valid Guard attestation."),
-                    &mut omitted_facts,
-                ),
-            }
-        }
-    }
-    for task_run in view
-        .runs
-        .iter()
-        .filter(|task_run| goal.run_ids.contains(&task_run.id))
-    {
-        for tool in &task_run.tools {
-            let Some(observation) = tool.observation.as_ref() else {
-                continue;
-            };
-            if observation.disposition != crate::tools::ToolDisposition::Succeeded
-                || !observation.attested_for(&tool.intent)
-            {
-                continue;
-            }
-            let call = &tool.intent.call;
-            match call {
-                crate::tools::ToolCall::Write { path, .. }
-                | crate::tools::ToolCall::Edit { path, .. } => {
-                    push_goal_report_item(
-                        &mut report,
-                        GoalReportSection::Changes,
-                        &format!("{} {path}.", call.label()),
-                        &mut omitted_facts,
-                    );
-                }
-                crate::tools::ToolCall::Mkdir { path } => {
-                    push_goal_report_item(
-                        &mut report,
-                        GoalReportSection::Changes,
-                        &format!("Created directory {path}."),
-                        &mut omitted_facts,
-                    );
-                }
-                crate::tools::ToolCall::ApplyChangeset { changeset, .. } => {
-                    for change in &changeset.files {
-                        let action = if change.after.is_none() {
-                            "removed"
-                        } else if change.before.is_none() {
-                            "created"
-                        } else {
-                            "updated"
-                        };
-                        push_goal_report_item(
-                            &mut report,
-                            GoalReportSection::Changes,
-                            &format!("Command {action} {}.", change.path),
-                            &mut omitted_facts,
-                        );
-                    }
-                }
-                _ => {}
-            }
-            push_goal_report_item(
-                &mut report,
-                GoalReportSection::Evidence,
-                &goal_report_evidence(call, &observation.output),
-                &mut omitted_facts,
-            );
-        }
-    }
-    if omitted_facts {
-        append_goal_report_omission(&mut report, protected_unresolved_count);
-    }
-    report
-}
-
-#[cfg(test)]
-mod goal_report_tests {
-    use super::*;
-    use crate::session::{AgentStatus, AgentView, GoalPhase, GoalView, RunStatus, ToolView};
-    use crate::tools::{
-        CacheUpdate, EffectIntent, GuardReceipt, ToolCall, ToolDisposition, ToolLimits,
-    };
-    use uuid::Uuid;
-
-    #[test]
-    fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
-        let session_id = SessionId::new();
-        let goal_id = GoalId::new();
-        let run_id = RunId::new();
-        let command_intent = EffectIntent {
-            id: Uuid::now_v7(),
-            run_id,
-            agent_run_id: AgentRunId::new(),
-            policy_digest: [1; 32],
-            enforcement_digest: [2; 32],
-            workspace_device: 1,
-            workspace_inode: 2,
-            call: ToolCall::Command {
-                program: "cargo".into(),
-                args: vec!["check".into()],
-                cwd: ".".into(),
-            },
-            limits: ToolLimits::default(),
-            expires_at_ms: 1,
-            use_count: 1,
-        };
-        let command_observation = crate::tools::ToolObservation {
-            attestation: Some(crate::tools::Attestation::Guard(GuardReceipt {
-                contract_version: 1,
-                intent_digest: command_intent.digest(),
-                enforcement_digest: command_intent.enforcement_digest,
-                limits: command_intent.limits.clone(),
-            })),
-            intent: command_intent.clone(),
-            disposition: ToolDisposition::Succeeded,
-            output: serde_json::json!({
-                "exit_code": 0,
-                "stdout": "",
-                "stderr": "",
-                "changeset": {"files": []}
-            })
-            .to_string(),
-            cache_update: CacheUpdate::Failed,
-        };
-        let mut tools = vec![ToolView {
-            intent: command_intent,
-            observation: Some(command_observation),
-            review_call_index: None,
-            finished_sequence: None,
-        }];
-        tools.extend((0..15).map(|index| {
-            let intent = EffectIntent {
-                id: Uuid::now_v7(),
-                run_id,
-                agent_run_id: AgentRunId::new(),
-                policy_digest: [1; 32],
-                enforcement_digest: [2; 32],
-                workspace_device: 1,
-                workspace_inode: 2,
-                call: ToolCall::Read {
-                    path: format!("src/{index}-{}", "x".repeat(480)),
-                    offset: 0,
-                    limit: 4096,
-                },
-                limits: ToolLimits::default(),
-                expires_at_ms: 1,
-                use_count: 1,
-            };
-            let observation = crate::tools::ToolObservation {
-                attestation: Some(crate::tools::Attestation::for_site(&intent)),
-                intent: intent.clone(),
-                disposition: ToolDisposition::Succeeded,
-                output: serde_json::json!({
-                    "sha256": crate::tools::types::hex_digest(b"evidence")
-                })
-                .to_string(),
-                cache_update: crate::tools::CacheUpdate::NotApplicable,
-            };
-            ToolView {
-                intent,
-                observation: Some(observation),
-                review_call_index: None,
-                finished_sequence: None,
-            }
-        }));
-        let run = RunView {
-            id: run_id,
-            objective: "Report bounded evidence".into(),
-            images: Vec::new(),
-            config: None,
-            agents: vec![AgentView {
-                id: AgentRunId::new(),
-                role: AgentRole::Primary,
-                ordinal: 0,
-                objective: None,
-                summary: Some("A concise result".into()),
-                result: Some("Done".into()),
-                provider_calls: Vec::new(),
-                grant: None,
-                tools: Vec::new(),
-                status: AgentStatus::Finished,
-            }],
-            assistant_message: Some("Done".into()),
-            status: RunStatus::Finished,
-            accepted_sequence: 1,
-            finished_sequence: Some(2),
-            tools,
-            tool_compaction_summary: None,
-            tool_compaction_covered_count: 0,
-            display: Vec::new(),
-            steering_notes: Vec::new(),
-        };
-        let goal = GoalView {
-            id: goal_id,
-            objective: "Report bounded evidence".into(),
-            workspace_identity: (1, 2),
-            budget: GoalBudget::default(),
-            phase: GoalPhase::Implementation,
-            autonomous: false,
-            resource_settings: crate::tools::ToolResourceSettings::default(),
-            status: GoalStatus::Running,
-            run_ids: vec![run_id],
-            active_run: None,
-            plan_contract: None,
-            success_state: crate::session::GoalSuccessState::NoContract,
-            success_criterion_satisfied: false,
-            awaiting_plan_contract: false,
-            active_ms: 0,
-            uncertain_active_ms: 0,
-            reserved_active_run: None,
-            reserved_active_ms: None,
-            compaction_call_reserved: None,
-            uncertain_compaction_calls: 0,
-            provider_calls: 1,
-            unobserved_provider_calls: Vec::new(),
-            known_tokens: 0,
-            token_usage_unknown: true,
-            report: None,
-            started_sequence: 0,
-            finished_sequence: None,
-            known_cached_tokens: 0,
-        };
-        let view = crate::session::SessionView {
-            id: session_id,
-            title: "Report bounded evidence".into(),
-            title_is_explicit: false,
-            inherited_title: None,
-            workspace_identity: Some((1, 2)),
-            defaults: crate::session::SessionDefaults::default(),
-            created_sequence: 0,
-            last_sequence: 2,
-            lineage: None,
-            runs: vec![run.clone()],
-            compactions: Vec::new(),
-            goals: vec![goal.clone()],
-        };
-
-        let report = goal_report(&view, &run, &goal);
-        assert!(report.evidence.len() < 17, "report retains its byte bound");
-        assert!(
-            report.evidence.len() > 1,
-            "report keeps canonical tool evidence"
-        );
-        assert!(
-            report
-                .evidence
-                .iter()
-                .any(|item| item == "Command cargo exited 0."),
-            "successful Command evidence survives a cache update failure"
-        );
-        assert!(report.unresolved.iter().any(|item| {
-            item.contains("build cache update failed") && item.contains("previous cache was kept")
-        }));
-        assert!(
-            report
-                .unresolved
-                .iter()
-                .any(|item| item.contains("token usage is incomplete"))
-        );
-        assert!(
-            serde_json::to_vec(&report).unwrap().len() <= crate::session::MAX_GOAL_REPORT_BYTES
-        );
-
-        let mut late_run = run.clone();
-        let late_failed_command = late_run.tools.remove(0);
-        let failed_cache_observation = late_failed_command
-            .observation
-            .as_ref()
-            .expect("attested Command result");
-        assert!(failed_cache_observation.valid());
-        assert!(failed_cache_observation.attested_for(&late_failed_command.intent));
-        late_run.tools.truncate(10);
-        let mut late_rejected_command = late_failed_command.clone();
-        late_run.tools.push(late_failed_command);
-        late_rejected_command.intent.id = Uuid::now_v7();
-        let rejected_digest = late_rejected_command.intent.digest();
-        let rejected_observation = late_rejected_command
-            .observation
-            .as_mut()
-            .expect("attested Command result");
-        rejected_observation.intent = late_rejected_command.intent.clone();
-        let Some(crate::tools::Attestation::Guard(receipt)) = &mut rejected_observation.attestation
-        else {
-            panic!("Guard receipt");
-        };
-        receipt.intent_digest = rejected_digest;
-        rejected_observation.cache_update = CacheUpdate::Rejected;
-        assert!(rejected_observation.valid());
-        assert!(rejected_observation.attested_for(&late_rejected_command.intent));
-        late_run.tools.push(late_rejected_command);
-        let uncertain_intent = EffectIntent {
-            id: Uuid::now_v7(),
-            run_id,
-            agent_run_id: late_run.agents[0].id,
-            policy_digest: [1; 32],
-            enforcement_digest: [2; 32],
-            workspace_device: 1,
-            workspace_inode: 2,
-            call: ToolCall::Command {
-                program: "cargo".into(),
-                args: vec!["test".into()],
-                cwd: ".".into(),
-            },
-            limits: ToolLimits::default(),
-            expires_at_ms: 1,
-            use_count: 1,
-        };
-        let uncertain_observation = crate::tools::ToolObservation {
-            attestation: Some(crate::tools::Attestation::Guard(GuardReceipt {
-                contract_version: 1,
-                intent_digest: uncertain_intent.digest(),
-                enforcement_digest: uncertain_intent.enforcement_digest,
-                limits: uncertain_intent.limits.clone(),
-            })),
-            intent: uncertain_intent.clone(),
-            disposition: ToolDisposition::Uncertain,
-            output: run.tools[0]
-                .observation
-                .as_ref()
-                .expect("valid Command result")
-                .output
-                .clone(),
-            cache_update: CacheUpdate::Uncertain,
-        };
-        assert!(uncertain_observation.valid());
-        assert!(uncertain_observation.attested_for(&uncertain_intent));
-        late_run.tools.push(ToolView {
-            intent: uncertain_intent.clone(),
-            observation: Some(uncertain_observation),
-            review_call_index: None,
-            finished_sequence: None,
-        });
-        assert_eq!(late_run.tools.len(), 13);
-        late_run.agents[0].summary = Some("\u{1}".repeat(2_048));
-        let mut late_view = view.clone();
-        late_view.runs = vec![late_run.clone()];
-        let late_report = goal_report(&late_view, &late_run, &goal);
-        let late_report_bytes = serde_json::to_vec(&late_report).unwrap();
-        assert!(
-            late_report_bytes.len() > crate::session::MAX_GOAL_REPORT_BYTES * 3 / 4,
-            "late cache outcomes exercise a near-capacity report"
-        );
-        assert!(late_report_bytes.len() <= crate::session::MAX_GOAL_REPORT_BYTES);
-        assert!(late_report.summary.len() <= 2_048);
-        assert!(
-            late_report.summary.len() < 1_800,
-            "JSON-escaped controls consume serialized report capacity"
-        );
-        assert!(
-            late_report
-                .summary
-                .chars()
-                .all(|character| character == '\u{1}')
-        );
-        late_report
-            .validate()
-            .expect("bounded report remains valid");
-        assert!(late_report.unresolved.iter().any(|item| {
-            item.contains("build cache update was rejected")
-                && item.contains("previous cache was kept")
-        }));
-        assert!(late_report.unresolved.iter().any(|item| {
-            item.contains("build cache update failed") && item.contains("previous cache was kept")
-        }));
-        assert!(late_report.unresolved.iter().any(|item| {
-            item.contains("uncertain build cache publication") && item.contains("Session history")
-        }));
-        assert!(
-            late_report
-                .unresolved
-                .iter()
-                .any(|item| item == GOAL_REPORT_OMISSION),
-            "omitted lower-priority facts remain visible: {late_report:?}"
-        );
-        assert!(
-            late_report
-                .unresolved
-                .iter()
-                .any(|item| { item.contains("primary summary was shortened") })
-        );
-
-        let mut byte_run = run.clone();
-        byte_run.tools.truncate(13);
-        let failed_intent = EffectIntent {
-            id: Uuid::now_v7(),
-            run_id,
-            agent_run_id: byte_run.agents[0].id,
-            policy_digest: [1; 32],
-            enforcement_digest: [2; 32],
-            workspace_device: 1,
-            workspace_inode: 2,
-            call: ToolCall::Read {
-                path: "src/report-failure".into(),
-                offset: 0,
-                limit: 4096,
-            },
-            limits: ToolLimits::default(),
-            expires_at_ms: 1,
-            use_count: 1,
-        };
-        let failed_observation = crate::tools::ToolObservation {
-            intent: failed_intent.clone(),
-            disposition: ToolDisposition::Denied,
-            output: String::new(),
-            attestation: None,
-            cache_update: CacheUpdate::NotApplicable,
-        };
-        assert!(failed_observation.valid());
-        assert!(!failed_observation.attested_for(&failed_intent));
-        assert!(!failed_observation.stops_run());
-        byte_run.tools.push(ToolView {
-            observation: Some(failed_observation),
-            intent: failed_intent,
-            review_call_index: None,
-            finished_sequence: None,
-        });
-        assert_eq!(byte_run.tools.len(), 14);
-        byte_run.agents[0].summary = Some("x".repeat(1_800));
-        let mut byte_view = view.clone();
-        byte_view.runs = vec![byte_run.clone()];
-        let byte_report = goal_report(&byte_view, &byte_run, &goal);
-        byte_report
-            .validate()
-            .expect("byte-boundary Goal report remains valid");
-        assert!(byte_report.unresolved.len() < 32);
-        assert!(byte_report.unresolved.iter().any(|item| {
-            item.contains("read src/report-failure failed")
-                && item.contains("effect was not recorded as successful")
-        }));
-        assert!(
-            byte_report
-                .unresolved
-                .iter()
-                .any(|item| item == GOAL_REPORT_OMISSION)
-        );
-        assert!(byte_report.evidence.len() < 13);
-        assert!(
-            byte_report
-                .evidence
-                .iter()
-                .any(|item| item == "Command cargo exited 0.")
-        );
-        assert!(
-            serde_json::to_vec(&byte_report).unwrap().len()
-                <= crate::session::MAX_GOAL_REPORT_BYTES
-        );
-
-        let mut saturation_runs = Vec::with_capacity(3);
-        let mut saturation_run_ids = Vec::with_capacity(3);
-        for (run_index, denied_count) in [10, 11, 12].into_iter().enumerate() {
-            let run_id = RunId::new();
-            let agent_run_id = AgentRunId::new();
-            saturation_run_ids.push(run_id);
-            let mut tools = Vec::with_capacity(denied_count + usize::from(run_index == 0));
-            if run_index == 0 {
-                let mut command = run.tools[0].clone();
-                command.intent.id = Uuid::now_v7();
-                command.intent.run_id = run_id;
-                command.intent.agent_run_id = agent_run_id;
-                let digest = command.intent.digest();
-                let observation = command.observation.as_mut().expect("successful Command");
-                observation.intent = command.intent.clone();
-                let Some(crate::tools::Attestation::Guard(receipt)) = &mut observation.attestation
-                else {
-                    panic!("Command Guard receipt");
-                };
-                receipt.intent_digest = digest;
-                observation.cache_update = CacheUpdate::NotApplicable;
-                assert!(observation.valid());
-                assert!(observation.attested_for(&command.intent));
-                tools.push(command);
-            }
-            for failure_index in 0..denied_count {
-                let intent = EffectIntent {
-                    id: Uuid::now_v7(),
-                    run_id,
-                    agent_run_id,
-                    policy_digest: [1; 32],
-                    enforcement_digest: [2; 32],
-                    workspace_device: 1,
-                    workspace_inode: 2,
-                    call: ToolCall::Read {
-                        path: format!("src/{run_index}-{failure_index}"),
-                        offset: 0,
-                        limit: 4096,
-                    },
-                    limits: ToolLimits::default(),
-                    expires_at_ms: 1,
-                    use_count: 1,
-                };
-                let observation = crate::tools::ToolObservation {
-                    intent: intent.clone(),
-                    disposition: ToolDisposition::Denied,
-                    output: String::new(),
-                    attestation: None,
-                    cache_update: CacheUpdate::NotApplicable,
-                };
-                assert!(observation.valid());
-                assert!(!observation.attested_for(&intent));
-                tools.push(ToolView {
-                    observation: Some(observation),
-                    intent,
-                    review_call_index: None,
-                    finished_sequence: None,
-                });
-            }
-            let mut saturation_run = run.clone();
-            saturation_run.id = run_id;
-            saturation_run.agents[0].id = agent_run_id;
-            saturation_run.tools = tools;
-            saturation_runs.push(saturation_run);
-        }
-        let mut saturation_goal = goal.clone();
-        saturation_goal.run_ids = saturation_run_ids;
-        let mut saturation_view = view.clone();
-        saturation_view.runs = saturation_runs;
-        assert_eq!(
-            saturation_view
-                .runs
-                .iter()
-                .flat_map(|task_run| &task_run.tools)
-                .filter(|tool| {
-                    tool.observation.as_ref().is_some_and(|observation| {
-                        observation.disposition == ToolDisposition::Denied
-                    })
-                })
-                .count(),
-            33
-        );
-        let saturation_report =
-            goal_report(&saturation_view, &saturation_view.runs[0], &saturation_goal);
-        saturation_report
-            .validate()
-            .expect("item-boundary Goal report remains valid");
-        assert_eq!(saturation_report.unresolved.len(), 32);
-        assert!(
-            saturation_report
-                .unresolved
-                .iter()
-                .any(|item| item == GOAL_REPORT_OMISSION)
-        );
-        assert!(
-            saturation_report
-                .evidence
-                .iter()
-                .any(|item| item == "Command cargo exited 0.")
-        );
-        assert!(
-            serde_json::to_vec(&saturation_report).unwrap().len()
-                <= crate::session::MAX_GOAL_REPORT_BYTES
-        );
-
-        let mut timeout_intent = run.tools[0].intent.clone();
-        timeout_intent.id = Uuid::now_v7();
-        timeout_intent.limits.runtime_ms = 2_000;
-        timeout_intent.limits.cache_bytes = 0;
-        timeout_intent.limits.cache_candidate_bytes = 0;
-        timeout_intent.limits.cache_transfer_ms = 0;
-        let timeout_observation = crate::tools::ToolObservation {
-            intent: timeout_intent.clone(),
-            disposition: ToolDisposition::Limit,
-            output: crate::tools::types::command_timeout_limit_message(2_000, 1_000),
-            attestation: None,
-            cache_update: CacheUpdate::NotApplicable,
-        };
-        assert!(timeout_observation.valid());
-        let mut timeout_run = run.clone();
-        timeout_run.tools = vec![ToolView {
-            intent: timeout_intent,
-            observation: Some(timeout_observation),
-            review_call_index: None,
-            finished_sequence: None,
-        }];
-        let mut timeout_goal = goal.clone();
-        timeout_goal.resource_settings.default_command_timeout_ms = 1_000;
-        timeout_goal.resource_settings.max_command_timeout_ms = 1_000;
-        timeout_goal.plan_contract = Some(crate::session::GoalPlanContract {
-            mission: "Run the configured command within pinned limits".into(),
-            paths: Vec::new(),
-            commands: vec!["cargo".into()],
-            resource_class: crate::tools::ToolResourceClass::Default,
-            command_timeout_ms: Some(2_000),
-            skills: Vec::new(),
-            mcp_tools: Vec::new(),
-            success_criterion: crate::session::GoalSuccessCriterion::WorkspaceFileContent {
-                path: "src/main.rs".into(),
-                content: "expected".into(),
-            },
-            budget: GoalBudget::default(),
-        });
-        let mut timeout_view = view.clone();
-        timeout_view.runs = vec![timeout_run.clone()];
-        timeout_view.goals = vec![timeout_goal.clone()];
-        let timeout_report = goal_report(&timeout_view, &timeout_run, &timeout_goal);
-        assert!(timeout_report.unresolved.iter().any(|item| {
-            item.contains("2000 ms")
-                && item.contains("pinned max 1000 ms")
-                && item.contains("Lower request or change /settings")
-        }));
-    }
 }
 
 #[cfg(all(test, unix))]
@@ -1492,158 +733,6 @@ mod goal_workspace_lease_tests {
     }
 }
 
-#[derive(Clone, Copy)]
-enum GoalReportSection {
-    Changes,
-    Evidence,
-    Unresolved,
-}
-
-const GOAL_REPORT_OMISSION: &str =
-    "Some lower-priority Goal facts were omitted to fit the report limits.";
-
-fn push_goal_report_item(
-    report: &mut GoalReport,
-    section: GoalReportSection,
-    text: &str,
-    omitted_facts: &mut bool,
-) {
-    let count = match section {
-        GoalReportSection::Changes => report.changes.len(),
-        GoalReportSection::Evidence => report.evidence.len(),
-        GoalReportSection::Unresolved => report.unresolved.len(),
-    };
-    if count >= 32 {
-        *omitted_facts = true;
-        return;
-    }
-    let item = truncate_utf8(text, 512).to_owned();
-    match section {
-        GoalReportSection::Changes => report.changes.push(item),
-        GoalReportSection::Evidence => report.evidence.push(item),
-        GoalReportSection::Unresolved => report.unresolved.push(item),
-    }
-    if serde_json::to_vec(report).map_or(true, |bytes| {
-        bytes.len() > crate::session::MAX_GOAL_REPORT_BYTES
-    }) {
-        match section {
-            GoalReportSection::Changes => report.changes.pop(),
-            GoalReportSection::Evidence => report.evidence.pop(),
-            GoalReportSection::Unresolved => report.unresolved.pop(),
-        };
-        *omitted_facts = true;
-    }
-}
-
-fn append_goal_report_omission(report: &mut GoalReport, protected_unresolved_count: usize) {
-    while !goal_report_fits_with_omission(report) {
-        if report.unresolved.len() >= 32 && report.unresolved.len() > protected_unresolved_count {
-            report.unresolved.pop();
-            continue;
-        }
-        if report.evidence.pop().is_some() || report.changes.pop().is_some() {
-            continue;
-        }
-        if report.unresolved.len() > protected_unresolved_count {
-            report.unresolved.pop();
-            continue;
-        }
-        if !report.summary.is_empty() {
-            let summary_bytes = report.summary.len().saturating_sub(128);
-            report.summary = truncate_utf8(&report.summary, summary_bytes).to_owned();
-            continue;
-        }
-        unreachable!("priority Goal report facts and omission notice fit their bounds");
-    }
-    report.unresolved.push(GOAL_REPORT_OMISSION.to_owned());
-}
-
-fn goal_report_fits_with_omission(report: &mut GoalReport) -> bool {
-    if report.unresolved.len() >= 32 {
-        return false;
-    }
-    report.unresolved.push(GOAL_REPORT_OMISSION.to_owned());
-    let fits = serde_json::to_vec(report)
-        .is_ok_and(|bytes| bytes.len() <= crate::session::MAX_GOAL_REPORT_BYTES);
-    report.unresolved.pop();
-    fits
-}
-
-fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
-    if text.len() <= max_bytes {
-        return text;
-    }
-    let mut end = max_bytes;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
-}
-
-fn goal_report_call_label(call: &crate::tools::ToolCall) -> String {
-    match call {
-        crate::tools::ToolCall::Read { path, .. }
-        | crate::tools::ToolCall::List { path }
-        | crate::tools::ToolCall::Search { path, .. }
-        | crate::tools::ToolCall::Mkdir { path }
-        | crate::tools::ToolCall::Write { path, .. }
-        | crate::tools::ToolCall::Edit { path, .. } => format!("{} {path}", call.label()),
-        crate::tools::ToolCall::Command { program, .. } => format!("Command {program}"),
-        crate::tools::ToolCall::ApplyChangeset { .. } => "Command changeset publication".into(),
-        crate::tools::ToolCall::Skill { name, .. } => format!("Skill {name}"),
-        crate::tools::ToolCall::McpList { server } => format!("MCP catalog {server}"),
-        crate::tools::ToolCall::McpCall { server, tool, .. } => format!("MCP {server}.{tool}"),
-        crate::tools::ToolCall::GitStatus { path } => format!("Git status {path}"),
-        crate::tools::ToolCall::GitDiff { path, .. } => format!("Git diff {path}"),
-        crate::tools::ToolCall::GitLog { path, .. } => format!("Git log {path}"),
-    }
-}
-
-fn goal_report_evidence(call: &crate::tools::ToolCall, output: &str) -> String {
-    match call {
-        crate::tools::ToolCall::Command { program, .. } => {
-            serde_json::from_str::<crate::tools::types::CommandResult>(output)
-                .ok()
-                .filter(crate::tools::types::CommandResult::valid)
-                .map_or_else(
-                    || format!("Command {program} returned an attested result."),
-                    |result| {
-                        format!(
-                            "Command {program} exited {}.",
-                            result
-                                .exit_code
-                                .map_or_else(|| "without a code".into(), |code| code.to_string())
-                        )
-                    },
-                )
-        }
-        crate::tools::ToolCall::ApplyChangeset { changeset, .. } => {
-            format!(
-                "Guard attested publication of {} command file change(s).",
-                changeset.files.len()
-            )
-        }
-        crate::tools::ToolCall::Read { path, .. } => {
-            serde_json::from_str::<serde_json::Value>(output)
-                .ok()
-                .and_then(|value| {
-                    value
-                        .get("sha256")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned)
-                })
-                .map_or_else(
-                    || format!("Guard attested a read of {path}."),
-                    |digest| format!("Guard attested a read of {path} (SHA-256 {digest})."),
-                )
-        }
-        crate::tools::ToolCall::McpCall { server, tool, .. } => {
-            format!("Guard attested MCP call {server}.{tool}.")
-        }
-        _ => format!("Guard attested {}.", goal_report_call_label(call)),
-    }
-}
-
 /// `continuation` admits the next Run of a live autonomous Goal, whose history projects as interrupted.
 fn resolve_goal_admission(
     request: &RunRequest,
@@ -1693,9 +782,6 @@ fn resolve_goal_admission(
             is_new: false,
             resume,
             usage: goal.resume_usage(view),
-            uncertain_active_ms: goal.uncertain_active_ms,
-            success_criterion_satisfied: goal.success_criterion_satisfied,
-            success_state: goal.success_state.clone(),
         })
     } else {
         // A paused Goal does not block a new one; the Session lock serializes live Runs.
@@ -1716,9 +802,6 @@ fn resolve_goal_admission(
                 known_tokens: 0,
                 token_usage_unknown: false,
             },
-            uncertain_active_ms: 0,
-            success_criterion_satisfied: false,
-            success_state: crate::session::GoalSuccessState::NoContract,
         })
     }
 }
@@ -1822,10 +905,16 @@ impl Engine {
     async fn append_goal_lifecycle(
         &mut self,
         session_id: SessionId,
-        progress: Option<&ProgressPublisher>,
+        scope: Option<RunScope<'_>>,
         event: Event,
     ) -> Result<u64, EngineError> {
-        match append_observed(&self.store, progress, None, session_id, event.clone()).await {
+        let appended = match scope {
+            Some(scope) => append_scoped(&self.store, scope, None, session_id, event.clone()).await,
+            None => append_observed(&self.store, None, session_id, event.clone())
+                .await
+                .map(|committed| committed.sequence),
+        };
+        match appended {
             Ok(sequence) => Ok(sequence),
             // The Session lock is held, so a commit that lost its acknowledgment is the last Event.
             Err(error) => match self.store.load_session(session_id).await {
@@ -2044,9 +1133,268 @@ impl Engine {
         if cancellation.is_cancelled() {
             return Err(EngineError::CancelledBeforeStart);
         }
+
         let provider = Arc::clone(&self.provider);
         let identity = checked_identity(provider.as_ref())?;
-        self.validate_request(&request)?;
+        let previews = progress.as_ref().is_some_and(RunProgress::previews_enabled);
+        let finish_after_run = request.goal.finish_after_run;
+        let admitted = self
+            .admit_turn(&request, identity, continuation, previews, leases)
+            .await?;
+        let prepared = self.prepare_turn(&request, identity, &admitted)?;
+        let AdmittedTurn {
+            session_id,
+            workspace_identity,
+            mut session_lock,
+            _lineage_locks,
+            history: _,
+            goal,
+            objective,
+            budget,
+            provisional_workspace_lock,
+        } = admitted;
+        let PreparedTurn {
+            tools,
+            tool_context,
+            inputs,
+            images,
+            history,
+            summary,
+            config,
+            context_started,
+            context_ended,
+            provider_concurrency,
+        } = prepared;
+        if cancellation.is_cancelled() {
+            return Err(EngineError::CancelledBeforeStart);
+        }
+
+        if request.session_id.is_none() {
+            self.store
+                .append(
+                    session_id,
+                    Event::SessionStarted {
+                        title: request.title.unwrap_or_else(|| "New Session".into()),
+                        workspace_identity,
+                    },
+                )
+                .await?;
+            session_lock.keep();
+        }
+        let run_id = RunId::new();
+        let agent_run_id = AgentRunId::new();
+        if cancellation.is_cancelled() {
+            return Err(EngineError::CancelledBeforeStart);
+        }
+        let trace_provider = crate::telemetry::TraceProvider::from_profile(&config.provider);
+        let goal_trace = self
+            .telemetry
+            .begin_goal(session_id, goal.id, context_started);
+        // Reduces the open state that appends validate; the closed view would reject this Run's links.
+        let view = self
+            .store
+            .load_open_view(session_id)
+            .await?
+            .ok_or(EngineError::InvalidHistory)?;
+        let ledger = GoalLedger::new(view, goal.id);
+        let publisher = progress.map(|progress| ProgressPublisher::new(progress, run_id));
+        let scope = RunScope {
+            ledger: &ledger,
+            publisher: publisher.as_ref(),
+        };
+        if cancellation.is_cancelled() {
+            return Err(EngineError::CancelledBeforeStart);
+        }
+        Self::retain_goal_workspace(
+            leases,
+            goal.id,
+            workspace_identity,
+            provisional_workspace_lock,
+        );
+        if goal.is_new {
+            let sequence = self
+                .append_goal_lifecycle(
+                    session_id,
+                    Some(scope),
+                    Event::GoalStarted {
+                        goal_id: goal.id,
+                        objective: objective.clone(),
+                        workspace_identity,
+                        budget: goal.budget,
+                        phase: goal.phase,
+                        autonomous: goal.autonomous,
+                        resource_settings: goal.resource_settings,
+                    },
+                )
+                .await?;
+            goal_trace.event_committed(sequence, crate::telemetry::TraceEventKind::GoalStarted);
+        } else if goal.resume {
+            let sequence = self
+                .append_goal_lifecycle(
+                    session_id,
+                    Some(scope),
+                    Event::GoalResumed { goal_id: goal.id },
+                )
+                .await?;
+            goal_trace.event_committed(sequence, crate::telemetry::TraceEventKind::GoalResumed);
+        }
+        if cancellation.is_cancelled() {
+            return Err(EngineError::CancelledBeforeStart);
+        }
+        // A link is an admission acknowledgment: a lost acknowledgment may still have committed it.
+        let linked_sequence = self
+            .append_goal_lifecycle(
+                session_id,
+                Some(scope),
+                Event::GoalRunLinked {
+                    goal_id: goal.id,
+                    run_id,
+                    phase: goal.phase,
+                },
+            )
+            .await?;
+        goal_trace.event_committed(
+            linked_sequence,
+            crate::telemetry::TraceEventKind::GoalRunLinked,
+        );
+        if cancellation.is_cancelled() {
+            return Err(EngineError::CancelledBeforeStart);
+        }
+        let accepted_sequence = append_scoped(
+            &self.store,
+            scope,
+            None,
+            session_id,
+            Event::MessageAccepted {
+                run_id,
+                text: objective.clone(),
+                images: request.images,
+            },
+        )
+        .await?;
+        let started_sequence = append_scoped(
+            &self.store,
+            scope,
+            None,
+            session_id,
+            Event::RunStarted { run_id, config },
+        )
+        .await?;
+        let trace = self.telemetry.begin_goal_run(
+            session_id,
+            run_id,
+            trace_provider,
+            &goal_trace,
+            Some((context_started, context_ended)),
+        );
+        trace.event_committed(
+            accepted_sequence,
+            crate::telemetry::TraceEventKind::MessageAccepted,
+        );
+        trace.event_committed(
+            started_sequence,
+            crate::telemetry::TraceEventKind::RunStarted,
+        );
+        append_scoped(
+            &self.store,
+            scope,
+            Some(&trace),
+            session_id,
+            Event::AgentSpawned {
+                run_id,
+                agent_run_id,
+                role: AgentRole::Primary,
+                ordinal: 0,
+                objective: None,
+                grant: None,
+            },
+        )
+        .await?;
+
+        let role = if tool_context.is_some() {
+            PromptRole::Primary
+        } else {
+            PromptRole::ReadOnly
+        };
+        let provider_request = ProviderRequest {
+            session_id,
+            run_id,
+            agent_run_id,
+            phase: AgentPhase::RootPlan,
+            collaboration: request.policy,
+            model: identity.model.clone(),
+            max_output_tokens: identity.limits.max_output_tokens,
+            input: RunInput {
+                images,
+                goal_budget: Some(budget),
+                goal_plan_contract: goal.plan_contract.clone(),
+                workspace_guidance: inputs.instructions.map(|(_, snapshot)| snapshot.content),
+                includes: inputs
+                    .includes
+                    .into_iter()
+                    .map(|snapshot| snapshot.model_include())
+                    .collect(),
+                history,
+                context_summary: summary,
+                tools: tool_context,
+                ..RunInput::new(role, objective)
+            },
+        };
+        if let Some(steering) = &self.steering {
+            steering.begin_run();
+        }
+        // Boxed: the Run loop's future is large and would overflow a small caller stack.
+        Box::pin(
+            RunLoop::new(
+                &self.store,
+                Arc::clone(&self.provider),
+                RunIdentity {
+                    session_id,
+                    run_id,
+                    goal_id: goal.id,
+                    primary_id: agent_run_id,
+                },
+                RunControls {
+                    policy: request.policy,
+                    concurrency: provider_concurrency,
+                    goal_phase: goal.phase,
+                    cancellation,
+                    tools: tools.as_ref(),
+                    approvals: self.tool_approvals.as_ref(),
+                    steering: self.steering.clone(),
+                },
+                &ledger,
+                publisher.as_ref(),
+                &trace,
+            )
+            .execute(provider_request),
+        )
+        .await?;
+        self.settle_turn(
+            StartedRun {
+                session_id,
+                run_id,
+                goal: &goal,
+                finish_after_run,
+                workspace_identity,
+            },
+            leases,
+            trace,
+            goal_trace,
+        )
+        .await
+    }
+
+    /// Resolves the Goal and takes the Session, lineage and Workspace admissions a Run needs.
+    async fn admit_turn(
+        &mut self,
+        request: &RunRequest,
+        identity: &crate::provider::ProviderIdentity,
+        continuation: bool,
+        previews: bool,
+        leases: &WorkspaceLeases,
+    ) -> Result<AdmittedTurn, EngineError> {
+        self.validate_request(request)?;
         if self.tools.is_some() && identity.custom_provenance().is_some() {
             return Err(EngineError::InvalidRequest);
         }
@@ -2076,7 +1424,7 @@ impl Engine {
         if let Some(view) = &history {
             ensure_session_workspace(view, workspace_identity.0, workspace_identity.1)?;
         }
-        let goal = resolve_goal_admission(&request, history.as_ref(), continuation)?;
+        let goal = resolve_goal_admission(request, history.as_ref(), continuation)?;
         let objective = if request.objective.trim().is_empty() && request.goal.id.is_some() {
             goal.objective.clone()
         } else {
@@ -2091,13 +1439,13 @@ impl Engine {
             return Err(EngineError::GoalBudgetExhausted);
         }
         // Run start reserves the GoalStarted objective envelope, the MessageAccepted objective and image envelopes, the Goal lifecycle and the first action; each later action admits its own.
-        let previews = progress.as_ref().is_some_and(RunProgress::previews_enabled);
-        let event_slots =
-            13 + if previews {
-                crate::session::MAX_DISPLAY_CHUNKS
-            } else {
-                0
-            } + usize::from(request.session_id.is_none());
+        let first_action = Action::ProviderCall {
+            previews,
+            steering: self.steering.is_some(),
+        };
+        let event_slots = RUN_START_EVENTS
+            + first_action.max_events()
+            + usize::from(request.session_id.is_none());
         self.store.admit_run_start(session_id, event_slots).await?;
         let provisional_workspace_lock = if goal.phase == crate::session::GoalPhase::Implementation
             && self.tools.as_ref().is_some_and(|(config, _)| config.write)
@@ -2106,6 +1454,31 @@ impl Engine {
         } else {
             None
         };
+        Ok(AdmittedTurn {
+            session_id,
+            workspace_identity,
+            session_lock,
+            _lineage_locks,
+            history,
+            goal,
+            objective,
+            budget,
+            provisional_workspace_lock,
+        })
+    }
+
+    /// Admits the Tools, loads the pinned Workspace inputs and compiles the Run's context and config.
+    fn prepare_turn(
+        &self,
+        request: &RunRequest,
+        identity: &crate::provider::ProviderIdentity,
+        admitted: &AdmittedTurn,
+    ) -> Result<PreparedTurn, EngineError> {
+        let workspace_identity = admitted.workspace_identity;
+        let history = &admitted.history;
+        let goal = &admitted.goal;
+        let objective = &admitted.objective;
+        let budget = admitted.budget;
         if let Some(permissions) = &self.workspace_permissions {
             permissions.verify(&request.workspace)?;
         }
@@ -2167,7 +1540,7 @@ impl Engine {
         .ok_or(EngineError::ContextTooLarge)?;
         let context = CompiledContext::compile(
             history.as_ref(),
-            &objective,
+            objective,
             &request.images,
             &inputs,
             request.policy,
@@ -2219,214 +1592,35 @@ impl Engine {
             tool_policy: tools.as_ref().map(crate::tools::ToolRuntime::receipt),
         };
         config.validate().map_err(|_| EngineError::InvalidRequest)?;
+        Ok(PreparedTurn {
+            tools,
+            tool_context,
+            inputs,
+            images: context.images,
+            history: context.history,
+            summary: context.summary,
+            config,
+            context_started,
+            context_ended,
+            provider_concurrency,
+        })
+    }
 
-        if cancellation.is_cancelled() {
-            return Err(EngineError::CancelledBeforeStart);
-        }
-
-        if request.session_id.is_none() {
-            self.store
-                .append(
-                    session_id,
-                    Event::SessionStarted {
-                        title: request.title.unwrap_or_else(|| "New Session".into()),
-                        workspace_identity: (workspace_device, workspace_inode),
-                    },
-                )
-                .await?;
-            session_lock.keep();
-        }
-        let run_id = RunId::new();
-        let agent_run_id = AgentRunId::new();
-        if cancellation.is_cancelled() {
-            return Err(EngineError::CancelledBeforeStart);
-        }
-        let trace_provider = crate::telemetry::TraceProvider::from_profile(&config.provider);
-        let goal_trace = self
-            .telemetry
-            .begin_goal(session_id, goal.id, context_started);
-        let publisher = if let Some(progress) = progress {
-            // Reduces the open state that appends validate; the closed view would reject this Run's links.
-            let view = self
-                .store
-                .load_open_view(session_id)
-                .await?
-                .ok_or(EngineError::InvalidHistory)?;
-            Some(ProgressPublisher::new(view, progress, run_id))
-        } else {
-            None
-        };
-        if cancellation.is_cancelled() {
-            return Err(EngineError::CancelledBeforeStart);
-        }
-        Self::retain_goal_workspace(
-            leases,
-            goal.id,
+    /// Closes the Goal when the Run's outcome settles it and reports the committed Run.
+    async fn settle_turn(
+        &self,
+        started: StartedRun<'_>,
+        leases: &mut WorkspaceLeases,
+        trace: crate::telemetry::RunTrace,
+        goal_trace: crate::telemetry::GoalTrace,
+    ) -> Result<RunTurn, EngineError> {
+        let StartedRun {
+            session_id,
+            run_id,
+            goal,
+            finish_after_run,
             workspace_identity,
-            provisional_workspace_lock,
-        );
-        if goal.is_new {
-            let sequence = self
-                .append_goal_lifecycle(
-                    session_id,
-                    publisher.as_ref(),
-                    Event::GoalStarted {
-                        goal_id: goal.id,
-                        objective: objective.clone(),
-                        workspace_identity,
-                        budget: goal.budget,
-                        phase: goal.phase,
-                        autonomous: goal.autonomous,
-                        resource_settings: goal.resource_settings,
-                    },
-                )
-                .await?;
-            goal_trace.event_committed(sequence, crate::telemetry::TraceEventKind::GoalStarted);
-        } else if goal.resume {
-            let sequence = self
-                .append_goal_lifecycle(
-                    session_id,
-                    publisher.as_ref(),
-                    Event::GoalResumed { goal_id: goal.id },
-                )
-                .await?;
-            goal_trace.event_committed(sequence, crate::telemetry::TraceEventKind::GoalResumed);
-        }
-        if cancellation.is_cancelled() {
-            return Err(EngineError::CancelledBeforeStart);
-        }
-        // A link is an admission acknowledgment: a lost acknowledgment may still have committed it.
-        let linked_sequence = self
-            .append_goal_lifecycle(
-                session_id,
-                publisher.as_ref(),
-                Event::GoalRunLinked {
-                    goal_id: goal.id,
-                    run_id,
-                    phase: goal.phase,
-                },
-            )
-            .await?;
-        goal_trace.event_committed(
-            linked_sequence,
-            crate::telemetry::TraceEventKind::GoalRunLinked,
-        );
-        if cancellation.is_cancelled() {
-            return Err(EngineError::CancelledBeforeStart);
-        }
-        let accepted_sequence = append_observed(
-            &self.store,
-            publisher.as_ref(),
-            None,
-            session_id,
-            Event::MessageAccepted {
-                run_id,
-                text: objective.clone(),
-                images: request.images,
-            },
-        )
-        .await?;
-        let started_sequence = append_observed(
-            &self.store,
-            publisher.as_ref(),
-            None,
-            session_id,
-            Event::RunStarted { run_id, config },
-        )
-        .await?;
-        let trace = self.telemetry.begin_goal_run(
-            session_id,
-            run_id,
-            trace_provider,
-            &goal_trace,
-            Some((context_started, context_ended)),
-        );
-        trace.event_committed(
-            accepted_sequence,
-            crate::telemetry::TraceEventKind::MessageAccepted,
-        );
-        trace.event_committed(
-            started_sequence,
-            crate::telemetry::TraceEventKind::RunStarted,
-        );
-        append_observed(
-            &self.store,
-            publisher.as_ref(),
-            Some(&trace),
-            session_id,
-            Event::AgentSpawned {
-                run_id,
-                agent_run_id,
-                role: AgentRole::Primary,
-                ordinal: 0,
-                objective: None,
-                grant: None,
-            },
-        )
-        .await?;
-
-        let role = if tool_context.is_some() {
-            PromptRole::Primary
-        } else {
-            PromptRole::ReadOnly
-        };
-        let provider_request = ProviderRequest {
-            session_id,
-            run_id,
-            agent_run_id,
-            phase: AgentPhase::RootPlan,
-            collaboration: request.policy,
-            model: identity.model.clone(),
-            max_output_tokens: identity.limits.max_output_tokens,
-            input: RunInput {
-                images: context.images,
-                goal_budget: Some(budget),
-                goal_plan_contract: goal.plan_contract.clone(),
-                workspace_guidance: inputs.instructions.map(|(_, snapshot)| snapshot.content),
-                includes: inputs
-                    .includes
-                    .into_iter()
-                    .map(|snapshot| snapshot.model_include())
-                    .collect(),
-                history: context.history,
-                context_summary: context.summary,
-                tools: tool_context,
-                ..RunInput::new(role, objective)
-            },
-        };
-        if let Some(steering) = &self.steering {
-            steering.begin_run();
-        }
-        let goal_run_budget = Arc::new(GoalRunBudget::new(
-            &goal,
-            budget.max_provider_calls,
-            budget.max_tokens,
-        ));
-        RunLoop::new(
-            &self.store,
-            Arc::clone(&self.provider),
-            RunIdentity {
-                session_id,
-                run_id,
-                goal_id: goal.id,
-                primary_id: agent_run_id,
-            },
-            RunControls {
-                policy: request.policy,
-                concurrency: provider_concurrency,
-                goal_phase: goal.phase,
-                cancellation,
-                tools: tools.as_ref(),
-                approvals: self.tool_approvals.as_ref(),
-                goal_budget: Arc::clone(&goal_run_budget),
-                steering: self.steering.clone(),
-            },
-            publisher.as_ref(),
-            &trace,
-        )
-        .execute(provider_request)
-        .await?;
-        drop(publisher);
+        } = started;
         let view = self
             .store
             .load_view(session_id)
@@ -2451,10 +1645,9 @@ impl Engine {
                     None
                 }
             }
-            crate::session::RunStatus::Finished => request
-                .goal
-                .finish_after_run
-                .then_some(GoalStatus::Completed),
+            crate::session::RunStatus::Finished => {
+                finish_after_run.then_some(GoalStatus::Completed)
+            }
             crate::session::RunStatus::Failed => Some(GoalStatus::Failed),
             _ => None,
         };
@@ -2463,7 +1656,6 @@ impl Engine {
             let report = goal_report(&view, &run, goal_view);
             append_observed(
                 &self.store,
-                None,
                 Some(&trace),
                 session_id,
                 Event::GoalFinished {

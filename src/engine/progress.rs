@@ -1,4 +1,5 @@
 use super::EngineError;
+use super::ledger::GoalLedger;
 use crate::provider::PreviewText;
 use crate::session::{
     AgentRunId, Event, EventEnvelope, GoalView, RunId, RunView, SessionId, SessionView,
@@ -6,7 +7,6 @@ use crate::session::{
 use crate::store::Store;
 use crate::telemetry::{RunTrace, TraceEventKind};
 use std::sync::Arc;
-use std::sync::Mutex;
 use tokio::sync::watch;
 
 /// Committed Run snapshots and separate temporary display and Tool capacity hints.
@@ -128,13 +128,23 @@ pub(super) struct PreviewContext {
     pub(super) limit_recorded: bool,
 }
 
+/// The Run's committed Events: the ledger reads them, the optional publisher projects them.
+#[derive(Clone, Copy)]
+pub(super) struct RunScope<'a> {
+    pub(super) ledger: &'a GoalLedger,
+    pub(super) publisher: Option<&'a ProgressPublisher>,
+}
+
 pub(super) struct ProgressPublisher {
-    view: Mutex<SessionView>,
     progress: RunProgress,
     run_id: RunId,
 }
 
 impl ProgressPublisher {
+    pub(super) fn new(progress: RunProgress, run_id: RunId) -> Self {
+        Self { progress, run_id }
+    }
+
     pub(super) fn previews_enabled(&self) -> bool {
         self.progress.previews_enabled()
     }
@@ -145,46 +155,45 @@ impl ProgressPublisher {
 
     pub(super) fn preview_context(
         &self,
+        ledger: &GoalLedger,
         primary: AgentRunId,
     ) -> Result<Option<PreviewContext>, EngineError> {
-        if !self.progress.previews_enabled {
+        if !self.previews_enabled() {
             return Ok(None);
         }
-        let view = self
-            .view
-            .lock()
-            .map_err(|_| EngineError::CoordinatorFailed)?;
-        let run = view
-            .runs
-            .last()
-            .filter(|run| run.id == self.run_id)
-            .ok_or(EngineError::CoordinatorFailed)?;
-        let agent = run
-            .agents
-            .first()
-            .filter(|agent| agent.id == primary)
-            .ok_or(EngineError::CoordinatorFailed)?;
-        let mut items = std::collections::HashSet::new();
-        let commentary_bytes = run
-            .display
-            .iter()
-            .filter(|chunk| chunk.category == crate::session::DisplayCategory::Commentary)
-            .map(|chunk| {
-                items.insert((chunk.call_index, chunk.item));
-                chunk.text.len()
-            })
-            .sum();
-        Ok(Some(PreviewContext {
-            call_index: u32::try_from(agent.provider_calls.len())
-                .map_err(|_| EngineError::CoordinatorFailed)?,
-            chunks: run.display.len(),
-            commentary_bytes,
-            commentary_items: items.len(),
-            limit_recorded: run
+        ledger.view(|view| {
+            let run = view
+                .runs
+                .last()
+                .filter(|run| run.id == self.run_id)
+                .ok_or(EngineError::CoordinatorFailed)?;
+            let agent = run
+                .agents
+                .first()
+                .filter(|agent| agent.id == primary)
+                .ok_or(EngineError::CoordinatorFailed)?;
+            let mut items = std::collections::HashSet::new();
+            let commentary_bytes = run
                 .display
                 .iter()
-                .any(|chunk| chunk.category == crate::session::DisplayCategory::Limit),
-        }))
+                .filter(|chunk| chunk.category == crate::session::DisplayCategory::Commentary)
+                .map(|chunk| {
+                    items.insert((chunk.call_index, chunk.item));
+                    chunk.text.len()
+                })
+                .sum();
+            Ok(Some(PreviewContext {
+                call_index: u32::try_from(agent.provider_calls.len())
+                    .map_err(|_| EngineError::CoordinatorFailed)?,
+                chunks: run.display.len(),
+                commentary_bytes,
+                commentary_items: items.len(),
+                limit_recorded: run
+                    .display
+                    .iter()
+                    .any(|chunk| chunk.category == crate::session::DisplayCategory::Limit),
+            }))
+        })?
     }
 
     pub(super) fn publish_preview(
@@ -202,50 +211,31 @@ impl ProgressPublisher {
                 text,
             }));
     }
-    pub(super) fn new(view: SessionView, progress: RunProgress, run_id: RunId) -> Self {
-        Self {
-            view: Mutex::new(view),
-            progress,
-            run_id,
-        }
-    }
 
-    fn committed(&self, envelope: &EventEnvelope) -> Result<(), EngineError> {
-        let update = {
-            let mut view = self
-                .view
-                .lock()
-                .map_err(|_| EngineError::CoordinatorFailed)?;
-            view.apply_committed(envelope)
-                .map_err(|_| EngineError::InvalidHistory)?;
-            view.runs
-                .last()
-                .filter(|run| run.id == self.run_id)
-                .cloned()
-                .map(|run| RunUpdate {
-                    sequence: envelope.sequence,
-                    goal: view
-                        .goals
-                        .iter()
-                        .find(|goal| goal.run_ids.contains(&self.run_id))
-                        .cloned(),
-                    run,
-                })
-        };
-        if let Some(update) = update {
-            self.progress.publish(update);
-        }
-        Ok(())
+    fn project(&self, view: &SessionView, sequence: u64) -> Option<RunUpdate> {
+        view.runs
+            .last()
+            .filter(|run| run.id == self.run_id)
+            .cloned()
+            .map(|run| RunUpdate {
+                sequence,
+                goal: view
+                    .goals
+                    .iter()
+                    .find(|goal| goal.run_ids.contains(&self.run_id))
+                    .cloned(),
+                run,
+            })
     }
 }
 
+/// Appends an Event the ledger does not track: lifecycle outside a Run and closing receipts.
 pub(super) async fn append_observed(
     store: &Store,
-    progress: Option<&ProgressPublisher>,
     trace: Option<&RunTrace>,
     session_id: SessionId,
     event: Event,
-) -> Result<u64, EngineError> {
+) -> Result<EventEnvelope, EngineError> {
     let kind = match &event {
         Event::GoalStarted { .. } => Some(TraceEventKind::GoalStarted),
         Event::GoalRunLinked { .. } => Some(TraceEventKind::GoalRunLinked),
@@ -281,8 +271,25 @@ pub(super) async fn append_observed(
     if let (Some(trace), Some(kind)) = (trace, kind) {
         trace.event_committed(committed.sequence, kind);
     }
-    if let Some(progress) = progress {
-        progress.committed(&committed)?;
+    Ok(committed)
+}
+
+/// Appends a Run's Event and feeds it to the ledger before any projection sees it.
+pub(super) async fn append_scoped(
+    store: &Store,
+    scope: RunScope<'_>,
+    trace: Option<&RunTrace>,
+    session_id: SessionId,
+    event: Event,
+) -> Result<u64, EngineError> {
+    let committed = append_observed(store, trace, session_id, event).await?;
+    let update = scope.ledger.committed(&committed, |view| {
+        scope
+            .publisher
+            .and_then(|publisher| publisher.project(view, committed.sequence))
+    })?;
+    if let (Some(update), Some(publisher)) = (update, scope.publisher) {
+        publisher.progress.publish(update);
     }
     Ok(committed.sequence)
 }
