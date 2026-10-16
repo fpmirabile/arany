@@ -146,6 +146,10 @@ pub(crate) fn tool_detail_text(tool: &crate::session::ToolView) -> String {
 }
 
 pub(crate) fn display_answer(run: &RunView) -> Option<String> {
+    Some(display_answer_chunks(run)?.collect())
+}
+
+pub(crate) fn display_answer_chunks(run: &RunView) -> Option<impl Iterator<Item = &str>> {
     let call = run
         .display
         .iter()
@@ -158,19 +162,22 @@ pub(crate) fn display_answer(run: &RunView) -> Option<String> {
     Some(
         run.display
             .iter()
-            .filter(|chunk| {
+            .filter(move |chunk| {
                 chunk.call_index == call
                     && chunk.category == crate::session::DisplayCategory::Answer
             })
-            .map(|chunk| chunk.text.as_str())
-            .collect(),
+            .map(|chunk| chunk.text.as_str()),
     )
 }
 
-pub(crate) fn display_call_visible(run: &RunView, call: u8) -> bool {
+pub(crate) fn display_call_visible(run: &RunView, call: u32) -> bool {
     run.agents
         .first()
-        .and_then(|agent| agent.provider_calls.get(usize::from(call)))
+        .and_then(|agent| {
+            usize::try_from(call)
+                .ok()
+                .and_then(|index| agent.provider_calls.get(index))
+        })
         .is_none_or(|record| {
             matches!(
                 record.disposition,
@@ -185,8 +192,8 @@ pub(crate) fn display_call_visible(run: &RunView, call: u8) -> bool {
         })
 }
 
-pub(crate) fn display_commentary(run: &RunView) -> Vec<(u8, u8, String)> {
-    let mut items: Vec<(u8, u8, String)> = Vec::new();
+pub(crate) fn display_commentary(run: &RunView) -> Vec<(u32, u8, String)> {
+    let mut items: Vec<(u32, u8, String)> = Vec::new();
     for chunk in &run.display {
         if chunk.category != crate::session::DisplayCategory::Commentary
             || !display_call_visible(run, chunk.call_index)
@@ -525,7 +532,9 @@ pub fn goal_status(view: &SessionView) -> String {
         goal.run_ids.len(),
         budget.max_runs,
         goal.provider_calls,
-        budget.max_provider_calls,
+        budget
+            .max_provider_calls
+            .map_or_else(|| "unlimited".to_owned(), |limit| limit.to_string()),
         goal.known_tokens,
         budget
             .max_tokens
@@ -536,7 +545,9 @@ pub fn goal_status(view: &SessionView) -> String {
             ""
         },
         goal_clock(goal.active_ms),
-        goal_clock(budget.max_active_ms),
+        budget
+            .max_active_ms
+            .map_or_else(|| "unlimited".to_owned(), goal_clock),
     );
     if goal.status == crate::session::GoalStatus::Interrupted {
         text.push_str(if goal.admits_resume(view) {
@@ -680,6 +691,7 @@ mod exec_jsonl_tests {
             budget: GoalBudget::default(),
             phase: GoalPhase::Implementation,
             autonomous: false,
+            resource_settings: crate::tools::ToolResourceSettings::default(),
         }
     }
 
@@ -777,6 +789,8 @@ mod exec_jsonl_tests {
             accepted_sequence: 8,
             finished_sequence: Some(8),
             tools: Vec::new(),
+            tool_compaction_summary: None,
+            tool_compaction_covered_count: 0,
             display: Vec::new(),
         };
 
@@ -874,7 +888,7 @@ pub(crate) fn image_message_lines(
         .collect()
 }
 
-fn image_description(image: &crate::provider::ImageAttachment, index: usize) -> String {
+pub(crate) fn image_description(image: &crate::provider::ImageAttachment, index: usize) -> String {
     let (width, height) = image.dimensions();
     format!(
         "Image {}: PNG {width}x{height}, {:.1} KB",
@@ -912,6 +926,19 @@ pub fn escape_terminal(value: &str) -> String {
         }
     }
     safe
+}
+
+pub(crate) fn escaped_terminal_bytes(value: &str) -> usize {
+    value
+        .chars()
+        .map(|character| {
+            if unsafe_display_character(character) {
+                character.escape_unicode().count().max(8)
+            } else {
+                character.len_utf8()
+            }
+        })
+        .sum()
 }
 
 pub(crate) fn escaped_terminal_width(value: &str) -> usize {
@@ -964,7 +991,7 @@ pub(crate) fn session_access_label(defaults: &crate::session::SessionDefaults) -
 
 #[cfg(test)]
 mod tests {
-    use super::user_message_lines;
+    use super::{escape_terminal, escaped_terminal_bytes, user_message_lines};
     use unicode_width::UnicodeWidthStr;
 
     #[test]
@@ -983,6 +1010,12 @@ mod tests {
         );
         assert!(!lines.join("\n").contains('\u{1b}'));
         assert_eq!(user_message_lines("你好", 5), ["You:", "  你…"]);
+    }
+
+    #[test]
+    fn escaped_terminal_byte_count_matches_safe_text_without_materializing_it() {
+        let text = "a\u{001b}\u{202e}é";
+        assert_eq!(escaped_terminal_bytes(text), escape_terminal(text).len());
     }
 }
 
@@ -1005,6 +1038,7 @@ mod goal_status_tests {
                 budget: GoalBudget::default(),
                 phase: GoalPhase::Implementation,
                 autonomous,
+                resource_settings: crate::tools::ToolResourceSettings::default(),
             },
         ]
         .into_iter()
@@ -1090,7 +1124,10 @@ mod goal_status_tests {
     fn goal_status_shows_out_of_budget_instead_of_a_resume_hint() {
         let mut view = session_with_goal(true);
         view.goals[0].status = GoalStatus::Interrupted;
-        view.goals[0].provider_calls = view.goals[0].effective_budget().max_provider_calls;
+        view.goals[0].provider_calls = view.goals[0]
+            .effective_budget()
+            .max_provider_calls
+            .unwrap_or(0);
         let exhausted = goal_status(&view);
         assert!(exhausted.ends_with(" · out of budget"), "{exhausted}");
         assert!(!exhausted.contains("/goal resume"), "{exhausted}");
@@ -1106,7 +1143,7 @@ mod goal_status_tests {
     }
 
     #[test]
-    fn goal_status_hint_matches_resume_admission_for_unaccepted_links_and_reservations() {
+    fn goal_status_hint_matches_resume_admission_for_unaccepted_links_and_spent_time() {
         // A trailing GoalRunLinked without its accepted Run is not a Run, so the hint still offers resume.
         let mut view = session_with_goal(true);
         view.goals[0].status = GoalStatus::Interrupted;
@@ -1118,12 +1155,22 @@ mod goal_status_tests {
             "{linked}"
         );
 
-        // An unsettled active-time reservation resume would settle as spent is counted, so no Run is admitted.
         let mut view = session_with_goal(true);
         view.goals[0].status = GoalStatus::Interrupted;
-        let limit = view.goals[0].effective_budget().max_active_ms;
+        view.goals[0].active_ms = view.goals[0].effective_budget().max_active_ms.unwrap_or(0);
+        let spent = goal_status(&view);
+        assert!(spent.ends_with(" · out of budget"), "{spent}");
+
+        // An unsettled active-time reservation that resume would settle as spent is counted.
+        let mut view = session_with_goal(true);
+        view.goals[0].status = GoalStatus::Interrupted;
+        let limit = view.goals[0]
+            .effective_budget()
+            .max_active_ms
+            .expect("finite active limit");
         view.goals[0].active_ms = limit - 1;
-        view.goals[0].active_time_reservation = Some((crate::session::RunId::new(), 1));
+        view.goals[0].reserved_active_run = Some(crate::session::RunId::new());
+        view.goals[0].reserved_active_ms = Some(1);
         let reserved = goal_status(&view);
         assert!(reserved.ends_with(" · out of budget"), "{reserved}");
     }

@@ -193,7 +193,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
         return Err(ToolError::ProtectionUnavailable);
     }
-    let mut bytes = b"arany-macos-guard-v13:shared-fifo-capacity;durable-observed-attachment;boot-bound-locked-root-recovery;persisted-supervisor-before-task;image-inode-device-mount-ownership;no-buffered-go-before-ready;typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;metadata-only-directory-ancestors;workspace-call-write;guard-read-only;file-cpu-default-unblocked-immutable;supervised-resources;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;strict-bounded-no-follow-command-changeset-after-coalition-emptiness-before-detach;bounded-go-receipt;versioned-exact-ro-runtime-and-cache-grants;mount-table-no-descendant-under-selected-physical-runtime-before-seatbelt-and-before-go".to_vec();
+    let mut bytes = b"arany-macos-guard-v14:shared-fifo-capacity;durable-observed-attachment;boot-bound-locked-root-recovery;persisted-supervisor-before-task;image-inode-device-mount-ownership;no-buffered-go-before-ready;typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;metadata-only-directory-ancestors;workspace-call-write;guard-read-only;file-cpu-default-unblocked-immutable;supervised-resources;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;strict-bounded-no-follow-command-changeset-after-coalition-emptiness-before-detach;bounded-go-receipt;versioned-exact-ro-runtime-and-cache-grants;admitted-cache-volume-grant;mount-table-no-descendant-under-selected-physical-runtime-before-seatbelt-and-before-go".to_vec();
     bytes.extend_from_slice(profile(PROFILE, FILE_DENIED_SYSCALLS).as_bytes());
     bytes.extend_from_slice(profile(COMMAND_PROFILE, COMMAND_DENIED_SYSCALLS).as_bytes());
     bytes.extend_from_slice(b"native-commands-mcp:checked-private-cwd;fixed-capacity-nosuid-project-scratch;fresh-selected-snapshot;read-only-pinned-runtime;bounded-positive-root-owned-non-setid-unentitled-system-exec;stamp-bound-process-signature-verdicts;admission-catalogue-bound-to-enforcement;per-worker-pinned-system-directories-no-follow-metadata-revalidation;exact-literal-union-profile;dynamic-coalition-persona-entitlement-fork-denial;null-bootstrap-registered-ports;child-only-signals;supervised-cpu;physical-footprint-memory");
@@ -343,7 +343,7 @@ fn command_root(task: &Task) -> Result<PathBuf, ToolError> {
     {
         return Err(ToolError::ChangedInput);
     }
-    storage::verify_storage(&root)?;
+    storage::verify_storage(&root, &task.intent.limits)?;
     Ok(root)
 }
 
@@ -428,7 +428,12 @@ fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<Pat
         }
     }
     let mut profile = profile(COMMAND_PROFILE, COMMAND_DENIED_SYSCALLS);
-    for name in ["workspace", "scratch"] {
+    let grants = if task.intent.limits.cache_bytes > 0 {
+        &["workspace", "scratch", "cache"][..]
+    } else {
+        &["workspace", "scratch"][..]
+    };
+    for name in grants {
         let path = root.join(name);
         ancestors(&mut profile, &path)?;
         profile.push_str(&format!(
@@ -810,7 +815,9 @@ impl Task {
     fn into_runtime(self) -> (ToolRuntime, EffectIntent, Option<super::BuildCacheTransfer>) {
         let cache = self.cache;
         let runtime = ToolRuntime {
+            context_limit_bytes: crate::tools::types::MAX_TOOL_CONTEXT_BYTES,
             queue_progress: None,
+            active_action_gate: None,
             cache_state: None,
             config: self.config,
             workspace: self.workspace,

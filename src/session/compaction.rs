@@ -2,6 +2,7 @@ use super::lineage::PrefixHasher;
 use super::{CompactionStatus, Event, EventEnvelope, ReplayError, RunStatus, SessionView};
 use crate::provider::{CompactionItem, HistoryTurn, UnansweredStatus};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 
 pub(crate) const MAX_COMPACTION_INPUT_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_COMPACTION_TURNS: usize = 256;
@@ -12,8 +13,6 @@ pub(crate) const AUTO_COMPACTION_HISTORY_BYTES: usize = MAX_COMPACTION_INPUT_BYT
         + super::MAX_ASSISTANT_MESSAGE_BYTES
         + 64
         + crate::provider::MAX_MESSAGE_IMAGES * crate::provider::MAX_IMAGE_METADATA_BYTES);
-pub(crate) const AUTO_TOOL_COMPACTION_HISTORY_BYTES: usize =
-    AUTO_COMPACTION_HISTORY_BYTES - 2 * (crate::tools::MAX_TOOL_CONTEXT_BYTES + 2048);
 
 pub(crate) enum CompactionInputError {
     Empty,
@@ -23,7 +22,6 @@ pub(crate) enum CompactionInputError {
 pub(crate) struct PreparedCompaction {
     pub previous_summary: Option<String>,
     pub items: Vec<CompactionItem>,
-    pub source_bytes: u32,
     pub compiler_version: u16,
 }
 
@@ -99,7 +97,6 @@ impl PreparedCompaction {
         Ok(Self {
             previous_summary: prior.map(|(_, summary)| summary),
             items,
-            source_bytes: used as u32,
             compiler_version: 3,
         })
     }
@@ -145,6 +142,64 @@ pub(crate) fn validate_compactions(events: &[EventEnvelope]) -> Result<(), Repla
             }
             _ => {}
         }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_goal_context_compactions(
+    events: &[EventEnvelope],
+) -> Result<(), ReplayError> {
+    let mut hasher = PrefixHasher::new();
+    let mut tool_counts = HashMap::<super::RunId, u32>::new();
+    let mut tool_prefixes = HashMap::<super::RunId, Vec<(u32, u64, [u8; 32])>>::new();
+    let mut last_attempts = HashMap::<super::RunId, (u32, u64)>::new();
+    for envelope in events {
+        if let Event::ToolFinished { run_id, .. } = &envelope.event {
+            let count = tool_counts.entry(*run_id).or_default();
+            *count = count.checked_add(1).ok_or(ReplayError::InvalidSnapshot)?;
+            hasher.update(envelope)?;
+            tool_prefixes.entry(*run_id).or_default().push((
+                *count,
+                envelope.sequence,
+                hasher.digest(),
+            ));
+            continue;
+        }
+        if let Event::GoalContextCompacted {
+            run_id,
+            covered_tool_count,
+            record,
+            ..
+        } = &envelope.event
+        {
+            let point = tool_prefixes
+                .get(run_id)
+                .and_then(|prefixes| {
+                    prefixes
+                        .iter()
+                        .find(|(count, _, _)| count == covered_tool_count)
+                })
+                .ok_or(ReplayError::InvalidSnapshot)?;
+            if record.covered_run_id != *run_id
+                || record.covered_sequence != point.1
+                || record.source_digest != point.2
+                || matches!(
+                    &record.status,
+                    CompactionStatus::Succeeded {
+                        summary,
+                        content_digest,
+                        ..
+                    } if Sha256::digest(summary.as_bytes()).as_slice() != content_digest
+                )
+                || last_attempts
+                    .get(run_id)
+                    .is_some_and(|(count, _)| *covered_tool_count <= *count)
+            {
+                return Err(ReplayError::InvalidSnapshot);
+            }
+            last_attempts.insert(*run_id, (*covered_tool_count, record.covered_sequence));
+        }
+        hasher.update(envelope)?;
     }
     Ok(())
 }

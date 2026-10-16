@@ -1,7 +1,6 @@
 use super::acquisition::ProductGuard;
 use super::{
-    product_child_of_executable, redacted_tail, transcript_field, try_product_child_of_executable,
-    tty_settings, wait_stopped,
+    redacted_tail, transcript_field, try_product_child_of_executable, tty_settings, wait_stopped,
 };
 use crate::loopback::{
     ChildGuard, check_profile_with_binary, read_request, send_response_for, wait_product,
@@ -96,13 +95,19 @@ fn decline_initial_consent(server: &TmuxServer, screen: &[u8], declined: &mut bo
         .chars()
         .filter(|character| !character.is_whitespace())
         .collect();
-    if visible.contains("Doyoutrust")
-        && (visible.contains("Ctrl+Cexit") || visible.contains("^Cexit"))
+    let consent_title_visible = visible.contains("Doyoutrustthisfolder?");
+    let consent_page_visible =
+        visible.contains("Page1/") && visible.contains("Enter/PgDncontinues");
+    let consent_exit_visible = visible.contains("Ctrl+Cexit") || visible.contains("^Cexit");
+    let consent_choice_footer_visible = visible.contains("↑↓choose·Tabnext·Enter");
+    if !consent_title_visible
+        || !(consent_page_visible || consent_exit_visible || consent_choice_footer_visible)
     {
-        let dismissed = server.run(&["send-keys", "-t", "arany-test:0.0", "Escape"]);
-        assert!(dismissed.status.success(), "dismiss fixture folder consent");
-        *declined = true;
+        return;
     }
+    let dismissed = server.run(&["send-keys", "-t", "arany-test:0.0", "Escape"]);
+    assert!(dismissed.status.success(), "dismiss fixture folder consent");
+    *declined = true;
 }
 
 fn capture_scrollback(server: &TmuxServer) -> Option<Vec<u8>> {

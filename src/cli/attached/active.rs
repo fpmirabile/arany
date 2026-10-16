@@ -188,7 +188,12 @@ pub(super) async fn submit_objective(
     let mut approval_allow = false;
     let mut approval_answer = Composer::default();
     let include_paths = objective_includes(admission, &objective)?;
-    let goal = goal_request(view, goal)?;
+    let execution_settings = super::controls::restore_settings(admission).await?;
+    let mut goal = goal_request(view, goal)?;
+    if goal.id.is_none() {
+        goal.budget = Some(execution_settings.goal_budget);
+    }
+    goal.resource_settings = execution_settings.resources;
     let request = RunRequest {
         session_id: Some(view.id),
         title: None,
@@ -759,6 +764,7 @@ fn compaction_notice(record: &CompactionRecord) -> String {
                 CompactionFailure::ProviderRejected => "Provider rejected",
                 CompactionFailure::InvalidOutcome => "invalid Provider outcome",
                 CompactionFailure::TimedOut => "timed out",
+                CompactionFailure::Cancelled => "cancelled",
             };
             format!("Error: Compaction failed: {reason}; {usage}{bound}")
         }
@@ -812,6 +818,7 @@ mod tests {
                 budget: arany::GoalBudget::default(),
                 phase: arany::GoalPhase::Implementation,
                 autonomous: false,
+                resource_settings: arany::ToolResourceSettings::default(),
             },
         ]
         .into_iter()
@@ -916,6 +923,7 @@ mod goal_request_tests {
             budget: arany::GoalBudget::default(),
             phase: arany::GoalPhase::Implementation,
             autonomous,
+            resource_settings: arany::ToolResourceSettings::default(),
         };
         let started = arany::Event::SessionStarted {
             title: "Goals".into(),

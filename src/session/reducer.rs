@@ -1,8 +1,8 @@
 use super::events::{
-    AgentDisposition, AgentRole, AgentRunId, CompactionRecord, Event, EventEnvelope, ForkLineage,
-    GoalBudget, GoalId, GoalPhase, GoalPlanContract, GoalReport, GoalStatus, GoalUsage,
-    ProviderCallDisposition, ProviderCallRecord, ReplayError, RunConfig, RunDisposition, RunId,
-    SessionDefaults, SessionId,
+    AgentDisposition, AgentRole, AgentRunId, CompactionRecord, CompactionStatus, Event,
+    EventEnvelope, ForkLineage, GoalBudget, GoalId, GoalPhase, GoalPlanContract, GoalReport,
+    GoalStatus, GoalUsage, ProviderCallDisposition, ProviderCallRecord, ReplayError, RunConfig,
+    RunDisposition, RunId, SessionDefaults, SessionId,
 };
 use crate::provider::AgentPhase;
 
@@ -42,20 +42,27 @@ pub struct GoalView {
     pub objective: String,
     pub workspace_identity: (u64, u64),
     pub budget: GoalBudget,
+    pub resource_settings: crate::tools::ToolResourceSettings,
     pub phase: GoalPhase,
     pub autonomous: bool,
     pub status: GoalStatus,
     pub run_ids: Vec<RunId>,
     pub active_run: Option<RunId>,
     pub plan_contract: Option<GoalPlanContract>,
+    pub(crate) success_state: crate::session::GoalSuccessState,
     pub success_criterion_satisfied: bool,
     pub awaiting_plan_contract: bool,
     pub active_ms: u64,
     pub uncertain_active_ms: u64,
     /// Run and reserved milliseconds of the unsettled active-time segment.
-    pub active_time_reservation: Option<(RunId, u64)>,
+    pub reserved_active_run: Option<RunId>,
+    pub reserved_active_ms: Option<u64>,
     pub provider_calls: u32,
     pub unobserved_provider_calls: Vec<AgentRunId>,
+    /// Run whose Goal-context compaction call is reserved and not yet settled.
+    pub compaction_call_reserved: Option<RunId>,
+    /// Goal-context compaction calls whose outcome a crash left unknown.
+    pub uncertain_compaction_calls: u32,
     pub known_tokens: u64,
     pub token_usage_unknown: bool,
     pub report: Option<GoalReport>,
@@ -87,14 +94,15 @@ impl GoalView {
             .run_ids
             .last()
             .is_some_and(|run_id| !view.runs.iter().any(|run| run.id == *run_id));
-        let reserved_ms = self.active_time_reservation.map_or(0, |(_, ms)| ms);
+        let reserved_ms = self.reserved_active_ms.unwrap_or_default();
         GoalUsage {
             runs: self.run_ids.len() - usize::from(unaccepted_link),
             provider_calls: self.provider_calls,
             active_ms: self.active_ms.saturating_add(reserved_ms),
             known_tokens: self.known_tokens,
             token_usage_unknown: self.token_usage_unknown
-                || !self.unobserved_provider_calls.is_empty(),
+                || !self.unobserved_provider_calls.is_empty()
+                || self.compaction_call_reserved.is_some(),
         }
     }
 
@@ -172,6 +180,7 @@ mod goal_recovery_tests {
                 cache_update: crate::tools::CacheUpdate::NotApplicable,
             }),
             review_call_index: None,
+            finished_sequence: disposition.map(|_| 2),
         };
         SessionView {
             id: session_id,
@@ -194,6 +203,8 @@ mod goal_recovery_tests {
                 accepted_sequence: 1,
                 finished_sequence: None,
                 tools: vec![tool],
+                tool_compaction_summary: None,
+                tool_compaction_covered_count: 0,
                 display: Vec::new(),
             }],
             compactions: Vec::new(),
@@ -202,19 +213,24 @@ mod goal_recovery_tests {
                 objective: "Inspect before planning".into(),
                 workspace_identity: (1, 2),
                 budget: GoalBudget::default(),
+                resource_settings: crate::tools::ToolResourceSettings::default(),
                 phase: GoalPhase::Research,
                 autonomous: false,
                 status: GoalStatus::Interrupted,
                 run_ids: vec![run_id],
                 active_run: None,
                 plan_contract: None,
+                success_state: crate::session::GoalSuccessState::NoContract,
                 success_criterion_satisfied: false,
                 awaiting_plan_contract: true,
                 active_ms: 0,
                 uncertain_active_ms: 0,
-                active_time_reservation: None,
+                reserved_active_run: None,
+                reserved_active_ms: None,
                 provider_calls: 1,
                 unobserved_provider_calls: Vec::new(),
+                compaction_call_reserved: None,
+                uncertain_compaction_calls: 0,
                 known_tokens: 0,
                 token_usage_unknown: false,
                 report: None,
@@ -267,6 +283,8 @@ pub struct RunView {
     pub accepted_sequence: u64,
     pub finished_sequence: Option<u64>,
     pub tools: Vec<ToolView>,
+    pub tool_compaction_summary: Option<String>,
+    pub tool_compaction_covered_count: u32,
     pub display: Vec<super::events::DisplayChunk>,
 }
 
@@ -274,7 +292,8 @@ pub struct RunView {
 pub struct ToolView {
     pub intent: crate::tools::EffectIntent,
     pub observation: Option<crate::tools::ToolObservation>,
-    pub review_call_index: Option<u8>,
+    pub review_call_index: Option<u32>,
+    pub finished_sequence: Option<u64>,
 }
 
 fn all_children_finished(run: &RunView) -> bool {
@@ -420,17 +439,21 @@ impl RunView {
     }
 
     pub(crate) fn tool_context(&self) -> String {
-        if self.tools.is_empty() {
+        if self.tools.is_empty() && self.tool_compaction_summary.is_none() {
             return String::new();
         }
-        let records: Vec<_> = self.tools.iter().map(|tool| serde_json::json!({
+        let records: Vec<_> = self
+            .tools
+            .iter()
+            .skip(self.tool_compaction_covered_count as usize)
+            .map(|tool| serde_json::json!({
             "intent":tool.intent,
             "disposition":tool.observation.as_ref().map(|observation| observation.disposition),
             "cache_update":tool.observation.as_ref().map(|observation| observation.cache_update),
             "output":tool.observation.as_ref().map(|observation| &observation.output),
             "execution":if tool.observation.is_none() { "uncertain; never replay" } else { "observed; never replay" },
         })).collect();
-        serde_json::json!({"scope":"historical Run; no pending Tool in the current Run; never replay intents or approvals; fresh inspection may establish present state", "run_status":format!("{:?}", self.status),"tool_records":records})
+        serde_json::json!({"scope":"historical Run; no pending Tool in the current Run; never replay intents or approvals; fresh inspection may establish present state", "run_status":format!("{:?}", self.status),"summary_untrusted":self.tool_compaction_summary,"tool_records":records})
             .to_string()
     }
 }
@@ -605,6 +628,7 @@ impl SessionView {
             }
         }
         super::compaction::validate_compactions(events)?;
+        super::compaction::validate_goal_context_compactions(events)?;
         Ok(view)
     }
 
@@ -643,6 +667,11 @@ impl SessionView {
                 Event::GoalResumed { goal_id } if *goal_id == awaiting
             )
             && !matches!(&envelope.event, Event::GoalStarted { .. })
+            && !matches!(
+                &envelope.event,
+                Event::GoalActiveTimeReserved { goal_id, .. } | Event::GoalActiveTimeSettled { goal_id, .. }
+                    if *goal_id == awaiting
+            )
             && !closes_run_without_plan(&envelope.event)
         {
             return Err(ReplayError::InvalidTransition);
@@ -670,13 +699,20 @@ impl SessionView {
                 objective,
                 workspace_identity,
                 budget,
+                resource_settings,
                 phase,
                 autonomous,
             } => {
-                current.start_goal(goal_id, objective, workspace_identity, budget, phase, prior)?;
-                if let Some(goal) = current.goals.last_mut() {
-                    goal.autonomous = *autonomous;
-                }
+                current.start_goal(
+                    goal_id,
+                    objective,
+                    workspace_identity,
+                    budget,
+                    resource_settings,
+                    phase,
+                    *autonomous,
+                    prior,
+                )?;
             }
             Event::GoalRunLinked {
                 goal_id,
@@ -706,16 +742,8 @@ impl SessionView {
                 goal_id,
                 run_id,
                 contract,
-                active_ms,
-                reserved_ms,
             } => {
-                current.record_goal_plan_contract(
-                    goal_id,
-                    run_id,
-                    contract,
-                    active_ms,
-                    reserved_ms,
-                )?;
+                current.record_goal_plan_contract(goal_id, run_id, contract)?;
             }
             Event::GoalProviderCallReserved {
                 goal_id,
@@ -723,6 +751,58 @@ impl SessionView {
                 agent_run_id,
             } => {
                 current.reserve_goal_provider_call(goal_id, run_id, agent_run_id)?;
+            }
+            Event::GoalCompactionCallReserved { goal_id, run_id } => {
+                current.reserve_goal_compaction_call(goal_id, run_id)?;
+            }
+            Event::GoalContextCompacted {
+                goal_id,
+                run_id,
+                covered_tool_count,
+                record,
+            } => {
+                let goal = current
+                    .goal(*goal_id)
+                    .ok_or(ReplayError::InvalidTransition)?;
+                let run = current
+                    .runs
+                    .last()
+                    .filter(|run| run.id == *run_id)
+                    .ok_or(ReplayError::InvalidTransition)?;
+                let covered_count = usize::try_from(*covered_tool_count)
+                    .map_err(|_| ReplayError::InvalidTransition)?;
+                let covered_tool = covered_count
+                    .checked_sub(1)
+                    .and_then(|index| run.tools.get(index))
+                    .ok_or(ReplayError::InvalidTransition)?;
+                if goal.status != GoalStatus::Running
+                    || goal.active_run != Some(*run_id)
+                    || goal.run_ids.last() != Some(run_id)
+                    || goal.compaction_call_reserved != Some(*run_id)
+                    || !goal.unobserved_provider_calls.is_empty()
+                    || record.covered_run_id != *run_id
+                    || run.status != RunStatus::Active
+                    || run.tools.iter().any(|tool| tool.observation.is_none())
+                    || covered_count > run.tools.len()
+                    || *covered_tool_count <= run.tool_compaction_covered_count
+                    || covered_tool.finished_sequence != Some(record.covered_sequence)
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
+                let tokens = u64::from(record.input_tokens.unwrap_or_default())
+                    .checked_add(u64::from(record.output_tokens.unwrap_or_default()))
+                    .and_then(|tokens| goal.known_tokens.checked_add(tokens))
+                    .ok_or(ReplayError::InvalidTransition)?;
+                let run = active_run(current, *run_id)?;
+                if let CompactionStatus::Succeeded { summary, .. } = &record.status {
+                    run.tool_compaction_summary = Some(summary.clone());
+                    run.tool_compaction_covered_count = *covered_tool_count;
+                }
+                let goal = current_goal_mut(current, *goal_id)?;
+                goal.known_tokens = tokens;
+                goal.token_usage_unknown |=
+                    record.input_tokens.is_none() || record.output_tokens.is_none();
+                goal.compaction_call_reserved = None;
             }
             Event::GoalFinished {
                 goal_id,
@@ -740,10 +820,24 @@ impl SessionView {
                         .lineage
                         .map(|lineage| (lineage.source_run_id, current.created_sequence))
                 };
-                if current.compactions.len() >= super::MAX_COMPACTIONS
-                    || boundary != Some((record.covered_run_id, record.covered_sequence))
-                {
+                if boundary != Some((record.covered_run_id, record.covered_sequence)) {
                     return Err(ReplayError::InvalidSnapshot);
+                }
+                if let Some(goal) = current.goals.iter_mut().find(|goal| {
+                    goal.status == GoalStatus::Running
+                        && goal.run_ids.last() == Some(&record.covered_run_id)
+                }) {
+                    if goal.compaction_call_reserved != Some(record.covered_run_id) {
+                        return Err(ReplayError::InvalidTransition);
+                    }
+                    let tokens = u64::from(record.input_tokens.unwrap_or_default())
+                        .checked_add(u64::from(record.output_tokens.unwrap_or_default()))
+                        .and_then(|tokens| goal.known_tokens.checked_add(tokens))
+                        .ok_or(ReplayError::InvalidTransition)?;
+                    goal.known_tokens = tokens;
+                    goal.token_usage_unknown |=
+                        record.input_tokens.is_none() || record.output_tokens.is_none();
+                    goal.compaction_call_reserved = None;
                 }
                 current.compactions.push(CompactionView {
                     event_sequence: prior,
@@ -779,6 +873,8 @@ impl SessionView {
                     accepted_sequence: prior,
                     finished_sequence: None,
                     tools: Vec::new(),
+                    tool_compaction_summary: None,
+                    tool_compaction_covered_count: 0,
                     display: Vec::new(),
                 });
             }
@@ -816,7 +912,9 @@ impl SessionView {
                     let goal =
                         active_run_goal(current, *run_id).ok_or(ReplayError::InvalidTransition)?;
                     let budget = goal.effective_budget();
-                    if goal.provider_calls >= budget.max_provider_calls
+                    if budget
+                        .max_provider_calls
+                        .is_some_and(|limit| goal.provider_calls >= limit)
                         || budget.max_tokens.is_some_and(|limit| {
                             goal.token_usage_unknown || goal.known_tokens >= limit
                         })
@@ -900,7 +998,6 @@ impl SessionView {
                         && (!tools_enabled
                             || agent.role != AgentRole::Primary
                             || record.phase == crate::provider::AgentPhase::ToolReview)
-                    || tools_enabled && agent.provider_calls.len() >= crate::tools::MAX_MODEL_STEPS
                     || (record.phase != AgentPhase::RootPlan
                         && record.disposition == ProviderCallDisposition::Delegated)
                 {
@@ -913,8 +1010,8 @@ impl SessionView {
                     )
                     && run.display.iter().any(|chunk| {
                         chunk.category == super::events::DisplayCategory::Answer
-                            && usize::from(chunk.call_index)
-                                == run.agents[index].provider_calls.len()
+                            && usize::try_from(chunk.call_index).ok()
+                                == Some(run.agents[index].provider_calls.len())
                     })
                 {
                     return Err(ReplayError::InvalidTransition);
@@ -923,7 +1020,10 @@ impl SessionView {
                     run.tools
                         .last_mut()
                         .ok_or(ReplayError::InvalidTransition)?
-                        .review_call_index = Some(run.agents[index].provider_calls.len() as u8);
+                        .review_call_index = Some(
+                        u32::try_from(run.agents[index].provider_calls.len())
+                            .map_err(|_| ReplayError::InvalidTransition)?,
+                    );
                 }
                 run.agents[index].provider_calls.push(record.clone());
                 let goal = current_goal_mut(current, goal_id)?;
@@ -977,7 +1077,7 @@ impl SessionView {
                     || is_tool_continuation(run, primary, &candidate);
                 if primary.id != *agent_run_id
                     || primary.status != AgentStatus::Active
-                    || chunk.call_index as usize != primary.provider_calls.len()
+                    || usize::try_from(chunk.call_index).ok() != Some(primary.provider_calls.len())
                     || !valid_phase
                     || run.display.len() >= MAX_DISPLAY_CHUNKS
                 {
@@ -1073,7 +1173,6 @@ impl SessionView {
                     || primary.id != *agent_run_id
                     || primary.status != AgentStatus::Active
                     || !valid_origin
-                    || run.tools.len() >= crate::tools::MAX_TOOL_CALLS
                     || run
                         .tools
                         .iter()
@@ -1087,6 +1186,7 @@ impl SessionView {
                     intent: intent.clone(),
                     observation: None,
                     review_call_index: None,
+                    finished_sequence: None,
                 });
             }
             Event::ToolFinished {
@@ -1110,6 +1210,45 @@ impl SessionView {
                 {
                     return Err(ReplayError::InvalidTransition);
                 }
+                let timeout_limit = match &observation.intent.call {
+                    crate::tools::ToolCall::Command { .. } => {
+                        let run = current
+                            .runs
+                            .iter()
+                            .find(|run| run.id == *run_id)
+                            .ok_or(ReplayError::InvalidTransition)?;
+                        let contract_timeout = goal
+                            .plan_contract
+                            .as_ref()
+                            .and_then(|contract| contract.command_timeout_ms);
+                        let requested = contract_timeout
+                            .unwrap_or(goal.resource_settings.default_command_timeout_ms);
+                        (requested > goal.resource_settings.max_command_timeout_ms)
+                            .then_some((requested, goal.resource_settings.max_command_timeout_ms))
+                            .map(|limit| {
+                                (
+                                    limit,
+                                    run.tools
+                                        .last()
+                                        .is_some_and(|tool| tool.review_call_index.is_none()),
+                                )
+                            })
+                    }
+                    _ => None,
+                };
+                if let Some(((requested, maximum), no_review)) = timeout_limit
+                    && (!no_review
+                        || observation.intent.limits.runtime_ms != requested
+                        || observation.disposition != crate::tools::ToolDisposition::Limit
+                        || observation.guard.is_some()
+                        || observation.cache_update != crate::tools::CacheUpdate::NotApplicable
+                        || observation.output
+                            != crate::tools::types::command_timeout_limit_message(
+                                requested, maximum,
+                            ))
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
                 {
                     let run = active_run(current, *run_id)?;
                     if run.primary().is_none_or(|agent| {
@@ -1122,16 +1261,7 @@ impl SessionView {
                         return Err(ReplayError::InvalidTransition);
                     }
                     tool.observation = Some(observation.clone());
-                    let observations: Vec<&crate::tools::ToolObservation> = run
-                        .tools
-                        .iter()
-                        .filter_map(|tool| tool.observation.as_ref())
-                        .collect();
-                    if !serde_json::to_vec(&observations)
-                        .is_ok_and(|bytes| bytes.len() <= crate::tools::MAX_TOOL_CONTEXT_BYTES)
-                    {
-                        return Err(ReplayError::InvalidTransition);
-                    }
+                    tool.finished_sequence = Some(prior);
                 }
                 let goal_id = current
                     .goals
@@ -1139,13 +1269,11 @@ impl SessionView {
                     .find(|goal| goal.active_run == Some(*run_id))
                     .map(|goal| goal.id)
                     .ok_or(ReplayError::InvalidTransition)?;
-                if let Some(contract) = current
-                    .goal(goal_id)
-                    .and_then(|goal| goal.plan_contract.clone())
-                {
-                    let satisfied =
-                        contract.matches_success(goal_tool_observations(current, goal_id)?);
-                    current_goal_mut(current, goal_id)?.success_criterion_satisfied = satisfied;
+                let goal = current_goal_mut(current, goal_id)?;
+                if let Some(contract) = goal.plan_contract.as_ref() {
+                    contract.observe_success(&mut goal.success_state, observation);
+                    goal.success_criterion_satisfied =
+                        contract.success_state_satisfied(&goal.success_state);
                 }
                 let unplanned_prelude = current
                     .goal(goal_id)
@@ -1222,7 +1350,7 @@ impl SessionView {
                     let call = run.agents[index].provider_calls.len().saturating_sub(1);
                     for chunk in run.display.iter().filter(|chunk| {
                         chunk.category == super::events::DisplayCategory::Answer
-                            && usize::from(chunk.call_index) == call
+                            && usize::try_from(chunk.call_index).ok() == Some(call)
                     }) {
                         let start = chunk.offset as usize;
                         if result.as_ref().is_none_or(|text| {
@@ -1344,20 +1472,6 @@ fn current_goal_mut(view: &mut SessionView, id: GoalId) -> Result<&mut GoalView,
         .ok_or(ReplayError::InvalidTransition)
 }
 
-fn goal_tool_observations(
-    view: &SessionView,
-    id: GoalId,
-) -> Result<Vec<&crate::tools::ToolObservation>, ReplayError> {
-    let goal = view.goal(id).ok_or(ReplayError::InvalidTransition)?;
-    Ok(view
-        .runs
-        .iter()
-        .filter(|run| goal.run_ids.contains(&run.id))
-        .flat_map(|run| run.tools.iter())
-        .filter_map(|tool| tool.observation.as_ref())
-        .collect())
-}
-
 /// A failed or cancelled end of the Run is valid while a plan wait is open: the engine
 /// ends the Run when a Tool is refused before `ToolStarted`, and that refusal leaves no
 /// pending plan to record.
@@ -1418,9 +1532,7 @@ mod goal_replay_tests {
             tool_policy: tools.then_some(ToolPolicyReceipt {
                 contract_version: 1,
                 config_digest: [1; 32],
-                max_tool_calls: crate::tools::MAX_TOOL_CALLS as u32,
-                max_model_steps: crate::tools::MAX_MODEL_STEPS as u32,
-                max_context_bytes: crate::tools::MAX_TOOL_CONTEXT_BYTES as u32,
+                max_context_bytes: crate::tools::types::MAX_TOOL_CONTEXT_BYTES as u32,
             }),
         }
     }
@@ -1465,6 +1577,7 @@ mod goal_replay_tests {
             objective: GOAL_OBJECTIVE.into(),
             workspace_identity: (1, 2),
             budget,
+            resource_settings: crate::tools::ToolResourceSettings::default(),
             phase: GoalPhase::Implementation,
             autonomous: false,
         }
@@ -1792,7 +1905,7 @@ mod goal_replay_tests {
             report,
         };
         let budget = GoalBudget {
-            max_provider_calls: 1,
+            max_provider_calls: Some(1),
             ..GoalBudget::default()
         };
         // The process died inside the only admitted provider call: no RunFinished was journaled.
@@ -1838,6 +1951,147 @@ mod goal_replay_tests {
             SessionView::replay_open(session, &session_with(session, admissible)).is_err(),
             "a crash-left Goal that still admits a Run cannot close as Failed"
         );
+    }
+
+    #[test]
+    fn resumed_crash_left_compaction_call_settles_as_uncertain() {
+        let session_id = SessionId::new();
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let mut events = vec![goal_started(goal_id, GoalBudget::default())];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.extend(cancel_run(run_id, agent_run_id));
+        // The process died after the compaction call was reserved, before its outcome was journaled.
+        events.push(Event::GoalCompactionCallReserved { goal_id, run_id });
+        events.push(Event::GoalResumed { goal_id });
+
+        let view = SessionView::replay_open(session_id, &session_with(session_id, events))
+            .expect("resumed Goal replays")
+            .expect("Session exists");
+        let goal = view.goal(goal_id).expect("Goal");
+        assert_eq!(goal.status, GoalStatus::Running);
+        assert_eq!(goal.compaction_call_reserved, None);
+        assert_eq!(goal.uncertain_compaction_calls, 1);
+        assert!(goal.token_usage_unknown);
+    }
+
+    #[test]
+    fn exhausted_goal_closes_over_a_crash_left_compaction_call() {
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let budget = GoalBudget {
+            max_provider_calls: Some(1),
+            ..GoalBudget::default()
+        };
+        let mut events = vec![goal_started(goal_id, budget)];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.extend(cancel_run(run_id, agent_run_id));
+        // The only admitted call is the compaction call, whose outcome never committed.
+        events.push(Event::GoalCompactionCallReserved { goal_id, run_id });
+        events.push(Event::GoalFinished {
+            goal_id,
+            status: GoalStatus::Failed,
+            active_ms: 0,
+            report: GoalReport {
+                summary: "Goal budget is exhausted.".into(),
+                changes: Vec::new(),
+                evidence: Vec::new(),
+                unresolved: Vec::new(),
+            },
+        });
+
+        let session = SessionId::new();
+        let view = SessionView::replay_open(session, &session_with(session, events))
+            .expect("an exhausted Goal closes over its crash-left compaction call")
+            .expect("Session exists");
+        let goal = view.goal(goal_id).expect("Goal");
+        assert_eq!(goal.status, GoalStatus::Failed);
+        assert_eq!(goal.compaction_call_reserved, None);
+        assert_eq!(goal.uncertain_compaction_calls, 1);
+    }
+
+    #[test]
+    fn exhausted_autonomous_goal_closes_over_a_crash_left_compaction_call() {
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let budget = GoalBudget {
+            max_provider_calls: Some(2),
+            ..GoalBudget::default()
+        };
+        let mut events = vec![Event::GoalStarted {
+            goal_id,
+            objective: GOAL_OBJECTIVE.into(),
+            workspace_identity: (1, 2),
+            budget,
+            resource_settings: crate::tools::ToolResourceSettings::default(),
+            phase: GoalPhase::Implementation,
+            autonomous: true,
+        }];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.push(Event::GoalProviderCallReserved {
+            goal_id,
+            run_id,
+            agent_run_id,
+        });
+        events.push(Event::ProviderCallRecorded {
+            run_id,
+            agent_run_id,
+            record: record(
+                AgentPhase::RootPlan,
+                ProviderCallDisposition::Finished,
+                None,
+            ),
+        });
+        events.extend([
+            Event::AgentFinished {
+                run_id,
+                agent_run_id,
+                disposition: AgentDisposition::Finished,
+                summary: Some("done".into()),
+                result: Some("done".into()),
+            },
+            Event::MessageCommitted {
+                run_id,
+                text: "done".into(),
+            },
+            Event::RunFinished {
+                run_id,
+                disposition: RunDisposition::Finished,
+            },
+        ]);
+        // The Run finished, but its between-Run compaction call never committed: the Goal is paused.
+        events.push(Event::GoalCompactionCallReserved { goal_id, run_id });
+        events.push(Event::GoalFinished {
+            goal_id,
+            status: GoalStatus::Failed,
+            active_ms: 0,
+            report: GoalReport {
+                summary: "Goal budget is exhausted.".into(),
+                changes: Vec::new(),
+                evidence: Vec::new(),
+                unresolved: Vec::new(),
+            },
+        });
+
+        let session = SessionId::new();
+        let view = SessionView::replay_open(session, &session_with(session, events))
+            .expect("an exhausted autonomous Goal closes over its crash-left compaction call")
+            .expect("Session exists");
+        let goal = view.goal(goal_id).expect("Goal");
+        assert_eq!(goal.status, GoalStatus::Failed);
+        assert_eq!(goal.uncertain_compaction_calls, 1);
     }
 
     #[test]
@@ -1934,7 +2188,7 @@ mod goal_replay_tests {
             let session_id = SessionId::new();
             let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
             let budget = GoalBudget {
-                max_active_ms: limit,
+                max_active_ms: Some(limit),
                 ..GoalBudget::default()
             };
             let mut events = vec![
@@ -1947,6 +2201,7 @@ mod goal_replay_tests {
                     objective: GOAL_OBJECTIVE.into(),
                     workspace_identity: (1, 2),
                     budget,
+                    resource_settings: crate::tools::ToolResourceSettings::default(),
                     phase: GoalPhase::Implementation,
                     autonomous: true,
                 },
@@ -1987,14 +2242,14 @@ mod goal_replay_tests {
                 run_id,
                 text: "done".into(),
             });
-            events.push(Event::RunFinished {
-                run_id,
-                disposition: RunDisposition::Finished,
-            });
             events.push(Event::GoalActiveTimeSettled {
                 goal_id,
                 run_id,
                 active_ms: settled,
+            });
+            events.push(Event::RunFinished {
+                run_id,
+                disposition: RunDisposition::Finished,
             });
             let mut view = SessionView::replay_open(session_id, &journal(session_id, events))
                 .expect("Finished Run before the Goal receipt")
@@ -2003,6 +2258,8 @@ mod goal_replay_tests {
                 let goal = view.goals.last_mut().expect("Goal");
                 goal.plan_contract = Some(GoalPlanContract {
                     mission: GOAL_OBJECTIVE.into(),
+                    resource_class: crate::tools::ToolResourceClass::Default,
+                    command_timeout_ms: None,
                     paths: Vec::new(),
                     commands: Vec::new(),
                     skills: Vec::new(),
@@ -2012,7 +2269,7 @@ mod goal_replay_tests {
                         sha256: crate::tools::types::hex_digest(b"done"),
                     },
                     budget: GoalBudget {
-                        max_active_ms: limit,
+                        max_active_ms: Some(limit),
                         ..GoalBudget::default()
                     },
                 });
@@ -2069,6 +2326,11 @@ mod goal_replay_tests {
                 Some(0),
             ),
         });
+        events.push(Event::GoalActiveTimeSettled {
+            goal_id,
+            run_id,
+            active_ms: 0,
+        });
         // Engine fails the primary when the Tool deadline or context capacity refuses before ToolStarted.
         events.push(Event::AgentFinished {
             run_id,
@@ -2080,11 +2342,6 @@ mod goal_replay_tests {
         events.push(Event::RunFinished {
             run_id,
             disposition: RunDisposition::Failed,
-        });
-        events.push(Event::GoalActiveTimeSettled {
-            goal_id,
-            run_id,
-            active_ms: 0,
         });
         events.push(Event::GoalFinished {
             goal_id,
@@ -2166,6 +2423,8 @@ mod goal_replay_tests {
         let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
         let contract = GoalPlanContract {
             mission: "Plan".into(),
+            resource_class: crate::tools::ToolResourceClass::Default,
+            command_timeout_ms: None,
             paths: vec!["src/lib.rs".into()],
             commands: Vec::new(),
             skills: Vec::new(),
@@ -2218,6 +2477,8 @@ mod goal_replay_tests {
                 accepted_sequence: 1,
                 finished_sequence: None,
                 tools: Vec::new(),
+                tool_compaction_summary: None,
+                tool_compaction_covered_count: 0,
                 display: Vec::new(),
             }],
             compactions: Vec::new(),
@@ -2236,7 +2497,12 @@ mod goal_replay_tests {
                 awaiting_plan_contract: false,
                 active_ms: 0,
                 uncertain_active_ms: 0,
-                active_time_reservation: None,
+                reserved_active_run: None,
+                reserved_active_ms: None,
+                compaction_call_reserved: None,
+                uncertain_compaction_calls: 0,
+                success_state: crate::session::GoalSuccessState::NoContract,
+                resource_settings: crate::tools::ToolResourceSettings::default(),
                 provider_calls: 1,
                 unobserved_provider_calls: Vec::new(),
                 known_tokens,
@@ -2278,6 +2544,17 @@ mod goal_replay_tests {
     }
 
     fn read_observation(path: &str, content: &[u8]) -> ToolObservation {
+        file_observation(
+            ToolCall::Read {
+                path: path.into(),
+                offset: 0,
+                limit: 1024,
+            },
+            content,
+        )
+    }
+
+    fn file_observation(call: ToolCall, content: &[u8]) -> ToolObservation {
         let intent = EffectIntent {
             id: uuid::Uuid::now_v7(),
             run_id: RunId::new(),
@@ -2286,11 +2563,7 @@ mod goal_replay_tests {
             enforcement_digest: [2; 32],
             workspace_device: 1,
             workspace_inode: 2,
-            call: ToolCall::Read {
-                path: path.into(),
-                offset: 0,
-                limit: 1024,
-            },
+            call,
             limits: ToolLimits::default(),
             expires_at_ms: 1,
             use_count: 1,
@@ -2320,6 +2593,8 @@ mod goal_replay_tests {
         let read_intent = read.intent.clone();
         let contract = GoalPlanContract {
             mission: "Verify the file".into(),
+            resource_class: crate::tools::ToolResourceClass::Default,
+            command_timeout_ms: None,
             paths: vec!["src/main.rs".into()],
             commands: Vec::new(),
             skills: Vec::new(),
@@ -2374,7 +2649,10 @@ mod goal_replay_tests {
                     intent: read_intent,
                     observation: Some(read),
                     review_call_index: None,
+                    finished_sequence: Some(2),
                 }],
+                tool_compaction_summary: None,
+                tool_compaction_covered_count: 0,
                 display: Vec::new(),
             }],
             compactions: Vec::new(),
@@ -2383,6 +2661,7 @@ mod goal_replay_tests {
                 objective: GOAL_OBJECTIVE.into(),
                 workspace_identity: (1, 2),
                 budget: GoalBudget::default(),
+                resource_settings: crate::tools::ToolResourceSettings::default(),
                 phase: GoalPhase::Research,
                 autonomous: false,
                 status: GoalStatus::Running,
@@ -2393,7 +2672,11 @@ mod goal_replay_tests {
                 awaiting_plan_contract: true,
                 active_ms: 0,
                 uncertain_active_ms: 0,
-                active_time_reservation: Some((run_id, 1000)),
+                reserved_active_run: None,
+                reserved_active_ms: None,
+                compaction_call_reserved: None,
+                uncertain_compaction_calls: 0,
+                success_state: crate::session::GoalSuccessState::NoContract,
                 provider_calls: 2,
                 unobserved_provider_calls: Vec::new(),
                 known_tokens: 0,
@@ -2412,12 +2695,150 @@ mod goal_replay_tests {
                 goal_id,
                 run_id,
                 contract,
-                active_ms: 0,
-                reserved_ms: 1000,
             },
             created_at_ms: 0,
         })
         .expect("contract records");
         assert!(view.goals[0].success_criterion_satisfied);
+    }
+
+    #[test]
+    fn plan_contract_counts_a_write_from_an_earlier_run() {
+        let session_id = SessionId::new();
+        let (goal_id, earlier_run_id, run_id, agent_run_id) =
+            (GoalId::new(), RunId::new(), RunId::new(), AgentRunId::new());
+        let write = file_observation(
+            ToolCall::Write {
+                path: "src/main.rs".into(),
+                expected_digest: None,
+                content: "after".into(),
+            },
+            b"after",
+        );
+        let contract = GoalPlanContract {
+            mission: "Write the file".into(),
+            paths: vec!["src/main.rs".into()],
+            commands: Vec::new(),
+            resource_class: crate::tools::ToolResourceClass::Default,
+            command_timeout_ms: None,
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: GoalSuccessCriterion::WorkspaceFileContent {
+                path: "src/main.rs".into(),
+                content: "after".into(),
+            },
+            budget: GoalBudget::default(),
+        };
+        let mut view = SessionView {
+            id: session_id,
+            title: "Goal".into(),
+            title_is_explicit: false,
+            inherited_title: None,
+            workspace_identity: Some((1, 2)),
+            defaults: SessionDefaults::default(),
+            created_sequence: 0,
+            last_sequence: 2,
+            lineage: None,
+            runs: vec![
+                RunView {
+                    id: earlier_run_id,
+                    objective: GOAL_OBJECTIVE.into(),
+                    images: Vec::new(),
+                    config: Some(config(CollaborationPolicy::Single, true)),
+                    agents: Vec::new(),
+                    assistant_message: None,
+                    status: RunStatus::Finished,
+                    accepted_sequence: 1,
+                    finished_sequence: Some(1),
+                    tools: vec![ToolView {
+                        intent: write.intent.clone(),
+                        observation: Some(write),
+                        review_call_index: None,
+                        finished_sequence: Some(1),
+                    }],
+                    tool_compaction_summary: None,
+                    tool_compaction_covered_count: 0,
+                    display: Vec::new(),
+                },
+                RunView {
+                    id: run_id,
+                    objective: GOAL_OBJECTIVE.into(),
+                    images: Vec::new(),
+                    config: Some(config(CollaborationPolicy::Single, true)),
+                    agents: vec![AgentView {
+                        id: agent_run_id,
+                        role: AgentRole::Primary,
+                        ordinal: 0,
+                        objective: None,
+                        summary: None,
+                        result: None,
+                        provider_calls: vec![record(
+                            AgentPhase::RootPlan,
+                            ProviderCallDisposition::ToolRequested,
+                            Some(0),
+                        )],
+                        status: AgentStatus::Active,
+                    }],
+                    assistant_message: None,
+                    status: RunStatus::Active,
+                    accepted_sequence: 2,
+                    finished_sequence: None,
+                    tools: Vec::new(),
+                    tool_compaction_summary: None,
+                    tool_compaction_covered_count: 0,
+                    display: Vec::new(),
+                },
+            ],
+            compactions: Vec::new(),
+            goals: vec![GoalView {
+                id: goal_id,
+                objective: GOAL_OBJECTIVE.into(),
+                workspace_identity: (1, 2),
+                budget: GoalBudget::default(),
+                resource_settings: crate::tools::ToolResourceSettings::default(),
+                phase: GoalPhase::Research,
+                autonomous: false,
+                status: GoalStatus::Running,
+                run_ids: vec![earlier_run_id, run_id],
+                active_run: Some(run_id),
+                plan_contract: None,
+                success_state: crate::session::GoalSuccessState::NoContract,
+                success_criterion_satisfied: false,
+                awaiting_plan_contract: true,
+                active_ms: 0,
+                uncertain_active_ms: 0,
+                reserved_active_run: None,
+                reserved_active_ms: None,
+                provider_calls: 2,
+                unobserved_provider_calls: Vec::new(),
+                compaction_call_reserved: None,
+                uncertain_compaction_calls: 0,
+                known_tokens: 0,
+                token_usage_unknown: false,
+                report: None,
+                started_sequence: 1,
+                finished_sequence: None,
+            }],
+        };
+        view.apply_committed(&EventEnvelope {
+            sequence: 3,
+            session_id,
+            run_id: Some(run_id),
+            agent_run_id: None,
+            event: Event::GoalPlanContractRecorded {
+                goal_id,
+                run_id,
+                contract,
+            },
+            created_at_ms: 0,
+        })
+        .expect("contract records");
+        assert!(view.goals[0].success_criterion_satisfied);
+        assert_eq!(
+            view.goals[0].success_state,
+            crate::session::GoalSuccessState::WorkspaceFile {
+                sha256: Some(crate::tools::types::hex_digest(b"after")),
+            }
+        );
     }
 }

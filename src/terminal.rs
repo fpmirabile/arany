@@ -107,6 +107,9 @@ impl Drop for AlternateScreen {
 #[derive(Default)]
 struct NativeTranscript {
     session: Option<crate::session::SessionId>,
+    initial_run_count: Option<usize>,
+    first_projected_run_index: Option<usize>,
+    omitted_history: bool,
     objectives: HashSet<crate::session::RunId>,
     answers: HashSet<crate::session::RunId>,
     tools: HashSet<(crate::session::RunId, usize)>,
@@ -189,6 +192,20 @@ fn model_catalog_status(item: &ModelEntry, exact_custom: bool) -> String {
         format!("selectable; effort {efforts}")
     } else {
         "availability only; compatibility unknown".to_owned()
+    }
+}
+
+fn classic_history_status(width: u16, omitted_history: bool, pinned: bool) -> &'static str {
+    if omitted_history {
+        if width < 32 {
+            "Ctrl+T history"
+        } else {
+            "More history · Ctrl+T history"
+        }
+    } else if pinned {
+        "Classic (--classic) · Ctrl+T details"
+    } else {
+        "Classic · Ctrl+T details · /settings"
     }
 }
 
@@ -802,12 +819,35 @@ impl AttachedTerminal {
             return Ok(());
         }
         if self.native.session != Some(session.id) {
+            let width = usize::from(
+                self.terminal
+                    .as_mut()
+                    .expect("owned terminal")
+                    .get_frame()
+                    .area()
+                    .width,
+            );
+            let projection = history::classic_projection(session, width);
             self.native = NativeTranscript {
                 session: Some(session.id),
+                initial_run_count: Some(session.runs.len()),
+                first_projected_run_index: projection.first_run_index,
+                omitted_history: projection.omitted_history,
                 ..NativeTranscript::default()
             };
         }
-        for run in &session.runs {
+        for (index, run) in session.runs.iter().enumerate() {
+            if self
+                .native
+                .initial_run_count
+                .is_some_and(|count| index < count)
+                && self
+                    .native
+                    .first_projected_run_index
+                    .is_none_or(|first| index < first)
+            {
+                continue;
+            }
             if !self.native.objectives.contains(&run.id) {
                 if self.native.objectives.is_empty() {
                     let terminal = self.terminal.as_mut().expect("owned terminal");
@@ -859,8 +899,14 @@ impl AttachedTerminal {
         self.cancel_clipboard_paste();
         if self.is_linear() {
             writeln!(io::stderr(), "Transcript details:")?;
-            let mut remaining = 64 * 1024;
-            for run in view.runs.iter().rev().take(16).rev() {
+            let mut remaining = history::MAX_CLASSIC_HISTORY_BYTES;
+            for run in view
+                .runs
+                .iter()
+                .rev()
+                .take(history::MAX_CLASSIC_HISTORY_RUNS)
+                .rev()
+            {
                 let mut parts = Vec::new();
                 if run.assistant_message.is_none()
                     && let Some(answer) = crate::presentation::display_answer(run)
@@ -1280,17 +1326,21 @@ impl AttachedTerminal {
         let native_transcript =
             self.mode == TerminalMode::Classic && !self.transcript_open && !view.runs.is_empty();
         let history_status = if native_transcript {
-            let hint = if self.classic_pinned {
-                "Classic (--classic) · Ctrl+T details"
-            } else {
-                "Classic · Ctrl+T details · /settings"
-            };
-            // State and model lead; the mode hint is secondary and truncation drops it first.
-            model.status_line = crate::presentation::safe_truncate(
-                &format!("{} · {hint}", model.status_line),
-                usize::from(area.width),
+            let hint = classic_history_status(
+                area.width,
+                self.native.omitted_history,
+                self.classic_pinned,
             );
-            None
+            if self.native.omitted_history {
+                Some(hint.to_owned())
+            } else {
+                // State and model lead; the mode hint is secondary and truncation drops it first.
+                model.status_line = crate::presentation::safe_truncate(
+                    &format!("{} · {hint}", model.status_line),
+                    usize::from(area.width),
+                );
+                None
+            }
         } else {
             self.history_mut().status()
         };

@@ -9,8 +9,16 @@ use unicode_width::UnicodeWidthStr;
 
 const MAX_FIND_BYTES: usize = 64;
 pub(super) const MAX_ROW_CELLS: usize = 4096;
+pub(super) const MAX_CLASSIC_HISTORY_RUNS: usize = 16;
+pub(super) const MAX_CLASSIC_HISTORY_BYTES: usize = 64 * 1024;
+pub(super) const MAX_CLASSIC_HISTORY_ROWS: usize = 4096;
 const MAX_NOTICES: usize = 32;
 const MAX_NOTICE_BYTES: usize = 8192;
+
+pub(super) struct ClassicProjection {
+    pub(super) first_run_index: Option<usize>,
+    pub(super) omitted_history: bool,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum MessageKind {
@@ -31,7 +39,7 @@ enum MessageSource {
     Assistant(usize),
     Notice(u64),
     Tool(usize, usize),
-    Commentary(usize, u8, u8),
+    Commentary(usize, u32, u8),
 }
 
 struct Notice {
@@ -210,7 +218,7 @@ impl History {
                         .any(|chunk| chunk.category == crate::session::DisplayCategory::Limit)
                 {
                     self.push_owned(
-                        MessageSource::Commentary(index, u8::MAX, 0),
+                        MessageSource::Commentary(index, u32::MAX, 0),
                         MessageKind::Notice,
                         crate::session::DISPLAY_LIMIT_TEXT.to_owned(),
                         width,
@@ -699,6 +707,104 @@ fn run_row_counts(runs: &[RunView], width: usize) -> Vec<(usize, Option<usize>)>
     })
 }
 
+pub(super) fn classic_projection(view: &SessionView, width: usize) -> ClassicProjection {
+    let first_candidate = view.runs.len().saturating_sub(MAX_CLASSIC_HISTORY_RUNS);
+    let mut first_selected = view.runs.len();
+    let mut bytes = 0usize;
+    let mut rows = 0usize;
+    for index in (first_candidate..view.runs.len()).rev() {
+        let cost = classic_run_cost(&view.runs[index], width);
+        if bytes.saturating_add(cost.0) > MAX_CLASSIC_HISTORY_BYTES
+            || rows.saturating_add(cost.1) > MAX_CLASSIC_HISTORY_ROWS
+        {
+            break;
+        }
+        bytes += cost.0;
+        rows += cost.1;
+        first_selected = index;
+    }
+    ClassicProjection {
+        first_run_index: view.runs.get(first_selected).map(|_| first_selected),
+        omitted_history: first_selected > 0,
+    }
+}
+
+fn classic_run_cost(run: &RunView, width: usize) -> (usize, usize) {
+    let mut user_body_bytes = crate::presentation::escaped_terminal_bytes(&run.objective);
+    let mut user_body_rows = if run.images.is_empty() || !run.objective.is_empty() {
+        message_row_count(&run.objective, width).saturating_sub(2)
+    } else {
+        0
+    };
+    let mut has_user_text = !run.objective.is_empty();
+    for (index, image) in run.images.iter().enumerate() {
+        if has_user_text {
+            user_body_bytes = user_body_bytes.saturating_add(1);
+        }
+        let description = crate::presentation::image_description(image, index);
+        user_body_bytes = user_body_bytes
+            .saturating_add(crate::presentation::escaped_terminal_bytes(&description));
+        user_body_rows =
+            user_body_rows.saturating_add(message_row_count(&description, width).saturating_sub(2));
+        has_user_text = true;
+    }
+    let (mut bytes, mut rows) =
+        classic_message_cost(MessageKind::User, user_body_bytes, user_body_rows);
+    let mut add_message = |kind, text: &str| {
+        let (message_bytes, message_rows) = classic_message_cost(
+            kind,
+            crate::presentation::escaped_terminal_bytes(text),
+            message_row_count(text, width).saturating_sub(2),
+        );
+        bytes = bytes.saturating_add(message_bytes);
+        rows = rows.saturating_add(message_rows);
+    };
+    for tool in &run.tools {
+        if tool.observation.is_some() {
+            add_message(MessageKind::Tool, &crate::presentation::tool_summary(tool));
+        }
+    }
+    if let Some(answer) = &run.assistant_message {
+        add_message(MessageKind::Assistant, answer);
+    } else if !matches!(
+        run.status,
+        crate::session::RunStatus::Pending | crate::session::RunStatus::Active
+    ) && let Some(chunks) = crate::presentation::display_answer_chunks(run)
+    {
+        let mut chunk_count = 0usize;
+        let mut body_rows = 0usize;
+        for chunk in chunks {
+            bytes = bytes.saturating_add(crate::presentation::escaped_terminal_bytes(chunk));
+            body_rows = body_rows.saturating_add(message_row_count(chunk, width).saturating_sub(2));
+            chunk_count = chunk_count.saturating_add(1);
+        }
+        if chunk_count > 0 {
+            bytes = bytes.saturating_add(1);
+            let (message_bytes, message_rows) = classic_message_cost(
+                MessageKind::Incomplete,
+                0,
+                body_rows.saturating_add(chunk_count.saturating_sub(1)),
+            );
+            bytes = bytes.saturating_add(message_bytes);
+            rows = rows.saturating_add(message_rows);
+        }
+    }
+    (bytes, rows)
+}
+
+fn classic_message_cost(kind: MessageKind, body_bytes: usize, body_rows: usize) -> (usize, usize) {
+    let body_decoration = if kind == MessageKind::User {
+        native_marker(kind, false).len()
+    } else {
+        2 + native_marker(kind, false).len()
+    };
+    let bytes = body_bytes
+        .saturating_add(body_rows.saturating_mul(body_decoration))
+        .saturating_add(message_heading(kind).len())
+        .saturating_add(native_marker(kind, true).len());
+    (bytes, body_rows.saturating_add(3))
+}
+
 fn previous_run(view: &SessionView, count: usize) -> Option<RunId> {
     count
         .checked_sub(1)
@@ -720,7 +826,7 @@ fn message_text<'a>(
         } else {
             crate::presentation::tool_summary(&view.runs[run].tools[tool])
         }),
-        MessageSource::Commentary(_, u8::MAX, _) => {
+        MessageSource::Commentary(_, u32::MAX, _) => {
             Cow::Borrowed(crate::session::DISPLAY_LIMIT_TEXT)
         }
         MessageSource::Commentary(run, call, item) => Cow::Owned(
@@ -765,9 +871,17 @@ pub(super) fn display_rows(kind: MessageKind, text: &str, width: usize) -> Vec<H
         .collect()
 }
 
-fn message_rows(kind: MessageKind, text: &str, width: usize) -> Vec<MessageRow> {
-    let width = width.min(MAX_ROW_CELLS);
-    let heading = match kind {
+pub(super) fn native_marker(kind: MessageKind, heading: bool) -> &'static str {
+    match (kind, heading) {
+        (MessageKind::User, true) => "› ",
+        (MessageKind::Assistant, true) => "● ",
+        (MessageKind::User, false) => "│ ",
+        _ => "",
+    }
+}
+
+fn message_heading(kind: MessageKind) -> &'static str {
+    match kind {
         MessageKind::User => "You:",
         MessageKind::Assistant => "Arany:",
         MessageKind::Notice => "Arany · notice:",
@@ -776,7 +890,12 @@ fn message_rows(kind: MessageKind, text: &str, width: usize) -> Vec<MessageRow> 
         MessageKind::Incomplete => "Arany · incomplete:",
         MessageKind::Tool | MessageKind::ToolDetails => "Tool:",
         MessageKind::Commentary => "Arany · commentary:",
-    };
+    }
+}
+
+fn message_rows(kind: MessageKind, text: &str, width: usize) -> Vec<MessageRow> {
+    let width = width.min(MAX_ROW_CELLS);
+    let heading = message_heading(kind);
     let mut rows = vec![MessageRow {
         text: safe_truncate(heading, width),
         source_byte: 0,
@@ -896,8 +1015,119 @@ mod tests {
             accepted_sequence: 2,
             finished_sequence: Some(3),
             tools: Vec::new(),
+            tool_compaction_summary: None,
+            tool_compaction_covered_count: 0,
             display: Vec::new(),
         }
+    }
+
+    #[test]
+    fn classic_projection_uses_run_order_across_fork_sequence_coordinates() {
+        let mut view = session();
+        for index in 0..MAX_CLASSIC_HISTORY_RUNS + 2 {
+            let mut run = run(&format!("objective {index}"), "answer");
+            run.accepted_sequence = if index < 16 {
+                index as u64 + 100
+            } else {
+                index as u64 - 15
+            };
+            view.runs.push(run);
+        }
+        view.last_sequence = 10;
+
+        let projection = classic_projection(&view, 80);
+
+        assert_eq!(projection.first_run_index, Some(2));
+        assert!(view.runs[2].accepted_sequence > view.last_sequence);
+        assert!(view.runs[16].accepted_sequence <= view.last_sequence);
+        assert!(projection.omitted_history);
+    }
+
+    #[test]
+    fn classic_projection_byte_budget_includes_native_headings_and_rails() {
+        let mut view = session();
+        for index in 0..MAX_CLASSIC_HISTORY_RUNS {
+            let mut run = run(&"x".repeat(4093), "a");
+            run.accepted_sequence = index as u64 + 2;
+            view.runs.push(run);
+        }
+        view.last_sequence = 100;
+
+        let projection = classic_projection(&view, 80);
+        let first = projection.first_run_index.expect("recent suffix");
+        let selected_bytes: usize = view.runs[first..]
+            .iter()
+            .map(|run| classic_run_cost(run, 80).0)
+            .sum();
+
+        assert_eq!(first, 1);
+        assert!(selected_bytes <= MAX_CLASSIC_HISTORY_BYTES);
+        assert!(
+            selected_bytes + classic_run_cost(&view.runs[first - 1], 80).0
+                > MAX_CLASSIC_HISTORY_BYTES
+        );
+    }
+
+    #[test]
+    fn classic_projection_omits_a_whole_run_when_escaped_bytes_exceed_limit() {
+        let mut view = session();
+        let mut run = run("objective", &"\u{202e}".repeat(9000));
+        run.accepted_sequence = 2;
+        view.runs.push(run);
+        view.last_sequence = 3;
+
+        let projection = classic_projection(&view, 80);
+
+        assert_eq!(projection.first_run_index, None);
+        assert!(projection.omitted_history);
+        assert!(
+            crate::presentation::escaped_terminal_bytes(
+                view.runs[0].assistant_message.as_ref().unwrap()
+            ) > MAX_CLASSIC_HISTORY_BYTES
+        );
+    }
+
+    #[test]
+    fn classic_projection_bounds_rendered_rows_from_newlines() {
+        let mut view = session();
+        let mut run = run(&"line\n".repeat(MAX_CLASSIC_HISTORY_ROWS), "answer");
+        run.accepted_sequence = 2;
+        view.runs.push(run);
+        view.last_sequence = 3;
+
+        let projection = classic_projection(&view, 80);
+
+        assert_eq!(projection.first_run_index, None);
+        assert!(projection.omitted_history);
+        assert!(message_row_count(&view.runs[0].objective, 80) > MAX_CLASSIC_HISTORY_ROWS);
+    }
+
+    #[test]
+    fn full_managed_history_can_find_a_run_outside_the_classic_projection() {
+        let mut view = session();
+        for index in 0..MAX_CLASSIC_HISTORY_RUNS + 2 {
+            let mut run = run(&format!("objective {index}"), "answer");
+            run.accepted_sequence = index as u64 + 2;
+            view.runs.push(run);
+        }
+        view.last_sequence = 100;
+        let projection = classic_projection(&view, 80);
+        assert!(projection.omitted_history);
+        assert!(projection.first_run_index.unwrap() > 0);
+
+        let mut history = History::default();
+        history.sync(&view, 80, 20);
+        assert!(history.handle(super::super::TerminalInput::HistoryFind, &view));
+        for character in "objective 0".chars() {
+            assert!(history.handle(super::super::TerminalInput::Character(character), &view));
+        }
+        assert!(history.handle(super::super::TerminalInput::Submit, &view));
+        assert!(
+            history
+                .visible(&view)
+                .iter()
+                .any(|row| row.text.contains("objective 0"))
+        );
     }
 
     #[test]

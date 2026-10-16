@@ -33,6 +33,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         runtime_grants: Vec::new(),
     };
     let runtime = ToolRuntime {
+        context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
         config,
         workspace: PathBuf::new(),
@@ -40,6 +41,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         guard_executable: PathBuf::new(),
         enforcement_digest: [1; 32],
         queue_progress: None,
+        active_action_gate: None,
         #[cfg(target_os = "macos")]
         system_programs: None,
         process_enforcement_digest: [1; 32],
@@ -48,6 +50,8 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         mission: "Read the requested Skill guidance".into(),
         paths: Vec::new(),
         commands: Vec::new(),
+        resource_class: ToolResourceClass::Default,
+        command_timeout_ms: None,
         skills: vec![GoalSkillBinding {
             name: name.into(),
             resource: resource.map(str::to_owned),
@@ -1031,6 +1035,7 @@ fn project_skill_discovery_preserves_grants_and_reports_missing_installation() {
             }
             let context = ToolContext {
                 catalog,
+                history_summary: None,
                 observations: Vec::new(),
             };
             assert!(context.model_input()["catalog"].is_object());
@@ -1256,15 +1261,10 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         use_count: 1,
     };
     assert!(intent.valid());
-    let mut limits = json!({
-        "result_bytes": MAX_TOOL_RESULT_BYTES,
-        "runtime_ms": 60_000,
-        "memory_bytes": MEMORY_BYTES,
-        "max_processes": MAX_PROCESSES_OR_THREADS,
-        "scratch_bytes": SCRATCH_BYTES,
-        "network": "none"
-    });
-    assert!(serde_json::from_value::<ToolLimits>(limits.clone()).is_err());
+    let mut limits = serde_json::to_value(&intent.limits).unwrap();
+    let mut partial = limits.clone();
+    partial.as_object_mut().unwrap().remove("cache_transfer_ms");
+    assert!(serde_json::from_value::<ToolLimits>(partial).is_err());
     let mut native = intent.clone();
     native.limits.resource_profile = ToolResourceProfile::LinuxKernel;
     let linux_intent = native.digest();
@@ -1350,6 +1350,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
     worker_observation.disposition = ToolDisposition::Succeeded;
     worker_observation.cache_update = CacheUpdate::NotAttempted;
     assert!(worker_observation.valid());
+    assert!(!worker_observation.stops_run());
     worker_observation.cache_update = CacheUpdate::Failed;
     assert!(worker_observation.valid());
     let mut encoded = serde_json::to_value(&worker_observation).unwrap();
@@ -1370,7 +1371,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
     assert!(unattempted_error.valid());
     assert!(unattempted_error.stops_run());
     let mut widened = intent.clone();
-    widened.limits.runtime_ms += 1;
+    widened.limits.runtime_ms = MAX_COMMAND_TIMEOUT_MS + 1;
     assert!(!widened.valid());
     let mut reusable = intent;
     reusable.use_count = 2;
@@ -1485,6 +1486,7 @@ fn goal_success_criterion_offers_only_admitted_calls() {
             "mcp_servers": []
         })
         .to_string(),
+        history_summary: None,
         observations: Vec::new(),
     };
     let budget = crate::session::GoalBudget::default();
@@ -1540,6 +1542,7 @@ fn goal_success_criterion_without_admitted_calls_omits_the_call_alternative() {
             "mcp_servers": []
         })
         .to_string(),
+        history_summary: None,
         observations: Vec::new(),
     };
     let budget = crate::session::GoalBudget::default();
@@ -1579,6 +1582,7 @@ fn goal_without_pinned_budget_offers_only_the_plan_free_prelude() {
             "mcp_servers": [{"name": "local"}]
         })
         .to_string(),
+        history_summary: None,
         observations: Vec::new(),
     };
     let branches = context.outcome_branch_with_plan(true, None);
@@ -1601,4 +1605,111 @@ fn goal_without_pinned_budget_offers_only_the_plan_free_prelude() {
         branches[0]["properties"]["plan_contract"],
         json!({"type": "null"})
     );
+}
+
+#[tokio::test]
+async fn cache_receipt_states_preserve_success_without_publication_uncertainty() {
+    fn make_observation(call: ToolCall, cache_requested_bytes: u64) -> ToolObservation {
+        let mut intent = EffectIntent {
+            id: uuid::Uuid::now_v7(),
+            run_id: crate::session::RunId::new(),
+            agent_run_id: crate::session::AgentRunId::new(),
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call,
+            limits: ToolLimits::default(),
+            expires_at_ms: u64::MAX,
+            use_count: 1,
+        };
+        intent.limits.cache_requested_bytes = cache_requested_bytes;
+        intent.limits.cache_bytes = cache_requested_bytes;
+        intent.limits.cache_candidate_bytes = 0;
+        let guard = GuardReceipt {
+            contract_version: 1,
+            intent_digest: intent.digest(),
+            enforcement_digest: intent.enforcement_digest,
+            limits: intent.limits.clone(),
+        };
+        ToolObservation {
+            intent,
+            disposition: ToolDisposition::Succeeded,
+            output: "{}".into(),
+            guard: Some(guard),
+            cache_update: CacheUpdate::NotAttempted,
+        }
+    }
+
+    let read = ToolCall::Read {
+        path: "src/main.rs".into(),
+        offset: 0,
+        limit: 1024,
+    };
+    let mut observation = make_observation(read, 0);
+    super::guard::publish_cache_candidate(
+        &mut observation,
+        super::guard::CacheCandidate::Received,
+        None,
+        tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+    )
+    .await;
+    assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+    assert_eq!(observation.cache_update, CacheUpdate::NotApplicable);
+    assert!(observation.valid());
+    assert!(!observation.stops_run());
+
+    for (candidate, requested, expected_update, expected_disposition) in [
+        (
+            super::guard::CacheCandidate::Received,
+            0,
+            CacheUpdate::NotApplicable,
+            ToolDisposition::Succeeded,
+        ),
+        (
+            super::guard::CacheCandidate::Received,
+            1,
+            CacheUpdate::Rejected,
+            ToolDisposition::Succeeded,
+        ),
+        (
+            super::guard::CacheCandidate::Rejected,
+            1,
+            CacheUpdate::Rejected,
+            ToolDisposition::Succeeded,
+        ),
+        (
+            super::guard::CacheCandidate::Failed,
+            1,
+            CacheUpdate::Failed,
+            ToolDisposition::Succeeded,
+        ),
+        (
+            super::guard::CacheCandidate::Uncertain,
+            1,
+            CacheUpdate::Uncertain,
+            ToolDisposition::Succeeded,
+        ),
+    ] {
+        let call = ToolCall::Command {
+            program: "cargo".into(),
+            args: vec!["check".into()],
+            cwd: ".".into(),
+        };
+        let mut observation = make_observation(call, requested);
+        super::guard::publish_cache_candidate(
+            &mut observation,
+            candidate,
+            None,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(observation.cache_update, expected_update);
+        assert_eq!(observation.disposition, expected_disposition);
+        assert!(observation.valid());
+        assert_eq!(
+            observation.stops_run(),
+            expected_update == CacheUpdate::Uncertain
+        );
+    }
 }

@@ -4,8 +4,8 @@ use super::{
 };
 use crate::engine::RunCancellation;
 use crate::tools::types::{
-    EffectIntent, MAX_CHANGESET_BYTES, MAX_CHANGESET_FILES, MAX_PROCESSES_OR_THREADS, MEMORY_BYTES,
-    ToolCall, ToolObservation, digest,
+    EffectIntent, MAX_BUILD_PROCESSES_OR_THREADS, MAX_CHANGESET_BYTES, MAX_CHANGESET_FILES,
+    ToolCall, ToolLimits, ToolObservation, ToolResourceClass, digest,
 };
 use crate::tools::{ToolError, ToolRuntime};
 use std::io::{Read, Write};
@@ -53,7 +53,7 @@ pub(super) fn check_available() -> Result<(), ToolError> {
 }
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
-    let mut bytes = b"arany-guard-v12:shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;fixed-root-owned-unshare-bootstrap-user-map-current-recursive-private-no-retained-caps;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go".to_vec();
+    let mut bytes = b"arany-guard-v13:shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;fixed-root-owned-unshare-bootstrap-user-map-current-recursive-private-no-retained-caps;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go".to_vec();
     bytes.extend_from_slice(&profile::profile_digest()?);
     bytes.extend_from_slice(&(MAX_CHANGESET_FILES as u64).to_le_bytes());
     bytes.extend_from_slice(&(MAX_CHANGESET_BYTES as u64).to_le_bytes());
@@ -98,7 +98,7 @@ pub(super) async fn stop_command_descendants(
                 .parse::<u32>()
                 .map_err(|_| ToolError::ProtectionUnavailable)?;
             count += 1;
-            if count > MAX_PROCESSES_OR_THREADS as usize + 2 {
+            if count > MAX_BUILD_PROCESSES_OR_THREADS as usize + 2 {
                 return Err(ToolError::Limit);
             }
             live |= pid != 1 && pid != own;
@@ -176,6 +176,7 @@ struct Unit {
     invocation: Option<String>,
     group: Option<cap_std::fs::Dir>,
     kill: Option<cap_std::fs::File>,
+    limits: Option<ToolLimits>,
 }
 
 impl Unit {
@@ -211,6 +212,17 @@ impl Unit {
     }
 
     async fn admit(&mut self) -> Result<(), ToolError> {
+        let limits = self
+            .limits
+            .as_ref()
+            .ok_or(ToolError::ProtectionUnavailable)?;
+        let memory = limits.memory_bytes.to_string();
+        let processes = limits.max_processes.to_string();
+        let cpu = if limits.resource_class == ToolResourceClass::Build {
+            "100000 100000"
+        } else {
+            "25000 100000"
+        };
         let values = self.properties().await?;
         let group = values["ControlGroup"]
             .as_str()
@@ -242,11 +254,11 @@ impl Unit {
                 .map_err(|_| ToolError::ProtectionUnavailable)?,
         );
         for (name, expected) in [
-            ("memory.max", MEMORY_BYTES.to_string()),
+            ("memory.max", memory),
             ("memory.swap.max", "0".into()),
             ("memory.oom.group", "1".into()),
-            ("pids.max", MAX_PROCESSES_OR_THREADS.to_string()),
-            ("cpu.max", "25000 100000".into()),
+            ("pids.max", processes.clone()),
+            ("cpu.max", cpu.into()),
         ] {
             let mut file = dir
                 .open(name)
@@ -271,7 +283,7 @@ impl Unit {
             .take(4096)
             .read_to_string(&mut members)
             .map_err(|_| ToolError::ProtectionUnavailable)?;
-        if members.lines().count() > MAX_PROCESSES_OR_THREADS as usize
+        if members.lines().count() > limits.max_processes as usize
             || !members
                 .lines()
                 .any(|line| line.parse::<u32>() == Ok(main_pid))
@@ -388,6 +400,7 @@ pub(super) async fn recover_reservation(id: uuid::Uuid) -> Result<bool, ToolErro
         invocation: None,
         group: None,
         kill: None,
+        limits: None,
     };
     let values = unit.properties().await?;
     // No loaded unit cannot settle a controller interrupted during its launch request.
@@ -461,6 +474,7 @@ pub(super) async fn seed_unit_group(id: uuid::Uuid) -> cap_std::fs::Dir {
         invocation: None,
         group: None,
         kill: None,
+        limits: None,
     };
     let values = unit.properties().await.unwrap();
     assert_eq!(values["ActiveState"], "active");
@@ -548,16 +562,33 @@ pub(super) async fn execute_inner(
         () = cancellation.cancelled() => return Err(ToolError::Operation),
         permit = super::admission::acquire(intent.id, intent.expires_at_ms, |queued| runtime.queue_changed(intent.id, queued)) => permit?,
     };
-    let deadline = tokio::time::Instant::now()
-        + Duration::from_millis(u64::from(intent.limits.runtime_ms))
-        + Duration::from_secs(5);
+    let capacity_started = tokio::time::Instant::now();
+    let active_window = runtime.begin_active_action(capacity_started).await?;
+    let cache_transfer = Duration::from_millis(u64::from(intent.limits.cache_transfer_ms));
+    let preparation_deadline = active_window
+        .map_or(capacity_started + Duration::from_secs(5), |window| {
+            window.preparation_deadline
+        });
+    let go_deadline = active_window.map_or(preparation_deadline + cache_transfer, |window| {
+        window.go_deadline
+    });
+    let deadline = active_window.map_or_else(
+        || {
+            capacity_started
+                + Duration::from_secs(15)
+                + cache_transfer.saturating_mul(2)
+                + Duration::from_millis(u64::from(intent.limits.runtime_ms))
+        },
+        |window| window.completion_deadline,
+    );
     crate::tools::fs::validate_workspace(runtime)?;
     let runtime_grants = if intent.call.is_process() {
         runtime.config.runtime_grants.as_slice()
     } else {
         &[]
     };
-    let (runtime_directories, mounts) = runtime_mounts(runtime_grants)?;
+    let (runtime_directories, mounts) =
+        runtime_mounts(runtime_grants, intent.limits.cache_bytes > 0)?;
     let runtime_path = super::runtime_path(runtime_grants)?;
     let workspace = crate::tools::fs::open_directory(&runtime.workspace)?;
     let mut cache = super::build_cache_session(runtime, intent)?;
@@ -569,6 +600,14 @@ pub(super) async fn execute_inner(
         invocation: None,
         group: None,
         kill: None,
+        limits: Some(intent.limits.clone()),
+    };
+    let memory_max = format!("--property=MemoryMax={}", intent.limits.memory_bytes);
+    let tasks_max = format!("--property=TasksMax={}", intent.limits.max_processes);
+    let cpu_quota = if intent.limits.resource_class == ToolResourceClass::Build {
+        "--property=CPUQuota=100%"
+    } else {
+        "--property=CPUQuota=25%"
     };
     let mut command = manager_command("/usr/bin/systemd-run");
     command.args([
@@ -590,18 +629,18 @@ pub(super) async fn execute_inner(
         "--property=TimeoutStopSec=2s",
         "--property=RuntimeRandomizedExtraSec=0",
         "--property=RemainAfterExit=no",
-        "--property=MemoryMax=536870912",
+        &memory_max,
         "--property=MemorySwapMax=0",
         "--property=OOMPolicy=kill",
-        "--property=TasksMax=64",
-        "--property=CPUQuota=25%",
+        &tasks_max,
+        cpu_quota,
         "--property=CPUQuotaPeriodSec=100ms",
     ]);
+    let service_runtime_ms = 10_000_u64
+        .saturating_add(u64::from(intent.limits.cache_transfer_ms).saturating_mul(2))
+        .saturating_add(u64::from(intent.limits.runtime_ms));
     command
-        .arg(format!(
-            "--property=RuntimeMaxSec={}ms",
-            intent.limits.runtime_ms
-        ))
+        .arg(format!("--property=RuntimeMaxSec={}ms", service_runtime_ms))
         .args(BWRAP_BOOTSTRAP);
     let native = matches!(
         intent.call,
@@ -624,6 +663,7 @@ pub(super) async fn execute_inner(
         &seed_path,
         &folders,
         workspace_mount,
+        &intent.limits,
         &runtime.guard_executable,
     );
     for directory in runtime_directories {
@@ -655,15 +695,27 @@ pub(super) async fn execute_inner(
             cache: cache_transfer,
             parent_namespaces: parent_namespaces.clone(),
         })?;
-        stdin
-            .write_all(&task)
-            .await
-            .map_err(|_| ToolError::Operation)?;
-        let mut ready_bytes = read_line_capped(&mut stdout, 2048).await?;
+        let mut ready_bytes = tokio::time::timeout_at(preparation_deadline, async {
+            stdin
+                .write_all(&task)
+                .await
+                .map_err(|_| ToolError::Operation)?;
+            read_line_capped(&mut stdout, 2048).await
+        })
+        .await
+        .map_err(|_| ToolError::Limit)??;
         if ready_bytes == b"CACHE_READY\n" {
             let session = cache.as_ref().ok_or(ToolError::Operation)?;
-            super::send_cache_archive(&mut stdin, &session.lease).await?;
-            ready_bytes = read_line_capped(&mut stdout, 2048).await?;
+            let transfer_deadline = super::cache_transfer_deadline(intent, Some(go_deadline));
+            tokio::time::timeout_at(
+                transfer_deadline,
+                super::send_cache_archive(&mut stdin, &session.lease),
+            )
+            .await
+            .map_err(|_| ToolError::Limit)??;
+            ready_bytes = tokio::time::timeout_at(go_deadline, read_line_capped(&mut stdout, 2048))
+                .await
+                .map_err(|_| ToolError::Limit)??;
         }
         let ready = parse_ready(&ready_bytes, intent)?;
         if ready.pid != 1 && ready.pid != 2 {
@@ -675,6 +727,7 @@ pub(super) async fn execute_inner(
         unit.admit()
             .await
             .map_err(|_| ToolError::GuardRejected(GuardStage::ResourceAttestation))?;
+        runtime.before_dispatch(active_window, intent.limits.runtime_ms)?;
         *dispatched = true;
         stdin
             .write_all(b"GO\n")
@@ -683,7 +736,22 @@ pub(super) async fn execute_inner(
         stdin.shutdown().await.map_err(|_| ToolError::Operation)?;
         let (observation, candidate) = if let Some(session) = cache.as_ref() {
             let observation = super::read_observation_line(&mut stdout, intent).await?;
-            let candidate = super::receive_cache_candidate(&mut stdout, &session.lease).await?;
+            let update_deadline = super::cache_transfer_deadline(
+                intent,
+                active_window.map(|window| window.completion_deadline),
+            );
+            let candidate = match tokio::time::timeout_at(
+                update_deadline,
+                super::receive_cache_candidate(&mut stdout, &session.lease),
+            )
+            .await
+            {
+                Ok(Ok(candidate)) => candidate,
+                Ok(Err(_)) | Err(_) => super::CacheCandidate::Uncertain,
+            };
+            if candidate == super::CacheCandidate::Uncertain {
+                return Ok((observation, candidate));
+            }
             (observation, candidate)
         } else {
             (
@@ -709,20 +777,27 @@ pub(super) async fn execute_inner(
         () = cancellation.cancelled() => Err(ToolError::Operation),
         result = tokio::time::timeout_at(deadline, execution) => result.unwrap_or(Err(ToolError::Limit)),
     };
-    let cleanup = tokio::time::timeout(Duration::from_secs(5), unit.stop()).await;
+    let cleanup = tokio::time::timeout_at(deadline, unit.stop()).await;
     if !matches!(cleanup, Ok(Ok(()))) {
         unit.kill_group();
     }
     let _ = child.start_kill();
-    let reaped = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
-    let drained = drain_stderr(&mut stderr_task).await;
+    let reaped = tokio::time::timeout_at(deadline, child.wait()).await;
+    let drained = match tokio::time::timeout_at(deadline, drain_stderr(&mut stderr_task)).await {
+        Ok(drained) => drained,
+        Err(_) => {
+            stderr_task.abort();
+            let _ = stderr_task.await;
+            None
+        }
+    };
     if matches!(cleanup, Ok(Ok(()))) {
         permit
             .terminated()
             .map_err(|_| ToolError::GuardRejected(GuardStage::StorageCleanup))?;
-        permit
-            .cleanup()
+        tokio::time::timeout_at(deadline, permit.cleanup())
             .await
+            .map_err(|_| ToolError::GuardRejected(GuardStage::StorageCleanup))?
             .map_err(|_| ToolError::GuardRejected(GuardStage::StorageCleanup))?;
     }
     if result.is_err()
@@ -750,21 +825,25 @@ pub(super) async fn execute_inner(
         };
         return Err(ToolError::GuardRejected(stage));
     }
-    result.map(|(observation, candidate)| {
-        let mut observation = observation;
-        super::publish_cache_candidate(&mut observation, candidate, cache.as_mut());
-        observation
-    })
+    match result {
+        Ok((mut observation, candidate)) => {
+            super::publish_cache_candidate(&mut observation, candidate, cache.take(), deadline)
+                .await;
+            Ok(observation)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Destinations that `profile_arguments` mounts or creates; a toolchain may not overlap them.
-const PROFILE_MOUNT_TARGETS: [&str; 12] = [
+const PROFILE_MOUNT_TARGETS: [&str; 13] = [
     RUNTIME_ROOT,
     "/lib",
     "/lib64",
     "/proc",
     "/dev",
     "/scratch",
+    "/cache",
     "/workspace",
     "/seed",
     "/programs",
@@ -801,17 +880,18 @@ type RuntimeMounts = (Vec<PathBuf>, Vec<(PathBuf, PathBuf)>);
 /// Verifies every grant before any seed exists; a rejected grant leaves no state behind.
 fn runtime_mounts(
     grants: &[super::super::toolchains::RuntimeGrant],
+    cache_enabled: bool,
 ) -> Result<RuntimeMounts, ToolError> {
     let mut directories = Vec::new();
     let mut mounts = Vec::new();
     for grant in grants {
         grant.verify_host()?;
-        let target = grant.mounted_path()?;
+        let target = grant.mounted_path(cache_enabled)?;
         let root = if grant.kind.is_toolchain() {
             reject_profile_overlap(&target)?;
             Path::new("/")
         } else {
-            Path::new("/scratch")
+            Path::new(super::super::toolchains::sandbox_cache_root(cache_enabled))
         };
         directories.extend(mount_directories(&target, root));
         mounts.push((grant.path.clone(), target));
@@ -828,6 +908,7 @@ fn profile_arguments(
     seed_path: &Path,
     folders: &[&str],
     workspace: Option<(&Path, bool)>,
+    limits: &ToolLimits,
     guard: &Path,
 ) {
     command.args([
@@ -851,7 +932,11 @@ fn profile_arguments(
         "/scratch",
         "--setenv",
         "CARGO_TARGET_DIR",
-        "/scratch/target",
+        if limits.cache_bytes > 0 {
+            "/cache/target"
+        } else {
+            "/scratch/target"
+        },
         "--ro-bind",
         RUNTIME_ROOT,
         RUNTIME_ROOT,
@@ -865,11 +950,17 @@ fn profile_arguments(
         "/proc",
         "--dev",
         "/dev",
-        "--size",
-        "67108864",
-        "--tmpfs",
-        "/scratch",
     ]);
+    command
+        .args(["--size"])
+        .arg(limits.scratch_bytes.to_string())
+        .args(["--tmpfs", "/scratch"]);
+    if limits.cache_bytes > 0 {
+        command
+            .args(["--size"])
+            .arg(limits.cache_bytes.to_string())
+            .args(["--tmpfs", "/cache"]);
+    }
     command.args(["--ro-bind"]).arg(seed_path).arg("/seed");
     for folder in folders {
         command
@@ -885,7 +976,10 @@ fn profile_arguments(
             command.args(["--ro-bind"]).arg(path).arg("/workspace");
         }
         None => {
-            command.args(["--size", "67108864", "--tmpfs", "/workspace"]);
+            command
+                .args(["--size"])
+                .arg(limits.project_bytes.to_string())
+                .args(["--tmpfs", "/workspace"]);
         }
     }
     command.args(["--ro-bind"]).arg(guard).arg("/arany");
@@ -893,6 +987,7 @@ fn profile_arguments(
 
 pub(super) fn verify_runtime_mounts(
     grants: &[super::super::toolchains::RuntimeGrant],
+    cache_enabled: bool,
 ) -> Result<(), ToolError> {
     use std::io::Read;
 
@@ -908,7 +1003,7 @@ pub(super) fn verify_runtime_mounts(
     let mounts = parse_mountinfo(&bytes)?;
     let targets = grants
         .iter()
-        .map(super::super::toolchains::RuntimeGrant::mounted_path)
+        .map(|grant| grant.mounted_path(cache_enabled))
         .collect::<Result<Vec<_>, _>>()?;
     verify_mount_entries(&mounts, &targets)
 }
@@ -1151,6 +1246,7 @@ mod tests {
                 Path::new("/host/seed"),
                 &folders,
                 mount,
+                &ToolLimits::default(),
                 Path::new("/host/guard"),
             );
             let arguments = command
@@ -1275,13 +1371,31 @@ mod tests {
             command_path,
             format!(
                 "{}:/usr/bin:/bin",
-                node.grant.mounted_path().unwrap().join("bin").display()
+                node.grant
+                    .mounted_path(false)
+                    .unwrap()
+                    .join("bin")
+                    .display()
             )
         );
         assert_eq!(
-            cache.grant.mounted_path().unwrap(),
+            cache.grant.mounted_path(true).unwrap(),
+            Path::new("/cache/cargo/registry/cache")
+        );
+        assert_eq!(
+            cache.grant.mounted_path(false).unwrap(),
             Path::new("/scratch/cargo/registry/cache")
         );
+        let (directories, mounts) =
+            runtime_mounts(std::slice::from_ref(&cache.grant), false).unwrap();
+        assert_eq!(
+            mounts,
+            [(
+                cache.grant.path.clone(),
+                PathBuf::from("/scratch/cargo/registry/cache")
+            )]
+        );
+        assert!(directories.iter().all(|path| path.starts_with("/scratch")));
         assert!(node.grant.verify_host().is_ok() && cache.grant.verify_host().is_ok());
     }
 
@@ -1707,6 +1821,7 @@ mod tests {
                     Path::new(&fixture),
                     &[],
                     None,
+                    &ToolLimits::default(),
                     Path::new(&binary),
                 );
                 for directory in mount_directories(Path::new(&target), Path::new("/")) {
@@ -1768,7 +1883,7 @@ mod tests {
             let grant: RuntimeGrant =
                 serde_json::from_slice(&std::fs::read(grant_path).expect("fixture grant"))
                     .expect("fixture grant schema");
-            let target = grant.mounted_path().unwrap();
+            let target = grant.mounted_path(false).unwrap();
             grant.verify_at(&target).expect("runtime alias identity");
             let call = ToolCall::Command {
                 program: "node".into(),
@@ -1777,7 +1892,7 @@ mod tests {
             };
             let grants = std::slice::from_ref(&grant);
             let mut stage = super::super::BootstrapStage::Workspace;
-            if super::super::attest_runtime_mounts(&call, grants, &mut stage).is_err() {
+            if super::super::attest_runtime_mounts(&call, grants, false, &mut stage).is_err() {
                 let failure = super::super::BootstrapFailure { stage };
                 std::fs::write(
                     result_path,
@@ -1793,7 +1908,7 @@ mod tests {
                     assert!(std::time::Instant::now() < deadline, "fixture GO deadline");
                     std::thread::sleep(Duration::from_millis(10));
                 }
-                super::super::attest_runtime_mounts(&call, grants, &mut stage)
+                super::super::attest_runtime_mounts(&call, grants, false, &mut stage)
                     .expect("late shared-source mount must not propagate");
             }
             std::fs::write(result_path, b"PASS").expect("fixture success result");
@@ -1828,7 +1943,7 @@ mod tests {
         };
         grant.validate_shape().unwrap();
         let grant_path = fixture.path().join("grant.json");
-        let target = grant.mounted_path().unwrap();
+        let target = grant.mounted_path(false).unwrap();
         let result_path = fixture.path().join("result");
         let test_binary = std::env::current_exe().unwrap();
         std::fs::write(fixture.path().join("arany-test-bin"), b"placeholder").unwrap();
@@ -1954,6 +2069,7 @@ mod tests {
             invocation: None,
             group: None,
             kill: None,
+            limits: None,
         };
         let name = unit.name.clone();
         let result = tokio::spawn(async move {
