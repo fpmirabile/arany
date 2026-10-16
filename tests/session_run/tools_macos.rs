@@ -1839,7 +1839,7 @@ int main(void) {
         if case == "receipt-loss" {
             // A Guard error after dispatch never attempts cache publication; the command outcome stays uncertain.
             assert_eq!(
-                replay.runs[0].input.tools[0]
+                replay.runs[0].tools[0]
                     .observation
                     .as_ref()
                     .unwrap()
@@ -1861,7 +1861,7 @@ int main(void) {
                 "no cache publication was attempted: {unresolved:?}"
             );
         }
-        let observation = replay.runs[0].input.tools[0].observation.as_ref().unwrap();
+        let observation = replay.runs[0].tools[0].observation.as_ref().unwrap();
         assert_eq!(
             observation.disposition,
             match case {
