@@ -33,7 +33,7 @@ fn team_cancellation_latency_on_named_host() {
             started,
             requests: Arc::clone(&requests),
             fail_child: None,
-            capacity: CHILDREN as u8,
+            identity: crate::gated_identity(CHILDREN as u8),
         };
         let mut engine = Engine::open(StateRoot::admit(&state).expect("private state"), provider)
             .expect("benchmark Engine");

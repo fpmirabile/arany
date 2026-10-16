@@ -218,16 +218,16 @@ fn build_goal_request() -> arany::GoalRequest {
 
 #[async_trait::async_trait]
 impl Provider for CacheCanary {
-    fn profile_name(&self) -> &str {
-        "scripted"
-    }
-
-    fn model_name(&self) -> &str {
-        "cache-canary-model"
-    }
-
-    fn max_concurrent_calls(&self) -> u8 {
-        1
+    fn identity(&self) -> &arany::ProviderIdentity {
+        static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::new(
+                    "scripted",
+                    "cache-canary-model",
+                    arany::Provenance::native(),
+                )
+            });
+        &IDENTITY
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {

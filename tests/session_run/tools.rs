@@ -98,14 +98,12 @@ struct Journey {
 }
 #[async_trait::async_trait]
 impl Provider for Journey {
-    fn profile_name(&self) -> &str {
-        "scripted"
-    }
-    fn model_name(&self) -> &str {
-        "tool-model"
-    }
-    fn max_concurrent_calls(&self) -> u8 {
-        1
+    fn identity(&self) -> &arany::ProviderIdentity {
+        static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::new("scripted", "tool-model", arany::Provenance::native())
+            });
+        &IDENTITY
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
@@ -526,15 +524,14 @@ struct Proposal {
 }
 #[async_trait::async_trait]
 impl Provider for Proposal {
-    fn profile_name(&self) -> &str {
-        "scripted"
+    fn identity(&self) -> &arany::ProviderIdentity {
+        static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::new("scripted", "guard-model", arany::Provenance::native())
+            });
+        &IDENTITY
     }
-    fn model_name(&self) -> &str {
-        "guard-model"
-    }
-    fn max_concurrent_calls(&self) -> u8 {
-        1
-    }
+
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         let mut requests = self.requests.lock().unwrap();
         let request_index = requests.len();
@@ -631,16 +628,16 @@ struct OverTimeoutCommand {
 }
 #[async_trait::async_trait]
 impl Provider for OverTimeoutCommand {
-    fn profile_name(&self) -> &str {
-        "scripted"
-    }
-
-    fn model_name(&self) -> &str {
-        "goal-resource-model"
-    }
-
-    fn max_concurrent_calls(&self) -> u8 {
-        1
+    fn identity(&self) -> &arany::ProviderIdentity {
+        static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::new(
+                    "scripted",
+                    "goal-resource-model",
+                    arany::Provenance::native(),
+                )
+            });
+        &IDENTITY
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
@@ -804,16 +801,16 @@ struct ExactTokenTool {
 
 #[async_trait::async_trait]
 impl arany::Provider for ExactTokenTool {
-    fn profile_name(&self) -> &str {
-        "scripted"
-    }
-
-    fn model_name(&self) -> &str {
-        "goal-budget-model"
-    }
-
-    fn max_concurrent_calls(&self) -> u8 {
-        1
+    fn identity(&self) -> &arany::ProviderIdentity {
+        static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::new(
+                    "scripted",
+                    "goal-budget-model",
+                    arany::Provenance::native(),
+                )
+            });
+        &IDENTITY
     }
 
     async fn invoke(
@@ -941,16 +938,16 @@ struct GoalWorkspaceLease {
 }
 #[async_trait::async_trait]
 impl Provider for GoalWorkspaceLease {
-    fn profile_name(&self) -> &str {
-        "scripted"
-    }
-
-    fn model_name(&self) -> &str {
-        "goal-lease-model"
-    }
-
-    fn max_concurrent_calls(&self) -> u8 {
-        1
+    fn identity(&self) -> &arany::ProviderIdentity {
+        static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::new(
+                    "scripted",
+                    "goal-lease-model",
+                    arany::Provenance::native(),
+                )
+            });
+        &IDENTITY
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
@@ -1256,15 +1253,14 @@ fn bounded_loop_plan() -> arany::GoalPlanContract {
 }
 #[async_trait::async_trait]
 impl Provider for BoundedLoop {
-    fn profile_name(&self) -> &str {
-        "scripted"
+    fn identity(&self) -> &arany::ProviderIdentity {
+        static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::new("scripted", "guard-model", arany::Provenance::native())
+            });
+        &IDENTITY
     }
-    fn model_name(&self) -> &str {
-        "guard-model"
-    }
-    fn max_concurrent_calls(&self) -> u8 {
-        1
-    }
+
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         let mut requests = self.requests.lock().unwrap();
         let outcome = if self.team {
@@ -2441,15 +2437,14 @@ struct ApprovalJourney {
 }
 #[async_trait::async_trait]
 impl Provider for ApprovalJourney {
-    fn profile_name(&self) -> &str {
-        "scripted"
+    fn identity(&self) -> &arany::ProviderIdentity {
+        static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::new("scripted", "guard-model", arany::Provenance::native())
+            });
+        &IDENTITY
     }
-    fn model_name(&self) -> &str {
-        "guard-model"
-    }
-    fn max_concurrent_calls(&self) -> u8 {
-        1
-    }
+
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         let mut requests = self.requests.lock().unwrap();
         let first = requests.is_empty();
@@ -2777,14 +2772,12 @@ struct GitJourney {
 }
 #[async_trait::async_trait]
 impl Provider for GitJourney {
-    fn profile_name(&self) -> &str {
-        "scripted"
-    }
-    fn model_name(&self) -> &str {
-        "tool-model"
-    }
-    fn max_concurrent_calls(&self) -> u8 {
-        1
+    fn identity(&self) -> &arany::ProviderIdentity {
+        static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::new("scripted", "tool-model", arany::Provenance::native())
+            });
+        &IDENTITY
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {

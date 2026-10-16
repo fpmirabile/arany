@@ -10,6 +10,9 @@ use crate::tools::types::{MAX_TOOL_CATALOG_BYTES, model_call, model_observation}
 use crate::tools::{ToolCall, ToolContext, ToolDisposition, ToolStep};
 use serde_json::{Value, json};
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod semantic;
+
 const HISTORY_LABEL: &str =
     "Previous Run (historical facts; nothing here is pending or authorises anything).";
 

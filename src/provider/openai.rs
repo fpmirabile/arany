@@ -1,9 +1,9 @@
 use super::conversation::Conversation;
 use super::{
-    CompactionRequest, CompactionResponse, Effort, MAX_REPORTED_INPUT_TOKENS, MAX_RESPONSE_BYTES,
-    Provider, ProviderError, ProviderRequest, ProviderResponse, Usage, raw_reflects_secret, render,
-    resolve_native_effort, resolve_native_effort_for_run, valid_saved_api_account_id,
-    validate_native_api_key,
+    CallLimits, CompactionRequest, CompactionResponse, Effort, MAX_REPORTED_INPUT_TOKENS,
+    MAX_RESPONSE_BYTES, Provenance, Provider, ProviderError, ProviderIdentity, ProviderRequest,
+    ProviderResponse, Usage, raw_reflects_secret, render, resolve_native_effort,
+    resolve_native_effort_for_run, valid_saved_api_account_id, validate_native_api_key,
 };
 use reqwest::Client;
 use serde_json::Value;
@@ -29,11 +29,9 @@ pub async fn probe_chatgpt_model(
 
 pub struct OpenAiProvider {
     client: Client,
-    model: String,
+    identity: ProviderIdentity,
     effort: Effort,
     key: String,
-    saved_api_account_id: Option<Uuid>,
-    max_concurrent_calls: u8,
 }
 
 impl OpenAiProvider {
@@ -83,7 +81,9 @@ impl OpenAiProvider {
             return Err(ProviderError::Rejected);
         }
         let mut provider = Self::from_api_key_with_effort(model, selected_effort, key)?;
-        provider.saved_api_account_id = Some(account_id);
+        provider.identity.provenance = Provenance::Native {
+            saved_api_account_id: Some(account_id),
+        };
         Ok(provider)
     }
 
@@ -105,8 +105,10 @@ impl OpenAiProvider {
         )
         .await?;
         let mut provider = Self::with_resolved_effort(model, effort, key)?;
-        provider.saved_api_account_id = saved_api_account_id;
-        provider.max_concurrent_calls = 1;
+        provider.identity.provenance = Provenance::Native {
+            saved_api_account_id,
+        };
+        provider.identity.limits.concurrency = 1;
         Ok(provider)
     }
 
@@ -138,13 +140,20 @@ impl OpenAiProvider {
         } else {
             1
         };
+        let mut identity =
+            ProviderIdentity::new("openai", model, crate::provider::Provenance::native());
+        identity.effort = Some(effort);
+        identity.limits = CallLimits {
+            concurrency: max_concurrent_calls,
+            max_output_tokens: super::MAX_OUTPUT_TOKEN_CAP,
+            deadline: DEADLINE,
+            ..CallLimits::default()
+        };
         Ok(Self {
             client,
-            model,
+            identity,
             effort,
             key,
-            saved_api_account_id: None,
-            max_concurrent_calls,
         })
     }
 
@@ -197,7 +206,7 @@ impl OpenAiProvider {
         bytes: &[u8],
         output_cap: u32,
     ) -> Result<CompactionResponse, ProviderError> {
-        let response = wire::decode_compaction(bytes, &self.model)?;
+        let response = wire::decode_compaction(bytes, &self.identity.model)?;
         if !valid_usage(response.usage, output_cap) || response.reflects_secret(&self.key) {
             return Err(ProviderError::InvalidOutcome);
         }
@@ -215,39 +224,15 @@ fn valid_usage(usage: Usage, output_cap: u32) -> bool {
 
 #[async_trait::async_trait]
 impl Provider for OpenAiProvider {
-    fn profile_name(&self) -> &str {
-        "openai"
-    }
-
-    fn model_name(&self) -> &str {
-        &self.model
-    }
-
-    fn reasoning_effort(&self) -> Option<Effort> {
-        Some(self.effort)
-    }
-
-    fn max_concurrent_calls(&self) -> u8 {
-        self.max_concurrent_calls
-    }
-
-    fn saved_api_account_id(&self) -> Option<Uuid> {
-        self.saved_api_account_id
-    }
-
-    fn max_output_tokens(&self) -> u32 {
-        super::MAX_OUTPUT_TOKEN_CAP
-    }
-
-    fn call_deadline(&self) -> Duration {
-        DEADLINE
+    fn identity(&self) -> &ProviderIdentity {
+        &self.identity
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         request.validate_scope()?;
         super::image::validate_images(&request)?;
-        if request.model != self.model
-            || !(1..=self.max_output_tokens()).contains(&request.max_output_tokens)
+        if request.model != self.identity.model
+            || !(1..=self.identity.limits.max_output_tokens).contains(&request.max_output_tokens)
         {
             return Err(ProviderError::Rejected);
         }
@@ -264,8 +249,8 @@ impl Provider for OpenAiProvider {
     ) -> Result<ProviderResponse, ProviderError> {
         request.validate_scope()?;
         super::image::validate_images(&request)?;
-        if request.model != self.model
-            || !(1..=self.max_output_tokens()).contains(&request.max_output_tokens)
+        if request.model != self.identity.model
+            || !(1..=self.identity.limits.max_output_tokens).contains(&request.max_output_tokens)
         {
             return Err(ProviderError::Rejected);
         }
@@ -290,8 +275,13 @@ impl Provider for OpenAiProvider {
                 ProviderError::Rejected
             });
         }
-        let bytes =
-            read_streamed_reply(&mut response, &self.key, &self.model, Some(preview)).await?;
+        let bytes = read_streamed_reply(
+            &mut response,
+            &self.key,
+            &self.identity.model,
+            Some(preview),
+        )
+        .await?;
         let decoded = wire::decode_streamed_run(
             &bytes,
             &wire::RunScope::new(&request, &conversation, &self.key),
@@ -309,7 +299,8 @@ impl Provider for OpenAiProvider {
         &self,
         request: CompactionRequest,
     ) -> Result<CompactionResponse, ProviderError> {
-        if request.model != self.model || !(1..=1024).contains(&request.max_output_tokens) {
+        if request.model != self.identity.model || !(1..=1024).contains(&request.max_output_tokens)
+        {
             return Err(ProviderError::Rejected);
         }
         let response = self
@@ -356,12 +347,15 @@ mod tests {
             "synthetic-openai-key".into(),
         )
         .expect("selected API key");
-        assert_eq!(provider.model_name(), "gpt-5.4");
-        assert_eq!(provider.reasoning_effort(), Some(Effort::High));
+        assert_eq!(provider.identity().model, "gpt-5.4");
+        assert_eq!(provider.identity().effort, Some(Effort::High));
         assert_eq!(provider.key, "synthetic-openai-key");
-        assert_eq!(provider.saved_api_account_id(), None);
-        assert_eq!(provider.max_output_tokens(), 16_384);
-        assert_eq!(provider.call_deadline(), Duration::from_secs(600));
+        assert_eq!(provider.identity().saved_api_account_id(), None);
+        assert_eq!(provider.identity().limits.max_output_tokens, 16_384);
+        assert_eq!(
+            provider.identity().limits.deadline,
+            Duration::from_secs(600)
+        );
         let account_id = Uuid::now_v7();
         let saved = OpenAiProvider::from_saved_api_key_with_effort(
             "gpt-5.4".into(),
@@ -370,7 +364,7 @@ mod tests {
             account_id,
         )
         .expect("saved API account");
-        assert_eq!(saved.saved_api_account_id(), Some(account_id));
+        assert_eq!(saved.identity().saved_api_account_id(), Some(account_id));
         for effort in Effort::ALL {
             let selected = OpenAiProvider::from_saved_api_key_with_effort(
                 "future-model".into(),
@@ -379,10 +373,10 @@ mod tests {
                 account_id,
             )
             .expect("explicit native choice needs no synthetic check");
-            assert_eq!(selected.model_name(), "future-model");
-            assert_eq!(selected.reasoning_effort(), Some(effort));
-            assert_eq!(selected.saved_api_account_id(), Some(account_id));
-            assert_eq!(selected.max_concurrent_calls(), 1);
+            assert_eq!(selected.identity().model, "future-model");
+            assert_eq!(selected.identity().effort, Some(effort));
+            assert_eq!(selected.identity().saved_api_account_id(), Some(account_id));
+            assert_eq!(selected.identity().limits.concurrency, 1);
         }
         assert!(matches!(
             OpenAiProvider::from_saved_api_key_with_effort(

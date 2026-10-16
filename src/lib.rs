@@ -36,20 +36,23 @@ pub use presentation::{
     Output, escape_terminal, goal_status, render_cache_update_feedback, render_exec,
     render_run_feedback, render_session,
 };
+#[cfg(feature = "test-support")]
+pub use provider::semantic;
 pub use provider::{
-    AgentPhase, AnthropicProvider, ChatGptAdmission, ChatGptProvenance, ChatGptProvider,
-    ChildResult, CompactionItem, CompactionRequest, CompactionResponse, CustomProfile,
-    CustomProfileCheck, CustomProfileError, CustomProfileProvenance, CustomProvider, Delegate,
-    Effort, Finish, GoalContextFacts, HistoryTurn, ImageAttachment, ImageOrigin,
+    AgentPhase, AnthropicProvider, CallLimits, ChatGptAdmission, ChatGptProvenance,
+    ChatGptProvider, ChildResult, CompactionItem, CompactionRequest, CompactionResponse,
+    CustomProfile, CustomProfileCheck, CustomProfileError, CustomProfileProvenance, CustomProvider,
+    Delegate, Effort, Finish, GoalContextFacts, HistoryTurn, ImageAttachment, ImageOrigin,
     MAX_ANTHROPIC_WORKSPACE_ID_BYTES, MAX_IMAGE_BYTES, MAX_MESSAGE_IMAGES,
     MAX_NATIVE_API_KEY_BYTES, ModelEntry, NativeApiCredentials, NativeCheckError, OpenAiProvider,
-    OutputTokenBound, PreviewText, PromptRole, Provider, ProviderError, ProviderFailureReason,
-    ProviderImage, ProviderOutcome, ProviderRequest, ProviderResponse, ProviderTurn,
-    ProviderWireProvenance, ResponsePreview, RunInput, ToolUseId, UnansweredStatus, Usage,
-    check_custom_profile, check_native_model_from_env, check_native_model_with_api_key,
-    check_native_model_with_credentials, list_native_models, list_native_models_with_api_key,
-    list_native_models_with_credentials, probe_chatgpt_model, resolve_native_effort,
-    resolve_native_effort_for_run, validate_native_api_key, validate_native_model_id,
+    OutputTokenBound, PreviewText, PromptRole, Provenance, Provider, ProviderError,
+    ProviderFailureReason, ProviderIdentity, ProviderImage, ProviderOutcome, ProviderRequest,
+    ProviderResponse, ProviderTurn, ProviderWireProvenance, ResponsePreview, RunInput, ToolUseId,
+    UnansweredStatus, Usage, check_custom_profile, check_native_model_from_env,
+    check_native_model_with_api_key, check_native_model_with_credentials, list_native_models,
+    list_native_models_with_api_key, list_native_models_with_credentials, probe_chatgpt_model,
+    resolve_native_effort, resolve_native_effort_for_run, validate_native_api_key,
+    validate_native_model_id,
 };
 pub use session::{
     AgentDisposition, AgentRole, AgentRunId, AgentStatus, AgentView, ChildGrant,

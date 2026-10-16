@@ -1666,19 +1666,36 @@ impl RunConfig {
         }) || self.history_run_ids.len() + 1 >= super::MAX_HISTORY_RUNS * 3 / 4
     }
 
-    pub(crate) fn validate(&self) -> Result<(), ReplayError> {
-        if !(crate::provider::ProviderIdentity {
-            profile: &self.provider,
-            model: &self.model,
+    fn identity(&self) -> Option<crate::provider::ProviderIdentity> {
+        use crate::provider::Provenance;
+        let provenance = match (
+            &self.custom_profile_provenance,
+            self.saved_api_account_id,
+            &self.chatgpt_provenance,
+        ) {
+            (Some(custom), None, None) => Provenance::Custom(custom.clone()),
+            (None, saved_api_account_id, None) => Provenance::Native {
+                saved_api_account_id,
+            },
+            (None, None, Some(chatgpt)) => Provenance::ChatGpt(chatgpt.clone()),
+            _ => return None,
+        };
+        Some(crate::provider::ProviderIdentity {
+            profile: self.provider.clone(),
+            model: self.model.clone(),
             effort: self.effort,
-            concurrency: self.provider_concurrency,
-            custom_profile_provenance: self.custom_profile_provenance.as_ref(),
-            saved_api_account_id: self.saved_api_account_id,
-            chatgpt_provenance: self.chatgpt_provenance.as_ref(),
-            output_token_bound: self.output_token_bound,
+            provenance,
+            limits: crate::provider::CallLimits {
+                concurrency: self.provider_concurrency,
+                max_output_tokens: self.output_token_cap,
+                output_token_bound: self.output_token_bound,
+                ..Default::default()
+            },
         })
-        .valid()
-            || !(1..=crate::provider::MAX_OUTPUT_TOKEN_CAP).contains(&self.output_token_cap)
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ReplayError> {
+        if !self.identity().is_some_and(|identity| identity.valid())
             || self
                 .tool_policy
                 .as_ref()

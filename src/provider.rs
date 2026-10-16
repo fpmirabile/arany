@@ -39,6 +39,8 @@ pub use native_check::{
 };
 pub use openai::{ChatGptProvider, OpenAiProvider, probe_chatgpt_model};
 pub(crate) use render::history_tool_block;
+#[cfg(feature = "test-support")]
+pub use render::semantic;
 pub use streaming::{PreviewText, ResponsePreview};
 
 fn http_client(timeout: std::time::Duration) -> reqwest::ClientBuilder {
@@ -258,34 +260,110 @@ pub(crate) fn valid_saved_api_account_id(profile: &str, id: Option<Uuid>) -> boo
     })
 }
 
-pub(crate) struct ProviderIdentity<'a> {
-    pub profile: &'a str,
-    pub model: &'a str,
-    pub effort: Option<Effort>,
-    pub concurrency: u8,
-    pub custom_profile_provenance: Option<&'a CustomProfileProvenance>,
-    pub saved_api_account_id: Option<Uuid>,
-    pub chatgpt_provenance: Option<&'a ChatGptProvenance>,
-    pub output_token_bound: OutputTokenBound,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Provenance {
+    Native { saved_api_account_id: Option<Uuid> },
+    Custom(CustomProfileProvenance),
+    ChatGpt(ChatGptProvenance),
 }
 
-impl ProviderIdentity<'_> {
+/// Declared ceilings the Engine enforces for every call of one adapter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CallLimits {
+    pub concurrency: u8,
+    /// Output tokens a primary call requests; children and Tool review request smaller caps.
+    pub max_output_tokens: u32,
+    pub output_token_bound: OutputTokenBound,
+    /// The wall-clock bound for one primary, child or Tool-review call.
+    pub deadline: std::time::Duration,
+}
+
+impl Default for CallLimits {
+    fn default() -> Self {
+        Self {
+            concurrency: 1,
+            max_output_tokens: DEFAULT_OUTPUT_TOKEN_CAP,
+            output_token_bound: OutputTokenBound::ProviderEnforced,
+            deadline: std::time::Duration::from_secs(120),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderIdentity {
+    pub profile: String,
+    pub model: String,
+    pub effort: Option<Effort>,
+    pub provenance: Provenance,
+    pub limits: CallLimits,
+}
+
+impl Provenance {
+    pub fn native() -> Self {
+        Self::Native {
+            saved_api_account_id: None,
+        }
+    }
+}
+
+impl ProviderIdentity {
+    pub fn new(
+        profile: impl Into<String>,
+        model: impl Into<String>,
+        provenance: Provenance,
+    ) -> Self {
+        Self {
+            profile: profile.into(),
+            model: model.into(),
+            effort: None,
+            provenance,
+            limits: CallLimits::default(),
+        }
+    }
+
+    pub(crate) fn custom_provenance(&self) -> Option<&CustomProfileProvenance> {
+        match &self.provenance {
+            Provenance::Custom(provenance) => Some(provenance),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn saved_api_account_id(&self) -> Option<Uuid> {
+        match self.provenance {
+            Provenance::Native {
+                saved_api_account_id,
+            } => saved_api_account_id,
+            _ => None,
+        }
+    }
+
+    pub(crate) fn chatgpt_provenance(&self) -> Option<&ChatGptProvenance> {
+        match &self.provenance {
+            Provenance::ChatGpt(provenance) => Some(provenance),
+            _ => None,
+        }
+    }
+
     pub(crate) fn valid(&self) -> bool {
+        let chatgpt = self.profile == "chatgpt";
+        let limits = &self.limits;
         !self.profile.is_empty()
             && self.profile.len() <= 128
             && !self.model.is_empty()
             && self.model.len() <= 128
-            && self.profile.starts_with("custom:") == self.custom_profile_provenance.is_some()
-            && valid_saved_api_account_id(self.profile, self.saved_api_account_id)
-            && (self.profile == "chatgpt") == self.chatgpt_provenance.is_some()
-            && (self.profile == "chatgpt")
-                == (self.output_token_bound == OutputTokenBound::LocalAcceptanceOnly)
-            && (self.profile != "chatgpt" || self.effort.is_some() && self.concurrency == 1)
-            && self.chatgpt_provenance.is_none_or(ChatGptProvenance::valid)
+            && self.profile.starts_with("custom:") == self.custom_provenance().is_some()
+            && valid_saved_api_account_id(&self.profile, self.saved_api_account_id())
+            && chatgpt == self.chatgpt_provenance().is_some()
+            && chatgpt == (limits.output_token_bound == OutputTokenBound::LocalAcceptanceOnly)
+            && (!chatgpt || self.effort.is_some() && limits.concurrency == 1)
             && self
-                .custom_profile_provenance
-                .is_none_or(|provenance| provenance.valid())
-            && (1..=8).contains(&self.concurrency)
+                .chatgpt_provenance()
+                .is_none_or(ChatGptProvenance::valid)
+            && self
+                .custom_provenance()
+                .is_none_or(CustomProfileProvenance::valid)
+            && (1..=8).contains(&limits.concurrency)
+            && (1..=MAX_OUTPUT_TOKEN_CAP).contains(&limits.max_output_tokens)
     }
 }
 
@@ -684,8 +762,8 @@ impl CustomProfileProvenance {
     }
 }
 
-/// One resolved inference adapter. Profile, model, effort, concurrency and provenance
-/// declarations remain immutable while the Engine uses this value.
+/// One resolved inference adapter. Its identity (profile, model, effort, provenance and
+/// call limits) remains immutable while the Engine uses this value.
 ///
 /// Requests and results carry Arany semantics, not wire or persistence objects.
 /// The Engine owns admission, aggregate budgets, journal ordering and Tool authority;
@@ -698,42 +776,7 @@ impl CustomProfileProvenance {
 /// or remote usage. Implementations must not detach unowned effectful work.
 #[async_trait::async_trait]
 pub trait Provider: Send + Sync {
-    fn profile_name(&self) -> &str;
-
-    fn model_name(&self) -> &str;
-
-    fn reasoning_effort(&self) -> Option<Effort> {
-        None
-    }
-
-    /// A declared ceiling enforced by the Engine, not internal call serialization.
-    fn max_concurrent_calls(&self) -> u8;
-
-    fn custom_profile_provenance(&self) -> Option<CustomProfileProvenance> {
-        None
-    }
-
-    fn saved_api_account_id(&self) -> Option<Uuid> {
-        None
-    }
-
-    fn chatgpt_provenance(&self) -> Option<ChatGptProvenance> {
-        None
-    }
-
-    fn output_token_bound(&self) -> OutputTokenBound {
-        OutputTokenBound::ProviderEnforced
-    }
-
-    /// Output tokens a primary call requests; children and Tool review request smaller caps.
-    fn max_output_tokens(&self) -> u32 {
-        DEFAULT_OUTPUT_TOKEN_CAP
-    }
-
-    /// The wall-clock bound for one primary, child or Tool-review call.
-    fn call_deadline(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(120)
-    }
+    fn identity(&self) -> &ProviderIdentity;
 
     /// Returns one complete semantic outcome or an error, never an accepted partial result.
     /// The Engine independently validates its phase, bounds and durable transition.

@@ -1,12 +1,12 @@
 use arany::{
-    AgentPhase, AgentRunId, AgentStatus, ChatGptAdmission, ChatGptProvenance, CollaborationPolicy,
-    CompactionFailure, CompactionItem, CompactionRequest, CompactionResponse, CompactionStatus,
-    ContextUsage, Delegate, Effort, Engine, EngineError, Event, Finish, ImageAttachment,
-    ImageOrigin, OutputTokenBound, PromptRole, Provider, ProviderCallDisposition, ProviderError,
-    ProviderImage, ProviderOutcome, ProviderRequest, ProviderResponse, RunCancellation, RunId,
-    RunInput, RunProgress, RunRequest, RunStatus, RunSteering, SessionId, SessionView, StateRoot,
-    Store, UnansweredStatus, continue_session, fork_session, list_sessions, rename_session,
-    resume_session,
+    AgentPhase, AgentRunId, AgentStatus, CallLimits, ChatGptAdmission, ChatGptProvenance,
+    CollaborationPolicy, CompactionFailure, CompactionItem, CompactionRequest, CompactionResponse,
+    CompactionStatus, ContextUsage, Delegate, Effort, Engine, EngineError, Event, Finish,
+    ImageAttachment, ImageOrigin, OutputTokenBound, PromptRole, Provenance, Provider,
+    ProviderCallDisposition, ProviderError, ProviderIdentity, ProviderImage, ProviderOutcome,
+    ProviderRequest, ProviderResponse, RunCancellation, RunId, RunInput, RunProgress, RunRequest,
+    RunStatus, RunSteering, SessionId, SessionView, StateRoot, Store, UnansweredStatus,
+    continue_session, fork_session, list_sessions, rename_session, resume_session,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
@@ -46,14 +46,7 @@ fn tool_outcome(
 }
 
 struct ScriptedProvider {
-    profile: String,
-    model: String,
-    effort: Option<Effort>,
-    saved_api_account_id: Option<Uuid>,
-    chatgpt_provenance: Option<ChatGptProvenance>,
-    output_token_bound: OutputTokenBound,
-    capacity: u8,
-    max_output_tokens: u32,
+    identity: ProviderIdentity,
     responses: Mutex<VecDeque<Result<ProviderOutcome, ProviderError>>>,
     cancel_at_completion: Option<(AgentPhase, RunCancellation)>,
     before_call: Option<(usize, Box<dyn Fn() + Send + Sync>)>,
@@ -69,14 +62,13 @@ struct ScriptedProvider {
 impl ScriptedProvider {
     fn new(responses: Vec<ProviderOutcome>) -> Self {
         Self {
-            profile: "scripted".into(),
-            model: "test-model".into(),
-            effort: None,
-            saved_api_account_id: None,
-            chatgpt_provenance: None,
-            output_token_bound: OutputTokenBound::ProviderEnforced,
-            capacity: 3,
-            max_output_tokens: 4096,
+            identity: ProviderIdentity {
+                limits: CallLimits {
+                    concurrency: 3,
+                    ..CallLimits::default()
+                },
+                ..ProviderIdentity::new("scripted", "test-model", arany::Provenance::native())
+            },
             responses: Mutex::new(responses.into_iter().map(Ok).collect()),
             cancel_at_completion: None,
             before_call: None,
@@ -128,73 +120,47 @@ impl ScriptedProvider {
     }
 
     fn with_profile(mut self, profile: &str, model: &str) -> Self {
-        self.profile = profile.into();
-        self.model = model.into();
+        self.identity.profile = profile.into();
+        self.identity.model = model.into();
         self
     }
 
     fn with_effort(mut self, effort: Effort) -> Self {
-        self.effort = Some(effort);
+        self.identity.effort = Some(effort);
         self
     }
 
     fn with_max_output_tokens(mut self, cap: u32) -> Self {
-        self.max_output_tokens = cap;
+        self.identity.limits.max_output_tokens = cap;
         self
     }
 
     fn with_saved_api_account(mut self, id: Uuid) -> Self {
-        self.saved_api_account_id = Some(id);
+        self.identity.provenance = Provenance::Native {
+            saved_api_account_id: Some(id),
+        };
         self
     }
 
     fn with_chatgpt_account(mut self, id: Uuid, fingerprint: [u8; 32]) -> Self {
-        self.profile = "chatgpt".into();
-        self.model = "model-a".into();
-        self.effort = Some(Effort::High);
-        self.chatgpt_provenance = Some(ChatGptProvenance {
+        self.identity.profile = "chatgpt".into();
+        self.identity.model = "model-a".into();
+        self.identity.effort = Some(Effort::High);
+        self.identity.provenance = Provenance::ChatGpt(ChatGptProvenance {
             account_id: id,
             evidence_fingerprint: fingerprint,
             admission: ChatGptAdmission::AccountConsent,
         });
-        self.output_token_bound = OutputTokenBound::LocalAcceptanceOnly;
-        self.capacity = 1;
+        self.identity.limits.output_token_bound = OutputTokenBound::LocalAcceptanceOnly;
+        self.identity.limits.concurrency = 1;
         self
     }
 }
 
 #[async_trait::async_trait]
 impl Provider for ScriptedProvider {
-    fn profile_name(&self) -> &str {
-        &self.profile
-    }
-
-    fn model_name(&self) -> &str {
-        &self.model
-    }
-
-    fn reasoning_effort(&self) -> Option<Effort> {
-        self.effort
-    }
-
-    fn max_concurrent_calls(&self) -> u8 {
-        self.capacity
-    }
-
-    fn saved_api_account_id(&self) -> Option<Uuid> {
-        self.saved_api_account_id
-    }
-
-    fn chatgpt_provenance(&self) -> Option<ChatGptProvenance> {
-        self.chatgpt_provenance.clone()
-    }
-
-    fn output_token_bound(&self) -> OutputTokenBound {
-        self.output_token_bound
-    }
-
-    fn max_output_tokens(&self) -> u32 {
-        self.max_output_tokens
+    fn identity(&self) -> &ProviderIdentity {
+        &self.identity
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
@@ -257,25 +223,37 @@ impl Provider for ScriptedProvider {
     }
 }
 
+fn gated_identity(concurrency: u8) -> ProviderIdentity {
+    ProviderIdentity {
+        limits: CallLimits {
+            concurrency,
+            ..CallLimits::default()
+        },
+        ..ProviderIdentity::new("gated", "test-model", arany::Provenance::native())
+    }
+}
+
+fn waiting_identity(deadline: Duration) -> ProviderIdentity {
+    ProviderIdentity {
+        limits: CallLimits {
+            deadline,
+            ..CallLimits::default()
+        },
+        ..ProviderIdentity::new("waiting", "test-model", arany::Provenance::native())
+    }
+}
+
 struct GatedProvider {
     started: mpsc::UnboundedSender<(String, oneshot::Sender<()>)>,
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
     fail_child: Option<&'static str>,
-    capacity: u8,
+    identity: ProviderIdentity,
 }
 
 #[async_trait::async_trait]
 impl Provider for GatedProvider {
-    fn profile_name(&self) -> &str {
-        "gated"
-    }
-
-    fn model_name(&self) -> &str {
-        "test-model"
-    }
-
-    fn max_concurrent_calls(&self) -> u8 {
-        self.capacity
+    fn identity(&self) -> &ProviderIdentity {
+        &self.identity
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
@@ -333,7 +311,7 @@ struct WaitingProvider {
     started: mpsc::UnboundedSender<()>,
     dropped: Arc<AtomicUsize>,
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
-    call_deadline: Duration,
+    identity: ProviderIdentity,
 }
 
 struct WaitingCompactionProvider {
@@ -345,16 +323,16 @@ struct WaitingCompactionProvider {
 
 #[async_trait::async_trait]
 impl Provider for WaitingCompactionProvider {
-    fn profile_name(&self) -> &str {
-        "waiting-compaction"
-    }
-
-    fn model_name(&self) -> &str {
-        "test-model"
-    }
-
-    fn max_concurrent_calls(&self) -> u8 {
-        1
+    fn identity(&self) -> &arany::ProviderIdentity {
+        static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::new(
+                    "waiting-compaction",
+                    "test-model",
+                    arany::Provenance::native(),
+                )
+            });
+        &IDENTITY
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
@@ -393,20 +371,8 @@ impl Provider for WaitingCompactionProvider {
 
 #[async_trait::async_trait]
 impl Provider for WaitingProvider {
-    fn call_deadline(&self) -> Duration {
-        self.call_deadline
-    }
-
-    fn profile_name(&self) -> &str {
-        "waiting"
-    }
-
-    fn model_name(&self) -> &str {
-        "test-model"
-    }
-
-    fn max_concurrent_calls(&self) -> u8 {
-        1
+    fn identity(&self) -> &ProviderIdentity {
+        &self.identity
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
@@ -3482,7 +3448,7 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
             started,
             requests: Arc::clone(&requests),
             fail_child: None,
-            capacity: 3,
+            identity: gated_identity(3),
         };
         let mut engine = Engine::open(
             StateRoot::admit(&state_path).expect("state readmission"),
@@ -3719,7 +3685,7 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
         let cancelled_requests = Arc::new(Mutex::new(Vec::new()));
         let mut engine = Engine::open(
             StateRoot::open_existing(&state_path).expect("cancellation State"),
-            GatedProvider { started, requests: Arc::clone(&cancelled_requests), fail_child: None, capacity: 3 },
+            GatedProvider { started, requests: Arc::clone(&cancelled_requests), fail_child: None, identity: gated_identity(3), },
         )
         .expect("cancellation Engine");
         let cancellation = RunCancellation::new();
@@ -3868,7 +3834,7 @@ fn failed_child_cancels_and_drains_siblings_without_a_final_message() {
             started,
             requests: Arc::clone(&requests),
             fail_child: Some("B"),
-            capacity: 3,
+            identity: gated_identity(3),
         };
         let mut engine = Engine::open(
             StateRoot::admit(&state_path).expect("private state"),
@@ -4013,7 +3979,7 @@ fn provider_concurrency_ceiling_serializes_admitted_children() {
             started,
             requests: Arc::new(Mutex::new(Vec::new())),
             fail_child: None,
-            capacity: 1,
+            identity: gated_identity(1),
         };
         let mut engine = Engine::open(
             StateRoot::admit(&temp.path().join("state")).expect("private state"),
@@ -4089,7 +4055,7 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
             started,
             dropped: Arc::clone(&dropped),
             requests: Arc::clone(&requests),
-            call_deadline: Duration::from_secs(120),
+            identity: waiting_identity(Duration::from_secs(120)),
         };
         let mut engine = Engine::open(
             StateRoot::admit(&state_path).expect("private state"),
@@ -4491,7 +4457,7 @@ fn same_session_operation_is_excluded_while_other_sessions_continue() {
                     started,
                     dropped: Arc::clone(&dropped),
                     requests: Arc::clone(&held_calls),
-                    call_deadline: Duration::from_secs(120),
+                    identity: waiting_identity(Duration::from_secs(120)),
                 },
             )
             .expect("held engine");
@@ -4697,7 +4663,7 @@ fn cancellation_before_admission_creates_no_run_or_provider_call() {
             started,
             dropped: Arc::new(AtomicUsize::new(0)),
             requests: Arc::clone(&requests),
-            call_deadline: Duration::from_secs(120),
+            identity: waiting_identity(Duration::from_secs(120)),
         };
         let mut engine = Engine::open(
             StateRoot::admit(&state_path).expect("private state"),
@@ -4749,7 +4715,7 @@ fn team_cancellation_drains_active_and_queued_children() {
                 started,
                 requests: Arc::clone(&requests),
                 fail_child: None,
-                capacity,
+                identity: gated_identity(capacity),
             };
             let mut engine = Engine::open(
                 StateRoot::admit(&state_path).expect("private state"),
@@ -4995,7 +4961,7 @@ fn provider_call_timeout_fails_without_a_final_message() {
             started,
             dropped: Arc::clone(&dropped),
             requests: Arc::clone(&requests),
-            call_deadline: Duration::from_secs(300),
+            identity: waiting_identity(Duration::from_secs(300)),
         };
         let mut engine = Engine::open(
             StateRoot::admit(&temp.path().join("state")).expect("private state"),
@@ -5072,7 +5038,7 @@ fn provider_declared_call_deadline_times_out_and_settles_its_active_reservation(
             started,
             dropped: Arc::clone(&dropped),
             requests: Arc::new(Mutex::new(Vec::new())),
-            call_deadline: Duration::from_millis(50),
+            identity: waiting_identity(Duration::from_millis(50)),
         };
         let mut engine = Engine::open(
             StateRoot::admit(&state_path).expect("private state"),
@@ -5571,15 +5537,14 @@ struct PreviewProvider {
 
 #[async_trait::async_trait]
 impl Provider for PreviewProvider {
-    fn max_concurrent_calls(&self) -> u8 {
-        1
+    fn identity(&self) -> &arany::ProviderIdentity {
+        static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::new("preview", "test-model", arany::Provenance::native())
+            });
+        &IDENTITY
     }
-    fn profile_name(&self) -> &str {
-        "preview"
-    }
-    fn model_name(&self) -> &str {
-        "test-model"
-    }
+
     async fn invoke(&self, _: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         panic!("attached primary must use the preview invocation")
     }

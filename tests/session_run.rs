@@ -60,8 +60,7 @@ fn safe_run_diagnostics(run: &arany::RunView) -> String {
     format!("agents={agents:?}; tools={tools:?}")
 }
 
-#[path = "common/semantic.rs"]
-mod semantic;
+use arany::semantic;
 
 #[path = "common/process.rs"]
 pub mod process;
@@ -2531,16 +2530,12 @@ struct HeldProvider {
 #[cfg(unix)]
 #[async_trait::async_trait]
 impl arany::Provider for HeldProvider {
-    fn profile_name(&self) -> &str {
-        "scripted"
-    }
-
-    fn model_name(&self) -> &str {
-        "held-model"
-    }
-
-    fn max_concurrent_calls(&self) -> u8 {
-        1
+    fn identity(&self) -> &arany::ProviderIdentity {
+        static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::new("scripted", "held-model", arany::Provenance::native())
+            });
+        &IDENTITY
     }
 
     async fn invoke(
