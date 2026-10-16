@@ -4,7 +4,7 @@
 **Status:** retained primary-source comparison, not implementation or containment proof
 **Scope:** Codex, official Claude Code documentation, and current upstream Pi; functional beta 1 tools and commands, without a new UX requirement
 
-The [Tool spec](../specs/tools.md), [Engine rules](../../agents/engine.md) and [security gate](../../agents/security.md#effectful-execution-gate) own the accepted lifecycle. This note retains source comparisons behind the adopted loop; implementation steps and acceptance requirements live in those owners. No provider call, account operation, installer, foreign project code or tool execution was performed for this research.
+The [Tool spec](../specs/tools.md), [Execution spec](../specs/execution.md) and [security gate](../../agents/security.md#effectful-execution-gate) own the accepted lifecycle. This note retains source comparisons behind the adopted loop; implementation steps and acceptance requirements live in those owners. No provider call, account operation, installer, foreign project code or tool execution was performed for this research.
 
 ## What the primary sources establish
 

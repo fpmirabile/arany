@@ -20,48 +20,36 @@ Everything else, including the agent loop shape, wire formats, defaults, permiss
 
 1. **Build the harness.** Arany owns agent execution, context, Tools, permissions and durable Sessions. Keep product policy in the Engine and platform, Provider and presentation details at their existing boundaries. Evaluate changes against the complete task lifecycle, including failure, cancellation and recovery. The [system overview](./docs/architecture/system-overview.md) owns the architecture.
 2. **Design for Linux and macOS parity.** Arany targets Linux and macOS with equivalent behavior. Native Windows is out of scope: Windows users run the Linux build under WSL2. For every implementation, consider platform impact on both targets; when OS facilities are involved, prefer standard/library capabilities with equivalent guarantees, then narrow native adapters. Do not assume a shell, path layout, desktop, distribution or service manager. Document unavoidable differences and unavailable capabilities in the owning contract; unsupported security enforcement fails closed. A Linux-first milestone is delivery order, not the product boundary. Native evidence is required before claiming support; current gaps belong in [NEXT_STEPS.md](./NEXT_STEPS.md).
-3. **Apply Ponytail on every implementation.** Read [Ponytail](./.agents/skills/ponytail/SKILL.md) before implementing, refactoring or reviewing code; install it through [project skill setup](./agents/skills/README.md#install-for-a-harness) if missing. Prefer existing code, the standard library, OS facilities and installed dependencies; add only complexity the agreed task or a demonstrated constraint requires. Never reduce scope, correctness, security, accessibility, error handling, resource bounds or verification to save lines; repository rules win over the skill's shortcuts.
+3. **Apply Ponytail on every implementation.** Read [Ponytail](./.agents/skills/ponytail/SKILL.md) before implementing, refactoring or reviewing code; install it through [project skill setup](./agents/skills/README.md#install-for-a-harness) if missing. Prefer existing code, the standard library, OS facilities and installed dependencies; add only complexity the agreed task or a demonstrated constraint requires. Never reduce scope, correctness, security, accessibility, error handling, resource bounds or verification to save lines; repository rules win over the skill's shortcuts. Every implementation and review also applies [rust-clean-code](./agents/skills/rust-clean-code/SKILL.md) and [clean-architecture-review](./agents/skills/clean-architecture-review/SKILL.md).
 4. **Prefer proven harness designs.** When established harnesses (Claude Code, Codex CLI, OpenCode, Goose, Aider) share a working answer for a behavior, default or wire format, replicate it; diverge only for a documented Arany constraint (security, durability, strict replay) and name the peer behavior and reason in the owning contract.
 
 ## Rules to load before editing
 
+**Documentation ownership.** `agents/` holds general working practice only: how we work and why. `docs/specs/<domain>.md` is the only home of behavior, decisions, limits and scenarios; load a spec only when the task changes, fixes or verifies that behavior, and read its scenarios before implementing. Implementation invariants and pitfalls that the code does not show live in the code as `//!` module docs or `///` item docs, so opening the file loads them. A separate unit of work, such as a split-out crate, gets `agents/<unit>.md`; a module in the single crate does not. Never state a fact in more than one of these homes; link instead.
+
 | Task or boundary | Read |
 |---|---|
-| Git operations, including planned steps | [Git](./agents/git.md) |
-| Auth, secrets, I/O, APIs, Tools, processes, MCP, memory, transports, untrusted rendering | [Security](./agents/security.md) |
-| Providers, models, capabilities, credentials, routing, conformance | [Provider](./agents/provider.md) |
-| SSE framing, provisional answer extraction and credential-safe streaming | [Provider streaming](./agents/provider-streaming.md) |
-| Saved accounts, keyrings, credential transport | [Credential spec](./docs/specs/credentials.md), [credential rules](./agents/credentials.md) |
-| ChatGPT-plan OAuth, consent, tokens, weaker output bounds | [ChatGPT](./agents/chatgpt.md) |
-| Sessions, resume/fork/compaction, collaboration, topology, context | [Session](./agents/session.md) |
-| SQLite admission, Events, replay | [Store](./agents/store.md) |
-| Persistent Workspace build-cache identity, quota, archive and recovery | [Build cache](./agents/build-cache.md) |
-| Shared private-directory admission and native ACL checks | [Private filesystem](./agents/private-fs.md) |
-| Terminal behavior, output, accessibility, restoration, presentation | [Terminal](./agents/terminal.md) |
-| Ratatui backend, Inline cursor responses and scoped clearing | [Terminal backend](./agents/terminal-backend.md) |
-| Clipboard transport, clients, workers, results | [Clipboard](./agents/clipboard.md) |
-| Image admission, multimodal context, replay | [Image](./agents/image.md) |
-| History indexing, navigation, find, anchors | [History](./agents/history.md) |
-| Behavior, fixes, tests, output, correctness/release claims, beta continuation, verification handoff | [Testing](./agents/testing.md) |
+| Git operations, branches, commits, PRs, stacked PRs | [Git](./agents/git.md) |
+| Auth, secrets, I/O, APIs, Tools, processes, MCP, memory, transports, untrusted rendering, audits | [Security](./agents/security.md) |
+| Behavior, fixes, tests, output, correctness/release claims, deferred evidence, verification handoff | [Testing](./agents/testing.md) |
+| Native, PTY, tmux, account, storage or process fixtures; local CI reproduction | [Fixture procedures](./agents/references/testing-details.md) |
 | Documentation and agent-instruction routing | [Documentation checks](./agents/testing.md#documentation-and-instruction-changes) |
+| Development skill installation or maintenance | [Project skills](./agents/skills/README.md) |
 | Architecture, codebase shape, data model, new seams | [System overview](./docs/architecture/system-overview.md) |
 | Creating or changing implementation plans | [Planning](./planning/PLANNING.md) |
-| Product behavior, fixes, acceptance scenarios, documentation ownership | [Spec workflow](./docs/specs/README.md) and the owning contract |
-| Run coordination, budgets, Provider outcomes | [Engine](./agents/engine.md) |
-| Model-driven Tools, commands, runtime Skills, MCP, Guard | [Tools](./agents/tools.md) |
-| Runtime profile discovery, exact identities and folder-trust selection | [Toolchains](./agents/toolchains.md) |
-| Native Guard launch, sandbox profiles, resources, FFI and process ownership | [Guard](./agents/guard.md) |
-| Shared Guard capacity, FIFO waiting and user settings | [Guard admission](./agents/guard-admission.md) |
-| Native macOS coalition ownership, control transport and resource supervision | [Guard unit](./agents/guard-unit.md) |
-| Explicit native fixture stage capture and timeout observations | [Guard fixture](./agents/guard-fixture.md) |
-| Development skill installation or maintenance | [Project skills](./agents/skills/README.md) |
-| CLI admission, modes, channels, `exec` composition | [CLI](./agents/cli.md) |
-| OTLP endpoints, privacy, bounds, shutdown | [Telemetry](./agents/telemetry.md) |
-| Development logs, failure stages, stack traces | [Diagnostics](./agents/diagnostics.md) |
+| Product behavior, acceptance scenarios, spec ownership | [Spec workflow](./docs/specs/README.md) and the owning spec below |
+| Providers, models, efforts, custom endpoints, conformance, streaming, usage | [Provider spec](./docs/specs/provider.md) |
+| ChatGPT-plan OAuth, consent, tokens, catalogs, local-only output bound | [ChatGPT spec](./docs/specs/chatgpt.md) |
+| Saved accounts, keyrings, credential helper, startup authorization | [Credential spec](./docs/specs/credentials.md) |
+| Sessions, resume/fork/compaction, collaboration policy, context | [Session spec](./docs/specs/session.md) |
+| Goal lifecycle, budgets, plan contracts, steering, `exec` | [Goals spec](./docs/specs/goals.md) |
+| Run coordination, strict outcomes, Events, replay, persistence bounds | [Execution spec](./docs/specs/execution.md) |
+| Model-driven Tools, commands, Skills, MCP, Guard, folder trust, toolchains, build cache | [Tool spec](./docs/specs/tools.md) |
+| Terminal behavior, output, accessibility, restoration, history, clipboard, images, CLI modes | [Terminal spec](./docs/specs/terminal.md) |
+| OTLP endpoints, privacy, bounds, shutdown | [Telemetry spec](./docs/specs/telemetry.md) |
+| Development logs, failure stages, stack traces | [Diagnostics spec](./docs/specs/diagnostics.md) |
 
-Open the linked files whose triggers apply, including `agents/<module>.md` for the module being edited; links are ordinary documents, not automatic imports. Start with the task's contract and rules and do not preload everything. Use the [documentation map](./docs/README.md#find-the-owner-for-a-task) when ownership is unclear; [development setup and checks](./docs/development.md) owns shared commands.
-
-When a new module is introduced, add `agents/<module>.md` and link it here. Create the file only when the module has a real boundary, invariant, or workflow to document; avoid empty templates.
+Open the linked files whose triggers apply; links are ordinary documents, not automatic imports. Start with the spec and rules for the task and do not preload everything. Use the [documentation map](./docs/README.md#find-the-owner-for-a-task) when ownership is unclear; [development setup and checks](./docs/development.md) owns shared commands. Create `agents/<unit>.md` only for a separate unit of work and link it here; module knowledge goes into the owning spec or the code's `//!`/`///` docs.
 
 ## Global rules
 
@@ -75,7 +63,7 @@ When a new module is introduced, add `agents/<module>.md` and link it here. Crea
 
 ## Auto-learning
 
-When a change reveals a non-obvious invariant, a recurring failure mode or an ownership decision, record it once at its owner from the [documentation map](./docs/README.md#where-each-fact-belongs), in the same change. Fix misleading guidance instead of adding a duplicate. Do not add task transcripts, check logs or facts readable from code.
+When a change reveals a non-obvious invariant, a recurring failure mode or an ownership decision, record it once in the same change: behavior, limits and decisions in the owning spec under the [spec workflow](./docs/specs/README.md); an implementation invariant or pitfall as a `//!` or `///` doc on the code it guards; a working practice in the general rule it belongs to. Fix misleading guidance instead of adding a duplicate. Do not add task transcripts, check logs or facts readable from code.
 
 ## Module boundaries
 
@@ -86,7 +74,7 @@ Create a module only after its implementation gains depth; a crate needs measure
 ## Workflow
 
 1. **Read, then plan only when the change is big.** Read the triggered rules and the affected flow; for behavior work, find the owning contract and its scenarios. For multi-module or public-interface changes, propose a short plan first: scope, Ponytail choice, OS impact or none, triggered [security pass](./agents/security.md#security-pass-triggers) and how the change will be verified (successful and meaningful failure paths, through existing evidence owners). Ask before deleting files, renaming public APIs, restructuring modules or changing CI/shared infrastructure unless the request already authorizes it; preserve existing user work under [Git rules](./agents/git.md).
-2. **Verify by target locally, fully in CI.** Run formatting, Clippy and the tests that cover what you touched as described in [verification](./docs/development.md#verification); the complete workspace suite runs in CI on every pull request. After pushing, watch the PR's CI: a red CI blocks handoff and must be fixed; if the failure is demonstrably unrelated or infrastructural, say so with the run link and ask the user. Until a stable pre-beta, synthetic tests plus green CI are sufficient evidence for a change; live-account, native and manual checklists stay in [NEXT_STEPS.md](./NEXT_STEPS.md), never block day-to-day work, and remain the only basis for claiming native or live support.
+2. **Verify by target locally, fully in CI.** Run formatting, Clippy and the tests that cover what you touched as described in [verification](./docs/development.md#verification); the complete workspace suite runs in CI on every pull request. After pushing, watch the PR's CI; stacked PRs are fine and [Git rules](./agents/git.md#pull-requests) own their mechanics: a red CI blocks handoff and must be fixed; if the failure is demonstrably unrelated or infrastructural, say so with the run link and ask the user. Until a stable pre-beta, synthetic tests plus green CI are sufficient evidence for a change; live-account, native and manual checklists stay in [NEXT_STEPS.md](./NEXT_STEPS.md), never block day-to-day work, and remain the only basis for claiming native or live support.
 3. **Touch documentation once, and only when behavior changed.** If observable behavior, a limit or a recovery path changed, update the owning spec under the [spec workflow](./docs/specs/README.md). A refactor, a fix that restores specified behavior or an adequate unchanged contract needs no documentation edit. Review the final diff with Ponytail, keep local visual artifacts in gitignored `.lavish/`, and report what changed, the checks actually run, limitations and any platform evidence.
 
 ## Maintaining these instructions

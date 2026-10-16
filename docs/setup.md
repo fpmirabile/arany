@@ -2,8 +2,8 @@
 
 This guide explains account setup and everyday recovery. The [credential
 contract](./specs/credentials.md) owns account scope and storage; the [terminal
-contract](./specs/terminal.md) owns interaction. [Provider rules](../agents/provider.md)
-and [ChatGPT rules](../agents/chatgpt.md) retain route and OAuth admission.
+contract](./specs/terminal.md) owns interaction. [Provider spec](./specs/provider.md)
+and [ChatGPT spec](./specs/chatgpt.md) retain route and OAuth admission.
 
 ## Start an attached conversation
 
@@ -112,7 +112,7 @@ arany provider logout chatgpt
 Logout blocks account use, attempts remote revocation and removes the local
 token while retaining registration for Reconnect. Follow any warning about
 unconfirmed revocation or token deletion. It does not erase backups or cancel
-requests already in flight. [ChatGPT rules](../agents/chatgpt.md) own the precise
+requests already in flight. [ChatGPT spec](./specs/chatgpt.md) own the precise
 renewal, permission and logout behavior.
 
 ## Storage and recovery
@@ -166,7 +166,7 @@ An Anthropic API key not limited to one Console workspace needs an explicit
 `ANTHROPIC_WORKSPACE_ID` alongside the environment key. A workspace-scoped key
 may omit it. Saved-account setup instead asks Key scoped to workspace or Choose
 API workspace; saved selections never inherit ambient workspace variables.
-[Provider account rules](../agents/references/provider-details.md#native-models-and-accounts)
+[Provider account spec](./specs/provider.md#native-models-and-accounts)
 own workspace validation and admission.
 
 ## Headless ChatGPT use and optional diagnostics
@@ -197,7 +197,7 @@ account. Each check makes at most three synthetic calls and sends no Workspace
 content. ChatGPT's output cap is local acceptance only; failure or cancellation
 does not prove remote usage stopped. Checks do not authorize fallback, retries or
 broader disclosure. Exact custom profiles have their own mandatory conformance
-admission under [Provider rules](../agents/provider.md).
+admission under [Provider spec](./specs/provider.md).
 
 ## Resume and inspect results
 

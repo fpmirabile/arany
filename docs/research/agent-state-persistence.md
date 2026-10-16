@@ -2,7 +2,7 @@
 
 **Research baseline:** 2026-09-29.
 
-[Store rules](../../agents/store.md) own persistence, admission and format checks;
+[Execution spec](../specs/execution.md#admission-persistence-and-recovery) own persistence, admission and format checks;
 [architecture](../architecture/system-overview.md) owns the schema. This report
 explains the storage choice and the evidence that could justify changing it.
 
@@ -52,7 +52,7 @@ Commit-before-feedback prevents the UI from claiming a transition that cannot
 be replayed. Process death leaves a complete transaction or the prior prefix;
 missing terminal facts mean interrupted work, not completed cancellation.
 Store failures cannot be repaired by rebuilding history from terminal output.
-[Execution recovery](../specs/execution.md) and [Store rules](../../agents/store.md)
+[Execution recovery](../specs/execution.md) and [Execution spec](../specs/execution.md#admission-persistence-and-recovery)
 own rejection, interrupted replay and capacity behavior.
 
 SQLite checks and typed reduction protect different boundaries. A structurally

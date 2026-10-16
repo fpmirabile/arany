@@ -4,7 +4,7 @@
 source review. [Cargo.lock](../../Cargo.lock) and the [dependency inventory](../security/beta-dependency-inventory.md)
 own the current resolved build; the baseline is not a release-support claim.
 
-[Telemetry rules](../../agents/telemetry.md) own endpoint admission, privacy,
+[Telemetry spec](../specs/telemetry.md) own endpoint admission, privacy,
 resource bounds, SDK integration and shutdown. [Architecture](../architecture/system-overview.md)
 owns placement. This report retains the reasons behind those choices.
 
@@ -61,7 +61,7 @@ SDK shutdown is synchronous. Calling it on the current-thread coordinator can
 starve the async work needed to finish. Construct and close the telemetry owner
 at the process lifetime boundary; Run cancellation and durable cleanup take
 priority. Queue overflow drops telemetry rather than blocking the Engine.
-[Telemetry rules](../../agents/telemetry.md) own the exact implementation and
+[Telemetry spec](../specs/telemetry.md) own the exact implementation and
 limits; no duplicate SDK-default or feature table is maintained here.
 
 ## Semantics and evidence

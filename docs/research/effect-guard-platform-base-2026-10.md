@@ -2,7 +2,7 @@
 
 Source baseline: 2026-10-04. Primary-source review and read-only Linux host observations; no payload, filter, service or native macOS test was executed by this investigation.
 
-[Tool behavior](../specs/tools.md), [Guard rules](../../agents/guard.md) and [local Tool evidence](../tools.md) own the implementation, platform claims and outstanding verification. [Protection research](./deterministic-harness-protection.md) retains the broader threat model. This report preserves the source distinctions behind the platform design, not a second launch protocol or implementation checklist.
+[Tool behavior](../specs/tools.md), [Tool spec](../specs/tools.md) and [local Tool evidence](../tools.md) own the implementation, platform claims and outstanding verification. [Protection research](./deterministic-harness-protection.md) retains the broader threat model. This report preserves the source distinctions behind the platform design, not a second launch protocol or implementation checklist.
 
 ## Source facts that determine the design
 

@@ -3,7 +3,7 @@
 **Research baseline:** 2026-09-28.
 
 [Execution](../specs/execution.md) owns the bounded primary/direct-child protocol;
-[Session rules](../../agents/session.md) own lineage and context;
+[Session spec](../specs/session.md) own lineage and context;
 [terminal behavior](../specs/terminal.md) owns inspection and feedback. This report
 retains orchestration alternatives and conditions for a broader design.
 
