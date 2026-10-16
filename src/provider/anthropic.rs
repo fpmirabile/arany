@@ -13,7 +13,7 @@ use uuid::Uuid;
 mod wire;
 
 const ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
-const DEADLINE: Duration = Duration::from_secs(120);
+const DEADLINE: Duration = Duration::from_secs(600);
 
 pub struct AnthropicProvider {
     client: Client,
@@ -278,10 +278,20 @@ impl Provider for AnthropicProvider {
         self.saved_api_account_id
     }
 
+    fn max_output_tokens(&self) -> u32 {
+        super::MAX_OUTPUT_TOKEN_CAP
+    }
+
+    fn call_deadline(&self) -> Duration {
+        DEADLINE
+    }
+
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         request.validate_scope()?;
         super::image::validate_images(&request)?;
-        if request.model != self.model || !(1..=4096).contains(&request.max_output_tokens) {
+        if request.model != self.model
+            || !(1..=self.max_output_tokens()).contains(&request.max_output_tokens)
+        {
             return Err(ProviderError::Rejected);
         }
         let conversation = render::conversation(&request)?;
@@ -297,7 +307,9 @@ impl Provider for AnthropicProvider {
     ) -> Result<ProviderResponse, ProviderError> {
         request.validate_scope()?;
         super::image::validate_images(&request)?;
-        if request.model != self.model || !(1..=4096).contains(&request.max_output_tokens) {
+        if request.model != self.model
+            || !(1..=self.max_output_tokens()).contains(&request.max_output_tokens)
+        {
             return Err(ProviderError::Rejected);
         }
         let conversation = render::conversation(&request)?;
@@ -338,7 +350,9 @@ impl Provider for AnthropicProvider {
         &self,
         request: CompactionRequest,
     ) -> Result<CompactionResponse, ProviderError> {
-        if request.model != self.model || !(1..=4096).contains(&request.max_output_tokens) {
+        if request.model != self.model
+            || !(1..=self.max_output_tokens()).contains(&request.max_output_tokens)
+        {
             return Err(ProviderError::Rejected);
         }
         let response = self
@@ -379,6 +393,8 @@ mod tests {
         assert_eq!(provider.reasoning_effort(), Some(Effort::Max));
         assert_eq!(provider.key, "synthetic-anthropic-key");
         assert_eq!(provider.saved_api_account_id(), None);
+        assert_eq!(provider.max_output_tokens(), 16_384);
+        assert_eq!(provider.call_deadline(), Duration::from_secs(600));
         assert!(
             !provider
                 .request(serde_json::json!({}))

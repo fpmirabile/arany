@@ -3,7 +3,7 @@ use super::{
     TOOL_PREPARATION_OVERHEAD, call_record, call_trace_result, call_trace_usage, duration_ms,
     invoke_bounded, valid_finish,
 };
-use crate::engine::{EngineError, OUTPUT_TOKEN_CAP, RunCancellation, STORE_ACTION_OVERHEAD};
+use crate::engine::{CHILD_OUTPUT_TOKEN_CAP, EngineError, RunCancellation, STORE_ACTION_OVERHEAD};
 use crate::provider::{
     AgentPhase, ChildResult, Finish, PromptRole, ProviderOutcome, ProviderRequest,
     ProviderResponse, ProviderTurn, RunInput,
@@ -26,8 +26,8 @@ use tokio::time::Instant;
 const MAX_CHILD_OBJECTIVE_BYTES: usize = 2 * 1024;
 const MAX_CHILD_RESULT_BYTES: usize = 16 * 1024;
 const CANCELLATION_DRAIN: Duration = Duration::from_secs(2);
-/// Wall-clock bound of one delegation whose children may use read-only Tools.
-const RESEARCH_DELEGATION_DEADLINE: Duration = Duration::from_secs(20 * 60);
+/// Wall-clock bound of one delegation, with or without read-only Tools.
+const MAX_DELEGATION_DEADLINE: Duration = Duration::from_secs(20 * 60);
 /// Free context kept for the next child Tool intent.
 const CHILD_INTENT_RESERVE_BYTES: usize = 4 * 1024;
 /// A full 4 KiB Read page plus metadata; with less room a child is offered only Finish.
@@ -171,11 +171,7 @@ impl RunLoop<'_> {
                 .min(usize::from(self.controls.policy.max_children())),
         );
         let waves = objectives.len().div_ceil(parallel.max(1));
-        let active_bound = if research {
-            RESEARCH_DELEGATION_DEADLINE
-        } else {
-            super::CALL_DEADLINE.saturating_mul(u32::try_from(waves).unwrap_or(u32::MAX))
-        };
+        let active_bound = delegation_active_bound(research, self.provider.call_deadline(), waves);
         // Covers every child's calls, Tools and terminal facts plus the largest later admission, so a refusal precedes AgentSpawned.
         let active_event_tail = if research {
             objectives.len() * (4 * MAX_CHILD_TOOL_CALLS + 4) + 10
@@ -614,7 +610,7 @@ impl RunLoop<'_> {
                 phase: AgentPhase::ChildWork,
                 collaboration: CollaborationPolicy::Single,
                 model: root_request.model.clone(),
-                max_output_tokens: OUTPUT_TOKEN_CAP,
+                max_output_tokens: CHILD_OUTPUT_TOKEN_CAP.min(root_request.max_output_tokens),
                 input: RunInput {
                     images: root
                         .images
@@ -843,4 +839,42 @@ fn valid_child_response(result: &CallResult) -> bool {
             ..
         }) if valid_finish(finish, MAX_CHILD_RESULT_BYTES)
     )
+}
+
+/// Researcher delegations use the fixed bound; a tool-free delegation runs one call per wave.
+fn delegation_active_bound(research: bool, call_deadline: Duration, waves: usize) -> Duration {
+    if research {
+        MAX_DELEGATION_DEADLINE
+    } else {
+        call_deadline
+            .saturating_mul(u32::try_from(waves).unwrap_or(u32::MAX))
+            .min(MAX_DELEGATION_DEADLINE)
+    }
+}
+
+#[cfg(test)]
+mod delegation_bound_tests {
+    use super::*;
+
+    #[test]
+    fn tool_free_delegation_is_capped_at_the_delegation_deadline() {
+        let call = Duration::from_secs(600);
+        assert_eq!(
+            delegation_active_bound(false, call, 1),
+            Duration::from_secs(600)
+        );
+        assert_eq!(
+            delegation_active_bound(false, call, 2),
+            MAX_DELEGATION_DEADLINE
+        );
+        assert_eq!(
+            delegation_active_bound(false, call, 4),
+            MAX_DELEGATION_DEADLINE
+        );
+        assert_eq!(
+            delegation_active_bound(true, Duration::from_secs(120), 1),
+            MAX_DELEGATION_DEADLINE
+        );
+        assert_eq!(MAX_DELEGATION_DEADLINE, Duration::from_secs(20 * 60));
+    }
 }

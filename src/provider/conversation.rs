@@ -316,6 +316,11 @@ mod tests {
     fn turn_bound_follows_max_output_tokens() {
         let filler = |bytes: usize| format!(r#"[{{"text":"{}"}}]"#, "x".repeat(bytes));
         assert_eq!(max_turn_bytes(4096), 96 * 1024);
+        assert_eq!(
+            max_turn_bytes(16_384),
+            192 * 1024,
+            "the native 16,384-token cap"
+        );
         assert_eq!(max_turn_bytes(u32::MAX), MAX_RESPONSE_BYTES);
         assert!(ProviderTurn::new("openai", &filler(90 * 1024), SECRET, 4096).is_ok());
         assert!(ProviderTurn::new("openai", &filler(97 * 1024), SECRET, 4096).is_err());

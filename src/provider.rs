@@ -85,6 +85,10 @@ async fn read_identity_body(
 }
 
 pub(crate) const MAX_REPORTED_INPUT_TOKENS: u32 = 1_000_000;
+/// The largest primary output cap a Provider may declare; replay rejects a larger pinned cap.
+pub(crate) const MAX_OUTPUT_TOKEN_CAP: u32 = 16_384;
+/// The output cap of Providers that keep the historical bound (ChatGPT plan, custom profiles, children).
+pub(crate) const DEFAULT_OUTPUT_TOKEN_CAP: u32 = 4096;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
 fn outcome_schema() -> Value {
@@ -709,6 +713,16 @@ pub trait Provider: Send + Sync {
 
     fn output_token_bound(&self) -> OutputTokenBound {
         OutputTokenBound::ProviderEnforced
+    }
+
+    /// Output tokens a primary call requests; children and Tool review request smaller caps.
+    fn max_output_tokens(&self) -> u32 {
+        DEFAULT_OUTPUT_TOKEN_CAP
+    }
+
+    /// The wall-clock bound for one primary, child or Tool-review call.
+    fn call_deadline(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(120)
     }
 
     /// Returns one complete semantic outcome or an error, never an accepted partial result.

@@ -15,7 +15,7 @@ pub(crate) mod wire;
 pub use subscription::ChatGptProvider;
 
 const ENDPOINT: &str = "https://api.openai.com/v1/responses";
-const DEADLINE: Duration = Duration::from_secs(120);
+const DEADLINE: Duration = Duration::from_secs(600);
 
 /// Makes three potentially plan-consuming, data-free strict-outcome probes.
 /// The caller must verify the selected account, catalog visibility, and explicit cost consent.
@@ -235,10 +235,20 @@ impl Provider for OpenAiProvider {
         self.saved_api_account_id
     }
 
+    fn max_output_tokens(&self) -> u32 {
+        super::MAX_OUTPUT_TOKEN_CAP
+    }
+
+    fn call_deadline(&self) -> Duration {
+        DEADLINE
+    }
+
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         request.validate_scope()?;
         super::image::validate_images(&request)?;
-        if request.model != self.model || !(1..=4096).contains(&request.max_output_tokens) {
+        if request.model != self.model
+            || !(1..=self.max_output_tokens()).contains(&request.max_output_tokens)
+        {
             return Err(ProviderError::Rejected);
         }
         let conversation = render::conversation(&request)?;
@@ -254,7 +264,9 @@ impl Provider for OpenAiProvider {
     ) -> Result<ProviderResponse, ProviderError> {
         request.validate_scope()?;
         super::image::validate_images(&request)?;
-        if request.model != self.model || !(1..=4096).contains(&request.max_output_tokens) {
+        if request.model != self.model
+            || !(1..=self.max_output_tokens()).contains(&request.max_output_tokens)
+        {
             return Err(ProviderError::Rejected);
         }
         let conversation = render::conversation(&request)?;
@@ -348,6 +360,8 @@ mod tests {
         assert_eq!(provider.reasoning_effort(), Some(Effort::High));
         assert_eq!(provider.key, "synthetic-openai-key");
         assert_eq!(provider.saved_api_account_id(), None);
+        assert_eq!(provider.max_output_tokens(), 16_384);
+        assert_eq!(provider.call_deadline(), Duration::from_secs(600));
         let account_id = Uuid::now_v7();
         let saved = OpenAiProvider::from_saved_api_key_with_effort(
             "gpt-5.4".into(),

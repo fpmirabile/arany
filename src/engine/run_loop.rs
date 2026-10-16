@@ -24,8 +24,9 @@ use tokio::time::Instant;
 mod children;
 
 const MAX_FINISH_SUMMARY_BYTES: usize = 2 * 1024;
-const CALL_DEADLINE: Duration = Duration::from_secs(120);
 const TOOL_CLEANUP_OVERHEAD: Duration = Duration::from_secs(10);
+/// Wall-clock bound of one Tool-review call, excluding its Store overhead.
+const TOOL_REVIEW_DEADLINE: Duration = Duration::from_secs(20);
 #[cfg(target_os = "linux")]
 const TOOL_PREPARATION_OVERHEAD: Duration = Duration::from_secs(5);
 #[cfg(target_os = "macos")]
@@ -1156,7 +1157,7 @@ impl<'a> RunLoop<'a> {
             .is_some_and(|progress| progress.previews_enabled());
         let event_tail = 8 + if previews { MAX_DISPLAY_CHUNKS } else { 0 };
         let active_segment = self
-            .reserve_active_segment_with_tail(CALL_DEADLINE, event_tail)
+            .reserve_active_segment_with_tail(self.provider.call_deadline(), event_tail)
             .await?;
         let deadline = active_segment
             .deadline()
@@ -2334,7 +2335,9 @@ impl<'a> RunLoop<'a> {
             },
         };
         let trace = primary.begin_provider(AgentPhase::ToolReview, &review.model);
-        let active_segment = self.reserve_active_segment(CALL_DEADLINE).await?;
+        let active_segment = self
+            .reserve_active_segment(TOOL_REVIEW_DEADLINE + STORE_ACTION_OVERHEAD)
+            .await?;
         if let Err(error) = self.reserve_provider_call(self.primary_id).await {
             trace.finish_refused();
             if matches!(error, EngineError::GoalBudgetExhausted) {
@@ -2350,7 +2353,7 @@ impl<'a> RunLoop<'a> {
                 .deadline()
                 .checked_sub(STORE_ACTION_OVERHEAD)
                 .unwrap_or(active_segment.started)
-                .min(Instant::now() + Duration::from_secs(20)),
+                .min(Instant::now() + TOOL_REVIEW_DEADLINE),
             self.controls.cancellation.clone(),
         )
         .await;
@@ -2468,7 +2471,7 @@ async fn invoke_bounded_with_preview(
     if remaining.is_zero() {
         return CallResult::Failed(CallFailure::Timeout);
     }
-    let timeout = CALL_DEADLINE.min(remaining);
+    let timeout = provider.call_deadline().min(remaining);
     let output_cap = request.max_output_tokens;
     let invocation = async {
         match preview {
