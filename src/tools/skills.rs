@@ -1,7 +1,8 @@
 use super::ToolError;
+use super::catalog::{nullable, string};
 use super::config::Skill;
 use super::fs;
-use super::types::{MAX_SKILLS, MAX_SNAPSHOT_BYTES, valid_name, valid_relative};
+use super::types::{MAX_SKILLS, MAX_SNAPSHOT_BYTES, ToolCall, valid_name, valid_relative};
 use super::types::{MAX_TOOL_RESULT_BYTES, hex_digest};
 use cap_std::fs::Dir;
 use serde::de::{DeserializeSeed, Error, MapAccess, SeqAccess, Visitor};
@@ -10,6 +11,25 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::Path;
+
+pub(super) fn valid(call: &ToolCall) -> bool {
+    matches!(call, ToolCall::Skill { name, resource }
+        if valid_name(name) && resource.as_ref().is_none_or(|path| valid_relative(path, false)))
+}
+
+pub(super) fn schema() -> Option<Vec<(&'static str, Value)>> {
+    Some(vec![("name", string()), ("resource", nullable())])
+}
+
+pub(super) fn run(call: &ToolCall, bytes: &[u8]) -> Result<String, ToolError> {
+    let ToolCall::Skill { name, resource } = call else {
+        return Err(ToolError::Configuration);
+    };
+    if resource.as_deref().unwrap_or("SKILL.md") == "SKILL.md" {
+        metadata(name, bytes)?;
+    }
+    String::from_utf8(bytes.to_vec()).map_err(|_| ToolError::Operation)
+}
 
 pub struct ProjectSkills {
     pub names: Vec<String>,

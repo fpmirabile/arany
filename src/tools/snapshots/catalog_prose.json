@@ -1,0 +1,67 @@
+{
+  "primary": {
+    "command_contract": "Explicit argv only. Private writable selected-project snapshot at /workspace; /scratch is bounded. No network, host home, credentials or state. Bounded regular-file changes return as a changeset; a separate applied integration receipt confirms Workspace publication. Skills available at /skills/NAME.",
+    "commands": [
+      {
+        "inputs": [],
+        "interpreter": true,
+        "name": "bash"
+      }
+    ],
+    "file_tools": "list (directory entries), read (UTF-8, zero-based byte offset, limit 1..4096, whole-file sha256), search (literal UTF-8 content in a file or directory; use Read or an include for edit sha256), mkdir (new directory; parent must exist), write (null digest only creates), edit (unique literal match, expected sha256)",
+    "git": "unavailable",
+    "host_clock": {
+      "timezone": "UTC",
+      "unix_ms": 0
+    },
+    "mcp_servers": [
+      {
+        "name": "local",
+        "protocol": "2025-11-25 stdio; use mcp_list before mcp_call",
+        "tools": [
+          "probe"
+        ]
+      }
+    ],
+    "skills": [
+      {
+        "description": "Review guidance",
+        "name": "review"
+      }
+    ],
+    "workspace_paths": [
+      "src",
+      "Cargo.toml"
+    ],
+    "write": true
+  },
+  "researcher": {
+    "commands": [],
+    "file_tools": "list (directory entries), read (UTF-8, zero-based byte offset, limit 1..4096, whole-file sha256), search (literal UTF-8 content in a file or directory)",
+    "host_clock": {
+      "timezone": "UTC",
+      "unix_ms": 0
+    },
+    "mcp_servers": [
+      {
+        "name": "local",
+        "protocol": "2025-11-25 stdio; catalog listing with mcp_list only",
+        "tools": [
+          "probe"
+        ]
+      }
+    ],
+    "skills": [
+      {
+        "description": "Review guidance",
+        "name": "review"
+      }
+    ],
+    "tool_calls_remaining": 3,
+    "workspace_paths": [
+      "src",
+      "Cargo.toml"
+    ],
+    "write": false
+  }
+}

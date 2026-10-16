@@ -1,3 +1,4 @@
+use super::catalog::Family;
 use super::config::Config;
 use super::toolchains::{RuntimeGrant, validate_selection};
 use super::types::*;
@@ -743,7 +744,7 @@ pub(super) async fn reap_owned_child(
     child.wait().await
 }
 
-async fn capture(
+pub(super) async fn capture(
     mut child: Child,
     cap: usize,
     deadline: Duration,
@@ -829,6 +830,23 @@ fn bootstrap_locations(
     ))
 }
 
+pub(super) struct GuardContext<'a> {
+    pub(super) intent: &'a EffectIntent,
+    pub(super) config: &'a Config,
+    pub(super) root: &'a Path,
+    pub(super) workspace: &'a Path,
+    pub(super) skill: Option<Vec<u8>>,
+    #[cfg(target_os = "linux")]
+    parent_namespaces: &'a profile::Namespaces,
+}
+
+#[cfg(target_os = "linux")]
+impl GuardContext<'_> {
+    pub(super) async fn stop_descendants(&self) -> Result<(), ToolError> {
+        linux::stop_command_descendants(self.parent_namespaces).await
+    }
+}
+
 pub(super) fn helper_main() -> ExitCode {
     let mut stage = BootstrapStage::Admission;
     let result = (|| -> Result<(), ToolError> {
@@ -887,23 +905,15 @@ pub(super) fn helper_main() -> ExitCode {
         }
         let workspace = workspace.as_path();
         stage = BootstrapStage::Workspace;
-        if (matches!(
-            task.intent.call,
-            ToolCall::List { .. }
-                | ToolCall::Read { .. }
-                | ToolCall::Search { .. }
-                | ToolCall::Write { .. }
-                | ToolCall::Edit { .. }
-                | ToolCall::Mkdir { .. }
-                | ToolCall::ApplyChangeset { .. }
-        ) || task.intent.call.is_git_read()
-            || cfg!(target_os = "macos") && matches!(task.intent.call, ToolCall::Skill { .. }))
+        let family = task.intent.call.facts().family;
+        if (matches!(family, Family::File | Family::Git)
+            || cfg!(target_os = "macos") && family == Family::Skill)
             && super::fs::identity(&super::fs::open_directory(workspace)?)?
                 != (task.intent.workspace_device, task.intent.workspace_inode)
         {
             return Err(ToolError::ChangedInput);
         }
-        let skill = if matches!(task.intent.call, ToolCall::Skill { .. }) {
+        let skill = if task.intent.call.facts().family == Family::Skill {
             Some(load_skill_bytes(&task)?)
         } else {
             None
@@ -958,98 +968,19 @@ pub(super) fn helper_main() -> ExitCode {
             .enable_all()
             .build()
             .map_err(|_| ToolError::Operation)?;
-        let result = runtime.block_on(async {
-            match &task.intent.call {
-                ToolCall::Command { program, args, cwd } => {
-                    let definition = task
-                        .config
-                        .commands
-                        .iter()
-                        .find(|value| &value.name == program)
-                        .ok_or(ToolError::Configuration)?;
-                    #[cfg(target_os = "linux")]
-                    let before = super::fs::command_snapshot(workspace)?;
-                    let mut command = payload(
-                        definition,
-                        args,
-                        cwd,
-                        &root,
-                        &task.config.runtime_grants,
-                        task.intent.limits.cache_bytes > 0,
-                    )?;
-                    let (status, out, err) = capture(
-                        command.spawn().map_err(|_| ToolError::Operation)?,
-                        (task.intent.limits.result_bytes as usize / 2).saturating_sub(128),
-                        Duration::from_millis(u64::from(task.intent.limits.runtime_ms)),
-                    )
-                    .await?;
-                    #[cfg(target_os = "linux")]
-                    let changeset = {
-                        linux::stop_command_descendants(&task.parent_namespaces).await?;
-                        super::fs::command_changeset(workspace, &before)?
-                    };
-                    #[cfg(not(target_os = "linux"))]
-                    let changeset = CommandChangeset::default();
-                    let output = CommandResult {
-                        exit_code: status.code(),
-                        stdout: String::from_utf8(out).map_err(|_| ToolError::Operation)?,
-                        stderr: String::from_utf8(err).map_err(|_| ToolError::Operation)?,
-                        changeset,
-                    };
-                    if !output.valid() {
-                        return Err(ToolError::Limit);
-                    }
-                    serde_json::to_string(&output).map_err(|_| ToolError::Operation)
-                }
-                ToolCall::Skill { name, resource } => skill_text(
-                    name,
-                    resource.as_deref(),
-                    skill.ok_or(ToolError::Configuration)?,
-                ),
-                ToolCall::McpList { .. } | ToolCall::McpCall { .. } => {
-                    super::mcp::execute(
-                        &task.intent.call,
-                        &task.config,
-                        &root,
-                        task.intent.limits.cache_bytes > 0,
-                    )
-                    .await
-                }
-                ToolCall::GitStatus { .. } | ToolCall::GitDiff { .. } | ToolCall::GitLog { .. } => {
-                    let git = task.config.git.as_ref().ok_or(ToolError::Configuration)?;
-                    #[cfg(target_os = "linux")]
-                    let scratch = Path::new("/scratch");
-                    #[cfg(not(target_os = "linux"))]
-                    let scratch = root.as_path();
-                    let output = super::git::execute(
-                        workspace,
-                        scratch,
-                        git,
-                        &task.intent.call,
-                        task.intent.limits.result_bytes as usize,
-                        Duration::from_millis(u64::from(task.intent.limits.runtime_ms)),
-                    )
-                    .await;
-                    #[cfg(target_os = "linux")]
-                    linux::stop_command_descendants(&task.parent_namespaces).await?;
-                    output
-                }
-                call => super::fs::native(workspace, call, &task.config),
-            }
-        });
+        let site = GuardContext {
+            intent: &task.intent,
+            config: &task.config,
+            root: &root,
+            workspace,
+            skill,
+            #[cfg(target_os = "linux")]
+            parent_namespaces: &task.parent_namespaces,
+        };
+        let result = runtime.block_on(super::dispatch::run(&site));
         let (disposition, output) = match result {
             Ok(output) if output.len() <= task.intent.limits.result_bytes as usize => {
-                let failed = match &task.intent.call {
-                    ToolCall::Command { .. } => serde_json::from_str::<serde_json::Value>(&output)
-                        .map_or(true, |value| value["exit_code"] != 0),
-                    ToolCall::McpCall { .. } => serde_json::from_str::<serde_json::Value>(&output)
-                        .map_or(true, |value| value["is_error"] == true),
-                    ToolCall::GitStatus { .. }
-                    | ToolCall::GitDiff { .. }
-                    | ToolCall::GitLog { .. } => serde_json::from_str::<serde_json::Value>(&output)
-                        .map_or(true, |value| value.get("failed").is_some()),
-                    _ => false,
-                };
+                let failed = super::dispatch::failed(&task.intent.call, &output);
                 (
                     if failed {
                         ToolDisposition::Failed
@@ -1215,13 +1146,6 @@ fn load_skill_bytes(task: &Task) -> Result<Vec<u8>, ToolError> {
         return Err(ToolError::ChangedInput);
     }
     Ok(bytes)
-}
-
-fn skill_text(name: &str, resource: Option<&str>, bytes: Vec<u8>) -> Result<String, ToolError> {
-    if resource.unwrap_or("SKILL.md") == "SKILL.md" {
-        super::skills::metadata(name, &bytes)?;
-    }
-    String::from_utf8(bytes).map_err(|_| ToolError::Operation)
 }
 
 /// Toolchain `bin` directories in grant order, then the system bins; both platforms mount toolchains at their host path.
