@@ -1,3 +1,4 @@
+//! Private Session lifecycle orchestration re-exported by `engine.rs`.
 use super::EngineError;
 use crate::session::input::WorkspaceInputs;
 use crate::session::{Event, RunStatus, SessionDefaults, SessionId, SessionListItem, SessionView};

@@ -1,3 +1,9 @@
+//! Ratatui Inline needs cursor observation at acquisition and resize. Crossterm's Unix query writes
+//! to stdout and opens a competing input path, so the query goes through this stderr backend and
+//! the sole admitted raw reader; unsolicited responses are discarded and query bytes never enter
+//! drafts, stdout or history. Classic clearing starts at the owned viewport and never clears
+//! settled primary-screen output; cleanup uses the stored owned area and never queries a stopped
+//! reader. Detach backend output after real cleanup, before Ratatui destruction.
 use super::{TerminalMode, TerminalOutput, input::CursorQuery};
 use ratatui::{
     backend::{Backend, ClearType, CrosstermBackend, WindowSize},

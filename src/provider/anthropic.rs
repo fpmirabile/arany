@@ -1,3 +1,6 @@
+//! Normalize input usage as uncached + cache-creation + cache-read tokens with checked arithmetic;
+//! `input_tokens` alone excludes cached tokens. Thinking blocks are opaque: replay them unchanged
+//! within a Run, never interpret them, drop them from kept turns when compaction rewrites history.
 use super::conversation::Conversation;
 use super::{
     CompactionRequest, CompactionResponse, Effort, MAX_RESPONSE_BYTES, NativeApiCredentials,

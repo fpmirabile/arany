@@ -1,3 +1,5 @@
+//! The declared effort list is part of the evidence fingerprint; a change to either compiled strict
+//! contract invalidates old evidence independently of configuration version.
 use super::{CustomProfile, CustomProfileError, PinnedDestination, transport::CustomTransport};
 use crate::provider::{
     AgentPhase, CompactionItem, CompactionRequest, HistoryTurn, PromptRole, ProviderOutcome,

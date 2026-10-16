@@ -1,3 +1,6 @@
+//! Bump the checker-contract version whenever prompts, strict request/decoder, effort mapping,
+//! remote output cap or validation semantics change; package version alone does not invalidate
+//! evidence.
 use super::{
     AgentPhase, AnthropicProvider, CompactionItem, CompactionRequest, Effort, HistoryTurn,
     MAX_REPORTED_INPUT_TOKENS, NativeApiCredentials, OpenAiProvider, PromptRole, Provider,

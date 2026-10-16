@@ -1,3 +1,10 @@
+//! Enable only after ordinary attached Session or `exec` State admission so help, inspection and
+//! helpers keep their channel contracts. Record failed Engine/Provider/Tool/compaction facts at
+//! their typed boundaries and closed CLI stages, never by classifying display text. Carry measured
+//! stream counters through completed Run and compaction decoding; never substitute zero after a
+//! completed stream or collapse outcome rejection into response rejection. The privacy-owner test
+//! runs in its exact filtered bounded subprocess because activation is process-global and
+//! concurrent failure tests can rotate the best-effort log.
 use crate::store::StateRoot;
 use std::fmt::{self, Write};
 use std::sync::{Mutex, OnceLock};

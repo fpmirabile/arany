@@ -1,3 +1,8 @@
+//! Immutable semantic image value, not an Engine seam. The constructor and the closed deserializer
+//! enforce one canonical value; shared Base64 data prevents caller mutation and per-snapshot pixel
+//! copies; `Debug` prints metadata and digest, never Base64. The image-list visitor stops at four
+//! values before allocating a fifth. Children receive only current-objective images. Changing
+//! native request semantics bumps the affected native, check and account-admission contracts.
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeStruct};
 use sha2::{Digest, Sha256};

@@ -1,3 +1,10 @@
+//! `engine/lifecycle.rs` owns Session create, resume, discovery, defaults, rename and fork; this
+//! file retains Run admission. Cancellation is a sticky caller signal whose waiter lets callers
+//! interrupt pre-Engine admission; dropping a waiter does not undo started work. Each Provider
+//! call, Tool dispatch, approval pause and compaction admits its own worst-case Event envelope
+//! before its effect; Store owns lineage-count and byte preflight. Run and compaction hold the
+//! Session lock and every fork ancestor's operation lock because strict replay counts ancestor
+//! suffixes outside the inherited boundary.
 use crate::provider::{
     AgentPhase, ImageAttachment, PromptRole, Provider, ProviderRequest, RunInput,
 };
@@ -278,6 +285,10 @@ impl Default for RunCancellation {
 
 /// The attached caller's handle on one submission's steering: at most one note waits for the
 /// next primary call, and a pause request stops the Run at its next boundary.
+///
+/// Notes offered while one waits merge; a note is journaled only inside the primary planning or
+/// synthesis reservation and never reaches children or Tool review. Pause is sticky and becomes
+/// cancellation only at the Goal boundaries the Goals spec lists.
 #[derive(Clone, Default)]
 pub struct RunSteering {
     state: Arc<Mutex<SteeringState>>,
@@ -2046,6 +2057,13 @@ impl Engine {
     }
 
     /// Runs one admitted Run, then keeps an autonomous Goal iterating on its pinned objective.
+    ///
+    /// With `continuation` set, reuses the live Goal without `GoalResumed`, takes the pinned
+    /// objective and refuses to finish an unsatisfied Run while another is admissible. Owns the
+    /// write-capable Workspace lease across autonomous continuations: transfer the provisional
+    /// lease in before awaiting the first Goal append, reuse it only for the same Goal and
+    /// Workspace identity, report `GoalAdmissionUncertain` when an append error follows a committed
+    /// Goal.
     async fn run_inner(
         &mut self,
         request: RunRequest,

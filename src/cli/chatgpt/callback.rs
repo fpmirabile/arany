@@ -1,3 +1,6 @@
+//! The one-shot listener is a security boundary: bind only after the current `RiskPrompt`
+//! acknowledgment, accept one exact-path GET with exact `Host`, no `Origin` or body headers, and
+//! never reflect a code or token in a response.
 use super::{
     AuthorizationAttempt, AuthorizationError, CodeExchange, MAX_CALLBACK_BYTES, RiskAcknowledgment,
 };

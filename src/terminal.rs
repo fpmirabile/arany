@@ -1,3 +1,12 @@
+//! The sole RAII terminal owner; private input, composer, history, linear and view files separate
+//! decoding, editing, indexing, append-only output and drawing from lifecycle ownership. Only this
+//! module emits control sequences. Attempt real backend cleanup, retain its errors, then detach
+//! output before dropping Ratatui: its destructor otherwise prints a cursor-restoration diagnostic
+//! to stderr, which panics on a disconnected sink before raw-mode restoration. Keep original signal
+//! listeners alive through restored committed output and transfer them into reacquired ownership;
+//! Tokio process-wide handlers do not revert when a listener drops. Sanitize untrusted text before
+//! cell measurement and truncate by grapheme or cell width. The terminal owns the single clipboard
+//! worker and result and cancels it on modal entry, find, release or suspension.
 use crate::presentation::{
     AgentInspectorModel, DraftAction, PresentationModel, image_message_lines, render_answer,
     user_message_lines,
@@ -778,6 +787,9 @@ impl AttachedTerminal {
         }
     }
 
+    /// Ratatui's scrolling-region `insert_before` needs at least two free rows in total (rows below
+    /// the viewport are used first); this handles the full-screen and one-free-row cases by
+    /// inserting row by row as a diff from blank cells so wide-character padding is never sent.
     fn insert_native(
         &mut self,
         kind: history::MessageKind,

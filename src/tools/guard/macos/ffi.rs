@@ -1,4 +1,10 @@
 //! Safe wrappers over the reviewed Darwin, Seatbelt and Security ABIs used by the native Guard.
+//!
+//! Match the installed SDK and libc ABI, validate exact initialized output sizes, bound descriptor
+//! and profile buffers, retain C string lifetimes through each call and free native error
+//! allocations once. Never parse or print arbitrary native diagnostics. The syscall-number filter
+//! supports only reviewed 64-bit ABIs. A dedicated FFI review covers allocation, alignment,
+//! initialization, ownership, variadic argument types, signal state and unreaped PID lifetime.
 
 use crate::tools::ToolError;
 use nix::libc;

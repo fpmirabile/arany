@@ -1,3 +1,9 @@
+//! Uses the pinned Security framework for one exact Keychain, service and slot: insert only after
+//! native item-not-found, never after a locked or denied lookup; select the user's domain without
+//! changing preferences or item ACLs. Debug-only `ARANY_TEST_KEYCHAIN_ROOT` selects the fixed
+//! `arany-test.keychain-db` inside an admitted private root and disables UI only in the helper;
+//! optimized builds reject it before OS-store access. Fixtures create a privately named Keychain,
+//! never `login.keychain`, and never add it to a search list.
 use keyring::{Error, Result};
 use security_framework::{
     item::{ItemClass, ItemSearchOptions},

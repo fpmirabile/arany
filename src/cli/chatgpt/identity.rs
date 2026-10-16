@@ -1,3 +1,7 @@
+//! The ID-token validator accepts RS256 only; an algorithm change requires an explicit source,
+//! fixture and live-conformance review. Rejection reports only a compiled typed category (format,
+//! signing key, signature, claim binding, time), never a token, claim value, callback or response
+//! body.
 use super::AuthorizationError;
 use aws_lc_rs::signature::{RSA_PKCS1_2048_8192_SHA256, RsaPublicKeyComponents};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
