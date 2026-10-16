@@ -912,6 +912,17 @@ impl ToolContext {
     }
 }
 
+/// The model-facing call; an internal changeset's source intent digest stays out of model input.
+pub(crate) fn model_call(call: &ToolCall) -> Value {
+    let mut value = json!(call);
+    if let ToolCall::ApplyChangeset { .. } = call
+        && let Some(object) = value.as_object_mut()
+    {
+        object.remove("source_intent_digest");
+    }
+    value
+}
+
 fn model_observation(observation: &ToolObservation) -> Value {
     let output = super::skills::parse_json(observation.output.as_bytes(), MAX_TOOL_RESULT_BYTES)
         .unwrap_or_else(|_| json!(observation.output));
@@ -931,12 +942,7 @@ fn model_observation(observation: &ToolObservation) -> Value {
             _ => "not_confirmed",
         }
     };
-    let mut call = json!(observation.intent.call);
-    if let ToolCall::ApplyChangeset { .. } = observation.intent.call {
-        call.as_object_mut()
-            .expect("typed call")
-            .remove("source_intent_digest");
-    }
+    let call = model_call(&observation.intent.call);
     json!({"call":call,"disposition":observation.disposition,"output":output,"workspace_effect":effect,"cache_update":observation.cache_update})
 }
 
@@ -1165,4 +1171,28 @@ pub(crate) fn outcome_branch() -> Value {
         json!({"type":"object", "properties":properties, "required":required, "additionalProperties":false})
     }).collect();
     json!({"type":"object", "properties": {"type":{"type":"string","enum":["tool"]}, "call":{"anyOf":branches}}, "required":["type","call"], "additionalProperties":false})
+}
+
+#[cfg(test)]
+mod model_call_tests {
+    use super::*;
+
+    #[test]
+    fn model_call_strips_only_the_changeset_source_digest() {
+        let changeset = ToolCall::ApplyChangeset {
+            source_intent_digest: [7; 32],
+            changeset: CommandChangeset::default(),
+        };
+        let value = model_call(&changeset);
+        assert!(value.get("source_intent_digest").is_none());
+        assert!(value.get("changeset").is_some());
+
+        let read = model_call(&ToolCall::Read {
+            path: "src/main.rs".into(),
+            offset: 0,
+            limit: 32,
+        });
+        assert_eq!(read["operation"], "read");
+        assert_eq!(read["path"], "src/main.rs");
+    }
 }
