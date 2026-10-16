@@ -1,11 +1,10 @@
-use crate::provider::tool_specs::{ToolSpec, specs};
-use crate::provider::{
-    COMPACTION_INSTRUCTIONS, compaction_input, outcome_schema, run_input, summary_schema,
-};
+use crate::provider::prompts::COMPACTION_INSTRUCTIONS;
+use crate::provider::tool_specs::{NAME_PREFIX, ToolSpec, name_of, specs};
 use crate::provider::{
     CompactionRequest, CompactionResponse, Delegate, Effort, Finish, ProviderError,
     ProviderOutcome, ProviderRequest, ProviderResponse, ProviderWireProvenance,
 };
+use crate::provider::{compaction_input, outcome_schema, run_input, summary_schema};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -127,8 +126,10 @@ pub(crate) fn outcome_failure_diagnostic(
     if response.output.iter().any(|item| {
         item.kind == "function_call"
             && !matches!(
-                item.name.as_deref(),
-                Some("arany_finish" | "arany_delegate")
+                item.name
+                    .as_deref()
+                    .and_then(|name| name.strip_prefix(NAME_PREFIX)),
+                Some("finish" | "delegate")
             )
             && item.arguments.as_ref().is_some_and(|arguments| {
                 arguments.len() > crate::tools::types::MAX_TOOL_ARGUMENT_BYTES
@@ -268,6 +269,11 @@ fn run_body_inner(request: &ProviderRequest, effort: Option<Effort>) -> Value {
             .remove("observations");
     }
     let schema = crate::provider::restrict_outcome_schema(outcome_schema(), request);
+    let functions: Vec<Value> = if request.tools.is_some() {
+        specs(&schema).into_iter().map(function_json).collect()
+    } else {
+        Vec::new()
+    };
     let instructions = crate::provider::run_instructions(
         crate::provider::instruction_base(
             request,
@@ -299,12 +305,7 @@ fn run_body_inner(request: &ProviderRequest, effort: Option<Effort>) -> Value {
     }
     if let Some(context) = &request.tools {
         body.as_object_mut().expect("request object").remove("text");
-        body["tools"] = json!(
-            specs(request)
-                .into_iter()
-                .map(function_json)
-                .collect::<Vec<_>>()
-        );
+        body["tools"] = json!(functions);
         body["tool_choice"] = json!("required");
         body["parallel_tool_calls"] = json!(false);
         let mut input = match body["input"].take() {
@@ -329,7 +330,7 @@ fn run_body_inner(request: &ProviderRequest, effort: Option<Effort>) -> Value {
                 .remove("operation")
                 .expect("typed operation");
             let call_id = format!("arany_action_{index}");
-            input.push(json!({"type":"function_call","call_id":call_id,"name":format!("arany_{}",operation.as_str().expect("operation name")),"arguments":arguments.to_string(),"status":"completed"}));
+            input.push(json!({"type":"function_call","call_id":call_id,"name":name_of(operation.as_str().expect("operation name")),"arguments":arguments.to_string(),"status":"completed"}));
             input.push(json!({"type":"function_call_output","call_id":call_id,"output":observation.to_string()}));
         }
         body["input"] = json!(input);
@@ -512,7 +513,7 @@ impl WireResponse {
                     let operation = item
                         .name
                         .as_deref()
-                        .and_then(|name| name.strip_prefix("arany_"))
+                        .and_then(|name| name.strip_prefix(NAME_PREFIX))
                         .ok_or(ResponseError::Outcome)?;
                     let arguments = item
                         .arguments

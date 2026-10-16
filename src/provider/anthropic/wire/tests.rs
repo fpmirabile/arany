@@ -228,7 +228,7 @@ fn outbound_messages_pin_schema_cap_and_disclosure_scope() {
         body["system"]
             .as_str()
             .unwrap()
-            .contains(crate::provider::COLLABORATION_INSTRUCTIONS)
+            .contains(crate::provider::prompts::COLLABORATION_INSTRUCTIONS)
     );
     assert_eq!(body["max_tokens"], 4096);
     assert_eq!(body["stream"], false);
@@ -429,7 +429,7 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
         body["system"]
             .as_str()
             .unwrap()
-            .contains(crate::provider::COLLABORATION_INSTRUCTIONS)
+            .contains(crate::provider::prompts::COLLABORATION_INSTRUCTIONS)
     );
     let input: Value =
         serde_json::from_str(body["messages"][0]["content"].as_str().unwrap()).unwrap();
@@ -852,7 +852,7 @@ fn steering_notes_are_user_input_data_never_system_instructions() {
     request.steering_notes = vec!["steering canary".into()];
     let body = run_body(&request, Effort::Max);
     let system = body["system"].as_str().unwrap();
-    assert!(system.contains(crate::provider::STEERING_INSTRUCTIONS));
+    assert!(system.contains(crate::provider::prompts::STEERING_INSTRUCTIONS));
     assert!(!system.contains("steering canary"));
     assert!(body["messages"].to_string().contains("steering canary"));
 
@@ -861,7 +861,7 @@ fn steering_notes_are_user_input_data_never_system_instructions() {
         !plain["system"]
             .as_str()
             .unwrap()
-            .contains(crate::provider::STEERING_INSTRUCTIONS)
+            .contains(crate::provider::prompts::STEERING_INSTRUCTIONS)
     );
     assert!(!plain["messages"].to_string().contains("steering_notes"));
 }
@@ -889,7 +889,7 @@ fn child_research_request_offers_only_read_only_calls_and_finish() {
         body["system"]
             .as_str()
             .unwrap()
-            .starts_with(crate::provider::RESEARCH_INSTRUCTIONS)
+            .starts_with(crate::provider::prompts::RESEARCH_INSTRUCTIONS)
     );
     let branches = body["output_config"]["format"]["schema"]["properties"]["outcome"]["anyOf"]
         .as_array()

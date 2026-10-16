@@ -33,8 +33,8 @@ pub use native_check::{
 };
 pub use openai::{ChatGptProvider, OpenAiProvider, probe_chatgpt_model};
 use prompts::{
-    COLLABORATION_INSTRUCTIONS, COMPACTION_INSTRUCTIONS, PLAN_CONTRACT_INSTRUCTIONS,
-    READ_ONLY_INSTRUCTIONS, RESEARCH_INSTRUCTIONS, STEERING_INSTRUCTIONS,
+    COLLABORATION_INSTRUCTIONS, PLAN_CONTRACT_INSTRUCTIONS, READ_ONLY_INSTRUCTIONS,
+    RESEARCH_INSTRUCTIONS, STEERING_INSTRUCTIONS,
 };
 pub use streaming::{PreviewText, ResponsePreview};
 
@@ -819,6 +819,10 @@ pub trait Provider: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    use super::prompts::{
+        COLLABORATION_INSTRUCTIONS, PLAN_CONTRACT_INSTRUCTIONS, READ_ONLY_INSTRUCTIONS,
+        RESEARCH_INSTRUCTIONS, STEERING_INSTRUCTIONS,
+    };
     use super::*;
 
     #[test]

@@ -279,8 +279,8 @@ fn run_instructions_join_without_an_empty_plan_contract_part() {
         body["instructions"],
         format!(
             "{} {}",
-            crate::provider::READ_ONLY_INSTRUCTIONS,
-            crate::provider::COLLABORATION_INSTRUCTIONS
+            crate::provider::prompts::READ_ONLY_INSTRUCTIONS,
+            crate::provider::prompts::COLLABORATION_INSTRUCTIONS
         )
     );
 }
@@ -294,7 +294,7 @@ fn outbound_documents_pin_privacy_schema_and_scope() {
         body["instructions"]
             .as_str()
             .unwrap()
-            .contains(crate::provider::COLLABORATION_INSTRUCTIONS)
+            .contains(crate::provider::prompts::COLLABORATION_INSTRUCTIONS)
     );
     assert_eq!(body["store"], false);
     assert_eq!(body["truncation"], "disabled");
@@ -608,7 +608,7 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
         body["instructions"]
             .as_str()
             .unwrap()
-            .contains(crate::provider::COLLABORATION_INSTRUCTIONS)
+            .contains(crate::provider::prompts::COLLABORATION_INSTRUCTIONS)
     );
     let input: Value = serde_json::from_str(body["input"][0]["content"].as_str().unwrap()).unwrap();
     assert_eq!(input["tools"]["catalog"], "UNTRUSTED_TOOL_CATALOG_CANARY");
@@ -1413,7 +1413,7 @@ fn steering_notes_are_user_input_data_never_instructions() {
     request.steering_notes = vec!["steering canary".into()];
     let body = run_body(&request);
     let instructions = body["instructions"].as_str().unwrap();
-    assert!(instructions.contains(crate::provider::STEERING_INSTRUCTIONS));
+    assert!(instructions.contains(crate::provider::prompts::STEERING_INSTRUCTIONS));
     assert!(!instructions.contains("steering canary"));
     let input: Value = serde_json::from_str(body["input"].as_str().unwrap()).unwrap();
     assert_eq!(input["steering_notes"], json!(["steering canary"]));
@@ -1423,7 +1423,7 @@ fn steering_notes_are_user_input_data_never_instructions() {
         !plain["instructions"]
             .as_str()
             .unwrap()
-            .contains(crate::provider::STEERING_INSTRUCTIONS)
+            .contains(crate::provider::prompts::STEERING_INSTRUCTIONS)
     );
     let plain_input: Value = serde_json::from_str(plain["input"].as_str().unwrap()).unwrap();
     assert!(plain_input.get("steering_notes").is_none());
@@ -1464,7 +1464,7 @@ fn child_research_request_offers_only_read_only_functions_and_finish() {
         body["instructions"]
             .as_str()
             .unwrap()
-            .starts_with(crate::provider::RESEARCH_INSTRUCTIONS)
+            .starts_with(crate::provider::prompts::RESEARCH_INSTRUCTIONS)
     );
     assert_eq!(
         names(&body),

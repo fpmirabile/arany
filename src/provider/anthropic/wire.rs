@@ -1,11 +1,10 @@
-use crate::provider::{
-    COMPACTION_INSTRUCTIONS, compaction_input, outcome_schema, run_input, summary_schema,
-};
+use crate::provider::prompts::COMPACTION_INSTRUCTIONS;
 use crate::provider::{
     CompactionRequest, CompactionResponse, Delegate, Effort, Finish, MAX_REPORTED_INPUT_TOKENS,
     MAX_RESPONSE_BYTES, ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse,
     ProviderWireProvenance,
 };
+use crate::provider::{compaction_input, outcome_schema, run_input, summary_schema};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
