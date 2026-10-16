@@ -38,52 +38,64 @@ env:
 
 jobs:
   changes:
-    name: Detect Markdown-only PR
+    name: Detect code changes
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     outputs:
-      markdown-only: ${{ steps.diff.outputs.markdown-only }}
+      code-changed: ${{ steps.diff.outputs.code-changed }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 2
           persist-credentials: false
+      - name: Verify code change detection
+        run: python3 scripts/test-ci-changes.py
       - id: diff
         run: |
           python3 - <<'PY'
           import os
           import subprocess
 
+          def non_code(path):
+              if path.startswith((b".github/workflows/", b"src/", b"tests/", b"scripts/")):
+                  return False
+              return (
+                  path.endswith(b".md")
+                  or path.startswith((b"docs/", b"planning/", b"agents/", b".agents/", b".claude/", b".github/ISSUE_TEMPLATE/"))
+                  or path == b"skills-lock.json"
+              )
+
           paths = subprocess.check_output([
               "git", "diff", "--no-renames", "--name-only", "-z", "HEAD^1", "HEAD",
           ]).split(b"\0")[:-1]
-          markdown_only = bool(paths) and all(path.endswith(b".md") for path in paths)
+          code_changed = not paths or any(not non_code(path) for path in paths)
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write(f"markdown-only={str(markdown_only).lower()}\n")
+              output.write(f"code-changed={str(code_changed).lower()}\n")
           PY
 
+  # Keep all standard checks present; skip Rust steps only on an explicit non-code result.
   format-and-clippy:
-    name: Linux Format and Clippy
+    name: Clippy
     needs: changes
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - if: needs.changes.outputs.markdown-only != 'true'
+      - if: needs.changes.outputs.code-changed != 'false'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install repository Rust toolchain
-        if: needs.changes.outputs.markdown-only != 'true'
+        if: needs.changes.outputs.code-changed != 'false'
         run: rustup show
-      - if: needs.changes.outputs.markdown-only != 'true'
+      - if: needs.changes.outputs.code-changed != 'false'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - if: needs.changes.outputs.markdown-only != 'true'
+      - if: needs.changes.outputs.code-changed != 'false'
         run: cargo fmt --all --check
-      - if: needs.changes.outputs.markdown-only != 'true'
+      - if: needs.changes.outputs.code-changed != 'false'
         run: cargo fetch --locked
-      - if: needs.changes.outputs.markdown-only != 'true'
+      - if: needs.changes.outputs.code-changed != 'false'
         run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 
   tests:
@@ -97,28 +109,28 @@ jobs:
       matrix:
         profile: [debug, release]
     steps:
-      - if: needs.changes.outputs.markdown-only != 'true'
+      - if: needs.changes.outputs.code-changed != 'false'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install repository Rust toolchain
-        if: needs.changes.outputs.markdown-only != 'true'
+        if: needs.changes.outputs.code-changed != 'false'
         run: rustup show
-      - if: needs.changes.outputs.markdown-only != 'true'
+      - if: needs.changes.outputs.code-changed != 'false'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.profile }}
       - name: Prepare isolated Linux terminal fixtures
-        if: needs.changes.outputs.markdown-only != 'true'
+        if: needs.changes.outputs.code-changed != 'false'
         run: |
           sudo apt-get update
           sudo apt-get install --yes bubblewrap iproute2 util-linux
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           test -x /usr/sbin/ip
           bwrap --unshare-user --unshare-net --ro-bind / / -- true
-      - if: needs.changes.outputs.markdown-only != 'true'
+      - if: needs.changes.outputs.code-changed != 'false'
         run: cargo fetch --locked
-      - if: needs.changes.outputs.markdown-only != 'true'
+      - if: needs.changes.outputs.code-changed != 'false'
         run: cargo test --workspace --locked --offline ${{ matrix.profile == 'release' && '--release' || '' }}
       - name: Measure native long-history behavior
         if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.history_benchmark && matrix.profile == 'release' }}
@@ -256,7 +268,7 @@ jobs:
           exit "$result"
 
   macos-tests:
-    name: macOS tests (${{ matrix.profile }})
+    name: macOS Tests (${{ matrix.profile }})
     needs: changes
     if: ${{ !cancelled() }}
     runs-on: macos-15
@@ -269,21 +281,21 @@ jobs:
       matrix:
         profile: [debug, release]
     steps:
-      - if: needs.changes.outputs.markdown-only != 'true'
+      - if: needs.changes.outputs.code-changed != 'false'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install repository Rust toolchain
-        if: needs.changes.outputs.markdown-only != 'true'
+        if: needs.changes.outputs.code-changed != 'false'
         run: rustup show
-      - if: needs.changes.outputs.markdown-only != 'true'
+      - if: needs.changes.outputs.code-changed != 'false'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.profile }}
-      - if: needs.changes.outputs.markdown-only != 'true'
+      - if: needs.changes.outputs.code-changed != 'false'
         run: cargo fetch --locked
       - name: Clippy on macOS
-        if: matrix.profile == 'debug' && needs.changes.outputs.markdown-only != 'true'
+        if: matrix.profile == 'debug' && needs.changes.outputs.code-changed != 'false'
         run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
-      - if: needs.changes.outputs.markdown-only != 'true'
+      - if: needs.changes.outputs.code-changed != 'false'
         run: cargo test --workspace --locked --offline ${{ matrix.profile == 'release' && '--release' || '' }}

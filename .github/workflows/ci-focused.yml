@@ -53,7 +53,7 @@ jobs:
       - run: cargo test --workspace --locked --offline ${{ matrix.profile == 'release' && '--release' || '' }}
 
   macos:
-    name: Focused macOS tests (${{ matrix.profile }})
+    name: Focused macOS Tests (${{ matrix.profile }})
     if: startsWith(inputs.lane, 'macos-')
     runs-on: macos-15
     timeout-minutes: 30
