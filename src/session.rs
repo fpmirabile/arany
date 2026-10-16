@@ -17,7 +17,7 @@ pub(crate) const MAX_ASSISTANT_MESSAGE_BYTES: usize = 32 * 1024;
 
 pub(crate) use compaction::{
     CompactionInputError, MAX_COMPACTION_INPUT_BYTES, MAX_COMPACTION_OUTPUT_TOKENS,
-    PreparedCompaction, validate_compaction_references,
+    MAX_COMPACTION_SUMMARY_BYTES, PreparedCompaction, validate_compaction_references,
 };
 pub(crate) use context::CompiledContext;
 pub use events::{
