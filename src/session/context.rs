@@ -116,7 +116,8 @@ impl CompiledContext {
                 }
                 context
             };
-            let size = run.objective.len()
+            let user = run.history_user_text();
+            let size = user.len()
                 + assistant.len()
                 + 64
                 + run
@@ -138,13 +139,7 @@ impl CompiledContext {
             used += size;
             image_count += run.images.len();
             image_bytes += turn_image_bytes;
-            selected.push((
-                run,
-                HistoryTurn {
-                    user: run.objective.clone(),
-                    assistant,
-                },
-            ));
+            selected.push((run, HistoryTurn { user, assistant }));
         }
         selected.reverse();
         let excluded_history_runs =

@@ -206,6 +206,7 @@ mod goal_recovery_tests {
                 tool_compaction_summary: None,
                 tool_compaction_covered_count: 0,
                 display: Vec::new(),
+                steering_notes: Vec::new(),
             }],
             compactions: Vec::new(),
             goals: vec![GoalView {
@@ -286,6 +287,7 @@ pub struct RunView {
     pub tool_compaction_summary: Option<String>,
     pub tool_compaction_covered_count: u32,
     pub display: Vec<super::events::DisplayChunk>,
+    pub steering_notes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -465,6 +467,19 @@ pub struct CompactionView {
 }
 
 impl RunView {
+    /// The objective, then the steering notes the user sent during this Run, as labelled user text.
+    pub(crate) fn history_user_text(&self) -> String {
+        let mut text = self.objective.clone();
+        if !self.steering_notes.is_empty() {
+            text.push_str("\n\nSteering notes the user sent during this Run:");
+            for (index, note) in self.steering_notes.iter().enumerate() {
+                use std::fmt::Write;
+                write!(&mut text, "\n[{}] {note}", index + 1).expect("String formatting");
+            }
+        }
+        text
+    }
+
     pub(crate) fn primary(&self) -> Option<&AgentView> {
         self.agents
             .first()
@@ -876,7 +891,15 @@ impl SessionView {
                     tool_compaction_summary: None,
                     tool_compaction_covered_count: 0,
                     display: Vec::new(),
+                    steering_notes: Vec::new(),
                 });
+            }
+            Event::GoalSteeringNoteRecorded {
+                goal_id,
+                run_id,
+                text,
+            } => {
+                current.record_goal_steering_note(goal_id, run_id, text)?;
             }
             Event::RunStarted { run_id, config } => {
                 let workspace_identity = (config.workspace_device, config.workspace_inode);
@@ -1689,6 +1712,285 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn steering_note_is_accepted_only_inside_an_open_primary_reservation() {
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let session = SessionId::new();
+        let started = || {
+            let mut events = vec![goal_started(goal_id, GoalBudget::default())];
+            events.extend(start_run(
+                goal_id,
+                run_id,
+                agent_run_id,
+                config(CollaborationPolicy::Single, false),
+            ));
+            events
+        };
+        let open = || {
+            let mut events = started();
+            events.push(Event::GoalProviderCallReserved {
+                goal_id,
+                run_id,
+                agent_run_id,
+            });
+            events
+        };
+        let note = |goal_id: GoalId, text: &str| Event::GoalSteeringNoteRecorded {
+            goal_id,
+            run_id,
+            text: text.into(),
+        };
+        let accepts = |events: Vec<Event>| {
+            SessionView::replay_open(session, &session_with(session, events)).is_ok()
+        };
+
+        let mut accepted = open();
+        accepted.push(note(goal_id, "use the smaller fixture"));
+        let view = SessionView::replay_open(session, &session_with(session, accepted.clone()))
+            .expect("a note inside the open reservation replays")
+            .expect("Session exists");
+        assert_eq!(view.runs[0].steering_notes, vec!["use the smaller fixture"]);
+
+        // Every rejected case first proves its prefix is accepted, so the rejection is not vacuous.
+        let prefix = started();
+        assert!(accepts(prefix.clone()));
+        let mut before = prefix;
+        before.push(note(goal_id, "before the reservation"));
+        assert!(!accepts(before));
+
+        let recorded_prefix = {
+            let mut events = open();
+            events.push(Event::ProviderCallRecorded {
+                run_id,
+                agent_run_id,
+                record: record(
+                    AgentPhase::RootPlan,
+                    ProviderCallDisposition::Finished,
+                    None,
+                ),
+            });
+            events
+        };
+        assert!(accepts(recorded_prefix.clone()));
+        let mut recorded = recorded_prefix;
+        recorded.push(note(goal_id, "after the call settled"));
+        assert!(!accepts(recorded));
+
+        let child = AgentRunId::new();
+        let child_prefix = {
+            let mut events = vec![goal_started(goal_id, GoalBudget::default())];
+            events.extend(start_run(
+                goal_id,
+                run_id,
+                agent_run_id,
+                config(
+                    CollaborationPolicy::Auto {
+                        max_active_children: 1,
+                    },
+                    false,
+                ),
+            ));
+            events.push(Event::GoalProviderCallReserved {
+                goal_id,
+                run_id,
+                agent_run_id,
+            });
+            events.push(Event::ProviderCallRecorded {
+                run_id,
+                agent_run_id,
+                record: record(
+                    AgentPhase::RootPlan,
+                    ProviderCallDisposition::Delegated,
+                    None,
+                ),
+            });
+            events.push(Event::AgentSpawned {
+                run_id,
+                agent_run_id: child,
+                role: AgentRole::Child,
+                ordinal: 1,
+                objective: Some("inspect the parser".into()),
+            });
+            events.push(Event::GoalProviderCallReserved {
+                goal_id,
+                run_id,
+                agent_run_id: child,
+            });
+            events
+        };
+        assert!(accepts(child_prefix.clone()));
+        let mut child_open = child_prefix;
+        child_open.push(note(goal_id, "for the child"));
+        assert!(!accepts(child_open));
+
+        let mut full = open();
+        full.extend((1..=4).map(|n| note(goal_id, &n.to_string())));
+        assert!(accepts(full.clone()));
+        full.push(note(goal_id, "fifth"));
+        assert!(!accepts(full));
+
+        // Exactly the per-Run byte cap is accepted; one more byte is not.
+        let mut exact = open();
+        exact.push(note(goal_id, &"a".repeat(4 * 1024)));
+        exact.push(note(goal_id, &"b".repeat(4 * 1024)));
+        assert!(accepts(exact.clone()));
+        let mut oversized = open();
+        oversized.push(note(goal_id, &"a".repeat(4 * 1024)));
+        oversized.push(note(goal_id, &"b".repeat(4 * 1024 + 1)));
+        assert!(!accepts(oversized));
+
+        let mut finished_prefix = open();
+        finished_prefix.push(Event::ProviderCallRecorded {
+            run_id,
+            agent_run_id,
+            record: record(
+                AgentPhase::RootPlan,
+                ProviderCallDisposition::Finished,
+                None,
+            ),
+        });
+        finished_prefix.push(Event::AgentFinished {
+            run_id,
+            agent_run_id,
+            disposition: AgentDisposition::Finished,
+            summary: Some("done".into()),
+            result: Some("done".into()),
+        });
+        assert!(accepts(finished_prefix.clone()));
+        let mut between = finished_prefix;
+        between.push(note(goal_id, "between AgentFinished and RunFinished"));
+        assert!(!accepts(between));
+
+        let mut ended_prefix = open();
+        ended_prefix.extend(cancel_run(run_id, agent_run_id));
+        assert!(accepts(ended_prefix.clone()));
+        let mut finished = ended_prefix;
+        finished.push(note(goal_id, "after the Run ended"));
+        assert!(!accepts(finished));
+
+        let other_prefix = open();
+        assert!(accepts(other_prefix.clone()));
+        let mut other = other_prefix;
+        other.push(note(GoalId::new(), "another Goal"));
+        assert!(!accepts(other));
+
+        // A Tool review reserves under the primary id; its pending Tool observation must reject notes.
+        let mut review = SessionView::replay_open(session, &session_with(session, open()))
+            .expect("open reservation replays")
+            .expect("Session exists");
+        let intent = crate::tools::EffectIntent {
+            id: uuid::Uuid::now_v7(),
+            run_id,
+            agent_run_id,
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call: crate::tools::ToolCall::Read {
+                path: "src/main.rs".into(),
+                offset: 0,
+                limit: 32,
+            },
+            limits: crate::tools::ToolLimits::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        };
+        review.runs[0].tools.push(ToolView {
+            intent,
+            observation: None,
+            review_call_index: None,
+            finished_sequence: None,
+        });
+        assert!(
+            review
+                .record_goal_steering_note(&goal_id, &run_id, "during a Tool review")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn history_user_text_labels_notes_within_the_steering_reserve() {
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let session = SessionId::new();
+        let mut events = vec![goal_started(goal_id, GoalBudget::default())];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.push(Event::GoalProviderCallReserved {
+            goal_id,
+            run_id,
+            agent_run_id,
+        });
+        for _ in 0..4 {
+            events.push(Event::GoalSteeringNoteRecorded {
+                goal_id,
+                run_id,
+                text: "n".repeat(2 * 1024),
+            });
+        }
+        let view = SessionView::replay_open(session, &session_with(session, events))
+            .expect("notes replay")
+            .expect("Session exists");
+        let run = &view.runs[0];
+        let text = run.history_user_text();
+        assert!(text.starts_with(&run.objective));
+        assert!(text.contains("\n[4] nnnn"));
+        // The reserve covers every note byte plus its labels and header, so compaction and history agree on size.
+        assert!(text.len() - run.objective.len() <= crate::session::MAX_STEERING_CONTEXT_BYTES);
+        let mut bare = run.clone();
+        bare.steering_notes.clear();
+        assert_eq!(bare.history_user_text(), run.objective);
+    }
+
+    #[test]
+    fn crash_after_steering_note_replays_interrupted_and_resume_starts_without_notes() {
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let session = SessionId::new();
+        let mut events = vec![goal_started(goal_id, GoalBudget::default())];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.push(Event::GoalProviderCallReserved {
+            goal_id,
+            run_id,
+            agent_run_id,
+        });
+        events.push(Event::GoalSteeringNoteRecorded {
+            goal_id,
+            run_id,
+            text: "steer".into(),
+        });
+        // The process dies before the reserved call's outcome commits.
+        let crashed = SessionView::replay(session, &session_with(session, events.clone()))
+            .expect("crashed journal replays")
+            .expect("Session exists");
+        assert_eq!(crashed.runs[0].status, RunStatus::Interrupted);
+        assert_eq!(crashed.goals[0].status, GoalStatus::Interrupted);
+        assert_eq!(crashed.runs[0].steering_notes, vec!["steer"]);
+
+        let resumed_run = RunId::new();
+        let resumed_agent = AgentRunId::new();
+        events.push(Event::GoalResumed { goal_id });
+        events.extend(start_run(
+            goal_id,
+            resumed_run,
+            resumed_agent,
+            config(CollaborationPolicy::Single, false),
+        ));
+        let resumed = SessionView::replay_open(session, &session_with(session, events))
+            .expect("resume replays")
+            .expect("Session exists");
+        assert_eq!(resumed.runs.len(), 2);
+        assert_eq!(resumed.runs[0].steering_notes, vec!["steer"]);
+        assert!(resumed.runs[1].steering_notes.is_empty());
+    }
+
+    #[test]
     fn a_new_goal_is_accepted_after_a_paused_goal_and_owns_its_run() {
         let (first, second) = (GoalId::new(), GoalId::new());
         let (first_run, first_agent) = (RunId::new(), AgentRunId::new());
@@ -2480,6 +2782,7 @@ mod goal_replay_tests {
                 tool_compaction_summary: None,
                 tool_compaction_covered_count: 0,
                 display: Vec::new(),
+                steering_notes: Vec::new(),
             }],
             compactions: Vec::new(),
             goals: vec![GoalView {
@@ -2654,6 +2957,7 @@ mod goal_replay_tests {
                 tool_compaction_summary: None,
                 tool_compaction_covered_count: 0,
                 display: Vec::new(),
+                steering_notes: Vec::new(),
             }],
             compactions: Vec::new(),
             goals: vec![GoalView {
@@ -2759,6 +3063,7 @@ mod goal_replay_tests {
                     tool_compaction_summary: None,
                     tool_compaction_covered_count: 0,
                     display: Vec::new(),
+                    steering_notes: Vec::new(),
                 },
                 RunView {
                     id: run_id,
@@ -2787,6 +3092,7 @@ mod goal_replay_tests {
                     tool_compaction_summary: None,
                     tool_compaction_covered_count: 0,
                     display: Vec::new(),
+                    steering_notes: Vec::new(),
                 },
             ],
             compactions: Vec::new(),

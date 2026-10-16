@@ -3586,7 +3586,7 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
             &mut answered,
             edited_start,
             if linear {
-                b"Notice: Draft: 8 characters; Enter retains until Run ends\r\n"
+                b"Notice: Draft: 8 characters; Enter offers it as a steering note\r\n"
             } else {
                 b"\x1b[10;11H"
             },

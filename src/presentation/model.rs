@@ -481,6 +481,7 @@ mod tests {
             tool_compaction_summary: None,
             tool_compaction_covered_count: 0,
             display: Vec::new(),
+            steering_notes: Vec::new(),
         });
         let model = PresentationModel::from_session(&view, 80);
         assert_eq!(model.draft_action, DraftAction::InspectRun);

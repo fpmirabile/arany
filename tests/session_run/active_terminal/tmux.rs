@@ -466,7 +466,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
                 loop {
                     if let Some(screen) = capture_pane(&server) {
                         let screen = String::from_utf8_lossy(&screen);
-                        if screen.contains("Commands 1/19")
+                        if screen.contains("Commands 1/20")
                             && screen.contains("> /help")
                             && screen.contains("Up/Dn Enter Esc")
                         {
@@ -482,7 +482,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
                 loop {
                     if let Some(screen) = capture_pane(&server) {
                         let screen = String::from_utf8_lossy(&screen);
-                        if screen.contains("Commands 19/19")
+                        if screen.contains("Commands 20/20")
                             && screen.contains("> /exit")
                             && screen.contains("Exit Session")
                         {
@@ -1330,7 +1330,7 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     loop {
         if capture_pane(&server).is_some_and(|screen| {
             let text = String::from_utf8_lossy(&screen);
-            text.contains("Commands · 19 local controls")
+            text.contains("Commands · 20 local controls")
                 && text.contains("> /help")
                 && text.contains("Enter/Esc close")
         }) {

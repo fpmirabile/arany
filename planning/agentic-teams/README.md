@@ -38,7 +38,8 @@ the user-owned checks in [next steps](../../NEXT_STEPS.md).
 
 - **Goal.** A durable, Engine-owned unit of user intent that spans one or more
   Runs and ends Completed or Failed with a final report (E11). Cancellation
-  (Ctrl+C) pauses it as Interrupted until `/goal resume`.
+  (Ctrl+C) pauses it as Interrupted until `/goal resume`; `/pause` pauses it at
+  its next step.
 - **RPI.** Research → Plan → Implementation, the default mode (B6).
 - **Plan contract.** An agent's declared scope (paths, command names), success
   criterion and budget; the anchor for every Supervisor signal (B1).
@@ -63,7 +64,7 @@ the user-owned checks in [next steps](../../NEXT_STEPS.md).
 - **Wave.** A group of workers that starts after the previous group integrates
   (C2).
 - **Steering note.** A user message delivered to a running Goal's primary at
-  its next call boundary (E1).
+  its next call boundary (E1, landed).
 
 ## Current facts
 
@@ -611,10 +612,9 @@ triggered and evidence under [testing rules](../../agents/testing.md).
    for the worker command's cache outcome (R14-6); [Engine Run corpus](../../tests/engine_run.rs)
    for cancellation discarding views (R14-4). Stays out: MCP invocation (R14-7)
    and worker cache publication.
-9. **Goal completion.** E1–E4 steering, context reinjection, Workspace
+9. **Goal completion.** E2–E4 context reinjection, Workspace
    checkpoints and rewind, E8 compaction and E10 `exec` integration. This
-   extends Goal Foundation with the remaining durable workflows and UI. E1
-   steering is in review ahead of this position.
+   extends Goal Foundation with the remaining durable workflows and UI.
 10. B6 modes including RPI and grilling, E7 Goal view and E12 settings.
 11. B2, B3, B5 and E5 Supervisor signals, escalation, Finish gate and override.
 12. A5 Typed Git reads and E6 Git writes.
@@ -630,7 +630,7 @@ per-slice specification and evidence cost slows delivery.
 
 E13 telemetry spans land with the slice that introduces each span's subject.
 
-Next action: land E1 steering, then C1 read-only researchers. Dogfooding
+Next action: land C1 read-only researchers. Dogfooding
 starts once the user runs Beta 1 check 7. The A3 per-Workspace
 cache retains its 64 MiB default and shares an 8 GiB StateRoot aggregate; A4
 derives the effective admitted cache quota from remaining aggregate headroom,

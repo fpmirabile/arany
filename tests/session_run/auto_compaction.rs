@@ -138,7 +138,7 @@ fn synthetic_server(
                 assert_eq!(input["includes"].as_array().unwrap().len(), 2);
                 use sha2::{Digest, Sha256};
                 for (index, path, letter) in [(0, "a.txt", "A"), (1, "b.txt", "B")] {
-                    let text = letter.repeat(125 * 1024);
+                    let text = letter.repeat(120 * 1024);
                     let digest: String = Sha256::digest(text.as_bytes())
                         .iter()
                         .map(|byte| format!("{byte:02x}"))
@@ -245,8 +245,9 @@ fn run_attached_auto_compaction(case: CompactionCase) {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     std::fs::write(workspace.join("AGENTS.md"), "G".repeat(20 * 1024)).expect("guidance");
-    std::fs::write(workspace.join("a.txt"), "A".repeat(125 * 1024)).expect("first include");
-    std::fs::write(workspace.join("b.txt"), "B".repeat(125 * 1024)).expect("second include");
+    // Attached Runs reserve steering context, so includes stay below the old budget edge.
+    std::fs::write(workspace.join("a.txt"), "A".repeat(120 * 1024)).expect("first include");
+    std::fs::write(workspace.join("b.txt"), "B".repeat(120 * 1024)).expect("second include");
     std::fs::write(workspace.join("private.txt"), "OMITTED_CANARY").expect("omitted input");
     let state = temp.path().join("state");
     StateRoot::admit(&state).expect("state root");

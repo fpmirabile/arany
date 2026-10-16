@@ -90,6 +90,7 @@ async fn probe(
         goal_plan_contract: None,
         goal_context_facts: None,
         child_results: Vec::new(),
+        steering_notes: Vec::new(),
         max_output_tokens: profile.max_output_tokens(),
         tools: None,
     };
@@ -122,6 +123,7 @@ async fn probe(
         goal_plan_contract: None,
         goal_context_facts: None,
         child_results: Vec::new(),
+        steering_notes: Vec::new(),
         max_output_tokens: 128,
         tools: None,
     };
@@ -543,6 +545,7 @@ mod tests {
             goal_plan_contract: None,
             goal_context_facts: None,
             child_results: Vec::new(),
+            steering_notes: Vec::new(),
             max_output_tokens: 4096,
             tools: None,
         };

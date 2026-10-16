@@ -1,5 +1,5 @@
 use super::progress::{ProgressPublisher, append_observed};
-use super::{EngineError, RunCancellation};
+use super::{EngineError, RunCancellation, RunSteering};
 use crate::provider::{
     AgentPhase, CompactionItem, CompactionRequest, Finish, HistoryTurn, MAX_REPORTED_INPUT_TOKENS,
     PreviewText, Provider, ProviderFailureClass, ProviderFailureReason, ProviderOutcome,
@@ -146,6 +146,7 @@ pub(super) struct RunControls<'a> {
     pub(super) tools: Option<&'a crate::tools::ToolRuntime>,
     pub(super) approvals: Option<&'a crate::tools::ToolApprovals>,
     pub(super) goal_budget: Arc<GoalRunBudget>,
+    pub(super) steering: Option<RunSteering>,
 }
 
 pub(super) struct RunIdentity {
@@ -849,16 +850,18 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                     .saturating_mul(2),
             )
         } else {
-            7_usize.saturating_add(
-                if self
-                    .progress
-                    .is_some_and(|progress| progress.previews_enabled())
-                {
-                    MAX_DISPLAY_CHUNKS
-                } else {
-                    0
-                },
-            )
+            7_usize
+                .saturating_add(
+                    if self
+                        .progress
+                        .is_some_and(|progress| progress.previews_enabled())
+                    {
+                        MAX_DISPLAY_CHUNKS
+                    } else {
+                        0
+                    },
+                )
+                .saturating_add(usize::from(self.controls.steering.is_some()))
         };
         self.store
             .admit_operation(self.session_id, event_tail)
@@ -879,6 +882,42 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                 .map_err(|_| EngineError::GoalBudgetExhausted)?;
         }
         Ok(())
+    }
+
+    /// Journals the waiting steering note inside the open primary reservation and adds it to this call.
+    async fn record_steering_note(&self, request: &mut ProviderRequest) -> Result<(), EngineError> {
+        let Some(steering) = &self.controls.steering else {
+            return Ok(());
+        };
+        // A cancelled call never dispatches, so its note must not be journaled as delivered.
+        if self.controls.cancellation.is_cancelled() {
+            return Ok(());
+        }
+        let Some(text) = steering.take_note() else {
+            return Ok(());
+        };
+        self.append(Event::GoalSteeringNoteRecorded {
+            goal_id: self.goal_id,
+            run_id: self.run_id,
+            text: text.clone(),
+        })
+        .await?;
+        steering.note_recorded();
+        request.steering_notes.push(text);
+        Ok(())
+    }
+
+    /// Converts a requested pause into this Run's cancellation; callers stop at their boundary.
+    pub(super) fn pause_at_boundary(&self) -> bool {
+        let requested = self
+            .controls
+            .steering
+            .as_ref()
+            .is_some_and(RunSteering::pause_requested);
+        if requested {
+            self.controls.cancellation.cancel();
+        }
+        requested
     }
 
     /// Records an admitted Plan contract and narrows this Run to it; `false` means the Run must fail.
@@ -927,11 +966,14 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         let primary = self.trace.begin_primary(self.primary_id);
         let mut first_call = true;
         loop {
+            if self.pause_at_boundary() {
+                return self.fail_known_budget_exhaustion(primary).await;
+            }
             let first_trace = first_call.then(|| primary.begin_first_provider());
             let next_trace = (!first_call)
                 .then(|| primary.begin_provider(AgentPhase::RootPlan, &root_request.model));
             first_call = false;
-            let (first, active_segment) = match self.invoke_primary(root_request.clone()).await {
+            let (first, active_segment) = match self.invoke_primary(&mut root_request).await {
                 Ok(result) => result,
                 Err(EngineError::GoalBudgetExhausted) => {
                     if let Some(first_trace) = first_trace {
@@ -1016,6 +1058,9 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                     outcome: ProviderOutcome::Delegate(delegation),
                     ..
                 }) if valid_response => {
+                    if self.pause_at_boundary() {
+                        return self.fail_known_budget_exhaustion(primary).await;
+                    }
                     return self
                         .run_children(&mut root_request, delegation.children, primary)
                         .await;
@@ -1028,6 +1073,9 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                         },
                     ..
                 }) if valid_response => {
+                    if self.pause_at_boundary() {
+                        return self.fail_known_budget_exhaustion(primary).await;
+                    }
                     if let Some(contract) = plan_contract
                         && !self
                             .admit_plan_contract(&mut root_request, *contract)
@@ -1072,9 +1120,10 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         }
     }
 
+    /// Each primary call carries every steering note this Run has recorded so far, in order.
     async fn invoke_primary(
         &self,
-        mut request: ProviderRequest,
+        root: &mut ProviderRequest,
     ) -> Result<(CallResult, ActiveSegment), EngineError> {
         let previews = self
             .progress
@@ -1093,6 +1142,8 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             }
             return Err(error);
         }
+        self.record_steering_note(root).await?;
+        let mut request = root.clone();
         request.goal_context_facts = Some(self.controls.goal_budget.context_facts()?);
         let context = self
             .progress
@@ -1933,7 +1984,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                     Err(error) => return Err(error),
                 }
             }
-            if !approved && !active_time_exhausted {
+            if !approved && !active_time_exhausted && !self.pause_at_boundary() {
                 match self.reserve_active_pause().await {
                     Ok(pause) => {
                         let mut cancellation = self.controls.cancellation.clone();
@@ -1951,7 +2002,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                 }
             }
         }
-        let queue_pause = if approved
+        let mut queue_pause = if approved
             && goal_allows
             && !active_time_exhausted
             && self.controls.goal_budget.can_start_provider_call()
@@ -1978,6 +2029,22 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                     output:
                         "The effect is outside the active Goal plan; no operation was dispatched"
                             .into(),
+                    guard: None,
+                    cache_update: crate::tools::CacheUpdate::NotApplicable,
+                },
+                None,
+            )
+        } else if self.pause_at_boundary() {
+            // A pause requested during review or the approval wait stops the Run before dispatch.
+            approved = false;
+            if let Some(pause) = queue_pause.take() {
+                self.settle_active_pause(pause, None).await?;
+            }
+            (
+                crate::tools::ToolObservation {
+                    intent,
+                    disposition: crate::tools::ToolDisposition::Denied,
+                    output: "Goal paused before this operation; no operation was dispatched".into(),
                     guard: None,
                     cache_update: crate::tools::CacheUpdate::NotApplicable,
                 },
@@ -2135,7 +2202,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             images: Vec::new(), includes: Vec::new(), history: Vec::new(), context_summary: None,
             goal_budget: request.goal_budget, goal_plan_contract: request.goal_plan_contract.clone(),
             goal_context_facts: None,
-            child_results: Vec::new(), tools: None, max_output_tokens: 256,
+            child_results: Vec::new(), steering_notes: Vec::new(), tools: None, max_output_tokens: 256,
         };
         let trace = primary.begin_provider(AgentPhase::ToolReview, &review.model);
         let active_segment = self.reserve_active_segment(CALL_DEADLINE).await?;

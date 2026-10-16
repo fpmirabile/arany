@@ -34,6 +34,8 @@ history. Implementation status and verified support are separate claims.
 
 - Exercise classic scrollback, narrow resize/reflow, temporary details, idle `/settings` chat-view transitions and a 200-line streamed response in a real macOS emulator and native Linux terminals, including under WSL2. Synthetic macOS PTYs prove controlled cursor ownership, transcript insertion and restoration; they do not emulate scrollback or prove other OS support.
 - With explicit usage consent, repeat OpenAI, Anthropic, ChatGPT and exact-custom streaming conformance against actual selected accounts/endpoints. Offline fixtures prove protocol/lifecycle behavior, not live compatibility. Keep incomplete answers outside future context and confirm recovery after cancellation/crash.
+- Native Linux linear-mode PTY journeys ([steering](tests/session_run/active_terminal/steering.rs)) show a steering note reaching synthesis, controls running while a note waits, and `/pause` pausing at the next boundary. Classic, fullscreen and macOS attached journeys remain unverified; their evidence is the Engine corpus, reducer tests and terminal unit tests.
+- In linear mode, a retained draft during a Run (steering refusals TooLarge, RunFull, Empty or Unavailable) still swallows later control lines with no separator. This predates steering notes; E1 makes it more likely. Fix it in the owning Terminal contract.
 - Check `--screen-reader`, `/transcript`, monochrome labels and managed following with real assistive technology. These usability claims remain unverified.
 
 ## Beta 1: final user-owned checks

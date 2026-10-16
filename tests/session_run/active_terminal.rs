@@ -358,10 +358,10 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             patterns.push(b"pX");
         }
         if expect_resume {
-            patterns.push(b"Draft: 6000 characters; Enter retains until Run ends");
+            patterns.push(b"Draft: 6000 characters; Enter offers it as a steering note");
             patterns.push(b"Presentation: screen-reader");
             patterns.push(b"Notice: Error: invalid or overlong terminal line; draft unchanged\r\n");
-            patterns.push(b"Draft: 8192 characters; Enter retains until Run ends");
+            patterns.push(b"Draft: 8192 characters; Enter offers it as a steering note");
         }
         if expect_second_ctrl_c {
             patterns.push(b"Cancelling Run...");
@@ -1156,6 +1156,9 @@ pub(super) use acquisition::ProductGuard;
 
 #[path = "active_terminal/panic.rs"]
 mod panic;
+
+#[path = "active_terminal/steering.rs"]
+mod steering;
 
 #[cfg(target_os = "linux")]
 #[path = "active_terminal/tmux.rs"]

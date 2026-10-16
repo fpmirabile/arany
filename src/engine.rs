@@ -2,14 +2,15 @@ use crate::provider::{AgentPhase, ImageAttachment, Provider, ProviderRequest};
 use crate::session::input::{InputError, WorkspaceInputs};
 use crate::session::{
     AgentRole, AgentRunId, CollaborationPolicy, CompiledContext, Event, GoalBudget, GoalId,
-    GoalPhase, GoalPlanContract, GoalReport, GoalStatus, GoalUsage,
+    GoalPhase, GoalPlanContract, GoalReport, GoalStatus, GoalUsage, MAX_STEERING_CONTEXT_BYTES,
     MAX_USER_MESSAGE_BYTES as MAX_OBJECTIVE_BYTES, RunConfig, RunId, RunView, SessionId,
 };
 use crate::store::{SessionRunLock, StateRoot, Store, StoreError, WorkspaceRunLock};
 use crate::telemetry::{Telemetry, TraceOutcome};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
 use tokio::sync::watch;
 
@@ -267,6 +268,112 @@ impl RunCancellation {
 impl Default for RunCancellation {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The attached caller's handle on one submission's steering: at most one note waits for the
+/// next primary call, and a pause request stops the Run at its next boundary.
+#[derive(Clone, Default)]
+pub struct RunSteering {
+    state: Arc<Mutex<SteeringState>>,
+    pause: Arc<AtomicBool>,
+}
+
+#[derive(Default)]
+struct SteeringState {
+    waiting: Option<String>,
+    run_notes: usize,
+    run_bytes: usize,
+    recorded: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SteeringRefused {
+    NoteWaiting,
+    RunFull,
+    Empty,
+    TooLarge,
+    Unavailable,
+}
+
+impl RunSteering {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn lock(&self) -> Option<MutexGuard<'_, SteeringState>> {
+        self.state.lock().ok()
+    }
+
+    /// Holds one note until the Engine records it or the caller withdraws it.
+    pub fn offer_note(&self, text: String) -> Result<(), SteeringRefused> {
+        let mut state = self.lock().ok_or(SteeringRefused::Unavailable)?;
+        if state.waiting.is_some() {
+            return Err(SteeringRefused::NoteWaiting);
+        }
+        if text.trim().is_empty() {
+            return Err(SteeringRefused::Empty);
+        }
+        if text.len() > MAX_OBJECTIVE_BYTES {
+            return Err(SteeringRefused::TooLarge);
+        }
+        if state.run_notes >= crate::session::MAX_GOAL_STEERING_NOTES_PER_RUN
+            || state.run_bytes + text.len() > MAX_OBJECTIVE_BYTES
+        {
+            return Err(SteeringRefused::RunFull);
+        }
+        state.waiting = Some(text);
+        Ok(())
+    }
+
+    /// Returns true when a waiting note was removed before the Engine took it.
+    pub fn withdraw_note(&self) -> bool {
+        self.lock()
+            .is_some_and(|mut state| state.waiting.take().is_some())
+    }
+
+    pub fn delivered_notes(&self) -> u64 {
+        self.lock().map_or(0, |state| state.recorded)
+    }
+
+    /// Returns true only for the first pause request.
+    pub fn pause(&self) -> bool {
+        !self.pause.swap(true, Ordering::SeqCst)
+    }
+
+    pub(crate) fn pause_requested(&self) -> bool {
+        self.pause.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn begin_run(&self) {
+        if let Some(mut state) = self.lock() {
+            state.run_notes = 0;
+            state.run_bytes = 0;
+        }
+    }
+
+    /// Takes the waiting note only if it still fits this Run's quota. Taking reserves the quota,
+    /// so an accepted offer always stays deliverable within this Run.
+    pub(crate) fn take_note(&self) -> Option<String> {
+        let mut state = self.lock()?;
+        let fits = state.waiting.as_ref().is_some_and(|text| {
+            state.run_notes < crate::session::MAX_GOAL_STEERING_NOTES_PER_RUN
+                && state.run_bytes + text.len() <= MAX_OBJECTIVE_BYTES
+        });
+        if !fits {
+            return None;
+        }
+        let text = state.waiting.take()?;
+        state.run_notes += 1;
+        state.run_bytes += text.len();
+        Some(text)
+    }
+
+    pub(crate) fn note_recorded(&self) {
+        if let Some(mut state) = self.lock() {
+            state.recorded += 1;
+        }
     }
 }
 
@@ -702,6 +809,7 @@ mod goal_report_tests {
             tool_compaction_summary: None,
             tool_compaction_covered_count: 0,
             display: Vec::new(),
+            steering_notes: Vec::new(),
         };
         let goal = GoalView {
             id: goal_id,
@@ -1679,6 +1787,7 @@ pub struct Engine<P: Provider> {
     tools: Option<(crate::tools::config::Config, PathBuf)>,
     workspace_permissions: Option<crate::tools::WorkspacePermissions>,
     tool_approvals: Option<crate::tools::ToolApprovals>,
+    steering: Option<RunSteering>,
 }
 
 /// Writer locks held by one call. A paused Goal holds none: the call drops them when it returns.
@@ -1837,6 +1946,7 @@ impl<P: Provider + 'static> Engine<P> {
             tools: None,
             workspace_permissions: None,
             tool_approvals: None,
+            steering: None,
         })
     }
 
@@ -1854,6 +1964,12 @@ impl<P: Provider + 'static> Engine<P> {
 
     pub fn set_tool_approvals(&mut self, approvals: crate::tools::ToolApprovals) {
         self.tool_approvals = Some(approvals);
+    }
+
+    /// Installs the caller's handle. Its pause request is sticky for the handle's lifetime, so a
+    /// caller creates one `RunSteering` per submission.
+    pub fn set_steering(&mut self, steering: RunSteering) {
+        self.steering = Some(steering);
     }
 
     pub fn enable_trusted_workspace(
@@ -1980,6 +2096,7 @@ impl<P: Provider + 'static> Engine<P> {
         continuation: bool,
         leases: &mut WorkspaceLeases,
     ) -> Result<RunTurn, EngineError> {
+        self.cancel_if_paused(&cancellation);
         if cancellation.is_cancelled() {
             return Err(EngineError::CancelledBeforeStart);
         }
@@ -2090,12 +2207,19 @@ impl<P: Provider + 'static> Engine<P> {
             ensure_session_workspace(view, workspace_device, workspace_inode)?;
         }
         let context_started = SystemTime::now();
+        let steering_reserved = if self.steering.is_some() {
+            MAX_STEERING_CONTEXT_BYTES
+        } else {
+            0
+        };
         let goal_metadata_reserved = goal_context_metadata_reservation(
             goal.plan_contract
                 .as_ref()
                 .map_or(&goal.budget, |plan| &plan.budget),
             goal.plan_contract.as_ref(),
-        )?;
+        )?
+        .checked_add(steering_reserved)
+        .ok_or(EngineError::ContextTooLarge)?;
         let context = CompiledContext::compile(
             history.as_ref(),
             &objective,
@@ -2318,9 +2442,13 @@ impl<P: Provider + 'static> Engine<P> {
             goal_plan_contract: goal.plan_contract.clone(),
             goal_context_facts: None,
             child_results: Vec::new(),
+            steering_notes: Vec::new(),
             max_output_tokens: OUTPUT_TOKEN_CAP,
             tools: tool_context,
         };
+        if let Some(steering) = &self.steering {
+            steering.begin_run();
+        }
         let goal_run_budget = Arc::new(GoalRunBudget::new(
             &goal,
             budget.max_provider_calls,
@@ -2346,6 +2474,7 @@ impl<P: Provider + 'static> Engine<P> {
                 tools: tools.as_ref(),
                 approvals: self.tool_approvals.as_ref(),
                 goal_budget: Arc::clone(&goal_run_budget),
+                steering: self.steering.clone(),
             },
             publisher.as_ref(),
             &trace,
@@ -2422,6 +2551,17 @@ impl<P: Provider + 'static> Engine<P> {
         })
     }
 
+    /// A pause requested while no Run is open stops the Run before it is admitted.
+    fn cancel_if_paused(&self, cancellation: &RunCancellation) {
+        if self
+            .steering
+            .as_ref()
+            .is_some_and(RunSteering::pause_requested)
+        {
+            cancellation.cancel();
+        }
+    }
+
     fn validate_request(&self, request: &RunRequest) -> Result<(), EngineError> {
         if (request.objective.trim().is_empty()
             && request.images.is_empty()
@@ -2474,5 +2614,92 @@ impl<P: Provider + 'static> Engine<P> {
             return Err(EngineError::InvalidRequest);
         }
         Ok(selection)
+    }
+}
+
+#[cfg(test)]
+mod run_steering_tests {
+    use super::*;
+
+    #[test]
+    fn run_steering_quota_and_withdraw_race() {
+        let steering = RunSteering::new();
+        assert_eq!(
+            steering.offer_note(" \n".into()),
+            Err(SteeringRefused::Empty)
+        );
+        assert_eq!(
+            steering.offer_note("x".repeat(MAX_OBJECTIVE_BYTES + 1)),
+            Err(SteeringRefused::TooLarge)
+        );
+        steering.offer_note("first".into()).expect("first note");
+        assert_eq!(
+            steering.offer_note("second".into()),
+            Err(SteeringRefused::NoteWaiting)
+        );
+        assert!(steering.withdraw_note());
+        assert!(!steering.withdraw_note(), "nothing is waiting twice");
+
+        steering.offer_note("taken".into()).expect("note offered");
+        assert_eq!(steering.take_note().as_deref(), Some("taken"));
+        assert!(
+            !steering.withdraw_note(),
+            "a note the Engine took cannot be withdrawn"
+        );
+        assert_eq!(steering.delivered_notes(), 0);
+        steering.note_recorded();
+        assert_eq!(steering.delivered_notes(), 1);
+
+        for _ in 0..3 {
+            steering.offer_note("n".into()).expect("within quota");
+            assert!(steering.take_note().is_some());
+            steering.note_recorded();
+        }
+        assert_eq!(
+            steering.offer_note("fifth".into()),
+            Err(SteeringRefused::RunFull)
+        );
+
+        steering.begin_run();
+        steering
+            .offer_note("x".repeat(MAX_OBJECTIVE_BYTES))
+            .expect("a new Run has its own byte quota");
+        assert!(steering.take_note().is_some());
+        steering.note_recorded();
+        assert_eq!(
+            steering.offer_note("y".into()),
+            Err(SteeringRefused::RunFull)
+        );
+
+        assert!(steering.pause());
+        assert!(!steering.pause(), "only the first pause request is new");
+        assert!(steering.pause_requested());
+    }
+
+    #[test]
+    fn run_steering_take_reserves_quota_and_poisoned_lock_fails_closed() {
+        let steering = RunSteering::new();
+        for _ in 0..crate::session::MAX_GOAL_STEERING_NOTES_PER_RUN {
+            steering.offer_note("n".into()).expect("within quota");
+            assert!(steering.take_note().is_some());
+        }
+        assert_eq!(
+            steering.offer_note("unrecorded takes still count".into()),
+            Err(SteeringRefused::RunFull)
+        );
+
+        let poisoned = RunSteering::new();
+        let handle = poisoned.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = handle.state.lock().expect("unpoisoned");
+            panic!("poison the steering lock");
+        })
+        .join();
+        assert_eq!(
+            poisoned.offer_note("x".into()),
+            Err(SteeringRefused::Unavailable)
+        );
+        assert!(poisoned.take_note().is_none());
+        assert_eq!(poisoned.delivered_notes(), 0);
     }
 }

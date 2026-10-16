@@ -4,8 +4,8 @@ use super::{
 use crate::cli::chatgpt;
 use arany::{
     AttachedTerminal, CompactionFailure, CompactionRecord, CompactionStatus, Composer,
-    ComposerEdit, RunCancellation, RunOutcome, RunProgress, RunRequest, SessionView,
-    ShutdownSignal, TerminalError, TerminalInput, TerminalNotice,
+    ComposerEdit, RunCancellation, RunOutcome, RunProgress, RunRequest, RunSteering, SessionView,
+    ShutdownSignal, SteeringRefused, TerminalError, TerminalInput, TerminalNotice,
 };
 use std::time::Duration;
 
@@ -92,6 +92,50 @@ fn draft_retained_notice(autonomous: bool) -> &'static str {
     } else {
         "Draft retained; press Enter after this Run to submit"
     }
+}
+
+/// How the attached Run answers a stop request: `/pause` waits for a step boundary, Ctrl+C cancels now.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ActiveStop {
+    Running,
+    Pausing,
+    Cancelling,
+}
+
+const STEERING_SENT: &str = "Steering note sent to the agent";
+
+fn steering_refusal(refused: SteeringRefused, autonomous: bool) -> String {
+    match refused {
+        SteeringRefused::NoteWaiting => "A steering note is already waiting; draft retained".into(),
+        SteeringRefused::RunFull => format!(
+            "No room for more steering notes this Run. {}",
+            draft_retained_notice(autonomous)
+        ),
+        SteeringRefused::TooLarge => "Steering note exceeds 8 KiB; draft retained".into(),
+        SteeringRefused::Empty => "Steering note is empty; draft retained".into(),
+        SteeringRefused::Unavailable => "Steering note unavailable; draft retained".into(),
+    }
+}
+
+/// Consumes a note the Engine recorded since the last check. The composer clears only while it
+/// still holds the offered text; an edited draft stays as the user's retained text.
+fn settle_recorded_note(
+    delivered: u64,
+    seen: &mut u64,
+    offered: &mut Option<String>,
+    composer: &mut Composer,
+) -> bool {
+    if delivered == *seen {
+        return false;
+    }
+    *seen = delivered;
+    let Some(text) = offered.take() else {
+        return false;
+    };
+    if composer.text() == text && composer.images().is_empty() {
+        composer.take();
+    }
+    true
 }
 
 /// Checks an idle run before any Session or Goal state is created. Returns the notice to show.
@@ -204,7 +248,8 @@ pub(super) async fn submit_objective(
         policy: view.defaults.policy,
         goal,
     };
-    draw_active_snapshot(terminal, view, composer, false, false, None)
+    let steering = RunSteering::new();
+    draw_active_snapshot(terminal, view, composer, false, ActiveStop::Running, None)
         .map_err(|error| error.to_string())?;
     let future = run::run_selected(
         &admission.state_dir,
@@ -224,10 +269,13 @@ pub(super) async fn submit_objective(
             permissions: admission.workspace_permissions.as_ref(),
             approvals: &approvals,
         },
+        steering.clone(),
     );
     tokio::pin!(future);
-    let mut cancelling = false;
+    let mut stop = ActiveStop::Running;
     let mut user_recorded = false;
+    let mut offered: Option<String> = None;
+    let mut seen_delivered = 0u64;
     let shutdown_reason = loop {
         let approval_more = match &pending {
             Some(approval) => terminal
@@ -251,10 +299,38 @@ pub(super) async fn submit_objective(
                         "terminal input cleanup failed; Run may have committed; check Session history".into(),
                     ));
                 }
-                if result.is_err()
+                // An undelivered note ends the Run as an ordinary retained draft.
+                let had_offer = offered.is_some();
+                let sent = settle_recorded_note(steering.delivered_notes(), &mut seen_delivered, &mut offered, composer);
+                // Linear offers leave the composer empty, so the undelivered text returns to it here.
+                let mut withdrawn = false;
+                if let Some(text) = offered.take() {
+                    steering.withdraw_note();
+                    if terminal.is_linear() {
+                        if composer.is_empty() {
+                            withdrawn = !matches!(composer.insert_paste(&text), Ok(ComposerEdit::Changed));
+                        } else {
+                            withdrawn = true;
+                        }
+                    }
+                }
+                if (result.is_err() || had_offer || sent)
                     && terminal.restore_draft_input(composer.text().len()).is_err()
                 {
                     return Ok(RunSubmission::Shutdown("terminal input cleanup failed".into()));
+                }
+                let ended_notice = if sent {
+                    Some(STEERING_SENT)
+                } else if withdrawn {
+                    Some("Steering note withdrawn; draft retained")
+                } else {
+                    None
+                };
+                if let Some(notice) = ended_notice
+                    && draw_active_snapshot(terminal, view, composer, user_recorded, stop, Some(TerminalNotice::History(notice)))
+                        .is_err()
+                {
+                    return Ok(RunSubmission::Shutdown("terminal rendering failed".into()));
                 }
                 return match result {
                     Ok(outcome) => Ok(RunSubmission::Completed(Box::new(outcome), user_recorded, None)),
@@ -267,7 +343,7 @@ pub(super) async fn submit_objective(
             },
             preview = previews.changed() => {
                 terminal.set_preview(preview);
-                if draw_active_snapshot(terminal, view, composer, user_recorded, cancelling, None).is_err() {
+                if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
                     break "terminal rendering failed".to_owned();
                 }
             }
@@ -292,13 +368,18 @@ pub(super) async fn submit_objective(
                     view.runs.push(update.run);
                 }
                 view.last_sequence = update.sequence;
-                if draw_active_snapshot(terminal, view, composer, user_recorded, cancelling, None).is_err() {
+                let sent = settle_recorded_note(steering.delivered_notes(), &mut seen_delivered, &mut offered, composer);
+                if sent && terminal.restore_draft_input(composer.text().len()).is_err() {
+                    break "terminal input failed".to_owned();
+                }
+                let notice = sent.then_some(TerminalNotice::History(STEERING_SENT));
+                if draw_active_snapshot(terminal, view, composer, user_recorded, stop, notice).is_err() {
                     break "terminal rendering failed".to_owned();
                 }
             }
             waiting = waiting_progress.waiting_changed() => {
                 terminal.set_waiting_tool(waiting);
-                if draw_active_snapshot(terminal, view, composer, user_recorded, cancelling, None).is_err() {
+                if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
                     break "terminal rendering failed".to_owned();
                 }
             }
@@ -350,7 +431,7 @@ pub(super) async fn submit_objective(
                         TerminalInput::Suspend | TerminalInput::Shutdown(_) => {}
                         _ => {
                             terminal.help_input(input);
-                            if draw_active_snapshot(terminal, view, composer, user_recorded, cancelling, None).is_err() {
+                            if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
                                 break "terminal rendering failed".to_owned();
                             }
                             continue;
@@ -364,7 +445,7 @@ pub(super) async fn submit_objective(
                         break "terminal rendering failed".to_owned();
                     }
                     if !terminal.agents_open()
-                        && draw_active_snapshot(terminal, view, composer, user_recorded, cancelling, None).is_err()
+                        && draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err()
                     {
                         break "terminal rendering failed".to_owned();
                     }
@@ -378,7 +459,7 @@ pub(super) async fn submit_objective(
                 }
                 match terminal.handle_transcript_input(input, view) {
                     Ok(true) => {
-                        if draw_active_snapshot(terminal, view, composer, user_recorded, cancelling, None).is_err() {
+                        if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
                             break "terminal rendering failed".to_owned();
                         }
                         continue;
@@ -387,12 +468,12 @@ pub(super) async fn submit_objective(
                     Err(_) => break "terminal rendering failed".to_owned(),
                 }
                 if terminal.handle_history_input(input, view) {
-                    if draw_active_snapshot(terminal, view, composer, user_recorded, cancelling, None).is_err() {
+                    if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
                         break "terminal rendering failed".to_owned();
                     }
                     continue;
                 }
-                let notice = match input {
+                let mut notice = match input {
                     TerminalInput::CycleApprovalMode => {
                         let notice = super::permissions::cycle(composer);
                         approvals.set_mode(composer.approval_mode().unwrap_or_default());
@@ -405,7 +486,7 @@ pub(super) async fn submit_objective(
                     TerminalInput::Paste => match terminal.paste_into(composer) {
                         Err(error) => Some(Feedback::History(format!("Error: {error}; draft unchanged"))),
                         Ok(ComposerEdit::Changed) => {
-                            if draw_active_snapshot(terminal, view, composer, user_recorded, cancelling, None).is_err() {
+                            if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
                                 break "terminal rendering failed".to_owned();
                             }
                             None
@@ -429,7 +510,7 @@ pub(super) async fn submit_objective(
                     | TerminalInput::Escape) => match composer.apply(input) {
                         ComposerEdit::AtCapacity => Some(Feedback::History("Error: message is too long; shorten it; draft unchanged".into())),
                         ComposerEdit::Changed if !terminal.is_linear() => {
-                            if draw_active_snapshot(terminal, view, composer, user_recorded, cancelling, None).is_err() {
+                            if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
                                 break "terminal rendering failed".to_owned();
                             }
                             None
@@ -441,7 +522,7 @@ pub(super) async fn submit_objective(
                         Some(Feedback::History("Error: invalid or overlong terminal line; draft unchanged".into()))
                     }
                     TerminalInput::LineContinued => {
-                        Some(Feedback::History(format!("Draft: {} characters; Enter retains until Run ends", composer.character_count())))
+                        Some(Feedback::History(format!("Draft: {} characters; Enter offers it as a steering note", composer.character_count())))
                     }
                     TerminalInput::QuickActions => {
                         Some(Feedback::History("Quick actions are unavailable during a Run; /agents opens details".into()))
@@ -454,19 +535,51 @@ pub(super) async fn submit_objective(
                     }
                     TerminalInput::Submit if !terminal.is_linear()
                         && composer.apply(TerminalInput::Submit) == ComposerEdit::Changed => {
-                        if draw_active_snapshot(terminal, view, composer, user_recorded, cancelling, None).is_err() {
+                        if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
                             break "terminal rendering failed".to_owned();
                         }
                         None
                     }
                     TerminalInput::Submit => {
                         match super::controls::handle_active_submission(composer, view, starting_sequence) {
-                            ActiveSubmission::RetainedDraft => {
+                            ActiveSubmission::SteeringNote(text) => {
+                                let feedback = if !composer.images().is_empty() {
+                                    Feedback::Transient("Steering notes are text only; draft retained".into())
+                                } else if offered.is_some() {
+                                    if terminal.is_linear() {
+                                        composer.take();
+                                        Feedback::Transient("A steering note is already waiting; line not sent".into())
+                                    } else {
+                                        Feedback::Transient(steering_refusal(SteeringRefused::NoteWaiting, autonomous))
+                                    }
+                                } else {
+                                    match steering.offer_note(text) {
+                                        Ok(()) => {
+                                            offered = Some(composer.text().to_owned());
+                                            if terminal.is_linear() {
+                                                composer.take();
+                                                Feedback::Transient("Steering note waits for the agent's next step".into())
+                                            } else {
+                                                Feedback::Transient("Steering note waits for the agent's next step; editing withdraws it".into())
+                                            }
+                                        }
+                                        Err(refused) => Feedback::Transient(steering_refusal(refused, autonomous)),
+                                    }
+                                };
                                 if terminal.restore_draft_input(composer.text().len()).is_err() {
                                     break "terminal input failed".to_owned();
                                 }
-                                Some(Feedback::Transient(draft_retained_notice(autonomous).into()))
+                                Some(feedback)
                             }
+                            ActiveSubmission::Pause => Some(Feedback::History(match stop {
+                                ActiveStop::Running => {
+                                    steering.pause();
+                                    stop = ActiveStop::Pausing;
+                                    "Pausing at the next step; Ctrl+C cancels now".into()
+                                }
+                                ActiveStop::Pausing => "Already pausing at the next step".into(),
+                                ActiveStop::Cancelling => "Run is already cancelling".into(),
+                            })),
                             ActiveSubmission::Rejected(notice) => {
                                 if terminal.is_linear() {
                                     composer.take();
@@ -492,7 +605,7 @@ pub(super) async fn submit_objective(
                             }
                             ActiveSubmission::OpenTranscript => {
                                 if terminal.toggle_transcript(view).is_err()
-                                    || draw_active_snapshot(terminal, view, composer, user_recorded, cancelling, None).is_err()
+                                    || draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err()
                                 {
                                     break "terminal rendering failed".to_owned();
                                 }
@@ -501,10 +614,10 @@ pub(super) async fn submit_objective(
                         }
                     }
                     TerminalInput::Interrupt => {
-                        if cancelling {
+                        if stop == ActiveStop::Cancelling {
                             break "forced shutdown after second Ctrl+C".to_owned();
                         }
-                        cancelling = true;
+                        stop = ActiveStop::Cancelling;
                         cancellation.cancel();
                         None
                     }
@@ -512,7 +625,7 @@ pub(super) async fn submit_objective(
                         if terminal.suspend_and_resume(composer.text().len()).is_err() {
                             break "terminal resume failed".to_owned();
                         }
-                        if draw_active_snapshot(terminal, view, composer, user_recorded, cancelling, None).is_err() {
+                        if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
                             break "terminal rendering failed".to_owned();
                         }
                         None
@@ -521,7 +634,7 @@ pub(super) async fn submit_objective(
                         break format!("terminated by {}", signal.name());
                     }
                     TerminalInput::Resize => {
-                        if draw_active_snapshot(terminal, view, composer, user_recorded, cancelling, None).is_err() {
+                        if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
                             break "terminal rendering failed".to_owned();
                         }
                         None
@@ -531,8 +644,17 @@ pub(super) async fn submit_objective(
                     }
                     _ => None,
                 };
+                if !terminal.is_linear() && offered.as_deref().is_some_and(|text| composer.text() != text || !composer.images().is_empty()) {
+                    offered = None;
+                    notice = Some(if steering.withdraw_note() {
+                        Feedback::Transient("Steering note withdrawn; draft retained".into())
+                    } else {
+                        // The Engine already took the note, so it is sent; the edited draft stays.
+                        Feedback::History(STEERING_SENT.into())
+                    });
+                }
                 if (notice.is_some() || matches!(input, TerminalInput::Interrupt))
-                    && draw_active_snapshot(terminal, view, composer, user_recorded, cancelling, notice.as_ref().map(Feedback::notice)).is_err()
+                    && draw_active_snapshot(terminal, view, composer, user_recorded, stop, notice.as_ref().map(Feedback::notice)).is_err()
                 {
                     break "terminal rendering failed".to_owned();
                 }
@@ -580,20 +702,25 @@ fn draw_active_snapshot(
     view: &SessionView,
     composer: &Composer,
     current_run_started: bool,
-    cancelling: bool,
+    stop: ActiveStop,
     notice: Option<TerminalNotice<'_>>,
 ) -> Result<(), TerminalError> {
     if !current_run_started {
+        let status = match stop {
+            ActiveStop::Running => None,
+            ActiveStop::Pausing => Some("Pausing at the next step... Ctrl+C cancels now"),
+            ActiveStop::Cancelling => Some("Stopping request..."),
+        };
         terminal.draw_preparing_notice(
             view,
             composer,
-            notice.or(cancelling.then_some(TerminalNotice::Transient("Stopping request..."))),
+            notice.or(status.map(TerminalNotice::Transient)),
         )
-    } else if cancelling || terminal.is_linear() {
-        let notice = notice.unwrap_or(TerminalNotice::Transient(if cancelling {
-            "Cancelling Run..."
-        } else {
-            "Run in progress... Ctrl+C cancels"
+    } else if stop != ActiveStop::Running || terminal.is_linear() {
+        let notice = notice.unwrap_or(TerminalNotice::Transient(match stop {
+            ActiveStop::Cancelling => "Cancelling Run...",
+            ActiveStop::Pausing => "Pausing at the next step... Ctrl+C cancels now",
+            ActiveStop::Running => "Run in progress... Ctrl+C cancels",
         }));
         if terminal.is_linear() {
             terminal.draw_busy_notice(view, composer, Some(notice))
@@ -1012,6 +1139,69 @@ mod goal_request_tests {
             !admission.state_dir.exists(),
             "refused submissions create no State"
         );
+    }
+
+    #[test]
+    fn steering_refusals_name_the_retained_draft_without_echoing_text() {
+        assert_eq!(
+            steering_refusal(SteeringRefused::TooLarge, false),
+            "Steering note exceeds 8 KiB; draft retained"
+        );
+        assert_eq!(
+            steering_refusal(SteeringRefused::Unavailable, true),
+            "Steering note unavailable; draft retained"
+        );
+        assert_eq!(
+            steering_refusal(SteeringRefused::RunFull, true),
+            "No room for more steering notes this Run. Draft retained; press Enter after this Goal to submit"
+        );
+    }
+
+    #[test]
+    fn recorded_note_clears_only_an_unchanged_composer() {
+        let mut seen = 0;
+        let mut composer = Composer::default();
+        for character in "first note".chars() {
+            composer.apply(TerminalInput::Character(character));
+        }
+        let mut offered = Some(composer.text().to_owned());
+        assert!(!settle_recorded_note(
+            0,
+            &mut seen,
+            &mut offered,
+            &mut composer
+        ));
+        assert!(settle_recorded_note(
+            1,
+            &mut seen,
+            &mut offered,
+            &mut composer
+        ));
+        assert!(
+            composer.is_empty(),
+            "an unchanged offer clears the composer"
+        );
+        assert!(offered.is_none());
+        assert!(!settle_recorded_note(
+            1,
+            &mut seen,
+            &mut offered,
+            &mut composer
+        ));
+
+        // An edit after the Engine took the note keeps the user's text as a retained draft.
+        for character in "second".chars() {
+            composer.apply(TerminalInput::Character(character));
+        }
+        let mut offered = Some("second".to_owned());
+        composer.apply(TerminalInput::Character('!'));
+        assert!(settle_recorded_note(
+            2,
+            &mut seen,
+            &mut offered,
+            &mut composer
+        ));
+        assert_eq!(composer.text(), "second!");
     }
 
     #[test]

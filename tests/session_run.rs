@@ -233,6 +233,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                         tool_compaction_summary: None,
                         tool_compaction_covered_count: 0,
                         display: Vec::new(),
+                        steering_notes: Vec::new(),
                     });
                     terminal.record_user_run(&view.runs[0]).unwrap();
                     for lines in [50, 100, 200] {

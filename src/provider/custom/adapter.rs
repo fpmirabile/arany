@@ -214,6 +214,7 @@ mod tests {
                 goal_context_facts: None,
                 child_results: Vec::new(),
                 tools,
+                steering_notes: Vec::new(),
                 max_output_tokens: 4096,
             };
             assert!(matches!(

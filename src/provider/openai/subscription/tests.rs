@@ -67,6 +67,7 @@ fn request() -> ProviderRequest {
         goal_plan_contract: None,
         goal_context_facts: None,
         child_results: Vec::new(),
+        steering_notes: Vec::new(),
         max_output_tokens: 64,
         tools: None,
     }

@@ -28,6 +28,7 @@ fn run_request() -> ProviderRequest {
             summary: "child summary canary".into(),
             result: "child result canary".into(),
         }],
+        steering_notes: Vec::new(),
         max_output_tokens: 4096,
         tools: None,
     }
@@ -1403,4 +1404,26 @@ fn provider_bound_schemas_carry_no_validation_keywords() {
     }
     request.goal_plan_contract = Some(goal_plan_contract());
     assert_no_schema_bounds(&run_body_with_effort(&request, Effort::Low), "continued");
+}
+
+#[test]
+fn steering_notes_are_user_input_data_never_instructions() {
+    let mut request = run_request();
+    request.steering_notes = vec!["steering canary".into()];
+    let body = run_body(&request);
+    let instructions = body["instructions"].as_str().unwrap();
+    assert!(instructions.contains(crate::provider::STEERING_INSTRUCTIONS));
+    assert!(!instructions.contains("steering canary"));
+    let input: Value = serde_json::from_str(body["input"].as_str().unwrap()).unwrap();
+    assert_eq!(input["steering_notes"], json!(["steering canary"]));
+
+    let plain = run_body(&run_request());
+    assert!(
+        !plain["instructions"]
+            .as_str()
+            .unwrap()
+            .contains(crate::provider::STEERING_INSTRUCTIONS)
+    );
+    let plain_input: Value = serde_json::from_str(plain["input"].as_str().unwrap()).unwrap();
+    assert!(plain_input.get("steering_notes").is_none());
 }

@@ -2,8 +2,8 @@ use crate::cli::{chatgpt, credentials};
 use arany::{
     AnthropicProvider, ChatGptProvider, CompactionRecord, CustomProvider, Effort, Engine,
     NativeApiCredentials, OpenAiProvider, Provider, RunCancellation, RunId, RunOutcome,
-    RunProgress, RunRequest, SessionId, StateRoot, Telemetry, native_protection_supported,
-    resolve_native_effort_for_run,
+    RunProgress, RunRequest, RunSteering, SessionId, StateRoot, Telemetry,
+    native_protection_supported, resolve_native_effort_for_run,
 };
 use std::path::Path;
 use uuid::Uuid;
@@ -77,6 +77,7 @@ pub(super) async fn preflight_selected(
     select_provider(state_dir, selection).await.map(|_| ())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_selected(
     state_dir: &Path,
     telemetry: &Telemetry,
@@ -85,6 +86,7 @@ pub(super) async fn run_selected(
     cancellation: RunCancellation,
     progress: RunProgress,
     tools: ToolAccess<'_>,
+    steering: RunSteering,
 ) -> Result<RunOutcome, RunAttemptError> {
     let mut admission_cancellation = cancellation.clone();
     let provider = tokio::select! {
@@ -104,6 +106,7 @@ pub(super) async fn run_selected(
                 cancellation,
                 progress,
                 tools,
+                steering,
             )
             .await
         }
@@ -116,6 +119,7 @@ pub(super) async fn run_selected(
                 cancellation,
                 progress,
                 tools,
+                steering,
             )
             .await
         }
@@ -128,6 +132,7 @@ pub(super) async fn run_selected(
                 cancellation,
                 progress,
                 tools,
+                steering,
             )
             .await
         }
@@ -140,6 +145,7 @@ pub(super) async fn run_selected(
                 cancellation,
                 progress,
                 tools,
+                steering,
             )
             .await
         }
@@ -305,6 +311,7 @@ fn classify_run_error(error: arany::EngineError) -> RunAttemptError {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_with_provider<P: Provider + 'static>(
     state_dir: &Path,
     telemetry: &Telemetry,
@@ -313,6 +320,7 @@ async fn run_with_provider<P: Provider + 'static>(
     cancellation: RunCancellation,
     progress: RunProgress,
     tools: ToolAccess<'_>,
+    steering: RunSteering,
 ) -> Result<RunOutcome, RunAttemptError> {
     let trusted_tools =
         !tools.configured && super::permissions::supports_tools(Some(provider.profile_name()));
@@ -350,6 +358,7 @@ async fn run_with_provider<P: Provider + 'static>(
             })?;
     }
     engine.set_tool_approvals(tools.approvals.clone());
+    engine.set_steering(steering);
     let result = engine
         .run_with_progress(request, cancellation, progress)
         .await;
@@ -1407,6 +1416,7 @@ mod tests {
                         permissions,
                         approvals: &approvals,
                     },
+                    RunSteering::new(),
                 )
                 .await
                 .expect("ordinary greeting retains the admitted native file capability");
@@ -1479,6 +1489,7 @@ mod tests {
                     permissions: None,
                     approvals: &approvals,
                 },
+                RunSteering::new(),
             )
             .await
             .expect_err("explicit Tool admission must reject before inference");

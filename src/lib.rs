@@ -24,8 +24,9 @@ pub use diagnostics::{
 };
 pub use engine::{
     DisplayUpdate, Engine, EngineError, GoalRequest, RunCancellation, RunOutcome, RunPreview,
-    RunProgress, RunRequest, RunUpdate, continue_session, create_session, fork_session,
-    list_sessions, rename_session, resume_session, set_session_defaults, validate_workspace_inputs,
+    RunProgress, RunRequest, RunSteering, RunUpdate, SteeringRefused, continue_session,
+    create_session, fork_session, list_sessions, rename_session, resume_session,
+    set_session_defaults, validate_workspace_inputs,
 };
 pub use presentation::{
     Output, escape_terminal, goal_status, render_cache_update_feedback, render_exec,
