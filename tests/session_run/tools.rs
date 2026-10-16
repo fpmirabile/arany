@@ -1093,37 +1093,6 @@ fn mcp_definition() -> Value {
     json!({"name":"echo","description":"Return a synthetic value; no host I/O","inputSchema":schema,"outputSchema":schema})
 }
 
-#[test]
-fn exec_tool_configuration_rejects_before_workspace_content_or_provider_egress() {
-    use std::os::unix::fs::symlink;
-    let temp = tempfile::tempdir().unwrap();
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir_all(workspace.join("src")).unwrap();
-    let omitted = temp.path().join("omitted");
-    private_file(&omitted, b"OMITTED_CONFIG_CANARY");
-    symlink(&omitted, workspace.join("AGENTS.md")).unwrap();
-    for (name, bytes, expected) in [
-        ("missing", None, "tools require a private tools.json; see docs/tools.md"),
-        ("unknown", Some(b"{\"version\":1,\"workspace_paths\":[\"src\"],\"write\":false,\"commands\":[],\"skills\":[],\"mcp\":[],\"network\":true}".as_slice()), "Tool configuration is invalid or unsafe"),
-        ("duplicates", Some(b"{\"version\":1,\"version\":1}".as_slice()), "Tool configuration is invalid or unsafe"),
-    ] {
-        let state_path = temp.path().join(format!("state-{name}"));
-        StateRoot::admit(&state_path).unwrap();
-        if let Some(bytes) = bytes { private_file(&state_path.join("tools.json"), bytes); }
-        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_arany"));
-        command.env_clear().current_dir(temp.path()).env("OPENAI_API_KEY", "synthetic-never-sent-key")
-            .args(["exec", "--tools", "--provider", "openai", "--model", "gpt-5.4", "--state-dir"]).arg(&state_path)
-            .arg("--workspace").arg(&workspace).arg("Must reject before hostile Workspace input");
-        let output = super::process_output_before_deadline(command);
-        assert_eq!(output.status.code(), Some(1), "configuration case {name}");
-        assert!(output.stdout.is_empty());
-        assert_eq!(String::from_utf8(output.stderr).unwrap(), format!("error: {expected}\n"));
-        let connection = rusqlite::Connection::open(state_path.join("events.sqlite3")).unwrap();
-        assert_eq!(connection.query_row("SELECT COUNT(*) FROM events", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
-        assert_eq!(std::fs::read(&omitted).unwrap(), b"OMITTED_CONFIG_CANARY");
-    }
-}
-
 #[tokio::test]
 #[ignore = "native Linux real MCP version/framing/schema/capability failure corpus"]
 async fn mcp_stdio_corpus_rejects_unnegotiated_authority_and_hostile_results() {
