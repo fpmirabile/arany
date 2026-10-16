@@ -1897,8 +1897,18 @@ fn git_read_calls_validate_paths_combinations_and_counts() {
 }
 
 #[test]
-fn git_pin_is_optional_closed_and_linux_only() {
-    let pin = json!({"name":"git","executable":"/usr/bin/git","sha256":"0".repeat(64),"interpreter":false,"inputs":[]});
+fn git_pin_is_optional_closed_and_rooted_per_platform() {
+    let good = if cfg!(target_os = "macos") {
+        "/Library/Developer/CommandLineTools/usr/bin/git"
+    } else {
+        "/usr/bin/git"
+    };
+    let other = if cfg!(target_os = "macos") {
+        "/usr/bin/git"
+    } else {
+        "/Library/Developer/CommandLineTools/usr/bin/git"
+    };
+    let pin = json!({"name":"git","executable":good,"sha256":"0".repeat(64),"interpreter":false,"inputs":[]});
     let config_with = |workspace: Value, git: Option<Value>| {
         let mut value = config_value();
         value["workspace_paths"] = workspace;
@@ -1909,22 +1919,21 @@ fn git_pin_is_optional_closed_and_linux_only() {
     };
     let status = ToolCall::GitStatus { path: ".".into() };
     let config = config_with(json!(["."]), Some(pin.clone()));
-    assert_eq!(config.validate().is_ok(), cfg!(target_os = "linux"));
-    if cfg!(target_os = "linux") {
-        assert!(config.allows(&status));
-        assert!(config.allows(&ToolCall::GitLog {
-            path: ".".into(),
-            revision: None,
-            max_count: 5
-        }));
-        assert!(config.allows(&ToolCall::GitDiff {
-            path: "src".into(),
-            base: None,
-            head: None,
-            staged: false,
-        }));
-    }
+    assert!(config.validate().is_ok());
+    assert!(config.allows(&status));
+    assert!(config.allows(&ToolCall::GitLog {
+        path: ".".into(),
+        revision: None,
+        max_count: 5
+    }));
+    assert!(config.allows(&ToolCall::GitDiff {
+        path: "src".into(),
+        base: None,
+        head: None,
+        staged: false,
+    }));
     let mutations = [
+        json!({"name":"git","executable":other,"sha256":"0".repeat(64),"interpreter":false,"inputs":[]}),
         json!({"name":"sh","executable":"/usr/bin/git","sha256":"0".repeat(64),"interpreter":false,"inputs":[]}),
         json!({"name":"git","executable":"/usr/bin/git","sha256":"0".repeat(64),"interpreter":true,"inputs":[]}),
         json!({"name":"git","executable":"/usr/bin/git","sha256":"0".repeat(64),"interpreter":false,"inputs":[{"path":"/usr/bin/true","destination":"t","sha256":"0".repeat(64)}]}),
@@ -1939,7 +1948,7 @@ fn git_pin_is_optional_closed_and_linux_only() {
         );
     }
     let narrow = config_with(json!(["src", "Cargo.toml"]), Some(pin));
-    assert_eq!(narrow.validate().is_ok(), cfg!(target_os = "linux"));
+    assert!(narrow.validate().is_ok());
     assert!(!narrow.allows(&status));
     let absent = config_with(json!(["."]), None);
     assert!(absent.validate().is_ok());

@@ -397,10 +397,7 @@ impl WorkspacePermissions {
             skills: Vec::new(),
             mcp: Vec::new(),
             runtime_grants: self.runtime_grants.clone(),
-            #[cfg(target_os = "linux")]
             git: super::git::discover(),
-            #[cfg(not(target_os = "linux"))]
-            git: None,
         };
         config.validate()?;
         Ok(config)
@@ -905,9 +902,7 @@ mod tests {
             assert_eq!(config.commands[0].executable, "/bin/sh");
             config.commands[0].verify().unwrap();
             assert!(config.mcp.is_empty());
-            assert!(config.git.is_none());
         }
-        #[cfg(target_os = "linux")]
         assert_eq!(
             access.config(&path).unwrap().git.map(|git| git.sha256),
             super::super::git::discover().map(|git| git.sha256)
