@@ -29,10 +29,10 @@ owning contract when intentionally changing observable behavior.
 
 ## Verification
 
-Run the applicable [development checks](./docs/development.md#verification).
-Documentation changes need prose and link review; they do not require rebuilding
-Rust. For code changes, cover the affected behavior and meaningful failure path
-through the existing tests where possible.
+Run the targeted [development checks](./docs/development.md#verification) for
+what you changed; CI runs the complete suite on your pull request. For code
+changes, cover the affected behavior and meaningful failure path through the
+existing tests where possible.
 
 Tell reviewers which checks you ran and on which OS. If a check needs a service,
 account or platform you do not have, describe the missing verification. An

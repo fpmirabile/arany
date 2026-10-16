@@ -72,6 +72,37 @@ async fn goal_lifecycle_bounds_report_and_requires_goal_replay_linkage() {
 }
 
 #[tokio::test]
+async fn goal_report_counts_cached_input_tokens() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let state_path = temp.path().join("state");
+    let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
+        summary: "done".into(),
+        result: "accepted result".into(),
+    })])
+    .with_cached_input_tokens(7);
+    let mut engine =
+        Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+    let mut input = request(&workspace, "Complete a Goal");
+    input.include_paths.clear();
+    let outcome = engine.run(input).await.expect("Goal Run");
+    engine.close().await.expect("engine shutdown");
+
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
+        .expect("read-only Store");
+    let events = store
+        .load_session(outcome.session_id)
+        .await
+        .expect("Events");
+    let view = SessionView::replay(outcome.session_id, &events)
+        .expect("strict replay")
+        .expect("Session");
+    let report = view.goals[0].report.as_ref().expect("durable report");
+    assert_eq!(report.cached_input_tokens, 7);
+}
+
+#[tokio::test]
 async fn summary_within_the_serialized_report_budget_is_kept_whole() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = temp.path().join("workspace");
@@ -153,8 +184,11 @@ async fn compact_read_only_goal_prefix(objective: &str) {
                 "Earlier pages were read; their exact results remain in the canonical journal."
                     .into(),
             response_id: None,
-            input_tokens: Some(32),
-            output_tokens: Some(12),
+            usage: arany::Usage {
+                input_tokens: Some(32),
+                output_tokens: Some(12),
+                ..Default::default()
+            },
             wire_provenance: None,
         })
     };
@@ -162,8 +196,11 @@ async fn compact_read_only_goal_prefix(objective: &str) {
         std::iter::once(Ok(CompactionResponse {
             summary: String::new(),
             response_id: None,
-            input_tokens: None,
-            output_tokens: Some(8),
+            usage: arany::Usage {
+                input_tokens: None,
+                output_tokens: Some(8),
+                ..Default::default()
+            },
             wire_provenance: None,
         }))
         .chain((0..8).map(|_| good_compaction()))
@@ -440,8 +477,11 @@ async fn goal_call_budget_blocks_a_later_run_before_provider_dispatch() {
     .with_compactions(vec![Ok(CompactionResponse {
         summary: "The completed Run remains in the canonical history.".into(),
         response_id: None,
-        input_tokens: Some(12),
-        output_tokens: Some(4),
+        usage: arany::Usage {
+            input_tokens: Some(12),
+            output_tokens: Some(4),
+            ..Default::default()
+        },
         wire_provenance: None,
     })]);
     let requests = Arc::clone(&provider.requests);
@@ -786,8 +826,11 @@ impl Provider for FiniteTokenTeam {
         Ok(ProviderResponse {
             outcome,
             response_id: None,
-            input_tokens: Some(input_tokens),
-            output_tokens: Some(output_tokens),
+            usage: arany::Usage {
+                input_tokens: Some(input_tokens),
+                output_tokens: Some(output_tokens),
+                ..Default::default()
+            },
             wire_provenance: None,
         })
     }
@@ -1247,8 +1290,11 @@ impl Provider for ExactCapToolReview {
         Ok(ProviderResponse {
             outcome,
             response_id: None,
-            input_tokens: Some(input_tokens),
-            output_tokens: Some(output_tokens),
+            usage: arany::Usage {
+                input_tokens: Some(input_tokens),
+                output_tokens: Some(output_tokens),
+                ..Default::default()
+            },
             wire_provenance: None,
         })
     }
@@ -1349,8 +1395,11 @@ impl Provider for PendingChildren {
                     children: vec!["First child".into(), "Second child".into()],
                 }),
                 response_id: None,
-                input_tokens: Some(0),
-                output_tokens: Some(1),
+                usage: arany::Usage {
+                    input_tokens: Some(0),
+                    output_tokens: Some(1),
+                    ..Default::default()
+                },
                 wire_provenance: None,
             }),
             AgentPhase::ChildWork => {
@@ -1787,8 +1836,11 @@ impl Provider for MeteredProvider {
         Ok(ProviderResponse {
             outcome,
             response_id: None,
-            input_tokens: Some(self.tokens),
-            output_tokens: Some(0),
+            usage: arany::Usage {
+                input_tokens: Some(self.tokens),
+                output_tokens: Some(0),
+                ..Default::default()
+            },
             wire_provenance: None,
         })
     }

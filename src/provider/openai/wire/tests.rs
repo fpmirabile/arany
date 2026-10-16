@@ -279,8 +279,8 @@ fn run_instructions_join_without_an_empty_plan_contract_part() {
         body["instructions"],
         format!(
             "{} {}",
-            crate::provider::READ_ONLY_INSTRUCTIONS,
-            crate::provider::COLLABORATION_INSTRUCTIONS
+            crate::provider::prompts::READ_ONLY_INSTRUCTIONS,
+            crate::provider::prompts::COLLABORATION_INSTRUCTIONS
         )
     );
 }
@@ -294,7 +294,7 @@ fn outbound_documents_pin_privacy_schema_and_scope() {
         body["instructions"]
             .as_str()
             .unwrap()
-            .contains(crate::provider::COLLABORATION_INSTRUCTIONS)
+            .contains(crate::provider::prompts::COLLABORATION_INSTRUCTIONS)
     );
     assert_eq!(body["store"], false);
     assert_eq!(body["truncation"], "disabled");
@@ -595,6 +595,31 @@ fn message(text: &str) -> Value {
 }
 
 #[test]
+fn openai_usage_maps_cached_tokens() {
+    let mut finish = response(
+        "completed",
+        json!([message(
+            r#"{"outcome":{"type":"finish","summary":"done","result":"answer"}}"#
+        )]),
+    );
+    finish["usage"] = json!({
+        "input_tokens": 12,
+        "output_tokens": 8,
+        "input_tokens_details": {"cached_tokens": 5}
+    });
+    let cached = decode_run(&serde_json::to_vec(&finish).unwrap(), "gpt-5.4")
+        .expect("cached Responses result");
+    assert_eq!(cached.usage.input_tokens, Some(12));
+    assert_eq!(cached.usage.cache_read_input_tokens, Some(5));
+    assert_eq!(cached.usage.cache_creation_input_tokens, None);
+    assert!(cached.usage.cache_consistent());
+    finish["usage"] = json!({"input_tokens": 12, "output_tokens": 8});
+    let uncached = decode_run(&serde_json::to_vec(&finish).unwrap(), "gpt-5.4")
+        .expect("usage without cache details");
+    assert_eq!(uncached.usage.cache_read_input_tokens, None);
+}
+
+#[test]
 fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
     let mut request = run_request();
     request.phase = AgentPhase::RootPlan;
@@ -608,7 +633,7 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
         body["instructions"]
             .as_str()
             .unwrap()
-            .contains(crate::provider::COLLABORATION_INSTRUCTIONS)
+            .contains(crate::provider::prompts::COLLABORATION_INSTRUCTIONS)
     );
     let input: Value = serde_json::from_str(body["input"][0]["content"].as_str().unwrap()).unwrap();
     assert_eq!(input["tools"]["catalog"], "UNTRUSTED_TOOL_CATALOG_CANARY");
@@ -1109,7 +1134,7 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
         accepted.wire_provenance,
         Some(ProviderWireProvenance::ResponsesCompletedStoreFalseRequested)
     );
-    assert_eq!(accepted.input_tokens, Some(12));
+    assert_eq!(accepted.usage.input_tokens, Some(12));
     for compaction in [false, true] {
         let text = if compaction {
             r#"{"summary":"short"}"#
@@ -1413,7 +1438,7 @@ fn steering_notes_are_user_input_data_never_instructions() {
     request.steering_notes = vec!["steering canary".into()];
     let body = run_body(&request);
     let instructions = body["instructions"].as_str().unwrap();
-    assert!(instructions.contains(crate::provider::STEERING_INSTRUCTIONS));
+    assert!(instructions.contains(crate::provider::prompts::STEERING_INSTRUCTIONS));
     assert!(!instructions.contains("steering canary"));
     let input: Value = serde_json::from_str(body["input"].as_str().unwrap()).unwrap();
     assert_eq!(input["steering_notes"], json!(["steering canary"]));
@@ -1423,7 +1448,7 @@ fn steering_notes_are_user_input_data_never_instructions() {
         !plain["instructions"]
             .as_str()
             .unwrap()
-            .contains(crate::provider::STEERING_INSTRUCTIONS)
+            .contains(crate::provider::prompts::STEERING_INSTRUCTIONS)
     );
     let plain_input: Value = serde_json::from_str(plain["input"].as_str().unwrap()).unwrap();
     assert!(plain_input.get("steering_notes").is_none());
@@ -1464,7 +1489,7 @@ fn child_research_request_offers_only_read_only_functions_and_finish() {
         body["instructions"]
             .as_str()
             .unwrap()
-            .starts_with(crate::provider::RESEARCH_INSTRUCTIONS)
+            .starts_with(crate::provider::prompts::RESEARCH_INSTRUCTIONS)
     );
     assert_eq!(
         names(&body),

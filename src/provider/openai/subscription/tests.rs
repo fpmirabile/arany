@@ -441,7 +441,7 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
         .expect("complete response");
     let decoded = wire::decode_streamed_run(&body, "model-a").expect("strict outcome");
     assert!(matches!(decoded.outcome, ProviderOutcome::Finish(_)));
-    assert_eq!(decoded.output_tokens, Some(12));
+    assert_eq!(decoded.usage.output_tokens, Some(12));
     for (name, ending, named) in [
         ("LF", "\n", true),
         ("CRLF", "\r\n", true),
@@ -703,7 +703,7 @@ async fn streaming_transport_accepts_only_final_usage_within_local_cap() {
         let response = invoke_at(&client(), endpoint, TOKEN, &request(), Effort::Medium)
             .await
             .expect(label);
-        assert_eq!(response.output_tokens, Some(12), "{label}");
+        assert_eq!(response.usage.output_tokens, Some(12), "{label}");
         assert!(
             matches!(response.outcome, ProviderOutcome::Finish(ref value) if value.result == "done")
         );
@@ -807,7 +807,7 @@ async fn compaction_stream_requires_complete_bounded_summary() {
     .await
     .expect("complete summary");
     assert_eq!(response.summary, "Condensed");
-    assert_eq!(response.output_tokens, Some(12));
+    assert_eq!(response.usage.output_tokens, Some(12));
     let request = server.await.expect("server");
     let document: Value = serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
     assert_eq!(document["text"]["format"]["name"], "arany_compaction");
@@ -1158,4 +1158,15 @@ fn attached_stream_preview_is_in_place_and_never_exposes_wire_arguments() {
         );
         assert!(observed.borrow().answer.is_empty());
     }
+}
+
+#[test]
+fn subscription_accept_rejects_cached_tokens_above_input() {
+    let usage = Usage {
+        input_tokens: Some(12),
+        output_tokens: Some(8),
+        cache_read_input_tokens: Some(13),
+        cache_creation_input_tokens: None,
+    };
+    assert!(accept_result(false, usage, 4096, StreamCounts::default()).is_err());
 }

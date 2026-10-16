@@ -2,8 +2,8 @@ name: Release policy
 
 # Fresh advisory and dependency-policy scan for every lockfile or policy change; never a required check.
 on:
+  # Also runs for stacked pull requests whose base is another branch.
   pull_request:
-    branches: [main]
     paths: [Cargo.lock, deny.toml, .github/workflows/release-policy.yml]
   push:
     branches: [main]

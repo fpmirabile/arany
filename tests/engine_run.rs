@@ -46,6 +46,8 @@ struct ScriptedProvider {
     before_call: Option<(usize, Box<dyn Fn() + Send + Sync>)>,
     clock_advance: Option<(usize, Duration)>,
     known_input_tokens: bool,
+    cached_input_tokens: u32,
+    usage_override: Option<arany::Usage>,
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
     compact_responses: Mutex<VecDeque<Result<CompactionResponse, ProviderError>>>,
     compact_requests: Arc<Mutex<Vec<CompactionRequest>>>,
@@ -67,6 +69,8 @@ impl ScriptedProvider {
             before_call: None,
             clock_advance: None,
             known_input_tokens: false,
+            cached_input_tokens: 0,
+            usage_override: None,
             requests: Arc::new(Mutex::new(Vec::new())),
             compact_responses: Mutex::new(VecDeque::new()),
             compact_requests: Arc::new(Mutex::new(Vec::new())),
@@ -86,6 +90,17 @@ impl ScriptedProvider {
     }
 
     /// Reports known input usage (zero tokens) so a finite Goal token budget counts every call.
+    fn with_reported_usage(mut self, usage: arany::Usage) -> Self {
+        self.usage_override = Some(usage);
+        self
+    }
+
+    fn with_cached_input_tokens(mut self, count: u32) -> Self {
+        self.known_input_tokens = true;
+        self.cached_input_tokens = count;
+        self
+    }
+
     fn with_known_input_tokens(mut self) -> Self {
         self.known_input_tokens = true;
         self
@@ -197,11 +212,16 @@ impl Provider for ScriptedProvider {
         {
             assert!(cancellation.cancel(), "first completion-time cancellation");
         }
+        let input = self.known_input_tokens.then_some(self.cached_input_tokens);
         Ok(ProviderResponse {
             outcome: outcome?,
             response_id: None,
-            input_tokens: self.known_input_tokens.then_some(0),
-            output_tokens: Some(8),
+            usage: self.usage_override.unwrap_or(arany::Usage {
+                input_tokens: input,
+                cache_read_input_tokens: input,
+                output_tokens: Some(8),
+                ..Default::default()
+            }),
             wire_provenance: None,
         })
     }
@@ -274,8 +294,11 @@ impl Provider for GatedProvider {
         Ok(ProviderResponse {
             outcome,
             response_id: None,
-            input_tokens: None,
-            output_tokens: Some(8),
+            usage: arany::Usage {
+                input_tokens: None,
+                output_tokens: Some(8),
+                ..Default::default()
+            },
             wire_provenance: None,
         })
     }
@@ -324,8 +347,11 @@ impl Provider for WaitingCompactionProvider {
                 result: "Seed answer".into(),
             }),
             response_id: None,
-            input_tokens: None,
-            output_tokens: Some(8),
+            usage: arany::Usage {
+                input_tokens: None,
+                output_tokens: Some(8),
+                ..Default::default()
+            },
             wire_provenance: None,
         })
     }
@@ -789,7 +815,12 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             ProviderOutcome::Finish(Finish { summary: "fork".into(), result: "Fork answer".into() }),
         ]).with_compactions(vec![Ok(CompactionResponse {
             summary: "Image conversation summary".into(), response_id: None,
-            input_tokens: Some(50), output_tokens: Some(12), wire_provenance: None,
+            usage: arany::Usage {
+                input_tokens: Some(50),
+                output_tokens: Some(12),
+                ..Default::default()
+            },
+            wire_provenance: None,
         })]);
         let requests = Arc::clone(&provider.requests);
         let compactions = Arc::clone(&provider.compact_requests);
@@ -987,12 +1018,12 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 assert_eq!(lines.len(), events.len());
                 let accepted = lines.iter().filter(|line| line["kind"] == "MessageAccepted").collect::<Vec<_>>();
                 assert_eq!(accepted.len(), 5);
-                assert_eq!(accepted[0]["event_version"], 5);
+                assert_eq!(accepted[0]["event_version"], 6);
                 assert_eq!(accepted[0]["payload"]["images"][0]["media_type"], "image/png");
                 assert_eq!(accepted[0]["payload"]["images"][0]["data"], view.runs[0].images[0].base64());
                 assert_eq!(accepted[2]["payload"]["text"], "");
                 assert!(accepted[3]["payload"]["text"].as_str() == Some(&realistic_objective[..64 * 1024]));
-                assert_eq!(accepted[4]["event_version"], 5);
+                assert_eq!(accepted[4]["event_version"], 6);
                 assert!(accepted[4]["payload"]["text"].as_str() == Some(maximal_objective.as_str()));
                 assert_eq!(accepted[4]["payload"].to_string().len(), 6 * 64 * 1024 + 23, "maximally escaped text-only input fits its Event");
                 assert_eq!(accepted[4]["payload"]["images"], serde_json::json!([]), "text-only input retains the current Message shape");
@@ -1013,11 +1044,11 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         let original: serde_json::Value = serde_json::from_str(&payload).unwrap();
         for fault in ["unsupported version", "unknown version", "missing images", "empty Message", "five images", "aggregate bytes", "non-PNG", "corrupted image", "URL", "extra field", "text overflow", "payload overflow", "agent scope"] {
             let mut invalid = original.clone();
-            let mut version = 5;
+            let mut version = 6;
             let mut agent_scope = None;
             match fault {
-                "unsupported version" => version = 1,
-                "unknown version" => version = 6,
+                "unsupported version" => version = 5,
+                "unknown version" => version = 7,
                 "missing images" => { invalid.as_object_mut().unwrap().remove("images"); }
                 "empty Message" => { invalid["text"] = "".into(); invalid["images"] = serde_json::json!([]); },
                 "five images" => invalid["images"] = serde_json::to_value(vec![second_image.clone(); 5]).unwrap(),
@@ -1037,7 +1068,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             assert!(matches!(store.load_view(first.session_id).await, Err(arany::StoreError::InvalidHistory)), "image replay fault: {fault}");
             store.close().await.unwrap();
         }
-        connection.execute("UPDATE events SET event_version=5, payload=?1, agent_run_id=NULL WHERE sequence=?2", rusqlite::params![payload, sequence]).unwrap();
+        connection.execute("UPDATE events SET event_version=6, payload=?1, agent_run_id=NULL WHERE sequence=?2", rusqlite::params![payload, sequence]).unwrap();
         drop(connection);
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
         assert_eq!(store.load_view(first.session_id).await.unwrap().unwrap(), view);
@@ -1072,8 +1103,11 @@ fn subscription_account_and_local_bound_survive_run_and_compaction_replay() {
         .with_compactions(vec![Ok(CompactionResponse {
             summary: "Compacted synthetic history".into(),
             response_id: Some("resp_compact".into()),
-            input_tokens: Some(20),
-            output_tokens: Some(8),
+            usage: arany::Usage {
+                input_tokens: Some(20),
+                output_tokens: Some(8),
+                ..Default::default()
+            },
             wire_provenance: Some(
                 arany::ProviderWireProvenance::ResponsesCompletedStoreFalseRequested,
             ),
@@ -1370,8 +1404,11 @@ fn compaction_is_derived_durable_context_and_failure_keeps_the_prior_summary() {
         .with_compactions(vec![Ok(CompactionResponse {
             summary: "Derived summary".into(),
             response_id: Some("compact-1".into()),
-            input_tokens: Some(100),
-            output_tokens: Some(8),
+            usage: arany::Usage {
+                input_tokens: Some(100),
+                output_tokens: Some(8),
+                ..Default::default()
+            },
             wire_provenance: None,
         })]);
         let compact_requests = Arc::clone(&provider.compact_requests);
@@ -1680,8 +1717,11 @@ fn a_fork_before_the_snapshot_event_recompiles_from_canonical_history() {
         .with_compactions(vec![Ok(CompactionResponse {
             summary: "Source-only derived summary".into(),
             response_id: None,
-            input_tokens: None,
-            output_tokens: Some(8),
+            usage: arany::Usage {
+                input_tokens: None,
+                output_tokens: Some(8),
+                ..Default::default()
+            },
             wire_provenance: None,
         })]);
         let observed = Arc::clone(&provider.requests);
@@ -1755,8 +1795,11 @@ fn invalid_compaction_snapshot_corpus_fails_before_provider_disclosure() {
             .with_compactions(vec![Ok(CompactionResponse {
                 summary: "Derived summary".into(),
                 response_id: None,
-                input_tokens: Some(12),
-                output_tokens: Some(8),
+                usage: arany::Usage {
+                    input_tokens: Some(12),
+                    output_tokens: Some(8),
+                    ..Default::default()
+                },
                 wire_provenance: None,
             })]);
             let mut engine = Engine::open(
@@ -1925,8 +1968,11 @@ fn compaction_input_limit_rejects_before_provider_egress() {
                     Ok(CompactionResponse {
                         summary: "s".repeat(8 * 1024),
                         response_id: None,
-                        input_tokens: Some(100),
-                        output_tokens: Some(1024),
+                        usage: arany::Usage {
+                            input_tokens: Some(100),
+                            output_tokens: Some(1024),
+                            ..Default::default()
+                        },
                         wire_provenance: None,
                     })
                 })
@@ -2083,15 +2129,21 @@ fn oversized_compaction_output_is_recorded_as_failure_without_a_snapshot() {
             Ok(CompactionResponse {
                 summary: "z".repeat(8 * 1024 + 1),
                 response_id: None,
-                input_tokens: Some(12),
-                output_tokens: Some(1024),
+                usage: arany::Usage {
+                    input_tokens: Some(12),
+                    output_tokens: Some(1024),
+                    ..Default::default()
+                },
                 wire_provenance: None,
             }),
             Ok(CompactionResponse {
                 summary: "safe summary".into(),
                 response_id: Some("bad\nidentifier".into()),
-                input_tokens: Some(12),
-                output_tokens: Some(8),
+                usage: arany::Usage {
+                    input_tokens: Some(12),
+                    output_tokens: Some(8),
+                    ..Default::default()
+                },
                 wire_provenance: None,
             }),
         ]);
@@ -2175,8 +2227,11 @@ fn compaction_preserves_unanswered_accepted_objectives_as_untrusted_data() {
         .with_compactions(vec![Ok(CompactionResponse {
             summary: "Question remains unresolved".into(),
             response_id: None,
-            input_tokens: None,
-            output_tokens: Some(8),
+            usage: arany::Usage {
+                input_tokens: None,
+                output_tokens: Some(8),
+                ..Default::default()
+            },
             wire_provenance: None,
         })]);
         let compact_requests = Arc::clone(&provider.compact_requests);
@@ -2280,8 +2335,11 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
         .with_compactions(vec![Ok(CompactionResponse {
             summary: "Unfinished then finished".into(),
             response_id: None,
-            input_tokens: None,
-            output_tokens: Some(8),
+            usage: arany::Usage {
+                input_tokens: None,
+                output_tokens: Some(8),
+                ..Default::default()
+            },
             wire_provenance: None,
         })]);
         let compact_requests = Arc::clone(&provider.compact_requests);
@@ -2364,7 +2422,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
                 })
                 .unwrap();
             for sequence in first_padding_sequence..=i64::from(prefix) {
-                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',5,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string()]).unwrap();
+                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',6,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string()]).unwrap();
             }
             transaction.commit().unwrap();
             drop(connection);
@@ -2465,7 +2523,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
                 .query_row("SELECT COALESCE(MAX(sequence), 0) + 1 FROM events", [], |row| row.get(0))
                 .unwrap();
             for sequence in first_padding_sequence..=prefix {
-                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',5,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string()]).unwrap();
+                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',6,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string()]).unwrap();
             }
             transaction.commit().unwrap();
             drop(connection);
@@ -2527,7 +2585,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
                 .unwrap();
             if let Some(prefix) = prefix {
                 for sequence in first_padding_sequence..=prefix {
-                    transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',5,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, root.to_string()]).unwrap();
+                    transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',6,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, root.to_string()]).unwrap();
                 }
             }
             let event_count_before_forks = prefix.unwrap_or(first_padding_sequence - 1);
@@ -2643,8 +2701,11 @@ fn database_capacity_is_admitted_before_provider_usage() {
         })]).with_compactions(vec![Ok(CompactionResponse {
             summary: "source and recovered answer".into(),
             response_id: None,
-            input_tokens: None,
-            output_tokens: Some(8),
+            usage: arany::Usage {
+                input_tokens: None,
+                output_tokens: Some(8),
+                ..Default::default()
+            },
             wire_provenance: None,
         })]);
         let calls = provider.requests.clone();
@@ -2705,8 +2766,11 @@ fn database_capacity_is_admitted_before_provider_usage() {
         })]).with_compactions(vec![Ok(CompactionResponse {
             summary: "source and recovered answer".into(),
             response_id: None,
-            input_tokens: None,
-            output_tokens: Some(8),
+            usage: arany::Usage {
+                input_tokens: None,
+                output_tokens: Some(8),
+                ..Default::default()
+            },
             wire_provenance: None,
         })]);
         let calls = provider.requests.clone();
@@ -2880,6 +2944,51 @@ fn bounded_finish_output_must_fit_canonical_json() {
             }
             store.close().await.unwrap();
         }
+    });
+}
+
+#[test]
+fn inconsistent_cache_usage_closes_as_invalid_response() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let state_path = temp.path().join("state");
+        let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
+            summary: "done".into(),
+            result: "accepted result".into(),
+        })])
+        .with_reported_usage(arany::Usage {
+            input_tokens: Some(4),
+            cache_read_input_tokens: Some(9),
+            output_tokens: Some(8),
+            ..Default::default()
+        });
+        let mut engine = Engine::open(
+            StateRoot::admit(&state_path).expect("private state"),
+            provider,
+        )
+        .expect("engine");
+        let mut input = request(&workspace, "Question");
+        input.include_paths.clear();
+        let outcome = engine.run(input).await.expect("durable failed Run");
+        assert_eq!(outcome.run.status, RunStatus::Failed);
+        assert_eq!(
+            outcome.run.agents[0].provider_calls[0].disposition,
+            ProviderCallDisposition::InvalidResponse
+        );
+        engine.close().await.expect("engine shutdown");
+        let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+        let view = store
+            .load_view(outcome.session_id)
+            .await
+            .expect("strict replay of the closed Run")
+            .expect("Session");
+        assert_eq!(view.runs[0].status, RunStatus::Failed);
     });
 }
 
@@ -3238,8 +3347,11 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
             .with_compactions(vec![Ok(CompactionResponse {
                 summary: "Derived summary".into(),
                 response_id: Some("compact-seed".into()),
-                input_tokens: Some(20),
-                output_tokens: Some(8),
+                usage: arany::Usage {
+                    input_tokens: Some(20),
+                    output_tokens: Some(8),
+                    ..Default::default()
+                },
                 wire_provenance: None,
             })]);
             let requests = Arc::clone(&provider.requests);
@@ -4294,7 +4406,7 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                         if let Event::ProviderCallRecorded { record, .. } = &envelope.event {
                             let document: serde_json::Value =
                                 serde_json::from_str(line).expect("canonical JSONL");
-                            assert_eq!(document["event_version"], 5);
+                            assert_eq!(document["event_version"], 6);
                             assert_eq!(document["payload"], serde_json::to_value(record).unwrap());
                         }
                     }
@@ -5459,8 +5571,11 @@ impl Provider for PreviewProvider {
             Some(outcome) => Ok(ProviderResponse {
                 outcome: outcome.clone(),
                 response_id: None,
-                input_tokens: None,
-                output_tokens: Some(8),
+                usage: arany::Usage {
+                    input_tokens: None,
+                    output_tokens: Some(8),
+                    ..Default::default()
+                },
                 wire_provenance: None,
             }),
             None => std::future::pending().await,
@@ -5548,8 +5663,11 @@ async fn attached_previews_checkpoint_cancel_reopen_and_stay_out_of_context() {
     let provider = provider.with_compactions(vec![Ok(CompactionResponse {
         summary: "safe summary".into(),
         response_id: None,
-        input_tokens: None,
-        output_tokens: Some(8),
+        usage: arany::Usage {
+            input_tokens: None,
+            output_tokens: Some(8),
+            ..Default::default()
+        },
         wire_provenance: None,
     })]);
     let compact_requests = provider.compact_requests.clone();

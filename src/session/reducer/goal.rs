@@ -1,6 +1,6 @@
 use super::{
     AgentStatus, GoalView, RunStatus, RunView, SessionView, active_run, current_goal_mut,
-    current_run, model_tool_count,
+    current_run, pending_tool_requests,
 };
 use crate::provider::AgentPhase;
 use crate::session::events::{
@@ -67,6 +67,7 @@ impl SessionView {
             report: None,
             started_sequence: prior,
             finished_sequence: None,
+            known_cached_tokens: 0,
         });
         Ok(())
     }
@@ -211,11 +212,6 @@ impl SessionView {
                     .as_ref()
                     .is_some_and(|observation| !observation.stops_run())
         });
-        let requested_tools = primary
-            .provider_calls
-            .iter()
-            .filter(|call| call.disposition == ProviderCallDisposition::ToolRequested)
-            .count();
         let valid_contract_call = run.status == RunStatus::Active
             && primary.role == AgentRole::Primary
             && primary.provider_calls.last().is_some_and(|call| {
@@ -223,7 +219,9 @@ impl SessionView {
                     && matches!(call.phase, AgentPhase::RootPlan | AgentPhase::RootSynthesis)
             })
             && valid_previous_tools
-            && requested_tools == model_tool_count(run) + 1;
+            // The contract precedes the step's first started request, so every request of the step is pending.
+            && pending_tool_requests(run)
+                == Some(primary.provider_calls.last().map_or(0, |call| usize::from(call.requested_tools)));
         // Pre-plan inspections count: folding every Run's observations decides the criterion.
         let mut success_state = contract.initial_success_state();
         for observation in self
@@ -384,14 +382,7 @@ impl SessionView {
                                 call.phase == AgentPhase::ToolReview
                                     && call.disposition == ProviderCallDisposition::Finished
                             })
-                        && model_tool_count(run)
-                            == primary
-                                .provider_calls
-                                .iter()
-                                .filter(|call| {
-                                    call.disposition == ProviderCallDisposition::ToolRequested
-                                })
-                                .count()
+                        && pending_tool_requests(run) == Some(0)
                 });
         let goal = current_goal_mut(self, *goal_id)?;
         let budget = goal.effective_budget();
@@ -426,6 +417,13 @@ impl SessionView {
         report: &GoalReport,
         prior: u64,
     ) -> Result<(), ReplayError> {
+        // The report's cache-read total must be exactly what the Goal accumulated from its Provider calls.
+        if self
+            .goal(*goal_id)
+            .is_none_or(|goal| report.cached_input_tokens != goal.known_cached_tokens)
+        {
+            return Err(ReplayError::InvalidTransition);
+        }
         // An unaccepted trailing link is not a Run, so the last accepted Run decides the disposition.
         let run_status = self
             .goal(*goal_id)
