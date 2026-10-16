@@ -302,16 +302,32 @@ pub(super) async fn submit_objective(
                 // An undelivered note ends the Run as an ordinary retained draft.
                 let had_offer = offered.is_some();
                 let sent = settle_recorded_note(steering.delivered_notes(), &mut seen_delivered, &mut offered, composer);
-                if offered.take().is_some() {
+                // Linear offers leave the composer empty, so the undelivered text returns to it here.
+                let mut withdrawn = false;
+                if let Some(text) = offered.take() {
                     steering.withdraw_note();
+                    if terminal.is_linear() {
+                        if composer.is_empty() {
+                            withdrawn = !matches!(composer.insert_paste(&text), Ok(ComposerEdit::Changed));
+                        } else {
+                            withdrawn = true;
+                        }
+                    }
                 }
                 if (result.is_err() || had_offer || sent)
                     && terminal.restore_draft_input(composer.text().len()).is_err()
                 {
                     return Ok(RunSubmission::Shutdown("terminal input cleanup failed".into()));
                 }
-                if sent
-                    && draw_active_snapshot(terminal, view, composer, user_recorded, stop, Some(TerminalNotice::History(STEERING_SENT)))
+                let ended_notice = if sent {
+                    Some(STEERING_SENT)
+                } else if withdrawn {
+                    Some("Steering note withdrawn; draft retained")
+                } else {
+                    None
+                };
+                if let Some(notice) = ended_notice
+                    && draw_active_snapshot(terminal, view, composer, user_recorded, stop, Some(TerminalNotice::History(notice)))
                         .is_err()
                 {
                     return Ok(RunSubmission::Shutdown("terminal rendering failed".into()));
@@ -530,12 +546,22 @@ pub(super) async fn submit_objective(
                                 let feedback = if !composer.images().is_empty() {
                                     Feedback::Transient("Steering notes are text only; draft retained".into())
                                 } else if offered.is_some() {
-                                    Feedback::Transient(steering_refusal(SteeringRefused::NoteWaiting, autonomous))
+                                    if terminal.is_linear() {
+                                        composer.take();
+                                        Feedback::Transient("A steering note is already waiting; line not sent".into())
+                                    } else {
+                                        Feedback::Transient(steering_refusal(SteeringRefused::NoteWaiting, autonomous))
+                                    }
                                 } else {
                                     match steering.offer_note(text) {
                                         Ok(()) => {
                                             offered = Some(composer.text().to_owned());
-                                            Feedback::Transient("Steering note waits for the agent's next step; editing withdraws it".into())
+                                            if terminal.is_linear() {
+                                                composer.take();
+                                                Feedback::Transient("Steering note waits for the agent's next step".into())
+                                            } else {
+                                                Feedback::Transient("Steering note waits for the agent's next step; editing withdraws it".into())
+                                            }
                                         }
                                         Err(refused) => Feedback::Transient(steering_refusal(refused, autonomous)),
                                     }
@@ -618,7 +644,7 @@ pub(super) async fn submit_objective(
                     }
                     _ => None,
                 };
-                if offered.as_deref().is_some_and(|text| composer.text() != text || !composer.images().is_empty()) {
+                if !terminal.is_linear() && offered.as_deref().is_some_and(|text| composer.text() != text || !composer.images().is_empty()) {
                     offered = None;
                     notice = Some(if steering.withdraw_note() {
                         Feedback::Transient("Steering note withdrawn; draft retained".into())

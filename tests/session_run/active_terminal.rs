@@ -1157,6 +1157,9 @@ pub(super) use acquisition::ProductGuard;
 #[path = "active_terminal/panic.rs"]
 mod panic;
 
+#[path = "active_terminal/steering.rs"]
+mod steering;
+
 #[cfg(target_os = "linux")]
 #[path = "active_terminal/tmux.rs"]
 mod tmux;
