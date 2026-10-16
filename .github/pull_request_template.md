@@ -12,13 +12,13 @@ through the CLI or API.
 
 ## Verification
 
-- **Checked:** <targeted local checks run → result; CI result on the final head>
+- **Checked:** <targeted local checks run (name the OS for native evidence) → result; CI result on the final head>
 - **Not run:** <skipped or blocked check → reason, or N/A>
 
 ## Notes
 
-<!-- Only when applicable: the trust boundary touched and the attack it prevents
-(see agents/security.md triggers); a concrete risk and its rollback; the spec or
-contract that changed. Omit bullets that do not apply. -->
+<!-- Required when a security-pass trigger in agents/security.md fires: name the trust
+boundary touched, the attack or failure prevented, and the evidence or remaining gap;
+passing tests alone are not a safety claim. Otherwise omit. -->
 
-- <security, risk or documentation note, or N/A>
+- <trust boundary, attack or failure prevented, and evidence or remaining gap>
