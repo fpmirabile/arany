@@ -2,9 +2,9 @@
   "version": 1,
   "skills": {
     "arany-terminal-design": {
-      "source": "./agents/skills",
+      "source": "./agents/skills/arany-terminal-design",
       "sourceType": "local",
-      "computedHash": "4e4705913547e02084ba73074dbd011253f1982f2d867fea125b2c0690238caf"
+      "computedHash": "4f8bd2e90e6ae6bf7651d29174dc8554738b98db9ca023610a7e385e16131e6d"
     },
     "ask-matt": {
       "source": "mattpocock/skills",
@@ -21,7 +21,7 @@
     "clean-architecture-review": {
       "source": "./agents/skills/clean-architecture-review",
       "sourceType": "local",
-      "computedHash": "c68577f77a774f0ce6f7e372fd5ab5b26e355a225751d0b8c4044b1032b05270"
+      "computedHash": "b320b9736fa9187d2e3963f8ecf3fc1ae08bb2f8cccc6f52e9c6583bd375a731"
     },
     "code-review": {
       "source": "mattpocock/skills",
