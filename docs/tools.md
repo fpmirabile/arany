@@ -46,49 +46,46 @@ Check the [Linux prerequisites](./specs/tools.md#linux-enforcement-and-compatibi
 
 ## Historical Linux seed maintenance
 
-Current seeds are recovered on subsequent Tool admission under the
-[ownership contract](./specs/tools.md#linux-host-seed-ownership). Older unrecorded
-`/tmp/arany-tools-*` directories and version-1 Linux reservations need one explicit
-maintenance interval. There is no automatic migration or prefix-based cleaner.
-The old seed UUID and unit UUID were independent, so names, modes and timestamps
-cannot establish their association or authorize deletion.
+Current seeds recover on subsequent Tool admission under the
+[ownership contract](./specs/tools.md#linux-host-seed-ownership). Unrecorded
+`/tmp/arany-tools-*` roots and version-1 Linux reservations require explicit
+maintenance; no automatic migration or prefix cleaner exists. Historical seed
+and unit UUIDs were independent: names, modes and timestamps cannot establish
+association or authorize deletion.
 
-1. Stop Arany for the selected Linux account and prevent new launches. Establish
-   termination of its owned native units, including descendants. An absent unit
-   alone cannot prove an interrupted launch ended. If inactivity remains uncertain,
-   reboot the maintenance host and clean before restarting Arany. For a disposable
-   Docker fixture, stopping its container establishes inactivity of its processes;
-   it does not remove files in its writable layer or volumes.
-2. Inventory metadata only for explicitly selected candidate roots and obsolete
-   reservation/publication files. Record each absolute path, checked parent and
-   object device/inode, UID, mode and link count. Bound the inventory to 64 roots
-   per batch and the existing seed traversal limit. Do not read copied payloads.
-   Obtain authorization for these exact current objects; a prefix is only a
-   discovery hint. Record settings and unrelated canaries to preserve.
-3. Reopen selected parents component by component without following links.
-   Revalidate every selected identity immediately before deletion. Acquire the
-   checked dead lease for each selected reservation; a live flock refuses
-   maintenance. Require private account/root permissions and current ownership.
-   Refuse replacements, symlinks, hard-linked files, special objects and mounts.
-4. Delete the approved tree through pinned directory handles, with no-follow and
-   no-cross-mount opens, bounded traversal and identity revalidation before each
-   unlink/rmdir. Synchronize the parent after verified root absence. The existing
-   Guard deletion primitive owns this behavior; do not replace it with a wildcard
-   `rm -rf`. Retire only explicitly selected obsolete records under the account's
-   namespace lock, after storage absence and native inactivity. Preserve
-   `limits.json`, counters, other reservations and unrelated account data.
-5. Verify each selected root/record absent and preserved metadata/canaries intact.
-   Report any refused or partially removed object as unresolved. Resume Arany only
-   after that final inventory; completion applies to this host/account, not other
-   installations or secure media erasure.
+1. Stop Arany and prevent launches for the selected Linux account. Prove owned
+   units and descendants terminated; an absent unit cannot settle an interrupted
+   launch. If uncertain, reboot and clean before restarting. Stopping a disposable
+   Docker container proves process inactivity but preserves layer/volume files.
+2. Inventory only selected root/reservation/publication metadata: absolute path,
+   checked parent, object device/inode, UID, mode and link count. Limit batches to
+   64 roots and the existing seed traversal bound; read no copied payloads.
+   Authorize these exact current objects; prefixes only aid discovery. Record
+   settings and unrelated canaries to preserve.
+3. Reopen parents component by component without following links; revalidate
+   each identity immediately before deletion. Acquire each reservation's checked
+   dead lease; live flocks refuse maintenance. Require private account/root
+   permissions and current ownership. Refuse replacements, symlinks, hard-linked
+   files, special objects and mounts.
+4. Use the Guard's checked deletion primitive through pinned directory handles:
+   no-follow/no-cross-mount opens, bounded traversal and identity checks before
+   every unlink/rmdir. Never substitute wildcard `rm -rf`. Synchronize the parent
+   after verified root absence. Retire only selected obsolete records under the
+   account namespace lock after storage absence and native inactivity. Preserve
+   `limits.json`, counters, other reservations and unrelated data.
+5. Verify selected roots/records absent and preserved metadata/canaries intact.
+   Report refused or partial removal as unresolved; resume only after this final
+   inventory. Completion covers this host/account, not other installations or
+   secure media erasure.
 
-The disposable maintenance scenario uses the same checked deletion primitive,
-independent historical UUIDs, an explicit selected identity, a live-lease refusal,
-a replacement and unrelated canaries. Run it on Linux with:
+[`historical_seed_maintenance_removes_only_selected_inactive_objects`](../src/tools/guard/admission.rs)
+uses the same deletion primitive with independent UUIDs, selected identity,
+live-lease refusal, replacement and unrelated canaries. `Linux Tests (debug)` and
+`Linux Tests (release)` in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)
+own this synthetic scenario. To run it separately on Linux:
 
 ```sh
 cargo test --lib tools::guard::admission::tests::historical_seed_maintenance_removes_only_selected_inactive_objects -- --exact
 ```
 
-That command deletes only test-owned synthetic fixtures. It does not inventory or
-remove an existing user's installation.
+It inventories and deletes only test-owned fixtures, never an existing user's installation.
