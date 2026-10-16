@@ -200,7 +200,10 @@ impl BuildCacheLease {
         if self.candidate_limit == 0 {
             return Err(StoreError::StorageFull);
         }
+        #[cfg(not(test))]
         let _aggregate = lock_file(&self.dir, AGGREGATE_LOCK, true)?;
+        #[cfg(test)]
+        let _aggregate = retry_busy(|| lock_file(&self.dir, AGGREGATE_LOCK, true))?;
         let old = self.archive.as_ref().map(|_| archive_name(&self.token));
         let staged = stage_name(&self.token);
         let mut stage = create_private_file(&self.dir, &staged)?;

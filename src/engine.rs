@@ -450,6 +450,7 @@ fn goal_report(
         changes: Vec::new(),
         evidence: Vec::new(),
         unresolved: Vec::new(),
+        cached_input_tokens: goal.known_cached_tokens,
     };
     let mut omitted_facts = false;
     let uncertain_calls = goal.unobserved_provider_calls.len();
@@ -850,6 +851,7 @@ mod goal_report_tests {
             report: None,
             started_sequence: 0,
             finished_sequence: None,
+            known_cached_tokens: 0,
         };
         let view = crate::session::SessionView {
             id: session_id,

@@ -47,15 +47,10 @@ Follow relevant cross-boundary links before editing. A harmless prose correction
 
 ## Read for the task
 
-1. Identify the requested outcome and affected boundary. Use the table above or search headings and paths; read the owning contract and the rules triggered by [AGENTS.md](../AGENTS.md).
-2. Locate the relevant implementation and acceptance evidence. Read linked references when that boundary applies; a link is a navigation aid, not a request to load its entire subtree.
-3. Open research or decision records when the task needs rationale, source facts or alternatives. Check their scope and date before reusing time-sensitive claims. Consult a plan only for the initiative being continued and next steps for open work.
-4. Update the existing owner when knowledge changes. User guides explain actions, specs define outcomes, rules constrain edits, and Skills describe repeatable procedures. Link between them instead of copying the same contract or command block.
-
-This is a reading strategy, not a relaxation of security, testing or cross-boundary rules. Spec requirements, implementation state and completed verification are distinct: report disagreements rather than choosing whichever document is newer. Preserve accepted decisions unless the task authorizes changing them.
+Read the owning contract and the rules [AGENTS.md](../AGENTS.md) triggers, then the implementation and its evidence owner. Open research or decision records only for rationale, checking their scope and date before reusing time-sensitive claims; consult a plan only for the initiative being continued. User guides explain actions, specs define outcomes, rules constrain edits and Skills describe repeatable procedures; link between them instead of copying. Spec requirements, implementation state and completed verification are distinct: report disagreements rather than choosing the newer document.
 
 ## Current milestone and evidence
 
-The current milestone is a personal Linux beta. [Next steps](../NEXT_STEPS.md) distinguishes open defects, unperformed checks, missing functionality and release work. [The active beta plan](../planning/arany-beta/README.md) contains only remaining Beta 1 execution, and [the agentic coding teams plan](../planning/agentic-teams/README.md) owns the remaining Beta 1 implementation work; accepted behavior belongs in specs. Remove completed plan sections and closed pending items instead of adding closeout narratives. Git/PR/CI and the implementation handoff preserve completed results. Scoped security/review records retain evidence only when needed for their reasoning; keep specs independent of test totals, artifact hashes and past run logs.
+The current milestone is a personal Linux beta. [Next steps](../NEXT_STEPS.md) owns open defects, unperformed checks and release work; [the active beta plan](../planning/arany-beta/README.md) holds remaining Beta 1 execution; [the agentic coding teams plan](../planning/agentic-teams/README.md) owns the remaining Beta 1 implementation work; accepted behavior belongs in specs. Keep specs independent of test totals, artifact hashes and past run logs.
 
 The executable snapshots the exact Workspace-root AGENTS.md, with CLAUDE.md only as an absence fallback. This documentation workflow does not make Arany discover nested rules, follow spec links, or expand outbound content. Its admission contract remains in [Session input rules](../agents/session.md) and [security rules](../agents/security.md).

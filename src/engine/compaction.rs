@@ -1,7 +1,7 @@
 use super::{Engine, EngineError, STORE_ACTION_OVERHEAD, ensure_session_workspace};
 use crate::provider::{
     CompactionRequest, CompactionResponse, MAX_REPORTED_INPUT_TOKENS, Provider,
-    ProviderFailureClass,
+    ProviderFailureClass, Usage,
 };
 use crate::session::input::WorkspaceInputs;
 use crate::session::{
@@ -228,7 +228,7 @@ impl<P: Provider + 'static> Engine<P> {
             });
         let response =
             tokio::time::timeout(provider_deadline, self.provider.compact(request)).await;
-        let (status, response_id, input_tokens, output_tokens, wire_provenance) = match response {
+        let (status, response_id, usage, wire_provenance) = match response {
             Ok(Ok(response)) => classify_response(response),
             Ok(Err(error)) => (
                 CompactionStatus::Failed {
@@ -239,8 +239,7 @@ impl<P: Provider + 'static> Engine<P> {
                     },
                 },
                 None,
-                None,
-                None,
+                Usage::default(),
                 None,
             ),
             Err(_) => (
@@ -248,8 +247,7 @@ impl<P: Provider + 'static> Engine<P> {
                     reason: CompactionFailure::TimedOut,
                 },
                 None,
-                None,
-                None,
+                Usage::default(),
                 None,
             ),
         };
@@ -273,7 +271,7 @@ impl<P: Provider + 'static> Engine<P> {
                 CompactionFailure::Cancelled => unreachable!("handled above"),
             }),
         };
-        provider_trace.finish_with_usage(provider_outcome, input_tokens, output_tokens);
+        provider_trace.finish_with_usage(provider_outcome, usage.input_tokens, usage.output_tokens);
         let record = CompactionRecord {
             covered_run_id,
             covered_sequence,
@@ -285,8 +283,10 @@ impl<P: Provider + 'static> Engine<P> {
             compiler_version,
             source_bytes,
             source_tokens_estimate: source_bytes.div_ceil(4),
-            input_tokens,
-            output_tokens,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_input_tokens: usage.cache_read_input_tokens,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
             response_id,
             wire_provenance,
             chatgpt_provenance: selection.chatgpt_provenance,
@@ -338,29 +338,30 @@ pub(super) fn classify_response(
 ) -> (
     CompactionStatus,
     Option<String>,
-    Option<u32>,
-    Option<u32>,
+    Usage,
     Option<crate::provider::ProviderWireProvenance>,
 ) {
     let valid_id = response.response_id.as_ref().is_none_or(|value| {
         !value.is_empty() && value.len() <= 128 && value.bytes().all(|byte| byte.is_ascii_graphic())
     });
-    let valid_input_tokens = response
+    let reported = response.usage;
+    let valid_input_tokens = reported
         .input_tokens
-        .is_none_or(|count| count <= MAX_REPORTED_INPUT_TOKENS);
-    let valid_output_tokens = response
+        .is_none_or(|count| count <= MAX_REPORTED_INPUT_TOKENS)
+        && reported.cache_consistent();
+    let valid_output_tokens = reported
         .output_tokens
         .is_none_or(|count| count <= 1_000_000);
     let valid_summary = !response.summary.is_empty()
         && response.summary.len() <= MAX_COMPACTION_SUMMARY_BYTES
-        && response
+        && reported
             .output_tokens
             .is_none_or(|count| count <= MAX_COMPACTION_OUTPUT_TOKENS);
     let valid_provenance = response.wire_provenance.is_none_or(|provenance| {
         provenance.valid_for(
             response.response_id.as_deref(),
-            response.input_tokens,
-            response.output_tokens,
+            reported.input_tokens,
+            reported.output_tokens,
         )
     });
     let status = if valid_id
@@ -381,11 +382,20 @@ pub(super) fn classify_response(
             reason: CompactionFailure::InvalidOutcome,
         }
     };
+    let usage = Usage {
+        input_tokens: reported.input_tokens.filter(|_| valid_input_tokens),
+        output_tokens: reported.output_tokens.filter(|_| valid_output_tokens),
+        cache_read_input_tokens: reported
+            .cache_read_input_tokens
+            .filter(|_| valid_input_tokens),
+        cache_creation_input_tokens: reported
+            .cache_creation_input_tokens
+            .filter(|_| valid_input_tokens),
+    };
     (
         status,
         response.response_id.filter(|_| valid_id),
-        response.input_tokens.filter(|_| valid_input_tokens),
-        response.output_tokens.filter(|_| valid_output_tokens),
+        usage,
         response
             .wire_provenance
             .filter(|_| valid_id && valid_input_tokens && valid_output_tokens && valid_provenance),
