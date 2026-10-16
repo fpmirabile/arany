@@ -1,8 +1,7 @@
 use super::config::Config;
 use super::toolchains::{RuntimeGrant, validate_selection};
 use super::types::*;
-use super::{ToolError, ToolRuntime, now_ms};
-use crate::engine::RunCancellation;
+use super::{Cancellation, ToolError, ToolRuntime, now_ms};
 use crate::store::{BuildCacheIdentity, BuildCacheLease, StoreError};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
@@ -23,10 +22,6 @@ mod profile;
 
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(target_os = "linux")]
-pub(crate) use linux::PREPARATION_OVERHEAD;
-#[cfg(target_os = "macos")]
-pub(crate) use macos::PREPARATION_OVERHEAD;
 #[cfg(target_os = "macos")]
 pub(super) use macos::fixture::{Span as FixtureSpan, Stage as FixtureStage};
 #[cfg(target_os = "macos")]
@@ -52,6 +47,20 @@ pub(super) fn native_system_program(path: &str) -> Result<bool, ToolError> {
     {
         let _ = path;
         Ok(false)
+    }
+}
+
+impl ToolRuntime {
+    /// Native preparation and handshake time the Engine adds to a Tool's action deadline.
+    pub(crate) fn reservation_overhead(&self, _call: &ToolCall) -> Duration {
+        #[cfg(target_os = "macos")]
+        {
+            macos::PREPARATION_DEADLINE.saturating_add(Duration::from_secs(5))
+        }
+        #[cfg(target_os = "linux")]
+        {
+            Duration::from_secs(5)
+        }
     }
 }
 
@@ -482,7 +491,7 @@ fn attest_runtime_mounts(
 pub(super) async fn execute(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
-    cancellation: RunCancellation,
+    cancellation: Cancellation,
 ) -> Result<ToolObservation, ToolError> {
     let mut dispatched = false;
     #[cfg(target_os = "macos")]

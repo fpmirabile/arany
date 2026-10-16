@@ -2,7 +2,7 @@ use super::{
     BootstrapFailure, BootstrapStage, CAPTURE_BYTES, GuardStage, TASK_BYTES_CAP, Task,
     bootstrap_failure, drain_stderr, parse_ready, read_capped, read_line_capped, read_observation,
 };
-use crate::engine::RunCancellation;
+use crate::tools::Cancellation;
 use crate::tools::types::{MAX_PROCESSES_OR_THREADS, MEMORY_BYTES, digest};
 use crate::tools::{EffectIntent, ToolCall, ToolError, ToolObservation, ToolRuntime};
 
@@ -41,9 +41,6 @@ const SYSTEM_PROGRAMS_CAP: usize = 2048;
 const PROFILE_BYTES_CAP: usize = 96 * 1024;
 pub(super) const SUPERVISION_INTERVAL: Duration = Duration::from_millis(10);
 pub(super) const PREPARATION_DEADLINE: Duration = Duration::from_secs(30);
-/// The preparation deadline plus slack for the handshake that follows it.
-pub(crate) const PREPARATION_OVERHEAD: Duration =
-    Duration::from_secs(PREPARATION_DEADLINE.as_secs() + 5);
 const PROCESS_LIMITS: &[(rustix::process::Resource, u64)] = &[
     (rustix::process::Resource::Nofile, 64),
     (rustix::process::Resource::Core, 0),
@@ -830,17 +827,17 @@ fn check_process_resources(pid: u32) -> Result<bool, ToolError> {
 pub(super) async fn execute_inner(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
-    mut cancellation: RunCancellation,
+    mut cancellation: Cancellation,
     dispatched: &mut bool,
 ) -> Result<ToolObservation, ToolError> {
     // Dropping the awaiting future stops only this worker, never the caller's Run.
-    struct CancelOnDrop(RunCancellation);
+    struct CancelOnDrop(Cancellation);
     impl Drop for CancelOnDrop {
         fn drop(&mut self) {
             self.0.cancel();
         }
     }
-    let worker = CancelOnDrop(RunCancellation::new());
+    let worker = CancelOnDrop(Cancellation::new());
     let worker_cancellation = worker.0.clone();
     let runtime = runtime.clone();
     let intent = intent.clone();
@@ -913,7 +910,7 @@ impl Task {
 async fn execute_worker(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
-    mut cancellation: RunCancellation,
+    mut cancellation: Cancellation,
     scope: &mut unit::Scope,
     control: &mut tokio::net::unix::OwnedWriteHalf,
     receive_go: tokio::sync::oneshot::Receiver<()>,

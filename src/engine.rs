@@ -15,12 +15,12 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
-use tokio::sync::watch;
 
 mod compaction;
 mod lifecycle;
 mod progress;
 mod run_loop;
+pub use crate::tools::Cancellation as RunCancellation;
 pub use lifecycle::{
     continue_session, create_session, fork_session, list_sessions, rename_session, resume_session,
     set_session_defaults,
@@ -232,47 +232,6 @@ impl RunTurn {
         self.autonomous
             && self.goal_status == GoalStatus::Running
             && self.outcome.run.status == crate::session::RunStatus::Finished
-    }
-}
-
-#[derive(Clone)]
-pub struct RunCancellation {
-    sender: watch::Sender<bool>,
-    receiver: watch::Receiver<bool>,
-}
-
-impl RunCancellation {
-    #[must_use]
-    pub fn new() -> Self {
-        let (sender, receiver) = watch::channel(false);
-        Self { sender, receiver }
-    }
-
-    /// Returns true only for the first cancellation request.
-    pub fn cancel(&self) -> bool {
-        !self.sender.send_replace(true)
-    }
-
-    fn is_cancelled(&self) -> bool {
-        *self.receiver.borrow()
-    }
-
-    /// Waits for sticky cancellation; dropping the waiter does not undo started work.
-    pub async fn cancelled(&mut self) {
-        if self.is_cancelled() {
-            return;
-        }
-        while self.receiver.changed().await.is_ok() {
-            if *self.receiver.borrow_and_update() {
-                return;
-            }
-        }
-    }
-}
-
-impl Default for RunCancellation {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
