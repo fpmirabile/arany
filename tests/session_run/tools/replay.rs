@@ -1427,7 +1427,7 @@ pub(super) async fn native_command_changeset_corpus(
                         && request.input.child_results.is_empty()
                         && request.input.context_summary.is_none()
                 );
-                assert!(request.input.workspace_guidance.is_some());
+                assert_eq!(request.input.role, arany::PromptRole::ToolReview);
                 assert_eq!(request.max_output_tokens, 256);
                 let payload: serde_json::Value =
                     serde_json::from_str(&request.input.objective).unwrap();
