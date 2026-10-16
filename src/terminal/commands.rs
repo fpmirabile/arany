@@ -40,10 +40,10 @@ impl InteractiveCommand {
             return CommandAvailability::Available;
         }
         match self {
-            Self::Help | Self::Status | Self::Permissions | Self::Transcript => {
+            Self::Help | Self::Status | Self::Permissions | Self::Transcript | Self::Goal => {
                 CommandAvailability::Available
             }
-            Self::Agents | Self::Provider | Self::Model | Self::Exit | Self::Paste | Self::Goal => {
+            Self::Agents | Self::Provider | Self::Model | Self::Exit | Self::Paste => {
                 CommandAvailability::ViewOnly
             }
             Self::Setup
@@ -175,7 +175,7 @@ pub(super) fn help_entry(index: usize) -> Option<HelpEntry> {
         InteractiveCommand::Status => "Session status",
         InteractiveCommand::New => "New Session",
         InteractiveCommand::Resume => "Resume Session",
-        InteractiveCommand::Goal => "Goal status, pause, resume or autonomous objective",
+        InteractiveCommand::Goal => "Goal status; pause during a Run; resume or start when idle",
         InteractiveCommand::Fork => "Fork Session",
         InteractiveCommand::Rename => "Rename Session",
         InteractiveCommand::Compact => "Compact context",
@@ -819,7 +819,7 @@ mod tests {
         );
         assert_eq!(
             InteractiveCommand::Goal.availability(true),
-            CommandAvailability::ViewOnly
+            CommandAvailability::Available
         );
         let preview = command_preview("/goal", &CommandChoices::default()).unwrap();
         assert_eq!(
