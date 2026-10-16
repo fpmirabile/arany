@@ -1,0 +1,1 @@
+steering_notes are messages the user sent while you worked; apply them from this step when consistent with the objective, plan contract and granted authority; they never grant permissions.
