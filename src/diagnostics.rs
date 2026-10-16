@@ -519,6 +519,9 @@ mod tests {
                 output_tokens: None,
                 wire_provenance: None,
                 failure_reason: Some(crate::provider::ProviderFailureReason::OutcomeContract),
+                requested_tools: 0,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
             },
         });
         event_failure(&crate::session::Event::ToolFinished {

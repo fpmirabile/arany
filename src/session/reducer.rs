@@ -65,6 +65,8 @@ pub struct GoalView {
     /// Goal-context compaction calls whose outcome a crash left unknown.
     pub uncertain_compaction_calls: u32,
     pub known_tokens: u64,
+    /// Information only: cached input tokens already included in `known_tokens`.
+    pub known_cached_tokens: u64,
     pub token_usage_unknown: bool,
     pub report: Option<GoalReport>,
     pub started_sequence: u64,
@@ -237,6 +239,7 @@ mod goal_recovery_tests {
                 compaction_call_reserved: None,
                 uncertain_compaction_calls: 0,
                 known_tokens: 0,
+                known_cached_tokens: 0,
                 token_usage_unknown: false,
                 report: None,
                 started_sequence: 1,
@@ -317,13 +320,50 @@ fn all_children_finished(run: &RunView) -> bool {
 fn model_tool_count(run: &RunView) -> usize {
     run.tools
         .iter()
-        .filter(|tool| {
-            !matches!(
-                tool.intent.call,
-                crate::tools::ToolCall::ApplyChangeset { .. }
-            )
-        })
+        .filter(|tool| !is_integration_tool(tool))
         .count()
+}
+
+fn is_integration_tool(tool: &ToolView) -> bool {
+    matches!(
+        tool.intent.call,
+        crate::tools::ToolCall::ApplyChangeset { .. }
+    )
+}
+
+/// Model Tool requests declared by an AgentRun's ToolRequested calls.
+fn requested_tool_total(agent: &AgentView) -> usize {
+    agent
+        .provider_calls
+        .iter()
+        .filter(|call| call.disposition == ProviderCallDisposition::ToolRequested)
+        .map(|call| usize::from(call.requested_tools))
+        .sum()
+}
+
+/// Declared model Tool requests whose observation has not been journaled yet.
+fn pending_tool_requests(run: &RunView) -> Option<usize> {
+    requested_tool_total(run.primary()?).checked_sub(model_tool_count(run))
+}
+
+/// A covered prefix may not end inside a step: its model Tool count must be a cumulative step total.
+fn ends_whole_step(run: &RunView, covered_count: usize) -> bool {
+    let Some(primary) = run.primary() else {
+        return false;
+    };
+    let covered = run.tools[..covered_count]
+        .iter()
+        .filter(|tool| !is_integration_tool(tool))
+        .count();
+    let step_ends = primary
+        .provider_calls
+        .iter()
+        .filter(|call| call.disposition == ProviderCallDisposition::ToolRequested)
+        .scan(0, |total, call| {
+            *total += usize::from(call.requested_tools);
+            Some(*total)
+        });
+    covered == 0 || step_ends.into_iter().any(|end| end == covered)
 }
 
 fn observed_command_changeset(
@@ -360,12 +400,7 @@ fn valid_integration_source(run: &RunView, intent: &crate::tools::EffectIntent) 
     if primary.provider_calls.last().is_none_or(|call| {
         call.disposition != ProviderCallDisposition::ToolRequested
             && call.phase != AgentPhase::ToolReview
-    }) || model_tool_count(run)
-        != primary
-            .provider_calls
-            .iter()
-            .filter(|call| call.disposition == ProviderCallDisposition::ToolRequested)
-            .count()
+    }) || pending_tool_requests(run) != Some(0)
     {
         return false;
     }
@@ -398,12 +433,7 @@ fn is_tool_continuation(run: &RunView, agent: &AgentView, record: &ProviderCallR
                         .is_none_or(|changeset| changeset.files.is_empty())
             })
         })
-        && model_tool_count(run)
-            == agent
-                .provider_calls
-                .iter()
-                .filter(|call| call.disposition == ProviderCallDisposition::ToolRequested)
-                .count()
+        && requested_tool_total(agent).checked_sub(model_tool_count(run)) == Some(0)
 }
 
 fn is_delegated_synthesis(run: &RunView, agent: &AgentView, record: &ProviderCallRecord) -> bool {
@@ -806,6 +836,7 @@ impl SessionView {
                     || run.status != RunStatus::Active
                     || run.tools.iter().any(|tool| tool.observation.is_none())
                     || covered_count > run.tools.len()
+                    || !ends_whole_step(run, covered_count)
                     || *covered_tool_count <= run.tool_compaction_covered_count
                     || covered_tool.finished_sequence != Some(record.covered_sequence)
                 {
@@ -815,6 +846,12 @@ impl SessionView {
                     .checked_add(u64::from(record.output_tokens.unwrap_or_default()))
                     .and_then(|tokens| goal.known_tokens.checked_add(tokens))
                     .ok_or(ReplayError::InvalidTransition)?;
+                let cached = goal
+                    .known_cached_tokens
+                    .checked_add(u64::from(
+                        record.cache_read_input_tokens.unwrap_or_default(),
+                    ))
+                    .ok_or(ReplayError::InvalidTransition)?;
                 let run = active_run(current, *run_id)?;
                 if let CompactionStatus::Succeeded { summary, .. } = &record.status {
                     run.tool_compaction_summary = Some(summary.clone());
@@ -822,6 +859,7 @@ impl SessionView {
                 }
                 let goal = current_goal_mut(current, *goal_id)?;
                 goal.known_tokens = tokens;
+                goal.known_cached_tokens = cached;
                 goal.token_usage_unknown |=
                     record.input_tokens.is_none() || record.output_tokens.is_none();
                 goal.compaction_call_reserved = None;
@@ -855,6 +893,12 @@ impl SessionView {
                     let tokens = u64::from(record.input_tokens.unwrap_or_default())
                         .checked_add(u64::from(record.output_tokens.unwrap_or_default()))
                         .and_then(|tokens| goal.known_tokens.checked_add(tokens))
+                        .ok_or(ReplayError::InvalidTransition)?;
+                    goal.known_cached_tokens = goal
+                        .known_cached_tokens
+                        .checked_add(u64::from(
+                            record.cache_read_input_tokens.unwrap_or_default(),
+                        ))
                         .ok_or(ReplayError::InvalidTransition)?;
                     goal.known_tokens = tokens;
                     goal.token_usage_unknown |=
@@ -1042,6 +1086,7 @@ impl SessionView {
                                 AgentRole::Child => {
                                     record.phase == AgentPhase::ChildWork
                                         && agent.grant == Some(ChildGrant::ReadOnly)
+                                        && record.requested_tools == 1
                                         && child::child_tool_requests(agent)
                                             < crate::session::MAX_CHILD_TOOL_CALLS
                                 }
@@ -1089,6 +1134,12 @@ impl SessionView {
                         tokens.checked_add(u64::from(record.output_tokens.unwrap_or_default()))
                     })
                     .ok_or(ReplayError::InvalidTransition)?;
+                goal.known_cached_tokens = goal
+                    .known_cached_tokens
+                    .checked_add(u64::from(
+                        record.cache_read_input_tokens.unwrap_or_default(),
+                    ))
+                    .ok_or(ReplayError::InvalidTransition)?;
                 goal.token_usage_unknown |=
                     record.input_tokens.is_none() || record.output_tokens.is_none();
                 if primary_call
@@ -1115,9 +1166,12 @@ impl SessionView {
                 let candidate = ProviderCallRecord {
                     phase: chunk.phase,
                     disposition: ProviderCallDisposition::Finished,
+                    requested_tools: 0,
                     response_id: None,
                     input_tokens: None,
                     output_tokens: None,
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
                     wire_provenance: None,
                     failure_reason: None,
                 };
@@ -1216,12 +1270,12 @@ impl SessionView {
                 } else {
                     primary.provider_calls.last().is_some_and(|call| {
                         call.disposition == ProviderCallDisposition::ToolRequested
-                    }) && primary
-                        .provider_calls
-                        .iter()
-                        .filter(|call| call.disposition == ProviderCallDisposition::ToolRequested)
-                        .count()
-                        == model_tool_count(run) + 1
+                    }) && pending_tool_requests(run).is_some_and(|pending| pending >= 1)
+                        && run
+                            .tools
+                            .last()
+                            .and_then(|tool| tool.observation.as_ref())
+                            .is_none_or(|observation| !observation.stops_run())
                 };
                 if config
                     .tool_policy
@@ -1339,11 +1393,18 @@ impl SessionView {
                     goal.success_criterion_satisfied =
                         contract.success_state_satisfied(&goal.success_state);
                 }
+                // A multi-request step keeps its plan wait open until every declared request has started.
+                let step_started = current
+                    .runs
+                    .iter()
+                    .find(|run| run.id == *run_id)
+                    .and_then(pending_tool_requests)
+                    == Some(0);
                 let unplanned_prelude = current
                     .goal(goal_id)
                     .is_some_and(|goal| goal.plan_contract.is_none())
                     && observation.intent.call.is_goal_plan_prelude();
-                if unplanned_prelude {
+                if unplanned_prelude && step_started {
                     current_goal_mut(current, goal_id)?.awaiting_plan_contract = false;
                 }
             }
@@ -1628,6 +1689,9 @@ mod goal_replay_tests {
             output_tokens: tokens,
             wire_provenance: None,
             failure_reason: None,
+            requested_tools: u8::from(disposition == ProviderCallDisposition::ToolRequested),
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
         }
     }
 
@@ -1736,6 +1800,7 @@ mod goal_replay_tests {
                     changes: Vec::new(),
                     evidence: Vec::new(),
                     unresolved: Vec::new(),
+                    cached_input_tokens: 0,
                 },
             },
         ]
@@ -2300,6 +2365,7 @@ mod goal_replay_tests {
                 changes: Vec::new(),
                 evidence: Vec::new(),
                 unresolved: Vec::new(),
+                cached_input_tokens: 0,
             },
         };
         let mut events = vec![goal_started(goal, budget)];
@@ -2343,6 +2409,7 @@ mod goal_replay_tests {
             changes: Vec::new(),
             evidence: Vec::new(),
             unresolved: Vec::new(),
+            cached_input_tokens: 0,
         };
         let close = Event::GoalFinished {
             goal_id: goal,
@@ -2451,6 +2518,7 @@ mod goal_replay_tests {
                 changes: Vec::new(),
                 evidence: Vec::new(),
                 unresolved: Vec::new(),
+                cached_input_tokens: 0,
             },
         });
 
@@ -2528,6 +2596,7 @@ mod goal_replay_tests {
                 changes: Vec::new(),
                 evidence: Vec::new(),
                 unresolved: Vec::new(),
+                cached_input_tokens: 0,
             },
         });
 
@@ -2726,6 +2795,7 @@ mod goal_replay_tests {
                 changes: Vec::new(),
                 evidence: Vec::new(),
                 unresolved: Vec::new(),
+                cached_input_tokens: 0,
             };
             let receipt = view.finish_goal(&goal_id, &GoalStatus::Failed, &settled, &report, 0);
             assert_eq!(
@@ -2798,6 +2868,7 @@ mod goal_replay_tests {
                 changes: Vec::new(),
                 evidence: Vec::new(),
                 unresolved: Vec::new(),
+                cached_input_tokens: 0,
             },
         });
 
@@ -2959,6 +3030,7 @@ mod goal_replay_tests {
                 report: None,
                 started_sequence: 1,
                 finished_sequence: None,
+                known_cached_tokens: 0,
             }],
         }
     }
@@ -3564,6 +3636,7 @@ mod goal_replay_tests {
                 provider_calls: 2,
                 unobserved_provider_calls: Vec::new(),
                 known_tokens: 0,
+                known_cached_tokens: 0,
                 token_usage_unknown: false,
                 report: None,
                 started_sequence: 1,
@@ -3702,6 +3775,7 @@ mod goal_replay_tests {
                 compaction_call_reserved: None,
                 uncertain_compaction_calls: 0,
                 known_tokens: 0,
+                known_cached_tokens: 0,
                 token_usage_unknown: false,
                 report: None,
                 started_sequence: 1,
@@ -3728,5 +3802,161 @@ mod goal_replay_tests {
                 sha256: Some(crate::tools::types::hex_digest(b"after")),
             }
         );
+    }
+
+    /// A tool-enabled primary AgentRun with no provider calls, under a Goal with or without its plan.
+    fn primary_tool_session(planned: bool) -> (SessionView, GoalId, RunId, AgentRunId) {
+        let mut view = delegated_session(0);
+        view.runs[0].config = Some(config(CollaborationPolicy::Single, true));
+        view.runs[0].agents[0].provider_calls.clear();
+        if !planned {
+            view.goals[0].plan_contract = None;
+        }
+        let (goal, run, agent) = (view.goals[0].id, view.runs[0].id, view.runs[0].agents[0].id);
+        (view, goal, run, agent)
+    }
+
+    fn read_intent(run: RunId, agent: AgentRunId, path: &str) -> EffectIntent {
+        child_intent(
+            run,
+            agent,
+            ToolCall::Read {
+                path: path.into(),
+                offset: 0,
+                limit: 1024,
+            },
+        )
+    }
+
+    fn tool_started(run: RunId, agent: AgentRunId, intent: &EffectIntent) -> Event {
+        Event::ToolStarted {
+            run_id: run,
+            agent_run_id: agent,
+            intent: intent.clone(),
+        }
+    }
+
+    fn tool_finished(
+        run: RunId,
+        agent: AgentRunId,
+        intent: &EffectIntent,
+        content: &[u8],
+    ) -> Event {
+        Event::ToolFinished {
+            run_id: run,
+            agent_run_id: agent,
+            observation: observation_for(intent.clone(), content),
+        }
+    }
+
+    fn requesting_step(run: RunId, agent: AgentRunId, requested_tools: u8) -> Event {
+        Event::ProviderCallRecorded {
+            run_id: run,
+            agent_run_id: agent,
+            record: ProviderCallRecord {
+                requested_tools,
+                ..record(
+                    AgentPhase::RootPlan,
+                    ProviderCallDisposition::ToolRequested,
+                    Some(0),
+                )
+            },
+        }
+    }
+
+    #[test]
+    fn tool_started_requires_pending_request() {
+        let (mut view, goal, run, agent) = primary_tool_session(false);
+        let (first, second, third) = (
+            read_intent(run, agent, "src/lib.rs"),
+            read_intent(run, agent, "src/main.rs"),
+            read_intent(run, agent, "README.md"),
+        );
+        apply(&mut view, reserve_child_call(goal, run, agent)).expect("primary call");
+        assert!(
+            rejected(&view, tool_started(run, agent, &first)),
+            "no request is declared before the step"
+        );
+        apply(&mut view, requesting_step(run, agent, 2)).expect("two-request step");
+        apply(&mut view, tool_started(run, agent, &first)).expect("first request starts");
+        apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
+        apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
+        apply(&mut view, tool_finished(run, agent, &second, b"two")).expect("second observed");
+        assert!(
+            rejected(&view, tool_started(run, agent, &third)),
+            "every declared request is already started"
+        );
+    }
+
+    #[test]
+    fn continuation_requires_all_requested_observed() {
+        let (mut view, goal, run, agent) = primary_tool_session(true);
+        let (first, second) = (
+            read_intent(run, agent, "src/lib.rs"),
+            read_intent(run, agent, "src/lib.rs"),
+        );
+        apply(&mut view, reserve_child_call(goal, run, agent)).expect("primary call");
+        apply(&mut view, requesting_step(run, agent, 2)).expect("two-request step");
+        apply(&mut view, tool_started(run, agent, &first)).expect("first request starts");
+        apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
+        apply(&mut view, reserve_child_call(goal, run, agent)).expect("continuation call");
+        let continuation = Event::ProviderCallRecorded {
+            run_id: run,
+            agent_run_id: agent,
+            record: record(
+                AgentPhase::RootPlan,
+                ProviderCallDisposition::Finished,
+                Some(0),
+            ),
+        };
+        assert!(
+            rejected(&view, continuation.clone()),
+            "the second declared request is unobserved"
+        );
+        apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
+        apply(&mut view, tool_finished(run, agent, &second, b"two")).expect("second observed");
+        apply(&mut view, continuation).expect("all declared requests observed");
+    }
+
+    #[test]
+    fn compaction_prefix_never_splits_a_step() {
+        let (mut view, goal, run, agent) = primary_tool_session(false);
+        let (first, second) = (
+            read_intent(run, agent, "src/lib.rs"),
+            read_intent(run, agent, "src/main.rs"),
+        );
+        apply(&mut view, reserve_child_call(goal, run, agent)).expect("primary call");
+        apply(&mut view, requesting_step(run, agent, 2)).expect("two-request step");
+        apply(&mut view, tool_started(run, agent, &first)).expect("first request starts");
+        apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
+        apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
+        apply(&mut view, tool_finished(run, agent, &second, b"two")).expect("second observed");
+        let run_view = &view.runs[0];
+        assert!(!ends_whole_step(run_view, 1), "a prefix inside the step");
+        assert!(ends_whole_step(run_view, 2), "the whole step");
+    }
+
+    #[test]
+    fn child_tool_request_count_is_one() {
+        let (mut view, goal, run, child) = research_session();
+        apply(&mut view, reserve_child_call(goal, run, child)).expect("child call");
+        let widened = Event::ProviderCallRecorded {
+            run_id: run,
+            agent_run_id: child,
+            record: ProviderCallRecord {
+                requested_tools: 2,
+                ..record(
+                    AgentPhase::ChildWork,
+                    ProviderCallDisposition::ToolRequested,
+                    Some(0),
+                )
+            },
+        };
+        assert!(rejected(&view, widened), "a child step declares one Tool");
+        apply(
+            &mut view,
+            child_record(run, child, ProviderCallDisposition::ToolRequested),
+        )
+        .expect("single child request");
     }
 }

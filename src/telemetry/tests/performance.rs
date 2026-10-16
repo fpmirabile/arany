@@ -152,8 +152,11 @@ impl Provider for FastProvider {
                 result: "synthetic answer".into(),
             }),
             response_id: None,
-            input_tokens: None,
-            output_tokens: Some(8),
+            usage: crate::provider::Usage {
+                input_tokens: None,
+                output_tokens: Some(8),
+                ..Default::default()
+            },
             wire_provenance: None,
         })
     }

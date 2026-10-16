@@ -595,6 +595,31 @@ fn message(text: &str) -> Value {
 }
 
 #[test]
+fn openai_usage_maps_cached_tokens() {
+    let mut finish = response(
+        "completed",
+        json!([message(
+            r#"{"outcome":{"type":"finish","summary":"done","result":"answer"}}"#
+        )]),
+    );
+    finish["usage"] = json!({
+        "input_tokens": 12,
+        "output_tokens": 8,
+        "input_tokens_details": {"cached_tokens": 5}
+    });
+    let cached = decode_run(&serde_json::to_vec(&finish).unwrap(), "gpt-5.4")
+        .expect("cached Responses result");
+    assert_eq!(cached.usage.input_tokens, Some(12));
+    assert_eq!(cached.usage.cache_read_input_tokens, Some(5));
+    assert_eq!(cached.usage.cache_creation_input_tokens, None);
+    assert!(cached.usage.cache_consistent());
+    finish["usage"] = json!({"input_tokens": 12, "output_tokens": 8});
+    let uncached = decode_run(&serde_json::to_vec(&finish).unwrap(), "gpt-5.4")
+        .expect("usage without cache details");
+    assert_eq!(uncached.usage.cache_read_input_tokens, None);
+}
+
+#[test]
 fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
     let mut request = run_request();
     request.phase = AgentPhase::RootPlan;
@@ -1109,7 +1134,7 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
         accepted.wire_provenance,
         Some(ProviderWireProvenance::ResponsesCompletedStoreFalseRequested)
     );
-    assert_eq!(accepted.input_tokens, Some(12));
+    assert_eq!(accepted.usage.input_tokens, Some(12));
     for compaction in [false, true] {
         let text = if compaction {
             r#"{"summary":"short"}"#

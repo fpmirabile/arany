@@ -3,7 +3,7 @@ use super::{EngineError, RunCancellation, RunSteering};
 use crate::provider::{
     AgentPhase, CompactionItem, CompactionRequest, Finish, HistoryTurn, MAX_REPORTED_INPUT_TOKENS,
     PreviewText, Provider, ProviderFailureClass, ProviderFailureReason, ProviderOutcome,
-    ProviderRequest, ProviderResponse, ResponsePreview,
+    ProviderRequest, ProviderResponse, ResponsePreview, Usage,
 };
 use crate::session::{
     AgentDisposition, AgentRunId, CollaborationPolicy, CompactionFailure, CompactionRecord,
@@ -1781,15 +1781,13 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                 Some(response)
             }
         };
-        let (mut status, response_id, input_tokens, output_tokens, wire_provenance) = match response
-        {
+        let (mut status, response_id, usage, wire_provenance) = match response {
             None => (
                 CompactionStatus::Failed {
                     reason: CompactionFailure::Cancelled,
                 },
                 None,
-                None,
-                None,
+                Usage::default(),
                 None,
             ),
             Some(Ok(Ok(response))) => super::compaction::classify_response(response),
@@ -1802,8 +1800,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                     },
                 },
                 None,
-                None,
-                None,
+                Usage::default(),
                 None,
             ),
             Some(Err(_)) => (
@@ -1811,8 +1808,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                     reason: CompactionFailure::TimedOut,
                 },
                 None,
-                None,
-                None,
+                Usage::default(),
                 None,
             ),
         };
@@ -1846,7 +1842,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             ProviderTraceOutcome::Cancelled => crate::telemetry::TraceOutcome::Cancelled,
             ProviderTraceOutcome::Failed(_) => crate::telemetry::TraceOutcome::Failed,
         };
-        provider_trace.finish_with_usage(provider_outcome, input_tokens, output_tokens);
+        provider_trace.finish_with_usage(provider_outcome, usage.input_tokens, usage.output_tokens);
         let record = CompactionRecord {
             covered_run_id: self.run_id,
             covered_sequence,
@@ -1858,8 +1854,10 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             compiler_version: 3,
             source_bytes,
             source_tokens_estimate: source_bytes.div_ceil(4),
-            input_tokens,
-            output_tokens,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_input_tokens: usage.cache_read_input_tokens,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
             response_id,
             wire_provenance,
             chatgpt_provenance: self.controls.chatgpt_provenance.clone(),
@@ -1884,7 +1882,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         compaction_trace.finish(trace_outcome);
         self.controls
             .goal_budget
-            .account_usage(input_tokens, output_tokens);
+            .account_usage(usage.input_tokens, usage.output_tokens);
         if let CompactionStatus::Succeeded { summary, .. } = &record.status {
             let context = request.tools.as_mut().ok_or(EngineError::InvalidRequest)?;
             context.history_summary = Some(summary.clone());
@@ -2363,10 +2361,10 @@ async fn invoke_bounded_with_preview<P: Provider>(
         biased;
         () = cancellation.cancelled() => CallResult::Cancelled,
         result = tokio::time::timeout(timeout, invocation) => match result {
-            Ok(Ok(response)) if response.input_tokens.is_some_and(|count| count > MAX_REPORTED_INPUT_TOKENS) => {
+            Ok(Ok(response)) if response.usage.input_tokens.is_some_and(|count| count > MAX_REPORTED_INPUT_TOKENS) => {
                 CallResult::Failed(CallFailure::InvalidResponse(None))
             }
-            Ok(Ok(response)) if response.output_tokens.is_some_and(|count| count > output_cap) => {
+            Ok(Ok(response)) if response.usage.output_tokens.is_some_and(|count| count > output_cap) => {
                 CallResult::Failed(CallFailure::OutputLimit)
             }
             Ok(Ok(response)) if response.response_id.as_ref().is_some_and(|id| {
@@ -2375,8 +2373,8 @@ async fn invoke_bounded_with_preview<P: Provider>(
             Ok(Ok(response)) if response.wire_provenance.is_some_and(|provenance| {
                 !provenance.valid_for(
                     response.response_id.as_deref(),
-                    response.input_tokens,
-                    response.output_tokens,
+                    response.usage.input_tokens,
+                    response.usage.output_tokens,
                 )
             }) => CallResult::Failed(CallFailure::InvalidResponse(None)),
             Ok(Ok(response)) => CallResult::Response(response),
@@ -2410,7 +2408,9 @@ fn call_trace_result(result: &CallResult, valid_response: bool) -> ProviderTrace
 
 fn call_trace_usage(result: &CallResult) -> (Option<u32>, Option<u32>) {
     match result {
-        CallResult::Response(response) => (response.input_tokens, response.output_tokens),
+        CallResult::Response(response) => {
+            (response.usage.input_tokens, response.usage.output_tokens)
+        }
         CallResult::Failed(_) | CallResult::Cancelled => (None, None),
     }
 }
@@ -2440,21 +2440,23 @@ fn call_record(phase: AgentPhase, result: &CallResult, valid_response: bool) -> 
         },
         CallResult::Cancelled => ProviderCallDisposition::Cancelled,
     };
-    let (response_id, input_tokens, output_tokens, wire_provenance) = match result {
+    let (response_id, usage, wire_provenance) = match result {
         CallResult::Response(response) => (
             response.response_id.clone(),
-            response.input_tokens,
-            response.output_tokens,
+            response.usage,
             response.wire_provenance,
         ),
-        CallResult::Failed(_) | CallResult::Cancelled => (None, None, None, None),
+        CallResult::Failed(_) | CallResult::Cancelled => (None, Usage::default(), None),
     };
     ProviderCallRecord {
         phase,
         disposition,
+        requested_tools: u8::from(disposition == ProviderCallDisposition::ToolRequested),
         response_id,
-        input_tokens,
-        output_tokens,
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cache_read_input_tokens: usage.cache_read_input_tokens,
+        cache_creation_input_tokens: usage.cache_creation_input_tokens,
         wire_provenance,
         failure_reason: match result {
             CallResult::Failed(
