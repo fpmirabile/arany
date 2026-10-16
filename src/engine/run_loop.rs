@@ -1750,6 +1750,7 @@ impl<'a> RunLoop<'a> {
         primary: &AgentTrace,
     ) -> Result<bool, EngineError> {
         let mut review = ProviderRequest {
+            session_id: request.session_id,
             run_id: request.run_id,
             agent_run_id: request.agent_run_id,
             phase: AgentPhase::ToolReview,

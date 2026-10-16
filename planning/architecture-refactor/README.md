@@ -18,7 +18,7 @@
 
 **Exclusions.** These stay out of this plan:
 
-- Prompt caching (roadmap item 2). It needs nothing from this plan and runs in parallel from day one.
+- Prompt caching. It needs nothing from this plan and runs in parallel from day one.
 - The macOS Guard internals (`macos/unit.rs`, about 3,200 lines). They are frozen until C2 and need a Mac for evidence.
 - Build cache internals, ChatGPT OAuth and credential internals (kept, only moved in PR13).
 - `apply_committed` transition rules. Only its layout changes (PR2); rule changes go through the [spec workflow](../../docs/specs/README.md).
@@ -85,7 +85,7 @@ This plan changes behavior in three places and otherwise preserves contracts. Ea
   - `submit` on a busy Engine returns `EngineError::Busy`; the Provider may change between two submissions on one Engine.
   - A catalog or schema byte change is caught by the catalog snapshot test before it reaches the wire corpora.
 - **Evidence owners.** The existing corpora in [Verification](../../docs/development.md#verification) and [Testing](../../agents/testing.md) own the proof. Live, native and manual checks stay in [NEXT_STEPS.md](../../NEXT_STEPS.md) and are not blockers for day-to-day PRs.
-- **Deferred checks.** Read p95 at or below 50 ms (roadmap item 3), the native Guard lane for mutations, the macOS release-build Tool journeys, and the manual native lanes for the workspace split (PR13).
+- **Deferred checks.** Read p95 at or below 50 ms (roadmap item 2), the native Guard lane for mutations, the macOS release-build Tool journeys, and the manual native lanes for the workspace split (PR13).
 
 ## Chosen direction
 
@@ -101,7 +101,7 @@ Apply Ponytail (`.agents/skills/ponytail/SKILL.md`, installed per [project skill
 - One `ProviderIdentity` replaces seven getters.
 - One `RecordKind` table replaces 25 methods.
 
-No new trait is introduced in this plan except the one hook seam in roadmap item 7 (see [Traits, enums and functions](#traits-enums-and-functions-for-the-other-reuse-points)).
+No new trait is introduced in this plan except the one hook seam in roadmap item 6 (see [Traits, enums and functions](#traits-enums-and-functions-for-the-other-reuse-points)).
 
 ### Target architecture
 
@@ -164,7 +164,7 @@ Leverage: the reducer, approval, resource settings, `tool_specs`, the Guard help
 | Place | Adapters today | Shape | Reason |
 |---|---|---|---|
 | Provider | 5 (OpenAI, ChatGPT subscription, Anthropic, Custom, Scripted), chosen at runtime | `Arc<dyn Provider>` (exists since A2), four methods after PR3 | Runtime-selected and open to a sixth; one vtable call per network round trip is nil |
-| Hooks (roadmap item 7) | 3 on day one: human approval, AI review, external command | `Vec<Box<dyn Hook>>` with a closed `Verdict` enum | The only new `dyn` seam in the plan: an open, user-configured list. Verdicts stay closed so journaling and "only narrow" are exhaustive. PR10 prepares the call site |
+| Hooks (roadmap item 6) | 3 on day one: human approval, AI review, external command | `Vec<Box<dyn Hook>>` with a closed `Verdict` enum | The only new `dyn` seam in the plan: an open, user-configured list. Verdicts stay closed so journaling and "only narrow" are exhaustive. PR10 prepares the call site |
 | Guard platform | 2 (`linux.rs`, `macos.rs`) | `cfg`-selected functions (as today) | The kernel chooses the adapter, never a runtime; a trait would be hypothetical |
 | Tool execution site | 2 (in-process, Guard) | enum and `if` in `ToolRuntime::execute` | Site is a property of the operation, not configuration; a fake Guard would let Engine tests pass against enforcement that never ran |
 | Journal observers | 3 (progress, telemetry, diagnostics) | `broadcast::Receiver<Arc<EventEnvelope>>`, no trait | The interface is a channel; a trait would re-invent `Receiver` |
@@ -211,7 +211,7 @@ These answers are owner decisions. They are final for this plan.
 1. **Per-kind payload versions (PR5): approved.** Each Event kind has one current payload version in one table. A change bumps that kind only. No global bump, no compatibility readers, no migrations.
 2. **Crates (PR13, PR14): approved.** The library `arany` keeps its name. The binary package `arany-cli` produces `arany`. `arany-journal` arrives with `serve --stdio`. Each crate owns a `tests/` corpus, and shared support sits behind `test-support`.
 3. **Documentation: no `//!` docs** (see the rule above).
-4. **Typed Git reads stay in the Guard.** NEXT_STEPS item 3 lists typed Git reads among in-process operations. The guarantee says every process runs in the Guard, and a Git read spawns `git` on a neutralized private view (`src/tools/git.rs:124, 405`). PR7 therefore moves only List, Read and Search. A warm per-Run Guard unit may cut the Git round trip later without weakening the boundary.
+4. **Typed Git reads stay in the Guard.** NEXT_STEPS item 2 lists typed Git reads among in-process operations. The guarantee says every process runs in the Guard, and a Git read spawns `git` on a neutralized private view (`src/tools/git.rs:124, 405`). PR7 therefore moves only List, Read and Search. A warm per-Run Guard unit may cut the Git round trip later without weakening the boundary.
 5. **Per-command unguarded fallback: outside this plan.** Tracked in NEXT_STEPS. The Tools spec owns it once implemented. Nothing here implements or depends on it.
 
 ### Not refactored yet
@@ -240,7 +240,7 @@ Each row names the trigger that reopens it.
 - Symlink policy is identical. Disclosure does not widen: the same `workspace_paths` scope applies.
 - The reducer rejects an `InProcess` attestation for any operation whose `site` is not `InProcess`, so a read receipt cannot authorize a write.
 - `SystemBlock` stays a closed enum, so untrusted text cannot become system text by construction. `ProviderTurn` stays opaque and is never journaled.
-- Approvals remain an `mpsc(1)` channel. Hook verdicts (roadmap item 7) stay a closed enum.
+- Approvals remain an `mpsc(1)` channel. Hook verdicts (roadmap item 6) stay a closed enum.
 - Credential storage does not change: the account-root and `StateRoot` records and the OS keyring keep their current owners, and the credential helper stays the same binary under supervision. The library drops its keyring dependency.
 
 **Bounds and backpressure.**
@@ -280,7 +280,7 @@ Each row names the trigger that reopens it.
 
 Sizes: S is at most 2 days, M is at most 2 weeks, L is more than 2 weeks. Every PR stacks cleanly on `main`. "Corpus" names the existing tests that prove no behavior change.
 
-**Critical path:** PR1, PR6, PR7, PR10, PR11, PR12, PR13, with PR8 feeding PR10 and PR9 between PR8 and PR11. One coder: about 12 to 14 weeks. Three coders on disjoint files: about 7 to 8 weeks. Caching (roadmap item 2) runs in parallel from day one.
+**Critical path:** PR1, PR6, PR7, PR10, PR11, PR12, PR13, with PR8 feeding PR10 and PR9 between PR8 and PR11. One coder: about 12 to 14 weeks. Three coders on disjoint files: about 7 to 8 weeks. Caching runs in parallel from day one.
 
 **Ordering rules.**
 
@@ -292,8 +292,8 @@ Sizes: S is at most 2 days, M is at most 2 weeks, L is more than 2 weeks. Every 
 
 | Lane | PRs | What it buys |
 |---|---|---|
-| Tools | PR1, PR6, PR7 | Roadmap item 3 (reads in milliseconds); one dispatch table; the vocabulary hooks and C2 need |
-| Engine | PR2, PR8, PR9, PR10, PR11, PR12 | Items 4 and 6 (engine hygiene, event stream, ledger diet); the seams hooks (7) and `serve --stdio` (8) plug into |
+| Tools | PR1, PR6, PR7 | Roadmap item 2 (reads in milliseconds); one dispatch table; the vocabulary hooks and C2 need |
+| Engine | PR2, PR8, PR9, PR10, PR11, PR12 | Items 3 and 5 (engine hygiene, event stream, ledger diet); the seams hooks (6) and `serve --stdio` (8) plug into |
 | Edges | PR3, PR4, PR5 | Smaller fakes, one record routine, additive journal fields without a global bump |
 | Shape | PR13, PR14 | The library compiles without ratatui, crossterm or keyring; `generate-schema` and an ACP adapter get the vocabulary without Guard code |
 
@@ -302,10 +302,10 @@ Sizes: S is at most 2 days, M is at most 2 weeks, L is more than 2 weeks. Every 
 | Weeks | Coder A (Tools) | Coder B (Engine) | Coder C (Edges) |
 |---|---|---|---|
 | 1-2 | PR1, PR6 | PR2, then PR8 design | PR3, PR4, PR5 |
-| 3-4 | PR7 (needs PR5, PR6) | PR8 (needs PR2, PR3) | Caching (roadmap 2), no dependency |
+| 3-4 | PR7 (needs PR5, PR6) | PR8 (needs PR2, PR3) | Caching, no dependency |
 | 5-6 | PR10 with B (needs PR7, PR8) | PR9 | PR13 scaffolding (workspace, lints, CI paths) |
 | 7-8 | PR11 | PR12 | PR13 documentation migration |
-| 9 | PR13 move (one coder) | Hooks (roadmap 7) on `execute_step` | PR14 when item 8 starts |
+| 9 | PR13 move (one coder) | Hooks (roadmap 6) on `execute_step` | PR14 when item 8 starts |
 
 **Shared hot spots.** `src/engine/run_loop.rs` (PR7 deadlines, PR8 budget calls, PR10 deletion), `src/session/events.rs` (PR5, PR7, PR9), `src/lib.rs` (PR3, PR12, PR13). Everything else is disjoint by lane.
 
@@ -339,7 +339,7 @@ Each entry gives the PR, lane, size, risk, dependencies and verification. Behavi
 
 **PR7. In-process reads with attestation.** Lane Tools. Size M. Risk medium; security pass required. Depends on PR1, PR5, PR6. Behavior change (stated).
 - `List`, `Read` and `Search` run in the Engine process under the admitted `cap-std` `Dir`. `ToolObservation.guard` becomes `attestation: Option<Attestation>`, with `Attestation::{InProcess {..}, Guard(GuardReceipt)}`. Dispatch happens in `ToolRuntime::execute` by `facts().site`. Read bounds rise to 64 KiB. Typed Git reads stay in the Guard. The design is in [PR7 design](#pr7-design-in-process-reads) below.
-- Verification: `src/tools/tests.rs` and `tests/session_run/tools*.rs` for both sites; native Guard lane for mutations on both platforms; `tests/engine_run/replay.rs`; reducer tests. New: replay with `InProcess` attestations survives process exit; an `InProcess` attestation on `Write` is rejected by the reducer; Read p95 at or below 50 ms (roadmap item 3).
+- Verification: `src/tools/tests.rs` and `tests/session_run/tools*.rs` for both sites; native Guard lane for mutations on both platforms; `tests/engine_run/replay.rs`; reducer tests. New: replay with `InProcess` attestations survives process exit; an `InProcess` attestation on `Write` is rejected by the reducer; Read p95 at or below 50 ms (roadmap item 2).
 
 **PR8. `GoalLedger` over the reducer's view; `Action::max_events`.** Lane Engine. Size M. Risk medium. Depends on PR2, PR3. Byte-identical journals.
 - Add `engine/ledger.rs` with `admits`, `reserve` and `settle` over `Action` (`ProviderCall`, `Tool`, `Review`, `Compaction`, `Pause`, `Delegation`), with `max_events` as the one table. Delete `GoalRunBudget` (about 460 lines). Split `run_turn` into `admit_turn`, `prepare_turn` and `settle_turn`, and move `goal_report` to `engine/report.rs`. `ProgressPublisher` shares the ledger's view.
@@ -397,12 +397,12 @@ Each roadmap item lands on a named PR, and the refactor removes the duplication 
 
 | Roadmap item (NEXT_STEPS) | Lands on | What the refactor removes from its path |
 |---|---|---|
-| 2 Prompt caching | `provider/render`, wire adapters | Nothing to wait for; runs in parallel. PR3 shrinks the ScriptedProvider the cache tests use |
-| 3 In-process reads | PR7, on PR6's `facts().site` and PR1's cycle cut | Without PR6, the in-process path would be a tenth hand-written match |
-| 4 Engine hygiene, event stream | PR11 (`Journal` tap) and PR12 (`RunHandle`) | `exec --output jsonl` and telemetry become receivers of one stream |
-| 5 Spec diet | Documentation changes in PR13 | `agents/<module>.md` behavior moves to specs and invariants to tests; `agents/` keeps general practice only |
-| 6 Ledger diet | PR8, then PR9 | Tail literals and `GoalRunBudget` are gone before the Event shape changes |
-| 7 Hooks and permission modes | PR10's `before_dispatch` | Hook adapters replace two inline branches instead of being threaded through two Tool paths |
+| Prompt caching (separate work) | `provider/render`, wire adapters | Nothing to wait for; runs in parallel. PR3 shrinks the ScriptedProvider the cache tests use |
+| 2 In-process reads | PR7, on PR6's `facts().site` and PR1's cycle cut | Without PR6, the in-process path would be a tenth hand-written match |
+| 3 Engine hygiene, event stream | PR11 (`Journal` tap) and PR12 (`RunHandle`) | `exec --output jsonl` and telemetry become receivers of one stream |
+| 4 Spec diet | Documentation changes in PR13 | `agents/<module>.md` behavior moves to specs and invariants to tests; `agents/` keeps general practice only |
+| 5 Ledger diet | PR8, then PR9 | Tail literals and `GoalRunBudget` are gone before the Event shape changes |
+| 6 Hooks and permission modes | PR10's `before_dispatch` | Hook adapters replace two inline branches instead of being threaded through two Tool paths |
 | 8 `serve --stdio` | PR12 (`submit`, `RunHandle.events`), PR13 (binary hosts `serve`), PR14 (vocabulary for `generate-schema`) | No per-submission Engine and no coalescing `watch` |
 | 9 Routing, 10 Multi-call | PR3 (`ProviderIdentity` per role), PR10 (`execute_step` over a request slice) | `RunControls` no longer carries ChatGPT fields |
 | 11 C2 workers | PR10's `Grant::Worker` and PR7's attestation | A third Tool path is never written |
@@ -416,7 +416,7 @@ Each roadmap item lands on a named PR, and the refactor removes the duplication 
 
 - **Per PR:** the verification listed above passes on the PR's own corpus, and the PR states whether it is behavior-preserving. Behavior changes in PR7, PR9 and PR11 land with their spec and telemetry updates in the same PR.
 - **Model-facing bytes:** the catalog and `tool_specs` snapshot is byte-equal before and after PR6, and changes in PR7 are reviewed as the one-time prefix invalidation they are.
-- **Performance:** Read p95 at or below 50 ms in the Tool journeys after PR7 (roadmap item 3).
+- **Performance:** Read p95 at or below 50 ms in the Tool journeys after PR7 (roadmap item 2).
 - **Crate boundary:** `cargo tree -p arany -e normal` has no `ratatui`, `crossterm` or `keyring` after PR13; `cargo tree -p arany-journal` has no `tokio`, `reqwest` or `rusqlite` after PR14.
 - **Native evidence:** the native lanes for Linux and macOS run once after PR1, PR7 and PR13. Anything the synthetic corpora cannot prove stays in [NEXT_STEPS.md](../../NEXT_STEPS.md); no native support is claimed from this plan.
 - **Documentation:** the Tools spec (PR7), the Goal spec (PR9), telemetry timestamps (PR11), and the system overview §2 with the AGENTS.md routing table (PR13) are updated. F12 drift is fixed. No `//!` docs are added.

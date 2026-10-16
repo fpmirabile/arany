@@ -11,7 +11,7 @@ use aws_lc_rs::hmac;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-v13";
+const CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-v14";
 const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 const PROBE_OUTPUT_CAP: u32 = 1024;
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
@@ -190,7 +190,9 @@ pub(super) async fn verify_credentials_for_run(
 
 async fn probe<P: Provider>(provider: &P) -> Result<(), NativeCheckError> {
     let model = provider.identity().model.to_owned();
+    let session_id = SessionId::new();
     let direct = ProviderRequest {
+        session_id,
         run_id: RunId::new(),
         agent_run_id: AgentRunId::new(),
         phase: AgentPhase::RootPlan,
@@ -237,7 +239,7 @@ async fn probe<P: Provider>(provider: &P) -> Result<(), NativeCheckError> {
     }
 
     let compact = CompactionRequest {
-        session_id: SessionId::new(),
+        session_id,
         covered_run_id: RunId::new(),
         model,
         previous_summary: None,

@@ -193,47 +193,11 @@ byte preflight is not a reservation against independent writers. The
 [execution contract](../specs/execution.md#admission-persistence-and-recovery)
 owns those public limits.
 
-The ignored Linux tmux gate,
-[`active_keyboard_stays_visible_with_near_cap_history`](../../tests/session_run/active_terminal/tmux/history_latency.rs),
-now encodes 800 Runs across 50 current Goal lifecycles. Each Run includes its
-link, accepted Message, active-time reservation and settlement, Agent spawn,
-Provider-call reservation and successful `ProviderCallRecorded`, finish and
-commit. Its seed count is `1 + 800 × 11 + 50 × 2 = 8,901` Events, leaving 1,099
-below the 10,000 lineage limit. The per-Run objective and answer strings total
-32,764,000 raw bytes, about half the old 65,528,000-byte intent; that is a
-smaller workload, not a same-volume replacement. The fixture asserts the seed
-count, text bytes, serialized payload bytes and SQLite file size, and replays
-the Session with 100 fresh read-only Store instances while reporting nearest-
-rank p50/p95/max `load_view` times. It then resumes one fresh product process
-in tmux, retains the existing input/delegation scenario, and reports resume to
-composer-ready time plus idle/final product RSS and high-water RSS. The replay
-samples start with fresh Store state but do not clear the OS page cache; they
-are not cold-disk evidence. Store replay timing and interactive terminal
-history/input timing are separate observations, with the latter including
-terminal work after the SessionView has been reduced.
+History owner: [`tests/session_run/active_terminal/tmux/history_latency.rs::active_keyboard_stays_visible_with_near_cap_history`](../../tests/session_run/active_terminal/tmux/history_latency.rs), in `Linux Tests (release)` with `history_benchmark=true`.
 
-The hosted run strictly replayed all 8,901 Events and sampled 100 fresh
-read-only `load_view` calls. It did not reach the resumed composer within the
-unchanged 30-second readiness gate, so the run supplies workload-scoped Store
-replay timing only; it produced no complete resume/input latency or RSS
-evidence. The old
-Classic path synchronously inserted every historical Run before drawing the
-composer. The bounded whole-Run projection now has assertions for its status
-cue and a full-history find into the omitted prefix, but the repaired hosted
-path still needs a rerun. Fresh Store instances do not clear the OS page cache,
-so these timings are not cold-disk evidence. This workload does not establish
-the exact 10,000-Event boundary, the 128 MiB HotSession limit, 256 MiB
-shared-Store quota, near-quota fallback, or prior 65.5 MB text volume. The separate named-host
-`show_replay_latency_on_named_host` gate in
-[`tests/session_run/performance.rs`](../../tests/session_run/performance.rs)
-uses a 100-Event Session. A different ignored
-`database_capacity_is_admitted_before_provider_usage` gate in
-[`tests/engine_run.rs`](../../tests/engine_run.rs) pads a non-Event table near
-the shared file limit to check StorageFull admission and canonical reopen; it
-is not history replay or latency evidence. Record sanitized Linux CPU/kernel,
-load and pressure metadata on the named run; neither this metadata nor an
-unexecuted fixture is performance evidence. The remaining evidence gap is
-tracked in [`NEXT_STEPS.md`](../../NEXT_STEPS.md).
+Its workload is 800 Runs across 50 Goal lifecycles, 8,901 Events and 32,764,000 objective/answer bytes, about half the former 65.5 MB intent and not the same workload. It checks strict replay, serialized payload and SQLite bytes, samples 100 fresh read-only Store loads, and measures resume-to-ready, input/delegation and product RSS/HWM. Fresh Store instances do not clear the OS page cache; Store replay and terminal history/input latency remain separate observations. This workload does not establish the exact 10,000-Event boundary, the 128 MiB HotSession limit, the 256 MiB shared-Store quota or near-quota fallback.
+
+Separate owners: [`tests/session_run/performance.rs::show_replay_latency_on_named_host`](../../tests/session_run/performance.rs) uses 100 Events; [`tests/engine_run.rs::database_capacity_is_admitted_before_provider_usage`](../../tests/engine_run.rs) pads a non-Event table to prove StorageFull admission and canonical reopen, rather than history latency. [Next steps](../../NEXT_STEPS.md#beta-2-and-broader-release) owns named-host measurements and remaining gates.
 
 ### Proposed policy, not accepted behavior
 
