@@ -567,14 +567,15 @@ triggered and evidence under [testing rules](../../agents/testing.md).
    agreed command timeout and finite build resource profile settings. Guard
    resource ceilings remain finite. This slice builds on the landed
    [Goal Foundation](../../docs/specs/goals.md) and must not make the current
-   fixed Run loop unlimited by itself. The implementation is complete on the
-   current branch and awaits full review and hosted CI.
+   fixed Run loop unlimited by itself. Landed in #32.
 5. **Dogfooding milestone: Arany develops Arany.** Use Arany for this
    repository's own work from here on. Requires Beta 1 check 7 (live
    validation of the chosen model's strict Tool encoding) in
-   [next steps](../../NEXT_STEPS.md#beta-1-final-user-owned-checks). Every
-   later slice is exercised through real use, which supplies the shadow-mode
-   calibration data B2 needs.
+   [next steps](../../NEXT_STEPS.md#beta-1-final-user-owned-checks). The user
+   runs it later; it runs alongside implementation and does not block C1 or
+   later slices (user directive 2026-10-16). Once it starts, every later slice
+   is exercised through real use, which supplies the shadow-mode calibration
+   data B2 needs.
 6. **C1 Read-only researchers (stage 1 of C, R14-8 (b)).** Child AgentRun
    identity and pins, read-only grants, bounded reports, catalog listing only,
    and every child on the primary's profile. Gate: the Goal plan contract
@@ -612,8 +613,8 @@ triggered and evidence under [testing rules](../../agents/testing.md).
    and worker cache publication.
 9. **Goal completion.** E1–E4 steering, context reinjection, Workspace
    checkpoints and rewind, E8 compaction and E10 `exec` integration. This
-   follows dogfooding and extends Goal Foundation with the remaining durable
-   workflows and UI.
+   extends Goal Foundation with the remaining durable workflows and UI. E1
+   steering is in review ahead of this position.
 10. B6 modes including RPI and grilling, E7 Goal view and E12 settings.
 11. B2, B3, B5 and E5 Supervisor signals, escalation, Finish gate and override.
 12. A5 Typed Git reads and E6 Git writes.
@@ -629,9 +630,8 @@ per-slice specification and evidence cost slows delivery.
 
 E13 telemetry spans land with the slice that introduces each span's subject.
 
-Next action: after A4's full review and hosted CI pass, complete the authorized
-dogfooding milestone before the staged team delivery (C1–C3) and the remaining
-Goal workflows. The A3 per-Workspace
+Next action: land E1 steering, then C1 read-only researchers. Dogfooding
+starts once the user runs Beta 1 check 7. The A3 per-Workspace
 cache retains its 64 MiB default and shares an 8 GiB StateRoot aggregate; A4
 derives the effective admitted cache quota from remaining aggregate headroom,
 so the 8 GiB requested maximum is not guaranteed usable capacity. Approved
