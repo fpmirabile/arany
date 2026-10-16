@@ -17,15 +17,11 @@ Unmigrated behavior, including remaining Session lifecycle, Provider/profile adm
 
 ## Maintain a contract
 
-1. Identify whether the work affects observable behavior. For behavior work, read the owning contract and triggered editing rules, and identify its acceptance scenarios and existing evidence owner. An unmigrated domain's existing contract remains authoritative until extraction is warranted.
-2. For new or changed behavior, describe the successful path and meaningful rejection, failure or recovery scenarios in the implementation plan when one is needed; otherwise put the accepted scenarios directly in the owning contract before implementation. The user's request and recorded decisions establish agreed scope; clarify only material unspecified behavior, rather than requesting approval again for already authorized work. Unaccepted alternatives remain proposals in the plan. A bug fix preserves the agreed behavior unless an authorized contract change applies.
-3. After each planning pass and before closing any implementation, including work without a plan, compare the accepted decisions and resulting behavior with the owning contract. Update it when agreed behavior, limits, compatibility, recovery or scenario coverage changes or is missing. A bug fix that restores an adequately specified behavior needs no spec edit; add a missing regression scenario when the contract does not cover the case. A refactor with unchanged behavior needs no spec edit. For an unmigrated domain, extract a spec when the behavior change or overloaded contract warrants it, replacing the relevant normative copies with links. If accepted behavior remains unimplemented, label that gap and link its task. Keep unaccepted proposals in `planning/`, and current verification debt in `NEXT_STEPS.md`.
-4. Reuse the owning test scenario or corpus. Link the spec's acceptance scenarios to that owner; [testing rules](../../agents/testing.md) decide when a new test is justified. Acceptance scenarios describe requirements, not a mandatory one-test-per-row layout.
-5. Preserve security-critical editing constraints, architecture ownership and decision rationale in their respective homes. When extracting a spec, update the domain index, module loading trigger and inbound links together.
-   Close the execution artifact according to [planning lifecycle](../../planning/README.md#lifecycle); a completed plan does not remain the contract owner.
-6. Check local links and anchors, changed prose and preservation of the contract. For behavior changes, run the repository checks required by the owning rules. Documentation-only changes need document/link review; they do not create new runtime evidence. In the existing plan, PR or final handoff, identify the owning contract and relevant evidence, and state what changed or why the contract remains adequate. For work with no observable impact, state that conclusion; no separate review log is required.
+1. Behavior work starts from the owning contract: read it, name the scenario you change or add, and note its evidence owner. The request and recorded decisions set scope; clarify only material unspecified behavior. An unmigrated domain's existing contract remains authoritative.
+2. Before closing, edit the contract only when agreed behavior, a limit, compatibility, recovery or scenario coverage changed or was missing. A refactor with unchanged behavior, or a fix that restores already specified behavior, needs no spec edit; add a regression scenario row only when the contract did not cover the case. Label accepted-but-unimplemented behavior and link its task. Proposals stay in `planning/`; open verification stays in `NEXT_STEPS.md`.
+3. Reuse the owning test scenario or corpus and link it from the scenario table; [testing rules](../../agents/testing.md) decide when a new test is justified. Check local links after editing. In the PR, name the contract that changed, or say none needed to.
 
-When contract, code and evidence disagree, name the discrepancy and resolve it at its owner. Neither an old research recommendation nor current faulty behavior silently overrides an agreed spec. If authoritative documents conflict and the decision is not recoverable from recorded user decisions, surface the uncertainty before changing the contract.
+When contract, code and evidence disagree, name the discrepancy and resolve it at the owner; neither an old research recommendation nor current faulty behavior silently overrides an agreed spec. Surface a conflict that recorded decisions cannot settle before changing the contract. Extract a spec from an unmigrated domain only when a real behavior change or an overloaded contract earns it; replace normative copies with links and update the domain index, the AGENTS.md loading trigger and inbound links together, then close the execution plan under the [planning lifecycle](../../planning/README.md#lifecycle).
 
 ## Spec structure
 
@@ -36,22 +32,8 @@ Use these sections when they contain substantive content; concise tables or pros
 - **Limits and compatibility:** bounds whose meaning is public, overflow behavior and explicit non-claims. Reference code/configuration for incidental constants.
 - **Acceptance scenarios and evidence owners:** concrete preconditions, action and expected outcome, with links to the existing tests or user procedure. Distinguish an owner from evidence that its gate passed.
 
-Give scenarios descriptive stable headings or table names so plans and tests can reference them. Use Given/When/Then wording when it clarifies a transition; no framework, generated schema or new identifier registry is required. Describe semantics rather than private function names, renderer libraries or test helper mechanics.
-
-Contract status and verification status are separate. Specs express requirements; native platforms, live Providers and human accessibility need their own evidence before a support claim. Name scenario owners here, report completed checks in the handoff/PR and CI, and keep only open verification in next steps. Do not maintain a pass/fail or completed-work ledger in specs.
+Give scenarios stable headings or table names so plans and tests can reference them; describe semantics, not private function names or test helper mechanics. Specs express requirements, not verification status: name scenario owners here, keep open verification in `NEXT_STEPS.md`, and never keep a pass/fail or completed-work ledger in a spec. Native platforms, live Providers and human accessibility need their own evidence before a support claim.
 
 ## Extraction discipline
 
-Classify each passage before moving it:
-
-| Passage | Destination |
-|---|---|
-| Observable behavior, bounds, failure and recovery | Domain spec |
-| Editing procedure, privilege boundary, ownership invariant or recurring implementation trap | Module rules |
-| Physical responsibility and data flow | Architecture |
-| Context, alternatives and trade-offs | Existing decision record, or ADR when warranted |
-| Proposed behavior or implementation sequence | Plan |
-| Completed verification outcome | Implementation handoff and Git/PR/CI history; scoped audit records only when still needed for their reasoning |
-| Unresolved defect or pending user check | Next steps, removed on completion |
-
-Validate the route with representative tasks: a terminal-copy edit reaches terminal behavior, a Provider decoder change still reaches Provider/security/testing, and a persistence change still reaches Session/Store/testing. Extraction succeeds when agents can locate the contract without losing required boundaries, not merely when a file becomes shorter.
+Route each passage by [where each fact belongs](../README.md#where-each-fact-belongs): observable behavior to the spec, editing procedure and ownership invariants to module rules, data flow to architecture, rationale to the decision owner, proposals to a plan, completed verification to Git/PR/CI history and open checks to `NEXT_STEPS.md`. Validate with representative tasks (a terminal-copy edit reaches terminal behavior; a Provider decoder change reaches Provider, security and testing; a persistence change reaches Session, Store and testing). Extraction succeeds when agents locate the contract without losing a required boundary, not merely when a file gets shorter.
