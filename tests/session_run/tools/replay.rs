@@ -1002,7 +1002,11 @@ pub(super) async fn native_command_changeset_corpus(
         fn identity(&self) -> &arany::ProviderIdentity {
             static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
                 std::sync::LazyLock::new(|| {
-                    arany::ProviderIdentity::native("scripted", "changeset-model")
+                    arany::ProviderIdentity::new(
+                        "scripted",
+                        "changeset-model",
+                        arany::Provenance::native(),
+                    )
                 });
             &IDENTITY
         }

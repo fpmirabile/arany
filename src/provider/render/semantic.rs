@@ -125,13 +125,15 @@ pub fn tool_results(wire: &Value) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{Effort, openai::wire, render, test_support};
+    use crate::provider::{Effort, anthropic, openai, render, test_support};
 
     #[test]
     fn semantic_inverts_render() {
         let request = test_support::read_only_request("gpt-5.4");
         let conversation = render::conversation(&request).unwrap();
-        let body = wire::run_body_with_effort(&request, &conversation, Effort::High).unwrap();
+        let responses =
+            openai::wire::run_body_with_effort(&request, &conversation, Effort::High).unwrap();
+        let messages = anthropic::wire::run_body(&request, &conversation, Effort::High).unwrap();
         let input = &request.input;
         let expected = json!({
             "objective": input.objective,
@@ -155,6 +157,8 @@ mod tests {
             "phase": "root_synthesis",
             "collaboration": request.collaboration,
         });
-        assert_eq!(super::input(&body), expected);
+        for body in [responses, messages] {
+            assert_eq!(super::input(&body), expected);
+        }
     }
 }

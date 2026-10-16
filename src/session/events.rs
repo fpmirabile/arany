@@ -1656,7 +1656,6 @@ impl RunConfig {
 
     pub(crate) fn validate(&self) -> Result<(), ReplayError> {
         if !self.identity().is_some_and(|identity| identity.valid())
-            || !(1..=crate::provider::MAX_OUTPUT_TOKEN_CAP).contains(&self.output_token_cap)
             || self
                 .tool_policy
                 .as_ref()

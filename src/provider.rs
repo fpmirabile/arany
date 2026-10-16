@@ -297,15 +297,25 @@ pub struct ProviderIdentity {
     pub limits: CallLimits,
 }
 
+impl Provenance {
+    pub fn native() -> Self {
+        Self::Native {
+            saved_api_account_id: None,
+        }
+    }
+}
+
 impl ProviderIdentity {
-    pub fn native(profile: impl Into<String>, model: impl Into<String>) -> Self {
+    pub fn new(
+        profile: impl Into<String>,
+        model: impl Into<String>,
+        provenance: Provenance,
+    ) -> Self {
         Self {
             profile: profile.into(),
             model: model.into(),
             effort: None,
-            provenance: Provenance::Native {
-                saved_api_account_id: None,
-            },
+            provenance,
             limits: CallLimits::default(),
         }
     }

@@ -1251,7 +1251,8 @@ mod tests {
             account_id: Uuid,
             observed: Arc<Mutex<Vec<ProviderRequest>>>,
         ) -> Self {
-            let mut identity = ProviderIdentity::native(profile, "synthetic-model");
+            let mut identity =
+                ProviderIdentity::new(profile, "synthetic-model", arany::Provenance::native());
             identity.effort = Some(Effort::Low);
             if profile == "chatgpt" {
                 identity.provenance = Provenance::ChatGpt(ChatGptProvenance {

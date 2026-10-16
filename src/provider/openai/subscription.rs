@@ -51,9 +51,8 @@ impl ChatGptProvider {
         {
             return Err(ProviderError::Rejected);
         }
-        let mut identity = ProviderIdentity::native("chatgpt", model);
+        let mut identity = ProviderIdentity::new("chatgpt", model, Provenance::ChatGpt(provenance));
         identity.effort = Some(effort);
-        identity.provenance = Provenance::ChatGpt(provenance);
         identity.limits = CallLimits {
             output_token_bound: OutputTokenBound::LocalAcceptanceOnly,
             deadline: DEADLINE,

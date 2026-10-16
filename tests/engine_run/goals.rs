@@ -790,8 +790,11 @@ impl Provider for FiniteTokenTeam {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
-                let mut identity =
-                    arany::ProviderIdentity::native("scripted", "goal-token-team-model");
+                let mut identity = arany::ProviderIdentity::new(
+                    "scripted",
+                    "goal-token-team-model",
+                    arany::Provenance::native(),
+                );
                 identity.limits = arany::CallLimits {
                     concurrency: 3,
                     ..Default::default()
@@ -1246,7 +1249,11 @@ impl Provider for ExactCapToolReview {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
-                arany::ProviderIdentity::native("scripted", "exact-cap-model")
+                arany::ProviderIdentity::new(
+                    "scripted",
+                    "exact-cap-model",
+                    arany::Provenance::native(),
+                )
             });
         &IDENTITY
     }
@@ -1385,8 +1392,11 @@ impl Provider for PendingChildren {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
-                let mut identity =
-                    arany::ProviderIdentity::native("scripted", "pending-children-model");
+                let mut identity = arany::ProviderIdentity::new(
+                    "scripted",
+                    "pending-children-model",
+                    arany::Provenance::native(),
+                );
                 identity.limits = arany::CallLimits {
                     concurrency: 2,
                     ..Default::default()
@@ -1837,7 +1847,11 @@ impl Provider for MeteredProvider {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
-                arany::ProviderIdentity::native("scripted", "metered-model")
+                arany::ProviderIdentity::new(
+                    "scripted",
+                    "metered-model",
+                    arany::Provenance::native(),
+                )
             });
         &IDENTITY
     }

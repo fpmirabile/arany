@@ -67,7 +67,7 @@ impl ScriptedProvider {
                     concurrency: 3,
                     ..CallLimits::default()
                 },
-                ..ProviderIdentity::native("scripted", "test-model")
+                ..ProviderIdentity::new("scripted", "test-model", arany::Provenance::native())
             },
             responses: Mutex::new(responses.into_iter().map(Ok).collect()),
             cancel_at_completion: None,
@@ -229,7 +229,7 @@ fn gated_identity(concurrency: u8) -> ProviderIdentity {
             concurrency,
             ..CallLimits::default()
         },
-        ..ProviderIdentity::native("gated", "test-model")
+        ..ProviderIdentity::new("gated", "test-model", arany::Provenance::native())
     }
 }
 
@@ -239,7 +239,7 @@ fn waiting_identity(deadline: Duration) -> ProviderIdentity {
             deadline,
             ..CallLimits::default()
         },
-        ..ProviderIdentity::native("waiting", "test-model")
+        ..ProviderIdentity::new("waiting", "test-model", arany::Provenance::native())
     }
 }
 
@@ -326,7 +326,11 @@ impl Provider for WaitingCompactionProvider {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
-                arany::ProviderIdentity::native("waiting-compaction", "test-model")
+                arany::ProviderIdentity::new(
+                    "waiting-compaction",
+                    "test-model",
+                    arany::Provenance::native(),
+                )
             });
         &IDENTITY
     }
@@ -5535,7 +5539,9 @@ struct PreviewProvider {
 impl Provider for PreviewProvider {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
-            std::sync::LazyLock::new(|| arany::ProviderIdentity::native("preview", "test-model"));
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::new("preview", "test-model", arany::Provenance::native())
+            });
         &IDENTITY
     }
 

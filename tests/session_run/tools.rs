@@ -100,7 +100,9 @@ struct Journey {
 impl Provider for Journey {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
-            std::sync::LazyLock::new(|| arany::ProviderIdentity::native("scripted", "tool-model"));
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::new("scripted", "tool-model", arany::Provenance::native())
+            });
         &IDENTITY
     }
 
@@ -524,7 +526,9 @@ struct Proposal {
 impl Provider for Proposal {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
-            std::sync::LazyLock::new(|| arany::ProviderIdentity::native("scripted", "guard-model"));
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::new("scripted", "guard-model", arany::Provenance::native())
+            });
         &IDENTITY
     }
 
@@ -627,7 +631,11 @@ impl Provider for OverTimeoutCommand {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
-                arany::ProviderIdentity::native("scripted", "goal-resource-model")
+                arany::ProviderIdentity::new(
+                    "scripted",
+                    "goal-resource-model",
+                    arany::Provenance::native(),
+                )
             });
         &IDENTITY
     }
@@ -796,7 +804,11 @@ impl arany::Provider for ExactTokenTool {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
-                arany::ProviderIdentity::native("scripted", "goal-budget-model")
+                arany::ProviderIdentity::new(
+                    "scripted",
+                    "goal-budget-model",
+                    arany::Provenance::native(),
+                )
             });
         &IDENTITY
     }
@@ -929,7 +941,11 @@ impl Provider for GoalWorkspaceLease {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
-                arany::ProviderIdentity::native("scripted", "goal-lease-model")
+                arany::ProviderIdentity::new(
+                    "scripted",
+                    "goal-lease-model",
+                    arany::Provenance::native(),
+                )
             });
         &IDENTITY
     }
@@ -1239,7 +1255,9 @@ fn bounded_loop_plan() -> arany::GoalPlanContract {
 impl Provider for BoundedLoop {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
-            std::sync::LazyLock::new(|| arany::ProviderIdentity::native("scripted", "guard-model"));
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::new("scripted", "guard-model", arany::Provenance::native())
+            });
         &IDENTITY
     }
 
@@ -2421,7 +2439,9 @@ struct ApprovalJourney {
 impl Provider for ApprovalJourney {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
-            std::sync::LazyLock::new(|| arany::ProviderIdentity::native("scripted", "guard-model"));
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::new("scripted", "guard-model", arany::Provenance::native())
+            });
         &IDENTITY
     }
 
@@ -2754,7 +2774,9 @@ struct GitJourney {
 impl Provider for GitJourney {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
-            std::sync::LazyLock::new(|| arany::ProviderIdentity::native("scripted", "tool-model"));
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::new("scripted", "tool-model", arany::Provenance::native())
+            });
         &IDENTITY
     }
 
