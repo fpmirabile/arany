@@ -23,6 +23,10 @@ mod profile;
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "linux")]
+pub(crate) use linux::PREPARATION_OVERHEAD;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::PREPARATION_OVERHEAD;
 #[cfg(target_os = "macos")]
 pub(super) use macos::fixture::{Span as FixtureSpan, Stage as FixtureStage};
 #[cfg(target_os = "macos")]
@@ -1017,25 +1021,23 @@ pub(super) fn helper_main() -> ExitCode {
                     .await
                 }
                 ToolCall::GitStatus { .. } | ToolCall::GitDiff { .. } | ToolCall::GitLog { .. } => {
+                    let git = task.config.git.as_ref().ok_or(ToolError::Configuration)?;
                     #[cfg(target_os = "linux")]
-                    {
-                        let git = task.config.git.as_ref().ok_or(ToolError::Configuration)?;
-                        let output = super::git::execute(
-                            workspace,
-                            Path::new("/scratch"),
-                            git,
-                            &task.intent.call,
-                            task.intent.limits.result_bytes as usize,
-                            Duration::from_millis(u64::from(task.intent.limits.runtime_ms)),
-                        )
-                        .await;
-                        linux::stop_command_descendants(&task.parent_namespaces).await?;
-                        output
-                    }
+                    let scratch = Path::new("/scratch");
                     #[cfg(not(target_os = "linux"))]
-                    {
-                        Err(ToolError::ProtectionUnavailable)
-                    }
+                    let scratch = root.as_path();
+                    let output = super::git::execute(
+                        workspace,
+                        scratch,
+                        git,
+                        &task.intent.call,
+                        task.intent.limits.result_bytes as usize,
+                        Duration::from_millis(u64::from(task.intent.limits.runtime_ms)),
+                    )
+                    .await;
+                    #[cfg(target_os = "linux")]
+                    linux::stop_command_descendants(&task.parent_namespaces).await?;
+                    output
                 }
                 call => super::fs::native(workspace, call, &task.config),
             }

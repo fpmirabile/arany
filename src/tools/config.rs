@@ -17,7 +17,7 @@ pub(crate) struct Config {
     pub mcp: Vec<Server>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runtime_grants: Vec<RuntimeGrant>,
-    /// Pinned system Git for typed Git reads; Linux only.
+    /// Pinned system Git for typed Git reads (Linux `/usr`, macOS Command Line Tools).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<Program>,
 }
@@ -107,11 +107,10 @@ impl Config {
         }
         if let Some(git) = &self.git {
             git.validate()?;
-            if !cfg!(target_os = "linux")
-                || git.name != "git"
+            if git.name != "git"
                 || git.interpreter
                 || !git.inputs.is_empty()
-                || !std::path::Path::new(&git.executable).starts_with(super::guard::RUNTIME_ROOT)
+                || !std::path::Path::new(&git.executable).starts_with(super::git::GIT_ROOT)
             {
                 return Err(ToolError::Configuration);
             }

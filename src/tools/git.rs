@@ -1,4 +1,4 @@
-//! Typed read-only Git operations, run by the Linux Guard helper on a private repository view.
+//! Typed read-only Git operations, run by the Guard helper on a private repository view.
 use super::ToolError;
 use super::config::Program;
 use super::types::{FORBIDDEN_NAMES, MAX_SNAPSHOT_BYTES, ToolCall, forbidden, hex_digest};
@@ -20,7 +20,25 @@ const ENVELOPE_BYTES: usize = 1024;
 const HEAD_BYTES: usize = 256;
 const CONFIG_BYTES: usize = 64 * 1024;
 const MAX_GIT_RUNTIME: Duration = Duration::from_secs(20);
-const VIEW: &str = "git-view";
+pub(super) const VIEW: &str = "git-view";
+pub(super) const HOME: &str = "git-home";
+/// The root a pinned system Git must live under: Command Line Tools on macOS, `/usr` on Linux.
+pub(super) const GIT_ROOT: &str = if cfg!(target_os = "macos") {
+    "/Library/Developer/CommandLineTools"
+} else {
+    "/usr"
+};
+const GIT_CANDIDATE: &str = if cfg!(target_os = "macos") {
+    "/Library/Developer/CommandLineTools/usr/bin/git"
+} else {
+    "/usr/bin/git"
+};
+/// Native executable magic: ELF on Linux, Mach-O (thin or fat) on macOS.
+const EXECUTABLE_MAGICS: &[&[u8]] = if cfg!(target_os = "macos") {
+    &[b"\xca\xfe\xba\xbe", b"\xcf\xfa\xed\xfe"]
+} else {
+    &[b"\x7fELF"]
+};
 const VIEW_CONFIG: &[u8] = b"[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tfsmonitor = false\n\thooksPath = /dev/null\n\tuntrackedCache = false\n";
 /// Repository data the view links as `(entry, directory, required)`; nothing else in `.git` is read.
 const LINKED: [(&str, bool, bool); 5] = [
@@ -34,7 +52,7 @@ const NO_REPOSITORY: &str = "The Workspace root has no .git directory; typed Git
 const UNSUPPORTED_LAYOUT: &str = "The Workspace .git is not a plain repository directory (linked worktree, submodule checkout, gitfile, symlink or missing data); typed Git reads do not support it.";
 const UNSUPPORTED_FORMAT: &str = "The repository uses Git extensions (such as SHA-256 objects, reftable refs or partial clone) that typed Git reads do not support.";
 
-/// Reads a pinned executable that is a regular, non-set-ID, non-writable ELF file within the snapshot bound.
+/// Reads a pinned executable that is a regular, non-set-ID, non-writable native executable within the snapshot bound.
 fn executable_bytes(executable: &str) -> Result<Vec<u8>, ToolError> {
     use std::os::unix::fs::MetadataExt;
     let file = super::fs::open_absolute(executable)?;
@@ -49,7 +67,11 @@ fn executable_bytes(executable: &str) -> Result<Vec<u8>, ToolError> {
     file.take(MAX_SNAPSHOT_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| ToolError::Operation)?;
-    if bytes.len() > MAX_SNAPSHOT_BYTES || !bytes.starts_with(b"\x7fELF") {
+    if bytes.len() > MAX_SNAPSHOT_BYTES
+        || !EXECUTABLE_MAGICS
+            .iter()
+            .any(|magic| bytes.starts_with(magic))
+    {
         return Err(ToolError::ChangedInput);
     }
     Ok(bytes)
@@ -75,8 +97,8 @@ pub(super) fn verify_host_executable(git: &Program) -> Result<(), ToolError> {
 
 /// The system Git that folder trust pins; `None` reports typed Git reads unavailable.
 pub(super) fn discover() -> Option<Program> {
-    let executable = std::fs::canonicalize("/usr/bin/git").ok()?;
-    if !executable.starts_with(super::guard::RUNTIME_ROOT) {
+    let executable = std::fs::canonicalize(GIT_CANDIDATE).ok()?;
+    if !executable.starts_with(GIT_ROOT) {
         return None;
     }
     let executable = executable.to_str()?.to_owned();
@@ -197,8 +219,8 @@ fn pathspecs(path: &str) -> Vec<String> {
         specs.push(format!(":(literal){path}"));
     }
     for name in FORBIDDEN_NAMES.into_iter().chain([".env.*"]) {
-        specs.push(format!(":(exclude,glob)**/{name}"));
-        specs.push(format!(":(exclude,glob)**/{name}/**"));
+        specs.push(format!(":(icase,exclude,glob)**/{name}"));
+        specs.push(format!(":(icase,exclude,glob)**/{name}/**"));
     }
     specs
 }
@@ -287,7 +309,7 @@ fn environment(view: &Path, workspace: &Path, scratch: &Path) -> Vec<(&'static s
     vec![
         ("GIT_DIR", view.into()),
         ("GIT_WORK_TREE", workspace.into()),
-        ("HOME", scratch.join("git-home").into_os_string()),
+        ("HOME", scratch.join(HOME).into_os_string()),
         ("PATH", "/usr/bin:/bin".into()),
         ("GIT_CONFIG_NOSYSTEM", "1".into()),
         ("GIT_CONFIG_GLOBAL", "/dev/null".into()),
@@ -354,7 +376,9 @@ async fn run(
             read_prefix(stdout, CAPTURE_BYTES, false),
             read_prefix(stderr, STDERR_BYTES, true)
         )?;
-        let status = child.wait().await.map_err(|_| ToolError::Operation)?;
+        let status = super::guard::reap_owned_child(&mut child)
+            .await
+            .map_err(|_| ToolError::Operation)?;
         Ok::<_, ToolError>(Captured {
             status: status.code(),
             stdout,
@@ -367,7 +391,11 @@ async fn run(
         Ok(result) => result,
         Err(_) => {
             let _ = child.start_kill();
-            let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
+            let _ = tokio::time::timeout(
+                Duration::from_secs(1),
+                super::guard::reap_owned_child(&mut child),
+            )
+            .await;
             Err(ToolError::Limit)
         }
     }
@@ -668,7 +696,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn host_git_output(repository: &Path, home: &Path, args: &[&str]) -> std::process::Output {
-        std::process::Command::new("/usr/bin/git")
+        std::process::Command::new(discover().expect("pinned git").executable)
             .args(args)
             .current_dir(repository)
             .env_clear()
@@ -683,7 +711,7 @@ mod tests {
             .env("GIT_AUTHOR_DATE", "1700000000 +0000")
             .env("GIT_COMMITTER_DATE", "1700000000 +0000")
             .output()
-            .expect("host /usr/bin/git")
+            .expect("pinned git")
     }
 
     fn host_git(repository: &Path, home: &Path, args: &[&str]) {
@@ -707,6 +735,7 @@ mod tests {
         std::fs::write(workspace.join("notes.md"), "notes\n").unwrap();
         std::fs::write(workspace.join(".env"), "SECRET_CANARY=1\n").unwrap();
         std::fs::write(workspace.join(".env.local"), "SECRET_CANARY=4\n").unwrap();
+        std::fs::write(workspace.join(".Env"), "SECRET_CANARY=6\n").unwrap();
         std::fs::write(workspace.join("cfg/.ssh/id"), "SECRET_CANARY key\n").unwrap();
         let big: String = (0..40_000).map(|n| format!("line-{n:05}\n")).collect();
         std::fs::write(workspace.join("src/big.txt"), big).unwrap();
@@ -718,6 +747,7 @@ mod tests {
         std::fs::write(workspace.join("src/a.txt"), "delta\n").unwrap();
         std::fs::write(workspace.join(".env"), "SECRET_CANARY=3\n").unwrap();
         std::fs::write(workspace.join(".env.local"), "SECRET_CANARY=5\n").unwrap();
+        std::fs::write(workspace.join(".Env"), "SECRET_CANARY=7\n").unwrap();
         let rewritten: String = (0..40_000).map(|n| format!("LINE-{n:05}\n")).collect();
         std::fs::write(workspace.join("src/big.txt"), rewritten).unwrap();
         std::fs::write(workspace.join("src/new.txt"), "new\n").unwrap();
@@ -835,7 +865,7 @@ mod tests {
     }
 
     fn run_call(workspace: &Path, scratch: &Path, call: &ToolCall) -> Value {
-        let git = discover().expect("root-owned /usr/bin/git");
+        let git = discover().expect("pinned system git");
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -863,9 +893,9 @@ mod tests {
 
     #[test]
     fn discover_pins_the_root_owned_system_git() {
-        let git = discover().expect("root-owned /usr/bin/git");
+        let git = discover().expect("pinned system git");
         assert_eq!(git.name, "git");
-        assert!(git.executable.starts_with("/usr/"));
+        assert!(Path::new(&git.executable).starts_with(GIT_ROOT));
         assert_eq!(
             git.sha256,
             hex_digest(&std::fs::read(&git.executable).unwrap())
@@ -876,6 +906,19 @@ mod tests {
         wrong.sha256 = "0".repeat(64);
         assert!(matches!(
             verify_host_executable(&wrong),
+            Err(ToolError::ChangedInput)
+        ));
+    }
+
+    #[test]
+    fn executable_magic_matches_the_platform_format() {
+        let git = discover().expect("pinned system git");
+        assert!(executable_bytes(&git.executable).is_ok());
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("git");
+        std::fs::write(&script, b"#!/bin/sh\n").unwrap();
+        assert!(matches!(
+            executable_bytes(script.to_str().unwrap()),
             Err(ToolError::ChangedInput)
         ));
     }
@@ -1487,6 +1530,24 @@ mod tests {
     }
 
     #[test]
+    fn secret_components_match_regardless_of_ascii_case() {
+        for path in [
+            ".ENV",
+            ".Env",
+            ".SSH/id_rsa",
+            ".AWS/credentials",
+            ".env.LOCAL",
+        ] {
+            assert!(excluded(path), "{path}");
+            assert!(mentions_forbidden(&format!("fatal: {path}")), "{path}");
+        }
+        assert!(pathspecs("src").contains(&":(icase,exclude,glob)**/.env".to_owned()));
+        assert!(pathspecs("src").contains(&":(icase,exclude,glob)**/.aws/**".to_owned()));
+        assert!(pathspecs("src").contains(&":(icase,exclude,glob)**/.env.*".to_owned()));
+        assert!(!excluded("src/environment.rs"));
+    }
+
+    #[test]
     fn extensions_are_detected_after_a_byte_order_mark() {
         assert!(uses_extensions(
             b"\xef\xbb\xbf[extensions]\n\tobjectFormat = sha256\n"
@@ -1498,11 +1559,11 @@ mod tests {
     #[test]
     fn numstat_rows_and_patch_hunks_drop_secret_paths() {
         let numstat = captured(
-            b"1\t1\tsrc/ok.rs\x000\t3\t.env.local\x000\t1\tcfg/.ssh/id\x00",
+            b"1\t1\tsrc/ok.rs\x000\t3\t.env.local\x000\t1\tcfg/.ssh/id\x000\t2\t.ENV\x00",
             false,
         );
         let patch = captured(
-            b"diff --git a/.env.local b/.env.local\n+SECRET_CANARY=1\ndiff --git a/src/ok.rs b/src/ok.rs\n+ok\n",
+            b"diff --git a/.env.local b/.env.local\n+SECRET_CANARY=1\ndiff --git a/.ENV b/.ENV\n+SECRET_CANARY=2\ndiff --git a/src/ok.rs b/src/ok.rs\n+ok\n",
             false,
         );
         let value = diff_output(&numstat, &patch, 4096).unwrap();
