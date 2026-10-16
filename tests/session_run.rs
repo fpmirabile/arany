@@ -51,6 +51,10 @@ fn safe_run_diagnostics(run: &arany::RunView) -> String {
 #[path = "common/process.rs"]
 pub mod process;
 
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+#[path = "common/git.rs"]
+pub mod git;
+
 #[cfg(target_os = "linux")]
 #[path = "session_run/isolation.rs"]
 mod isolation;
