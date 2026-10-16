@@ -35,7 +35,6 @@ history. Implementation status and verified support are separate claims.
 Found by the macOS architecture review after A5b; no behavior change is
 claimed until each lands.
 
-- **Flaky build-cache test on macOS.** `old_archive_is_restored_read_only_when_aggregate_headroom_cannot_stage_candidate` (`src/store/state/build_cache.rs`) intermittently fails with `BuildCacheBusy`: its two `begin_build_cache_with_limits` calls skip the `retry_busy` wrapper the other callers use for the macOS flock release lag.
 - **Guard timing behind the Guard seam.** `TOOL_PREPARATION_OVERHEAD` in `src/engine/run_loop.rs` is the only `cfg(target_os)` in the Engine and duplicates the macOS `PREPARATION_DEADLINE`; each Guard adapter should own it.
 - **One Seatbelt profile builder.** `install`, `install_command` and `install_git` in `src/tools/guard/macos.rs` repeat rules, ancestors, grants, port detach, install and attestation; one private builder with a single install-and-attest tail keeps digest-relevant logic in one place.
 - **One executable-identity table.** Platform root, shell and executable magic for trusted system executables are spread across `git.rs`, `config.rs`, `workspace.rs` and `macos.rs::system_file`; a single per-platform table makes a second Git root (for example Xcode.app) a one-row change.

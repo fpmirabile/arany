@@ -2384,9 +2384,10 @@ mod tests {
             .expect("bounded cache capacity");
         assert_eq!(view_bytes, DEFAULT_ARCHIVE_BYTES);
         assert_eq!(candidate_bytes, 0);
-        let lease = state
-            .begin_build_cache_with_limits(identity.clone(), view_bytes, candidate_bytes)
-            .expect("read-only restore lease");
+        let lease = retry_busy(|| {
+            state.begin_build_cache_with_limits(identity.clone(), view_bytes, candidate_bytes)
+        })
+        .expect("read-only restore lease");
         let (mut preserved, size) = lease.archive().expect("archive lookup").expect("archive");
         let mut bytes = Vec::new();
         preserved.read_to_end(&mut bytes).expect("read old archive");
@@ -2398,12 +2399,12 @@ mod tests {
         ));
         drop(lease);
 
-        let (mut still_preserved, _) = state
-            .begin_build_cache_with_limits(identity, view_bytes, 0)
-            .expect("prior archive remains available")
-            .archive()
-            .expect("archive lookup")
-            .expect("archive");
+        let (mut still_preserved, _) =
+            retry_busy(|| state.begin_build_cache_with_limits(identity.clone(), view_bytes, 0))
+                .expect("prior archive remains available")
+                .archive()
+                .expect("archive lookup")
+                .expect("archive");
         let mut bytes = Vec::new();
         still_preserved
             .read_to_end(&mut bytes)
