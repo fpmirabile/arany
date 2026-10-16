@@ -101,6 +101,7 @@ pub fn input(wire: &Value) -> Value {
     semantic
 }
 
+#[allow(dead_code)]
 /// The model-facing projection of every Tool result in the request, in order, for either route.
 pub fn tool_results(wire: &Value) -> Vec<Value> {
     if let Some(messages) = wire["messages"].as_array() {
