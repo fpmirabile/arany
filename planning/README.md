@@ -38,4 +38,4 @@ Neither a template nor an unresolved proposal expands the user's authorized scop
 
 ## Lifecycle
 
-Completed implementation moves into the owning domain spec; delete its execution plan in the same change, including when the implementation is still local and uncommitted. Keep architecture, rationale and editing rules at their respective owners, and unresolved defects/deferred checks in `NEXT_STEPS.md`. Update inbound links and retain only remaining execution work, unless the user explicitly requests a historical record. Report completed checks in the handoff/PR and CI; Git history preserves committed execution artifacts. A scoped security finding or investigation may retain evidence needed for its still-relevant reasoning.
+When implementation completes, accepted behavior moves into the owning spec and the execution plan is deleted in the same change (also when the work is still local). Unresolved defects and deferred checks go to `NEXT_STEPS.md`; update inbound links; Git/PR/CI history keeps completed results. Retain a plan only when the user explicitly asks for a historical record; a scoped security finding may retain the evidence needed for its reasoning.
