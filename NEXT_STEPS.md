@@ -9,26 +9,43 @@ history. Implementation status and verified support are separate claims.
 
 ## Next functional priority
 
-- **Agentic coding teams (Beta 1 scope, current implementation priority).**
-  Flexible limits, the remaining RPI Goal workflows, registry fetch, Git, a
-  narrowing-only Supervisor, per-agent Provider routing and writable team
-  workers. The [initiative plan](./planning/agentic-teams/README.md) is
-  self-contained and orders the slices; Goal Foundation has landed under the
-  [Goal spec](./docs/specs/goals.md), and A3 cache is in place. A4 flexible
-  limits (execution step 4) is implemented on its branch and awaits full review
-  and hosted CI. Once those pass, authorized dogfooding is next, then staged team
-  delivery (C1–C3), then the remaining Goal workflows. The Build profile has finite approved maxima of
-  4 GiB memory, 8 GiB requested cache, 1 GiB project storage and 256 tasks;
-  effective cache capacity is derived from StateRoot headroom, so the requested
-  maximum is not guaranteed usable capacity. Native build evidence and
-  named-host measurements still precede support claims. Remote
-  MCP/OAuth, interactive/background jobs and other network grants need their
-  own Policy/Guard/protocol evidence; retain the existing
-  [Tool scope](./docs/specs/tools.md) until each slice lands.
-- **Deferred Anthropic consumer subscriptions.** Native Claude-plan access is
-  missing and user-deferred behind the [route/authorization gate](./docs/research/subscription-provider-routes-2026-10.md#decision-boundary-for-beta-1).
-  Continue unaffected implementation. API-key billing is a separate route;
-  another harness's implementation or credentials do not authorize Arany access.
+Mission: the specialist harness for multi-agent coding teams that can be trusted to work autonomously (see [AGENTS.md](./AGENTS.md#mission)). Every item below either makes a non-negotiable guarantee cheaper, exposes it to more callers, or builds the team on top of it. Nothing below weakens a guarantee. Loop shape, wire formats, defaults, permission modes, hooks, agent definitions and embedding surfaces copy the named peer mechanism. The [initiative plan](./planning/agentic-teams/README.md) orders the team slices (C1-C3); Goal Foundation, A3 cache and A2 (message-native Provider request, #56) have landed.
+
+### Pursue, in order
+
+1. **Run probe P1** (owner, live; see [owner-run live probes](#message-native-provider-request-owner-run-live-probes)). Until P1 passes, the Anthropic native route stays "offline-tested, unvalidated live". Follow-up if P1 shows weak schema compliance: move `plan_contract` to its own `arany_plan` Tool so Tool schemas can be strict again.
+2. **Prompt caching (Stage C).** Copy Anthropic's three-breakpoint `cache_control` plan and OpenAI's `prompt_cache_key` (Codex CLI relies on implicit Responses caching plus encrypted-reasoning replay, already done in A2). Replace the `tool_choice: none` flip for finish-only researchers with a prompt line so the prefix stays byte-stable. Evidence: cached input tokens in the Goal report.
+3. **In-process read-only Tools.** Copy the peer split (Claude Code and Codex sandbox commands, not reads): List, Read, Search and typed Git reads run in the Engine under the admitted `cap-std` capability and the same bounds; receipts record `InProcess`; the Guard stays mandatory for every mutation, command, Skill script and MCP call. Read page and Tool result rise to 64 KiB. New gate: Read p95 <= 50 ms in the Tool journeys.
+4. **Engine hygiene for embedding.** One Engine per process (Provider swapped per thread); `Store::subscribe` ordered Event stream; `RunHandle { cancel, steer, approvals, events }`; `exec --output jsonl` and telemetry emitted from the stream. Copy Codex's core shape (submission queue in, ordered events out).
+5. **Spec diet** (process, owner-approved). Collapse per-slice evidence tables into test names and move native-gate ledgers into CI job names. Applies to frozen areas too.
+6. **Ledger diet.** Run-level active-time deadline plus one `active_ms` on `RunFinished` (replaces the per-action reserve/settle pairs); an `Action::max_events()` table replaces Event-tail literals; one `execute_step` shared by primary and children; per-kind payload versions so an optional field no longer invalidates every journal. The owner approved per-kind payload versions; they stay consistent with "one current format, no compatibility readers" because each kind has exactly one current version.
+7. **Hook seam and permission modes.** Copy Claude Code: hook events `PreToolUse`/`PostToolUse`/`Stop`/`SubagentStop`/`PreCompact`, command hooks with JSON on stdin and exit-2-blocks, `permissionDecision` `allow|deny|ask`; permission modes `default|acceptEdits|plan|auto|dontAsk` and rule syntax `Bash(git diff *)`. Arany-specific: hooks only narrow, verdicts are journaled, `updatedInput` is accepted only when it narrows. Human approval and AI review become hook adapters.
+8. **`arany serve --stdio`.** Chosen first by the north; ACP stays a later adapter (item 13). Copy Codex app-server: JSON-RPC 2.0 over NDJSON, `thread/start|resume|fork`, `turn/start|interrupt`, server-initiated approval requests, `thread/item/*` notifications, `arany generate-schema` (Codex `generate-ts`), an `initialize` capabilities array (Claude Code `system/init`). Arany-specific methods: `goal/pause|resume`, `turn/steer`, `receipt/get`, `events/subscribe { since }`. The attached TUI and `exec` become clients (OpenCode's TUI-as-client).
+9. **Per-role Provider routing (plan D).** `Providers { primary, child, review, compaction }`; per-role provenance pinned in `RunStarted`. Copy OpenCode's per-agent `model` field and Claude Code's `--fallback-model` chain semantics (fallback only on call failure, never on Tool re-dispatch, per design-tree R3-7).
+10. **Multi-call steps (Stage D)** after probe P2; copy Anthropic parallel `tool_use` with the journal's four-call cap.
+11. **C2 edit-only workers.** Copy Claude Code agent files (`name`, `description`, `tools`, `disallowedTools`, `model`, `permissionMode`, `maxTurns`, `isolation: worktree`, foreground/background, resume by id) as the definition format; Arany-specific: leases, handover, integration order and conflicts are journaled Events; worker effects publish only through changesets with receipts.
+12. **C3 command-capable views and the Supervisor as hook adapters.**
+13. **ACP adapter** (`arany acp`) over the stdio protocol (Goose's `goose acp` shape) for Zed, JetBrains and Neovim; then the crate split `arany-engine` / `arany`.
+
+Dogfooding starts after item 3; the owner leads it when that point is reached. Every later item is exercised through real use and supplies the Supervisor's calibration data.
+
+Teams today are read-only researcher children (C1); writable teams arrive with item 11. Native build evidence and named-host measurements still precede Build-profile support claims (finite approved maxima: 4 GiB memory, 8 GiB requested cache, 1 GiB project storage, 256 tasks; effective cache capacity derives from StateRoot headroom and is not guaranteed). Remote MCP/OAuth, interactive/background jobs and other network grants need their own Policy/Guard/protocol evidence; retain the existing [Tool scope](./docs/specs/tools.md) until each slice lands.
+
+### Freeze until item 11 lands
+
+CI stays green; no new features, spec sections or evidence gates for: terminal views and tmux evidence beyond dogfooding; macOS Guard features beyond parity probes; build cache; ChatGPT OAuth and subscription routes; A6 registry fetch; E4 checkpoints and rewind; the Supervisor as loop code; the Anthropic consumer-subscription gate; new typed Tools other than the in-process read set.
+
+- **Deferred Anthropic consumer subscriptions.** Native Claude-plan access is missing and user-deferred behind the [route/authorization gate](./docs/research/subscription-provider-routes-2026-10.md#decision-boundary-for-beta-1). API-key billing is a separate route; another harness's implementation or credentials do not authorize Arany access.
+
+### Copy or reuse (peer -> mechanism)
+
+- Claude Code -> hook protocol, permission modes and rule syntax, subagent frontmatter and nesting/resume model, `--max-turns`/`--max-budget-usd` names, `system/init` capabilities array, cheap first-pass tool-output truncation before summarizing, `--autocompact` threshold setting.
+- Codex CLI -> app-server method vocabulary and NDJSON framing, `generate-ts` schema export, sandbox preset names `read_only|workspace_write|full_access`, encrypted-reasoning replay (done), `agent-roles` naming for the roster.
+- OpenCode -> TUI as a client of the server; per-agent `model`; session fork/abort/revert endpoints; OpenAPI at `/doc` when the HTTP stage comes.
+- Goose -> `acp` subprocess adapter and `serve` loopback auth (`X-Secret-Key`, explicit allowed origins).
+- OpenHands -> sandbox-on-demand workspace adapter shape for a future container-backed Guard; `RemoteConversation` as the model for a remote client.
+- Aider -> repo map as a bounded, digest-pinned include (later).
+- Cline/Roo -> shadow-git checkpoints when E4 is unfrozen.
 
 ## Architecture follow-ups
 
@@ -118,7 +135,7 @@ to the user's credential store or clipboard.
 | Pending gate | Completion condition and owner |
 | --- | --- |
 | Hosted CI and native Linux regression checks | Publish when authorized, verify the pull-request jobs on a hosted runner (format and Clippy, Linux and macOS debug/release tests with `--cfg arany_ci`), and run the native consent, terminal, setup, Session picker, pinned-Skill and Tool owners, including the production private-mount bootstrap fixture (shared-source success, pre-existing nested-mount refusal and no late propagation), Linux command descendant termination before changeset capture and create/modify/delete publication, rejection, approval and cancellation with closed replay. The full systemd Guard product journey is separate from the topology fixture and is activated by a default-false `linux_native_advanced` manual lane. The product Guard and tmux outcomes remain pending until the exact parents pass on native x86_64 and ARM64. Native Linux command changeset execution remains unverified on the current macOS host. [Workflow](./.github/workflows/ci.yml), [testing rules](./agents/testing.md) |
-| macOS runtime mount topology | Run the native mounted-image refusal and selected-runtime command under Seatbelt on hosted macOS CI; the focused `getfsstat` topology fixture and existing guarded unit command cover adapter behavior, but a full product-level injected-mount Ready/GO journey remains unverified. Do not claim a lifetime mount-isolation guarantee. [Tools spec](./docs/specs/tools.md), [Guard rules](./agents/guard.md) |
+| macOS runtime mount topology | Run the native mounted-image refusal and selected-runtime command under Seatbelt on hosted macOS CI; the focused `getfsstat` topology fixture and existing guarded unit command cover adapter behavior, but a full product-level injected-mount Ready/GO journey remains unverified. Do not claim a lifetime mount-isolation guarantee. Known flake: the `hdiutil detach` busy failure in `guarded_runtime_profile_checks_mount_topology_before_dispatch` (fixture cleanup in `tests/session_run/tools_macos.rs`, near the final `hdiutil detach` assertion) recurs on hosted macOS; investigate natively on a Mac, no retries. [Tools spec](./docs/specs/tools.md), [Guard rules](./agents/guard.md) |
 | Native build profile coverage | After A3/A4, run real offline Arany builds on named Linux and macOS hosts. On macOS specifically trace `cc`/`xcrun` delegation to `/Library/Developer/CommandLineTools` and the selected SDK; grant only measured, exact runtime roots if the actual build demonstrates that need. [Tools spec](./docs/specs/tools.md), [native evidence rules](./agents/references/testing-details.md#native-and-live-evidence) |
 | macOS typed Git reads | The Command Line Tools Git profile probe (`native_git_profile_runs_pinned_git_and_denies_host_access`) and the macOS Git journey (`guarded_native_git_reads_survive_closed_replay`) passed in the hosted macOS debug and release jobs on head b83ac83 ([run 38929214556](https://github.com/fpmirabile/arany/actions/runs/38929214556)) and on a local arm64 host. The macOS journey file compiles only with `debug_assertions`, so release-profile Git evidence is unverified. Hosts with only Xcode.app or the `/usr/bin/git` xcrun shim and no Command Line Tools report Git unavailable. Git outside the platform root (Nix, Homebrew, Guix) stays unavailable by design. [Tools spec](./docs/specs/tools.md#typed-git-reads) |
 | macOS optimized product/account isolation | On a disposable effective-user home, run the full optimized Engine/active-CLI and account setup/refresh/logout/cross-user gates. Changing HOME does not isolate account paths; debug fixtures and override refusal do not prove this gate. [Fixture rules](./agents/references/testing-details.md#host-and-account-isolation) |

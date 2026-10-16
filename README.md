@@ -1,28 +1,27 @@
 # Arany
 
-A Rust-first, CLI-only agent harness specialized in multi-task agentic teams, with durable conversations and controlled coding work.
+A fast multi-agent coding harness for the terminal, built so you can trust what its agents did.
 
-Arany provides the runtime around a language model: it manages context, coordinates agent work, controls access to tools, and saves what happened. You work in a terminal, choose your Provider and model, and return to the same conversation across process restarts.
+Arany aims to do the hard thinking about teams for you: on a big task it plans the work and splits it across agents automatically. Every agent works inside a verifiable cage, so you can check that everything went as intended and that no agent went rogue.
 
-## Goal and principles
+## Why Arany
 
-The goal is a dependable harness where teams of agents carry out coding work end to end while Arany detects and restrains misbehavior, without replacing its Engine or tying your workflow to one Provider or operating system. Writable teams and the Supervisor are planned, not current features; see the [beta plan](./planning/agentic-teams/README.md).
+- **Teams without the choreography.** You describe the task; Arany plans it and divides the work across agents, instead of making you design the team.
+- **Safe AI, checkable afterwards.** Agents run inside a cage you can verify, and agents can only narrow authority, never widen it.
+  - **Durable journal and replay.** Every Provider call, Tool intent and effect is saved locally before the next step. Resume, fork and replay never re-run an effect.
+  - **Honest uncertainty.** If the outcome of an action is unknown, Arany says so, stops there and never retries it for you.
+  - **Sandboxed Guard with receipts.** Edits, commands, Skill scripts and MCP calls run in the Guard under an explicit grant and publish only as validated changes with receipts.
+  - **Budgeted Goals.** Budgets, pause, steering and cancellation survive restarts and crashes.
+  - **Hostile input stays data.** Repository files, Tool output, MCP metadata and Skill text are never treated as instructions.
+- **Your Provider, your terminal.** Choose OpenAI or Anthropic API keys, or a ChatGPT account, and work on Linux or macOS (Windows users run the Linux build under WSL2). Output is accessible and composes with scripts.
 
-- **Durable work.** Keep conversations and execution history locally, with explicit resume, fork and recovery.
-- **User control.** Make model selection, permissions and execution limits explicit. Tools operate within granted capabilities.
-- **OS parity.** Equivalent behavior on Linux and macOS, with narrow native integrations where necessary. On Windows, use the Linux build under WSL2.
-- **A useful terminal.** Support interactive conversations, accessible plain output and commands that compose with scripts.
-- **Simple engineering.** Build in Rust, reuse existing capabilities and apply Ponytail to every implementation. Add abstractions when a real requirement earns them.
+## Status
 
-## How it works
+Development beta; Linux and macOS have native Tool enforcement, but platform verification and release checks remain incomplete. Teams today are read-only researcher children: a primary agent can delegate bounded read-only work. Editing teams are in progress; see [next steps](./NEXT_STEPS.md) for the order and for remaining gaps. The [beta plan](./planning/agentic-teams/README.md) describes the team design.
 
-A conversation is a **Session**. Each submitted task starts a bounded **Run**, led by one primary agent. The primary can reason directly, use explicitly enabled tools, or delegate bounded read-only work to child agents. Arany records execution in a local SQLite journal so you can inspect results and continue the conversation later.
+## Get started
 
-The current implementation includes OpenAI and Anthropic API-key routes, consented ChatGPT-plan access, and verified custom read-only profiles. Optional coding tools provide guarded file edits, offline commands, runtime Skills and local MCP integrations.
-
-**Status:** development beta. Linux and macOS have native Tool enforcement; platform verification and release checks remain incomplete. Native Windows is not supported; WSL2 support still needs its own verification. See [next steps](./NEXT_STEPS.md) for remaining work.
-
-## Install from source
+### Install from source
 
 You need Git, Rustup and native build tools, including a C compiler. Rustup selects the toolchain pinned in [rust-toolchain.toml](./rust-toolchain.toml). From a terminal:
 
@@ -41,7 +40,7 @@ cargo run --locked
 
 Release packaging has a separate [build and distribution workflow](./docs/security/beta-dependency-inventory.md#release-checks-still-required).
 
-## Use Arany
+### Use Arany
 
 Start `arany` in the project you want to work with. Open `/setup` to connect an OpenAI or Anthropic API account, or a ChatGPT account through its consent flow, then submit a task.
 
@@ -65,34 +64,13 @@ Replace `SESSION_ID` with a saved Session ID. Model calls use your selected API 
 
 To enable file edits, commands, runtime Skills or MCP, follow the [local Tool setup](./docs/tools.md). Tool access requires explicit permission and available native enforcement.
 
-## Develop
-
-Start with the [contribution guide](./CONTRIBUTING.md) to find work, prepare a change and submit it for review. Coding agents start with [AGENTS.md](./AGENTS.md). Both use the shared [development setup and checks](./docs/development.md).
-
-### Install development skills
-
-Follow the [development skill setup](./agents/skills/README.md#install-for-a-harness)
-for Ponytail, Rust Clean Code, Arany Terminal Design and Clean Architecture Review.
-The same guide owns [restoration of the complete adopted set](./agents/skills/README.md#restore-the-lockfile)
-and [source updates](./agents/skills/README.md#update-a-local-skill). Installation
-uses Node.js/npm; the Arany executable itself is Rust. Development skills do not
-enable runtime Tools.
-
-### Run and check changes
-
-Use the [development guide](./docs/development.md) for setup, targeted verification
-commands and native prerequisites.
-
-## Contribute
-
-Bug reports, focused fixes, documentation improvements and native platform testing are welcome; the [contribution guide](./CONTRIBUTING.md) covers the workflow from issue to pull request.
-
-## Documentation
+## Learn more
 
 - [Documentation map](./docs/README.md): find the owner for a topic.
 - [System overview](./docs/architecture/system-overview.md): architecture and data flow.
 - [Product specs](./docs/specs/README.md): behavior and acceptance scenarios.
 - [Next steps](./NEXT_STEPS.md): current gaps and upcoming work.
+- [Contribution guide](./CONTRIBUTING.md): bug reports, fixes, documentation and native platform testing are welcome. Coding agents start with [AGENTS.md](./AGENTS.md); both use the shared [development setup and checks](./docs/development.md) and the [development skill setup](./agents/skills/README.md#install-for-a-harness).
 
 ## License
 

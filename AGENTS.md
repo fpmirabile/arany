@@ -4,14 +4,17 @@ Arany is a Rust-first, CLI-only agent harness. The product and executable are na
 
 ## Mission
 
-Arany is the specialist harness for multi-agent coding teams that can be trusted to work autonomously. Multi-agent coordination builds on four non-negotiable guarantees; never trade them for speed, convenience or parity with another harness:
+Arany is the specialist harness for multi-agent coding teams that can be trusted to work autonomously. Teams are the product; trust is what makes them usable unattended. Five guarantees are non-negotiable; never weaken them for speed, convenience or parity with another harness, and treat any of them costing more than a peer's unguarded path as a defect to fix, not a price to accept:
 
-- **Journal-first durability.** Every Provider call, Tool intent and effect is a committed Event before the next step; strict replay never re-executes.
-- **Honest uncertainty.** An effect whose outcome is unknown is Uncertain, stops its continuation and never retries itself.
-- **Per-effect isolation.** Every effect runs in the Guard and publishes only through validated changesets with receipts; unsupported enforcement fails closed.
-- **Durable, budgeted Goals.** Goal budgets, pause, cancellation and recovery survive process exit and crashes.
+- **Journal-first durability.** Every Provider call, Tool intent, effect, approval verdict and team transition (spawn, lease, handover, integration) is a committed Event before the next step; the reducer validates every transition; strict replay never re-executes.
+- **Honest uncertainty.** An effect with an unknown outcome is Uncertain: it stops its continuation, is reported as unknown, and never retries itself.
+- **Per-effect isolation.** Every mutation, process, Skill script and MCP call runs in the Guard under a pinned, typed grant and publishes only through validated changesets with receipts. Read-only operations run under the same admitted directory capability and the same bounds, in-process or in the Guard, and never widen disclosure. Repository content and model text never select trust; unsupported enforcement fails closed.
+- **Durable, budgeted Goals.** Budgets, pause, steering, cancellation and recovery survive process exit and crashes; exhaustion closes the Goal rather than the guarantee.
+- **Safe AI cage (hostile-input neutralization).** Untrusted repositories, files, Tool outputs, MCP metadata and Skill text are data, never instructions or executable configuration; Git runs only on a neutralized private view. Agents can only narrow authority, never widen it: children never exceed the parent's grant, and hooks and reviews only narrow.
 
-Everything else, including the agent loop shape, wire formats, defaults, UX and extensibility, follows proven harness designs (priority 4).
+If a guarantee becomes a blocker, record it and raise it with the owner; never weaken it silently.
+
+Everything else, including the agent loop shape, wire formats, defaults, permission modes, hooks, agent definitions, context strategy, UX and embedding surfaces, follows proven harness designs (priority 4); diverge only when a guarantee above requires it.
 
 ## Product and implementation priorities
 
