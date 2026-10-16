@@ -133,16 +133,12 @@ struct FastProvider;
 
 #[async_trait::async_trait]
 impl Provider for FastProvider {
-    fn profile_name(&self) -> &str {
-        "scripted"
-    }
-
-    fn model_name(&self) -> &str {
-        "test-model"
-    }
-
-    fn max_concurrent_calls(&self) -> u8 {
-        1
+    fn identity(&self) -> &crate::provider::ProviderIdentity {
+        static IDENTITY: std::sync::LazyLock<crate::provider::ProviderIdentity> =
+            std::sync::LazyLock::new(|| {
+                crate::provider::ProviderIdentity::native("scripted", "test-model")
+            });
+        &IDENTITY
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {

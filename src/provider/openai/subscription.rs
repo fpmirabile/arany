@@ -6,10 +6,11 @@ use crate::provider::ResponsePreview;
 use crate::provider::conversation::Conversation;
 use crate::provider::streaming::{FramingStage, ResponsesPreview, SseEvent, SseFramer};
 use crate::provider::{
-    AgentPhase, ChatGptProvenance, CompactionItem, CompactionRequest, CompactionResponse, Effort,
-    HistoryTurn, MAX_REPORTED_INPUT_TOKENS, MAX_RESPONSE_BYTES, OutputTokenBound, PromptRole,
-    Provider, ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse, RunInput, Usage,
-    catalog::valid_model_id, render,
+    AgentPhase, CallLimits, ChatGptProvenance, CompactionItem, CompactionRequest,
+    CompactionResponse, Effort, HistoryTurn, MAX_REPORTED_INPUT_TOKENS, MAX_RESPONSE_BYTES,
+    OutputTokenBound, PromptRole, Provenance, Provider, ProviderError, ProviderIdentity,
+    ProviderOutcome, ProviderRequest, ProviderResponse, RunInput, Usage, catalog::valid_model_id,
+    render,
 };
 use crate::session::{AgentRunId, RunId, SessionId};
 #[cfg(test)]
@@ -28,10 +29,9 @@ const PROBE_OUTPUT_CAP: u32 = 1024;
 
 pub struct ChatGptProvider {
     client: Client,
-    model: String,
+    identity: ProviderIdentity,
     effort: Effort,
     access_token: String,
-    provenance: ChatGptProvenance,
 }
 
 impl ChatGptProvider {
@@ -51,49 +51,32 @@ impl ChatGptProvider {
         {
             return Err(ProviderError::Rejected);
         }
+        let mut identity = ProviderIdentity::native("chatgpt", model);
+        identity.effort = Some(effort);
+        identity.provenance = Provenance::ChatGpt(provenance);
+        identity.limits = CallLimits {
+            output_token_bound: OutputTokenBound::LocalAcceptanceOnly,
+            deadline: DEADLINE,
+            ..CallLimits::default()
+        };
         Ok(Self {
             client: client()?,
-            model,
+            identity,
             effort,
             access_token,
-            provenance,
         })
     }
 }
 
 #[async_trait::async_trait]
 impl Provider for ChatGptProvider {
-    fn profile_name(&self) -> &str {
-        "chatgpt"
-    }
-
-    fn model_name(&self) -> &str {
-        &self.model
-    }
-
-    fn reasoning_effort(&self) -> Option<Effort> {
-        Some(self.effort)
-    }
-
-    fn max_concurrent_calls(&self) -> u8 {
-        1
-    }
-
-    fn chatgpt_provenance(&self) -> Option<ChatGptProvenance> {
-        Some(self.provenance.clone())
-    }
-
-    fn output_token_bound(&self) -> OutputTokenBound {
-        OutputTokenBound::LocalAcceptanceOnly
-    }
-
-    fn call_deadline(&self) -> Duration {
-        DEADLINE
+    fn identity(&self) -> &ProviderIdentity {
+        &self.identity
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         request.validate_scope()?;
-        if request.model != self.model {
+        if request.model != self.identity.model {
             return Err(ProviderError::Rejected);
         }
         timeout(
@@ -122,7 +105,7 @@ impl Provider for ChatGptProvider {
         preview: ResponsePreview,
     ) -> Result<ProviderResponse, ProviderError> {
         request.validate_scope()?;
-        if request.model != self.model {
+        if request.model != self.identity.model {
             return Err(ProviderError::Rejected);
         }
         timeout(
@@ -144,7 +127,7 @@ impl Provider for ChatGptProvider {
         &self,
         request: CompactionRequest,
     ) -> Result<CompactionResponse, ProviderError> {
-        if request.model != self.model {
+        if request.model != self.identity.model {
             return Err(ProviderError::Rejected);
         }
         timeout(

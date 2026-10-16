@@ -27,17 +27,17 @@ fn checked_provider_declares_local_bound_and_exact_account_provenance() {
         provenance.clone(),
     )
     .expect("admitted synthetic account");
-    assert_eq!(provider.profile_name(), "chatgpt");
-    assert_eq!(provider.model_name(), "model-a");
-    assert_eq!(provider.reasoning_effort(), Some(Effort::High));
-    assert_eq!(provider.max_concurrent_calls(), 1);
-    assert_eq!(provider.chatgpt_provenance(), Some(provenance.clone()));
+    assert_eq!(provider.identity().profile, "chatgpt");
+    assert_eq!(provider.identity().model, "model-a");
+    assert_eq!(provider.identity().effort, Some(Effort::High));
+    assert_eq!(provider.identity().limits.concurrency, 1);
+    assert_eq!(provider.identity().chatgpt_provenance(), Some(&provenance));
     assert_eq!(
-        provider.call_deadline(),
+        provider.identity().limits.deadline,
         std::time::Duration::from_secs(120)
     );
     assert_eq!(
-        provider.output_token_bound(),
+        provider.identity().limits.output_token_bound,
         OutputTokenBound::LocalAcceptanceOnly
     );
     assert!(

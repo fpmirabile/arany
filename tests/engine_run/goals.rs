@@ -787,16 +787,18 @@ struct FiniteTokenTeam {
 
 #[async_trait::async_trait]
 impl Provider for FiniteTokenTeam {
-    fn profile_name(&self) -> &str {
-        "scripted"
-    }
-
-    fn model_name(&self) -> &str {
-        "goal-token-team-model"
-    }
-
-    fn max_concurrent_calls(&self) -> u8 {
-        3
+    fn identity(&self) -> &arany::ProviderIdentity {
+        static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
+            std::sync::LazyLock::new(|| {
+                let mut identity =
+                    arany::ProviderIdentity::native("scripted", "goal-token-team-model");
+                identity.limits = arany::CallLimits {
+                    concurrency: 3,
+                    ..Default::default()
+                };
+                identity
+            });
+        &IDENTITY
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
@@ -1241,16 +1243,12 @@ struct ExactCapToolReview;
 
 #[async_trait::async_trait]
 impl Provider for ExactCapToolReview {
-    fn profile_name(&self) -> &str {
-        "scripted"
-    }
-
-    fn model_name(&self) -> &str {
-        "exact-cap-model"
-    }
-
-    fn max_concurrent_calls(&self) -> u8 {
-        1
+    fn identity(&self) -> &arany::ProviderIdentity {
+        static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::native("scripted", "exact-cap-model")
+            });
+        &IDENTITY
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
@@ -1384,16 +1382,18 @@ impl Drop for InFlightCall {
 
 #[async_trait::async_trait]
 impl Provider for PendingChildren {
-    fn profile_name(&self) -> &str {
-        "scripted"
-    }
-
-    fn model_name(&self) -> &str {
-        "pending-children-model"
-    }
-
-    fn max_concurrent_calls(&self) -> u8 {
-        2
+    fn identity(&self) -> &arany::ProviderIdentity {
+        static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
+            std::sync::LazyLock::new(|| {
+                let mut identity =
+                    arany::ProviderIdentity::native("scripted", "pending-children-model");
+                identity.limits = arany::CallLimits {
+                    concurrency: 2,
+                    ..Default::default()
+                };
+                identity
+            });
+        &IDENTITY
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
@@ -1834,16 +1834,12 @@ struct MeteredProvider {
 
 #[async_trait::async_trait]
 impl Provider for MeteredProvider {
-    fn profile_name(&self) -> &str {
-        "scripted"
-    }
-
-    fn model_name(&self) -> &str {
-        "metered-model"
-    }
-
-    fn max_concurrent_calls(&self) -> u8 {
-        1
+    fn identity(&self) -> &arany::ProviderIdentity {
+        static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::native("scripted", "metered-model")
+            });
+        &IDENTITY
     }
 
     async fn invoke(&self, _request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
@@ -3883,7 +3879,7 @@ async fn pause_before_queued_children_start_cancels_them_without_failing_the_run
     ])
     .with_before_call(1, move || assert!(pause.pause(), "first pause"));
     // One call at a time: the second child stays queued when the pause lands.
-    provider.capacity = 1;
+    provider.identity.limits.concurrency = 1;
     let requests = provider.requests.clone();
     let mut engine = facts_engine(
         StateRoot::admit(&state_path).expect("state"),
