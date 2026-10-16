@@ -1,10 +1,11 @@
 use super::{CustomProfile, CustomProfileError, PinnedDestination, transport::CustomTransport};
+use crate::provider::evidence::ProviderEvidenceRecord;
 use crate::provider::{
     AgentPhase, CompactionItem, CompactionRequest, HistoryTurn, PromptRole, ProviderOutcome,
     ProviderRequest, RunInput,
 };
 use crate::session::{AgentRunId, RunId, SessionId};
-use crate::store::{ProviderEvidenceRecord, StateRoot, Store};
+use crate::store::{StateRoot, Store};
 use sha2::{Digest, Sha256};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

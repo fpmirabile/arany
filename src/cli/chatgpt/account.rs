@@ -6,6 +6,7 @@ use crate::cli::credentials::{
     AccountStorage, delete_chatgpt_keyring_record, read_chatgpt_keyring_record,
     write_chatgpt_keyring_record,
 };
+use arany::RecordKind;
 use arany::{Effort, StateRoot, validate_native_model_id};
 use aws_lc_rs::hmac;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -271,7 +272,8 @@ impl AccountIndex {
 
     fn read(state: &StateRoot) -> Result<Self, AuthorizationError> {
         let Some(bytes) = state
-            .read_chatgpt_accounts_record()
+            .record(RecordKind::ChatgptAccounts)
+            .read()
             .map_err(|_| AuthorizationError::Unavailable)?
         else {
             return Ok(Self::empty());
@@ -292,7 +294,8 @@ impl AccountIndex {
         self.validate()?;
         let bytes = serde_json::to_vec(self).map_err(|_| AuthorizationError::Unavailable)?;
         state
-            .replace_chatgpt_accounts_record(&bytes)
+            .record(RecordKind::ChatgptAccounts)
+            .replace(&bytes)
             .map_err(|_| AuthorizationError::Unavailable)
     }
 }

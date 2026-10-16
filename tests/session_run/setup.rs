@@ -5,9 +5,9 @@ use super::active_terminal::{product_child_of, tty_settings, wait_stopped};
 use super::loopback::{ChildGuard, wait_product};
 use super::process::BoundedOutput;
 use super::session_picker::{pump, tail};
+use arany::{RecordKind, SessionView, StateRoot, Store};
 #[cfg(any(debug_assertions, target_os = "linux"))]
 use arany::{SessionDefaults, create_session, set_session_defaults};
-use arany::{SessionView, StateRoot, Store};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 #[cfg(any(debug_assertions, target_os = "linux"))]
 use rustix::process::{Signal, kill_process};
@@ -55,7 +55,8 @@ fn prepare_test_file_account_at(account_root: &Path) -> Uuid {
         }
     });
     state
-        .replace_saved_account_record(&serde_json::to_vec(&record).expect("test record"))
+        .record(RecordKind::SavedAccount)
+        .replace(&serde_json::to_vec(&record).expect("test record"))
         .expect("test file backend");
     account_id
 }
@@ -82,7 +83,8 @@ fn prepare_selected_chatgpt_account_at(account_root: &Path) -> Uuid {
         }], "model_checks": []
     });
     state
-        .replace_chatgpt_accounts_record(&serde_json::to_vec(&record).expect("account index"))
+        .record(RecordKind::ChatgptAccounts)
+        .replace(&serde_json::to_vec(&record).expect("account index"))
         .expect("test ChatGPT account index");
     let registration = serde_json::json!({
         "schema": 1,
@@ -90,9 +92,8 @@ fn prepare_selected_chatgpt_account_at(account_root: &Path) -> Uuid {
         "issued_client_id": null
     });
     state
-        .replace_chatgpt_registration_record(
-            &serde_json::to_vec(&registration).expect("registration"),
-        )
+        .record(RecordKind::ChatgptRegistration)
+        .replace(&serde_json::to_vec(&registration).expect("registration"))
         .expect("test ChatGPT registration");
     account_id
 }
@@ -251,22 +252,26 @@ fn bare_start_with_both_accounts_requires_an_explicit_billing_route() {
         if corrupt_native {
             StateRoot::open_existing(&temp.path().join("account-root"))
                 .expect("account root")
-                .replace_saved_account_record(b"invalid unselected account JSON")
+                .record(RecordKind::SavedAccount)
+                .replace(b"invalid unselected account JSON")
                 .expect("corrupt unselected native record");
         }
         if corrupt_chatgpt {
             StateRoot::open_existing(&temp.path().join("account-root"))
                 .expect("account root")
-                .replace_chatgpt_accounts_record(b"invalid unselected ChatGPT JSON")
+                .record(RecordKind::ChatgptAccounts)
+                .replace(b"invalid unselected ChatGPT JSON")
                 .expect("corrupt unselected ChatGPT index");
         }
         let account_root = StateRoot::open_existing(&temp.path().join("account-root"))
             .expect("protected account root");
         let native_before = account_root
-            .read_saved_account_record()
+            .record(RecordKind::SavedAccount)
+            .read()
             .expect("native account snapshot");
         let chatgpt_before = account_root
-            .read_chatgpt_accounts_record()
+            .record(RecordKind::ChatgptAccounts)
+            .read()
             .expect("ChatGPT account snapshot");
         let mut command = Command::new("/usr/bin/script");
         command
@@ -379,13 +384,15 @@ fn bare_start_with_both_accounts_requires_an_explicit_billing_route() {
         assert_eq!(marker("TTY_BEFORE:"), marker("TTY_AFTER:"));
         assert!(
             account_root
-                .read_saved_account_record()
+                .record(RecordKind::SavedAccount)
+                .read()
                 .expect("unchanged native record")
                 == native_before
         );
         assert!(
             account_root
-                .read_chatgpt_accounts_record()
+                .record(RecordKind::ChatgptAccounts)
+                .read()
                 .expect("unchanged ChatGPT record")
                 == chatgpt_before
         );
@@ -430,7 +437,8 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
             let account_root =
                 StateRoot::open_existing(&temp.path().join("account-root")).expect("account root");
             let bytes = account_root
-                .read_chatgpt_accounts_record()
+                .record(RecordKind::ChatgptAccounts)
+                .read()
                 .expect("account index")
                 .expect("selected account metadata");
             let mut index: serde_json::Value =
@@ -454,9 +462,8 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
                     }));
             }
             account_root
-                .replace_chatgpt_accounts_record(
-                    &serde_json::to_vec(&index).expect("account index"),
-                )
+                .record(RecordKind::ChatgptAccounts)
+                .replace(&serde_json::to_vec(&index).expect("account index"))
                 .expect("disconnected account index");
         }
         let mut command = Command::new("/usr/bin/script");
@@ -590,7 +597,8 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
         assert_eq!(marker("TTY_BEFORE:"), marker("TTY_AFTER:"));
         let index = StateRoot::open_existing(&temp.path().join("account-root"))
             .expect("account index remains")
-            .read_chatgpt_accounts_record()
+            .record(RecordKind::ChatgptAccounts)
+            .read()
             .expect("account index read")
             .expect("selected account metadata");
         let index: serde_json::Value = serde_json::from_slice(&index).expect("account index JSON");
@@ -619,7 +627,8 @@ fn saved_chatgpt_picker_lists_account_ids_and_cancels_cleanly() {
     let account_root =
         StateRoot::open_existing(&temp.path().join("account-root")).expect("account root");
     let bytes = account_root
-        .read_chatgpt_accounts_record()
+        .record(RecordKind::ChatgptAccounts)
+        .read()
         .expect("account index")
         .expect("selected account metadata");
     let mut index: serde_json::Value = serde_json::from_slice(&bytes).expect("account index JSON");
@@ -640,7 +649,8 @@ fn saved_chatgpt_picker_lists_account_ids_and_cancels_cleanly() {
             "token": null
         }));
     account_root
-        .replace_chatgpt_accounts_record(&serde_json::to_vec(&index).expect("two accounts"))
+        .record(RecordKind::ChatgptAccounts)
+        .replace(&serde_json::to_vec(&index).expect("two accounts"))
         .expect("save account index");
     let mut command = Command::new("/usr/bin/script");
     command
@@ -727,7 +737,8 @@ fn saved_chatgpt_picker_lists_account_ids_and_cancels_cleanly() {
     assert_eq!(marker("TTY_BEFORE:"), marker("TTY_AFTER:"));
     assert!(!state.exists(), "cancelled picker created Session State");
     let updated = account_root
-        .read_chatgpt_accounts_record()
+        .record(RecordKind::ChatgptAccounts)
+        .read()
         .expect("account index")
         .expect("saved accounts");
     let updated: serde_json::Value = serde_json::from_slice(&updated).expect("index JSON");
@@ -1006,9 +1017,20 @@ fn screen_reader_chatgpt_consent_defaults_to_back_before_browser_or_account_stat
         // The harness's Enter at folder consent is an explicit "read only" save, which creates the root.
         if let Ok(root) = StateRoot::open_existing(&account_root) {
             assert!(
-                root.read_saved_account_record().unwrap().is_none()
-                    && root.read_chatgpt_registration_record().unwrap().is_none()
-                    && root.read_chatgpt_accounts_record().unwrap().is_none(),
+                root.record(RecordKind::SavedAccount)
+                    .read()
+                    .unwrap()
+                    .is_none()
+                    && root
+                        .record(RecordKind::ChatgptRegistration)
+                        .read()
+                        .unwrap()
+                        .is_none()
+                    && root
+                        .record(RecordKind::ChatgptAccounts)
+                        .read()
+                        .unwrap()
+                        .is_none(),
                 "pre-consent setup created account State"
             );
         }
@@ -1163,7 +1185,8 @@ fn release_bare_session(
     if access_choice.is_some() {
         StateRoot::open_existing(&private_home.join(".local/state/arany"))
             .expect("fixture account root")
-            .replace_model_preferences_record(br#"{"version":1,"sources":[]}"#)
+            .record(RecordKind::ModelPreferences)
+            .replace(br#"{"version":1,"sources":[]}"#)
             .expect("mixed-access fixture without a remembered route");
     }
     let workspace = private_home.join("workspace");
@@ -1366,7 +1389,8 @@ fn release_mixed_access_prompts_each_start_without_reading_the_other_record() {
     prepare_selected_chatgpt_account_at(&account_path);
     let account = StateRoot::open_existing(&account_path).expect("private account root");
     account
-        .replace_chatgpt_accounts_record(b"invalid-unselected-chatgpt-canary")
+        .record(RecordKind::ChatgptAccounts)
+        .replace(b"invalid-unselected-chatgpt-canary")
         .expect("unselected index fixture");
     let passwd_home = release_passwd_home();
     let api = release_bare_session(
@@ -1384,7 +1408,8 @@ fn release_mixed_access_prompts_each_start_without_reading_the_other_record() {
 
     prepare_selected_chatgpt_account_at(&account_path);
     account
-        .replace_saved_account_record(b"invalid-unselected-native-canary")
+        .record(RecordKind::SavedAccount)
+        .replace(b"invalid-unselected-native-canary")
         .expect("unselected API fixture");
     let chatgpt = release_bare_session(
         &private_home,
@@ -1396,13 +1421,16 @@ fn release_mixed_access_prompts_each_start_without_reading_the_other_record() {
     .expect("explicit ChatGPT Session");
     assert!(chatgpt.contains("Provider: chatgpt\r\nModel: unset\r\n"));
     account
-        .replace_chatgpt_accounts_record(b"invalid-unselected-chatgpt-canary")
+        .record(RecordKind::ChatgptAccounts)
+        .replace(b"invalid-unselected-chatgpt-canary")
         .expect("both invalid fixture");
     let native_before = account
-        .read_saved_account_record()
+        .record(RecordKind::SavedAccount)
+        .read()
         .expect("native snapshot");
     let chatgpt_before = account
-        .read_chatgpt_accounts_record()
+        .record(RecordKind::ChatgptAccounts)
+        .read()
         .expect("ChatGPT snapshot");
     for (name, choice) in [("blank-session", ""), ("cancel-session", "Cancel")] {
         assert!(
@@ -1421,13 +1449,15 @@ fn release_mixed_access_prompts_each_start_without_reading_the_other_record() {
         );
         assert!(
             account
-                .read_saved_account_record()
+                .record(RecordKind::SavedAccount)
+                .read()
                 .expect("unchanged native record")
                 == native_before
         );
         assert!(
             account
-                .read_chatgpt_accounts_record()
+                .record(RecordKind::ChatgptAccounts)
+                .read()
                 .expect("unchanged ChatGPT record")
                 == chatgpt_before
         );
@@ -2183,7 +2213,8 @@ fn narrow_no_color_setup_hides_key_and_restores_terminal_on_cancel() {
         let account_root = StateRoot::open_existing(&temp.path().join("account-root"))
             .expect("synthetic account root");
         let account_before = account_root
-            .read_saved_account_record()
+            .record(RecordKind::SavedAccount)
+            .read()
             .expect("initial account");
         let mut command = Command::new("/usr/bin/script");
         command
@@ -2467,7 +2498,8 @@ fn narrow_no_color_setup_hides_key_and_restores_terminal_on_cancel() {
         assert!(
             account_before
                 == account_root
-                    .read_saved_account_record()
+                    .record(RecordKind::SavedAccount)
+                    .read()
                     .expect("account after cancel"),
             "cancelled workspace setup replaced the account"
         );
@@ -2485,7 +2517,8 @@ fn cancelled_screen_reader_setup_hides_key_and_creates_no_session() {
     let account_root = StateRoot::open_existing(&temp.path().join("account-root"))
         .expect("synthetic account root");
     let account_before = account_root
-        .read_saved_account_record()
+        .record(RecordKind::SavedAccount)
+        .read()
         .expect("initial account");
     let mut command = Command::new("/usr/bin/script");
     command
@@ -2714,7 +2747,8 @@ fn cancelled_screen_reader_setup_hides_key_and_creates_no_session() {
     assert!(
         account_before
             == account_root
-                .read_saved_account_record()
+                .record(RecordKind::SavedAccount)
+                .read()
                 .expect("account after cancel"),
         "cancelled workspace setup replaced the account"
     );
@@ -3267,7 +3301,7 @@ fn native_credential_helper_round_trips_a_synthetic_isolated_slot() {
             .expect("native helper read"),
     );
     assert!(output.status.success(), "native helper read failed");
-    assert!(output.stdout.len() <= StateRoot::MAX_ACCOUNT_RECORD_BYTES);
+    assert!(output.stdout.len() <= RecordKind::SavedAccount.limit());
     let loaded: serde_json::Value = serde_json::from_slice(&output.stdout).expect("saved record");
     let expected: serde_json::Value = serde_json::from_slice(&account).expect("synthetic record");
     assert_eq!(loaded, expected);
@@ -3377,7 +3411,8 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
     let account_path = temp.path().join("account-home/.local/state/arany");
     let account_root = StateRoot::admit(&account_path).expect("isolated account marker");
     account_root
-        .replace_saved_account_record(br#"{"schema":1,"storage":"keyring","account":null}"#)
+        .record(RecordKind::SavedAccount)
+        .replace(br#"{"schema":1,"storage":"keyring","account":null}"#)
         .expect("keyring marker without credential");
     drop(account_root);
     let state = temp.path().join("resumed-state");

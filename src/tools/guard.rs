@@ -1,8 +1,7 @@
 use super::config::Config;
 use super::toolchains::{RuntimeGrant, validate_selection};
 use super::types::*;
-use super::{ToolError, ToolRuntime, now_ms};
-use crate::engine::RunCancellation;
+use super::{Cancellation, ToolError, ToolRuntime, now_ms};
 use crate::store::{BuildCacheIdentity, BuildCacheLease, StoreError};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
@@ -23,10 +22,6 @@ mod profile;
 
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(target_os = "linux")]
-pub(crate) use linux::PREPARATION_OVERHEAD;
-#[cfg(target_os = "macos")]
-pub(crate) use macos::PREPARATION_OVERHEAD;
 #[cfg(target_os = "macos")]
 pub(super) use macos::fixture::{Span as FixtureSpan, Stage as FixtureStage};
 #[cfg(target_os = "macos")]
@@ -52,6 +47,20 @@ pub(super) fn native_system_program(path: &str) -> Result<bool, ToolError> {
     {
         let _ = path;
         Ok(false)
+    }
+}
+
+impl ToolRuntime {
+    /// Native preparation and handshake time the Engine adds to a Tool's action deadline.
+    pub(crate) fn reservation_overhead(&self, _call: &ToolCall) -> Duration {
+        #[cfg(target_os = "macos")]
+        {
+            macos::PREPARATION_DEADLINE.saturating_add(Duration::from_secs(5))
+        }
+        #[cfg(target_os = "linux")]
+        {
+            Duration::from_secs(5)
+        }
     }
 }
 
@@ -482,7 +491,7 @@ fn attest_runtime_mounts(
 pub(super) async fn execute(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
-    cancellation: RunCancellation,
+    cancellation: Cancellation,
 ) -> Result<ToolObservation, ToolError> {
     let mut dispatched = false;
     #[cfg(target_os = "macos")]
@@ -644,17 +653,6 @@ pub(super) async fn send_cache_archive<W: tokio::io::AsyncWrite + Unpin>(
     Ok(())
 }
 
-#[cfg(test)]
-thread_local! {
-    static CANDIDATE_SYNC_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Makes the next candidate sync on this thread fail once.
-#[cfg(test)]
-fn fail_next_candidate_sync() {
-    CANDIDATE_SYNC_FAULT.with(|fault| fault.set(true));
-}
-
 pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
     lease: &BuildCacheLease,
@@ -686,13 +684,10 @@ pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
     let Some(file) = staged else {
         return Ok(CacheCandidate::Failed);
     };
-    #[cfg(test)]
-    let synced = if CANDIDATE_SYNC_FAULT.with(|fault| fault.replace(false)) {
-        Err(std::io::Error::other("injected candidate sync failure"))
-    } else {
-        file.sync_all()
-    };
-    #[cfg(not(test))]
+    #[cfg(any(test, feature = "test-support"))]
+    let synced =
+        crate::fault::FaultPlan::candidate_sync(lease.token()).and_then(|()| file.sync_all());
+    #[cfg(not(any(test, feature = "test-support")))]
     let synced = file.sync_all();
     if synced.is_err() {
         return Ok(CacheCandidate::Failed);
@@ -1613,7 +1608,7 @@ mod tests {
         valid.write_all(&candidate).unwrap();
         valid.sync_all().unwrap();
         drop(valid);
-        crate::store::fail_next_commit_marker(&identity);
+        crate::fault::FaultPlan::fail_commit_marker(&identity);
         let mut observation = command_observation();
         publish_cache_candidate(
             &mut observation,
@@ -1645,7 +1640,7 @@ mod tests {
         stream.extend(&candidate);
         stream.extend(b"CACHE_DONE\n");
         let mut reader = tokio::io::BufReader::new(stream.as_slice());
-        fail_next_candidate_sync();
+        crate::fault::FaultPlan::fail_candidate_sync(&identity);
         let outcome = receive_cache_candidate(&mut reader, &lease).await.unwrap();
         assert!(matches!(outcome, CacheCandidate::Failed));
         let mut trailer = String::new();

@@ -1,4 +1,5 @@
 use super::{AuthorizationAttempt, AuthorizationError, CodeExchange, account, valid_client_id};
+use arany::RecordKind;
 use arany::StateRoot;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -40,7 +41,7 @@ impl Record {
     fn encode(&self) -> Result<Vec<u8>, AuthorizationError> {
         self.validate()?;
         let bytes = serde_json::to_vec(self).map_err(|_| AuthorizationError::Unavailable)?;
-        if bytes.len() > StateRoot::MAX_CHATGPT_REGISTRATION_BYTES {
+        if bytes.len() > RecordKind::ChatgptRegistration.limit() {
             return Err(AuthorizationError::Unavailable);
         }
         Ok(bytes)
@@ -59,7 +60,8 @@ pub(crate) fn validate_saved_setup(workspace: &Path) -> Result<(), Authorization
         .with_account_replacement_lock(workspace, || {
             let host = account::saved_host_at(&state)?;
             let bytes = state
-                .read_chatgpt_registration_record()
+                .record(RecordKind::ChatgptRegistration)
+                .read()
                 .map_err(|_| AuthorizationError::Unavailable)?;
             match bytes {
                 Some(bytes) => {
@@ -97,7 +99,8 @@ impl Registration {
             .with_account_replacement_lock(workspace, || {
                 let saved_host = account::saved_host_at(state)?;
                 if let Some(bytes) = state
-                    .read_chatgpt_registration_record()
+                    .record(RecordKind::ChatgptRegistration)
+                    .read()
                     .map_err(|_| AuthorizationError::Unavailable)?
                 {
                     let mut record = Record::decode(&bytes)?;
@@ -110,7 +113,8 @@ impl Registration {
                         // Account publication may have committed before retry-slot cleanup.
                         record.issued_client_id = None;
                         state
-                            .replace_chatgpt_registration_record(&record.encode()?)
+                            .record(RecordKind::ChatgptRegistration)
+                            .replace(&record.encode()?)
                             .map_err(|_| AuthorizationError::Unavailable)?;
                     }
                     return Ok(Self(record));
@@ -128,7 +132,8 @@ impl Registration {
                     issued_client_id: None,
                 };
                 state
-                    .replace_chatgpt_registration_record(&record.encode()?)
+                    .record(RecordKind::ChatgptRegistration)
+                    .replace(&record.encode()?)
                     .map_err(|_| AuthorizationError::Unavailable)?;
                 Ok(Self(record))
             })
@@ -152,7 +157,8 @@ impl Registration {
 
 pub(super) fn verify_host_at(state: &StateRoot, host_id: Uuid) -> Result<(), AuthorizationError> {
     let Some(bytes) = state
-        .read_chatgpt_registration_record()
+        .record(RecordKind::ChatgptRegistration)
+        .read()
         .map_err(|_| AuthorizationError::Unavailable)?
     else {
         return Ok(());
@@ -169,7 +175,8 @@ pub(super) fn complete_issued_client_at(
     host_id: Uuid,
 ) -> Result<(), AuthorizationError> {
     let Some(bytes) = state
-        .read_chatgpt_registration_record()
+        .record(RecordKind::ChatgptRegistration)
+        .read()
         .map_err(|_| AuthorizationError::Unavailable)?
     else {
         return Ok(());
@@ -183,7 +190,8 @@ pub(super) fn complete_issued_client_at(
     }
     record.issued_client_id = None;
     state
-        .replace_chatgpt_registration_record(&record.encode()?)
+        .record(RecordKind::ChatgptRegistration)
+        .replace(&record.encode()?)
         .map_err(|_| AuthorizationError::Unavailable)
 }
 
@@ -203,7 +211,8 @@ fn retain_at(
     state
         .with_account_replacement_lock(workspace, || {
             let bytes = state
-                .read_chatgpt_registration_record()
+                .record(RecordKind::ChatgptRegistration)
+                .read()
                 .map_err(|_| AuthorizationError::Unavailable)?
                 .ok_or(AuthorizationError::InvalidIdentity)?;
             let mut record = Record::decode(&bytes)?;
@@ -219,7 +228,8 @@ fn retain_at(
             }
             record.issued_client_id = Some(exchange.client_id.clone());
             state
-                .replace_chatgpt_registration_record(&record.encode()?)
+                .record(RecordKind::ChatgptRegistration)
+                .replace(&record.encode()?)
                 .map_err(|_| AuthorizationError::Unavailable)
         })
         .map_err(|_| AuthorizationError::Unavailable)?
@@ -295,7 +305,8 @@ mod tests {
         );
         assert!(!fields.contains_key("agent_name_hint"));
         let persisted = reopened
-            .read_chatgpt_registration_record()
+            .record(RecordKind::ChatgptRegistration)
+            .read()
             .unwrap()
             .unwrap();
         assert!(
@@ -337,7 +348,8 @@ mod tests {
         );
 
         reopened
-            .replace_chatgpt_registration_record(&persisted)
+            .record(RecordKind::ChatgptRegistration)
+            .replace(&persisted)
             .expect("simulate death after account save before marker clear");
         let recovered = Registration::at(&reopened, &workspace).expect("reconciled account");
         assert_eq!(recovered.0.issued_client_id, None);
@@ -389,7 +401,8 @@ mod tests {
             issued_client_id: None,
         };
         reopened
-            .replace_chatgpt_registration_record(&conflicting.encode().unwrap())
+            .record(RecordKind::ChatgptRegistration)
+            .replace(&conflicting.encode().unwrap())
             .unwrap();
         assert!(matches!(
             Registration::at(&reopened, &workspace),
@@ -425,7 +438,8 @@ mod tests {
     fn malformed_registration_fails_closed() {
         let (_temp, workspace, state) = workspace_and_state();
         state
-            .replace_chatgpt_registration_record(b"{\"schema\":2}")
+            .record(RecordKind::ChatgptRegistration)
+            .replace(b"{\"schema\":2}")
             .expect("synthetic malformed record");
         assert!(matches!(
             Registration::at(&state, &workspace),
@@ -441,10 +455,12 @@ mod tests {
         missing.as_object_mut().unwrap().remove("issued_client_id");
         assert!(Record::decode(&serde_json::to_vec(&missing).unwrap()).is_err());
         state
-            .replace_chatgpt_registration_record(&record.encode().unwrap())
+            .record(RecordKind::ChatgptRegistration)
+            .replace(&record.encode().unwrap())
             .unwrap();
         state
-            .replace_chatgpt_accounts_record(b"not an account index")
+            .record(RecordKind::ChatgptAccounts)
+            .replace(b"not an account index")
             .unwrap();
         assert!(matches!(
             Registration::at(&state, &workspace),

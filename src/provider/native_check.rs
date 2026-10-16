@@ -4,8 +4,9 @@ use super::{
     ProviderError, ProviderOutcome, ProviderRequest, RunInput, catalog::valid_model_id,
     list_native_models_with_credentials, valid_saved_api_account_id, validate_native_api_key,
 };
+use crate::provider::evidence::NativeEvidenceRecord;
 use crate::session::{AgentRunId, RunId, SessionId};
-use crate::store::{NativeEvidenceRecord, StateRoot, Store};
+use crate::store::{StateRoot, Store};
 use aws_lc_rs::hmac;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;

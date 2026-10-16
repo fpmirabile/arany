@@ -9,6 +9,7 @@ mod conversation;
 mod custom;
 mod decode;
 mod effort;
+pub(crate) mod evidence;
 mod image;
 #[cfg(test)]
 pub(crate) use image::test_image;

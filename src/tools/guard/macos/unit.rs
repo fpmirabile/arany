@@ -6,8 +6,8 @@ use super::storage::{
 use super::{
     CPU_LIMIT, PREPARATION_DEADLINE, SUPERVISION_INTERVAL, bootstrap, ffi, system_program,
 };
-use crate::engine::RunCancellation;
 use crate::private_fs::{PrivateDirectory, open_directory};
+use crate::tools::Cancellation;
 use crate::tools::types::{CommandResult, ToolDisposition, ToolLimits, ToolResourceClass};
 use crate::tools::{EffectIntent, ToolError, ToolObservation, ToolRuntime};
 use core_foundation::array::CFArray;
@@ -777,7 +777,7 @@ impl Drop for Unit {
 pub(super) async fn execute(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
-    mut cancellation: RunCancellation,
+    mut cancellation: Cancellation,
     dispatched: &AtomicBool,
 ) -> Result<ToolObservation, ToolError> {
     let (mut unit, active_window) = tokio::select! {
@@ -1024,7 +1024,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             let stream =
                 tokio::net::UnixStream::from_std(stream).map_err(|_| ToolError::Operation)?;
             let (mut input, mut output) = stream.into_split();
-            let cancellation = RunCancellation::new();
+            let cancellation = Cancellation::new();
             let mut reader = None;
             let mut storage: Option<Vec<cap_std::fs::Dir>> = None;
             let mut command_before = None;

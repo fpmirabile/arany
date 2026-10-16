@@ -7,6 +7,8 @@ mod test_process;
 
 mod diagnostics;
 mod engine;
+#[cfg(any(test, feature = "test-support"))]
+mod fault;
 mod presentation;
 mod private_fs;
 mod provider;
@@ -28,6 +30,8 @@ pub use engine::{
     create_session, fork_session, list_sessions, rename_session, resume_session,
     set_session_defaults, validate_workspace_inputs,
 };
+#[cfg(feature = "test-support")]
+pub use fault::FaultPlan;
 pub use presentation::{
     Output, escape_terminal, goal_status, render_cache_update_feedback, render_exec,
     render_run_feedback, render_session,
@@ -60,7 +64,7 @@ pub use session::{
     ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition, RunId, RunStatus,
     RunView, SessionDefaults, SessionId, SessionListItem, SessionView, ToolView,
 };
-pub use store::{HistoryReset, StateRoot, Store, StoreError};
+pub use store::{HistoryReset, Record, RecordKind, StateRoot, Store, StoreError};
 pub use telemetry::{Telemetry, TelemetryConfigError};
 pub use terminal::{
     AttachedTerminal, CommandAvailability, CommandParseError, CompletionLayout, Composer,

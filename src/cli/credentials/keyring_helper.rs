@@ -1,6 +1,6 @@
 use super::{CredentialError, DEFAULT_ACCOUNT, SERVICE, SavedAccount, admit_transport};
 use crate::cli::chatgpt::{MAX_TOKEN_RECORD_BYTES, valid_keyring_record};
-use arany::StateRoot;
+use arany::RecordKind;
 #[cfg(not(target_os = "macos"))]
 use keyring::Entry;
 use keyring::Error;
@@ -280,7 +280,7 @@ mod tests {
         assert_eq!(slot_record_limit("other"), None);
         assert_eq!(
             slot_record_limit(DEFAULT_ACCOUNT),
-            Some(StateRoot::MAX_ACCOUNT_RECORD_BYTES)
+            Some(RecordKind::SavedAccount.limit())
         );
         let account = SavedAccount::new(
             "openai".into(),
@@ -459,7 +459,7 @@ mod tests {
         if let Some(path) = std::env::var_os(SOCKET) {
             let mut record = Vec::new();
             std::io::stdin()
-                .take((StateRoot::MAX_ACCOUNT_RECORD_BYTES + 1) as u64)
+                .take((RecordKind::SavedAccount.limit() + 1) as u64)
                 .read_to_end(&mut record)
                 .expect("synthetic account input");
             let account: SavedAccount =
@@ -500,7 +500,7 @@ mod tests {
                 command,
                 "write",
                 Some(&record),
-                StateRoot::MAX_ACCOUNT_RECORD_BYTES,
+                RecordKind::SavedAccount.limit(),
                 DEADLINE,
                 &AtomicBool::new(false),
             )
@@ -573,7 +573,7 @@ fn slot_record_limit(slot: &str) -> Option<usize> {
                     .is_some_and(|id| Uuid::parse_str(id).is_ok())
             })
     {
-        Some(StateRoot::MAX_ACCOUNT_RECORD_BYTES)
+        Some(RecordKind::SavedAccount.limit())
     } else if slot.strip_prefix("chatgpt-").is_some_and(|suffix| {
         suffix.len() == 43
             && suffix
