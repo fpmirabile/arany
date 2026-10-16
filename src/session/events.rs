@@ -1437,6 +1437,13 @@ mod account_default_tests {
             tool_policy: None,
         };
         assert!(config.validate().is_ok());
+        config.output_token_cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
+        assert!(config.validate().is_ok());
+        for invalid in [0, crate::provider::MAX_OUTPUT_TOKEN_CAP + 1] {
+            config.output_token_cap = invalid;
+            assert!(config.validate().is_err(), "output cap {invalid}");
+        }
+        config.output_token_cap = 4096;
         config.saved_api_account_id = Some(Uuid::nil());
         assert!(matches!(
             config.validate(),
@@ -1621,7 +1628,7 @@ impl RunConfig {
             output_token_bound: self.output_token_bound,
         })
         .valid()
-            || self.output_token_cap != 4096
+            || !(1..=crate::provider::MAX_OUTPUT_TOKEN_CAP).contains(&self.output_token_cap)
             || self
                 .tool_policy
                 .as_ref()

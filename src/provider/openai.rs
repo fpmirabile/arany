@@ -224,10 +224,16 @@ impl Provider for OpenAiProvider {
         self.saved_api_account_id
     }
 
+    fn max_output_tokens(&self) -> u32 {
+        super::MAX_OUTPUT_TOKEN_CAP
+    }
+
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         request.validate_scope()?;
         super::image::validate_images(&request)?;
-        if request.model != self.model || !(1..=4096).contains(&request.max_output_tokens) {
+        if request.model != self.model
+            || !(1..=self.max_output_tokens()).contains(&request.max_output_tokens)
+        {
             return Err(ProviderError::Rejected);
         }
         let response = self
@@ -256,7 +262,9 @@ impl Provider for OpenAiProvider {
     ) -> Result<ProviderResponse, ProviderError> {
         request.validate_scope()?;
         super::image::validate_images(&request)?;
-        if request.model != self.model || !(1..=4096).contains(&request.max_output_tokens) {
+        if request.model != self.model
+            || !(1..=self.max_output_tokens()).contains(&request.max_output_tokens)
+        {
             return Err(ProviderError::Rejected);
         }
         let mut body = wire::run_body_with_effort(&request, self.effort);
@@ -353,6 +361,7 @@ mod tests {
         assert_eq!(provider.reasoning_effort(), Some(Effort::High));
         assert_eq!(provider.key, "synthetic-openai-key");
         assert_eq!(provider.saved_api_account_id(), None);
+        assert_eq!(provider.max_output_tokens(), 16_384);
         let account_id = Uuid::now_v7();
         let saved = OpenAiProvider::from_saved_api_key_with_effort(
             "gpt-5.4".into(),

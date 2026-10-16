@@ -39,7 +39,7 @@ pub fn validate_workspace_inputs(
     Ok(())
 }
 
-const OUTPUT_TOKEN_CAP: u32 = 4096;
+const CHILD_OUTPUT_TOKEN_CAP: u32 = 4096;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -392,6 +392,7 @@ struct ProviderSelection {
     saved_api_account_id: Option<uuid::Uuid>,
     chatgpt_provenance: Option<crate::provider::ChatGptProvenance>,
     output_token_bound: crate::provider::OutputTokenBound,
+    max_output_tokens: u32,
 }
 
 struct GoalAdmission {
@@ -2267,7 +2268,7 @@ impl<P: Provider + 'static> Engine<P> {
             chatgpt_provenance: selection.chatgpt_provenance,
             output_token_bound: selection.output_token_bound,
             policy: request.policy,
-            output_token_cap: OUTPUT_TOKEN_CAP,
+            output_token_cap: selection.max_output_tokens,
             provider_concurrency,
             workspace_device,
             workspace_inode,
@@ -2455,7 +2456,7 @@ impl<P: Provider + 'static> Engine<P> {
             goal_context_facts: None,
             child_results: Vec::new(),
             steering_notes: Vec::new(),
-            max_output_tokens: OUTPUT_TOKEN_CAP,
+            max_output_tokens: selection.max_output_tokens,
             tools: tool_context,
         };
         if let Some(steering) = &self.steering {
@@ -2610,6 +2611,7 @@ impl<P: Provider + 'static> Engine<P> {
             saved_api_account_id: self.provider.saved_api_account_id(),
             chatgpt_provenance: self.provider.chatgpt_provenance(),
             output_token_bound: self.provider.output_token_bound(),
+            max_output_tokens: self.provider.max_output_tokens(),
         };
         if !(crate::provider::ProviderIdentity {
             profile: &selection.name,
@@ -2622,6 +2624,7 @@ impl<P: Provider + 'static> Engine<P> {
             output_token_bound: selection.output_token_bound,
         })
         .valid()
+            || !(1..=crate::provider::MAX_OUTPUT_TOKEN_CAP).contains(&selection.max_output_tokens)
         {
             return Err(EngineError::InvalidRequest);
         }

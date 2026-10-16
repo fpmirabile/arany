@@ -40,6 +40,7 @@ struct ScriptedProvider {
     chatgpt_provenance: Option<ChatGptProvenance>,
     output_token_bound: OutputTokenBound,
     capacity: u8,
+    max_output_tokens: u32,
     responses: Mutex<VecDeque<Result<ProviderOutcome, ProviderError>>>,
     cancel_at_completion: Option<(AgentPhase, RunCancellation)>,
     before_call: Option<(usize, Box<dyn Fn() + Send + Sync>)>,
@@ -60,6 +61,7 @@ impl ScriptedProvider {
             chatgpt_provenance: None,
             output_token_bound: OutputTokenBound::ProviderEnforced,
             capacity: 3,
+            max_output_tokens: 4096,
             responses: Mutex::new(responses.into_iter().map(Ok).collect()),
             cancel_at_completion: None,
             before_call: None,
@@ -105,6 +107,11 @@ impl ScriptedProvider {
 
     fn with_effort(mut self, effort: Effort) -> Self {
         self.effort = Some(effort);
+        self
+    }
+
+    fn with_max_output_tokens(mut self, cap: u32) -> Self {
+        self.max_output_tokens = cap;
         self
     }
 
@@ -155,6 +162,10 @@ impl Provider for ScriptedProvider {
 
     fn output_token_bound(&self) -> OutputTokenBound {
         self.output_token_bound
+    }
+
+    fn max_output_tokens(&self) -> u32 {
+        self.max_output_tokens
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
@@ -4709,6 +4720,81 @@ fn team_cancellation_drains_active_and_queued_children() {
             );
             store.close().await.expect("store shutdown");
         }
+    });
+}
+
+#[test]
+fn provider_declared_output_cap_reaches_the_primary_and_caps_children() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
+        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let provider = ScriptedProvider::new(vec![
+            ProviderOutcome::Delegate(Delegate {
+                children: vec!["Inspect".into()],
+            }),
+            ProviderOutcome::Finish(Finish {
+                summary: "child".into(),
+                result: "Child answer".into(),
+            }),
+            ProviderOutcome::Finish(Finish {
+                summary: "done".into(),
+                result: "Answer".into(),
+            }),
+        ])
+        .with_max_output_tokens(16_384);
+        let requests = Arc::clone(&provider.requests);
+        let mut engine = Engine::open(
+            StateRoot::admit(&temp.path().join("state")).expect("private state"),
+            provider,
+        )
+        .expect("engine");
+        let mut team = request(&workspace, "Question");
+        team.policy = CollaborationPolicy::Team {
+            max_active_children: 1,
+        };
+        let outcome = engine.run(team).await.expect("team Run");
+        assert_eq!(outcome.run.status, RunStatus::Finished);
+        assert_eq!(
+            outcome
+                .run
+                .config
+                .as_ref()
+                .expect("Run config")
+                .output_token_cap,
+            16_384
+        );
+        let caps: Vec<_> = requests
+            .lock()
+            .expect("requests lock")
+            .iter()
+            .map(|call| (call.phase, call.max_output_tokens))
+            .collect();
+        assert_eq!(
+            caps,
+            [
+                (AgentPhase::RootPlan, 16_384),
+                (AgentPhase::ChildWork, 4096),
+                (AgentPhase::RootSynthesis, 16_384)
+            ]
+        );
+        engine.close().await.expect("engine shutdown");
+
+        let mut oversized = Engine::open(
+            StateRoot::admit(&temp.path().join("state")).expect("state readmission"),
+            ScriptedProvider::new(Vec::new()).with_max_output_tokens(16_385),
+        )
+        .expect("engine");
+        assert!(matches!(
+            oversized.run(request(&workspace, "Question")).await,
+            Err(EngineError::InvalidRequest)
+        ));
+        oversized.close().await.expect("engine shutdown");
     });
 }
 

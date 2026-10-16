@@ -3,7 +3,7 @@ use super::{
     TOOL_CLEANUP_OVERHEAD, TOOL_PREPARATION_OVERHEAD, call_record, call_trace_result,
     call_trace_usage, duration_ms, invoke_bounded, valid_finish,
 };
-use crate::engine::{EngineError, OUTPUT_TOKEN_CAP, RunCancellation};
+use crate::engine::{CHILD_OUTPUT_TOKEN_CAP, EngineError, RunCancellation};
 use crate::provider::{
     AgentPhase, ChildResult, Finish, Provider, ProviderOutcome, ProviderRequest, ProviderResponse,
 };
@@ -621,7 +621,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 goal_context_facts: None,
                 child_results: Vec::new(),
                 steering_notes: Vec::new(),
-                max_output_tokens: OUTPUT_TOKEN_CAP,
+                max_output_tokens: CHILD_OUTPUT_TOKEN_CAP.min(root_request.max_output_tokens),
                 tools: children[index].tools.clone(),
             };
             self.reserve_provider_call(children[index].agent_run_id)
