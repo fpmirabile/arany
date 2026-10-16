@@ -198,7 +198,9 @@ async fn probe_model_at(
     {
         return Err(ProviderError::Rejected);
     }
+    let session_id = SessionId::new();
     let direct = ProviderRequest {
+        session_id,
         run_id: RunId::new(),
         agent_run_id: AgentRunId::new(),
         phase: AgentPhase::RootPlan,
@@ -232,7 +234,7 @@ async fn probe_model_at(
     }
 
     let compact = CompactionRequest {
-        session_id: SessionId::new(),
+        session_id,
         covered_run_id: RunId::new(),
         model: model.to_owned(),
         previous_summary: None,
@@ -544,6 +546,19 @@ fn subscription_body(
 ) -> Result<Vec<u8>, ProviderError> {
     super::super::image::validate_images(request)?;
     let mut body = wire::run_body_with_effort(request, conversation, effort)?;
+    if let Some(tools) = &conversation.tools {
+        let allowed = wire::allowed_functions(request, tools, &conversation.outcome);
+        let functions = body
+            .get_mut("tools")
+            .and_then(Value::as_array_mut)
+            .ok_or(ProviderError::Rejected)?;
+        functions.retain(|function| {
+            function["name"]
+                .as_str()
+                .is_some_and(|name| allowed.iter().any(|allowed| allowed == name))
+        });
+        body["tool_choice"] = json!("required");
+    }
     // The ChatGPT route is stateless, so replayed items drop their server ids and keep their content.
     for item in body["input"].as_array_mut().into_iter().flatten() {
         if matches!(item["type"].as_str(), Some("reasoning" | "function_call"))
@@ -551,18 +566,6 @@ fn subscription_body(
         {
             fields.remove("id");
         }
-    }
-    // `allowed_tools` is unproven on this route (probe P3), so a spent researcher is offered Finish alone.
-    if request
-        .input
-        .tools
-        .as_ref()
-        .is_some_and(crate::tools::ToolContext::finish_only)
-    {
-        if let Some(tools) = body["tools"].as_array_mut() {
-            tools.retain(|tool| tool["name"] == "arany_finish");
-        }
-        body["tool_choice"] = json!("required");
     }
     streaming_body(body)
 }

@@ -56,6 +56,7 @@ fn checked_provider_declares_local_bound_and_exact_account_provenance() {
 
 fn request() -> ProviderRequest {
     ProviderRequest {
+        session_id: crate::session::SessionId::new(),
         run_id: RunId::new(),
         agent_run_id: AgentRunId::new(),
         phase: AgentPhase::RootPlan,
@@ -648,7 +649,7 @@ async fn streaming_transport_accepts_only_final_usage_within_local_cap() {
         history_summary: None,
         steps: Vec::new(),
     });
-    let response = json!({"id":"resp_function","status":"completed","model":"model-a","output":[{"type":"reasoning","id":"rs_function","summary":[],"encrypted_content":"CIPHERTEXT=="},{"type":"function_call","id":"fc_function","call_id":"call_function","name":"arany_read","arguments":json!({"path":"README.md","offset":0,"limit":4096,"plan_contract":null}).to_string(),"status":"completed"}],"usage":{"input_tokens":12,"output_tokens":12}});
+    let response = json!({"id":"resp_function","status":"completed","model":"model-a","output":[{"type":"reasoning","id":"rs_function","summary":[],"encrypted_content":"CIPHERTEXT=="},{"type":"function_call","id":"fc_function","call_id":"call_function","name":"arany_read","arguments":json!({"path":"README.md","offset":0,"limit":4096,"plan_contract":null}).to_string(),"status":"completed"}],"usage":{"input_tokens":12,"output_tokens":12,"input_tokens_details":{"cached_tokens":7}}});
     let stream = format!(
         "data: {}\n\n",
         json!({"type":"response.completed","response":response})
@@ -670,6 +671,7 @@ async fn streaming_transport_accepts_only_final_usage_within_local_cap() {
         )
     ));
     assert_eq!(decoded.turn.items("openai").unwrap().len(), 2);
+    assert_eq!(decoded.usage.cache_read_input_tokens, Some(7));
     let wire_request = server.await.unwrap();
     let body: Value = serde_json::from_str(wire_request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
     assert_eq!(body["tool_choice"], "required");
@@ -1236,19 +1238,64 @@ fn chatgpt_replay_drops_item_ids_and_keeps_ciphertext() {
 }
 
 #[test]
-fn chatgpt_spent_researcher_is_offered_finish_alone() {
+fn chatgpt_keeps_phase_specific_functions_until_probe_p3() {
+    let mut researcher = crate::provider::test_support::researcher_request("model-a");
+    let active: Value =
+        serde_json::from_slice(&body_for(&researcher, Effort::Low).unwrap()).unwrap();
     let mut spent = crate::provider::test_support::catalog();
     spent["tool_calls_remaining"] = json!(0);
-    let mut researcher = crate::provider::test_support::researcher_request("model-a");
     researcher.input.tools = Some(crate::provider::test_support::tool_context(spent));
     let value: Value =
         serde_json::from_slice(&body_for(&researcher, Effort::Low).unwrap()).unwrap();
-    let names: Vec<_> = value["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|tool| tool["name"].as_str().unwrap())
-        .collect();
-    assert_eq!(names, ["arany_finish"]);
+    for field in ["instructions", "prompt_cache_key"] {
+        assert_eq!(value[field], active[field], "{field}");
+    }
+    assert_eq!(value["prompt_cache_key"], researcher.session_id.to_string());
     assert_eq!(value["tool_choice"], "required");
+    let names = |body: &Value| {
+        body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert!(names(&active).contains(&"arany_read".into()));
+    assert_eq!(names(&value), ["arany_finish"]);
+    let mut primary = crate::provider::test_support::primary_request("model-a");
+    for policy in [
+        crate::session::CollaborationPolicy::Auto {
+            max_active_children: 2,
+        },
+        crate::session::CollaborationPolicy::Team {
+            max_active_children: 2,
+        },
+    ] {
+        primary.collaboration = policy;
+        primary.phase = AgentPhase::RootPlan;
+        let planning: Value =
+            serde_json::from_slice(&body_for(&primary, Effort::Low).unwrap()).unwrap();
+        primary.phase = AgentPhase::RootSynthesis;
+        let synthesis: Value =
+            serde_json::from_slice(&body_for(&primary, Effort::Low).unwrap()).unwrap();
+        for field in ["instructions", "prompt_cache_key"] {
+            assert_eq!(planning[field], synthesis[field], "{field}");
+        }
+        for body in [&planning, &synthesis] {
+            assert_eq!(body["tool_choice"], "required");
+            assert_eq!(body["prompt_cache_key"], primary.session_id.to_string());
+        }
+        assert!(names(&planning).contains(&"arany_delegate".into()));
+        assert_eq!(
+            names(&planning).contains(&"arany_finish".into()),
+            !matches!(policy, crate::session::CollaborationPolicy::Team { .. })
+        );
+        assert!(!names(&synthesis).contains(&"arany_delegate".into()));
+        assert!(names(&synthesis).contains(&"arany_finish".into()));
+        assert_ne!(planning["tools"], synthesis["tools"]);
+    }
+    let mut next_run = primary.clone();
+    next_run.run_id = RunId::new();
+    let next: Value = serde_json::from_slice(&body_for(&next_run, Effort::Low).unwrap()).unwrap();
+    assert_eq!(next["prompt_cache_key"], primary.session_id.to_string());
 }

@@ -87,6 +87,19 @@ fn function_names(body: &Value) -> Vec<String> {
 fn outbound_documents_pin_privacy_schema_and_scope() {
     let request = read_only_request(MODEL);
     let rendered = body(&request);
+    assert_eq!(rendered["prompt_cache_key"], request.session_id.to_string());
+    let mut next_run = request.clone();
+    next_run.run_id = RunId::new();
+    next_run.agent_run_id = crate::session::AgentRunId::new();
+    assert_eq!(
+        body(&next_run)["prompt_cache_key"],
+        rendered["prompt_cache_key"]
+    );
+    next_run.session_id = SessionId::new();
+    assert_ne!(
+        body(&next_run)["prompt_cache_key"],
+        rendered["prompt_cache_key"]
+    );
     assert_eq!(rendered["model"], MODEL);
     assert_eq!(rendered["store"], false);
     assert_eq!(rendered["truncation"], "disabled");
@@ -198,7 +211,7 @@ fn outbound_documents_pin_privacy_schema_and_scope() {
     }
 
     let compact = CompactionRequest {
-        session_id: SessionId::new(),
+        session_id: request.session_id,
         covered_run_id: request.run_id,
         model: request.model,
         previous_summary: Some("prior derived canary".into()),
@@ -218,6 +231,14 @@ fn outbound_documents_pin_privacy_schema_and_scope() {
     let compact_input: Value =
         serde_json::from_str(compact_body["input"].as_str().unwrap()).unwrap();
     assert_eq!(compact_body["store"], false);
+    assert_eq!(
+        compact_body["prompt_cache_key"],
+        rendered["prompt_cache_key"]
+    );
+    assert_eq!(
+        compact_body["prompt_cache_key"],
+        compact.session_id.to_string()
+    );
     assert_eq!(compact_body["max_output_tokens"], 1024);
     assert_eq!(compact_input["items"][1]["status"], "interrupted");
     assert!(compact_input.get("workspace_guidance").is_none());
@@ -387,7 +408,8 @@ fn outbound_requests_encrypted_reasoning_include_and_replays_items_adjacent_and_
     let rendered = body(&request);
     assert_eq!(rendered["include"], json!(["reasoning.encrypted_content"]));
     assert_eq!(rendered["store"], false);
-    assert_eq!(rendered["tool_choice"], "required");
+    assert_eq!(rendered["tool_choice"]["type"], "allowed_tools");
+    assert_eq!(rendered["tool_choice"]["mode"], "required");
     assert_eq!(rendered["parallel_tool_calls"], false);
     let input = rendered["input"].as_array().unwrap();
     let at = input
@@ -574,6 +596,21 @@ fn openai_usage_maps_cached_tokens() {
     assert_eq!(cached.usage.cache_read_input_tokens, Some(5));
     assert_eq!(cached.usage.cache_creation_input_tokens, None);
     assert!(cached.usage.cache_consistent());
+    assert_eq!(
+        decode_streamed(&request, &finish).unwrap().usage,
+        cached.usage
+    );
+    for invalid in [
+        json!(-1),
+        json!(1.5),
+        json!("5"),
+        json!(u64::from(u32::MAX) + 1),
+    ] {
+        let mut malformed = finish.clone();
+        malformed["usage"]["input_tokens_details"]["cached_tokens"] = invalid;
+        assert!(decode(&request, &malformed).is_err());
+        assert!(decode_streamed(&request, &malformed).is_err());
+    }
     finish["usage"] = json!({"input_tokens": 12, "output_tokens": 8});
     let uncached = decode(&request, &finish).expect("usage without cache details");
     assert_eq!(uncached.usage.cache_read_input_tokens, None);
@@ -586,7 +623,8 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
         json!({"write":false,"commands":[],"skills":[],"mcp_servers":[]}),
     ));
     let rendered = run_body_for(&request, Some(Effort::Low));
-    assert_eq!(rendered["tool_choice"], "required");
+    assert_eq!(rendered["tool_choice"]["type"], "allowed_tools");
+    assert_eq!(rendered["tool_choice"]["mode"], "required");
     assert_eq!(rendered["parallel_tool_calls"], false);
     assert_eq!(rendered["store"], false);
     assert_eq!(rendered["max_output_tokens"], 4096);
@@ -618,12 +656,72 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
             "arany_delegate"
         ]
     );
-    request.phase = AgentPhase::RootSynthesis;
-    assert_eq!(
-        function_names(&body(&request)),
-        ["arany_list", "arany_read", "arany_search", "arany_finish"],
-        "only the outcome functions follow the phase"
-    );
+    for policy in [
+        CollaborationPolicy::Single,
+        CollaborationPolicy::Auto {
+            max_active_children: 0,
+        },
+        CollaborationPolicy::Auto {
+            max_active_children: 2,
+        },
+        CollaborationPolicy::Team {
+            max_active_children: 2,
+        },
+    ] {
+        request.collaboration = policy;
+        request.phase = AgentPhase::RootPlan;
+        let planning = body(&request);
+        request.phase = AgentPhase::RootSynthesis;
+        let synthesis = body(&request);
+        for field in ["tools", "instructions", "prompt_cache_key"] {
+            assert_eq!(
+                serde_json::to_vec(&planning[field]).unwrap(),
+                serde_json::to_vec(&synthesis[field]).unwrap(),
+                "{policy:?}: {field}"
+            );
+        }
+        assert_eq!(planning["prompt_cache_key"], request.session_id.to_string());
+        let allowed = |body: &Value, name: &str| {
+            body["tool_choice"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == name)
+        };
+        assert_eq!(
+            allowed(&planning, "arany_finish"),
+            !matches!(policy, CollaborationPolicy::Team { .. })
+        );
+        assert_eq!(
+            allowed(&planning, "arany_delegate"),
+            policy.max_children() > 0
+        );
+        assert!(allowed(&synthesis, "arany_finish"));
+        assert!(!allowed(&synthesis, "arany_delegate"));
+        let delegate = response(
+            "completed",
+            json!([function_call(
+                "arany_delegate",
+                &json!({"children": ["inspect"]})
+            )]),
+        );
+        assert!(
+            decode(&request, &delegate).is_err(),
+            "synthesis cannot delegate from the cached catalog"
+        );
+        request.phase = AgentPhase::RootPlan;
+        let finish = response(
+            "completed",
+            json!([function_call(
+                "arany_finish",
+                &json!({"summary": "done", "result": "answer"})
+            )]),
+        );
+        assert_eq!(
+            decode(&request, &finish).is_ok(),
+            !matches!(policy, CollaborationPolicy::Team { .. })
+        );
+    }
 
     let rows: Vec<Value> =
         serde_json::from_str(include_str!("../../../../tests/fixtures/tool-calls.json")).unwrap();
@@ -1247,7 +1345,8 @@ fn steering_notes_are_user_input_data_never_instructions() {
 fn child_research_request_offers_only_read_only_functions_and_finish() {
     let request = researcher_request(MODEL);
     let rendered = body(&request);
-    assert_eq!(rendered["tool_choice"], "required");
+    assert_eq!(rendered["tool_choice"]["type"], "allowed_tools");
+    assert_eq!(rendered["tool_choice"]["mode"], "required");
     assert_eq!(rendered["parallel_tool_calls"], false);
     assert!(
         rendered["instructions"]
@@ -1294,11 +1393,16 @@ fn child_research_request_offers_only_read_only_functions_and_finish() {
     exhausted.input.tools = Some(tool_context(spent));
     let spent_body = body(&exhausted);
     assert_eq!(function_names(&spent_body), function_names(&rendered));
+    assert_eq!(spent_body["tools"], rendered["tools"]);
+    assert_eq!(spent_body["instructions"], rendered["instructions"]);
+    assert_eq!(spent_body["prompt_cache_key"], rendered["prompt_cache_key"]);
+    assert!(decode(&exhausted, &read).is_err());
     assert_eq!(
         spent_body["tool_choice"],
         json!({"type": "allowed_tools", "mode": "required", "tools": [{"type": "function", "name": "arany_finish"}]})
     );
-    assert_eq!(rendered["tool_choice"], "required");
+    assert_eq!(rendered["tool_choice"]["type"], "allowed_tools");
+    assert_eq!(rendered["tool_choice"]["mode"], "required");
 }
 
 #[test]
