@@ -1972,6 +1972,11 @@ fn host_git(repository: &Path, home: &Path, args: &[&str]) {
         .env("PATH", "/usr/bin:/bin")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_COUNT", "2")
+        .env("GIT_CONFIG_KEY_0", "gc.auto")
+        .env("GIT_CONFIG_VALUE_0", "0")
+        .env("GIT_CONFIG_KEY_1", "maintenance.auto")
+        .env("GIT_CONFIG_VALUE_1", "false")
         .env("GIT_AUTHOR_NAME", "Arany Test")
         .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
         .env("GIT_COMMITTER_NAME", "Arany Test")
@@ -2067,8 +2072,11 @@ impl Provider for GitJourney {
         Ok(ProviderResponse {
             outcome,
             response_id: None,
-            input_tokens: Some(1),
-            output_tokens: Some(1),
+            usage: arany::Usage {
+                input_tokens: Some(1),
+                output_tokens: Some(1),
+                ..Default::default()
+            },
             wire_provenance: None,
         })
     }
@@ -2222,7 +2230,14 @@ async fn native_git_journey_helper() {
         catalog["git"]["operations"],
         json!(["git_status", "git_diff", "git_log"])
     );
-    assert_eq!(tree_snapshot(&workspace.join(".git")), before);
+    let after = tree_snapshot(&workspace.join(".git"));
+    let changed: Vec<_> = before
+        .iter()
+        .chain(&after)
+        .filter(|entry| !(before.contains(entry) && after.contains(entry)))
+        .map(|entry| &entry.0)
+        .collect();
+    assert!(changed.is_empty(), "repository changed: {changed:?}");
 
     let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
     let events = store.load_session(outcome.session_id).await.unwrap();

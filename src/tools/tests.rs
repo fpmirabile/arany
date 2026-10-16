@@ -1934,7 +1934,7 @@ fn git_pin_is_optional_closed_and_rooted_per_platform() {
     }));
     let mutations = [
         json!({"name":"git","executable":other,"sha256":"0".repeat(64),"interpreter":false,"inputs":[]}),
-        json!({"name":"sh","executable":"/usr/bin/git","sha256":"0".repeat(64),"interpreter":false,"inputs":[]}),
+        json!({"name":"sh","executable":if cfg!(target_os = "macos") { "/Library/Developer/CommandLineTools/usr/bin/git" } else { "/usr/bin/git" },"sha256":"0".repeat(64),"interpreter":false,"inputs":[]}),
         json!({"name":"git","executable":"/usr/bin/git","sha256":"0".repeat(64),"interpreter":true,"inputs":[]}),
         json!({"name":"git","executable":"/usr/bin/git","sha256":"0".repeat(64),"interpreter":false,"inputs":[{"path":"/usr/bin/true","destination":"t","sha256":"0".repeat(64)}]}),
         json!({"name":"git","executable":"/opt/git/bin/git","sha256":"0".repeat(64),"interpreter":false,"inputs":[]}),
@@ -2071,12 +2071,10 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
     config.git = Some(
         serde_json::from_value(json!({"name":"git","executable":"/usr/bin/git","sha256":"0".repeat(64),"interpreter":false,"inputs":[]})).unwrap(),
     );
-    if cfg!(target_os = "linux") {
-        assert_eq!(
-            catalog(config)["git"]["operations"],
-            json!(["git_status", "git_diff", "git_log"])
-        );
-    }
+    assert_eq!(
+        catalog(config)["git"]["operations"],
+        json!(["git_status", "git_diff", "git_log"])
+    );
 }
 
 #[test]
