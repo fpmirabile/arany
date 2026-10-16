@@ -2026,7 +2026,7 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
         } else {
             "catalog_prose"
         };
-        return std::fs::write(
+        std::fs::write(
             format!(
                 "{}/src/tools/snapshots/{file}.json",
                 env!("CARGO_MANIFEST_DIR")
