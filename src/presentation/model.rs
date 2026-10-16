@@ -1,6 +1,3 @@
-//! Derive Provider failure guidance only from the last committed non-review call of a failed
-//! AgentRun, ahead of earlier recoverable Tool denials; attested filesystem denials, cancelled
-//! siblings, successful calls and absent records supply no cause.
 use super::escape_terminal;
 use crate::session::{AgentRole, AgentStatus, CollaborationPolicy, RunStatus, SessionView};
 use unicode_segmentation::UnicodeSegmentation;

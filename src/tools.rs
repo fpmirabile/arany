@@ -1,10 +1,3 @@
-//! One private router normalizes each typed proposal, reserves aggregate capacity, evaluates
-//! restrict-only Policy, journals the digest-bound one-use intent, invokes the separate Guard and
-//! journals its bounded observation before another model call. Classify dispatch at the Guard GO
-//! write boundary before attempting that write: pre-GO failure is Failed without a receipt, post-GO
-//! missing completion is Uncertain. YAML and JSON Schema compilation happen only inside the
-//! killable Guard. Guard failure receipts contain only compiled stage labels and must fit the
-//! 128-byte minimum result budget.
 mod approval;
 pub(crate) mod config;
 mod fs;

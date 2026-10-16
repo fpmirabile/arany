@@ -1,12 +1,3 @@
-//! Each adapter owns authentication, request documents, strict encoding, error mapping, usage,
-//! privacy and parsing; private helpers may share HTTP mechanics, but there is no transport trait
-//! or universal OpenAI-compatible adapter. The scripted Provider owns Engine tests; each adapter
-//! owns hand-reviewed offline wire fixtures and ignored live gates. Checkpoints belong to the
-//! Engine and Store, not the adapter. Keep instruction text consistent with each phase's schema:
-//! forcing synthesis to Finish suppresses allowed primary reads and edits, and advertising
-//! unconfigured MCP invites invalid fallback proposals after an unrelated file failure. An absent
-//! edit receipt after successful inspection is not an observed edit failure. Deterministic
-//! validation (`valid_tool`, the reducer) stays authoritative over anything the model proposes.
 use crate::session::{CollaborationPolicy, RunId, SessionId};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -50,6 +41,7 @@ pub(crate) use render::history_tool_block;
 pub use streaming::{PreviewText, ResponsePreview};
 
 fn http_client(timeout: std::time::Duration) -> reqwest::ClientBuilder {
+    // Decompression stays off even when another dependency enables reqwest's compression features.
     reqwest::Client::builder()
         .no_proxy()
         .no_gzip()

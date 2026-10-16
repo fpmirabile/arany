@@ -1,8 +1,3 @@
-//! Immutable semantic image value, not an Engine seam. The constructor and the closed deserializer
-//! enforce one canonical value; shared Base64 data prevents caller mutation and per-snapshot pixel
-//! copies; `Debug` prints metadata and digest, never Base64. The image-list visitor stops at four
-//! values before allocating a fifth. Children receive only current-objective images. Changing
-//! native request semantics bumps the affected native, check and account-admission contracts.
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeStruct};
 use sha2::{Digest, Sha256};
@@ -23,11 +18,6 @@ pub struct ImageAttachment {
 }
 
 impl ImageAttachment {
-    /// Admits bytes, never a filename, URL or terminal image escape. PNG structure, CRC and
-    /// dimension admission is not raster decoding or proof of vision support. Animated PNG and
-    /// unknown critical chunks reject; the original admitted bytes, including metadata, are kept
-    /// without local decompression. Native adapter admission validates count, aggregate bytes and
-    /// objective or history origin before body construction or egress.
     pub fn from_png(bytes: &[u8]) -> Result<Self, &'static str> {
         if bytes.len() > MAX_IMAGE_BYTES {
             return Err("image is too large; choose a smaller PNG");

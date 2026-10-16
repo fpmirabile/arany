@@ -1,8 +1,3 @@
-//! The committed-Event transition here is shared with live Run observation, so ordinary in-process
-//! progress must not apply the end-of-history Interrupted rule that closed replay applies. Typed
-//! envelopes still need payload validation at this boundary, not only SQL decoding. Pin each accepted AI review to its pending Tool in the projection: inferring
-//! ownership from adjacent review calls permits duplicate integration reviews when approval modes
-//! change between command execution and publication.
 use super::events::{
     AgentDisposition, AgentRole, AgentRunId, ChildGrant, CompactionRecord, CompactionStatus, Event,
     EventEnvelope, ForkLineage, GoalBudget, GoalId, GoalPhase, GoalPlanContract, GoalReport,

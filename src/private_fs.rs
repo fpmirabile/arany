@@ -1,12 +1,3 @@
-//! Shared private-directory admission for Store and Guard. Admit absolute normalized paths
-//! component by component through no-follow directory handles; new components use mode `0700`,
-//! existing leaves require the current owner and private permissions; root-owned sticky temporary
-//! ancestors are admissible, symlinked ancestors are not. On `AlreadyExists` reopen through the
-//! same handle and repeat every check. Select physical paths such as `/private/tmp`; never
-//! canonicalize an untrusted path to satisfy this rule. Ordinary Workspace access uses the separate
-//! no-follow opener without owner, mode or ACL requirements; exclusion checks compare the opened
-//! Workspace identity with the admitted root's ancestors. Opening creates no records, database or
-//! locks.
 use cap_fs_ext::DirExt;
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, DirBuilder};

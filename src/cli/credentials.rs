@@ -1,13 +1,3 @@
-//! Credentials stay inside this private owner. The selected-account loader returns the whole typed
-//! credential after UUID and Provider validation; never reconstruct saved workspace scope from the
-//! environment. Never derive `Debug` for a secret record or format a platform error that may
-//! contain one. Account roots derive from the effective OS user's passwd home, independently of
-//! Session and environment paths. Linux D-Bus admission accepts a single bounded `unix:path=` or
-//! `unix:abstract=` address with an optional exact GUID, or a bounded absolute `XDG_RUNTIME_DIR`;
-//! with both absent, pinned `zbus 5.19.0` connects directly to `/run/user/<uid>/bus` without
-//! autolaunch. Re-check all three paths when keyring or D-Bus dependencies change.
-//! `ARANY_TEST_ACCOUNT_ROOT` is debug-only and needs an absolute path with explicit `HOME` and XDG
-//! settings under a non-root fixture parent.
 use arany::{
     Effort, NativeApiCredentials, StateRoot, StoreError, resolve_native_effort,
     validate_native_model_id,

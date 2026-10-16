@@ -152,9 +152,6 @@ pub(super) async fn run_selected(
     }
 }
 
-/// Already supplies Provider admission inside the input-owning future; a separate awaited preflight
-/// duplicates credential work and stalls editing and interruption. Compute retained-byte feedback
-/// after maintenance, not before.
 pub(super) async fn compact_selected(
     state_dir: &Path,
     telemetry: &Telemetry,

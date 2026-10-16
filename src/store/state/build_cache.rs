@@ -1,14 +1,3 @@
-//! Persistent Workspace cache archives. Lock order: nonblocking exclusive identity lease across
-//! restore, candidate collection, publication and clear, then the aggregate reservation; competing
-//! operations return busy rather than wait, and never evict another identity. The trusted
-//! controller owns publication and writes the typed result onto the original `ToolObservation`;
-//! workers report only `not_applicable` or `not_attempted`. Commit protocol: build the candidate
-//! beside the committed archive, sync it, durably record rollback intent before renaming; the
-//! committed marker plus parent-directory sync is the commit point. A marker write or sync failure
-//! returns the error, skips Drop-time recovery and retains both archives and the transaction
-//! records. Never expose a `StateRoot` path or handle to a payload: task transport carries only the
-//! checked Workspace identity and the exact selected read-only exclusions. Capture archives regular
-//! files by content regardless of link count (Cargo hard links).
 use super::{StateRoot, StoreError, nonblocking};
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, DirBuilder, File, MetadataExt, OpenOptions};
@@ -150,12 +139,6 @@ fn commit_marker_fault(token: &str) -> io::Result<()> {
 }
 
 // flock release can lag behind a drop while another test thread spawns a child.
-/// Test-only: a `flock` release can lag behind concurrent process spawns in the same test process,
-/// so waits that expect a free lock retry busy within a bound while assertions that expect busy
-/// stay exact. Production takes each lock with one nonblocking try. Fault points are `cfg(test)`
-/// one-shots: the commit-marker fault is a process-global Mutex keyed by identity token
-/// (publication runs on a blocking thread), the candidate-sync fault is thread-local. Native
-/// overflow fixtures keep each write below usable scratch capacity.
 #[cfg(test)]
 fn retry_busy<T>(mut attempt: impl FnMut() -> Result<T, StoreError>) -> Result<T, StoreError> {
     for _ in 1..50 {

@@ -1,7 +1,3 @@
-//! Owns a current-thread Tokio runtime because the selected SDK batch worker uses
-//! `futures_executor`, not Tokio; create and poll the Reqwest request inside it with one 500 ms
-//! timeout around the complete response read, keep the SDK's 750 ms shutdown bound and the
-//! no-proxy, no-redirect, no-retry, no-decompression client policy.
 use super::{EXPORT_TIMEOUT, TelemetryConfigError};
 use async_trait::async_trait;
 use opentelemetry_http::{Bytes, HttpClient, HttpError, Request, Response};

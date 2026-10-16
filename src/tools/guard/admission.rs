@@ -1,25 +1,3 @@
-//! Shared cross-process Guard capacity under the fixed account root with checked private-filesystem
-//! handles; coordination creates no database or history records. The checked zero-byte namespace
-//! lock serializes ticket registration, counting and reservation publication; keep manager calls
-//! and other awaits outside it. Open existing files first, create missing locks exclusively and
-//! reopen on `AlreadyExists`; concurrent macOS no-follow `create(true)` can report `NotFound`.
-//! Publish complete locked lease records by atomic rename; unpublished `.new` records may be
-//! removed only under the namespace lock after acquiring their dead lease; counter publication
-//! precedes ticket publication, gaps are harmless, reuse is not. FIFO order is the persisted
-//! monotonic registration sequence. Count macOS control roots independently of reservations,
-//! deduplicating UUIDs; Linux reclamation needs checked seed deletion and positive native
-//! termination or validated previous-boot evidence; nil boot identities and uncertain startup never
-//! release capacity. Linux version-2 reservations are a stable leased inode with separately
-//! replaced seed metadata; commit launch-requested before spawning and termination before storage
-//! cleanup; create snapshot directories with explicit private permissions independent of umask. A
-//! reaper revalidates the lease inode and link count under the namespace lock after flock, keeps
-//! native awaits and recursive deletion outside the lock, retires seed metadata then the lease only
-//! after synchronized absence, and never bypasses its attempt/deadline budget in Drop. Route wait
-//! hints through the existing callback; admission never creates canonical Events. Publish the
-//! planned location before the exclusive mkdir and its checked identity before copying bytes;
-//! preparing without a committed identity authorizes only empty-directory removal. Reject
-//! unsupported records intact, since historical cleanup is explicit maintenance. Record files are
-//! no-follow, owner, mode and ACL checked, single-link and bounded.
 #[cfg(target_os = "macos")]
 const ROOT_SCAN_LIMIT: usize = 4096;
 pub(super) const RECORD_BYTES_CAP: usize = 2048;

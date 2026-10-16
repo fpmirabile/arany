@@ -1,11 +1,3 @@
-//! Private State records. Open every leaf nonblocking before checking its type: a private FIFO must
-//! fail admission rather than wait for a peer. `StateRoot` validates records structurally and never
-//! parses account JSON; the CLI credential owner does. Setup reset validates final and pending
-//! files before removing either and never touches history, trust or arbitrary paths. History reset
-//! validates the database and its three fixed SQLite sidecars before any SQLite access, snapshots
-//! their identities, sizes and mtimes under the lease and rejects any change before removing a
-//! file. It clears only those four files, recreates a checked empty database and leaves Session
-//! lock files in place.
 use super::{DATABASE_FILE, MAX_DATABASE_BYTES, StoreError};
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
@@ -109,10 +101,6 @@ impl StateRoot {
         })
     }
 
-    /// A debug account-root override confines this path to that fixture root's non-root parent
-    /// before environment-selected Session or preference state opens; optimized builds still
-    /// reject the override. Store admission rejects a debug environment-selected state root
-    /// outside that parent.
     pub fn default_path() -> Result<PathBuf, StoreError> {
         let dirs =
             ProjectDirs::from("dev", "Arany", "arany").ok_or(StoreError::InvalidStateDirectory)?;

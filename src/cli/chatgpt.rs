@@ -1,7 +1,3 @@
-//! ChatGPT-plan access. Authorization entropy stays on the reviewed OS-backed `getrandom` path;
-//! compiler flags or backend cfgs that could substitute another source need separate provenance
-//! review. Bump the account-admission contract version when the request/decoder, effort, consent or
-//! output-bound semantics change, independently of checker versions.
 use arany::{
     ChatGptAdmission, ChatGptProvenance, ChatGptProvider, Effort, ProviderError,
     validate_native_model_id,

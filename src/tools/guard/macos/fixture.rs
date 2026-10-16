@@ -1,17 +1,4 @@
 //! Explicitly activated, bounded native fixture observations; never Tool authority.
-//!
-//! Enabled only in debug builds with an explicit `ARANY_TEST_ACCOUNT_ROOT` and
-//! `ARANY_TEST_GUARD_TRACE` equal to its `guard-trace` child, both admitted through no-follow
-//! handles and forwarded only to the trusted supervisor. One fixed record per compiled stage, at
-//! most 128 bytes each and 8 KiB aggregate; repeated observations overwrite their stage (lossy
-//! snapshot, not a trace). Each record is `active`, `complete` or `interrupted`; an active stage has
-//! unknown elapsed time, Drop records interruption, and missing or unreadable records remain
-//! unknown.
-//! Capture failures never change Tool outcomes; records never enter Events, Provider context,
-//! telemetry or the development log. Keep records independent of removable unit roots; publish
-//! atomic snapshots without crash-durability sync. The parent journey keeps its 30-second case
-//! deadline and 180-second envelope; native preparation and recovery budgets are independent of
-//! that bound.
 
 #[derive(Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "snake_case")]

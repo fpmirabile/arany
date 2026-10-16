@@ -1,7 +1,3 @@
-//! Pure over committed `SessionView`/`RunView` facts and the CLI-owned unsaved conversation
-//! projection: a zero creation sequence denotes that local projection, never a replayed Session;
-//! label it unsaved and expose no temporary ID. Engine imports no terminal libraries or
-//! presentation state.
 use crate::session::{
     AgentStatus, Event, EventEnvelope, ProviderCallDisposition, ProviderCallRecord, RunStatus,
     RunView, SessionView,

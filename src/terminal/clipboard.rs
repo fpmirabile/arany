@@ -1,12 +1,3 @@
-//! Select the transport from checked local OS metadata (standard Wayland or local X11, the checked
-//! `osascript` bridge on macOS), never user PATH, an external host, an arbitrary command or
-//! Provider content; pin the trusted client's canonical absolute path and reject writable or
-//! untrusted ancestors. Clear the child environment and forward only the selected display/runtime
-//! or validated X authority path; never account credentials, network settings or the home as
-//! implicit configuration. Own the process group before any fallible pipe setup, keep its leader
-//! waitable until group cleanup, then kill and reap on every exit. Fixtures use uniquely named
-//! synthetic pasteboards and never the general pasteboard; never read the user's clipboard to
-//! inspect support.
 use crate::provider::ImageAttachment;
 use std::sync::{
     Arc,

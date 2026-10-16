@@ -1,6 +1,3 @@
-//! Decode JSON escapes, UTF-8 and surrogate pairs across fragments. The credential check runs on
-//! decoded text, so no fragment may reach a recorder or display before it; cancellation drops any
-//! buffered tail instead of flushing it.
 use super::{MAX_RESPONSE_BYTES, ProviderError};
 use crate::session::{MAX_DISPLAY_COMMENTARY_ITEMS, MAX_DISPLAY_TEXT_BYTES};
 use serde_json::Value;

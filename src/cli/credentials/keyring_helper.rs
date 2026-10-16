@@ -1,12 +1,3 @@
-//! Short-lived same-binary helper with bounded private pipes, fixed service, validated slots,
-//! admitted transport, `env_clear` plus only the required OS account and bus variables, working
-//! directory `/`. Linux launches the kernel-owned `/proc/self/exe` image: resolving or stripping a
-//! deleted pathname after a rebuild can fail or execute a different binary. Secret input writing
-//! and output draining run concurrently under the parent deadline so a large token cannot block
-//! supervision. Startup authorization validates native UUID and Provider inside the status-only
-//! helper and returns no credential. Tests use this production supervisor, never direct `cfg(test)`
-//! keyring calls; test builds require an absolute `ARANY_TEST_EXE`, shipped binaries ignore it;
-//! synthetic input comes through a private file, not a parent pipe.
 use super::{CredentialError, DEFAULT_ACCOUNT, SERVICE, SavedAccount, admit_transport};
 use crate::cli::chatgpt::{MAX_TOKEN_RECORD_BYTES, valid_keyring_record};
 use arany::StateRoot;
@@ -134,6 +125,7 @@ fn helper_command(operation: &str, slot: &str) -> Result<(Command, usize), Crede
         return Err(CredentialError::InvalidAccount);
     }
     #[cfg(all(not(test), target_os = "linux"))]
+    // Spawn /proc/self/exe: a rebuilt binary's deleted pathname could resolve to another image.
     let executable = std::path::Path::new("/proc/self/exe");
     #[cfg(all(not(test), not(target_os = "linux")))]
     let executable = std::env::current_exe().map_err(|_| CredentialError::Unavailable)?;

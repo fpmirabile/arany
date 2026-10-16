@@ -1,5 +1,3 @@
-//! Preserve credentials on transport, rate-limit, server, malformed and unknown refresh failures; only a
-//! recognized terminal error marks a token unusable.
 use super::{
     AuthorizationError, CodeExchange, VerifiedCredentials, VerifiedIdentity, VerifiedSignIn,
     identity,

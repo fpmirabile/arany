@@ -97,9 +97,6 @@ pub fn resolve_native_effort(
 }
 
 /// Resolves a native Run choice without treating unknown model metadata as compatibility evidence.
-///
-/// Also admits an explicit unknown choice without a compatibility claim and pins its concurrency to
-/// one.
 pub fn resolve_native_effort_for_run(
     provider: &str,
     model: &str,

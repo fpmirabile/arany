@@ -1,7 +1,3 @@
-//! The renewal owner holds the OS-user account lock through near-expiry exchange and whole-token
-//! replacement in a supervised blocking task; dropping its async waiter does not release the lock.
-//! Write the durable renewal-pending marker before egress. Malformed saved metadata keeps its own
-//! recovery diagnostic and never relaxes signed identity checks or contacts the token store.
 use super::{
     AuthorizationError, RiskAcknowledgment, VerifiedCredentials, VerifiedIdentity,
     consent::ConsentReceipt, registration, valid_client_id,

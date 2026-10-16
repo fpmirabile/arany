@@ -1,5 +1,3 @@
-//! Canonical Event payloads. Keep presentation state out of them; a new field bumps the payload
-//! version.
 use crate::provider::AgentPhase;
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path, str::FromStr};

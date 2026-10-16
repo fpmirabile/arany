@@ -1,12 +1,3 @@
-//! Native enforcement is private to the bounded same-binary helpers. The compiled
-//! enforcement-profile digest covers profile rules, admission algorithms and enforced constants;
-//! changing an enforced dimension changes it. The system-executable catalogue travels only through
-//! the trusted controller/supervisor Task channel, never Workspace or payload input, and is never
-//! persisted as an authority cache. Capture command changesets only after positive
-//! payload-descendant absence; Engine owns command-receipt linkage, Guard independently validates
-//! the integration batch. The cache view is imported before Ready/GO and the controller streams the
-//! candidate to Store only after native cleanup is positively confirmed; the worker holds no
-//! publication authority.
 use super::config::Config;
 use super::toolchains::{RuntimeGrant, validate_selection};
 use super::types::*;
@@ -740,8 +731,6 @@ async fn drain_candidate<R: tokio::io::AsyncRead + Unpin, W: Write>(
 /// Reaps a child this process owns. On macOS it closes stdin first and polls `try_wait`
 /// at the supervision interval, because Seatbelt blocks Tokio's signal wake socket;
 /// elsewhere it awaits exit.
-///
-/// Retain the exact owned child until reap, then stop PID observation immediately.
 pub(super) async fn reap_owned_child(
     child: &mut Child,
 ) -> std::io::Result<std::process::ExitStatus> {

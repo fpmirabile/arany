@@ -1,9 +1,3 @@
-//! Isolated unsafe exception. Borrowed descriptors stay live, entries borrow one validated
-//! allocation and the native allocator frees it exactly once; handle absent-ACL `ENOENT` and
-//! end-of-entry `EINVAL` only at their owning calls. Private objects reject every allow entry,
-//! ancestors reject mutation grants, deny-only entries are admissible, unknown entries, query
-//! errors and more than 128 entries fail closed. Review ABI and lifetimes and run the native ACL
-//! corpus when changing this file.
 use super::Error;
 use std::{
     ffi::c_void,

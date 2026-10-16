@@ -120,11 +120,6 @@ fn steering_refusal(refused: SteeringRefused, autonomous: bool) -> String {
 
 /// Consumes a note the Engine recorded since the last check. The composer clears only while it
 /// still holds the offered text; an edited draft stays as the user's retained text.
-///
-/// Clears the composer only when `delivered_notes()` advanced and the text is unchanged; any edit
-/// withdraws an offer the Engine has not taken. `/goal pause` is intercepted by
-/// `controls::handle_active_submission` as `ActiveSubmission::Pause`; Ctrl+C or an Escape with no
-/// open menu moves the loop to `Cancelling`. `exec` never calls `set_steering`.
 fn settle_recorded_note(
     delivered: u64,
     seen: &mut u64,
@@ -284,11 +279,6 @@ pub(super) fn preflight_idle_run(
     })
 }
 
-/// Creates the `RunSteering` handle once per submission and passes it through `run::run_selected`.
-/// Race selected-Provider admission against the sticky cancellation waiter before constructing the
-/// Engine. Mutate the caller-owned `SessionView` for progress; copying the resolved history per Run
-/// scales with the whole transcript. Capture the last committed sequence once before submission so
-/// active `/status`, `/provider` and `/model` report only facts after that boundary.
 pub(super) async fn submit_objective(
     terminal: &mut AttachedTerminal,
     admission: &Admission,

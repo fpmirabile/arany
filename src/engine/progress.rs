@@ -10,11 +10,6 @@ use std::sync::Mutex;
 use tokio::sync::watch;
 
 /// Committed Run snapshots and separate temporary display and Tool capacity hints.
-///
-/// One-slot watch over acknowledged Events; the publisher reduces the open projection that appends
-/// validate, not the closed recovery view, and coalesces superseded snapshots without blocking
-/// append. An observer cannot authorize, steer or cancel. A test may receive the terminal snapshot
-/// while checking the last child: retain it instead of waiting for another update.
 #[derive(Clone)]
 pub struct RunProgress {
     sender: watch::Sender<Option<RunUpdate>>,

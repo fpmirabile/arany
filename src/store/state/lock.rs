@@ -1,9 +1,3 @@
-//! Unlock the advisory lock explicitly when its guard drops: relying on descriptor closure caused
-//! intermittent self-contention in parallel lifecycle tests. Keep `history.lock` separate from the
-//! database because a macOS flock on the SQLite file conflicts with SQLite's own locking. Hold the
-//! account-replacement lock in the same blocking task as the OS credential-store write so
-//! cancelling the awaiting UI cannot release it early. Store append validates transitions, not live
-//! lock ownership.
 #[cfg(unix)]
 use super::nonblocking;
 use super::{StateRoot, StoreError};
@@ -40,6 +34,7 @@ struct NamespaceLock(File);
 #[cfg(unix)]
 impl Drop for NamespaceLock {
     fn drop(&mut self) {
+        // Explicit unlock: relying on descriptor closure caused flaky self-contention in parallel tests.
         let _ = rustix::fs::flock(&self.0, rustix::fs::FlockOperation::Unlock);
     }
 }

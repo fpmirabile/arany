@@ -1,16 +1,3 @@
-//! Start the unchanged Bubblewrap profile through the fixed root-owned `/usr/bin/unshare` user and
-//! mount namespace bootstrap with recursive-private propagation, cleared environment and fixed
-//! arguments, without `--keep-caps`: util-linux makes propagation private before exec, and retained
-//! capabilities make Bubblewrap reject a non-root real UID (util-linux v2.39.3 sys-utils/unshare.c;
-//! containers/bubblewrap bubblewrap.c). Explicitly unshare the user namespace before disabling
-//! nested namespaces; `--unshare-all` alone is only a try. Before Ready and again after GO parse
-//! bounded `/proc/self/mountinfo` and require a private root and one exact private entry per
-//! selected runtime mount with no propagation fields, stacked entries or descendant mounts. Keep
-//! `/lib` targeting `/usr/lib` and `/lib64` targeting `/usr/lib64`: mapping both to `/usr/lib`
-//! hides the x86-64 ELF loader even when ARM64 gates pass. After a typed Git read, only the
-//! digest-rechecked pinned Git runs; stop every other namespace process before the receipt.
-//! Validate effective cgroup limits including group OOM before releasing payloads and verify the
-//! owned group is empty or removed. Native fixtures preserve this loader layout.
 use super::{
     CAPTURE_BYTES, GuardStage, RUNTIME_ROOT, Task, bootstrap_failure, capture, drain_stderr,
     encode_task, parse_ready, profile, read_capped, read_line_capped, read_observation,
@@ -38,6 +25,7 @@ const BWRAP_BOOTSTRAP: &[&str] = &[
     "/usr/bin/env",
     "-i",
     "PATH=/usr/bin:/bin",
+    // No --keep-caps: retained capabilities make Bubblewrap reject a non-root real UID.
     "/usr/bin/unshare",
     "--user",
     "--map-current-user",
@@ -539,6 +527,7 @@ pub(super) async fn hold_seed_unit(permit: &super::admission::Permit, seed: &Pat
             "usr/lib",
             "/lib",
             "--symlink",
+            // /lib and /lib64 keep their own targets: mapping both to /usr/lib hides the x86-64 ELF loader.
             "usr/lib64",
             "/lib64",
             "--proc",
@@ -566,8 +555,6 @@ pub(super) async fn hold_seed_unit(permit: &super::admission::Permit, seed: &Pat
     panic!("native seed controller must be killed by its parent");
 }
 
-/// Linux `ro-bind` imports source submounts recursively, so admitted mount sources must be checked
-/// with that import in mind, not as a single mount.
 pub(super) async fn execute_inner(
     runtime: &ToolRuntime,
     intent: &EffectIntent,

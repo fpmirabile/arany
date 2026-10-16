@@ -1,5 +1,3 @@
-//! Compilation is a pure function of its inputs: never read clocks, randomness or Provider-hosted
-//! state here.
 use super::input::WorkspaceInputs;
 use super::{
     CollaborationPolicy, CompactionStatus, ContextUsage, MAX_CONTEXT_CONTENT_BYTES,

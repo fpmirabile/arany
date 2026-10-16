@@ -1,13 +1,3 @@
-//! Journal interface and SQLite owner thread. `store/journal.rs` holds setup and writes,
-//! `store/replay.rs` validates history, `store/state.rs` owns private State records,
-//! `store/state/lock.rs` owns Session, account and Workspace locks. SQLite opens with
-//! `SQLITE_OPEN_NOFOLLOW`, defensive mode, `trusted_schema=OFF`, rollback `DELETE`,
-//! `synchronous=EXTRA`, a 250 ms busy timeout and the declared page cap; read-only `show` creates
-//! no file, directory or journal. One named thread owns the connection behind a bounded channel of
-//! 64 requests; a closed channel is a store failure, never a successful append. The direct-Session
-//! projection is reused only when Session ID, `data_version` and next sequence still match, is
-//! installed after commit, dropped after any failed append, and never covers fork lineage. Evidence
-//! tables are derived caches, never Events.
 use crate::session::{
     EVENT_PAYLOAD_VERSION, Event, EventEnvelope, ReplayError, RunId, SessionId, SessionListItem,
     SessionView,
@@ -610,7 +600,6 @@ impl Store {
         .await
     }
 
-    /// Lookup hint only: callers load and strictly replay the parent before disclosing Events.
     pub async fn session_for_run(&self, run_id: RunId) -> Result<Option<SessionId>, StoreError> {
         self.call(|reply| Request::RunSession { run_id, reply })
             .await

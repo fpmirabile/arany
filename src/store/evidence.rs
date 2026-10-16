@@ -1,5 +1,3 @@
-//! Derived Provider evidence caches, never canonical Events; malformed or future-dated rows are
-//! unavailable.
 use super::{NativeEvidenceRecord, ProviderEvidenceRecord, StoreError};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::{

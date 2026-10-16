@@ -1,8 +1,3 @@
-//! Build the exporter before entering the current-thread Tokio runtime and shut it down after the
-//! runtime returns. The child coordinator retains each Provider span until its task joins: an
-//! aborted sibling closes as `cancelled`; `abandoned` is reserved for an unknown terminal state.
-//! The binary and library are separate crates bridged by an opaque handle, not a substitutable Engine seam; SDK and exporter types stay inside
-//! this module.
 use crate::provider::{AgentPhase, MAX_REPORTED_INPUT_TOKENS};
 use crate::session::{AgentRunId, GoalId, GoalStatus, GoalView, RunId, SessionId};
 use opentelemetry::{

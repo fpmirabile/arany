@@ -1,7 +1,4 @@
 //! Outcome decoding shared by every adapter: Finish, Delegate and native Tool requests.
-//!
-//! Changing this decoder invalidates native, exact-custom and ChatGPT check evidence and ChatGPT
-//! account admission: bump their contract versions in the same change.
 
 use super::{Delegate, Finish, ProviderError, ProviderOutcome, ToolUseId};
 use crate::tools::types::MAX_TOOL_ARGUMENT_BYTES;

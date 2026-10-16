@@ -1,25 +1,3 @@
-//! Close inherited descriptors at the single-threaded worker entry before Rust opens persistent
-//! handles. Only the non-spawning file/Skill worker resets and unblocks SIGXCPU and installs hard
-//! CPU expiry before Seatbelt prohibits changes; commands and MCP use external CPU supervision.
-//! Attest denial before GO; no payload runs under a partially installed profile. Keep sysctl access
-//! denied; named socket creation, network operations and descriptor-bearing messages stay
-//! prohibited, and an anonymous pair does not keep its writes under Seatbelt. Darwin task
-//! information disappears during exit: BSD inspection must include zombies (`arg = 1`) and
-//! positively establish kernel exit; poll child exit inside the worker rather than relying on
-//! Tokio's signal wake. Canonicalize selected roots and reject strict descendant targets in the
-//! `getfsstat` mount table before Seatbelt and before Ready/GO; this is point-in-time, not a
-//! lifetime guarantee. Workers revalidate every catalogue entry through no-follow handles (root
-//! ownership, non-writable non-set-ID mode, device/inode, size, timestamps) opened relative to
-//! pinned `/bin` and `/usr/bin` handles; encode the catalogue as one allow rule with a union of
-//! exact literal paths; reuse a signature verdict only for the same path and identical metadata
-//! stamp and never persist verdicts. The command profile reads the literal filesystem root because
-//! the native loader opens `/` and aborts when denied; this grants nothing beneath it. Return the
-//! admitted command root from profile installation; never rediscover it with getcwd after Seatbelt.
-//! Validate `launchctl`, `env` and `hdiutil` through the same no-follow OS-program admission. Deny
-//! credential and coalition changes through direct syscalls and spawn attributes, deny sandbox
-//! relabeling, clear inherited bootstrap ports before payload exec; `NOSUID` alone does not strip
-//! signed entitlements. Retain successful Security Copy results and release them with the Create
-//! rule.
 use super::{
     BootstrapFailure, BootstrapStage, CAPTURE_BYTES, GuardStage, TASK_BYTES_CAP, Task,
     bootstrap_failure, drain_stderr, parse_ready, read_capped, read_line_capped, read_observation,
@@ -60,14 +38,12 @@ pub(super) fn unit_main() -> std::process::ExitCode {
 
 const CPU_LIMIT: Duration = Duration::from_secs(15);
 const SYSTEM_PROGRAMS_CAP: usize = 2048;
-/// Retain this cap and every independent deny when the profile composition changes.
 const PROFILE_BYTES_CAP: usize = 96 * 1024;
 pub(super) const SUPERVISION_INTERVAL: Duration = Duration::from_millis(10);
 pub(super) const PREPARATION_DEADLINE: Duration = Duration::from_secs(30);
 /// The preparation deadline plus slack for the handshake that follows it.
 pub(crate) const PREPARATION_OVERHEAD: Duration =
     Duration::from_secs(PREPARATION_DEADLINE.as_secs() + 5);
-/// Shared descriptor and core limits are installed at bootstrap, before the profile applies.
 const PROCESS_LIMITS: &[(rustix::process::Resource, u64)] = &[
     (rustix::process::Resource::Nofile, 64),
     (rustix::process::Resource::Core, 0),
@@ -182,8 +158,7 @@ const PROFILE: &str = "(allow file-read-metadata (literal \"/\") (literal \"/Sys
 (allow file-read* (literal \"/dev/random\") (literal \"/dev/urandom\"))
 ";
 
-/// Both command profiles deny fork and spawn dynamically for actors holding coalition-spawn or
-/// persona-management authority after exec.
+// The loader opens /, so this grants root metadata only, nothing beneath it.
 const COMMAND_PROFILE: &str = "(allow file-read-metadata (literal \"/\") (literal \"/System\") (literal \"/usr\") (literal \"/dev\"))
 (allow file-read-metadata (literal \"/System/Cryptexes\") (literal \"/System/Cryptexes/OS\") (literal \"/var\") (literal \"/etc\") (literal \"/private/var\") (literal \"/private/var/select\") (literal \"/private/var/select/sh\"))
 (allow file-read* file-map-executable (subpath \"/System/Library\") (subpath \"/usr/lib\"))
@@ -555,10 +530,6 @@ fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<Pat
     Ok(root)
 }
 
-/// Derived from the command profile without its system-path literals, with
-/// `COMMAND_DENIED_SYSCALLS` and no `configure_file_cpu`; its view lives under `unit_root`, which
-/// skips `storage::verify_storage`, so writes are bounded only by the Git deadline and fixed argv.
-/// The pinned Git exec and the Workspace read are its only grants.
 fn install_git(task: &Task, stage: &mut super::BootstrapStage) -> Result<PathBuf, ToolError> {
     unprivileged_helper()?;
     let root = unit_root(task)?;

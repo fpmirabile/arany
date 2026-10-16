@@ -1,10 +1,3 @@
-//! The sole raw reader runs on a named thread with a 32-event bounded channel and backpressure;
-//! acquire raw mode before starting it and stop/join it before restoring. It owns an independently
-//! opened nonblocking handle to the admitted stdin terminal, checked by device and inode and closed
-//! on thread exit; never set inherited stdin flags or use a dup, because output can share that
-//! open-file description and partial redraws then fail with `WouldBlock`. Keep reads nonblocking
-//! through shutdown so signal-flushed input cannot strand the join. A lone Escape waits at most the
-//! poll interval; repeats, releases and unowned focus/mouse events are ignored.
 use super::{
     CursorQuery, INPUT_POLL_INTERVAL, MAX_DRAFT_BYTES, ReaderEvent, map_input, terminal_input,
 };

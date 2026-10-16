@@ -1,27 +1,3 @@
-//! One temporary Background launchd job owns a distinct kernel resource coalition; bind its
-//! reported PID, socket peer credentials, process unique ID and coalition before accepting a task.
-//! Use private-filesystem admission without creating records or locks and retain the handle for the
-//! unit lifetime. Serialize the job dictionary with Core Foundation into a bounded binary plist
-//! created exclusively with mode 0600; never interpolate markup. Observe membership through bounded
-//! kernel metadata, never arguments or environments, filtering foreign coalitions before full
-//! identity queries; a process unique ID survives exec, audit-token
-//! versions can change, so every signal selects the exact current PID and version atomically;
-//! revalidate identity after failed resource samples. Convert CPU counters
-//! through the validated Mach timebase; aggregate `ri_phys_footprint` and live threads; resident
-//! size omits compressed and swapped pages, so host pressure can hide an over-limit payload;
-//! missing live observation fails closed. Cleanup repeatedly stops and kills current members with
-//! audit-token signals and requires positively observed emptiness; an exact-target `bootout`
-//! success or `ESRCH` is required even after one-use retirement. The caller awaits a bounded
-//! blocking owner with its own reactor; teardown and synchronous Drop stay off the terminal
-//! reactor; preserve the GO marker across worker failure so uncertainty is never reported as
-//! pre-dispatch rejection; poll cleanup at the shared supervision interval. The controller holds
-//! the exclusive checked root lock through deletion, and incomplete publication cannot authorize
-//! dispatch. Persist the root identity and `kern.bootsessionuuid` before bootstrap: XNU coalition IDs are monotonic within a
-//! boot only, so same-boot recovery requires exact-target bootout and positive emptiness,
-//! later-boot recovery never signals stale identities. Emit fixed-stage failures through the live
-//! owned control writer exactly once; dropping Tokio's owned write half shuts down the shared
-//! socket and a cloned descriptor cannot publish afterward. Require positive helper exit before
-//! reading its completed-test summary; control EOF can precede the runner's final output.
 use super::super::{BootstrapFailure, GuardStage, Task, read_line_capped};
 use super::fixture::{Span as FixtureSpan, Stage as FixtureStage};
 use super::storage::{

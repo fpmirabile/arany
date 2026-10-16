@@ -1,12 +1,3 @@
-//! Derive rows from the caller's already-loaded committed `SessionView`; never read State,
-//! Workspace, credentials or Providers while indexing, searching or drawing. Index row counts and
-//! source-byte positions without a second transcript; reconstruct Tool/commentary/incomplete bodies
-//! only for counting or visible rows; only the latest bounded preview owns copied text. An image
-//! turn uses a borrowed virtual body (text plus metadata), never copied Base64. Local feedback has
-//! its own source identity ordered after the last indexed message. For the same Session and width
-//! replace only the last Run's index after confirming the prior identity. Rebuilds of at least 4
-//! MiB with multiple CPUs count independent Runs on at most four scoped threads; smaller rebuilds
-//! stay sequential. Explicit find scans synchronously.
 use crate::presentation::{
     escape_terminal, escaped_terminal_width, image_message_text, safe_truncate,
 };

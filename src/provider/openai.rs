@@ -1,7 +1,3 @@
-//! The HTTP client keeps redirects, ambient proxies, cookies and automatic protocol retries
-//! disabled; reqwest retries some protocol failures by default unless overridden. Decompression
-//! stays disabled even when another dependency enables reqwest compression features; reject any
-//! non-identity `Content-Encoding` before reading the body.
 use super::conversation::Conversation;
 use super::{
     CompactionRequest, CompactionResponse, Effort, MAX_REPORTED_INPUT_TOKENS, MAX_RESPONSE_BYTES,

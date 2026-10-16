@@ -1,8 +1,3 @@
-//! Resolve Workspace input one component at a time beneath the pinned directory handle with
-//! no-follow semantics; reject symlinks, special files, absolute paths, empty components, `.` and
-//! `..`; open candidates nonblocking before the regular-file check and use the validated handle
-//! instead of reopening by path. Folder trust pins exact path, device and inode in private OS-user
-//! state, never Session facts.
 use super::approval::ApprovalMode;
 use super::config::{Config, Program};
 use super::toolchains::{
