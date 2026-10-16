@@ -498,12 +498,36 @@ pub enum CompactionItem {
     },
 }
 
+/// Provider-reported token usage. Cache fields are subsets of `input_tokens`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Usage {
+    pub input_tokens: Option<u32>,
+    pub output_tokens: Option<u32>,
+    pub cache_read_input_tokens: Option<u32>,
+    pub cache_creation_input_tokens: Option<u32>,
+}
+
+impl Usage {
+    /// Cache counts exist only with a reported input total and must fit inside it.
+    pub(crate) fn cache_consistent(self) -> bool {
+        match self.input_tokens {
+            None => {
+                self.cache_read_input_tokens.is_none() && self.cache_creation_input_tokens.is_none()
+            }
+            Some(input) => self
+                .cache_read_input_tokens
+                .unwrap_or(0)
+                .checked_add(self.cache_creation_input_tokens.unwrap_or(0))
+                .is_some_and(|cached| cached <= input),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompactionResponse {
     pub summary: String,
     pub response_id: Option<String>,
-    pub input_tokens: Option<u32>,
-    pub output_tokens: Option<u32>,
+    pub usage: Usage,
     pub wire_provenance: Option<ProviderWireProvenance>,
 }
 
@@ -564,8 +588,7 @@ impl ProviderWireProvenance {
 pub struct ProviderResponse {
     pub outcome: ProviderOutcome,
     pub response_id: Option<String>,
-    pub input_tokens: Option<u32>,
-    pub output_tokens: Option<u32>,
+    pub usage: Usage,
     pub wire_provenance: Option<ProviderWireProvenance>,
 }
 
@@ -971,8 +994,11 @@ mod tests {
                 result: "safe".into(),
             }),
             response_id: Some("safe-id".into()),
-            input_tokens: Some(1),
-            output_tokens: Some(1),
+            usage: Usage {
+                input_tokens: Some(1),
+                output_tokens: Some(1),
+                ..Usage::default()
+            },
             wire_provenance: None,
         };
         assert!(!response.reflects_secret(secret));
@@ -1030,8 +1056,11 @@ mod tests {
         let mut compact = CompactionResponse {
             summary: "safe".into(),
             response_id: None,
-            input_tokens: Some(1),
-            output_tokens: Some(1),
+            usage: Usage {
+                input_tokens: Some(1),
+                output_tokens: Some(1),
+                ..Usage::default()
+            },
             wire_provenance: None,
         };
         assert!(!compact.reflects_secret(secret));

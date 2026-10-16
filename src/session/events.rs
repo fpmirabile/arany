@@ -98,8 +98,11 @@ impl FromStr for GoalId {
 
 pub const MAX_GOAL_PROVIDER_CALLS: u32 = 64;
 pub const MAX_GOAL_ACTIVE_MS: u64 = 30 * 60 * 1000;
-pub(crate) const EVENT_PAYLOAD_VERSION: i64 = 5;
+pub(crate) const EVENT_PAYLOAD_VERSION: i64 = 6;
 pub(crate) const MAX_CHILD_TOOL_CALLS: usize = 16;
+/// Model Tool requests one Provider step may declare. Engine and adapters emit one until fan-out lands.
+pub(crate) const MAX_STEP_TOOL_CALLS: u8 = 4;
+const _: () = assert!(MAX_STEP_TOOL_CALLS as u32 <= u8::MAX as u32);
 pub(crate) const MAX_GOAL_ACTION_ACTIVE_MS: u64 = 31 * 60 * 1000;
 pub const MAX_GOAL_RUNS: u8 = 16;
 pub const MAX_GOAL_PLAN_PATHS: usize = 64;
@@ -1208,6 +1211,8 @@ pub struct GoalReport {
     pub changes: Vec<String>,
     pub evidence: Vec<String>,
     pub unresolved: Vec<String>,
+    /// Information only: total cache-read input tokens across the Goal's Provider calls, never a budget.
+    pub cached_input_tokens: u64,
 }
 
 impl GoalReport {
@@ -1714,6 +1719,10 @@ pub struct CompactionRecord {
     #[serde(deserialize_with = "Option::deserialize")]
     pub output_tokens: Option<u32>,
     #[serde(deserialize_with = "Option::deserialize")]
+    pub cache_read_input_tokens: Option<u32>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub cache_creation_input_tokens: Option<u32>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub response_id: Option<String>,
     #[serde(deserialize_with = "Option::deserialize")]
     pub wire_provenance: Option<crate::provider::ProviderWireProvenance>,
@@ -1724,6 +1733,15 @@ pub struct CompactionRecord {
 }
 
 impl CompactionRecord {
+    fn usage(&self) -> crate::provider::Usage {
+        crate::provider::Usage {
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            cache_read_input_tokens: self.cache_read_input_tokens,
+            cache_creation_input_tokens: self.cache_creation_input_tokens,
+        }
+    }
+
     pub(crate) fn validate(&self) -> Result<(), ReplayError> {
         if self.covered_sequence == 0
             || self.prompt_version != 1
@@ -1734,6 +1752,7 @@ impl CompactionRecord {
             || self.source_tokens_estimate != self.source_bytes.div_ceil(4)
             || self.input_tokens.is_some_and(|value| value > 1_000_000)
             || self.output_tokens.is_some_and(|value| value > 1_000_000)
+            || !self.usage().cache_consistent()
             || self.response_id.as_ref().is_some_and(|value| {
                 value.is_empty()
                     || value.len() > 128
@@ -1804,6 +1823,8 @@ mod subscription_compaction_tests {
             status: CompactionStatus::Failed {
                 reason: CompactionFailure::ProviderUnavailable,
             },
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
         };
         assert!(record.validate().is_ok());
         let encoded = serde_json::to_value(&record).unwrap();
@@ -1879,6 +1900,7 @@ pub enum ProviderCallDisposition {
 pub struct ProviderCallRecord {
     pub phase: crate::provider::AgentPhase,
     pub disposition: ProviderCallDisposition,
+    pub requested_tools: u8,
     #[serde(deserialize_with = "Option::deserialize")]
     pub response_id: Option<String>,
     #[serde(deserialize_with = "Option::deserialize")]
@@ -1886,19 +1908,37 @@ pub struct ProviderCallRecord {
     #[serde(deserialize_with = "Option::deserialize")]
     pub output_tokens: Option<u32>,
     #[serde(deserialize_with = "Option::deserialize")]
+    pub cache_read_input_tokens: Option<u32>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub cache_creation_input_tokens: Option<u32>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub wire_provenance: Option<crate::provider::ProviderWireProvenance>,
     #[serde(deserialize_with = "Option::deserialize")]
     pub failure_reason: Option<crate::provider::ProviderFailureReason>,
 }
 
 impl ProviderCallRecord {
+    fn usage(&self) -> crate::provider::Usage {
+        crate::provider::Usage {
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            cache_read_input_tokens: self.cache_read_input_tokens,
+            cache_creation_input_tokens: self.cache_creation_input_tokens,
+        }
+    }
+
     fn validate(&self) -> Result<(), ReplayError> {
-        if self.response_id.as_ref().is_some_and(|id| {
-            id.is_empty() || id.len() > 128 || !id.bytes().all(|byte| byte.is_ascii_graphic())
-        }) || self
-            .input_tokens
-            .is_some_and(|count| count > crate::provider::MAX_REPORTED_INPUT_TOKENS)
+        if self.requested_tools > MAX_STEP_TOOL_CALLS
+            || (self.disposition == ProviderCallDisposition::ToolRequested)
+                != (self.requested_tools > 0)
+            || self.response_id.as_ref().is_some_and(|id| {
+                id.is_empty() || id.len() > 128 || !id.bytes().all(|byte| byte.is_ascii_graphic())
+            })
+            || self
+                .input_tokens
+                .is_some_and(|count| count > crate::provider::MAX_REPORTED_INPUT_TOKENS)
             || self.output_tokens.is_some_and(|count| count > 4096)
+            || !self.usage().cache_consistent()
             || self.wire_provenance.is_some_and(|provenance| {
                 !provenance.valid_for(
                     self.response_id.as_deref(),
@@ -1935,6 +1975,8 @@ impl ProviderCallRecord {
             ) && (self.response_id.is_some()
                 || self.input_tokens.is_some()
                 || self.output_tokens.is_some()
+                || self.cache_read_input_tokens.is_some()
+                || self.cache_creation_input_tokens.is_some()
                 || self.wire_provenance.is_some()))
         {
             return Err(ReplayError::InvalidPayload);
@@ -1948,6 +1990,81 @@ mod provider_call_tests {
     use super::*;
 
     #[test]
+    fn provider_call_record_v6_rejects_v5_and_inconsistent_cache_fields() {
+        let run = RunId::new();
+        let agent = AgentRunId::new();
+        let mut record = ProviderCallRecord {
+            phase: crate::provider::AgentPhase::RootPlan,
+            disposition: ProviderCallDisposition::Finished,
+            requested_tools: 0,
+            response_id: Some("response-1".into()),
+            input_tokens: Some(100),
+            output_tokens: Some(10),
+            cache_read_input_tokens: Some(40),
+            cache_creation_input_tokens: Some(20),
+            wire_provenance: None,
+            failure_reason: None,
+        };
+        assert!(record.validate().is_ok());
+        record.cache_read_input_tokens = Some(81);
+        assert!(
+            record.validate().is_err(),
+            "cache parts exceed the input total"
+        );
+        record.cache_read_input_tokens = Some(40);
+        record.input_tokens = None;
+        assert!(
+            record.validate().is_err(),
+            "cache without a reported input total"
+        );
+        record.input_tokens = Some(100);
+        record.requested_tools = 1;
+        assert!(
+            record.validate().is_err(),
+            "a finished call declares no Tool"
+        );
+        record.disposition = ProviderCallDisposition::ToolRequested;
+        record.requested_tools = 0;
+        assert!(
+            record.validate().is_err(),
+            "a Tool request declares at least one Tool"
+        );
+        record.requested_tools = MAX_STEP_TOOL_CALLS + 1;
+        assert!(record.validate().is_err(), "above the step ceiling");
+        record.requested_tools = MAX_STEP_TOOL_CALLS;
+        assert!(record.validate().is_ok());
+
+        let event = Event::ProviderCallRecorded {
+            run_id: run,
+            agent_run_id: agent,
+            record: record.clone(),
+        };
+        let payload = event.payload().expect("current payload");
+        assert_eq!(
+            Event::decode(
+                "ProviderCallRecorded",
+                EVENT_PAYLOAD_VERSION,
+                &payload,
+                Some(run),
+                Some(agent),
+            )
+            .expect("current replay"),
+            event
+        );
+        assert!(
+            Event::decode(
+                "ProviderCallRecorded",
+                EVENT_PAYLOAD_VERSION - 1,
+                &payload,
+                Some(run),
+                Some(agent),
+            )
+            .is_err(),
+            "payload version 5 is not current"
+        );
+    }
+
+    #[test]
     fn rejects_unbounded_or_unearned_provider_metadata() {
         let mut record = ProviderCallRecord {
             phase: crate::provider::AgentPhase::RootPlan,
@@ -1957,6 +2074,9 @@ mod provider_call_tests {
             output_tokens: Some(10),
             wire_provenance: None,
             failure_reason: None,
+            requested_tools: 0,
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
         };
         assert!(record.validate().is_ok());
         record.response_id = Some("bad\nidentifier".into());
@@ -2016,7 +2136,7 @@ mod provider_call_tests {
             .unwrap(),
             event
         );
-        for version in [0, 1, 2, 3, 4, EVENT_PAYLOAD_VERSION + 1] {
+        for version in [0, 1, 2, 3, 4, 5, EVENT_PAYLOAD_VERSION + 1] {
             assert!(
                 Event::decode(
                     "ProviderCallRecorded",
@@ -2081,6 +2201,9 @@ mod provider_call_tests {
                     output_tokens: None,
                     wire_provenance: None,
                     failure_reason: Some(reason),
+                    requested_tools: 0,
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
                 };
                 assert_eq!(
                     record.validate().is_ok(),
@@ -2108,7 +2231,7 @@ mod provider_call_tests {
                     .expect("current replay"),
                     event
                 );
-                for version in [0, 1, 2, 3, 4, EVENT_PAYLOAD_VERSION + 1] {
+                for version in [0, 1, 2, 3, 4, 5, EVENT_PAYLOAD_VERSION + 1] {
                     assert!(
                         Event::decode(
                             "ProviderCallRecorded",

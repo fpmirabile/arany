@@ -1,6 +1,6 @@
 use super::{
     CompactionRequest, CompactionResponse, Effort, MAX_REPORTED_INPUT_TOKENS, MAX_RESPONSE_BYTES,
-    Provider, ProviderError, ProviderRequest, ProviderResponse, raw_reflects_secret,
+    Provider, ProviderError, ProviderRequest, ProviderResponse, Usage, raw_reflects_secret,
     resolve_native_effort, resolve_native_effort_for_run, valid_saved_api_account_id,
     validate_native_api_key,
 };
@@ -175,9 +175,7 @@ impl OpenAiProvider {
 
     fn decode_run(&self, bytes: &[u8], output_cap: u32) -> Result<ProviderResponse, ProviderError> {
         let response = wire::decode_run(bytes, &self.model)?;
-        if !valid_usage(response.input_tokens, response.output_tokens, output_cap)
-            || response.reflects_secret(&self.key)
-        {
+        if !valid_usage(response.usage, output_cap) || response.reflects_secret(&self.key) {
             return Err(ProviderError::InvalidOutcome);
         }
         Ok(response)
@@ -189,18 +187,19 @@ impl OpenAiProvider {
         output_cap: u32,
     ) -> Result<CompactionResponse, ProviderError> {
         let response = wire::decode_compaction(bytes, &self.model)?;
-        if !valid_usage(response.input_tokens, response.output_tokens, output_cap)
-            || response.reflects_secret(&self.key)
-        {
+        if !valid_usage(response.usage, output_cap) || response.reflects_secret(&self.key) {
             return Err(ProviderError::InvalidOutcome);
         }
         Ok(response)
     }
 }
 
-fn valid_usage(input: Option<u32>, output: Option<u32>, output_cap: u32) -> bool {
-    input.is_none_or(|count| count <= MAX_REPORTED_INPUT_TOKENS)
-        && output.is_none_or(|count| count <= output_cap)
+fn valid_usage(usage: Usage, output_cap: u32) -> bool {
+    usage
+        .input_tokens
+        .is_none_or(|count| count <= MAX_REPORTED_INPUT_TOKENS)
+        && usage.output_tokens.is_none_or(|count| count <= output_cap)
+        && usage.cache_consistent()
 }
 
 impl Provider for OpenAiProvider {
@@ -235,11 +234,8 @@ impl Provider for OpenAiProvider {
             .await?;
         if request.tools.is_some() {
             let decoded = wire::decode_tool_run(&response, &self.model)?;
-            if !valid_usage(
-                decoded.input_tokens,
-                decoded.output_tokens,
-                request.max_output_tokens,
-            ) || decoded.reflects_secret(&self.key)
+            if !valid_usage(decoded.usage, request.max_output_tokens)
+                || decoded.reflects_secret(&self.key)
             {
                 return Err(ProviderError::InvalidOutcome);
             }
@@ -287,11 +283,8 @@ impl Provider for OpenAiProvider {
             wire::decode_streamed_run(&bytes, &self.model)
         }
         .map_err(wire::ResponseError::provider_error)?;
-        if !valid_usage(
-            decoded.input_tokens,
-            decoded.output_tokens,
-            request.max_output_tokens,
-        ) || decoded.reflects_secret(&self.key)
+        if !valid_usage(decoded.usage, request.max_output_tokens)
+            || decoded.reflects_secret(&self.key)
         {
             return Err(ProviderError::InvalidOutcome);
         }
@@ -497,5 +490,21 @@ mod tests {
             provider.decode_compaction(&reflected_compaction, 1024),
             Err(ProviderError::InvalidOutcome)
         ));
+    }
+
+    #[test]
+    fn cached_tokens_above_reported_input_are_rejected() {
+        let consistent = Usage {
+            input_tokens: Some(12),
+            output_tokens: Some(8),
+            cache_read_input_tokens: Some(12),
+            cache_creation_input_tokens: None,
+        };
+        assert!(valid_usage(consistent, 4096));
+        let inconsistent = Usage {
+            cache_read_input_tokens: Some(13),
+            ..consistent
+        };
+        assert!(!valid_usage(inconsistent, 4096));
     }
 }

@@ -95,6 +95,9 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             output_tokens: None,
             wire_provenance: None,
             failure_reason: None,
+            requested_tools: u8::from(disposition == ProviderCallDisposition::ToolRequested),
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
         },
     };
     let prefix = [
@@ -1094,8 +1097,11 @@ pub(super) async fn native_command_changeset_corpus(
             Ok(ProviderResponse {
                 outcome,
                 response_id: None,
-                input_tokens: review.then_some(3),
-                output_tokens: review.then_some(1),
+                usage: arany::Usage {
+                    input_tokens: review.then_some(3),
+                    output_tokens: review.then_some(1),
+                    ..Default::default()
+                },
                 wire_provenance: None,
             })
         }

@@ -41,7 +41,7 @@ pub use provider::{
     MAX_NATIVE_API_KEY_BYTES, ModelEntry, NativeApiCredentials, NativeCheckError, OpenAiProvider,
     OutputTokenBound, PreviewText, Provider, ProviderError, ProviderFailureReason, ProviderImage,
     ProviderOutcome, ProviderRequest, ProviderResponse, ProviderWireProvenance, ResponsePreview,
-    UnansweredStatus, check_custom_profile, check_native_model_from_env,
+    UnansweredStatus, Usage, check_custom_profile, check_native_model_from_env,
     check_native_model_with_api_key, check_native_model_with_credentials, list_native_models,
     list_native_models_with_api_key, list_native_models_with_credentials, probe_chatgpt_model,
     resolve_native_effort, resolve_native_effort_for_run, validate_native_api_key,

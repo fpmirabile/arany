@@ -186,3 +186,20 @@ fn failed_insert_drops_hot_projection_before_recovery() {
     assert_eq!(recovered.sequence, 2);
     assert!(hot_session.is_some());
 }
+
+#[test]
+fn image_message_admission_reserves_the_extra_payload_bytes() {
+    assert_eq!(
+        event_payload_limit("MessageAccepted", EVENT_PAYLOAD_VERSION),
+        320 * 1024
+    );
+    assert_eq!(
+        image_message_extra(true),
+        (320 * 1024 - crate::store::MAX_EVENT_BYTES) as i64
+    );
+    assert_eq!(image_message_extra(false), 0);
+    assert_eq!(
+        event_payload_limit("MessageAccepted", EVENT_PAYLOAD_VERSION - 1),
+        crate::store::MAX_EVENT_BYTES
+    );
+}

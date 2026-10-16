@@ -283,6 +283,9 @@ mod tests {
                 output_tokens: Some(222),
                 wire_provenance: None,
                 failure_reason: None,
+                requested_tools: 0,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
             };
             let last = crate::session::ProviderCallRecord {
                 phase: crate::provider::AgentPhase::RootSynthesis,

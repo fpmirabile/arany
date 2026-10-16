@@ -314,8 +314,7 @@ impl Provider for Journey {
         Ok(ProviderResponse {
             outcome,
             response_id: None,
-            input_tokens: None,
-            output_tokens: None,
+            usage: arany::Usage::default(),
             wire_provenance: None,
         })
     }
@@ -872,8 +871,7 @@ impl Provider for RuntimeJourney {
         Ok(ProviderResponse {
             outcome,
             response_id: None,
-            input_tokens: None,
-            output_tokens: None,
+            usage: arany::Usage::default(),
             wire_provenance: None,
         })
     }

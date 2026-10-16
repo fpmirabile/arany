@@ -7,7 +7,8 @@ use crate::provider::streaming::{FramingStage, ResponsesPreview, SseEvent, SseFr
 use crate::provider::{
     AgentPhase, ChatGptProvenance, CompactionItem, CompactionRequest, CompactionResponse, Effort,
     HistoryTurn, MAX_REPORTED_INPUT_TOKENS, MAX_RESPONSE_BYTES, OutputTokenBound, Provider,
-    ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse, catalog::valid_model_id,
+    ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse, Usage,
+    catalog::valid_model_id,
 };
 use crate::session::{AgentRunId, RunId, SessionId};
 #[cfg(test)]
@@ -316,8 +317,7 @@ async fn invoke_at_with_preview(
     })?;
     accept_result(
         result.reflects_secret(access_token),
-        result.input_tokens,
-        result.output_tokens,
+        result.usage,
         request.max_output_tokens,
         counts,
     )?;
@@ -340,8 +340,7 @@ async fn compact_at(
         .map_err(|error| response_failure(error, counts))?;
     accept_result(
         result.reflects_secret(access_token),
-        result.input_tokens,
-        result.output_tokens,
+        result.usage,
         request.max_output_tokens,
         counts,
     )?;
@@ -350,8 +349,7 @@ async fn compact_at(
 
 fn accept_result(
     reflects_secret: bool,
-    input_tokens: Option<u32>,
-    output_tokens: Option<u32>,
+    usage: Usage,
     max_output_tokens: u32,
     counts: StreamCounts,
 ) -> Result<(), ProviderError> {
@@ -362,8 +360,11 @@ fn accept_result(
             counts,
         ));
     }
-    if input_tokens.is_none_or(|count| count == 0 || count > MAX_REPORTED_INPUT_TOKENS)
-        || output_tokens.is_none_or(|count| count == 0)
+    if usage
+        .input_tokens
+        .is_none_or(|count| count == 0 || count > MAX_REPORTED_INPUT_TOKENS)
+        || usage.output_tokens.is_none_or(|count| count == 0)
+        || !usage.cache_consistent()
     {
         return Err(failure(
             Stage::UsageContract,
@@ -371,7 +372,10 @@ fn accept_result(
             counts,
         ));
     }
-    if output_tokens.is_some_and(|count| count > max_output_tokens) {
+    if usage
+        .output_tokens
+        .is_some_and(|count| count > max_output_tokens)
+    {
         return Err(failure(
             Stage::LocalOutputLimit,
             ProviderError::LocalOutputLimit,
