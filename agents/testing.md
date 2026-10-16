@@ -10,6 +10,7 @@ Load when continuing beta 1, adding or changing behavior, fixing a defect, editi
 - Process, account, OS-service, or private-state fixtures → [host and account isolation](./references/testing-details.md#host-and-account-isolation).
 - PTY input, signals, restoration, terminal faults, or tmux → [terminal process fixtures](./references/testing-details.md#terminal-process-fixtures).
 - Storage, Workspace faults, response RSS, or paused deadlines → [storage, Workspace and resource faults](./references/testing-details.md#storage-workspace-and-resource-faults).
+- Native Guard topology, PID or pidfd fixtures → [native Guard fixtures](./references/testing-details.md#native-guard-fixtures).
 
 ## Documentation and instruction changes
 

@@ -89,3 +89,10 @@ The [release-policy workflow](../../.github/workflows/release-policy.yml) runs w
 - For a nonblocking Workspace-input gate, use a real FIFO with no writer in a supervised child under a parent deadline; a Unix socket's rejection does not prove the open cannot hang. Confirm no Provider call or canonical Event. See [Linux `fifo(7)`](https://man7.org/linux/man-pages/man7/fifo.7.html).
 - For the Linux Workspace replacement gate, atomically exchange each selected component with an outside-pointing symlink using [`renameat2(2)`](https://man7.org/linux/man-pages/man2/renameat2.2.html). Prove the safe and rejected stable states, then require real swap and load overlap with no outside bytes across finite attempts; keep it ignored and explicitly timed.
 - For paused Tokio deadline tests involving the SQLite owner thread, pause after the Provider-start gate and resume before awaiting durable shutdown; otherwise virtual time can outrun the real store thread.
+
+## Native Guard fixtures
+
+- The Linux runtime-topology fixture runs its outer test owner in a private PID namespace with `--kill-child`. The outer fixture keeps the host procfs view so each process's own `/proc/self/status` reports host PIDs in its [`NSpid` field](https://man7.org/linux/man-pages/man5/proc_pid_status.5.html); the production Bubblewrap profile still mounts its own `/proc`.
+- A separate forced-timeout gate records the namespace init and held-descendant PIDs from those reports, binds both pidfds before killing and reaping the unshare owner, then awaits both exits before dropping the fixture directory. The topology path gates the init and each exact-filter worker until its host identity is bound and confirms its pidfd exit after capture on success and failure. Keep the fixture directory if any identity or exit stays unproved; assert only after confirmed exit.
+- Publish PID records and release gates atomically so pollers observe either nothing or a complete record.
+- Run captured Rust helpers with a full exact test filter and prove that exactly one test completed.

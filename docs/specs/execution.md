@@ -43,7 +43,7 @@ All adapters reject reported input above the shared input ceiling and output abo
 
 The selected Provider declares the primary output-token cap and the call deadline; the Run pins the cap in its configuration. Native OpenAI and Anthropic API routes declare 16,384 output tokens, and ChatGPT-plan and exact custom routes 4,096; replay rejects a pinned cap outside 1 to 16,384. Child calls request at most 4,096 tokens. Native OpenAI and Anthropic calls have a 600-second deadline; ChatGPT-plan and custom calls have 120 seconds. Each call also ends at the remaining Goal active time. A Tool review reserves 20 seconds plus Store overhead, compaction keeps its 120-second deadline, and a tool-free delegation reserves one deadline per wave of concurrent children, at most 20 minutes; a researcher delegation reserves 20 minutes. The useful answer ceiling stays at the 32 KiB assistant or result bound: the extra native output headroom is for reasoning tokens, and context budgeting reserves no output tokens.
 
-The ChatGPT route uses one bounded SSE parser regardless of absent or misleading media labels. Optional event labels must agree with JSON types. A matching created or completed identity plus complete indexed item events may supply empty terminal output; populated terminal output must agree. Deltas never supply accepted results. Missing or incomplete closure, invalid identity, model or usage, contradictory items, encoding errors and overflow publish no partial outcome. Native and catalog media admission remains unchanged; no JSON or HTML fallback is implied.
+The ChatGPT route's SSE parsing and item reconstruction rules are owned by the [ChatGPT contract](./chatgpt.md#catalog-checks-and-runs).
 
 Malformed, non-object or duplicate-key MCP arguments, and selected-credential reflections including nested escaped arguments, reject before persistence. Provider failure remains the call's outcome even when an earlier Tool denial could otherwise be continued. Every route has zero automatic retries and no billing, model or encoding fallback. A lost response can still consume remote usage.
 
@@ -70,7 +70,7 @@ Cancellation before Message acceptance creates no Run. After admission it drains
 | Bound | Limit | Overflow |
 |---|---|---|
 | Session lock files | 65,536, including pre-commit files stranded by process death; the directory scan stops after that bound plus 32 State files | quota failure before Workspace input or Provider disclosure |
-| Workspace writer lock files | 4,096 identities, shared across StateRoots ([Goals](./goals.md#lifecycle-budgets-and-recovery)) | new writers refused before disclosure or effects |
+| Workspace writer lock files | bounded and shared across StateRoots; the limit is owned by [Goals](./goals.md#lifecycle-budgets-and-recovery) | new writers refused before disclosure or effects |
 | Direct-Session projection cache | 128 MiB of serialized Event payload | not kept; the next append replays strictly |
 | Event payload, default | 64 KiB | append refused |
 | `MessageAccepted` | 656 KiB, with inline PNG bytes (an empty list for text) | append refused |
@@ -81,7 +81,7 @@ Cancellation before Message acceptance creates no Run. After admission it drains
 | Session discovery | 65,536 heads | exact-ID resume fallback |
 | `provider-profiles.json` and `tools.json` | 64 KiB each, read only through the admitted handle | rejected; never parsed as trusted configuration |
 
-SQLite integrity is not tamper evidence, and the database is not encrypted at rest. Persisted objectives, summaries, results and errors are untrusted typed data.
+Canonical state resolves before repository input and lives in a private directory outside the Workspace, with verified owner and permissions or ACL, a fixed aggregate page cap and admission headroom. SQLite integrity is not tamper evidence, and the database is not encrypted at rest. Persisted objectives, summaries, results and errors are untrusted typed data.
 
 ## Acceptance scenarios and evidence owners
 

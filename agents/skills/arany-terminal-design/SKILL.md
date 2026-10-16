@@ -13,7 +13,7 @@ This skill is self-contained. Its synthesis of `ui-ux-pro-max` and `emil-design-
 
 Resolve repository paths below from this skill's directory, independently of the shell working directory.
 
-- Read [terminal rules](../../../agents/terminal.md) before every design or review. They own modes, keys, layout constraints, drawing, restoration, and accessibility behavior.
+- Read [terminal contract](../../../docs/specs/terminal.md) before every design or review. They own modes, keys, layout constraints, drawing, restoration, and accessibility behavior.
 - Read [testing rules](../../../agents/testing.md) before implementation or verification claims. Use the existing owner for each claim.
 - Apply [Arany's priorities](../../../AGENTS.md#product-and-implementation-priorities), including Ponytail and OS parity, and follow its routing for security, CLI, Session, credentials, and architecture when the requested change reaches them.
 

@@ -9,7 +9,7 @@ This contract owns Provider selection and pinning, native and custom admission, 
 - A primary Goal call may carry a bounded typed `GoalContextFacts` projection. It is context, not a grant or budget override; children never receive it.
 - `Provider::compact` is a separate semantic call, not a synthetic AgentRun. It receives bounded accepted outcomes and an optional prior summary, never Workspace instructions or includes. API-key and custom routes enforce the output cap remotely; the ChatGPT-plan route records a local-only cap. The summary is untrusted data, portable only with its provenance.
 - Rollout is staged: native OpenAI and Anthropic first; exact custom profiles after data-free conformance; OpenRouter stays deferred behind its route and privacy gate; Z.AI stays unadmitted until an exact profile passes a strict outcome contract.
-- Selection is deterministic, not routing: no cross-Provider or model fallback and no hidden discovery call inside a Run.
+- Selection is deterministic, not routing: no cross-Provider or model fallback and no hidden discovery call or preliminary model check inside a Run.
 
 ## Native models and accounts
 
@@ -36,7 +36,7 @@ This contract owns Provider selection and pinning, native and custom admission, 
 ## Configuration and egress
 
 - An explicit CLI profile and model override trusted Session or user-configuration defaults. There is no compiled model default, Workspace-defined profile or implicit discovery.
-- Only the selected Provider's credential is read. Credentials never enter CLI arguments, Events, output, fixtures, telemetry or error bodies. Attached `/model` follows the [terminal contract](./terminal.md#interactive-commands-and-completion).
+- A Provider receives only the current objective, selected bounded Session context, instruction and include snapshots, and the Engine-produced child results the phase requires. Only the selected Provider's credential is read. Credentials never enter CLI arguments, Events, output, fixtures, telemetry or error bodies. Attached `/model` follows the [terminal contract](./terminal.md#interactive-commands-and-completion).
 - Every Provider HTTP client requests identity encoding, rejects any non-identity `Content-Encoding` before reading the body, and bounds declared and accumulated bytes to 1 MiB per response. Compressed Provider replies are unsupported.
 - HTTPS is required outside numeric loopback. Destinations are pinned, with no redirects or ambient proxies; route or model drift, changed addresses, metadata, link-local and multicast destinations, and credential reflection reject. Receipts say `custom verified` and never relabel a service as native OpenAI or Anthropic.
 - Operating-system TLS trust uses Reqwest's platform verifier with chain and server-name checks intact. Certificate and revocation connections the operating system makes during trust evaluation are not Provider destinations and never carry content, files or credentials.
