@@ -2504,3 +2504,34 @@ fn fullscreen_history_cue_stays_visible_behind_a_long_state() {
         );
     }
 }
+
+#[test]
+fn pausing_status_names_the_step_boundary_and_the_cancel_key() {
+    let mut terminal = Terminal::new(TestBackend::new(80, 6)).expect("test terminal");
+    let model = PresentationModel {
+        status_line: "working · model".into(),
+        activity_lines: vec!["primary · working".into()],
+        setup_required: false,
+        draft_action: DraftAction::InspectRun,
+        empty_chat: true,
+    };
+    let composer = Composer::default();
+    terminal
+        .draw(|frame| {
+            draw_frame(
+                frame,
+                &model,
+                &composer,
+                Some("Pausing at the next step... Ctrl+C cancels now"),
+                Palette { color: false },
+            )
+        })
+        .expect("pausing frame");
+    let buffer = terminal.backend().buffer();
+    assert!(
+        (0..6)
+            .any(|y| buffer_row(buffer, y)
+                .contains("Pausing at the next step... Ctrl+C cancels now"))
+    );
+    assert!((0..6).all(|y| !buffer_row(buffer, y).contains("Run in progress")));
+}

@@ -102,6 +102,8 @@ enum ActiveStop {
     Cancelling,
 }
 
+const STEERING_SENT: &str = "Steering note sent to the agent";
+
 fn steering_refusal(refused: SteeringRefused, autonomous: bool) -> String {
     match refused {
         SteeringRefused::NoteWaiting => "A steering note is already waiting; draft retained".into(),
@@ -308,6 +310,12 @@ pub(super) async fn submit_objective(
                 {
                     return Ok(RunSubmission::Shutdown("terminal input cleanup failed".into()));
                 }
+                if sent
+                    && draw_active_snapshot(terminal, view, composer, user_recorded, stop, Some(TerminalNotice::History(STEERING_SENT)))
+                        .is_err()
+                {
+                    return Ok(RunSubmission::Shutdown("terminal rendering failed".into()));
+                }
                 return match result {
                     Ok(outcome) => Ok(RunSubmission::Completed(Box::new(outcome), user_recorded, None)),
                     Err(run::RunAttemptError::Stopped { outcome, reason }) => {
@@ -348,7 +356,7 @@ pub(super) async fn submit_objective(
                 if sent && terminal.restore_draft_input(composer.text().len()).is_err() {
                     break "terminal input failed".to_owned();
                 }
-                let notice = sent.then_some(TerminalNotice::History("Steering note sent to the agent"));
+                let notice = sent.then_some(TerminalNotice::History(STEERING_SENT));
                 if draw_active_snapshot(terminal, view, composer, user_recorded, stop, notice).is_err() {
                     break "terminal rendering failed".to_owned();
                 }
@@ -610,11 +618,14 @@ pub(super) async fn submit_objective(
                     }
                     _ => None,
                 };
-                if offered.as_deref().is_some_and(|text| composer.text() != text || !composer.images().is_empty())
-                    && steering.withdraw_note()
-                {
+                if offered.as_deref().is_some_and(|text| composer.text() != text || !composer.images().is_empty()) {
                     offered = None;
-                    notice = Some(Feedback::Transient("Steering note withdrawn; draft retained".into()));
+                    notice = Some(if steering.withdraw_note() {
+                        Feedback::Transient("Steering note withdrawn; draft retained".into())
+                    } else {
+                        // The Engine already took the note, so it is sent; the edited draft stays.
+                        Feedback::History(STEERING_SENT.into())
+                    });
                 }
                 if (notice.is_some() || matches!(input, TerminalInput::Interrupt))
                     && draw_active_snapshot(terminal, view, composer, user_recorded, stop, notice.as_ref().map(Feedback::notice)).is_err()
@@ -669,11 +680,15 @@ fn draw_active_snapshot(
     notice: Option<TerminalNotice<'_>>,
 ) -> Result<(), TerminalError> {
     if !current_run_started {
+        let status = match stop {
+            ActiveStop::Running => None,
+            ActiveStop::Pausing => Some("Pausing at the next step... Ctrl+C cancels now"),
+            ActiveStop::Cancelling => Some("Stopping request..."),
+        };
         terminal.draw_preparing_notice(
             view,
             composer,
-            notice.or((stop == ActiveStop::Cancelling)
-                .then_some(TerminalNotice::Transient("Stopping request..."))),
+            notice.or(status.map(TerminalNotice::Transient)),
         )
     } else if stop != ActiveStop::Running || terminal.is_linear() {
         let notice = notice.unwrap_or(TerminalNotice::Transient(match stop {

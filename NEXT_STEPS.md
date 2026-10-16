@@ -34,6 +34,7 @@ history. Implementation status and verified support are separate claims.
 
 - Exercise classic scrollback, narrow resize/reflow, temporary details, idle `/settings` chat-view transitions and a 200-line streamed response in a real macOS emulator and native Linux terminals, including under WSL2. Synthetic macOS PTYs prove controlled cursor ownership, transcript insertion and restoration; they do not emulate scrollback or prove other OS support.
 - With explicit usage consent, repeat OpenAI, Anthropic, ChatGPT and exact-custom streaming conformance against actual selected accounts/endpoints. Offline fixtures prove protocol/lifecycle behavior, not live compatibility. Keep incomplete answers outside future context and confirm recovery after cancellation/crash.
+- Attached PTY journeys for Goal steering and pause are unimplemented: a steering note typed during an attached Run must reach synthesis and be confirmed in the terminal, and `/pause` during an attached Run must wait for the in-flight call and pause the Goal. Current evidence is the Engine corpus, reducer tests and terminal unit tests only.
 - Check `--screen-reader`, `/transcript`, monochrome labels and managed following with real assistive technology. These usability claims remain unverified.
 
 ## Beta 1: final user-owned checks

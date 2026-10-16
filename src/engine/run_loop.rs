@@ -1984,7 +1984,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                     Err(error) => return Err(error),
                 }
             }
-            if !approved && !active_time_exhausted {
+            if !approved && !active_time_exhausted && !self.pause_at_boundary() {
                 match self.reserve_active_pause().await {
                     Ok(pause) => {
                         let mut cancellation = self.controls.cancellation.clone();
@@ -2034,18 +2034,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                 },
                 None,
             )
-        } else if approved && !self.controls.goal_budget.can_start_provider_call() {
-            (
-                crate::tools::ToolObservation {
-                    intent,
-                    disposition: crate::tools::ToolDisposition::Limit,
-                    output: "Goal token budget exhausted; no operation was dispatched".into(),
-                    guard: None,
-                    cache_update: crate::tools::CacheUpdate::NotApplicable,
-                },
-                None,
-            )
-        } else if approved && self.pause_at_boundary() {
+        } else if self.pause_at_boundary() {
             // A pause requested during review or the approval wait stops the Run before dispatch.
             approved = false;
             if let Some(pause) = queue_pause.take() {
@@ -2056,6 +2045,17 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                     intent,
                     disposition: crate::tools::ToolDisposition::Denied,
                     output: "Goal paused before this operation; no operation was dispatched".into(),
+                    guard: None,
+                    cache_update: crate::tools::CacheUpdate::NotApplicable,
+                },
+                None,
+            )
+        } else if approved && !self.controls.goal_budget.can_start_provider_call() {
+            (
+                crate::tools::ToolObservation {
+                    intent,
+                    disposition: crate::tools::ToolDisposition::Limit,
+                    output: "Goal token budget exhausted; no operation was dispatched".into(),
                     guard: None,
                     cache_update: crate::tools::CacheUpdate::NotApplicable,
                 },

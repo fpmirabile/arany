@@ -3058,6 +3058,88 @@ async fn pause_during_approval_wait_dispatches_no_tool() {
 }
 
 #[tokio::test]
+async fn pause_during_tool_review_skips_the_prompt_and_dispatches_no_tool() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let steering = RunSteering::new();
+    let pause = steering.clone();
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Tool {
+            call: arany::ToolCall::Write {
+                path: "notes/facts.txt".into(),
+                expected_digest: None,
+                content: "changed".into(),
+            },
+            plan_contract: Some(Box::new(arany::GoalPlanContract {
+                mission: "Change the facts".into(),
+                resource_class: arany::ToolResourceClass::Default,
+                command_timeout_ms: None,
+                paths: vec!["notes".into()],
+                commands: Vec::new(),
+                skills: Vec::new(),
+                mcp_tools: Vec::new(),
+                success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
+                    path: "notes/facts.txt".into(),
+                    content: "changed".into(),
+                },
+                budget: arany::GoalBudget::default(),
+            })),
+        },
+        ProviderOutcome::Finish(Finish {
+            summary: "Ask the user".into(),
+            result: "ask".into(),
+        }),
+        finish_with("never reached"),
+    ])
+    // Zero-based call 1 is the Tool review that follows the proposed Tool.
+    .with_before_call(1, move || assert!(pause.pause(), "first pause"));
+    let requests = provider.requests.clone();
+    let mut engine =
+        Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+    let config = state_path.join("tools.json");
+    std::fs::write(
+        &config,
+        br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+    )
+    .expect("tool configuration");
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
+        .expect("tool configuration mode");
+    engine
+        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
+        .expect("Guard enabled");
+    let (approvals, _inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Auto);
+    engine.set_tool_approvals(approvals);
+    engine.set_steering(steering);
+    let mut input = request(&workspace, "Change the facts");
+    input.include_paths.clear();
+    let outcome = engine.run(input).await.expect("paused Run");
+    assert_eq!(outcome.run.status, RunStatus::Cancelled);
+    engine.close().await.expect("engine shutdown");
+
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("notes/facts.txt")).expect("facts"),
+        "v1",
+        "a Tool reviewed during a pause is not dispatched"
+    );
+    assert_eq!(requests.lock().expect("requests").len(), 2);
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    let observed: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            Event::ToolFinished { observation, .. } => Some(observation.disposition),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(observed, [arany::ToolDisposition::Denied]);
+    assert_eq!(
+        view.goal(outcome.goal_id).expect("Goal").status,
+        arany::GoalStatus::Interrupted
+    );
+}
+
+#[tokio::test]
 async fn pause_at_the_delegate_boundary_spawns_no_child() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "v1");

@@ -1642,6 +1642,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn idle_pause_reports_that_no_goal_is_running() {
+        let temp = tempfile::tempdir().expect("private test root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("Workspace");
+        let admission = Admission {
+            telemetry: arany::Telemetry::disabled(),
+            state_dir: temp.path().join("state"),
+            explicit_state_dir: false,
+            workspace,
+            include_paths: Vec::new(),
+            tools: false,
+            workspace_permissions: None,
+            defaults: SessionDefaults::default(),
+            screen_reader: false,
+            classic: false,
+            no_color: false,
+            setup_requested: false,
+            entry: EntryMode::New,
+            prompt: None,
+            resume_goal: None,
+        };
+        let root = StateRoot::admit(&admission.state_dir).expect("state");
+        let mut session_id = create_session(root, admission.workspace.clone(), None)
+            .await
+            .expect("Session");
+        let mut view = load_view(&admission.state_dir, session_id)
+            .await
+            .expect("view");
+        let notice = handle_command(
+            &admission,
+            &mut session_id,
+            &mut view,
+            InteractiveCommand::Pause,
+            None,
+        )
+        .await
+        .expect("local notice");
+        assert_eq!(notice, "No Goal is running; /pause works during a Run");
+    }
+
+    #[tokio::test]
     async fn lifecycle_commands_switch_only_after_a_valid_durable_operation() {
         let temp = tempfile::tempdir().expect("private test root");
         let workspace = temp.path().join("workspace");
