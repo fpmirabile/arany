@@ -1,5 +1,3 @@
-//! Typed Provider request, the rendered conversation and the opaque replay turn.
-
 use super::streaming::reflects_secret;
 use super::tool_specs::ToolSpec;
 use super::{

@@ -1,5 +1,3 @@
-//! Private unit records and quota-backed images for Workspace, scratch and cache.
-
 use super::super::CAPTURE_BYTES;
 use super::system_program;
 use crate::private_fs::open_directory;
@@ -196,6 +194,7 @@ async fn prepare_storage_with_sizes(
                 state: AttachmentState::Attaching,
             },
         )?;
+        // Kernel-only attachment: killing a userspace disk-image helper before unmount triggers an improper-eject warning.
         disk_command(
             root,
             &[

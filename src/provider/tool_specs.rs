@@ -1,5 +1,3 @@
-//! Native Tool functions one request offers. The Primary set never changes within a Run.
-
 use super::PromptRole;
 use crate::tools::types::{catalog_call_schemas, child_research_operation, plan_contract_property};
 use serde_json::Value;

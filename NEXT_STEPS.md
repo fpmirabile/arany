@@ -122,7 +122,7 @@ to the user's credential store or clipboard.
    a matching validated changeset receipt, MCP writes stay private, uncertainty
    stops continuation and no action retries itself. On Linux and macOS (Command Line Tools Git), also inspect typed Git status, diff and log on a repository with local changes.
    Validate the chosen real model's strict Tool encoding before claiming support.
-9. **Native macOS stores and clipboard.** On a macOS account, verify setup,
+8. **Native macOS stores and clipboard.** On a macOS account, verify setup,
    restart/reuse, replacement, refresh and logout through the login Keychain,
    including Allow/Always Allow/Deny and cancellation at the selected-item
    startup authorization dialog; Allow Once may prompt again because the OS owns

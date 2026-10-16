@@ -1,5 +1,3 @@
-//! Request fixtures shared by the Provider unit tests.
-
 use super::{AgentPhase, ChildResult, HistoryTurn, PromptRole, ProviderRequest, RunInput};
 use crate::session::{AgentRunId, CollaborationPolicy, GoalBudget, GoalPlanContract, RunId};
 use crate::tools::ToolContext;

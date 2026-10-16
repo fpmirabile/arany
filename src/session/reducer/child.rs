@@ -1,6 +1,3 @@
-//! Read-only research steps of child AgentRuns. Child Tool facts stay in the child's own
-//! `AgentView::tools`; the primary's `RunView::tools` and its plan rules are unchanged.
-
 use super::{AgentStatus, AgentView, RunView, SessionView, ToolView, active_run, active_run_goal};
 use crate::provider::AgentPhase;
 use crate::session::events::{

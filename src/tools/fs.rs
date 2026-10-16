@@ -1116,6 +1116,7 @@ fn apply_changeset(root: &Dir, changeset: &CommandChangeset) -> Result<String, T
                             }
                         })?;
                     affected = true;
+                    // Reopen "." readably first: a path-only capability handle cannot prove durability through fsync.
                     parent
                         .directory
                         .try_clone()

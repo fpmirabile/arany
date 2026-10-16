@@ -96,3 +96,4 @@ The [release-policy workflow](../../.github/workflows/release-policy.yml) runs w
 - A separate forced-timeout gate records the namespace init and held-descendant PIDs from those reports, binds both pidfds before killing and reaping the unshare owner, then awaits both exits before dropping the fixture directory. The topology path gates the init and each exact-filter worker until its host identity is bound and confirms its pidfd exit after capture on success and failure. Keep the fixture directory if any identity or exit stays unproved; assert only after confirmed exit.
 - Publish PID records and release gates atomically so pollers observe either nothing or a complete record.
 - Run captured Rust helpers with a full exact test filter and prove that exactly one test completed.
+- Require positive helper exit before reading a captured helper's completed-test summary; control-socket EOF can precede the runner's final output.

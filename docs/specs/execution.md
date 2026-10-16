@@ -20,6 +20,8 @@ Child identities and assignments retain ordinal order even when calls finish out
 
 One delegation active-time segment covers child calls and child Tools, including their shared Guard capacity waits. Pause also takes effect before each child step.
 
+Read-only research steps of child AgentRuns keep Child Tool facts in the child's own agent view; the primary's run view and its plan rules are unchanged.
+
 | Bound | Value | Overflow |
 |---|---|---|
 | Children per delegation | existing policy, ≤ 8 | invalid delegation |

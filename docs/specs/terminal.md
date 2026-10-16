@@ -29,8 +29,6 @@ An unavailable stderr sink never turns error reporting or cleanup into a panic, 
 
 Human output escapes or rejects ANSI/ECMA-48 controls, OSC sequences, C0/C1 controls, carriage return, backspace, bidirectional controls and forged line prefixes. JSONL comes only from a serializer, one object per line. Inline chat reserves one blank row above the transcript when at least five history rows fit, so a sticky command header cannot cover the first speaker label; with four or fewer history rows, content takes priority. Linear and deterministic output is unstyled and contains no CSI, OSC or carriage-return rewriting.
 
-Cursor-position queries travel only through the stderr backend and the sole raw reader. Unsolicited responses are discarded, and query bytes never enter drafts, stdout or history. Classic clearing starts at the owned viewport and never clears settled primary-screen output; cleanup uses the stored owned area and never queries a stopped reader.
-
 ## Conversation, progress and history
 
 A Tool waiting for shared Guard capacity shows `queued · waiting for capacity` in classic, fullscreen and linear mode. The one-slot hint follows the current committed pending intent, clears when waiting or the Run ends, and never enters Events, history, replay or Provider context. It grants no authority and does not resume after restart; draft editing and Ctrl+C stay available.
@@ -41,7 +39,7 @@ Classic mode uses native scrollback above a bounded viewport. On its first draw 
 
 The saved `/settings` chat view selects the initial presentation, defaulting to fullscreen; `--classic` selects classic for that process without saving it. Saving a different chat view in idle `/settings` switches presentation within the same Session, keeping draft, caret and reading anchors. A running task locks mode changes. `Ctrl+T` or `/transcript` opens and closes detailed presentation; `Ctrl+O` still inserts a newline. Details stay available during work without cancelling it or granting authority.
 
-Geometry is bounded to 4,096 columns and 262,144 cells; zero or excessive geometry fails with a typed presentation error. Classic uses a viewport of at most 12 rows, inserting native rows in batches of at most 64. Inline cursor observation targets stderr through the sole input reader under a one-second deadline; unavailable replies select linear fallback before work. Cleanup never queries a stopped reader or clears settled primary-screen transcript.
+Geometry is bounded to 4,096 columns and 262,144 cells; zero or excessive geometry fails with a typed presentation error. Classic uses a viewport of at most 12 rows, inserting native rows in batches of at most 64. Inline cursor observation targets stderr through the sole input reader under a one-second deadline; unavailable replies select linear fallback before work. Cursor queries travel only through the stderr backend and the sole raw reader; unsolicited replies are discarded and query bytes never enter drafts, stdout or history. Cleanup uses the stored owned area, never queries a stopped reader and never clears settled primary-screen transcript.
 
 Fullscreen follows new content only at the live tail. PageUp/PageDown, three-row wheel navigation and find keep older source anchors through generation, completion and resize; returning live resumes following. Classic delegates scrollback to the emulator, which can move the composer out of view. A complete 200-line answer stays readable without duplicate final lines or intermediate frames.
 

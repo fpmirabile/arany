@@ -38,7 +38,7 @@ Everything else (agent loop, wire formats, defaults, permission modes, hooks, ag
 | Behavior, scenarios, spec ownership | [Spec workflow](./docs/specs/README.md) and the owning spec below |
 | Providers, models, custom endpoints, streaming, usage | [Provider spec](./docs/specs/provider.md) |
 | ChatGPT-plan OAuth, consent, tokens, catalogs | [ChatGPT spec](./docs/specs/chatgpt.md) |
-| Saved accounts, keyrings, credential helper | [Credential spec](./docs/specs/credentials.md) |
+| Saved accounts, keyrings, credential helper, private State directories and ACL admission | [Credential spec](./docs/specs/credentials.md) |
 | Sessions, resume, fork, compaction, context | [Session spec](./docs/specs/session.md) |
 | Goals, budgets, steering, `exec` | [Goals spec](./docs/specs/goals.md) |
 | Runs, outcomes, Events, replay, persistence | [Execution spec](./docs/specs/execution.md) |
@@ -64,7 +64,7 @@ Record a found invariant, failure or ownership decision once: behavior, limits a
 
 ## Module boundaries
 
-Read the [system overview](./docs/architecture/system-overview.md#2-runtime-architecture) and the relevant module rules before changing a boundary; the overview owns package and process shape, dependency direction and state ownership.
+Read the [system overview](./docs/architecture/system-overview.md#2-runtime-architecture) and the owning spec before changing a boundary; the overview owns package and process shape, dependency direction and state ownership.
 
 Create a module only once it has depth; a crate needs measured dependency, release, privilege, ownership or compile pressure. Add a daemon only for a second Client or detached execution. Effectful Tools require deterministic Policy and the separate Guard.
 

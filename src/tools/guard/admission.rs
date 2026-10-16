@@ -99,6 +99,7 @@ pub(super) fn open_file(
                 .follow(FollowSymlinks::No);
             match dir.open_with(name, &options) {
                 Ok(file) => file,
+                // Reopen on AlreadyExists: concurrent macOS no-follow create(true) can report NotFound.
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => dir
                     .open_with(name, &existing)
                     .map_err(|_| ToolError::Path)?,

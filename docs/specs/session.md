@@ -53,6 +53,8 @@ Each Run pins one collaboration policy before it starts. `SessionDefaultChanged`
 
 Context compilation is a pure function of its inputs. It reads no clock, randomness or Provider-hosted state.
 
+Only the Provider renderer turns a typed request into the conversation: it alone decides what is `system` (a closed set), what is user input and what is labelled untrusted data. System prompt text is loaded byte-for-byte from `prompts/` files. Everything before a Run's loop is byte-stable for that Run; each later request is the previous one plus appended blocks, and compaction is the only rewrite.
+
 ## Persistence facts
 
 - Every canonical Event carries `session_id`; Run and AgentRun scopes are optional where an Event is Session-only. Session lists may use rebuildable indexes, never as a second source of truth.
