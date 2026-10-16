@@ -1,12 +1,12 @@
 use super::EngineError;
+use super::ledger::GoalLedger;
 use crate::provider::PreviewText;
 use crate::session::{
-    AgentRunId, Event, EventEnvelope, GoalView, RunId, RunView, SessionId, SessionView,
+    AgentRunId, Event, EventEnvelope, GoalId, GoalView, RunId, RunView, SessionId, SessionView,
 };
 use crate::store::Store;
 use crate::telemetry::{RunTrace, TraceEventKind};
 use std::sync::Arc;
-use std::sync::Mutex;
 use tokio::sync::watch;
 
 /// Committed Run snapshots and separate temporary display and Tool capacity hints.
@@ -129,62 +129,68 @@ pub(super) struct PreviewContext {
 }
 
 pub(super) struct ProgressPublisher {
-    view: Mutex<SessionView>,
-    progress: RunProgress,
+    ledger: GoalLedger,
+    progress: Option<RunProgress>,
     run_id: RunId,
 }
 
 impl ProgressPublisher {
-    pub(super) fn previews_enabled(&self) -> bool {
-        self.progress.previews_enabled()
+    pub(super) fn ledger(&self) -> &GoalLedger {
+        &self.ledger
     }
 
-    pub(super) fn tool_queue(&self) -> watch::Sender<Option<uuid::Uuid>> {
-        self.progress.waiting_sender.clone()
+    pub(super) fn previews_enabled(&self) -> bool {
+        self.progress
+            .as_ref()
+            .is_some_and(RunProgress::previews_enabled)
+    }
+
+    pub(super) fn tool_queue(&self) -> Option<watch::Sender<Option<uuid::Uuid>>> {
+        self.progress
+            .as_ref()
+            .map(|progress| progress.waiting_sender.clone())
     }
 
     pub(super) fn preview_context(
         &self,
         primary: AgentRunId,
     ) -> Result<Option<PreviewContext>, EngineError> {
-        if !self.progress.previews_enabled {
+        if !self.previews_enabled() {
             return Ok(None);
         }
-        let view = self
-            .view
-            .lock()
-            .map_err(|_| EngineError::CoordinatorFailed)?;
-        let run = view
-            .runs
-            .last()
-            .filter(|run| run.id == self.run_id)
-            .ok_or(EngineError::CoordinatorFailed)?;
-        let agent = run
-            .agents
-            .first()
-            .filter(|agent| agent.id == primary)
-            .ok_or(EngineError::CoordinatorFailed)?;
-        let mut items = std::collections::HashSet::new();
-        let commentary_bytes = run
-            .display
-            .iter()
-            .filter(|chunk| chunk.category == crate::session::DisplayCategory::Commentary)
-            .map(|chunk| {
-                items.insert((chunk.call_index, chunk.item));
-                chunk.text.len()
-            })
-            .sum();
-        Ok(Some(PreviewContext {
-            call_index: u32::try_from(agent.provider_calls.len())
-                .map_err(|_| EngineError::CoordinatorFailed)?,
-            chunks: run.display.len(),
-            commentary_bytes,
-            commentary_items: items.len(),
-            limit_recorded: run
+        self.ledger.view(|view| {
+            let run = view
+                .runs
+                .last()
+                .filter(|run| run.id == self.run_id)
+                .ok_or(EngineError::CoordinatorFailed)?;
+            let agent = run
+                .agents
+                .first()
+                .filter(|agent| agent.id == primary)
+                .ok_or(EngineError::CoordinatorFailed)?;
+            let mut items = std::collections::HashSet::new();
+            let commentary_bytes = run
                 .display
                 .iter()
-                .any(|chunk| chunk.category == crate::session::DisplayCategory::Limit),
-        }))
+                .filter(|chunk| chunk.category == crate::session::DisplayCategory::Commentary)
+                .map(|chunk| {
+                    items.insert((chunk.call_index, chunk.item));
+                    chunk.text.len()
+                })
+                .sum();
+            Ok(Some(PreviewContext {
+                call_index: u32::try_from(agent.provider_calls.len())
+                    .map_err(|_| EngineError::CoordinatorFailed)?,
+                chunks: run.display.len(),
+                commentary_bytes,
+                commentary_items: items.len(),
+                limit_recorded: run
+                    .display
+                    .iter()
+                    .any(|chunk| chunk.category == crate::session::DisplayCategory::Limit),
+            }))
+        })?
     }
 
     pub(super) fn publish_preview(
@@ -193,7 +199,10 @@ impl ProgressPublisher {
         call_index: u32,
         text: Option<Arc<PreviewText>>,
     ) {
-        self.progress
+        let Some(progress) = &self.progress else {
+            return;
+        };
+        progress
             .preview_sender
             .send_replace(text.map(|text| DisplayUpdate {
                 run_id: self.run_id,
@@ -202,22 +211,23 @@ impl ProgressPublisher {
                 text,
             }));
     }
-    pub(super) fn new(view: SessionView, progress: RunProgress, run_id: RunId) -> Self {
+
+    pub(super) fn new(
+        view: SessionView,
+        progress: Option<RunProgress>,
+        goal_id: GoalId,
+        run_id: RunId,
+    ) -> Self {
         Self {
-            view: Mutex::new(view),
+            ledger: GoalLedger::new(view, goal_id),
             progress,
             run_id,
         }
     }
 
     fn committed(&self, envelope: &EventEnvelope) -> Result<(), EngineError> {
-        let update = {
-            let mut view = self
-                .view
-                .lock()
-                .map_err(|_| EngineError::CoordinatorFailed)?;
-            view.apply_committed(envelope)
-                .map_err(|_| EngineError::InvalidHistory)?;
+        let update = self.ledger.committed(envelope, |view| {
+            self.progress.as_ref()?;
             view.runs
                 .last()
                 .filter(|run| run.id == self.run_id)
@@ -231,9 +241,9 @@ impl ProgressPublisher {
                         .cloned(),
                     run,
                 })
-        };
-        if let Some(update) = update {
-            self.progress.publish(update);
+        })?;
+        if let (Some(update), Some(progress)) = (update, &self.progress) {
+            progress.publish(update);
         }
         Ok(())
     }

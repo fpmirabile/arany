@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
 
 mod compaction;
+mod ledger;
 mod lifecycle;
 mod progress;
 mod report;
@@ -30,7 +31,7 @@ use lifecycle::{ensure_session_workspace, fork_with_store, lock_session};
 pub use progress::{DisplayUpdate, RunPreview, RunProgress, RunUpdate};
 use progress::{ProgressPublisher, append_observed};
 use report::goal_report;
-use run_loop::{GoalRunBudget, RunControls, RunIdentity, RunLoop};
+use run_loop::{RunControls, RunIdentity, RunLoop};
 
 /// Checks bounded Workspace input before an attached draft becomes a saved Session.
 /// Run admission reads and validates the inputs again before disclosure.
@@ -215,6 +216,37 @@ pub struct RunOutcome {
     pub run: RunView,
 }
 
+struct AdmittedTurn {
+    session_id: SessionId,
+    workspace_identity: (u64, u64),
+    session_lock: SessionRunLock,
+    _lineage_locks: Vec<SessionRunLock>,
+    history: Option<crate::session::SessionView>,
+    goal: GoalAdmission,
+    objective: String,
+    budget: GoalBudget,
+    provisional_workspace_lock: Option<WorkspaceRunLock>,
+}
+
+struct PreparedTurn {
+    tools: Option<crate::tools::ToolRuntime>,
+    tool_context: Option<crate::tools::ToolContext>,
+    inputs: WorkspaceInputs,
+    context: CompiledContext,
+    config: RunConfig,
+    context_started: SystemTime,
+    context_ended: SystemTime,
+    provider_concurrency: u8,
+}
+
+struct StartedRun<'a> {
+    session_id: SessionId,
+    run_id: RunId,
+    goal: &'a GoalAdmission,
+    finish_after_run: bool,
+    workspace_identity: (u64, u64),
+}
+
 /// One admitted Run and the Goal state it left behind.
 struct RunTurn {
     outcome: RunOutcome,
@@ -359,9 +391,6 @@ struct GoalAdmission {
     is_new: bool,
     resume: bool,
     usage: GoalUsage,
-    uncertain_active_ms: u64,
-    success_criterion_satisfied: bool,
-    success_state: crate::session::GoalSuccessState,
 }
 
 fn goal_context_metadata_reservation(
@@ -746,9 +775,6 @@ fn resolve_goal_admission(
             is_new: false,
             resume,
             usage: goal.resume_usage(view),
-            uncertain_active_ms: goal.uncertain_active_ms,
-            success_criterion_satisfied: goal.success_criterion_satisfied,
-            success_state: goal.success_state.clone(),
         })
     } else {
         // A paused Goal does not block a new one; the Session lock serializes live Runs.
@@ -769,9 +795,6 @@ fn resolve_goal_admission(
                 known_tokens: 0,
                 token_usage_unknown: false,
             },
-            uncertain_active_ms: 0,
-            success_criterion_satisfied: false,
-            success_state: crate::session::GoalSuccessState::NoContract,
         })
     }
 }
@@ -1097,9 +1120,257 @@ impl Engine {
         if cancellation.is_cancelled() {
             return Err(EngineError::CancelledBeforeStart);
         }
+
         let provider = Arc::clone(&self.provider);
         let identity = checked_identity(provider.as_ref())?;
-        self.validate_request(&request)?;
+        let previews = progress.as_ref().is_some_and(RunProgress::previews_enabled);
+        let finish_after_run = request.goal.finish_after_run;
+        let admitted = self
+            .admit_turn(&request, identity, continuation, previews, leases)
+            .await?;
+        let prepared = self.prepare_turn(&request, identity, &admitted)?;
+        let AdmittedTurn {
+            session_id,
+            workspace_identity,
+            mut session_lock,
+            _lineage_locks,
+            history: _,
+            goal,
+            objective,
+            budget,
+            provisional_workspace_lock,
+        } = admitted;
+        let PreparedTurn {
+            tools,
+            tool_context,
+            inputs,
+            context,
+            config,
+            context_started,
+            context_ended,
+            provider_concurrency,
+        } = prepared;
+        if cancellation.is_cancelled() {
+            return Err(EngineError::CancelledBeforeStart);
+        }
+
+        if request.session_id.is_none() {
+            self.store
+                .append(
+                    session_id,
+                    Event::SessionStarted {
+                        title: request.title.unwrap_or_else(|| "New Session".into()),
+                        workspace_identity,
+                    },
+                )
+                .await?;
+            session_lock.keep();
+        }
+        let run_id = RunId::new();
+        let agent_run_id = AgentRunId::new();
+        if cancellation.is_cancelled() {
+            return Err(EngineError::CancelledBeforeStart);
+        }
+        let trace_provider = crate::telemetry::TraceProvider::from_profile(&config.provider);
+        let goal_trace = self
+            .telemetry
+            .begin_goal(session_id, goal.id, context_started);
+        // Reduces the open state that appends validate; the closed view would reject this Run's links.
+        let view = self
+            .store
+            .load_open_view(session_id)
+            .await?
+            .ok_or(EngineError::InvalidHistory)?;
+        let publisher = ProgressPublisher::new(view, progress, goal.id, run_id);
+        if cancellation.is_cancelled() {
+            return Err(EngineError::CancelledBeforeStart);
+        }
+        Self::retain_goal_workspace(
+            leases,
+            goal.id,
+            workspace_identity,
+            provisional_workspace_lock,
+        );
+        if goal.is_new {
+            let sequence = self
+                .append_goal_lifecycle(
+                    session_id,
+                    Some(&publisher),
+                    Event::GoalStarted {
+                        goal_id: goal.id,
+                        objective: objective.clone(),
+                        workspace_identity,
+                        budget: goal.budget,
+                        phase: goal.phase,
+                        autonomous: goal.autonomous,
+                        resource_settings: goal.resource_settings,
+                    },
+                )
+                .await?;
+            goal_trace.event_committed(sequence, crate::telemetry::TraceEventKind::GoalStarted);
+        } else if goal.resume {
+            let sequence = self
+                .append_goal_lifecycle(
+                    session_id,
+                    Some(&publisher),
+                    Event::GoalResumed { goal_id: goal.id },
+                )
+                .await?;
+            goal_trace.event_committed(sequence, crate::telemetry::TraceEventKind::GoalResumed);
+        }
+        if cancellation.is_cancelled() {
+            return Err(EngineError::CancelledBeforeStart);
+        }
+        // A link is an admission acknowledgment: a lost acknowledgment may still have committed it.
+        let linked_sequence = self
+            .append_goal_lifecycle(
+                session_id,
+                Some(&publisher),
+                Event::GoalRunLinked {
+                    goal_id: goal.id,
+                    run_id,
+                    phase: goal.phase,
+                },
+            )
+            .await?;
+        goal_trace.event_committed(
+            linked_sequence,
+            crate::telemetry::TraceEventKind::GoalRunLinked,
+        );
+        if cancellation.is_cancelled() {
+            return Err(EngineError::CancelledBeforeStart);
+        }
+        let accepted_sequence = append_observed(
+            &self.store,
+            Some(&publisher),
+            None,
+            session_id,
+            Event::MessageAccepted {
+                run_id,
+                text: objective.clone(),
+                images: request.images,
+            },
+        )
+        .await?;
+        let started_sequence = append_observed(
+            &self.store,
+            Some(&publisher),
+            None,
+            session_id,
+            Event::RunStarted { run_id, config },
+        )
+        .await?;
+        let trace = self.telemetry.begin_goal_run(
+            session_id,
+            run_id,
+            trace_provider,
+            &goal_trace,
+            Some((context_started, context_ended)),
+        );
+        trace.event_committed(
+            accepted_sequence,
+            crate::telemetry::TraceEventKind::MessageAccepted,
+        );
+        trace.event_committed(
+            started_sequence,
+            crate::telemetry::TraceEventKind::RunStarted,
+        );
+        append_observed(
+            &self.store,
+            Some(&publisher),
+            Some(&trace),
+            session_id,
+            Event::AgentSpawned {
+                run_id,
+                agent_run_id,
+                role: AgentRole::Primary,
+                ordinal: 0,
+                objective: None,
+                grant: None,
+            },
+        )
+        .await?;
+
+        let role = if tool_context.is_some() {
+            PromptRole::Primary
+        } else {
+            PromptRole::ReadOnly
+        };
+        let provider_request = ProviderRequest {
+            run_id,
+            agent_run_id,
+            phase: AgentPhase::RootPlan,
+            collaboration: request.policy,
+            model: identity.model.clone(),
+            max_output_tokens: identity.limits.max_output_tokens,
+            input: RunInput {
+                images: context.images,
+                goal_budget: Some(budget),
+                goal_plan_contract: goal.plan_contract.clone(),
+                workspace_guidance: inputs.instructions.map(|(_, snapshot)| snapshot.content),
+                includes: inputs
+                    .includes
+                    .into_iter()
+                    .map(|snapshot| snapshot.model_include())
+                    .collect(),
+                history: context.history,
+                context_summary: context.summary,
+                tools: tool_context,
+                ..RunInput::new(role, objective)
+            },
+        };
+        if let Some(steering) = &self.steering {
+            steering.begin_run();
+        }
+        RunLoop::new(
+            &self.store,
+            Arc::clone(&self.provider),
+            RunIdentity {
+                session_id,
+                run_id,
+                goal_id: goal.id,
+                primary_id: agent_run_id,
+            },
+            RunControls {
+                policy: request.policy,
+                concurrency: provider_concurrency,
+                goal_phase: goal.phase,
+                cancellation,
+                tools: tools.as_ref(),
+                approvals: self.tool_approvals.as_ref(),
+                steering: self.steering.clone(),
+            },
+            &publisher,
+            &trace,
+        )
+        .execute(provider_request)
+        .await?;
+        drop(publisher);
+        self.settle_turn(
+            StartedRun {
+                session_id,
+                run_id,
+                goal: &goal,
+                finish_after_run,
+                workspace_identity,
+            },
+            leases,
+            trace,
+            goal_trace,
+        )
+        .await
+    }
+
+    /// Resolves the Goal and takes the Session, lineage and Workspace admissions a Run needs.
+    async fn admit_turn(
+        &mut self,
+        request: &RunRequest,
+        identity: &crate::provider::ProviderIdentity,
+        continuation: bool,
+        previews: bool,
+        leases: &WorkspaceLeases,
+    ) -> Result<AdmittedTurn, EngineError> {
+        self.validate_request(request)?;
         if self.tools.is_some() && identity.custom_provenance().is_some() {
             return Err(EngineError::InvalidRequest);
         }
@@ -1129,7 +1400,7 @@ impl Engine {
         if let Some(view) = &history {
             ensure_session_workspace(view, workspace_identity.0, workspace_identity.1)?;
         }
-        let goal = resolve_goal_admission(&request, history.as_ref(), continuation)?;
+        let goal = resolve_goal_admission(request, history.as_ref(), continuation)?;
         let objective = if request.objective.trim().is_empty() && request.goal.id.is_some() {
             goal.objective.clone()
         } else {
@@ -1144,7 +1415,6 @@ impl Engine {
             return Err(EngineError::GoalBudgetExhausted);
         }
         // Run start reserves the GoalStarted objective envelope, the MessageAccepted objective and image envelopes, the Goal lifecycle and the first action; each later action admits its own.
-        let previews = progress.as_ref().is_some_and(RunProgress::previews_enabled);
         let event_slots =
             13 + if previews {
                 crate::session::MAX_DISPLAY_CHUNKS
@@ -1159,6 +1429,31 @@ impl Engine {
         } else {
             None
         };
+        Ok(AdmittedTurn {
+            session_id,
+            workspace_identity,
+            session_lock,
+            _lineage_locks,
+            history,
+            goal,
+            objective,
+            budget,
+            provisional_workspace_lock,
+        })
+    }
+
+    /// Admits the Tools, loads the pinned Workspace inputs and compiles the Run's context and config.
+    fn prepare_turn(
+        &self,
+        request: &RunRequest,
+        identity: &crate::provider::ProviderIdentity,
+        admitted: &AdmittedTurn,
+    ) -> Result<PreparedTurn, EngineError> {
+        let workspace_identity = admitted.workspace_identity;
+        let history = &admitted.history;
+        let goal = &admitted.goal;
+        let objective = &admitted.objective;
+        let budget = admitted.budget;
         if let Some(permissions) = &self.workspace_permissions {
             permissions.verify(&request.workspace)?;
         }
@@ -1220,7 +1515,7 @@ impl Engine {
         .ok_or(EngineError::ContextTooLarge)?;
         let context = CompiledContext::compile(
             history.as_ref(),
-            &objective,
+            objective,
             &request.images,
             &inputs,
             request.policy,
@@ -1264,221 +1559,41 @@ impl Engine {
                 .iter()
                 .map(|snapshot| snapshot.digest)
                 .collect(),
-            history_run_ids: context.history_run_ids,
+            history_run_ids: context.history_run_ids.clone(),
             excluded_history_runs: context.excluded_history_runs,
-            context_usage: Some(context.context_usage),
+            context_usage: Some(context.context_usage.clone()),
             compaction_event_sequence: context.compaction_event_sequence,
             compaction_content_digest: context.compaction_content_digest,
             tool_policy: tools.as_ref().map(crate::tools::ToolRuntime::receipt),
         };
         config.validate().map_err(|_| EngineError::InvalidRequest)?;
+        Ok(PreparedTurn {
+            tools,
+            tool_context,
+            inputs,
+            context,
+            config,
+            context_started,
+            context_ended,
+            provider_concurrency,
+        })
+    }
 
-        if cancellation.is_cancelled() {
-            return Err(EngineError::CancelledBeforeStart);
-        }
-
-        if request.session_id.is_none() {
-            self.store
-                .append(
-                    session_id,
-                    Event::SessionStarted {
-                        title: request.title.unwrap_or_else(|| "New Session".into()),
-                        workspace_identity: (workspace_device, workspace_inode),
-                    },
-                )
-                .await?;
-            session_lock.keep();
-        }
-        let run_id = RunId::new();
-        let agent_run_id = AgentRunId::new();
-        if cancellation.is_cancelled() {
-            return Err(EngineError::CancelledBeforeStart);
-        }
-        let trace_provider = crate::telemetry::TraceProvider::from_profile(&config.provider);
-        let goal_trace = self
-            .telemetry
-            .begin_goal(session_id, goal.id, context_started);
-        let publisher = if let Some(progress) = progress {
-            // Reduces the open state that appends validate; the closed view would reject this Run's links.
-            let view = self
-                .store
-                .load_open_view(session_id)
-                .await?
-                .ok_or(EngineError::InvalidHistory)?;
-            Some(ProgressPublisher::new(view, progress, run_id))
-        } else {
-            None
-        };
-        if cancellation.is_cancelled() {
-            return Err(EngineError::CancelledBeforeStart);
-        }
-        Self::retain_goal_workspace(
-            leases,
-            goal.id,
+    /// Closes the Goal when the Run's outcome settles it and reports the committed Run.
+    async fn settle_turn(
+        &self,
+        started: StartedRun<'_>,
+        leases: &mut WorkspaceLeases,
+        trace: crate::telemetry::RunTrace,
+        goal_trace: crate::telemetry::GoalTrace,
+    ) -> Result<RunTurn, EngineError> {
+        let StartedRun {
+            session_id,
+            run_id,
+            goal,
+            finish_after_run,
             workspace_identity,
-            provisional_workspace_lock,
-        );
-        if goal.is_new {
-            let sequence = self
-                .append_goal_lifecycle(
-                    session_id,
-                    publisher.as_ref(),
-                    Event::GoalStarted {
-                        goal_id: goal.id,
-                        objective: objective.clone(),
-                        workspace_identity,
-                        budget: goal.budget,
-                        phase: goal.phase,
-                        autonomous: goal.autonomous,
-                        resource_settings: goal.resource_settings,
-                    },
-                )
-                .await?;
-            goal_trace.event_committed(sequence, crate::telemetry::TraceEventKind::GoalStarted);
-        } else if goal.resume {
-            let sequence = self
-                .append_goal_lifecycle(
-                    session_id,
-                    publisher.as_ref(),
-                    Event::GoalResumed { goal_id: goal.id },
-                )
-                .await?;
-            goal_trace.event_committed(sequence, crate::telemetry::TraceEventKind::GoalResumed);
-        }
-        if cancellation.is_cancelled() {
-            return Err(EngineError::CancelledBeforeStart);
-        }
-        // A link is an admission acknowledgment: a lost acknowledgment may still have committed it.
-        let linked_sequence = self
-            .append_goal_lifecycle(
-                session_id,
-                publisher.as_ref(),
-                Event::GoalRunLinked {
-                    goal_id: goal.id,
-                    run_id,
-                    phase: goal.phase,
-                },
-            )
-            .await?;
-        goal_trace.event_committed(
-            linked_sequence,
-            crate::telemetry::TraceEventKind::GoalRunLinked,
-        );
-        if cancellation.is_cancelled() {
-            return Err(EngineError::CancelledBeforeStart);
-        }
-        let accepted_sequence = append_observed(
-            &self.store,
-            publisher.as_ref(),
-            None,
-            session_id,
-            Event::MessageAccepted {
-                run_id,
-                text: objective.clone(),
-                images: request.images,
-            },
-        )
-        .await?;
-        let started_sequence = append_observed(
-            &self.store,
-            publisher.as_ref(),
-            None,
-            session_id,
-            Event::RunStarted { run_id, config },
-        )
-        .await?;
-        let trace = self.telemetry.begin_goal_run(
-            session_id,
-            run_id,
-            trace_provider,
-            &goal_trace,
-            Some((context_started, context_ended)),
-        );
-        trace.event_committed(
-            accepted_sequence,
-            crate::telemetry::TraceEventKind::MessageAccepted,
-        );
-        trace.event_committed(
-            started_sequence,
-            crate::telemetry::TraceEventKind::RunStarted,
-        );
-        append_observed(
-            &self.store,
-            publisher.as_ref(),
-            Some(&trace),
-            session_id,
-            Event::AgentSpawned {
-                run_id,
-                agent_run_id,
-                role: AgentRole::Primary,
-                ordinal: 0,
-                objective: None,
-                grant: None,
-            },
-        )
-        .await?;
-
-        let role = if tool_context.is_some() {
-            PromptRole::Primary
-        } else {
-            PromptRole::ReadOnly
-        };
-        let provider_request = ProviderRequest {
-            run_id,
-            agent_run_id,
-            phase: AgentPhase::RootPlan,
-            collaboration: request.policy,
-            model: identity.model.clone(),
-            max_output_tokens: identity.limits.max_output_tokens,
-            input: RunInput {
-                images: context.images,
-                goal_budget: Some(budget),
-                goal_plan_contract: goal.plan_contract.clone(),
-                workspace_guidance: inputs.instructions.map(|(_, snapshot)| snapshot.content),
-                includes: inputs
-                    .includes
-                    .into_iter()
-                    .map(|snapshot| snapshot.model_include())
-                    .collect(),
-                history: context.history,
-                context_summary: context.summary,
-                tools: tool_context,
-                ..RunInput::new(role, objective)
-            },
-        };
-        if let Some(steering) = &self.steering {
-            steering.begin_run();
-        }
-        let goal_run_budget = Arc::new(GoalRunBudget::new(
-            &goal,
-            budget.max_provider_calls,
-            budget.max_tokens,
-        ));
-        RunLoop::new(
-            &self.store,
-            Arc::clone(&self.provider),
-            RunIdentity {
-                session_id,
-                run_id,
-                goal_id: goal.id,
-                primary_id: agent_run_id,
-            },
-            RunControls {
-                policy: request.policy,
-                concurrency: provider_concurrency,
-                goal_phase: goal.phase,
-                cancellation,
-                tools: tools.as_ref(),
-                approvals: self.tool_approvals.as_ref(),
-                goal_budget: Arc::clone(&goal_run_budget),
-                steering: self.steering.clone(),
-            },
-            publisher.as_ref(),
-            &trace,
-        )
-        .execute(provider_request)
-        .await?;
-        drop(publisher);
+        } = started;
         let view = self
             .store
             .load_view(session_id)
@@ -1503,10 +1618,9 @@ impl Engine {
                     None
                 }
             }
-            crate::session::RunStatus::Finished => request
-                .goal
-                .finish_after_run
-                .then_some(GoalStatus::Completed),
+            crate::session::RunStatus::Finished => {
+                finish_after_run.then_some(GoalStatus::Completed)
+            }
             crate::session::RunStatus::Failed => Some(GoalStatus::Failed),
             _ => None,
         };

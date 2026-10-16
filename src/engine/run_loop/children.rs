@@ -1,6 +1,6 @@
 use super::{
-    CallFailure, CallResult, MAX_PRIMARY_RESULT_BYTES, RunLoop, TOOL_CLEANUP_OVERHEAD, call_record,
-    call_trace_result, call_trace_usage, duration_ms, invoke_bounded, valid_finish,
+    Action, CallFailure, CallResult, MAX_PRIMARY_RESULT_BYTES, RunLoop, TOOL_CLEANUP_OVERHEAD,
+    call_record, call_trace_result, call_trace_usage, duration_ms, invoke_bounded, valid_finish,
 };
 use crate::engine::{CHILD_OUTPUT_TOKEN_CAP, EngineError, RunCancellation, STORE_ACTION_OVERHEAD};
 use crate::provider::{
@@ -17,7 +17,6 @@ use crate::tools::{
 };
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::task::{Id, JoinError, JoinSet};
 use tokio::time::Instant;
@@ -114,7 +113,7 @@ impl ChildQueue {
 
 impl RunLoop<'_> {
     pub(super) fn valid_delegation(&self, children: &[String]) -> bool {
-        self.controls.goal_budget.can_start_provider_call()
+        self.ledger().can_start_provider_call()
             && !matches!(self.controls.policy, CollaborationPolicy::Single)
             && !children.is_empty()
             && children.len() <= usize::from(self.controls.policy.max_children())
@@ -130,20 +129,16 @@ impl RunLoop<'_> {
         delegate_turn: ProviderTurn,
         primary: AgentTrace,
     ) -> Result<(), EngineError> {
-        if self
-            .controls
-            .goal_budget
-            .remaining_calls()
-            .is_some_and(|remaining| {
-                remaining < u32::try_from(objectives.len().saturating_add(1)).unwrap_or(u32::MAX)
-            })
-        {
+        let research = self.controls.tools.is_some();
+        let delegation = Action::Delegation {
+            children: objectives.len(),
+            research,
+        };
+        if !self.ledger().admits(delegation) {
             return self.settle_stopped_primary(primary).await;
         }
-        let research = self.controls.tools.is_some();
         let tool_allowance = if research {
-            self.controls
-                .goal_budget
+            self.ledger()
                 .remaining_calls()
                 .map_or(MAX_CHILD_TOOL_CALLS, |remaining| {
                     // Each child keeps one call for its report, the primary one for synthesis; researchers share half the rest.
@@ -165,7 +160,7 @@ impl RunLoop<'_> {
         } else {
             ChildGrant::NoTools
         };
-        let parallel = self.controls.goal_budget.provider_concurrency(
+        let parallel = self.ledger().provider_concurrency(
             usize::from(self.controls.concurrency)
                 .min(usize::from(self.controls.policy.max_children())),
         );
@@ -173,15 +168,7 @@ impl RunLoop<'_> {
         let active_bound =
             delegation_active_bound(research, self.provider.identity().limits.deadline, waves);
         // Covers every child's calls, Tools and terminal facts plus the largest later admission, so a refusal precedes AgentSpawned.
-        let active_event_tail = if research {
-            objectives.len() * (4 * MAX_CHILD_TOOL_CALLS + 4) + 10
-        } else {
-            4 * objectives.len() + 10
-        };
-        let active_segment = match self
-            .reserve_active_segment_with_tail(active_bound, active_event_tail)
-            .await
-        {
+        let active_segment = match self.reserve_active_segment(active_bound, delegation).await {
             Ok(segment) => segment,
             Err(EngineError::GoalBudgetExhausted) => {
                 return self.settle_stopped_primary(primary).await;
@@ -249,7 +236,8 @@ impl RunLoop<'_> {
             let Some(index) = queue.active.get(&task_id).map(|active| active.index) else {
                 return Err(queue.abort_with(EngineError::CoordinatorFailed).await);
             };
-            let valid_response = self.controls.goal_budget.tokens_within_limit()
+            self.settle_result(&result);
+            let valid_response = self.ledger().tokens_within_limit()
                 && match &result {
                     CallResult::Response(ProviderResponse {
                         outcome: ProviderOutcome::Finish(finish),
@@ -307,12 +295,12 @@ impl RunLoop<'_> {
                     turn,
                     ..
                 }) if valid_response => {
-                    if let Err(error) = self.controls.goal_budget.child_call_finished() {
+                    if let Err(error) = self.ledger().child_call_finished() {
                         return Err(queue.abort_with(error).await);
                     }
                     // An exhausted Goal budget stops the child before its Tool starts, like a pause.
-                    let budget_spent = !self.controls.goal_budget.can_start_provider_call()
-                        || self.controls.goal_budget.remaining_calls() == Some(0);
+                    let budget_spent = !self.ledger().can_start_provider_call()
+                        || self.ledger().remaining_calls() == Some(0);
                     if budget_spent && abort_reason.is_none() {
                         abort_reason = Some(AbortReason::Budget);
                     }
@@ -418,7 +406,7 @@ impl RunLoop<'_> {
         if self.controls.cancellation.is_cancelled() {
             abort_reason = Some(AbortReason::Cancelled);
         }
-        if abort_reason.is_none() && self.controls.goal_budget.active_time_exhausted() {
+        if abort_reason.is_none() && self.ledger().active_time_exhausted() {
             abort_reason = Some(AbortReason::Budget);
         }
         if abort_reason.is_none() && !queue.pending.is_empty() {
@@ -440,7 +428,7 @@ impl RunLoop<'_> {
                     .finish(TraceOutcome::Cancelled);
             }
             return match reason {
-                AbortReason::Failed if self.controls.goal_budget.active_time_exhausted() => {
+                AbortReason::Failed if self.ledger().active_time_exhausted() => {
                     self.settle_stopped_primary(primary).await
                 }
                 AbortReason::Failed => self.fail_primary(primary).await,
@@ -449,7 +437,7 @@ impl RunLoop<'_> {
                 }
             };
         }
-        if !self.controls.goal_budget.can_start_provider_call() {
+        if !self.ledger().can_start_provider_call() {
             return self.settle_stopped_primary(primary).await;
         }
         root_request.phase = AgentPhase::RootSynthesis;
@@ -482,7 +470,7 @@ impl RunLoop<'_> {
                 Err(error) => return Err(error),
             };
             let (input_tokens, output_tokens) = call_trace_usage(&synthesis);
-            let valid_response = self.controls.goal_budget.tokens_within_limit()
+            let valid_response = self.ledger().tokens_within_limit()
                 && (matches!(
                     &synthesis,
                     CallResult::Response(ProviderResponse {
@@ -508,7 +496,7 @@ impl RunLoop<'_> {
             if matches!(&synthesis, CallResult::Cancelled) {
                 return self.cancel_primary(primary).await;
             }
-            if self.controls.goal_budget.active_time_exhausted() {
+            if self.ledger().active_time_exhausted() {
                 return self.settle_stopped_primary(primary).await;
             }
             match synthesis {
@@ -532,7 +520,7 @@ impl RunLoop<'_> {
                         Ok(false) if self.controls.cancellation.is_cancelled() => {
                             return self.settle_stopped_primary(primary).await;
                         }
-                        Ok(false) if self.controls.goal_budget.active_time_exhausted() => {
+                        Ok(false) if self.ledger().active_time_exhausted() => {
                             return self.settle_stopped_primary(primary).await;
                         }
                         Ok(false) => return self.fail_primary(primary).await,
@@ -554,7 +542,7 @@ impl RunLoop<'_> {
             None
         } else if self.pause_requested() {
             Some(AbortReason::Paused)
-        } else if !self.controls.goal_budget.can_start_provider_call() {
+        } else if !self.ledger().can_start_provider_call() {
             Some(AbortReason::Budget)
         } else {
             None
@@ -568,14 +556,10 @@ impl RunLoop<'_> {
         root_request: &ProviderRequest,
         deadline: Instant,
     ) -> Result<(), EngineError> {
-        while queue.active.len()
-            < self
-                .controls
-                .goal_budget
-                .provider_concurrency(queue.parallel)
+        while queue.active.len() < self.ledger().provider_concurrency(queue.parallel)
             && !self.controls.cancellation.is_cancelled()
             && !self.pause_requested()
-            && self.controls.goal_budget.can_start_provider_call()
+            && self.ledger().can_start_provider_call()
         {
             let Some(index) = queue.pending.pop_front() else {
                 break;
@@ -618,9 +602,9 @@ impl RunLoop<'_> {
                         .filter(|value| value.origin == crate::provider::ImageOrigin::Objective)
                         .cloned()
                         .collect(),
-                    goal_budget: Some(self.controls.goal_budget.effective_budget()?),
+                    goal_budget: Some(self.ledger().effective_budget()?),
                     goal_plan_contract: if researcher {
-                        self.controls.goal_budget.plan_contract()?
+                        self.ledger().plan_contract()?
                     } else {
                         None
                     },
@@ -637,19 +621,15 @@ impl RunLoop<'_> {
                     )
                 },
             };
-            self.reserve_provider_call(children[index].agent_run_id)
+            self.reserve_provider_call(children[index].agent_run_id, self.primary_call())
                 .await?;
             let provider_trace = children[index]
                 .trace
                 .as_ref()
                 .expect("child trace exists")
                 .begin_provider(AgentPhase::ChildWork, &request.model);
-            let goal_budget = Arc::clone(&self.controls.goal_budget);
             let handle = queue.calls.spawn(async move {
-                let result =
-                    invoke_bounded(provider.as_ref(), request, deadline, cancellation).await;
-                goal_budget.account_result(&result);
-                result
+                invoke_bounded(provider.as_ref(), request, deadline, cancellation).await
             });
             queue.active.insert(
                 handle.id(),
@@ -728,20 +708,11 @@ impl RunLoop<'_> {
         };
         intent.limits.result_bytes =
             capacity.min(crate::tools::types::MAX_TOOL_RESULT_BYTES) as u32;
-        let pending = self
-            .controls
-            .goal_budget
-            .in_flight_children
-            .load(Ordering::Acquire);
+        let child_step = Action::Child {
+            in_flight: self.ledger().in_flight_children(),
+        };
         self.store
-            .admit_operation(
-                self.session_id,
-                12_usize.saturating_add(
-                    usize::try_from(pending)
-                        .unwrap_or(usize::MAX)
-                        .saturating_mul(2),
-                ),
-            )
+            .admit_operation(self.session_id, child_step.max_events())
             .await?;
         self.append(Event::ToolStarted {
             run_id: self.run_id,
@@ -749,7 +720,7 @@ impl RunLoop<'_> {
             intent: intent.clone(),
         })
         .await?;
-        let observation = if self.controls.goal_budget.allows_tool(&intent.call) {
+        let observation = if self.ledger().allows_tool(&intent.call) {
             let worker_cancellation = RunCancellation::new();
             let mut run_cancellation = self.controls.cancellation.clone();
             let execution = runtime.execute(intent, worker_cancellation.clone());
@@ -806,7 +777,7 @@ impl RunLoop<'_> {
         })
         .await?;
         if call_reserved {
-            self.controls.goal_budget.child_call_finished()?;
+            self.ledger().child_call_finished()?;
         }
         Ok(())
     }
