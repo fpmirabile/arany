@@ -3,7 +3,8 @@ use crate::session::input::{InputError, WorkspaceInputs};
 use crate::session::{
     AgentRole, AgentRunId, CollaborationPolicy, CompiledContext, Event, GoalBudget, GoalId,
     GoalPhase, GoalPlanContract, GoalReport, GoalStatus, GoalUsage, MAX_STEERING_CONTEXT_BYTES,
-    MAX_USER_MESSAGE_BYTES as MAX_OBJECTIVE_BYTES, RunConfig, RunId, RunView, SessionId,
+    MAX_STEERING_LABEL_BYTES, MAX_USER_MESSAGE_BYTES as MAX_OBJECTIVE_BYTES, RunConfig, RunId,
+    RunView, SessionId,
 };
 use crate::store::{SessionRunLock, StateRoot, Store, StoreError, WorkspaceRunLock};
 use crate::telemetry::{Telemetry, TraceOutcome};
@@ -308,8 +309,8 @@ impl RunSteering {
     }
 
     /// Holds a note until the Engine records it or the caller withdraws it. A note offered while
-    /// another waits is appended to it, so the Engine delivers one merged note. Waiting and
-    /// recorded text together stay within this Run's byte bound.
+    /// another waits is appended to it, so the Engine delivers one merged note. Recorded text plus
+    /// one history label per note, and the waiting note, stay within this Run's byte bound.
     pub fn offer_note(&self, text: String) -> Result<(), SteeringRefused> {
         let mut state = self.lock().ok_or(SteeringRefused::Unavailable)?;
         if text.trim().is_empty() {
@@ -323,7 +324,7 @@ impl RunSteering {
             .as_ref()
             .map_or(0, |waiting| waiting.len() + NOTE_SEPARATOR.len())
             + text.len();
-        if state.run_bytes + merged_len > MAX_OBJECTIVE_BYTES {
+        if state.run_bytes + merged_len + MAX_STEERING_LABEL_BYTES > MAX_OBJECTIVE_BYTES {
             return Err(SteeringRefused::RunFull);
         }
         match state.waiting.as_mut() {
@@ -364,15 +365,14 @@ impl RunSteering {
     /// so an accepted offer always stays deliverable within this Run.
     pub(crate) fn take_note(&self) -> Option<String> {
         let mut state = self.lock()?;
-        let fits = state
-            .waiting
-            .as_ref()
-            .is_some_and(|text| state.run_bytes + text.len() <= MAX_OBJECTIVE_BYTES);
+        let fits = state.waiting.as_ref().is_some_and(|text| {
+            state.run_bytes + text.len() + MAX_STEERING_LABEL_BYTES <= MAX_OBJECTIVE_BYTES
+        });
         if !fits {
             return None;
         }
         let text = state.waiting.take()?;
-        state.run_bytes += text.len();
+        state.run_bytes += text.len() + MAX_STEERING_LABEL_BYTES;
         Some(text)
     }
 
@@ -2661,7 +2661,8 @@ mod run_steering_tests {
         steering.note_recorded();
         assert_eq!(steering.delivered_notes(), 1);
 
-        let taken = "x".repeat(MAX_OBJECTIVE_BYTES - "one\n\ntwo".len());
+        let taken =
+            "x".repeat(MAX_OBJECTIVE_BYTES - "one\n\ntwo".len() - 2 * MAX_STEERING_LABEL_BYTES);
         steering
             .offer_note(taken.clone())
             .expect("fills the Run bound");
@@ -2673,7 +2674,7 @@ mod run_steering_tests {
         );
         steering.begin_run();
         steering
-            .offer_note("x".repeat(MAX_OBJECTIVE_BYTES))
+            .offer_note("x".repeat(MAX_OBJECTIVE_BYTES - MAX_STEERING_LABEL_BYTES))
             .expect("a new Run has its own byte quota");
         assert!(steering.take_note().is_some());
         steering.note_recorded();
@@ -2688,10 +2689,26 @@ mod run_steering_tests {
     }
 
     #[test]
+    fn run_steering_charges_a_label_per_note_and_refuses_the_next_tiny_note() {
+        let steering = RunSteering::new();
+        let mut taken = 0;
+        while steering.offer_note("n".into()).is_ok() {
+            assert!(steering.take_note().is_some());
+            taken += 1;
+        }
+        assert_eq!(taken, MAX_OBJECTIVE_BYTES / (1 + MAX_STEERING_LABEL_BYTES));
+        assert_eq!(
+            steering.offer_note("n".into()),
+            Err(SteeringRefused::RunFull),
+            "the next one-byte note exceeds the bound with its label"
+        );
+    }
+
+    #[test]
     fn run_steering_take_reserves_quota_and_poisoned_lock_fails_closed() {
         let steering = RunSteering::new();
         steering
-            .offer_note("x".repeat(MAX_OBJECTIVE_BYTES))
+            .offer_note("x".repeat(MAX_OBJECTIVE_BYTES - MAX_STEERING_LABEL_BYTES))
             .expect("within quota");
         assert!(steering.take_note().is_some());
         assert_eq!(

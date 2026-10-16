@@ -8,8 +8,11 @@ mod reducer;
 pub(crate) const MAX_CONTEXT_CONTENT_BYTES: usize = 376 * 1024;
 pub(crate) const MAX_HISTORY_RUNS: usize = 32;
 pub(crate) const MAX_USER_MESSAGE_BYTES: usize = 8 * 1024;
-// Notes plus their history labels; labels take at most a few dozen bytes per note.
+// The history header is fixed; each note's "\n[N] " label is charged inside MAX_USER_MESSAGE_BYTES.
 pub(crate) const MAX_STEERING_CONTEXT_BYTES: usize = MAX_USER_MESSAGE_BYTES + 256;
+// Charged per recorded note against the Run's byte bound: a label "\n[N] " for any note count
+// up to 9999 is at most 8 bytes, and every note is at least one byte.
+pub(crate) const MAX_STEERING_LABEL_BYTES: usize = 8;
 pub(crate) const MAX_ASSISTANT_MESSAGE_BYTES: usize = 32 * 1024;
 
 pub(crate) use compaction::{
