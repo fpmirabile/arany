@@ -798,6 +798,11 @@ pub trait Provider: Send + Sync {
         4096
     }
 
+    /// The wall-clock bound for one primary, child or Tool-review call.
+    fn call_deadline(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(120)
+    }
+
     /// Returns one complete semantic outcome or an error, never an accepted partial result.
     /// The Engine independently validates its phase, bounds and durable transition.
     fn invoke(

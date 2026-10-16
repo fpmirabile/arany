@@ -25,8 +25,8 @@ use tokio::time::Instant;
 const MAX_CHILD_OBJECTIVE_BYTES: usize = 2 * 1024;
 const MAX_CHILD_RESULT_BYTES: usize = 16 * 1024;
 const CANCELLATION_DRAIN: Duration = Duration::from_secs(2);
-/// Wall-clock bound of one delegation whose children may use read-only Tools.
-const RESEARCH_DELEGATION_DEADLINE: Duration = Duration::from_secs(20 * 60);
+/// Wall-clock bound of one delegation, with or without read-only Tools.
+const MAX_DELEGATION_DEADLINE: Duration = Duration::from_secs(20 * 60);
 /// Free context kept for the next child Tool intent.
 const CHILD_INTENT_RESERVE_BYTES: usize = 4 * 1024;
 /// A full 4 KiB Read page plus metadata; with less room a child is offered only Finish.
@@ -170,9 +170,12 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         );
         let waves = objectives.len().div_ceil(parallel.max(1));
         let active_bound = if research {
-            RESEARCH_DELEGATION_DEADLINE
+            MAX_DELEGATION_DEADLINE
         } else {
-            super::CALL_DEADLINE.saturating_mul(u32::try_from(waves).unwrap_or(u32::MAX))
+            self.provider
+                .call_deadline()
+                .saturating_mul(u32::try_from(waves).unwrap_or(u32::MAX))
+                .min(MAX_DELEGATION_DEADLINE)
         };
         // Covers every child's calls, Tools and terminal facts plus the largest later admission, so a refusal precedes AgentSpawned.
         let active_event_tail = if research {

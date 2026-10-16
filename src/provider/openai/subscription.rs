@@ -83,6 +83,10 @@ impl Provider for ChatGptProvider {
         OutputTokenBound::LocalAcceptanceOnly
     }
 
+    fn call_deadline(&self) -> Duration {
+        DEADLINE
+    }
+
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         request.validate_scope()?;
         if request.model != self.model {

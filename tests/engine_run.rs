@@ -293,6 +293,7 @@ struct WaitingProvider {
     started: mpsc::UnboundedSender<()>,
     dropped: Arc<AtomicUsize>,
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
+    call_deadline: Duration,
 }
 
 struct WaitingCompactionProvider {
@@ -346,6 +347,10 @@ impl Provider for WaitingCompactionProvider {
 }
 
 impl Provider for WaitingProvider {
+    fn call_deadline(&self) -> Duration {
+        self.call_deadline
+    }
+
     fn profile_name(&self) -> &str {
         "waiting"
     }
@@ -3952,6 +3957,7 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
             started,
             dropped: Arc::clone(&dropped),
             requests: Arc::clone(&requests),
+            call_deadline: Duration::from_secs(120),
         };
         let mut engine = Engine::open(
             StateRoot::admit(&state_path).expect("private state"),
@@ -4353,6 +4359,7 @@ fn same_session_operation_is_excluded_while_other_sessions_continue() {
                     started,
                     dropped: Arc::clone(&dropped),
                     requests: Arc::clone(&held_calls),
+                    call_deadline: Duration::from_secs(120),
                 },
             )
             .expect("held engine");
@@ -4558,6 +4565,7 @@ fn cancellation_before_admission_creates_no_run_or_provider_call() {
             started,
             dropped: Arc::new(AtomicUsize::new(0)),
             requests: Arc::clone(&requests),
+            call_deadline: Duration::from_secs(120),
         };
         let mut engine = Engine::open(
             StateRoot::admit(&state_path).expect("private state"),
@@ -4816,6 +4824,7 @@ fn provider_call_timeout_fails_without_a_final_message() {
             started,
             dropped: Arc::clone(&dropped),
             requests: Arc::clone(&requests),
+            call_deadline: Duration::from_secs(300),
         };
         let mut engine = Engine::open(
             StateRoot::admit(&temp.path().join("state")).expect("private state"),
@@ -4831,6 +4840,16 @@ fn provider_call_timeout_fails_without_a_final_message() {
         assert_eq!(started.expect("Provider start deadline"), Some(()));
         tokio::time::pause();
         tokio::time::advance(Duration::from_secs(121)).await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            dropped.load(Ordering::SeqCst),
+            0,
+            "a call within its Provider-declared deadline stays in flight"
+        );
+        assert!(!run_task.is_finished());
+        tokio::time::advance(Duration::from_secs(180)).await;
         tokio::time::resume();
         let joined = tokio::time::timeout(Duration::from_secs(5), &mut run_task).await;
         let (outcome, close) = match joined {
