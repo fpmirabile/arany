@@ -6075,3 +6075,303 @@ fn escape_heavy_session_over_the_compaction_bound_fails_closed_and_keeps_its_jou
         store.close().await.expect("store shutdown");
     });
 }
+
+/// The Events of one Run with a single Tool step, with each Tool intent's sizing and outcome.
+async fn tool_step_events(
+    policy: CollaborationPolicy,
+    outcomes: Vec<ProviderOutcome>,
+) -> Vec<String> {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
+    std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("fact");
+    let state_path = temp.path().join("state");
+    let mut engine = Engine::open(
+        StateRoot::admit(&state_path).expect("state"),
+        ScriptedProvider::new(outcomes),
+    )
+    .expect("engine");
+    let config = state_path.join("tools.json");
+    std::fs::write(
+        &config,
+        br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+    )
+    .expect("Tool configuration");
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
+        .expect("private Tool configuration");
+    engine
+        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
+        .expect("read-only Tools");
+    let mut input = request(&workspace, "Inspect the notes");
+    input.policy = policy;
+    input.goal.budget = Some(arany::GoalBudget {
+        max_provider_calls: None,
+        max_tokens: None,
+        max_active_ms: Some(30 * 60 * 1000),
+        max_runs: 1,
+    });
+    let outcome = engine.run(input).await.expect("Tool Run");
+    engine.close().await.expect("engine shutdown");
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
+        .expect("read-only Store");
+    let events = store
+        .load_session(outcome.session_id)
+        .await
+        .expect("Events");
+    store.close().await.expect("store shutdown");
+    events
+        .iter()
+        .map(|envelope| match &envelope.event {
+            Event::ToolStarted { intent, .. } => format!(
+                "ToolStarted result_bytes={} runtime_ms={} cache_bytes={} cache_transfer_ms={}",
+                intent.limits.result_bytes,
+                intent.limits.runtime_ms,
+                intent.limits.cache_bytes,
+                intent.limits.cache_transfer_ms,
+            ),
+            Event::ToolFinished { observation, .. } => {
+                format!("ToolFinished {:?}", observation.disposition)
+            }
+            event => format!("{event:?}")
+                .split([' ', '{', '('])
+                .next()
+                .expect("variant name")
+                .to_owned(),
+        })
+        .collect()
+}
+
+const PRIMARY_READ: &str = "\
+SessionStarted
+GoalStarted
+GoalRunLinked
+MessageAccepted
+RunStarted
+AgentSpawned
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded
+GoalActiveTimeSettled
+ToolStarted result_bytes=62443 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+GoalActiveTimeReserved
+ToolFinished Succeeded
+GoalActiveTimeSettled
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded
+GoalActiveTimeSettled
+AgentFinished
+MessageCommitted
+RunFinished
+GoalFinished";
+
+const PRIMARY_GIT: &str = "\
+SessionStarted
+GoalStarted
+GoalRunLinked
+MessageAccepted
+RunStarted
+AgentSpawned
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded
+GoalActiveTimeSettled
+ToolStarted result_bytes=62447 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+GoalActiveTimeReserved
+GoalActiveTimeSettled
+ToolFinished Denied
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded
+GoalActiveTimeSettled
+AgentFinished
+MessageCommitted
+RunFinished
+GoalFinished";
+
+const PRIMARY_WRITE: &str = "\
+SessionStarted
+GoalStarted
+GoalRunLinked
+MessageAccepted
+RunStarted
+AgentSpawned
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded
+GoalActiveTimeSettled
+GoalPlanContractRecorded
+ToolStarted result_bytes=62439 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+GoalActiveTimeReserved
+GoalActiveTimeSettled
+ToolFinished Denied
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded
+GoalActiveTimeSettled
+AgentFinished
+RunFinished
+GoalFinished";
+
+const RESEARCHER_READ: &str = "\
+SessionStarted
+GoalStarted
+GoalRunLinked
+MessageAccepted
+RunStarted
+AgentSpawned
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded
+GoalActiveTimeSettled
+GoalActiveTimeReserved
+AgentSpawned
+GoalProviderCallReserved
+ProviderCallRecorded
+ToolStarted result_bytes=59099 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolFinished Succeeded
+GoalProviderCallReserved
+ProviderCallRecorded
+AgentFinished
+GoalActiveTimeSettled
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded
+GoalActiveTimeSettled
+AgentFinished
+MessageCommitted
+RunFinished
+GoalFinished";
+
+const RESEARCHER_SKILL: &str = "\
+SessionStarted
+GoalStarted
+GoalRunLinked
+MessageAccepted
+RunStarted
+AgentSpawned
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded
+GoalActiveTimeSettled
+GoalActiveTimeReserved
+AgentSpawned
+GoalProviderCallReserved
+ProviderCallRecorded
+ToolStarted result_bytes=59101 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolFinished Denied
+GoalProviderCallReserved
+ProviderCallRecorded
+AgentFinished
+GoalActiveTimeSettled
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded
+GoalActiveTimeSettled
+AgentFinished
+MessageCommitted
+RunFinished
+GoalFinished";
+
+#[tokio::test]
+async fn primary_tool_step_events_match_the_snapshot() {
+    let finish = || {
+        ProviderOutcome::Finish(Finish {
+            summary: "done".into(),
+            result: "answer".into(),
+        })
+    };
+    let plan = arany::GoalPlanContract {
+        mission: "Rewrite the fact".into(),
+        resource_class: arany::ToolResourceClass::Default,
+        command_timeout_ms: None,
+        paths: vec!["notes/facts.txt".into()],
+        commands: Vec::new(),
+        skills: Vec::new(),
+        mcp_tools: Vec::new(),
+        success_criterion: arany::GoalSuccessCriterion::WorkspaceFileDigest {
+            path: "notes/facts.txt".into(),
+            sha256: "0".repeat(64),
+        },
+        budget: arany::GoalBudget {
+            max_provider_calls: None,
+            max_tokens: None,
+            max_active_ms: Some(30 * 60 * 1000),
+            max_runs: 1,
+        },
+    };
+    let read = arany::ToolCall::Read {
+        path: "notes/facts.txt".into(),
+        offset: 0,
+        limit: 32,
+    };
+    let git = arany::ToolCall::GitStatus {
+        path: "notes".into(),
+    };
+    let write = arany::ToolCall::Write {
+        path: "notes/facts.txt".into(),
+        expected_digest: None,
+        content: "New".into(),
+    };
+    // Git and Write are Guard-site calls the read-only grant denies before any Guard launch; the
+    // Write still reserves the result size of an applied mutation.
+    for (case, step, expected) in [
+        ("in-process read", tool_outcome(read, None), PRIMARY_READ),
+        ("guard read", tool_outcome(git, None), PRIMARY_GIT),
+        (
+            "guard mutation",
+            tool_outcome(write, Some(Box::new(plan))),
+            PRIMARY_WRITE,
+        ),
+    ] {
+        let events = tool_step_events(CollaborationPolicy::Single, vec![step, finish()]).await;
+        assert_eq!(events.join("\n"), expected, "primary {case} step");
+    }
+}
+
+#[tokio::test]
+async fn researcher_tool_step_events_match_the_snapshot() {
+    let finish = || {
+        ProviderOutcome::Finish(Finish {
+            summary: "done".into(),
+            result: "answer".into(),
+        })
+    };
+    for (case, call, expected) in [
+        (
+            "in-process read",
+            arany::ToolCall::Read {
+                path: "notes/facts.txt".into(),
+                offset: 0,
+                limit: 32,
+            },
+            RESEARCHER_READ,
+        ),
+        (
+            "guard read",
+            arany::ToolCall::Skill {
+                name: "missing".into(),
+                resource: None,
+            },
+            RESEARCHER_SKILL,
+        ),
+    ] {
+        let outcomes = vec![
+            ProviderOutcome::Delegate(Delegate {
+                children: vec!["Inspect the fact".into()],
+            }),
+            tool_outcome(call, None),
+            finish(),
+            finish(),
+        ];
+        let events = tool_step_events(
+            CollaborationPolicy::Team {
+                max_active_children: 1,
+            },
+            outcomes,
+        )
+        .await;
+        assert_eq!(events.join("\n"), expected, "researcher {case} step");
+    }
+}
