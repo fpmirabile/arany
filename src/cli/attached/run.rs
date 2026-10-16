@@ -1284,8 +1284,11 @@ mod tests {
                     result: "Hola".into(),
                 }),
                 response_id: None,
-                input_tokens: Some(1),
-                output_tokens: Some(1),
+                usage: arany::Usage {
+                    input_tokens: Some(1),
+                    output_tokens: Some(1),
+                    ..Default::default()
+                },
                 wire_provenance: None,
             })
         }
