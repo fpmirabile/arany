@@ -323,7 +323,14 @@ fn history_tool_block_projects_calls_without_intent_internals() {
                 finished_sequence: Some(3),
             },
             ToolView {
-                intent: observation(read("src/main.rs"), "").intent,
+                intent: observation(
+                    ToolCall::ApplyChangeset {
+                        source_intent_digest: [7; 32],
+                        changeset: crate::tools::CommandChangeset::default(),
+                    },
+                    "",
+                )
+                .intent,
                 observation: None,
                 review_call_index: None,
                 finished_sequence: None,

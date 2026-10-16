@@ -12,7 +12,7 @@ use super::{
     restrict_outcome_schema,
 };
 use crate::session::RunView;
-use crate::tools::types::{MAX_TOOL_CATALOG_BYTES, model_observation};
+use crate::tools::types::{MAX_TOOL_CATALOG_BYTES, model_call, model_observation};
 use crate::tools::{ToolCall, ToolContext, ToolDisposition, ToolStep};
 use serde_json::{Value, json};
 
@@ -237,7 +237,7 @@ pub(crate) fn history_tool_block(run: &RunView) -> String {
         .skip(run.tool_compaction_covered_count as usize)
         .map(|tool| match &tool.observation {
             Some(observation) => model_observation(observation),
-            None => json!({"call": tool.intent.call, "execution": "uncertain; never replay"}),
+            None => json!({"call": model_call(&tool.intent.call), "execution": "uncertain; never replay"}),
         })
         .collect();
     json!({
