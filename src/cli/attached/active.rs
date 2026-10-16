@@ -95,7 +95,7 @@ fn draft_retained_notice(autonomous: bool) -> &'static str {
     }
 }
 
-/// How the attached Run answers a stop request: `/pause` waits for a step boundary, Ctrl+C cancels now.
+/// How the attached Run answers a stop request: `/goal pause` waits for a step boundary, Ctrl+C or Escape cancels now.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ActiveStop {
     Running,
@@ -532,6 +532,11 @@ pub(super) async fn submit_objective(
                     }
                     continue;
                 }
+                // Escape closes an open menu first; with nothing focused it cancels the Run like Ctrl+C.
+                let input = match input {
+                    TerminalInput::Escape if !composer.has_open_menu() => TerminalInput::Interrupt,
+                    input => input,
+                };
                 let mut notice = match input {
                     TerminalInput::CycleApprovalMode => {
                         let notice = super::permissions::cycle(composer);

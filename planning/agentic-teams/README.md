@@ -38,7 +38,7 @@ the user-owned checks in [next steps](../../NEXT_STEPS.md).
 
 - **Goal.** A durable, Engine-owned unit of user intent that spans one or more
   Runs and ends Completed or Failed with a final report (E11). Cancellation
-  (Ctrl+C) pauses it as Interrupted until `/goal resume`; `/pause` pauses it at
+  (Ctrl+C) pauses it as Interrupted until `/goal resume`; `/goal pause` pauses it at
   its next step.
 - **RPI.** Research → Plan → Implementation, the default mode (B6).
 - **Plan contract.** An agent's declared scope (paths, command names), success
@@ -379,7 +379,7 @@ execution contracts own the resulting behavior.
 
 1. **Steering.** While a Goal works, user messages become steering notes
    delivered to the primary at its next call boundary; they never cancel.
-   Escape/Ctrl+C keep cancellation; `/pause` pauses at the next boundary.
+   Ctrl+C and Escape (with nothing focused) cancel; `/goal pause` pauses at the next boundary.
 2. **Context.** Each phase Run receives the approved artifacts, Goal facts and
    its own capsule, not the full transcript; workers receive only their
    assignment capsule.

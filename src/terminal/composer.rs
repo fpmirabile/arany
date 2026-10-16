@@ -351,6 +351,11 @@ impl Composer {
         }
     }
 
+    /// Escape closes an open completion or file menu first; otherwise it changes nothing.
+    pub fn has_open_menu(&self) -> bool {
+        self.file_menu().is_some() || self.completion_menu().is_some()
+    }
+
     pub(super) fn completion_menu(&self) -> Option<(Vec<&str>, usize)> {
         if self.completion_hidden || self.cursor != self.text.len() {
             return None;
@@ -1143,8 +1148,15 @@ mod tests {
         }
         composer.apply(TerminalInput::Down);
         let cursor = composer.cursor_byte_offset();
+        assert!(composer.has_open_menu());
         assert_eq!(composer.apply(TerminalInput::Escape), ComposerEdit::Changed);
         assert!(composer.completion_menu().is_none());
+        assert!(!composer.has_open_menu());
+        assert_eq!(
+            composer.apply(TerminalInput::Escape),
+            ComposerEdit::Unchanged,
+            "Escape with no menu changes nothing"
+        );
         assert_eq!(composer.text(), "/s");
         assert_eq!(composer.cursor_byte_offset(), cursor);
         assert_eq!(composer.apply(TerminalInput::Down), ComposerEdit::Unchanged);

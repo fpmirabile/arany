@@ -356,7 +356,7 @@ fn pause_during_attached_run_waits_for_the_call_and_pauses_the_goal() {
         .expect("primary call reached the Provider");
     write_input(&attached.input, format!("{NOTE}\n").as_bytes());
     stage(&attached.stages, 2, "steering offer notice");
-    write_input(&attached.input, b"/pause\n");
+    write_input(&attached.input, b"/goal pause\n");
     stage(&attached.stages, 3, "pausing notice");
     release_sender.send(()).expect("release held primary call");
     stage(&attached.stages, 4, "cancelled receipt");
