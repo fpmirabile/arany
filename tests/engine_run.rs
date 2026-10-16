@@ -4803,6 +4803,21 @@ fn provider_declared_output_cap_reaches_the_primary_and_caps_children() {
             Err(EngineError::InvalidRequest)
         ));
         oversized.close().await.expect("engine shutdown");
+
+        let mut local_only = Engine::open(
+            StateRoot::admit(&temp.path().join("state")).expect("state readmission"),
+            {
+                let mut provider = ScriptedProvider::new(Vec::new()).with_max_output_tokens(16_384);
+                provider.output_token_bound = OutputTokenBound::LocalAcceptanceOnly;
+                provider
+            },
+        )
+        .expect("engine");
+        assert!(matches!(
+            local_only.run(request(&workspace, "Question")).await,
+            Err(EngineError::InvalidRequest)
+        ));
+        local_only.close().await.expect("engine shutdown");
     });
 }
 
@@ -4880,6 +4895,67 @@ fn provider_call_timeout_fails_without_a_final_message() {
         }
         assert_eq!(outcome.run.status, RunStatus::Failed);
         assert!(outcome.run.assistant_message.is_none());
+    });
+}
+
+#[test]
+fn provider_declared_call_deadline_times_out_and_settles_its_active_reservation() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
+        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let state_path = temp.path().join("state");
+        let (started, mut started_rx) = mpsc::unbounded_channel();
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let provider = WaitingProvider {
+            started,
+            dropped: Arc::clone(&dropped),
+            requests: Arc::new(Mutex::new(Vec::new())),
+            call_deadline: Duration::from_millis(50),
+        };
+        let mut engine = Engine::open(
+            StateRoot::admit(&state_path).expect("private state"),
+            provider,
+        )
+        .expect("engine");
+        let mut run_task = tokio::spawn(async move {
+            let outcome = engine.run(request(&workspace, "Question")).await;
+            let close = engine.close().await;
+            (outcome, close)
+        });
+        let started = tokio::time::timeout(Duration::from_secs(5), started_rx.recv()).await;
+        assert_eq!(started.expect("Provider start deadline"), Some(()));
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_millis(60)).await;
+        tokio::time::resume();
+        let joined = tokio::time::timeout(Duration::from_secs(5), &mut run_task).await;
+        let (outcome, close) = joined.expect("timed-out Run terminates").expect("Run task");
+        let outcome = outcome.expect("durable failed Run");
+        close.expect("engine shutdown");
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(outcome.run.status, RunStatus::Failed);
+
+        let store = Store::open(StateRoot::admit(&state_path).expect("state readmission"))
+            .expect("reopened store");
+        let events = store
+            .load_session(outcome.session_id)
+            .await
+            .expect("durable Events");
+        let view = SessionView::replay(outcome.session_id, &events)
+            .expect("replayed Session")
+            .expect("Session view");
+        let goal = view.goal(outcome.goal_id).expect("Goal");
+        assert_eq!(goal.reserved_active_ms, None, "the reservation is settled");
+        assert!(
+            goal.active_ms <= 1_000,
+            "the call is charged its declared 50 ms, not the 120 s default"
+        );
+        store.close().await.expect("store shutdown");
     });
 }
 

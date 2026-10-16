@@ -332,7 +332,9 @@ impl Provider for AnthropicProvider {
         &self,
         request: CompactionRequest,
     ) -> Result<CompactionResponse, ProviderError> {
-        if request.model != self.model || !(1..=4096).contains(&request.max_output_tokens) {
+        if request.model != self.model
+            || !(1..=self.max_output_tokens()).contains(&request.max_output_tokens)
+        {
             return Err(ProviderError::Rejected);
         }
         let response = self

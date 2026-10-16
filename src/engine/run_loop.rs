@@ -1,5 +1,5 @@
 use super::progress::{ProgressPublisher, append_observed};
-use super::{EngineError, RunCancellation, RunSteering};
+use super::{EngineError, RunCancellation, RunSteering, STORE_ACTION_OVERHEAD};
 use crate::provider::{
     AgentPhase, CompactionItem, CompactionRequest, Finish, HistoryTurn, MAX_REPORTED_INPUT_TOKENS,
     PreviewText, Provider, ProviderFailureClass, ProviderFailureReason, ProviderOutcome,
@@ -23,8 +23,9 @@ use tokio::time::Instant;
 mod children;
 
 const MAX_FINISH_SUMMARY_BYTES: usize = 2 * 1024;
-pub(super) const STORE_ACTION_OVERHEAD: Duration = Duration::from_secs(5);
 const TOOL_CLEANUP_OVERHEAD: Duration = Duration::from_secs(10);
+/// Wall-clock bound of one Tool-review call, excluding its Store overhead.
+const TOOL_REVIEW_DEADLINE: Duration = Duration::from_secs(20);
 #[cfg(target_os = "linux")]
 const TOOL_PREPARATION_OVERHEAD: Duration = Duration::from_secs(5);
 #[cfg(target_os = "macos")]
@@ -2211,7 +2212,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         };
         let trace = primary.begin_provider(AgentPhase::ToolReview, &review.model);
         let active_segment = self
-            .reserve_active_segment(self.provider.call_deadline())
+            .reserve_active_segment(TOOL_REVIEW_DEADLINE + STORE_ACTION_OVERHEAD)
             .await?;
         if let Err(error) = self.reserve_provider_call(self.primary_id).await {
             trace.finish_refused();
@@ -2228,7 +2229,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                 .deadline()
                 .checked_sub(STORE_ACTION_OVERHEAD)
                 .unwrap_or(active_segment.started)
-                .min(Instant::now() + Duration::from_secs(20)),
+                .min(Instant::now() + TOOL_REVIEW_DEADLINE),
             self.controls.cancellation.clone(),
         )
         .await;

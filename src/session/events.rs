@@ -1439,9 +1439,14 @@ mod account_default_tests {
         assert!(config.validate().is_ok());
         config.output_token_cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
         assert!(config.validate().is_ok());
-        for invalid in [0, crate::provider::MAX_OUTPUT_TOKEN_CAP + 1] {
-            config.output_token_cap = invalid;
-            assert!(config.validate().is_err(), "output cap {invalid}");
+        for (cap, valid) in [
+            (0, false),
+            (4096, true),
+            (crate::provider::MAX_OUTPUT_TOKEN_CAP, true),
+            (crate::provider::MAX_OUTPUT_TOKEN_CAP + 1, false),
+        ] {
+            config.output_token_cap = cap;
+            assert_eq!(config.validate().is_ok(), valid, "output cap {cap}");
         }
         config.output_token_cap = 4096;
         config.saved_api_account_id = Some(Uuid::nil());
@@ -1777,7 +1782,9 @@ impl CompactionRecord {
                 .map_err(|_| ReplayError::InvalidSnapshot)?;
             if *summary_bytes != summary.len() as u32
                 || *summary_tokens_estimate != summary_bytes.div_ceil(4)
-                || self.output_tokens.is_some_and(|count| count > 1024)
+                || self
+                    .output_tokens
+                    .is_some_and(|count| count > super::MAX_COMPACTION_OUTPUT_TOKENS)
             {
                 return Err(ReplayError::InvalidSnapshot);
             }
@@ -1906,7 +1913,9 @@ impl ProviderCallRecord {
         }) || self
             .input_tokens
             .is_some_and(|count| count > crate::provider::MAX_REPORTED_INPUT_TOKENS)
-            || self.output_tokens.is_some_and(|count| count > 4096)
+            || self
+                .output_tokens
+                .is_some_and(|count| count > crate::provider::MAX_OUTPUT_TOKEN_CAP)
             || self.wire_provenance.is_some_and(|provenance| {
                 !provenance.valid_for(
                     self.response_id.as_deref(),
@@ -1975,8 +1984,10 @@ mod provider_call_tests {
         record.input_tokens = Some(crate::provider::MAX_REPORTED_INPUT_TOKENS + 1);
         assert!(record.validate().is_err());
         record.input_tokens = Some(100);
-        record.output_tokens = Some(4097);
+        record.output_tokens = Some(crate::provider::MAX_OUTPUT_TOKEN_CAP + 1);
         assert!(record.validate().is_err());
+        record.output_tokens = Some(crate::provider::MAX_OUTPUT_TOKEN_CAP);
+        assert!(record.validate().is_ok());
         record.output_tokens = None;
         record.disposition = ProviderCallDisposition::Unavailable;
         record.input_tokens = Some(100);
