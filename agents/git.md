@@ -54,11 +54,10 @@ Load before running a git command or proposing a git step in a plan.
 
 - When publishing is authorized under the rules above, open a PR once the branch has a reviewable unit; do not merge it unless the user asks.
 - Use a short, imperative, scoped title without a trailing period.
-- Agents must read and use the [PR template](../.github/pull_request_template.md) whenever creating a PR, including through the CLI or API; do not assume the publishing tool applies it automatically. The body contains `Summary`, `Verification`, `Security`, `Risks`, and `Documentation`; use `N/A` with a short reason when a section does not apply.
-- Follow the template's writing guidance: TL;DR first, plain English, and 1–3 short bullets per section. Link or collapse longer evidence.
+- Agents must read and use the [PR template](../.github/pull_request_template.md) whenever creating a PR, including through the CLI or API; the publishing tool does not apply it. The body contains `Summary`, `Verification` and `Notes`; the Notes section carries security, risk and documentation remarks only when they apply.
 - For issues created through the CLI or API, use the [bug report](../.github/ISSUE_TEMPLATE/bug_report.md) or [improvement/task](../.github/ISSUE_TEMPLATE/improvement.md) template.
-- Report skipped or blocked checks. Do not claim checks that were not run.
-- After pushing, report the current CI state without waiting indefinitely.
+- Report skipped or blocked checks; do not claim checks that were not run.
+- After pushing, watch the PR's CI and fix a red result before handoff. If GitHub retargets a stacked PR after its base merges, push or re-run the workflow so CI covers the new merge.
 
 ## Rollback
 

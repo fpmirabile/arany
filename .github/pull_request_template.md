@@ -1,48 +1,24 @@
 <!--
-For humans and agents: write for readers with limited attention.
-Keep everything in English and TL;DR: lead with the point, use plain language,
-and aim for 1–3 short bullets per section. Link or collapse longer evidence.
-Replace placeholders; use "unknown" for missing facts and "N/A — <reason>"
-when a section does not apply. Skip filler and the history of your work.
-Agents: read AGENTS.md and follow this structure even when publishing by CLI/API.
-Never include secrets, personal data, or raw private prompts and payloads.
+Lead with the point; 1–3 short bullets per section. Write "N/A — <reason>"
+only where a section does not apply. Never include secrets, personal data or
+raw private prompts/payloads. Agents: follow AGENTS.md even when publishing
+through the CLI or API.
 -->
 
 ## Summary
 
-<!-- Explain the concrete problem and resulting behavior. Link the issue if one exists. -->
-
-- **Problem:** <what happens today and why it matters>
-- **Change:** <what happens after this PR; before → after when useful>
+- **Problem:** <what happens today and why it matters; link the issue if one exists>
+- **Change:** <what happens after this PR>
 
 ## Verification
 
-<!-- Report only checks actually run: command/scenario → result and what it proves.
-Name the OS for native evidence. List skipped/blocked checks and the reason.
-Use a short before/after excerpt or screenshot when it helps; avoid raw log dumps. -->
+- **Checked:** <targeted local checks run → result; CI result on the final head>
+- **Not run:** <skipped or blocked check → reason, or N/A>
 
-- **Checked:** <command or scenario → result; claim verified>
-- **Not run:** <check → reason, or N/A with a reason>
+## Notes
 
-## Security
+<!-- Only when applicable: the trust boundary touched and the attack it prevents
+(see agents/security.md triggers); a concrete risk and its rollback; the spec or
+contract that changed. Omit bullets that do not apply. -->
 
-<!-- Check agents/security.md triggers. When triggered, name the affected trust
-boundary, attack/failure prevented, and evidence or remaining gap. Otherwise
-write N/A with a reason. Do not claim safety from passing tests alone. -->
-
-- <security impact and evidence, or N/A with a reason>
-
-## Risks
-
-<!-- Name what could break, who/what is affected, and any OS limitations.
-Explain rollback; flag irreversible effects. Link follow-up work for known gaps. -->
-
-- **Impact:** <concrete risk and affected area, or N/A with a reason>
-- **Rollback:** <how to undo this change; any irreversible effects>
-
-## Documentation
-
-<!-- Link changed docs/specs and acceptance scenarios. If unchanged, explain why
-the existing contract is adequate or why there is no observable behavior change. -->
-
-- <documentation/contract impact and relevant links, or N/A with a reason>
+- <security, risk or documentation note, or N/A>
