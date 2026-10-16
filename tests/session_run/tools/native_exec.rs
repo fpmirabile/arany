@@ -281,8 +281,11 @@ impl Provider for CacheCanary {
         Ok(ProviderResponse {
             outcome,
             response_id: None,
-            input_tokens: None,
-            output_tokens: None,
+            usage: arany::Usage {
+                input_tokens: None,
+                output_tokens: None,
+                ..Default::default()
+            },
             wire_provenance: None,
         })
     }

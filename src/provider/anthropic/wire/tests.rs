@@ -228,7 +228,7 @@ fn outbound_messages_pin_schema_cap_and_disclosure_scope() {
         body["system"]
             .as_str()
             .unwrap()
-            .contains(crate::provider::COLLABORATION_INSTRUCTIONS)
+            .contains(crate::provider::prompts::COLLABORATION_INSTRUCTIONS)
     );
     assert_eq!(body["max_tokens"], 4096);
     assert_eq!(body["stream"], false);
@@ -429,7 +429,7 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
         body["system"]
             .as_str()
             .unwrap()
-            .contains(crate::provider::COLLABORATION_INSTRUCTIONS)
+            .contains(crate::provider::prompts::COLLABORATION_INSTRUCTIONS)
     );
     let input: Value =
         serde_json::from_str(body["messages"][0]["content"].as_str().unwrap()).unwrap();
@@ -516,6 +516,27 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
 }
 
 #[test]
+fn anthropic_usage_reports_cache_read_and_creation_separately() {
+    let finish = response(
+        "end_turn",
+        json!([text_block(
+            r#"{"outcome":{"type":"finish","summary":"done","result":"answer"}}"#
+        )]),
+    );
+    let answer = decode_run(
+        &serde_json::to_vec(&finish).unwrap(),
+        "claude-sonnet-5",
+        4096,
+    )
+    .expect("cached finish");
+    assert_eq!(answer.usage.input_tokens, Some(19));
+    assert_eq!(answer.usage.cache_read_input_tokens, Some(4));
+    assert_eq!(answer.usage.cache_creation_input_tokens, Some(3));
+    assert_eq!(answer.usage.output_tokens, Some(8));
+    assert!(answer.usage.cache_consistent());
+}
+
+#[test]
 fn inbound_messages_require_one_complete_structured_answer() {
     let finish = response(
         "end_turn",
@@ -532,8 +553,8 @@ fn inbound_messages_require_one_complete_structured_answer() {
     )
     .expect("schema-constrained finish");
     assert_eq!(answer.response_id.as_deref(), Some("msg_example"));
-    assert_eq!(answer.input_tokens, Some(19));
-    assert_eq!(answer.output_tokens, Some(8));
+    assert_eq!(answer.usage.input_tokens, Some(19));
+    assert_eq!(answer.usage.output_tokens, Some(8));
     assert_eq!(
         answer.wire_provenance,
         Some(ProviderWireProvenance::MessagesEndTurnStorageUnspecified)
@@ -576,6 +597,7 @@ fn inbound_messages_require_one_complete_structured_answer() {
             4096
         )
         .expect("uncached usage")
+        .usage
         .input_tokens,
         Some(12)
     );
@@ -628,7 +650,7 @@ fn inbound_messages_require_one_complete_structured_answer() {
             }
         }
     }
-    assert_eq!(summary.output_tokens, Some(8));
+    assert_eq!(summary.usage.output_tokens, Some(8));
     assert_eq!(
         summary.wire_provenance,
         Some(ProviderWireProvenance::MessagesEndTurnStorageUnspecified)
@@ -852,7 +874,7 @@ fn steering_notes_are_user_input_data_never_system_instructions() {
     request.steering_notes = vec!["steering canary".into()];
     let body = run_body(&request, Effort::Max);
     let system = body["system"].as_str().unwrap();
-    assert!(system.contains(crate::provider::STEERING_INSTRUCTIONS));
+    assert!(system.contains(crate::provider::prompts::STEERING_INSTRUCTIONS));
     assert!(!system.contains("steering canary"));
     assert!(body["messages"].to_string().contains("steering canary"));
 
@@ -861,7 +883,7 @@ fn steering_notes_are_user_input_data_never_system_instructions() {
         !plain["system"]
             .as_str()
             .unwrap()
-            .contains(crate::provider::STEERING_INSTRUCTIONS)
+            .contains(crate::provider::prompts::STEERING_INSTRUCTIONS)
     );
     assert!(!plain["messages"].to_string().contains("steering_notes"));
 }
@@ -889,7 +911,7 @@ fn child_research_request_offers_only_read_only_calls_and_finish() {
         body["system"]
             .as_str()
             .unwrap()
-            .starts_with(crate::provider::RESEARCH_INSTRUCTIONS)
+            .starts_with(crate::provider::prompts::RESEARCH_INSTRUCTIONS)
     );
     let branches = body["output_config"]["format"]["schema"]["properties"]["outcome"]["anyOf"]
         .as_array()
