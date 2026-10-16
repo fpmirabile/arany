@@ -1121,6 +1121,7 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
             role: arany::AgentRole::Primary,
             ordinal: 0,
             objective: None,
+            grant: None,
         },
         Event::GoalProviderCallReserved {
             goal_id,

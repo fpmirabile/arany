@@ -21,7 +21,7 @@ pub(crate) use compaction::{
 };
 pub(crate) use context::CompiledContext;
 pub use events::{
-    AgentDisposition, AgentRole, AgentRunId, CollaborationPolicy, CompactionFailure,
+    AgentDisposition, AgentRole, AgentRunId, ChildGrant, CollaborationPolicy, CompactionFailure,
     CompactionRecord, CompactionStatus, ContextUsage, DISPLAY_LIMIT_TEXT, DisplayCategory,
     DisplayChunk, Event, EventEnvelope, ForkLineage, GoalBudget, GoalId, GoalMcpTool, GoalPhase,
     GoalPlanContract, GoalReport, GoalSkillBinding, GoalStatus, GoalSuccessCriterion,
@@ -31,8 +31,8 @@ pub use events::{
     ProviderCallRecord, RunConfig, RunDisposition, RunId, SessionDefaults, SessionId,
 };
 pub(crate) use events::{
-    GoalSuccessState, GoalUsage, MAX_GOAL_ACTION_ACTIVE_MS, MAX_GOAL_PLAN_CONTRACT_BYTES,
-    ReplayError,
+    EVENT_PAYLOAD_VERSION, GoalSuccessState, GoalUsage, MAX_GOAL_ACTION_ACTIVE_MS,
+    MAX_GOAL_PLAN_CONTRACT_BYTES, ReplayError,
 };
 pub(crate) use lineage::prefix_digest;
 pub use reducer::{

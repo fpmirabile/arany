@@ -1,5 +1,5 @@
 use super::events::{
-    AgentDisposition, AgentRole, AgentRunId, CompactionRecord, CompactionStatus, Event,
+    AgentDisposition, AgentRole, AgentRunId, ChildGrant, CompactionRecord, CompactionStatus, Event,
     EventEnvelope, ForkLineage, GoalBudget, GoalId, GoalPhase, GoalPlanContract, GoalReport,
     GoalStatus, GoalUsage, ProviderCallDisposition, ProviderCallRecord, ReplayError, RunConfig,
     RunDisposition, RunId, SessionDefaults, SessionId,
@@ -269,6 +269,9 @@ pub struct AgentView {
     pub summary: Option<String>,
     pub result: Option<String>,
     pub provider_calls: Vec<ProviderCallRecord>,
+    pub grant: Option<crate::session::ChildGrant>,
+    /// Read-only research Tools of a child; the primary's Tools stay in `RunView::tools`.
+    pub tools: Vec<ToolView>,
     pub status: AgentStatus,
 }
 
@@ -930,6 +933,7 @@ impl SessionView {
                 role,
                 ordinal,
                 objective,
+                grant,
             } => {
                 if *role == AgentRole::Child {
                     let goal =
@@ -947,12 +951,18 @@ impl SessionView {
                 }
                 let run = active_run(current, *run_id)?;
                 let config = run.config.as_ref().ok_or(ReplayError::InvalidTransition)?;
+                let child_grant = if config.tool_policy.is_some() {
+                    ChildGrant::ReadOnly
+                } else {
+                    ChildGrant::NoTools
+                };
                 match role {
                     AgentRole::Primary if run.agents.is_empty() && *ordinal == 0 => {}
                     AgentRole::Child
                         if !run.agents.is_empty()
                             && *ordinal as usize == run.agents.len()
-                            && *ordinal <= config.policy.max_children() => {}
+                            && *ordinal <= config.policy.max_children()
+                            && *grant == Some(child_grant) => {}
                     _ => return Err(ReplayError::InvalidTransition),
                 }
                 if run.agents.iter().any(|agent| agent.id == *agent_run_id) {
@@ -974,6 +984,8 @@ impl SessionView {
                     summary: None,
                     result: None,
                     provider_calls: Vec::new(),
+                    grant: *grant,
+                    tools: Vec::new(),
                     status: AgentStatus::Active,
                 });
             }
@@ -1631,6 +1643,7 @@ mod goal_replay_tests {
                 role: AgentRole::Primary,
                 ordinal: 0,
                 objective: None,
+                grant: None,
             },
         ]
     }
@@ -1809,6 +1822,7 @@ mod goal_replay_tests {
                 role: AgentRole::Child,
                 ordinal: 1,
                 objective: Some("inspect the parser".into()),
+                grant: Some(ChildGrant::NoTools),
             });
             events.push(Event::GoalProviderCallReserved {
                 goal_id,
@@ -2859,6 +2873,8 @@ mod goal_replay_tests {
                         ProviderCallDisposition::Delegated,
                         Some(0),
                     )],
+                    grant: None,
+                    tools: Vec::new(),
                     status: AgentStatus::Active,
                 }],
                 assistant_message: None,
@@ -2904,7 +2920,7 @@ mod goal_replay_tests {
         }
     }
 
-    fn apply_child_spawn(view: &mut SessionView) -> Result<(), ReplayError> {
+    fn apply_child_spawn(view: &mut SessionView, grant: ChildGrant) -> Result<(), ReplayError> {
         let run_id = view.runs[0].id;
         let event = Event::AgentSpawned {
             run_id,
@@ -2912,6 +2928,7 @@ mod goal_replay_tests {
             role: AgentRole::Child,
             ordinal: 1,
             objective: Some("Check the child result".into()),
+            grant: Some(grant),
         };
         let (run_id, agent_run_id) = event.scope();
         view.apply_committed(&EventEnvelope {
@@ -2925,12 +2942,38 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn child_spawn_grant_follows_the_run_tool_policy() {
+        let session_with_tools = |tools| {
+            let mut view = delegated_session(0);
+            view.runs[0].config = Some(config(
+                CollaborationPolicy::Auto {
+                    max_active_children: 1,
+                },
+                tools,
+            ));
+            view
+        };
+        let mut no_tools = session_with_tools(false);
+        assert!(apply_child_spawn(&mut no_tools, ChildGrant::NoTools).is_ok());
+        assert_eq!(no_tools.runs[0].agents[1].grant, Some(ChildGrant::NoTools));
+        assert!(apply_child_spawn(&mut session_with_tools(false), ChildGrant::ReadOnly).is_err());
+
+        let mut with_tools = session_with_tools(true);
+        assert!(apply_child_spawn(&mut with_tools, ChildGrant::ReadOnly).is_ok());
+        assert_eq!(
+            with_tools.runs[0].agents[1].grant,
+            Some(ChildGrant::ReadOnly)
+        );
+        assert!(apply_child_spawn(&mut session_with_tools(true), ChildGrant::NoTools).is_err());
+    }
+
+    #[test]
     fn child_admission_uses_the_effective_plan_token_ceiling() {
         let mut below_cap = delegated_session(999);
-        assert!(apply_child_spawn(&mut below_cap).is_ok());
+        assert!(apply_child_spawn(&mut below_cap, ChildGrant::NoTools).is_ok());
 
         let mut at_cap = delegated_session(1000);
-        assert!(apply_child_spawn(&mut at_cap).is_err());
+        assert!(apply_child_spawn(&mut at_cap, ChildGrant::NoTools).is_err());
     }
 
     fn read_observation(path: &str, content: &[u8]) -> ToolObservation {
@@ -3029,6 +3072,8 @@ mod goal_replay_tests {
                             Some(0),
                         ),
                     ],
+                    grant: None,
+                    tools: Vec::new(),
                     status: AgentStatus::Active,
                 }],
                 assistant_message: None,
@@ -3169,6 +3214,8 @@ mod goal_replay_tests {
                             ProviderCallDisposition::ToolRequested,
                             Some(0),
                         )],
+                        grant: None,
+                        tools: Vec::new(),
                         status: AgentStatus::Active,
                     }],
                     assistant_message: None,

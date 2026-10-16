@@ -112,6 +112,7 @@ fn seed_interrupted_run(state: &Path) -> (SessionId, RunId) {
                 role: AgentRole::Primary,
                 ordinal: 0,
                 objective: None,
+                grant: None,
             },
             Event::AgentFinished {
                 run_id,

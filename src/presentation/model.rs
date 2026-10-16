@@ -456,6 +456,8 @@ mod tests {
                 summary: None,
                 result: None,
                 provider_calls: Vec::new(),
+                grant: None,
+                tools: Vec::new(),
                 status: AgentStatus::Active,
             })
             .chain((1..=5).map(|ordinal| AgentView {
@@ -466,6 +468,8 @@ mod tests {
                 summary: None,
                 result: None,
                 provider_calls: Vec::new(),
+                grant: None,
+                tools: Vec::new(),
                 status: if ordinal == 1 {
                     AgentStatus::Failed
                 } else {

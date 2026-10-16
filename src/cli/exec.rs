@@ -967,7 +967,7 @@ mod tests {
         for (line, event) in run_lines.into_iter().zip(run_events) {
             assert_eq!(line["sequence"], event.sequence);
             assert_eq!(line["created_at_ms"], event.created_at_ms);
-            assert_eq!(line["event_version"], 4);
+            assert_eq!(line["event_version"], 5);
         }
         store.close().await.expect("closed store");
 

@@ -48,10 +48,10 @@ pub use provider::{
     validate_native_model_id,
 };
 pub use session::{
-    AgentDisposition, AgentRole, AgentRunId, AgentStatus, AgentView, CollaborationPolicy,
-    CompactionFailure, CompactionRecord, CompactionStatus, CompactionView, ContextUsage,
-    DisplayCategory, DisplayChunk, Event, EventEnvelope, ForkLineage, GoalBudget, GoalId,
-    GoalMcpTool, GoalPhase, GoalPlanContract, GoalReport, GoalSkillBinding, GoalStatus,
+    AgentDisposition, AgentRole, AgentRunId, AgentStatus, AgentView, ChildGrant,
+    CollaborationPolicy, CompactionFailure, CompactionRecord, CompactionStatus, CompactionView,
+    ContextUsage, DisplayCategory, DisplayChunk, Event, EventEnvelope, ForkLineage, GoalBudget,
+    GoalId, GoalMcpTool, GoalPhase, GoalPlanContract, GoalReport, GoalSkillBinding, GoalStatus,
     GoalSuccessCriterion, GoalView, MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_MCP_TOOLS,
     MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS,
     ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition, RunId, RunStatus,

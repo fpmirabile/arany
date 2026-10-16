@@ -131,6 +131,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             role: AgentRole::Primary,
             ordinal: 0,
             objective: None,
+            grant: None,
         },
         Event::GoalActiveTimeReserved {
             goal_id: goal,

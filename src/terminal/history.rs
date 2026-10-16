@@ -1756,6 +1756,7 @@ mod tests {
                         role: AgentRole::Primary,
                         ordinal: 0,
                         objective: None,
+                        grant: None,
                     },
                     Event::AgentFinished {
                         run_id,

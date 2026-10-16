@@ -6,7 +6,9 @@ use crate::engine::{EngineError, OUTPUT_TOKEN_CAP};
 use crate::provider::{
     AgentPhase, ChildResult, Finish, Provider, ProviderOutcome, ProviderRequest, ProviderResponse,
 };
-use crate::session::{AgentDisposition, AgentRole, AgentRunId, CollaborationPolicy, Event};
+use crate::session::{
+    AgentDisposition, AgentRole, AgentRunId, ChildGrant, CollaborationPolicy, Event,
+};
 use crate::telemetry::{AgentTrace, ProviderTrace, TraceOutcome};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -152,6 +154,11 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 role: AgentRole::Child,
                 ordinal: index as u8 + 1,
                 objective: Some(objective.clone()),
+                grant: Some(if self.controls.tools.is_some() {
+                    ChildGrant::ReadOnly
+                } else {
+                    ChildGrant::NoTools
+                }),
             })
             .await?;
             children.push(ChildWork {
