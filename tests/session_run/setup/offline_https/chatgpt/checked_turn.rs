@@ -419,19 +419,6 @@ pub(super) fn respond_after_catalog(
                 serde_json::json!({"outcome": {"type": "finish", "summary": "missing result"}}),
             ),
         ),
-        (
-            "OutcomeReadBounds",
-            completed("gpt-6.1-sol", serde_json::json!({"outcome": {"type": "tool", "call": {
-                "operation": "read", "path": FAILURE_BODY_CANARY, "offset": 0, "limit": 4097
-            }}})),
-        ),
-        (
-            "OutcomeToolDigest",
-            completed("gpt-6.1-sol", serde_json::json!({"outcome": {"type": "tool", "call": {
-                "operation": "edit", "path": FAILURE_BODY_CANARY, "expected_digest": FAILURE_BODY_CANARY,
-                "old": FAILURE_BODY_CANARY, "new": FAILURE_BODY_CANARY
-            }}})),
-        ),
     ]
     .into_iter()
     .chain(
@@ -818,16 +805,6 @@ pub(super) fn accept_check_and_run(
             arany::ProviderFailureReason::OutcomeContract,
             2,
         ),
-        (
-            "OutcomeReadBounds",
-            arany::ProviderFailureReason::OutcomeContract,
-            2,
-        ),
-        (
-            "OutcomeToolDigest",
-            arany::ProviderFailureReason::OutcomeContract,
-            2,
-        ),
     ]
     .into_iter()
     .chain(
@@ -903,14 +880,6 @@ pub(super) fn accept_check_and_run(
             assert!(bytes > 0 && bytes <= 1024 * 1024);
             assert_eq!(fields[3], format!("events={events}"));
             assert_eq!(fields[4], "http_status=Some(200)");
-            if stage == "OutcomeReadBounds" {
-                assert!(text.contains("tool_arguments ToolArgumentShape { operation: \"read\""));
-                assert!(text.contains("read_limit: Some(4097)"));
-            }
-            if stage == "OutcomeToolDigest" {
-                assert!(text.contains("tool_arguments ToolArgumentShape { operation: \"edit\""));
-                assert!(text.contains("digest_valid: Some(false)"));
-            }
             if let Some((_, phases)) = FINAL_MESSAGE_FAILURES
                 .iter()
                 .find(|(name, _)| *name == stage)

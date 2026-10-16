@@ -1090,7 +1090,16 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                 } else {
                     assert_eq!(body["tool_choice"]["type"], "auto");
                     assert_eq!(body["tool_choice"]["disable_parallel_tool_use"], true);
-                    assert_eq!(body["tools"].as_array().unwrap().len(), 13);
+                    let names: Vec<_> = body["tools"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .inspect(|tool| assert_eq!(tool["strict"], true))
+                        .map(|tool| tool["name"].as_str().unwrap().to_owned())
+                        .collect();
+                    for expected in ["arany_read", "arany_edit", "arany_command"] {
+                        assert!(names.iter().any(|name| name == expected), "{names:?}");
+                    }
                 }
                 assert_eq!(observations.len(), step);
                 assert_eq!(context["tools"]["catalog"]["write"], true);

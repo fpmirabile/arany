@@ -28,7 +28,10 @@ fn scoped(part: &str) -> Option<(String, Value)> {
 }
 
 pub fn input(wire: &Value) -> Value {
-    if let Some(text) = wire["input"].as_str() {
+    if let Some(text) = wire["input"]
+        .as_str()
+        .or_else(|| wire["messages"][0]["content"].as_str())
+    {
         return serde_json::from_str(text).expect("compaction input");
     }
     let system: String = wire["system"]
@@ -42,7 +45,6 @@ pub fn input(wire: &Value) -> Value {
     let mut semantic = json!({
         "objective": null, "history": [], "includes": [], "workspace_guidance": null,
         "derived_context_summary": null, "child_results": [],
-        "goal_budget": null, "goal_plan_contract": null,
     });
     let mut notes = Vec::new();
     for part in parts(wire) {
@@ -55,8 +57,11 @@ pub fn input(wire: &Value) -> Value {
                 "child_results" => semantic["child_results"] = data,
                 "tool_review_request" => semantic["objective"] = data,
                 "goal" => {
-                    semantic["goal_budget"] = data["budget"].clone();
-                    semantic["goal_plan_contract"] = data["plan_contract"].clone();
+                    for key in ["budget", "plan_contract"] {
+                        if !data[key].is_null() {
+                            semantic[format!("goal_{key}")] = data[key].clone();
+                        }
+                    }
                 }
                 "tool_catalog" => semantic["tools"] = json!({"catalog": data}),
                 _ => {}
