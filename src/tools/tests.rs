@@ -2019,6 +2019,22 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
         "researcher": render(runtime.research_context(3).unwrap().catalog),
     });
     let rendered = serde_json::to_string_pretty(&rendered).unwrap() + "\n";
+    // Regenerate with ARANY_UPDATE_SNAPSHOTS=1 (per OS), then review the diff.
+    if std::env::var_os("ARANY_UPDATE_SNAPSHOTS").is_some() {
+        let file = if cfg!(target_os = "macos") {
+            "catalog_prose_macos"
+        } else {
+            "catalog_prose"
+        };
+        return std::fs::write(
+            format!(
+                "{}/src/tools/snapshots/{file}.json",
+                env!("CARGO_MANIFEST_DIR")
+            ),
+            &rendered,
+        )
+        .unwrap();
+    }
     let expected = if cfg!(target_os = "macos") {
         include_str!("snapshots/catalog_prose_macos.json")
     } else {

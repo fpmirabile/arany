@@ -1,6 +1,6 @@
 use super::ToolError;
 use super::catalog::string;
-use super::guard::{SiteContext, capture, payload};
+use super::guard::{GuardContext, capture, payload};
 use super::types::{CommandResult, ToolCall, valid_name, valid_relative};
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -21,7 +21,7 @@ pub(super) fn schema() -> Option<Vec<(&'static str, Value)>> {
     ])
 }
 
-pub(super) async fn run(site: &SiteContext<'_>) -> Result<String, ToolError> {
+pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
     let ToolCall::Command { program, args, cwd } = &site.intent.call else {
         return Err(ToolError::Configuration);
     };

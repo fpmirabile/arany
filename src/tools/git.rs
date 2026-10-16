@@ -1,6 +1,6 @@
 use super::ToolError;
 use super::config::Program;
-use super::guard::SiteContext;
+use super::guard::GuardContext;
 use super::types::{
     FORBIDDEN_NAMES, MAX_GIT_LOG_COMMITS, MAX_SNAPSHOT_BYTES, ToolCall, forbidden, hex_digest,
     valid_relative, valid_revision,
@@ -461,7 +461,7 @@ async fn spawn_git(
 }
 
 /// Runs one typed Git read; Git failures and unsupported repositories return `{"failed": ..}` output.
-pub(super) async fn run(site: &SiteContext<'_>) -> Result<String, ToolError> {
+pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
     let git = site.config.git.as_ref().ok_or(ToolError::Configuration)?;
     #[cfg(target_os = "linux")]
     let scratch = Path::new("/scratch");

@@ -1440,6 +1440,17 @@ fn tool_surface_matches_the_checked_in_snapshot() {
             .map(|(label, request)| (label.to_owned(), body(&request)["tools"].clone()))
             .collect();
     let rendered = serde_json::to_string_pretty(&rendered).unwrap() + "\n";
+    // Regenerate with ARANY_UPDATE_SNAPSHOTS=1, then review the diff.
+    if std::env::var_os("ARANY_UPDATE_SNAPSHOTS").is_some() {
+        return std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/provider/snapshots/openai_tools.json"
+            ),
+            &rendered,
+        )
+        .unwrap();
+    }
     assert!(
         rendered == include_str!("../../snapshots/openai_tools.json"),
         "{rendered}"

@@ -844,7 +844,7 @@ fn bootstrap_locations(
     ))
 }
 
-pub(super) struct SiteContext<'a> {
+pub(super) struct GuardContext<'a> {
     pub(super) intent: &'a EffectIntent,
     pub(super) config: &'a Config,
     pub(super) root: &'a Path,
@@ -855,7 +855,7 @@ pub(super) struct SiteContext<'a> {
 }
 
 #[cfg(target_os = "linux")]
-impl SiteContext<'_> {
+impl GuardContext<'_> {
     pub(super) async fn stop_descendants(&self) -> Result<(), ToolError> {
         linux::stop_command_descendants(self.parent_namespaces).await
     }
@@ -982,7 +982,7 @@ pub(super) fn helper_main() -> ExitCode {
             .enable_all()
             .build()
             .map_err(|_| ToolError::Operation)?;
-        let site = SiteContext {
+        let site = GuardContext {
             intent: &task.intent,
             config: &task.config,
             root: &root,

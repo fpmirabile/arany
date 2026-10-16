@@ -11,16 +11,10 @@ pub(crate) enum Family {
     Git,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Site {
-    Guard,
-}
-
 #[derive(Debug)]
 pub(crate) struct OperationFacts {
     pub(crate) name: &'static str,
     pub(crate) family: Family,
-    pub(crate) site: Site,
     pub(crate) mutates: bool,
     pub(crate) spawns_process: bool,
     pub(crate) prelude: bool,
@@ -40,7 +34,6 @@ const fn facts_row(
     OperationFacts {
         name,
         family,
-        site: Site::Guard,
         mutates: false,
         spawns_process: false,
         prelude: false,
@@ -472,7 +465,6 @@ mod tests {
         let mut orders: Vec<_> = ALL.iter().map(|facts| facts.order).collect();
         orders.sort_unstable();
         assert_eq!(orders, (0..ALL.len() as u8).collect::<Vec<_>>());
-        assert!(ALL.iter().all(|facts| facts.site == Site::Guard));
     }
 
     #[test]

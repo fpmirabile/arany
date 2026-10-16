@@ -1,12 +1,11 @@
-use super::catalog::{Family, Site};
-use super::guard::SiteContext;
+use super::catalog::Family;
+use super::guard::GuardContext;
 use super::types::ToolCall;
 use super::{ToolError, fs, git, mcp, process, skills};
 
-pub(super) async fn run(site: &SiteContext<'_>) -> Result<String, ToolError> {
+pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
     let call = &site.intent.call;
     let facts = call.facts();
-    debug_assert_eq!(facts.site, Site::Guard);
     match facts.family {
         Family::File => fs::native(site.workspace, call, site.config),
         Family::Process => process::run(site).await,
