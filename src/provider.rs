@@ -1,11 +1,12 @@
-//! `Provider` is the only Engine behavior seam. Requests and responses carry Arany semantics, never
-//! provider wire objects or a generic parameter bag. Each adapter owns authentication, request
-//! documents, strict encoding, error mapping, usage, privacy and parsing; private helpers may share
-//! HTTP mechanics, but there is no transport trait or universal OpenAI-compatible adapter. The
-//! scripted Provider owns Engine tests; each adapter owns hand-reviewed offline wire fixtures and
-//! ignored live gates. MCP argument strings use the same bounded duplicate-free object decoder as
-//! the Guard. `ResponsePreview` is a one-slot observer whose text grants no outcome or authority;
-//! checkpoints belong to the Engine and Store, not the adapter.
+//! Each adapter owns authentication, request documents, strict encoding, error mapping, usage,
+//! privacy and parsing; private helpers may share HTTP mechanics, but there is no transport trait
+//! or universal OpenAI-compatible adapter. The scripted Provider owns Engine tests; each adapter
+//! owns hand-reviewed offline wire fixtures and ignored live gates. Checkpoints belong to the
+//! Engine and Store, not the adapter. Keep instruction text consistent with each phase's schema:
+//! forcing synthesis to Finish suppresses allowed primary reads and edits, and advertising
+//! unconfigured MCP invites invalid fallback proposals after an unrelated file failure. An absent
+//! edit receipt after successful inspection is not an observed edit failure. Deterministic
+//! validation (`valid_tool`, the reducer) stays authoritative over anything the model proposes.
 use crate::session::{CollaborationPolicy, RunId, SessionId};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

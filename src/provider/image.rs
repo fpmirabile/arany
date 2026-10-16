@@ -23,6 +23,11 @@ pub struct ImageAttachment {
 }
 
 impl ImageAttachment {
+    /// Admits bytes, never a filename, URL or terminal image escape. PNG structure, CRC and
+    /// dimension admission is not raster decoding or proof of vision support. Animated PNG and
+    /// unknown critical chunks reject; the original admitted bytes, including metadata, are kept
+    /// without local decompression. Native adapter admission validates count, aggregate bytes and
+    /// objective or history origin before body construction or egress.
     pub fn from_png(bytes: &[u8]) -> Result<Self, &'static str> {
         if bytes.len() > MAX_IMAGE_BYTES {
             return Err("image is too large; choose a smaller PNG");

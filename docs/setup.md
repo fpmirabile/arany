@@ -112,7 +112,7 @@ arany provider logout chatgpt
 Logout blocks account use, attempts remote revocation and removes the local
 token while retaining registration for Reconnect. Follow any warning about
 unconfirmed revocation or token deletion. It does not erase backups or cancel
-requests already in flight. [ChatGPT spec](./specs/chatgpt.md) own the precise
+requests already in flight. [ChatGPT spec](./specs/chatgpt.md) owns the precise
 renewal, permission and logout behavior.
 
 ## Storage and recovery

@@ -29,8 +29,8 @@ Everything else (agent loop, wire formats, defaults, permission modes, hooks, ag
 
 | Task or boundary | Read |
 |---|---|
-| Git, branches, commits, PRs | [Git](./agents/git.md) |
-| Auth, secrets, I/O, APIs, Tools, processes, MCP, transports, untrusted rendering, audits | [Security](./agents/security.md) |
+| Git operations, including planned steps | [Git](./agents/git.md) |
+| Auth, secrets, I/O, APIs, Tools, processes, MCP, memory, transports, untrusted rendering, audits | [Security](./agents/security.md) |
 | Behavior, fixes, tests, correctness or release claims, deferred evidence, handoff | [Testing](./agents/testing.md) |
 | Native, PTY, tmux, account, storage or process fixtures; CI reproduction | [Fixture procedures](./agents/references/testing-details.md) |
 | Documentation, instructions, development skills | [Documentation checks](./agents/testing.md#documentation-and-instruction-changes), [Project skills](./agents/skills/README.md) |
@@ -54,7 +54,7 @@ Open only the linked files whose triggers apply; they are not automatic imports.
 2. **Minimal comments**: default to none; add one short comment when the reason is non-obvious. Architectural reasoning belongs in the design document or ADR.
 3. **Deep modules**: keep interfaces small and hide complexity inside the implementation. Prefer in-process calls. Add a seam only with two adapters or when privilege, process, release or ownership isolation requires it. No speculative frameworks, traits or configuration.
 4. **Explicit resource bounds**: queues, buffers, caches, request bodies, decompression, stdout/stderr, tool output, artifacts, concurrency, and retry counts have declared limits and overflow behavior. Goal usage follows its pinned settings ([defaults](./docs/specs/goals.md#lifecycle-budgets-and-recovery)); this never removes finite per-action, storage, request, Tool and platform bounds.
-5. **No historical residue**: remove superseded code cleanly. During pre-beta, keep one current internal format without compatibility readers, automatic migrations or relocation fallbacks. Reject unsupported stored formats without changing their data; external protocol support stays with its owning contract. Documentation describes the current system.
+5. **No historical residue**: remove superseded code cleanly. During pre-beta, keep one current internal format without compatibility readers, automatic migrations or relocation fallbacks. Reject unsupported stored formats without changing their data; external protocol support stays with its owning contract. Documentation describes the current system; git history records the old one.
 6. **Never inspect or print `.env`**: read `.env.example` only. Commands may load secrets without echoing them or dumping the process environment.
 7. **Unsafe Rust is exceptional**: keep `unsafe` isolated behind a safe interface, document its invariants, and require a dedicated review and test strategy.
 

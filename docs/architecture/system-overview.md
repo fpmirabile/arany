@@ -57,7 +57,7 @@ catalogue per command/MCP-enabled Run. Process intents bind that catalogue into
 their enforcement digest; the controller passes it through the authenticated
 unit Task channel, and each Seatbelt worker revalidates its no-follow metadata
 pins before Ready. File/Skill workers retain the compiled policy digest without
-carrying a catalogue. The [Tool spec](../specs/tools.md) own cache and
+carrying a catalogue. The [Tool spec](../specs/tools.md) owns cache and
 admission constraints.
 
 ```mermaid
@@ -132,7 +132,7 @@ current private file layout; this document does not mirror the repository tree.
 | Tool admission, Policy and dispatch | [Tools](../../src/tools.rs) | [Tool spec](../specs/tools.md) |
 | Separate native effect enforcement | [Guard](../../src/tools/guard.rs) | [Tool spec](../specs/tools.md) |
 | Canonical SQLite and private records | [Store](../../src/store.rs) | [Execution spec](../specs/execution.md#admission-persistence-and-recovery) |
-| Shared no-follow and ACL admission | [Private filesystem](../../src/private_fs.rs) | [Tool spec](../specs/tools.md) |
+| Shared no-follow and ACL admission | [Private filesystem](../../src/private_fs.rs) | The `//!` docs of `src/private_fs.rs` |
 | Semantic presentation and terminal ownership | [Presentation](../../src/presentation.rs), [terminal](../../src/terminal.rs) | [Terminal spec](../specs/terminal.md) |
 | Lossy export and private failure inspection | [Telemetry](../../src/telemetry.rs), [diagnostics](../../src/diagnostics.rs) | [Telemetry spec](../specs/telemetry.md), [Diagnostics spec](../specs/diagnostics.md) |
 | Product acceptance and Engine evidence | [Session journey](../../tests/session_run.rs), [Engine corpus](../../tests/engine_run.rs) | [Testing](../../agents/testing.md) |
@@ -141,7 +141,7 @@ This remains one package and one long-lived process. OS credentials use a superv
 
 ## 4. Public command contract
 
-[The terminal spec](../specs/terminal.md#entry-modes-and-channels) owns attached entry, interactive controls, deterministic channels and their acceptance scenarios. [Account setup](../setup.md) and [local tools](../tools.md) are user procedures; the compiled CLI/command registry owns exact syntax. [Terminal spec](../specs/terminal.md) own admission ordering, typed error classification and command-specific composition.
+[The terminal spec](../specs/terminal.md#entry-modes-and-channels) owns attached entry, interactive controls, deterministic channels and their acceptance scenarios. [Account setup](../setup.md) and [local tools](../tools.md) are user procedures; the compiled CLI/command registry owns exact syntax. The spec also owns admission ordering, typed error classification and command-specific composition.
 
 `main.rs` selects attached chat, setup, `exec`, `show` or Provider operations. Private CLI callers resolve trusted inputs and call Engine operations; they do not implement Run transitions or wire decoding. Attached new/clear entry keeps a bounded empty conversation projection and its selected defaults/title local, with zero creation and last sequence; the first task submission delegates creation to the Engine before Run admission. Exit and resume discard that unsaved projection without deleting canonical state. No Events or resumable ID are invented. Continue/resume/fork delegate to the Engine, which revalidates the pinned Workspace and canonical lineage. Headless `exec` creates one Run in a new Session by default; append requires an explicit Session ID. `show` uses strict read-only replay. There is no `run` alias.
 
@@ -250,7 +250,7 @@ The initial vocabulary is intentionally small:
 - `AgentSpawned`, `ProviderCallRecorded`, `AgentFinished`; and
 - `ToolStarted`, `ToolFinished`.
 
-All current Events use payload version 6. Goal Events pin the user-approved usage/resource settings and record call, active-time and compaction reservations alongside terminal reports. Tool Events correlate the exact Run, acting AgentRun, one-use intent, pinned policy/enforcement digest, Workspace identity and finite effective limits. A successful observation requires a matching Guard receipt. Unknown, duplicated, unmatched, over-budget or mismatched transitions reject; uncertainty/cancellation cannot be followed by successful Agent completion. Public typed replay validates payloads as well as SQL loading. A started attempt without a terminal observation remains a past interrupted/uncertain fact, never an approval or retry instruction.
+All current Events use the payload version the [execution spec](../specs/execution.md#admission-persistence-and-recovery) owns. Goal Events pin the user-approved usage/resource settings and record call, active-time and compaction reservations alongside terminal reports. Tool Events correlate the exact Run, acting AgentRun, one-use intent, pinned policy/enforcement digest, Workspace identity and finite effective limits. A successful observation requires a matching Guard receipt. Unknown, duplicated, unmatched, over-budget or mismatched transitions reject; uncertainty/cancellation cannot be followed by successful Agent completion. Public typed replay validates payloads as well as SQL loading. A started attempt without a terminal observation remains a past interrupted/uncertain fact, never an approval or retry instruction.
 
 `SessionStarted` pins the admitted Workspace device and inode atomically with the title, including for an empty Session. Replay rejects a later Run or fork whose identity disagrees with the pinned Session. The SQLite owner admits only schema version 4 and current Event payloads; unsupported formats and missing fields reject without conversion or deletion.
 
@@ -266,7 +266,7 @@ The sole connection opens no-follow in a private owner-verified local state dire
 
 ## 8. Terminal presentation
 
-[The terminal spec](../specs/terminal.md) owns modes, layout, keys, draft retention, selectors, setup presentation, paste, accessibility, process channels and acceptance scenarios. [Terminal spec](../specs/terminal.md), [Terminal spec](../specs/terminal.md), [clipboard](../specs/terminal.md) and [image](../specs/terminal.md) rules own their implementation invariants.
+[The terminal spec](../specs/terminal.md) owns modes, layout, keys, draft retention, selectors, setup presentation, paste, accessibility, process channels and acceptance scenarios. Clipboard and image rules live in its [paste and attachments](../specs/terminal.md#paste-and-attachments) section; implementation invariants live in the code's `//!` docs.
 
 `presentation.rs` maps committed SessionView/RunView facts to bounded semantic rows and append-only lines. The private terminal module owns the primary-screen viewport, Composer, history index, raw/canonical readers, keys, focus, mouse and one RAII lifecycle owner. None of these presentation types enters the Engine.
 

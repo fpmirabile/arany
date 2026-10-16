@@ -15,7 +15,11 @@
 //! reaper revalidates the lease inode and link count under the namespace lock after flock, keeps
 //! native awaits and recursive deletion outside the lock, retires seed metadata then the lease only
 //! after synchronized absence, and never bypasses its attempt/deadline budget in Drop. Route wait
-//! hints through the existing callback; admission never creates canonical Events.
+//! hints through the existing callback; admission never creates canonical Events. Publish the
+//! planned location before the exclusive mkdir and its checked identity before copying bytes;
+//! preparing without a committed identity authorizes only empty-directory removal. Reject
+//! unsupported records intact, since historical cleanup is explicit maintenance. Record files are
+//! no-follow, owner, mode and ACL checked, single-link and bounded.
 #[cfg(target_os = "macos")]
 const ROOT_SCAN_LIMIT: usize = 4096;
 pub(super) const RECORD_BYTES_CAP: usize = 2048;

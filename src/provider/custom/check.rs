@@ -1,3 +1,6 @@
+//! Evidence is an HMAC, which needs high-entropy real keys and is not encryption of history or
+//! process memory. The checked library constructors require the exact evidence and pin concurrency
+//! at one; ordinary constructors and product Runs do not.
 //! The declared effort list is part of the evidence fingerprint; a change to either compiled strict
 //! contract invalidates old evidence independently of configuration version.
 use super::{CustomProfile, CustomProfileError, PinnedDestination, transport::CustomTransport};

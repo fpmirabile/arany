@@ -2,7 +2,7 @@
 
 ## Status and scope
 
-Fixed in source; the synthetic regression evidence below records the repair's scope, not a current release result. [Provider spec](../../specs/provider.md#usage-provenance-and-reliability) own the maintained constraint. No live account, credential, or prior private journal was inspected for this finding. It concerns selected-credential exclusion before canonical Tool persistence, not a demonstrated Guard escape.
+Fixed in source; the synthetic regression evidence below records the repair's scope, not a current release result. [Provider spec](../../specs/provider.md#usage-provenance-and-reliability) owns the maintained constraint. No live account, credential, or prior private journal was inspected for this finding. It concerns selected-credential exclusion before canonical Tool persistence, not a demonstrated Guard escape.
 
 ## Failure and evidence
 

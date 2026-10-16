@@ -1,7 +1,4 @@
-//! A bounded `invalid_grant` marks that one code unusable; never retry it. Record absolute access
-//! expiry from the local request-start time plus bounded `expires_in`; a relative lifetime cannot
-//! survive restart. `earliest_refresh_at` is opaque and never schedules refresh. Preserve
-//! credentials on transport, rate-limit, server, malformed and unknown refresh failures; only a
+//! Preserve credentials on transport, rate-limit, server, malformed and unknown refresh failures; only a
 //! recognized terminal error marks a token unusable.
 use super::{
     AuthorizationError, CodeExchange, VerifiedCredentials, VerifiedIdentity, VerifiedSignIn,

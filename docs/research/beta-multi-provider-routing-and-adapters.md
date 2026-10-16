@@ -2,8 +2,8 @@
 
 **Source baseline:** 2026-09-29; documentation consolidation is not a fresh API or live-account check.
 
-[Provider spec](../specs/provider.md) own admission, supported profiles and
-strict outcomes; [Provider spec](../specs/provider.md) own
+[Provider spec](../specs/provider.md) owns admission, supported profiles,
+strict outcomes and
 transport validation. This report retains the source comparison behind exact
 profile admission. [The subscription review](./subscription-provider-routes-2026-10.md)
 owns the later plan-access investigation. Recheck changing service capabilities

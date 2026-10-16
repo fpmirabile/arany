@@ -2,7 +2,7 @@
 
 **Research baseline:** 2026-09-28.
 
-[Session spec](../specs/session.md) own current context compilation,
+[Session spec](../specs/session.md) owns current context compilation,
 compaction and lineage; [architecture](../architecture/system-overview.md) owns
 placement. Cross-Session Memory, general Artifact storage, autonomous retrieval
 and opaque Provider continuation are expansion options, not an implementation

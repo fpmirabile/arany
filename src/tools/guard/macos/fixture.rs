@@ -4,7 +4,9 @@
 //! `ARANY_TEST_GUARD_TRACE` equal to its `guard-trace` child, both admitted through no-follow
 //! handles and forwarded only to the trusted supervisor. One fixed record per compiled stage, at
 //! most 128 bytes each and 8 KiB aggregate; repeated observations overwrite their stage (lossy
-//! snapshot, not a trace). An active stage has unknown elapsed time; Drop records interruption.
+//! snapshot, not a trace). Each record is `active`, `complete` or `interrupted`; an active stage has
+//! unknown elapsed time, Drop records interruption, and missing or unreadable records remain
+//! unknown.
 //! Capture failures never change Tool outcomes; records never enter Events, Provider context,
 //! telemetry or the development log. Keep records independent of removable unit roots; publish
 //! atomic snapshots without crash-durability sync. The parent journey keeps its 30-second case

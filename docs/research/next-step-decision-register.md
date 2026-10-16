@@ -31,7 +31,7 @@ real dependency, release, privilege, ownership or Client boundary. See
 Arany owns conversation history across Provider changes and process exit.
 Resume continues that identity; fork creates a new lineage; compaction is
 rebuildable context. This avoids depending on opaque Provider continuation for
-recovery. [Session spec](../specs/session.md) own lifecycle semantics;
+recovery. [Session spec](../specs/session.md) owns lifecycle semantics;
 [context rationale](./context-memory-and-compaction.md) explains the distinction.
 
 ### D-03 — Generic bounded agent protocol
@@ -56,7 +56,7 @@ own admission and current capability requirements.
 One SQLite journal owns canonical facts; Session and Run views are reductions.
 This keeps durable acknowledgement, causal history and replay consistent without
 multiple mutable representations of the same state. Rollback journaling fits
-the single-owner workload. [Execution spec](../specs/execution.md#admission-persistence-and-recovery) own durability
+the single-owner workload. [Execution spec](../specs/execution.md#admission-persistence-and-recovery) owns durability
 and format checks; [architecture](../architecture/system-overview.md) owns schema.
 
 ### D-06 — Identity and time
@@ -85,8 +85,8 @@ overflow; this register keeps no parallel constant table.
 
 Explicit attached and machine modes make interpretation predictable for humans
 and scripts. A compiled local registry prevents project/model text from becoming
-command authority. [Terminal](../specs/terminal.md) and [Terminal spec](../specs/terminal.md)
-own current entry modes, channels and syntax.
+command authority. [Terminal spec](../specs/terminal.md)
+owns current entry modes, channels and syntax.
 
 ### D-10 — Terminal contract
 
@@ -135,7 +135,7 @@ own the current set and review scope.
 Traces describe timing and causality; they are not durable history. A local
 Collector keeps remote authentication and routing outside the harness. Bounded,
 content-free export protects Run correctness and privacy even when delivery
-fails. [Telemetry spec](../specs/telemetry.md) own enforcement;
+fails. [Telemetry spec](../specs/telemetry.md) owns enforcement;
 [OTLP rationale](./otlp-observability.md) explains the transport and SDK choices.
 
 ### D-15 — Security boundary
@@ -208,7 +208,7 @@ The user accepted a distinct consented plan route with a weaker remote cost
 guarantee: local stream/time limits cannot enforce a remote output-token or
 plan-usage cap. The benefit is eligible plan access; the cost is that explicitly
 accepted limitation. It does not weaken API-key/custom guarantees or authorize
-billing fallback. [ChatGPT spec](../specs/chatgpt.md) own account-bound
+billing fallback. [ChatGPT spec](../specs/chatgpt.md) owns account-bound
 consent and transport; the [subscription source review](./subscription-provider-routes-2026-10.md)
 retains the dated provider-policy evidence.
 

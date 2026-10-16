@@ -53,8 +53,8 @@ Bounded channels keep memory use and backpressure visible. A journal request
 already accepted by its owner can finish committing even if its caller stops
 waiting, so cancellation must not fabricate a rollback. Commit acknowledgement
 precedes feedback; interrupted replay describes an honest committed prefix.
-[Execution spec](../specs/execution.md#admission-persistence-and-recovery) and [Execution spec](../specs/execution.md)
-own the exact ordering and admission requirements.
+[Execution spec](../specs/execution.md#admission-persistence-and-recovery)
+owns the exact ordering and admission requirements.
 
 Telemetry is a separate lossy output owner. Its SDK worker and shutdown must
 fit the coordinator lifetime without blocking Run correctness. See

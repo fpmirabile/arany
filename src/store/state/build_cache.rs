@@ -6,7 +6,9 @@
 //! beside the committed archive, sync it, durably record rollback intent before renaming; the
 //! committed marker plus parent-directory sync is the commit point. A marker write or sync failure
 //! returns the error, skips Drop-time recovery and retains both archives and the transaction
-//! records.
+//! records. Never expose a `StateRoot` path or handle to a payload: task transport carries only the
+//! checked Workspace identity and the exact selected read-only exclusions. Capture archives regular
+//! files by content regardless of link count (Cargo hard links).
 use super::{StateRoot, StoreError, nonblocking};
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, DirBuilder, File, MetadataExt, OpenOptions};

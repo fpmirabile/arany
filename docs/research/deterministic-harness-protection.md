@@ -4,7 +4,7 @@
 **Question:** what would establish that agent-executed code cannot access a
 protected resource, and why does enforcement need a separate boundary?
 
-[Security rules](../../agents/security.md), [Tool behavior](../specs/tools.md)
+[Security rules](../../agents/security.md)
 and [Tool spec](../specs/tools.md) own the accepted contract. This report
 retains threat-model reasoning and source comparisons. The illustrative no-DB
 property and alternative backends are not available profiles or implementation
@@ -123,7 +123,7 @@ Linux has complementary primitives, not one magic sandbox:
 
 Landlock's official example recommends degrading gracefully across older ABIs. That is appropriate for ordinary applications seeking incremental hardening. [[Landlock compatibility example](https://cdn.kernel.org/doc/html/latest/userspace-api/landlock.html)] **Fact** It is **not** sufficient for a profile that promises a required restriction. The guard must map each profile requirement to a minimum backend capability and fail closed if the running kernel lacks it.
 
-The investigated Linux composition combined mount visibility, network isolation, Landlock, seccomp, namespace separation and cgroup resources. These mechanisms cover different effects; their presence alone does not prove the complete boundary. [Tool spec](../specs/tools.md) own Arany's selected composition.
+The investigated Linux composition combined mount visibility, network isolation, Landlock, seccomp, namespace separation and cgroup resources. These mechanisms cover different effects; their presence alone does not prove the complete boundary. [Tool spec](../specs/tools.md) owns Arany's selected composition.
 
 ### 4.2 macOS
 

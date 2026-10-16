@@ -28,9 +28,9 @@ Use the [shared documentation checks](../docs/development.md#verification). When
 
 - Noninteractive acceptance scenarios produce an `ObservationBundle`: exit class, exact stdout and stderr bytes, Events reopened from a closed SQLite store, and the SessionView or RunView reduced from them. An Engine return, Provider call, stdout, or in-memory state alone is incomplete proof; interactive scenarios add a separate PTY observation.
 - Compare `exec` text, screen-reader output, receipts, and `show` as exact bytes. Canonicalize only explicitly volatile UUIDs, timestamps, and temporary paths. Parse JSONL one line at a time and compare it semantically with persisted Events.
-- Use a fresh product process for argument parsing, exit codes, channel separation, signals, and `show`: absolute Cargo binary path, explicit working directory, cleared allowlisted environment, isolated roots, a parent deadline, and guaranteed kill and reap. Drain piped channels while waiting and cap each capture, or a valid large export can deadlock.
+- Use a fresh product process for argument parsing, exit codes, channel separation, signals, and `show`: absolute Cargo binary path, explicit working directory, cleared allowlisted environment, isolated roots, a parent deadline, and guaranteed kill and reap. Drain piped channels while waiting and cap each capture, or a valid large export can deadlock. The credential-owner rule applies to every observation process: a bounded parent wait and output plus kill and reap, in addition to the descendant timeout.
 - The deterministic successful `exec` runs the real CLI adapter, Engine, SQLite file, reducer, and renderers with the strict scripted Provider. Do not add a fake-provider CLI mode or a second product binary for tests.
-- Keep a few manually reviewed goldens for public human and JSONL output. CI never rewrites them; update them only with an intentional contract change and a summarized diff.
+- Keep a few manually reviewed goldens for public human and JSONL output. CI never rewrites them; update them only with an intentional contract change and a summarized diff. Do not duplicate Engine scenarios per width or key.
 
 ## Test doubles and fixtures
 
@@ -66,7 +66,7 @@ Use the [shared documentation checks](../docs/development.md#verification). When
 
 ## Failure and maintenance discipline
 
-- After a hosted CI failure, consolidate confirmed failures and review findings from that exact head before correcting. Dispatch a [focused CI lane](./references/testing-details.md#local-verification-and-ci) only once diagnosis names the OS and profile; its pass is diagnostic, not verification. Before marking a change ready, the complete `ci.yml` workflow must pass on the exact final head.
+- After a hosted CI failure, consolidate confirmed failures and review findings from that exact head before correcting. Dispatch a [focused CI lane](./references/testing-details.md#local-verification-and-ci) only once diagnosis names the OS and profile; its pass is diagnostic, not verification. Before marking a change ready, the complete `ci.yml` workflow must pass on the exact final head, as an automatic PR run on any base branch, a push run or a manual dispatch.
 - Focused Cargo and test-binary invocations report their intended nonzero test count. A self-spawned helper filtered with `--exact` asserts exactly one completed test, with a bounded wait, output limit, and kill and reap. Helper-only tests are ignored by default and need their parent's private fixture. Zero-test or ignored-child success provides no evidence.
 - Failure output names the scenario, case, expected and observed exit, bounded escaped output, the semantic Event difference, and a safe fixture identifier. It never dumps secrets, raw hostile controls, provider bodies, or database payloads.
 - Every test owns its directories, files, ports, runtime, database, and processes, and never mutates shared process environment.
