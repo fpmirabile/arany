@@ -29,6 +29,6 @@ A Provider span of a child aborted by its parent closes as `cancelled`. `abandon
 
 | Scenario | Required outcome | Owner |
 |---|---|---|
-| Safe product export | Only closed identifiers, counts and markers cross; prompt and content canaries are absent | [`tests/session_run/telemetry.rs::product_exec_exports_only_safe_committed_trace_facts`](../../tests/session_run/telemetry.rs), [`src/telemetry.rs`](../../src/telemetry.rs) |
-| Goal segment status | An exhausted segment exports `failed`; a cancelled segment of an open Goal exports the Run's `cancelled` outcome with Goal status `running` | [`tests/session_run/telemetry.rs`](../../tests/session_run/telemetry.rs) |
-| Export failure | Telemetry failure or a full queue leaves Run state, presentation and exit class unchanged | [`src/telemetry.rs`](../../src/telemetry.rs) |
+| Safe product export | Only closed identifiers, counts and markers cross; prompt and content canaries are absent | [`tests/session_run/telemetry.rs::product_exec_exports_only_safe_committed_trace_facts`](../../tests/session_run/telemetry.rs), [telemetry boundary](../../src/telemetry.rs) |
+| Goal segment status | An exhausted segment exports `failed`; a cancelled segment of an open Goal exports the Run's `cancelled` outcome with Goal status `running` | [Telemetry journey](../../tests/session_run/telemetry.rs) |
+| Export failure | Telemetry failure or a full queue leaves Run state, presentation and exit class unchanged | [telemetry boundary](../../src/telemetry.rs) |
