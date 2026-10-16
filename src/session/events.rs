@@ -98,43 +98,37 @@ impl FromStr for GoalId {
 
 pub const MAX_GOAL_PROVIDER_CALLS: u32 = 64;
 pub const MAX_GOAL_ACTIVE_MS: u64 = 30 * 60 * 1000;
-/// Current payload version per Event kind. A format change bumps only that kind's entry.
-const PAYLOAD_VERSIONS: &[(&str, i64)] = &[
-    ("SessionStarted", 6),
-    ("SessionDefaultChanged", 6),
-    ("SessionForked", 6),
-    ("ContextCompacted", 6),
-    ("SessionRenamed", 6),
-    ("GoalStarted", 6),
-    ("GoalRunLinked", 6),
-    ("GoalResumed", 6),
-    ("GoalActiveTimeReserved", 6),
-    ("GoalActiveTimeSettled", 6),
-    ("GoalPlanContractRecorded", 6),
-    ("GoalFinished", 6),
-    ("MessageAccepted", 6),
-    ("RunStarted", 6),
-    ("AgentSpawned", 6),
-    ("ProviderCallRecorded", 6),
-    ("GoalProviderCallReserved", 6),
-    ("GoalCompactionCallReserved", 6),
-    ("GoalContextCompacted", 6),
-    ("GoalSteeringNoteRecorded", 6),
-    ("AssistantDisplayRecorded", 6),
-    ("ToolStarted", 6),
-    ("ToolFinished", 6),
-    ("AgentFinished", 6),
-    ("MessageCommitted", 6),
-    ("RunFinished", 6),
-];
-fn current_payload_version(table: &[(&str, i64)], kind: &str) -> Option<i64> {
-    table
-        .iter()
-        .find(|(name, _)| *name == kind)
-        .map(|(_, version)| *version)
-}
+/// Current payload version per Event kind. A format change bumps only that kind's arm.
 pub(crate) fn payload_version(kind: &str) -> Option<i64> {
-    current_payload_version(PAYLOAD_VERSIONS, kind)
+    match kind {
+        "SessionStarted"
+        | "SessionDefaultChanged"
+        | "SessionForked"
+        | "ContextCompacted"
+        | "SessionRenamed"
+        | "GoalStarted"
+        | "GoalRunLinked"
+        | "GoalResumed"
+        | "GoalActiveTimeReserved"
+        | "GoalActiveTimeSettled"
+        | "GoalPlanContractRecorded"
+        | "GoalFinished"
+        | "MessageAccepted"
+        | "RunStarted"
+        | "AgentSpawned"
+        | "ProviderCallRecorded"
+        | "GoalProviderCallReserved"
+        | "GoalCompactionCallReserved"
+        | "GoalContextCompacted"
+        | "GoalSteeringNoteRecorded"
+        | "AssistantDisplayRecorded"
+        | "ToolStarted"
+        | "ToolFinished"
+        | "AgentFinished"
+        | "MessageCommitted"
+        | "RunFinished" => Some(6),
+        _ => None,
+    }
 }
 pub(crate) const MAX_CHILD_TOOL_CALLS: usize = 16;
 /// Model Tool requests one Provider step may declare. Engine and adapters emit one until fan-out lands.
@@ -2054,6 +2048,7 @@ mod provider_call_tests {
 
     #[test]
     fn provider_call_record_v6_rejects_v5_and_inconsistent_cache_fields() {
+        let current = payload_version("ProviderCallRecorded").expect("payload version");
         let run = RunId::new();
         let agent = AgentRunId::new();
         let mut record = ProviderCallRecord {
@@ -2106,7 +2101,7 @@ mod provider_call_tests {
         assert_eq!(
             Event::decode(
                 "ProviderCallRecorded",
-                payload_version("ProviderCallRecorded").expect("payload version"),
+                current,
                 &payload,
                 Some(run),
                 Some(agent),
@@ -2117,7 +2112,7 @@ mod provider_call_tests {
         assert!(
             Event::decode(
                 "ProviderCallRecorded",
-                payload_version("ProviderCallRecorded").expect("payload version") - 1,
+                current - 1,
                 &payload,
                 Some(run),
                 Some(agent),
@@ -2129,6 +2124,7 @@ mod provider_call_tests {
 
     #[test]
     fn rejects_unbounded_or_unearned_provider_metadata() {
+        let current = payload_version("ProviderCallRecorded").expect("payload version");
         let mut record = ProviderCallRecord {
             phase: crate::provider::AgentPhase::RootPlan,
             disposition: ProviderCallDisposition::Finished,
@@ -2189,14 +2185,11 @@ mod provider_call_tests {
             record: decoded,
         };
         let payload = event.payload().expect("current payload");
-        assert_eq!(
-            event.version(),
-            payload_version("ProviderCallRecorded").expect("payload version")
-        );
+        assert_eq!(event.version(), current);
         assert_eq!(
             Event::decode(
                 "ProviderCallRecorded",
-                payload_version("ProviderCallRecorded").expect("payload version"),
+                current,
                 &payload,
                 run_id,
                 agent_run_id
@@ -2204,15 +2197,7 @@ mod provider_call_tests {
             .unwrap(),
             event
         );
-        for version in [
-            0,
-            1,
-            2,
-            3,
-            4,
-            5,
-            payload_version("ProviderCallRecorded").expect("payload version") + 1,
-        ] {
+        for version in [0, 1, 2, 3, 4, 5, current + 1] {
             assert!(
                 Event::decode(
                     "ProviderCallRecorded",
@@ -2295,14 +2280,11 @@ mod provider_call_tests {
                     record,
                 };
                 let payload = event.payload().expect("current payload");
-                assert_eq!(
-                    event.version(),
-                    payload_version("ProviderCallRecorded").expect("payload version")
-                );
+                assert_eq!(event.version(), current);
                 assert_eq!(
                     Event::decode(
                         "ProviderCallRecorded",
-                        payload_version("ProviderCallRecorded").expect("payload version"),
+                        current,
                         &payload,
                         run_id,
                         agent_run_id,
@@ -2310,15 +2292,7 @@ mod provider_call_tests {
                     .expect("current replay"),
                     event
                 );
-                for version in [
-                    0,
-                    1,
-                    2,
-                    3,
-                    4,
-                    5,
-                    payload_version("ProviderCallRecorded").expect("payload version") + 1,
-                ] {
+                for version in [0, 1, 2, 3, 4, 5, current + 1] {
                     assert!(
                         Event::decode(
                             "ProviderCallRecorded",
@@ -2333,14 +2307,8 @@ mod provider_call_tests {
                 }
                 for scope in [(None, agent_run_id), (run_id, None)] {
                     assert!(
-                        Event::decode(
-                            "ProviderCallRecorded",
-                            payload_version("ProviderCallRecorded").expect("payload version"),
-                            &payload,
-                            scope.0,
-                            scope.1
-                        )
-                        .is_err()
+                        Event::decode("ProviderCallRecorded", current, &payload, scope.0, scope.1)
+                            .is_err()
                     );
                 }
                 let mut invalid: serde_json::Value =
@@ -2349,7 +2317,7 @@ mod provider_call_tests {
                 assert!(
                     Event::decode(
                         "ProviderCallRecorded",
-                        payload_version("ProviderCallRecorded").expect("payload version"),
+                        current,
                         &invalid.to_string(),
                         run_id,
                         agent_run_id
@@ -3451,17 +3419,37 @@ mod payload_version_tests {
     use super::*;
 
     #[test]
-    fn bumping_one_kind_rejects_its_previous_version_and_keeps_the_others() {
-        let bumped: &[(&str, i64)] = &[("ToolFinished", 7), ("RunStarted", 6)];
-        assert_eq!(current_payload_version(bumped, "ToolFinished"), Some(7));
-        assert_ne!(current_payload_version(bumped, "ToolFinished"), Some(6));
-        assert_eq!(current_payload_version(bumped, "RunStarted"), Some(6));
-        assert_eq!(current_payload_version(bumped, "Unlisted"), None);
-        assert!(
-            PAYLOAD_VERSIONS
-                .iter()
-                .all(|(kind, version)| payload_version(kind) == Some(*version))
+    fn decode_accepts_the_current_version_and_rejects_its_neighbours() {
+        let run = RunId::new();
+        let agent = AgentRunId::new();
+        let event = Event::SessionRenamed {
+            title: "renamed".into(),
+        };
+        let payload = event.payload().expect("payload");
+        let version = payload_version(event.kind()).expect("known kind");
+        assert_eq!(
+            Event::decode(event.kind(), version, &payload, None, None).expect("current replay"),
+            event
         );
-        assert_eq!(payload_version("ProviderCallRecorded"), Some(6));
+        for stale in [version - 1, version + 1] {
+            assert!(matches!(
+                Event::decode(event.kind(), stale, &payload, None, None),
+                Err(ReplayError::UnknownEvent)
+            ));
+        }
+        for kind in ["ToolFinished", "RunStarted"] {
+            let version = payload_version(kind).expect("known kind");
+            for stale in [version - 1, version + 1] {
+                assert!(matches!(
+                    Event::decode(kind, stale, "{}", Some(run), Some(agent)),
+                    Err(ReplayError::UnknownEvent)
+                ));
+            }
+        }
+        assert!(matches!(
+            Event::decode("NotAKind", 6, "{}", Some(run), Some(agent)),
+            Err(ReplayError::UnknownEvent)
+        ));
+        assert_eq!(payload_version("NotAKind"), None);
     }
 }
