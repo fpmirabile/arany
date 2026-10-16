@@ -449,24 +449,43 @@ impl ProviderRequest {
 
 /// Finish and Delegate only; Tools are offered natively and never selected through this schema.
 pub(crate) fn restrict_outcome_schema(
-    mut schema: serde_json::Value,
+    schema: serde_json::Value,
     request: &ProviderRequest,
 ) -> serde_json::Value {
+    outcome_schema_for_phases(schema, request.collaboration, &[request.phase])
+}
+
+pub(crate) fn run_outcome_schema(request: &ProviderRequest) -> Value {
+    let phases = if request.input.role == PromptRole::Primary {
+        &[AgentPhase::RootPlan, AgentPhase::RootSynthesis][..]
+    } else {
+        std::slice::from_ref(&request.phase)
+    };
+    outcome_schema_for_phases(outcome_schema(), request.collaboration, phases)
+}
+
+fn outcome_schema_for_phases(
+    mut schema: Value,
+    collaboration: CollaborationPolicy,
+    phases: &[AgentPhase],
+) -> Value {
     let branches = schema["properties"]["outcome"]["anyOf"]
         .as_array_mut()
         .expect("compiled outcome branches");
-    branches.retain(
-        |branch| match branch["properties"]["type"]["enum"][0].as_str() {
-            Some("finish") => {
-                request.phase != AgentPhase::RootPlan
-                    || !matches!(request.collaboration, CollaborationPolicy::Team { .. })
-            }
-            Some("delegate") => {
-                request.phase == AgentPhase::RootPlan && request.collaboration.max_children() > 0
-            }
-            _ => false,
-        },
-    );
+    branches.retain(|branch| {
+        phases.iter().any(
+            |phase| match branch["properties"]["type"]["enum"][0].as_str() {
+                Some("finish") => {
+                    *phase != AgentPhase::RootPlan
+                        || !matches!(collaboration, CollaborationPolicy::Team { .. })
+                }
+                Some("delegate") => {
+                    *phase == AgentPhase::RootPlan && collaboration.max_children() > 0
+                }
+                _ => false,
+            },
+        )
+    });
     schema
 }
 
@@ -813,6 +832,7 @@ mod tests {
         tools: Option<crate::tools::ToolContext>,
     ) -> ProviderRequest {
         ProviderRequest {
+            session_id: crate::session::SessionId::new(),
             run_id: RunId::new(),
             agent_run_id: AgentRunId::new(),
             phase,

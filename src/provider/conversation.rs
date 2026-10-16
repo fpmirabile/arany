@@ -4,7 +4,9 @@ use super::{
     AgentPhase, ChildResult, GoalContextFacts, HistoryTurn, MAX_RESPONSE_BYTES, ProviderError,
     ProviderImage, raw_reflects_secret,
 };
-use crate::session::{AgentRunId, CollaborationPolicy, GoalBudget, GoalPlanContract, RunId};
+use crate::session::{
+    AgentRunId, CollaborationPolicy, GoalBudget, GoalPlanContract, RunId, SessionId,
+};
 use crate::tools::ToolContext;
 use serde_json::Value;
 
@@ -19,6 +21,7 @@ pub enum PromptRole {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderRequest {
+    pub session_id: SessionId,
     pub run_id: RunId,
     pub agent_run_id: AgentRunId,
     pub phase: AgentPhase,

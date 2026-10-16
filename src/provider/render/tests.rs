@@ -53,6 +53,7 @@ fn step(id: &str, path: &str) -> ToolStep {
 
 fn request(steps: Vec<ToolStep>) -> ProviderRequest {
     ProviderRequest {
+        session_id: crate::session::SessionId::new(),
         run_id: RunId::new(),
         agent_run_id: AgentRunId::new(),
         phase: AgentPhase::RootPlan,

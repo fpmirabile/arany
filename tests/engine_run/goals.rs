@@ -3665,6 +3665,11 @@ async fn child_tool_bound_offers_only_finish_and_rejects_a_further_tool() {
         engine.close().await.expect("engine shutdown");
 
         let calls = requests.lock().expect("requests").clone();
+        assert!(
+            calls
+                .iter()
+                .all(|call| call.session_id == outcome.session_id)
+        );
         let (events, view) = replayed(&state_path, outcome.session_id).await;
         let child = view.runs[0].agents[1].id;
         assert_eq!(child_tool_starts(&events, child), 16);

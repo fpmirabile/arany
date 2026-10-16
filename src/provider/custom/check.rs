@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
-const CHECK_VERSION: &str = "openai-responses-goal-contract-conformance-effort-stream-v12";
+const CHECK_VERSION: &str = "openai-responses-goal-contract-conformance-effort-stream-v13";
 
 pub struct CustomProfileCheck {
     profile_name: String,
@@ -76,7 +76,9 @@ async fn probe(
     key: String,
 ) -> Result<ProviderEvidenceRecord, CustomProfileError> {
     let transport = CustomTransport::new(destination, key)?;
+    let session_id = SessionId::new();
     let direct = ProviderRequest {
+        session_id,
         run_id: RunId::new(),
         agent_run_id: AgentRunId::new(),
         phase: AgentPhase::RootPlan,
@@ -99,6 +101,7 @@ async fn probe(
         .ok_or(CustomProfileError::ConformanceFailed)?;
 
     let delegate = ProviderRequest {
+        session_id,
         run_id: RunId::new(),
         agent_run_id: AgentRunId::new(),
         phase: AgentPhase::RootPlan,
@@ -124,7 +127,7 @@ async fn probe(
     }
 
     let compact = CompactionRequest {
-        session_id: SessionId::new(),
+        session_id,
         covered_run_id: RunId::new(),
         model: profile.model().to_owned(),
         previous_summary: None,
@@ -510,6 +513,7 @@ mod tests {
         let server = tokio::spawn(serve_probe(listener, reply));
         let transport = CustomTransport::new(&destination, "test-key".into()).expect("transport");
         let request = ProviderRequest {
+            session_id: crate::session::SessionId::new(),
             run_id: RunId::new(),
             agent_run_id: AgentRunId::new(),
             phase: AgentPhase::RootPlan,

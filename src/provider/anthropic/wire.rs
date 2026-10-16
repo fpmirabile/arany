@@ -404,23 +404,45 @@ pub(crate) fn run_body(
     });
     // Tool definitions are not strict: the plan-contract unions would exceed the strict-schema
     // complexity limit, and the Engine validates every call. Only the outcome format is strict.
+    let exhausted = request
+        .input
+        .tools
+        .as_ref()
+        .is_some_and(ToolContext::finish_only);
     if let Some(tools) = &conversation.tools {
         body["tools"] = tools
             .iter()
             .map(|tool| json!({"name": tool.name, "description": tool.description, "input_schema": tool.parameters}))
             .collect();
-        let exhausted = request
-            .input
-            .tools
-            .as_ref()
-            .is_some_and(ToolContext::finish_only);
         body["tool_choice"] = if exhausted {
             json!({"type": "none"})
         } else {
             json!({"type": "auto", "disable_parallel_tool_use": true})
         };
     }
+    cache_breakpoints(&mut body, conversation.tools.is_some() && !exhausted);
     Ok(body)
+}
+
+fn cache_breakpoints(body: &mut Value, cache_tail: bool) {
+    for key in ["tools", "system"] {
+        if let Some(last) = body
+            .get_mut(key)
+            .and_then(Value::as_array_mut)
+            .and_then(|blocks| blocks.last_mut())
+        {
+            last["cache_control"] = json!({"type": "ephemeral"});
+        }
+    }
+    if cache_tail
+        && let Some(last) = body["messages"]
+            .as_array_mut()
+            .and_then(|messages| messages.last_mut())
+            .and_then(|message| message["content"].as_array_mut())
+            .and_then(|blocks| blocks.last_mut())
+    {
+        last["cache_control"] = json!({"type": "ephemeral"});
+    }
 }
 
 fn messages(conversation: &Conversation) -> Result<Vec<Value>, ProviderError> {
@@ -471,14 +493,16 @@ fn user_blocks(block: &Block) -> Result<Vec<Value>, ProviderError> {
 }
 
 pub(super) fn compaction_body(request: &CompactionRequest, effort: Effort) -> Value {
-    json!({
+    let mut body = json!({
         "model": request.model,
         "max_tokens": request.max_output_tokens,
-        "system": COMPACTION_INSTRUCTIONS,
-        "messages": [{"role": "user", "content": compaction_input(request).to_string()}],
+        "system": [{"type": "text", "text": COMPACTION_INSTRUCTIONS}],
+        "messages": [{"role": "user", "content": [{"type": "text", "text": compaction_input(request).to_string()}]}],
         "output_config": {"format": {"type": "json_schema", "schema": summary_schema()}, "effort": effort.as_str()},
         "stream": false,
-    })
+    });
+    cache_breakpoints(&mut body, false);
+    body
 }
 
 #[derive(Deserialize)]
