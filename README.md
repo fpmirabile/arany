@@ -80,8 +80,8 @@ enable runtime Tools.
 
 ### Run and check changes
 
-Use the [development guide](./docs/development.md) for setup, verification commands
-and native prerequisites. Documentation-only edits need prose and link review.
+Use the [development guide](./docs/development.md) for setup, targeted verification
+commands and native prerequisites.
 
 ## Contribute
 
