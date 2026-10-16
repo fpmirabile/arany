@@ -54,7 +54,7 @@ Matt Pocock's skills are part of the project's adopted workflow. Preserve adopte
 Edit its source under `agents/skills`, then reinstall only that skill, for example:
 
 ```sh
-npx --yes skills@1.7.0 add ./agents/skills --skill rust-clean-code --agent codex claude-code --yes
+npx --yes skills@1.7.0 add ./agents/skills/rust-clean-code --agent codex claude-code --yes
 ```
 
 Review source changes and generated lock entries together. Never maintain project changes only in ignored installed copies. Preserve the Rust skill's license and attribution. Keep descriptions specific to the task and load supporting references only when needed, following the [Agent Skills guidance](https://agentskills.io/skill-creation/best-practices).
