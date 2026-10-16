@@ -53,5 +53,5 @@ invocations; the ordinary temporary-path aliases fail private-state admission.
 
 [Native test and CI reproduction notes](../agents/references/testing-details.md#local-verification-and-ci)
 explain additional prerequisites, fixture isolation and activation of checks
-ignored locally. Live Provider checks require separate deliberate usage
+ignored locally. A targeted or default local run is not the complete native or release suite; it does not establish platform support. Live Provider checks require separate deliberate usage
 authorization; an ignored check is not passing evidence.
