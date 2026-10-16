@@ -42,6 +42,8 @@ pub fn validate_workspace_inputs(
 }
 
 const OUTPUT_TOKEN_CAP: u32 = 4096;
+/// Store admission and commit time reserved after each action's own deadline.
+const STORE_ACTION_OVERHEAD: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
