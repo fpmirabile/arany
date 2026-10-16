@@ -1,4 +1,7 @@
-use super::{NativeEvidenceRecord, ProviderEvidenceRecord, StoreError};
+use super::StoreError;
+use crate::provider::evidence::{
+    EvidenceOp, EvidenceRecord, NativeEvidenceRecord, ProviderEvidenceRecord,
+};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::{
     net::SocketAddr,
@@ -11,7 +14,29 @@ const MAX_NATIVE_EVIDENCE_ROWS: i64 = 256;
 const MAX_ADDRESSES: usize = 8;
 const MAX_EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 
-pub(super) fn clear(connection: &mut Connection, name: &str) -> Result<(), StoreError> {
+pub(super) fn apply(
+    connection: &mut Connection,
+    read_only: bool,
+    op: EvidenceOp,
+) -> Result<Option<EvidenceRecord>, StoreError> {
+    match op {
+        EvidenceOp::LoadProvider(name) => {
+            Ok(load(connection, &name)?.map(EvidenceRecord::Provider))
+        }
+        EvidenceOp::LoadNative(fingerprint) => {
+            Ok(load_native(connection, &fingerprint)?.map(EvidenceRecord::Native))
+        }
+        _ if read_only => Err(StoreError::ReadOnly),
+        EvidenceOp::ClearProvider(name) => clear(connection, &name).map(|()| None),
+        EvidenceOp::RecordProvider(record) => record_provider(connection, &record).map(|()| None),
+        EvidenceOp::ClearNative(fingerprint) => {
+            clear_native(connection, &fingerprint).map(|()| None)
+        }
+        EvidenceOp::RecordNative(record) => record_native(connection, &record).map(|()| None),
+    }
+}
+
+fn clear(connection: &mut Connection, name: &str) -> Result<(), StoreError> {
     if !valid_name(name) {
         return Err(StoreError::InvalidHistory);
     }
@@ -22,7 +47,7 @@ pub(super) fn clear(connection: &mut Connection, name: &str) -> Result<(), Store
     Ok(())
 }
 
-pub(super) fn record(
+fn record_provider(
     connection: &mut Connection,
     record: &ProviderEvidenceRecord,
 ) -> Result<(), StoreError> {
@@ -68,10 +93,7 @@ pub(super) fn record(
     Ok(())
 }
 
-pub(super) fn load(
-    connection: &Connection,
-    name: &str,
-) -> Result<Option<ProviderEvidenceRecord>, StoreError> {
+fn load(connection: &Connection, name: &str) -> Result<Option<ProviderEvidenceRecord>, StoreError> {
     if !valid_name(name) {
         return Err(StoreError::InvalidHistory);
     }
@@ -111,10 +133,7 @@ pub(super) fn load(
     Ok(Some(record))
 }
 
-pub(super) fn clear_native(
-    connection: &mut Connection,
-    fingerprint: &[u8; 32],
-) -> Result<(), StoreError> {
+fn clear_native(connection: &mut Connection, fingerprint: &[u8; 32]) -> Result<(), StoreError> {
     connection.execute(
         "DELETE FROM native_provider_evidence WHERE fingerprint = ?1",
         [fingerprint.as_slice()],
@@ -122,7 +141,7 @@ pub(super) fn clear_native(
     Ok(())
 }
 
-pub(super) fn record_native(
+fn record_native(
     connection: &mut Connection,
     record: &NativeEvidenceRecord,
 ) -> Result<(), StoreError> {
@@ -160,7 +179,7 @@ pub(super) fn record_native(
     Ok(())
 }
 
-pub(super) fn load_native(
+fn load_native(
     connection: &Connection,
     fingerprint: &[u8; 32],
 ) -> Result<Option<NativeEvidenceRecord>, StoreError> {

@@ -465,7 +465,8 @@ fn isolated_stage(checked_turn: bool) {
     if unfinished {
         StateRoot::admit(Path::new("/root/.local/state/arany"))
             .expect("isolated account root")
-            .replace_chatgpt_registration_record(&pending_record)
+            .record(RecordKind::ChatgptRegistration)
+            .replace(&pending_record)
             .expect("seed unfinished registration");
     }
     assert!(
@@ -615,10 +616,15 @@ fn isolated_stage(checked_turn: bool) {
                 let root = StateRoot::open_existing(Path::new("/root/.local/state/arany"))
                     .expect("account root after cancellation");
                 assert_eq!(
-                    root.read_chatgpt_registration_record().unwrap(),
+                    root.record(RecordKind::ChatgptRegistration).read().unwrap(),
                     Some(pending_record)
                 );
-                assert!(root.read_chatgpt_accounts_record().unwrap().is_none());
+                assert!(
+                    root.record(RecordKind::ChatgptAccounts)
+                        .read()
+                        .unwrap()
+                        .is_none()
+                );
                 assert!(!Path::new("/root/state-chatgpt").exists());
                 assert!(!Path::new("/root/browser-url").exists());
                 assert!(!catalog_started.load(Ordering::SeqCst));
@@ -805,7 +811,8 @@ fn isolated_stage(checked_turn: bool) {
         let account_root =
             StateRoot::open_existing(Path::new("/root/.local/state/arany")).expect("account root");
         let record = account_root
-            .read_chatgpt_accounts_record()
+            .record(RecordKind::ChatgptAccounts)
+            .read()
             .expect("account index")
             .expect("saved account");
         let metadata = std::fs::metadata(account_root.path().join("chatgpt-accounts.json"))
@@ -862,7 +869,8 @@ fn isolated_stage(checked_turn: bool) {
         }
         previous_account = Some(account_id);
         let registration = account_root
-            .read_chatgpt_registration_record()
+            .record(RecordKind::ChatgptRegistration)
+            .read()
             .expect("registration")
             .expect("saved registration");
         let registration: serde_json::Value =
@@ -933,7 +941,8 @@ fn isolated_stage(checked_turn: bool) {
                 );
                 assert!(
                     account_root
-                        .read_chatgpt_accounts_record()
+                        .record(RecordKind::ChatgptAccounts)
+                        .read()
                         .unwrap()
                         .unwrap()
                         == record,
@@ -959,7 +968,8 @@ fn isolated_stage(checked_turn: bool) {
             }
             unsaved("/root/state-after-logout");
             account_root
-                .replace_chatgpt_registration_record(
+                .record(RecordKind::ChatgptRegistration)
+                .replace(
                     &serde_json::to_vec(&serde_json::json!({
                         "schema": 1,
                         "host_id": entry["host_id"],
@@ -1038,7 +1048,8 @@ fn isolated_stage(checked_turn: bool) {
             );
         }
         let preferences = account_root
-            .read_model_preferences_record()
+            .record(RecordKind::ModelPreferences)
+            .read()
             .unwrap()
             .unwrap();
         let cache: serde_json::Value = serde_json::from_slice(&preferences).unwrap();
@@ -1083,7 +1094,8 @@ fn isolated_stage(checked_turn: bool) {
             assert_eq!(output.stdout, b"ChatGPT account disconnected locally\n");
             assert!(output.stderr.is_empty(), "confirmed logout emitted warning");
             let record = account_root
-                .read_chatgpt_accounts_record()
+                .record(RecordKind::ChatgptAccounts)
+                .read()
                 .expect("account index after logout")
                 .expect("retained registration mapping");
             let index: serde_json::Value =

@@ -7,6 +7,9 @@ mod test_process;
 
 mod diagnostics;
 mod engine;
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(not(test), allow(dead_code))]
+mod fault;
 mod presentation;
 mod private_fs;
 mod provider;
@@ -57,7 +60,7 @@ pub use session::{
     ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition, RunId, RunStatus,
     RunView, SessionDefaults, SessionId, SessionListItem, SessionView, ToolView,
 };
-pub use store::{HistoryReset, StateRoot, Store, StoreError};
+pub use store::{HistoryReset, Record, RecordKind, StateRoot, Store, StoreError};
 pub use telemetry::{Telemetry, TelemetryConfigError};
 pub use terminal::{
     AttachedTerminal, CommandAvailability, CommandParseError, CompletionLayout, Composer,

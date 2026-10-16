@@ -5,6 +5,7 @@ use super::toolchains::{
 };
 use super::types::{MAX_SNAPSHOT_BYTES, hex_digest};
 use super::{ToolError, fs};
+use crate::store::RecordKind;
 use crate::store::{StateRoot, StoreError};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -99,7 +100,8 @@ struct Entry {
 
 fn read(root: &StateRoot) -> Result<Permissions, ToolError> {
     let Some(bytes) = root
-        .read_workspace_permissions()
+        .record(RecordKind::WorkspacePermissions)
+        .read()
         .map_err(|_| ToolError::Configuration)?
     else {
         return Ok(Permissions {
@@ -346,7 +348,8 @@ impl WorkspacePermissions {
                 });
             }
             let bytes = serde_json::to_vec(&record).map_err(|_| ToolError::Configuration)?;
-            root.replace_workspace_permissions(&bytes)
+            root.record(RecordKind::WorkspacePermissions)
+                .replace(&bytes)
                 .map_err(|_| ToolError::Configuration)
         })
         .map_err(|_| ToolError::Configuration)??;
@@ -857,7 +860,10 @@ mod tests {
         access
             .save(&root, true, ApprovalMode::AutoEdits, Vec::new())
             .unwrap();
-        let before = root.read_workspace_permissions().unwrap();
+        let before = root
+            .record(RecordKind::WorkspacePermissions)
+            .read()
+            .unwrap();
         assert!(
             before.is_some(),
             "the untouched record exists before the attempt"
@@ -872,7 +878,12 @@ mod tests {
             .remember_with(&root, true, ApprovalMode::Request, &[token])
             .unwrap_err();
         assert!(matches!(error, ToolError::Path), "{error:?}");
-        assert_eq!(root.read_workspace_permissions().unwrap(), before);
+        assert_eq!(
+            root.record(RecordKind::WorkspacePermissions)
+                .read()
+                .unwrap(),
+            before
+        );
         assert!(
             WorkspacePermissions::load(&workspace, &root)
                 .unwrap()
@@ -935,7 +946,7 @@ mod tests {
                 .is_trusted()
         );
         for record in [br#"{"version":1,"workspaces":[]}"#.as_slice(), br#"{"version":2,"workspaces":[{"path":"/project","device":1,"inode":1,"mode":"bypass","runtime_grants":[]}] }"#.as_slice()] {
-            root.replace_workspace_permissions(record).unwrap();
+            root.record(RecordKind::WorkspacePermissions).replace(record).unwrap();
             assert!(WorkspacePermissions::load(&path, &root).is_err());
         }
         #[cfg(unix)]

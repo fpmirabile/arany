@@ -3,6 +3,7 @@ use super::{
     update_defaults,
 };
 use crate::cli::{chatgpt, exec::ProviderArg};
+use arany::RecordKind;
 use arany::{
     AttachedTerminal, CollaborationPolicy, CommandAvailability, CommandParseError,
     CompletionLayout, Composer, CustomProfile, Effort, InteractiveCommand, SessionId, SessionView,
@@ -301,7 +302,8 @@ pub(super) async fn restore_settings_at(
 
 fn read_settings(root: &StateRoot) -> Result<Preferences, String> {
     let Some(record) = root
-        .read_ui_preferences_record()
+        .record(RecordKind::UiPreferences)
+        .read()
         .map_err(|_| "display settings unavailable or unsafe")?
     else {
         return Ok(Preferences::default());
@@ -331,7 +333,7 @@ async fn save_settings(admission: &Admission, preferences: Preferences) -> Resul
         })
         .map_err(|_| "display settings unavailable")?;
         root.with_account_replacement_lock(&workspace, || {
-            root.replace_ui_preferences_record(&record)
+            root.record(RecordKind::UiPreferences).replace(&record)
         })
         .map_err(|_| "display settings busy or unsafe")?
         .map_err(|_| "could not save display settings")
@@ -1585,15 +1587,24 @@ mod tests {
             br#"{"version":2}"#.as_slice(),
             b"malformed",
         ] {
-            root.replace_ui_preferences_record(document).unwrap();
+            root.record(RecordKind::UiPreferences)
+                .replace(document)
+                .unwrap();
             assert!(restore_settings(&admission).await.is_err());
             assert_eq!(
-                root.read_ui_preferences_record().unwrap().unwrap(),
+                root.record(RecordKind::UiPreferences)
+                    .read()
+                    .unwrap()
+                    .unwrap(),
                 document
             );
         }
         save_settings(&admission, combined_classic).await.unwrap();
-        let original = root.read_ui_preferences_record().unwrap().unwrap();
+        let original = root
+            .record(RecordKind::UiPreferences)
+            .read()
+            .unwrap()
+            .unwrap();
         assert_eq!(
             original,
             br#"{"version":3,"preferences":{"completion":"combined","view":"classic","goal_budget":{"max_provider_calls":64,"max_tokens":null,"max_active_ms":1800000,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592}}}"#
@@ -1602,16 +1613,23 @@ mod tests {
         invalid.resources.build_processes = 0;
         assert!(save_settings(&admission, invalid).await.is_err());
         assert_eq!(
-            root.read_ui_preferences_record().unwrap().unwrap(),
+            root.record(RecordKind::UiPreferences)
+                .read()
+                .unwrap()
+                .unwrap(),
             original,
             "invalid settings never replace the current record"
         );
         assert!(
-            root.replace_ui_preferences_record(&vec![b'x'; 1025])
+            root.record(RecordKind::UiPreferences)
+                .replace(&vec![b'x'; 1025])
                 .is_err()
         );
         assert_eq!(
-            root.read_ui_preferences_record().unwrap().unwrap(),
+            root.record(RecordKind::UiPreferences)
+                .read()
+                .unwrap()
+                .unwrap(),
             original
         );
         #[cfg(unix)]

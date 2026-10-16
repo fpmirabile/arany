@@ -1,5 +1,5 @@
 use super::loopback::{ChildGuard, check_profile, read_request, send_response, write_profile};
-use arany::{RunStatus, SessionId, SessionView, StateRoot, Store};
+use arany::{RecordKind, RunStatus, SessionId, SessionView, StateRoot, Store};
 use rustix::process::{Pid, Signal, WaitId, WaitIdOptions, kill_process, waitid};
 use std::{
     io::{Read, Write},
@@ -540,7 +540,8 @@ fn native_saved_classic_chat_view_selects_the_primary_screen() {
     std::fs::create_dir(&workspace).unwrap();
     StateRoot::admit(&state)
         .unwrap()
-        .replace_ui_preferences_record(&super::saved_ui_preferences("tabs", "classic"))
+        .record(RecordKind::UiPreferences)
+        .replace(&super::saved_ui_preferences("tabs", "classic"))
         .unwrap();
     let geometry = nix::pty::Winsize {
         ws_row: 24,

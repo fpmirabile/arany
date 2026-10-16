@@ -8,27 +8,19 @@ use std::path::{Path, PathBuf};
 mod build_cache;
 mod lock;
 #[cfg(test)]
+pub(crate) use build_cache::begin_released;
+#[cfg(test)]
 pub(crate) use build_cache::capture_archive;
 pub(crate) use build_cache::{
     BuildCacheIdentity, BuildCacheLease, DEFAULT_ARCHIVE_BYTES as BUILD_CACHE_ARCHIVE_BYTES,
     archive_size_with_limit,
 };
-#[cfg(test)]
-pub(crate) use build_cache::{begin_released, fail_next_commit_marker};
 #[cfg(target_os = "macos")]
 pub(crate) use build_cache::{capture_archive_async_with_limit, restore_archive_async_with_limit};
 #[cfg(target_os = "linux")]
 pub(crate) use build_cache::{capture_archive_with_limit, restore_archive_with_limit};
 pub(crate) use lock::{SessionRunLock, WorkspaceRunLock};
 
-const PROVIDER_PROFILES_FILE: &str = "provider-profiles.json";
-const MAX_PROVIDER_PROFILES_BYTES: usize = 64 * 1024;
-const SAVED_ACCOUNT_FILE: &str = "account-credentials.json";
-const PENDING_ACCOUNT_FILE: &str = "account-credentials.pending";
-const CHATGPT_REGISTRATION_FILE: &str = "chatgpt-registration.json";
-const PENDING_CHATGPT_REGISTRATION_FILE: &str = "chatgpt-registration.pending";
-const CHATGPT_ACCOUNTS_FILE: &str = "chatgpt-accounts.json";
-const PENDING_CHATGPT_ACCOUNTS_FILE: &str = "chatgpt-accounts.pending";
 const HISTORY_FILES: [&str; 4] = [
     "events.sqlite3-journal",
     "events.sqlite3-wal",
@@ -79,6 +71,97 @@ impl HistoryReset {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecordKind {
+    ToolsConfig,
+    WorkspacePermissions,
+    ProviderProfiles,
+    SavedAccount,
+    UiPreferences,
+    ModelPreferences,
+    ChatgptRegistration,
+    ChatgptAccounts,
+}
+
+impl RecordKind {
+    // Kinds without a pending file are read-only to the harness.
+    const fn spec(self) -> (&'static str, Option<&'static str>, usize) {
+        match self {
+            Self::ToolsConfig => ("tools.json", None, 64 * 1024),
+            Self::WorkspacePermissions => (
+                "workspace-permissions.json",
+                Some("workspace-permissions.pending"),
+                64 * 1024,
+            ),
+            Self::ProviderProfiles => ("provider-profiles.json", None, 64 * 1024),
+            Self::SavedAccount => (
+                "account-credentials.json",
+                Some("account-credentials.pending"),
+                1024,
+            ),
+            Self::UiPreferences => ("ui-preferences.json", Some("ui-preferences.pending"), 1024),
+            Self::ModelPreferences => (
+                "model-preferences.json",
+                Some("model-preferences.pending"),
+                1024 * 1024,
+            ),
+            Self::ChatgptRegistration => (
+                "chatgpt-registration.json",
+                Some("chatgpt-registration.pending"),
+                256,
+            ),
+            Self::ChatgptAccounts => (
+                "chatgpt-accounts.json",
+                Some("chatgpt-accounts.pending"),
+                384 * 1024,
+            ),
+        }
+    }
+
+    pub const fn file(self) -> &'static str {
+        self.spec().0
+    }
+
+    #[cfg(test)]
+    fn pending(self) -> &'static str {
+        self.spec().1.expect("writable record kind")
+    }
+
+    pub const fn limit(self) -> usize {
+        self.spec().2
+    }
+}
+
+pub struct Record<'a> {
+    root: &'a StateRoot,
+    kind: RecordKind,
+}
+
+impl Record<'_> {
+    pub fn read(&self) -> Result<Option<Vec<u8>>, StoreError> {
+        let (name, _, limit) = self.kind.spec();
+        self.root.read_private_record(name, limit)
+    }
+
+    pub fn present(&self) -> Result<bool, StoreError> {
+        let (name, _, limit) = self.kind.spec();
+        Ok(self.root.open_private_record(name, limit)?.is_some())
+    }
+
+    pub fn replace(&self, record: &[u8]) -> Result<(), StoreError> {
+        let (name, pending, limit) = self.kind.spec();
+        let pending = pending.ok_or(StoreError::InvalidStateDirectory)?;
+        self.root
+            .replace_private_record(name, pending, record, limit)
+    }
+
+    pub fn remove(&self) -> Result<(), StoreError> {
+        let (name, pending, limit) = self.kind.spec();
+        let pending = pending.ok_or(StoreError::InvalidStateDirectory)?;
+        self.root.remove_private_record(name, pending, limit)
+    }
+}
+
 pub struct StateRoot {
     path: PathBuf,
     dir: Dir,
@@ -87,11 +170,6 @@ pub struct StateRoot {
 }
 
 impl StateRoot {
-    pub const MAX_ACCOUNT_RECORD_BYTES: usize = 1024;
-    pub const MAX_CHATGPT_REGISTRATION_BYTES: usize = 256;
-    pub const MAX_CHATGPT_ACCOUNTS_BYTES: usize = 384 * 1024;
-    pub const MAX_MODEL_PREFERENCES_BYTES: usize = 1024 * 1024;
-
     pub(crate) fn try_clone(&self) -> Result<Self, StoreError> {
         Ok(Self {
             path: self.path.clone(),
@@ -246,138 +324,8 @@ impl StateRoot {
         }
     }
 
-    pub(crate) fn read_tools_config(&self) -> Result<Option<Vec<u8>>, StoreError> {
-        self.read_private_record("tools.json", 64 * 1024)
-    }
-
-    pub(crate) fn read_workspace_permissions(&self) -> Result<Option<Vec<u8>>, StoreError> {
-        self.read_private_record("workspace-permissions.json", 64 * 1024)
-    }
-
-    pub(crate) fn replace_workspace_permissions(&self, record: &[u8]) -> Result<(), StoreError> {
-        self.replace_private_record(
-            "workspace-permissions.json",
-            "workspace-permissions.pending",
-            record,
-            64 * 1024,
-        )
-    }
-
-    pub(crate) fn read_provider_profiles(&self) -> Result<Vec<u8>, StoreError> {
-        self.read_private_record(PROVIDER_PROFILES_FILE, MAX_PROVIDER_PROFILES_BYTES)?
-            .ok_or_else(|| StoreError::Io(io::ErrorKind::NotFound.into()))
-    }
-
-    pub fn read_saved_account_record(&self) -> Result<Option<Vec<u8>>, StoreError> {
-        self.read_private_record(SAVED_ACCOUNT_FILE, Self::MAX_ACCOUNT_RECORD_BYTES)
-    }
-
-    pub fn read_ui_preferences_record(&self) -> Result<Option<Vec<u8>>, StoreError> {
-        self.read_private_record("ui-preferences.json", 1024)
-    }
-
-    pub fn replace_ui_preferences_record(&self, record: &[u8]) -> Result<(), StoreError> {
-        self.replace_private_record(
-            "ui-preferences.json",
-            "ui-preferences.pending",
-            record,
-            1024,
-        )
-    }
-
-    pub fn read_model_preferences_record(&self) -> Result<Option<Vec<u8>>, StoreError> {
-        self.read_private_record("model-preferences.json", Self::MAX_MODEL_PREFERENCES_BYTES)
-    }
-
-    pub fn replace_model_preferences_record(&self, record: &[u8]) -> Result<(), StoreError> {
-        self.replace_private_record(
-            "model-preferences.json",
-            "model-preferences.pending",
-            record,
-            Self::MAX_MODEL_PREFERENCES_BYTES,
-        )
-    }
-
-    pub fn saved_account_record_present(&self) -> Result<bool, StoreError> {
-        Ok(self
-            .open_private_record(SAVED_ACCOUNT_FILE, Self::MAX_ACCOUNT_RECORD_BYTES)?
-            .is_some())
-    }
-
-    pub fn replace_saved_account_record(&self, record: &[u8]) -> Result<(), StoreError> {
-        self.replace_private_record(
-            SAVED_ACCOUNT_FILE,
-            PENDING_ACCOUNT_FILE,
-            record,
-            Self::MAX_ACCOUNT_RECORD_BYTES,
-        )
-    }
-
-    pub fn remove_saved_account_record(&self) -> Result<(), StoreError> {
-        self.remove_private_record(
-            SAVED_ACCOUNT_FILE,
-            PENDING_ACCOUNT_FILE,
-            Self::MAX_ACCOUNT_RECORD_BYTES,
-        )
-    }
-
-    pub fn remove_model_preferences_record(&self) -> Result<(), StoreError> {
-        self.remove_private_record(
-            "model-preferences.json",
-            "model-preferences.pending",
-            Self::MAX_MODEL_PREFERENCES_BYTES,
-        )
-    }
-
-    pub fn read_chatgpt_registration_record(&self) -> Result<Option<Vec<u8>>, StoreError> {
-        self.read_private_record(
-            CHATGPT_REGISTRATION_FILE,
-            Self::MAX_CHATGPT_REGISTRATION_BYTES,
-        )
-    }
-
-    pub fn replace_chatgpt_registration_record(&self, record: &[u8]) -> Result<(), StoreError> {
-        self.replace_private_record(
-            CHATGPT_REGISTRATION_FILE,
-            PENDING_CHATGPT_REGISTRATION_FILE,
-            record,
-            Self::MAX_CHATGPT_REGISTRATION_BYTES,
-        )
-    }
-
-    pub fn read_chatgpt_accounts_record(&self) -> Result<Option<Vec<u8>>, StoreError> {
-        self.read_private_record(CHATGPT_ACCOUNTS_FILE, Self::MAX_CHATGPT_ACCOUNTS_BYTES)
-    }
-
-    pub fn chatgpt_accounts_record_present(&self) -> Result<bool, StoreError> {
-        Ok(self
-            .open_private_record(CHATGPT_ACCOUNTS_FILE, Self::MAX_CHATGPT_ACCOUNTS_BYTES)?
-            .is_some())
-    }
-
-    pub fn replace_chatgpt_accounts_record(&self, record: &[u8]) -> Result<(), StoreError> {
-        self.replace_private_record(
-            CHATGPT_ACCOUNTS_FILE,
-            PENDING_CHATGPT_ACCOUNTS_FILE,
-            record,
-            Self::MAX_CHATGPT_ACCOUNTS_BYTES,
-        )
-    }
-
-    pub fn remove_chatgpt_accounts_record(&self) -> Result<(), StoreError> {
-        self.remove_private_record(
-            CHATGPT_ACCOUNTS_FILE,
-            PENDING_CHATGPT_ACCOUNTS_FILE,
-            Self::MAX_CHATGPT_ACCOUNTS_BYTES,
-        )
-    }
-
-    pub fn remove_chatgpt_registration_record(&self) -> Result<(), StoreError> {
-        self.remove_private_record(
-            CHATGPT_REGISTRATION_FILE,
-            PENDING_CHATGPT_REGISTRATION_FILE,
-            Self::MAX_CHATGPT_REGISTRATION_BYTES,
-        )
+    pub fn record(&self, kind: RecordKind) -> Record<'_> {
+        Record { root: self, kind }
     }
 
     fn remove_private_record(
@@ -604,10 +552,15 @@ mod tests {
                     let state =
                         StateRoot::admit(Path::new(OWNER_ROOT)).expect("owner account root");
                     state
-                        .replace_saved_account_record(RECORD)
+                        .record(RecordKind::SavedAccount)
+                        .replace(RECORD)
                         .expect("owner account record");
                     assert_eq!(
-                        state.read_saved_account_record().unwrap().as_deref(),
+                        state
+                            .record(RecordKind::SavedAccount)
+                            .read()
+                            .unwrap()
+                            .as_deref(),
                         Some(RECORD)
                     );
 
@@ -642,7 +595,11 @@ mod tests {
                         "second OS user",
                     );
                     assert_eq!(
-                        state.read_saved_account_record().unwrap().as_deref(),
+                        state
+                            .record(RecordKind::SavedAccount)
+                            .read()
+                            .unwrap()
+                            .as_deref(),
                         Some(RECORD)
                     );
                 }
@@ -653,7 +610,7 @@ mod tests {
                         Path::new("/other/.local/state/arany")
                     );
                     assert_eq!(
-                        std::fs::read(Path::new(OWNER_ROOT).join(SAVED_ACCOUNT_FILE))
+                        std::fs::read(Path::new(OWNER_ROOT).join(RecordKind::SavedAccount.file()))
                             .expect_err("another OS user read the saved record")
                             .kind(),
                         io::ErrorKind::PermissionDenied
@@ -755,59 +712,92 @@ mod tests {
         let state = StateRoot::admit(&path).expect("private state");
         assert!(
             state
-                .read_saved_account_record()
+                .record(RecordKind::SavedAccount)
+                .read()
                 .expect("empty state")
                 .is_none()
         );
-        assert!(!state.saved_account_record_present().expect("empty record"));
         assert!(
             !state
-                .chatgpt_accounts_record_present()
+                .record(RecordKind::SavedAccount)
+                .present()
+                .expect("empty record")
+        );
+        assert!(
+            !state
+                .record(RecordKind::ChatgptAccounts)
+                .present()
                 .expect("empty index")
         );
 
         state
-            .replace_saved_account_record(b"synthetic-first")
+            .record(RecordKind::SavedAccount)
+            .replace(b"synthetic-first")
             .expect("first account");
         state
-            .replace_saved_account_record(b"synthetic-second")
+            .record(RecordKind::SavedAccount)
+            .replace(b"synthetic-second")
             .expect("replacement account");
         assert_eq!(
-            state.read_saved_account_record().expect("saved account"),
+            state
+                .record(RecordKind::SavedAccount)
+                .read()
+                .expect("saved account"),
             Some(b"synthetic-second".to_vec())
         );
-        assert!(state.saved_account_record_present().expect("saved marker"));
+        assert!(
+            state
+                .record(RecordKind::SavedAccount)
+                .present()
+                .expect("saved marker")
+        );
         assert_eq!(
-            std::fs::metadata(path.join(SAVED_ACCOUNT_FILE))
+            std::fs::metadata(path.join(RecordKind::SavedAccount.file()))
                 .expect("saved metadata")
                 .mode()
                 & 0o077,
             0
         );
-        assert!(!path.join(PENDING_ACCOUNT_FILE).exists());
-        std::fs::write(path.join(PENDING_ACCOUNT_FILE), b"aborted-replacement").unwrap();
+        assert!(!path.join(RecordKind::SavedAccount.pending()).exists());
+        std::fs::write(
+            path.join(RecordKind::SavedAccount.pending()),
+            b"aborted-replacement",
+        )
+        .unwrap();
         std::fs::set_permissions(
-            path.join(PENDING_ACCOUNT_FILE),
+            path.join(RecordKind::SavedAccount.pending()),
             std::fs::Permissions::from_mode(0o600),
         )
         .unwrap();
-        state.remove_saved_account_record().unwrap();
-        assert!(state.read_saved_account_record().unwrap().is_none());
-        assert!(!path.join(PENDING_ACCOUNT_FILE).exists());
-        state.remove_saved_account_record().unwrap();
+        state.record(RecordKind::SavedAccount).remove().unwrap();
+        assert!(
+            state
+                .record(RecordKind::SavedAccount)
+                .read()
+                .unwrap()
+                .is_none()
+        );
+        assert!(!path.join(RecordKind::SavedAccount.pending()).exists());
+        state.record(RecordKind::SavedAccount).remove().unwrap();
         state
-            .replace_saved_account_record(b"synthetic-second")
+            .record(RecordKind::SavedAccount)
+            .replace(b"synthetic-second")
             .unwrap();
 
-        let file = path.join(SAVED_ACCOUNT_FILE);
+        let file = path.join(RecordKind::SavedAccount.file());
         let outside = temp.path().join("outside");
         std::fs::write(&outside, b"outside-stays").expect("outside fixture");
         std::fs::remove_file(&file).expect("remove test record");
         symlink(&outside, &file).expect("symlink fixture");
-        assert!(state.remove_saved_account_record().is_err());
-        assert!(state.saved_account_record_present().is_err());
-        assert!(state.read_saved_account_record().is_err());
-        assert!(state.replace_saved_account_record(b"new").is_err());
+        assert!(state.record(RecordKind::SavedAccount).remove().is_err());
+        assert!(state.record(RecordKind::SavedAccount).present().is_err());
+        assert!(state.record(RecordKind::SavedAccount).read().is_err());
+        assert!(
+            state
+                .record(RecordKind::SavedAccount)
+                .replace(b"new")
+                .is_err()
+        );
         assert_eq!(
             std::fs::read(&outside).expect("outside file"),
             b"outside-stays"
@@ -815,15 +805,26 @@ mod tests {
         std::fs::remove_file(&file).expect("remove test symlink");
 
         std::fs::hard_link(&outside, &file).expect("hard-link fixture");
-        assert!(state.remove_saved_account_record().is_err());
-        assert!(state.saved_account_record_present().is_err());
-        assert!(state.read_saved_account_record().is_err());
-        assert!(state.replace_saved_account_record(b"new").is_err());
+        assert!(state.record(RecordKind::SavedAccount).remove().is_err());
+        assert!(state.record(RecordKind::SavedAccount).present().is_err());
+        assert!(state.record(RecordKind::SavedAccount).read().is_err());
+        assert!(
+            state
+                .record(RecordKind::SavedAccount)
+                .replace(b"new")
+                .is_err()
+        );
         std::fs::remove_file(&file).expect("remove test hard link");
 
-        symlink(&outside, path.join(PENDING_ACCOUNT_FILE)).expect("pending symlink fixture");
-        assert!(state.remove_saved_account_record().is_err());
-        assert!(state.replace_saved_account_record(b"new").is_err());
+        symlink(&outside, path.join(RecordKind::SavedAccount.pending()))
+            .expect("pending symlink fixture");
+        assert!(state.record(RecordKind::SavedAccount).remove().is_err());
+        assert!(
+            state
+                .record(RecordKind::SavedAccount)
+                .replace(b"new")
+                .is_err()
+        );
         assert_eq!(
             std::fs::read(&outside).expect("outside file"),
             b"outside-stays"
@@ -835,100 +836,187 @@ mod tests {
         let temp = tempfile::tempdir().expect("test root");
         let path = temp.path().join("state");
         let state = StateRoot::admit(&path).expect("private state");
-        assert!(state.read_chatgpt_registration_record().unwrap().is_none());
+        assert!(
+            state
+                .record(RecordKind::ChatgptRegistration)
+                .read()
+                .unwrap()
+                .is_none()
+        );
         state
-            .replace_chatgpt_registration_record(b"synthetic-first")
+            .record(RecordKind::ChatgptRegistration)
+            .replace(b"synthetic-first")
             .expect("first registration");
         state
-            .replace_chatgpt_registration_record(b"synthetic-second")
+            .record(RecordKind::ChatgptRegistration)
+            .replace(b"synthetic-second")
             .expect("replacement registration");
         assert_eq!(
-            state.read_chatgpt_registration_record().unwrap(),
+            state
+                .record(RecordKind::ChatgptRegistration)
+                .read()
+                .unwrap(),
             Some(b"synthetic-second".to_vec())
         );
         assert_eq!(
-            std::fs::metadata(path.join(CHATGPT_REGISTRATION_FILE))
+            std::fs::metadata(path.join(RecordKind::ChatgptRegistration.file()))
                 .unwrap()
                 .mode()
                 & 0o077,
             0
         );
-        assert!(!path.join(PENDING_CHATGPT_REGISTRATION_FILE).exists());
-        state.remove_chatgpt_registration_record().unwrap();
-        assert!(state.read_chatgpt_registration_record().unwrap().is_none());
+        assert!(
+            !path
+                .join(RecordKind::ChatgptRegistration.pending())
+                .exists()
+        );
         state
-            .replace_chatgpt_registration_record(b"synthetic-second")
+            .record(RecordKind::ChatgptRegistration)
+            .remove()
+            .unwrap();
+        assert!(
+            state
+                .record(RecordKind::ChatgptRegistration)
+                .read()
+                .unwrap()
+                .is_none()
+        );
+        state
+            .record(RecordKind::ChatgptRegistration)
+            .replace(b"synthetic-second")
             .unwrap();
 
         let outside = temp.path().join("outside");
         std::fs::write(&outside, b"outside-stays").unwrap();
-        let file = path.join(CHATGPT_REGISTRATION_FILE);
+        let file = path.join(RecordKind::ChatgptRegistration.file());
         std::fs::remove_file(&file).unwrap();
         symlink(&outside, &file).unwrap();
-        assert!(state.remove_chatgpt_registration_record().is_err());
-        assert!(state.read_chatgpt_registration_record().is_err());
-        assert!(state.replace_chatgpt_registration_record(b"new").is_err());
+        assert!(
+            state
+                .record(RecordKind::ChatgptRegistration)
+                .remove()
+                .is_err()
+        );
+        assert!(
+            state
+                .record(RecordKind::ChatgptRegistration)
+                .read()
+                .is_err()
+        );
+        assert!(
+            state
+                .record(RecordKind::ChatgptRegistration)
+                .replace(b"new")
+                .is_err()
+        );
         std::fs::remove_file(&file).unwrap();
         std::fs::hard_link(&outside, &file).unwrap();
-        assert!(state.remove_chatgpt_registration_record().is_err());
-        assert!(state.read_chatgpt_registration_record().is_err());
+        assert!(
+            state
+                .record(RecordKind::ChatgptRegistration)
+                .remove()
+                .is_err()
+        );
+        assert!(
+            state
+                .record(RecordKind::ChatgptRegistration)
+                .read()
+                .is_err()
+        );
         std::fs::remove_file(&file).unwrap();
-        symlink(&outside, path.join(PENDING_CHATGPT_REGISTRATION_FILE)).unwrap();
-        assert!(state.remove_chatgpt_registration_record().is_err());
-        assert!(state.replace_chatgpt_registration_record(b"new").is_err());
+        symlink(
+            &outside,
+            path.join(RecordKind::ChatgptRegistration.pending()),
+        )
+        .unwrap();
+        assert!(
+            state
+                .record(RecordKind::ChatgptRegistration)
+                .remove()
+                .is_err()
+        );
+        assert!(
+            state
+                .record(RecordKind::ChatgptRegistration)
+                .replace(b"new")
+                .is_err()
+        );
         assert_eq!(std::fs::read(&outside).unwrap(), b"outside-stays");
         assert!(
             state
-                .replace_chatgpt_registration_record(&vec![b'x'; 257])
+                .record(RecordKind::ChatgptRegistration)
+                .replace(&vec![b'x'; 257])
                 .is_err()
         );
 
-        assert!(state.read_chatgpt_accounts_record().unwrap().is_none());
+        assert!(
+            state
+                .record(RecordKind::ChatgptAccounts)
+                .read()
+                .unwrap()
+                .is_none()
+        );
         state
-            .replace_chatgpt_accounts_record(b"synthetic-token-index")
+            .record(RecordKind::ChatgptAccounts)
+            .replace(b"synthetic-token-index")
             .expect("bounded account index");
-        assert!(state.chatgpt_accounts_record_present().unwrap());
+        assert!(state.record(RecordKind::ChatgptAccounts).present().unwrap());
         assert_eq!(
-            state.read_chatgpt_accounts_record().unwrap(),
+            state.record(RecordKind::ChatgptAccounts).read().unwrap(),
             Some(b"synthetic-token-index".to_vec())
         );
         assert_eq!(
-            std::fs::metadata(path.join(CHATGPT_ACCOUNTS_FILE))
+            std::fs::metadata(path.join(RecordKind::ChatgptAccounts.file()))
                 .unwrap()
                 .mode()
                 & 0o077,
             0
         );
-        assert!(!path.join(PENDING_CHATGPT_ACCOUNTS_FILE).exists());
-        state.remove_chatgpt_accounts_record().unwrap();
-        assert!(state.read_chatgpt_accounts_record().unwrap().is_none());
+        assert!(!path.join(RecordKind::ChatgptAccounts.pending()).exists());
+        state.record(RecordKind::ChatgptAccounts).remove().unwrap();
+        assert!(
+            state
+                .record(RecordKind::ChatgptAccounts)
+                .read()
+                .unwrap()
+                .is_none()
+        );
         state
-            .replace_chatgpt_accounts_record(b"synthetic-token-index")
+            .record(RecordKind::ChatgptAccounts)
+            .replace(b"synthetic-token-index")
             .unwrap();
         assert!(
             state
-                .replace_chatgpt_accounts_record(&vec![
-                    b'x';
-                    StateRoot::MAX_CHATGPT_ACCOUNTS_BYTES + 1
-                ])
+                .record(RecordKind::ChatgptAccounts)
+                .replace(&vec![b'x'; RecordKind::ChatgptAccounts.limit() + 1])
                 .is_err()
         );
-        let file = path.join(CHATGPT_ACCOUNTS_FILE);
+        let file = path.join(RecordKind::ChatgptAccounts.file());
         std::fs::remove_file(&file).unwrap();
         symlink(&outside, &file).unwrap();
-        assert!(state.remove_chatgpt_accounts_record().is_err());
-        assert!(state.chatgpt_accounts_record_present().is_err());
-        assert!(state.read_chatgpt_accounts_record().is_err());
-        assert!(state.replace_chatgpt_accounts_record(b"new").is_err());
+        assert!(state.record(RecordKind::ChatgptAccounts).remove().is_err());
+        assert!(state.record(RecordKind::ChatgptAccounts).present().is_err());
+        assert!(state.record(RecordKind::ChatgptAccounts).read().is_err());
+        assert!(
+            state
+                .record(RecordKind::ChatgptAccounts)
+                .replace(b"new")
+                .is_err()
+        );
         std::fs::remove_file(&file).unwrap();
         std::fs::hard_link(&outside, &file).unwrap();
-        assert!(state.remove_chatgpt_accounts_record().is_err());
-        assert!(state.chatgpt_accounts_record_present().is_err());
-        assert!(state.read_chatgpt_accounts_record().is_err());
+        assert!(state.record(RecordKind::ChatgptAccounts).remove().is_err());
+        assert!(state.record(RecordKind::ChatgptAccounts).present().is_err());
+        assert!(state.record(RecordKind::ChatgptAccounts).read().is_err());
         std::fs::remove_file(&file).unwrap();
-        symlink(&outside, path.join(PENDING_CHATGPT_ACCOUNTS_FILE)).unwrap();
-        assert!(state.remove_chatgpt_accounts_record().is_err());
-        assert!(state.replace_chatgpt_accounts_record(b"new").is_err());
+        symlink(&outside, path.join(RecordKind::ChatgptAccounts.pending())).unwrap();
+        assert!(state.record(RecordKind::ChatgptAccounts).remove().is_err());
+        assert!(
+            state
+                .record(RecordKind::ChatgptAccounts)
+                .replace(b"new")
+                .is_err()
+        );
         assert_eq!(std::fs::read(outside).unwrap(), b"outside-stays");
     }
 
@@ -941,10 +1029,10 @@ mod tests {
         let state = StateRoot::admit(&path).expect("private state");
 
         for name in [
-            SAVED_ACCOUNT_FILE,
-            CHATGPT_REGISTRATION_FILE,
-            CHATGPT_ACCOUNTS_FILE,
-            PROVIDER_PROFILES_FILE,
+            RecordKind::SavedAccount.file(),
+            RecordKind::ChatgptRegistration.file(),
+            RecordKind::ChatgptAccounts.file(),
+            RecordKind::ProviderProfiles.file(),
             "model-preferences.json",
             "ui-preferences.json",
             "events.sqlite3-journal",
@@ -953,10 +1041,15 @@ mod tests {
         ] {
             mkfifo(&path.join(name), Mode::S_IRUSR | Mode::S_IWUSR).expect("test FIFO");
         }
-        assert!(state.remove_saved_account_record().is_err());
-        assert!(state.remove_chatgpt_registration_record().is_err());
-        assert!(state.remove_chatgpt_accounts_record().is_err());
-        assert!(state.remove_model_preferences_record().is_err());
+        assert!(state.record(RecordKind::SavedAccount).remove().is_err());
+        assert!(
+            state
+                .record(RecordKind::ChatgptRegistration)
+                .remove()
+                .is_err()
+        );
+        assert!(state.record(RecordKind::ChatgptAccounts).remove().is_err());
+        assert!(state.record(RecordKind::ModelPreferences).remove().is_err());
         assert!(matches!(
             StateRoot::open_existing(&path)
                 .unwrap()
@@ -964,45 +1057,46 @@ mod tests {
             Err(StoreError::StateNotPrivate)
         ));
         assert!(matches!(
-            state.read_saved_account_record(),
+            state.record(RecordKind::SavedAccount).read(),
             Err(StoreError::StateNotPrivate)
         ));
         assert!(matches!(
-            state.saved_account_record_present(),
+            state.record(RecordKind::SavedAccount).present(),
             Err(StoreError::StateNotPrivate)
         ));
         assert!(matches!(
-            state.read_chatgpt_registration_record(),
+            state.record(RecordKind::ChatgptRegistration).read(),
             Err(StoreError::StateNotPrivate)
         ));
         assert!(matches!(
-            state.read_chatgpt_accounts_record(),
+            state.record(RecordKind::ChatgptAccounts).read(),
             Err(StoreError::StateNotPrivate)
         ));
         assert!(matches!(
-            state.chatgpt_accounts_record_present(),
+            state.record(RecordKind::ChatgptAccounts).present(),
             Err(StoreError::StateNotPrivate)
         ));
         assert!(matches!(
-            state.read_provider_profiles(),
+            state.record(RecordKind::ProviderProfiles).read(),
             Err(StoreError::StateNotPrivate)
         ));
         assert!(matches!(
-            state.read_model_preferences_record(),
+            state.record(RecordKind::ModelPreferences).read(),
             Err(StoreError::StateNotPrivate)
         ));
 
         assert!(matches!(
-            state.read_ui_preferences_record(),
+            state.record(RecordKind::UiPreferences).read(),
             Err(StoreError::StateNotPrivate)
         ));
         std::fs::remove_file(path.join("ui-preferences.json")).unwrap();
-        std::fs::remove_file(path.join(SAVED_ACCOUNT_FILE)).expect("remove account FIFO");
+        std::fs::remove_file(path.join(RecordKind::SavedAccount.file()))
+            .expect("remove account FIFO");
         std::fs::remove_file(path.join("model-preferences.json")).expect("remove preference FIFO");
         for name in [
-            PENDING_ACCOUNT_FILE,
-            PENDING_CHATGPT_REGISTRATION_FILE,
-            PENDING_CHATGPT_ACCOUNTS_FILE,
+            RecordKind::SavedAccount.pending(),
+            RecordKind::ChatgptRegistration.pending(),
+            RecordKind::ChatgptAccounts.pending(),
             "account-credentials.lock",
             "model-preferences.pending",
             "ui-preferences.pending",
@@ -1010,19 +1104,25 @@ mod tests {
             mkfifo(&path.join(name), Mode::S_IRUSR | Mode::S_IWUSR).expect("test FIFO");
         }
         assert!(matches!(
-            state.replace_saved_account_record(b"synthetic"),
+            state.record(RecordKind::SavedAccount).replace(b"synthetic"),
             Err(StoreError::StateNotPrivate)
         ));
         assert!(matches!(
-            state.replace_chatgpt_registration_record(b"synthetic"),
+            state
+                .record(RecordKind::ChatgptRegistration)
+                .replace(b"synthetic"),
             Err(StoreError::StateNotPrivate)
         ));
         assert!(matches!(
-            state.replace_chatgpt_accounts_record(b"synthetic"),
+            state
+                .record(RecordKind::ChatgptAccounts)
+                .replace(b"synthetic"),
             Err(StoreError::StateNotPrivate)
         ));
         assert!(matches!(
-            state.replace_model_preferences_record(b"synthetic"),
+            state
+                .record(RecordKind::ModelPreferences)
+                .replace(b"synthetic"),
             Err(StoreError::StateNotPrivate)
         ));
         assert!(matches!(
@@ -1031,7 +1131,9 @@ mod tests {
         ));
 
         assert!(matches!(
-            state.replace_ui_preferences_record(b"synthetic"),
+            state
+                .record(RecordKind::UiPreferences)
+                .replace(b"synthetic"),
             Err(StoreError::StateNotPrivate)
         ));
         drop(state);

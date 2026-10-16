@@ -1,5 +1,6 @@
 use super::{Admission, LoopError, controls};
 use crate::cli::{bounded_list, chatgpt, credentials};
+use arany::RecordKind;
 use arany::{
     AttachedTerminal, Composer, ComposerEdit, CustomProfile, Effort, ModelCatalogState, ModelEntry,
     ModelPicker, NativeApiCredentials, SessionId, SessionView, ShutdownSignal, StateRoot,
@@ -14,7 +15,7 @@ use std::{
 };
 
 const CATALOG_LOADING: &str = "Loading model catalog; Ctrl+C cancels";
-const MAX_PREFERENCE_BYTES: usize = StateRoot::MAX_MODEL_PREFERENCES_BYTES;
+const MAX_PREFERENCE_BYTES: usize = RecordKind::ModelPreferences.limit();
 const MAX_PREFERENCE_SOURCES: usize = 8;
 const MAX_CACHED_MODELS: usize = 4096;
 
@@ -66,7 +67,8 @@ fn bounded_models<'de, D: serde::Deserializer<'de>>(
 
 fn read_preferences(root: &StateRoot) -> Result<ModelPreferences, String> {
     let Some(record) = root
-        .read_model_preferences_record()
+        .record(RecordKind::ModelPreferences)
+        .read()
         .map_err(|_| "saved model preferences unavailable or unsafe")?
     else {
         return Ok(ModelPreferences {
@@ -93,7 +95,8 @@ pub(super) fn preferences_need_reset(workspace: &Path) -> Result<bool, String> {
     };
     root.with_account_replacement_lock(workspace, || {
         let record = root
-            .read_model_preferences_record()
+            .record(RecordKind::ModelPreferences)
+            .read()
             .map_err(|_| "saved model preferences unavailable or unsafe")?;
         Ok(record.is_some_and(|bytes| decode_preferences(&bytes).is_err()))
     })
@@ -328,7 +331,8 @@ fn write_preferences(
         let record =
             serde_json::to_vec(&preferences).map_err(|_| "model preferences unavailable")?;
         if record.len() <= MAX_PREFERENCE_BYTES {
-            root.replace_model_preferences_record(&record)
+            root.record(RecordKind::ModelPreferences)
+                .replace(&record)
                 .map_err(|_| "model preferences unavailable or unsafe")?;
             return Ok(());
         }
@@ -1036,12 +1040,14 @@ mod preference_tests {
             cases.push((changed, count == MAX_CACHED_MODELS));
         }
         for (document, accepted) in cases {
-            root.replace_model_preferences_record(&serde_json::to_vec(&document).unwrap())
+            root.record(RecordKind::ModelPreferences)
+                .replace(&serde_json::to_vec(&document).unwrap())
                 .unwrap();
             let reopened = StateRoot::open_existing(root.path()).unwrap();
             assert_eq!(read_preferences(&reopened).is_ok(), accepted);
         }
-        root.replace_model_preferences_record(&serde_json::to_vec(&document).unwrap())
+        root.record(RecordKind::ModelPreferences)
+            .replace(&serde_json::to_vec(&document).unwrap())
             .unwrap();
         let preferences = read_preferences(&root).unwrap();
         let mut defaults = arany::SessionDefaults {
@@ -1059,11 +1065,15 @@ mod preference_tests {
         defaults.provider = Some("openai".into());
         assert!(matching_source(&preferences, &defaults).is_none());
         assert!(
-            root.replace_model_preferences_record(&vec![b'x'; MAX_PREFERENCE_BYTES + 1])
+            root.record(RecordKind::ModelPreferences)
+                .replace(&vec![b'x'; MAX_PREFERENCE_BYTES + 1])
                 .is_err()
         );
         assert_eq!(
-            root.read_model_preferences_record().unwrap().unwrap(),
+            root.record(RecordKind::ModelPreferences)
+                .read()
+                .unwrap()
+                .unwrap(),
             serde_json::to_vec(&document).unwrap()
         );
         let original: SavedModels = serde_json::from_value(source).unwrap();

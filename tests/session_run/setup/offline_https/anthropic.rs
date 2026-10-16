@@ -182,7 +182,8 @@ pub(super) fn stage() {
     let root = StateRoot::open_existing(Path::new("/root/.local/state/arany"))
         .expect("private account root");
     let record = root
-        .read_saved_account_record()
+        .record(RecordKind::SavedAccount)
+        .read()
         .expect("read account")
         .expect("saved account");
     let saved: Value = serde_json::from_slice(&record).expect("bounded scoped account");
@@ -323,7 +324,8 @@ pub(super) fn stage() {
     assert!(
         record
             == root
-                .read_saved_account_record()
+                .record(RecordKind::SavedAccount)
+                .read()
                 .expect("reopen account")
                 .expect("saved account"),
         "catalog, conformance or turns replaced the account"
