@@ -693,6 +693,7 @@ impl RunLoop<'_> {
             turn: turn.clone(),
             requests: vec![request.clone()],
             observations: vec![ToolObservation {
+                enforcement_cause: None,
                 intent: intent.clone(),
                 disposition: ToolDisposition::Succeeded,
                 output: String::new(),
@@ -746,6 +747,7 @@ impl RunLoop<'_> {
             }
         } else {
             ToolObservation {
+                enforcement_cause: None,
                 intent,
                 disposition: ToolDisposition::Denied,
                 output: "The effect is outside the active Goal plan; no operation was dispatched"

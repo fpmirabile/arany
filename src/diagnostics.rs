@@ -534,6 +534,7 @@ mod tests {
             run_id: Default::default(),
             agent_run_id: Default::default(),
             observation: crate::tools::ToolObservation {
+                enforcement_cause: None,
                 intent: crate::tools::EffectIntent {
                     id: uuid::Uuid::now_v7(),
                     run_id: Default::default(),

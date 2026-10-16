@@ -651,11 +651,26 @@ impl Attestation {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnforcementCause {
+    FilesystemDenied,
+}
+
+impl EnforcementCause {
+    pub(crate) fn diagnostic(self) -> &'static str {
+        match self {
+            Self::FilesystemDenied => "Guard enforcement: filesystem boundary denied",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolObservation {
     pub intent: EffectIntent,
     pub disposition: ToolDisposition,
+    pub enforcement_cause: Option<EnforcementCause>,
     pub output: String,
     pub attestation: Option<Attestation>,
     pub cache_update: CacheUpdate,
@@ -682,6 +697,8 @@ impl ToolObservation {
                 .as_ref()
                 .is_none_or(|attestation| attestation.valid_for(&self.intent))
             && (self.disposition != ToolDisposition::Succeeded || self.attestation.is_some())
+            && (self.enforcement_cause.is_none()
+                || self.disposition == ToolDisposition::Denied && self.attestation.is_some())
             && match self.cache_update {
                 CacheUpdate::NotApplicable => true,
                 CacheUpdate::NotAttempted | CacheUpdate::Uncertain => self.intent.call.is_process(),
@@ -834,7 +851,11 @@ pub(crate) fn model_observation(observation: &ToolObservation) -> Value {
         }
     };
     let call = model_call(&observation.intent.call);
-    json!({"call":call,"disposition":observation.disposition,"output":output,"workspace_effect":effect,"cache_update":observation.cache_update})
+    let mut value = json!({"call":call,"disposition":observation.disposition,"output":output,"workspace_effect":effect,"cache_update":observation.cache_update});
+    if let Some(cause) = observation.enforcement_cause {
+        value["enforcement_cause"] = json!(cause.diagnostic());
+    }
+    value
 }
 
 #[cfg(test)]

@@ -1006,6 +1006,7 @@ impl<'a> RunLoop<'a> {
             reserved_step
                 .observations
                 .push(crate::tools::ToolObservation {
+                    enforcement_cause: None,
                     intent: intent.clone(),
                     disposition: crate::tools::ToolDisposition::Succeeded,
                     output: String::new(),
@@ -1031,6 +1032,7 @@ impl<'a> RunLoop<'a> {
                 reserved_step
                     .observations
                     .push(crate::tools::ToolObservation {
+                        enforcement_cause: None,
                         attestation: Some(crate::tools::Attestation::Guard(
                             crate::tools::GuardReceipt {
                                 contract_version: 1,
@@ -1499,6 +1501,7 @@ impl<'a> RunLoop<'a> {
         {
             return Ok((
                 crate::tools::ToolObservation {
+                    enforcement_cause: None,
                     intent,
                     disposition: crate::tools::ToolDisposition::Denied,
                     output: "Goal Provider-call budget exhausted; no operation was dispatched"
@@ -1524,6 +1527,7 @@ impl<'a> RunLoop<'a> {
         .await?;
         if let Some((requested, maximum)) = timeout_limit {
             let observation = crate::tools::ToolObservation {
+                enforcement_cause: None,
                 intent,
                 disposition: crate::tools::ToolDisposition::Limit,
                 output: crate::tools::types::command_timeout_limit_message(requested, maximum),
@@ -1605,6 +1609,7 @@ impl<'a> RunLoop<'a> {
         } else if !goal_allows {
             (
                 crate::tools::ToolObservation {
+                    enforcement_cause: None,
                     intent,
                     disposition: crate::tools::ToolDisposition::Denied,
                     output:
@@ -1623,6 +1628,7 @@ impl<'a> RunLoop<'a> {
             }
             (
                 crate::tools::ToolObservation {
+                    enforcement_cause: None,
                     intent,
                     disposition: crate::tools::ToolDisposition::Denied,
                     output: "Goal paused before this operation; no operation was dispatched".into(),
@@ -1634,6 +1640,7 @@ impl<'a> RunLoop<'a> {
         } else if approved && !self.ledger().can_start_provider_call() {
             (
                 crate::tools::ToolObservation {
+                    enforcement_cause: None,
                     intent,
                     disposition: crate::tools::ToolDisposition::Limit,
                     output: "Goal token budget exhausted; no operation was dispatched".into(),
@@ -1774,6 +1781,7 @@ impl<'a> RunLoop<'a> {
         } else {
             (
                 crate::tools::ToolObservation {
+                    enforcement_cause: None,
                     intent,
                     disposition: crate::tools::ToolDisposition::Denied,
                     output: "Approval was not granted; no operation was dispatched".into(),
@@ -2101,6 +2109,7 @@ fn active_time_limit_observation(
     intent: crate::tools::EffectIntent,
 ) -> crate::tools::ToolObservation {
     crate::tools::ToolObservation {
+        enforcement_cause: None,
         intent,
         disposition: crate::tools::ToolDisposition::Limit,
         output: "Goal active-time budget exhausted; no operation was dispatched".into(),

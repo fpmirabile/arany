@@ -70,6 +70,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         use_count: 1,
     };
     let observation = arany::ToolObservation {
+        enforcement_cause: None,
         intent: intent.clone(),
         disposition: ToolDisposition::Succeeded,
         output: serde_json::json!({
@@ -588,6 +589,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         run_id: run,
         agent_run_id: primary,
         observation: arany::ToolObservation {
+            enforcement_cause: None,
             disposition,
             output,
             attestation: Some(arany::Attestation::Guard(arany::GuardReceipt {

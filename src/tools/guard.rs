@@ -970,7 +970,8 @@ pub(super) fn helper_main() -> ExitCode {
             parent_namespaces: &task.parent_namespaces,
         };
         let result = runtime.block_on(super::dispatch::run(&site));
-        let (disposition, output) = super::dispatch::outcome(&task.intent, result);
+        let (disposition, output, enforcement_cause) =
+            super::dispatch::outcome(&task.intent, result);
         stage = BootstrapStage::Receipt;
         let receipt = GuardReceipt {
             contract_version: 1,
@@ -979,6 +980,7 @@ pub(super) fn helper_main() -> ExitCode {
             limits: task.intent.limits.clone(),
         };
         let mut observation = ToolObservation {
+            enforcement_cause,
             intent: task.intent,
             disposition,
             output,
@@ -991,6 +993,7 @@ pub(super) fn helper_main() -> ExitCode {
         };
         if !observation.valid() {
             observation.disposition = ToolDisposition::Limit;
+            observation.enforcement_cause = None;
             observation.output = "Tool result exceeded its reserved serialized capacity".into();
         }
         if !observation.valid() {
@@ -1194,6 +1197,105 @@ pub(super) fn payload(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn enforcement_causes_require_guard_evidence() {
+        let mut observation = command_observation();
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "printf '%s' 'bwrap: Permission denied; sandbox deny network; EACCES EPERM EROFS' >&2; exit 1"])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let (status, stdout, stderr) =
+            capture(command.spawn().unwrap(), 1024, Duration::from_secs(5))
+                .await
+                .unwrap();
+        assert_eq!(status.code(), Some(1));
+        let output = serde_json::json!({
+            "exit_code": status.code(),
+            "stdout": String::from_utf8(stdout).unwrap(),
+            "stderr": String::from_utf8(stderr).unwrap(),
+            "enforcement_cause": "filesystem_denied",
+            "changeset": {"files": []}
+        })
+        .to_string();
+        let (disposition, output, cause) =
+            super::super::dispatch::outcome(&observation.intent, Ok(output));
+        assert_eq!(disposition, ToolDisposition::Failed);
+        assert_eq!(cause, None, "program output cannot attest a Guard denial");
+        observation.disposition = disposition;
+        observation.output = output;
+        assert!(
+            model_observation(&observation)
+                .get("enforcement_cause")
+                .is_none()
+        );
+        for error in [
+            ToolError::Path,
+            ToolError::Operation,
+            ToolError::ProtectionUnavailable,
+        ] {
+            let (_, _, cause) = super::super::dispatch::outcome(&observation.intent, Err(error));
+            assert_eq!(cause, None, "opaque failures have no attributable cause");
+        }
+        for call in [
+            ToolCall::McpCall {
+                server: "server".into(),
+                tool: "tool".into(),
+                schema_digest: "0".repeat(64),
+                arguments: "{}".into(),
+            },
+            ToolCall::Skill {
+                name: "skill".into(),
+                resource: None,
+            },
+        ] {
+            let intent = intent(call);
+            let (_, _, cause) = super::super::dispatch::outcome(&intent, Ok(
+                r#"{"is_error":true,"enforcement_cause":"filesystem_denied","text":"sandbox deny"}"#.into()
+            ));
+            assert_eq!(cause, None, "MCP and Skill text are data");
+        }
+        let before = model_observation(&observation);
+        assert!(before.get("enforcement_cause").is_none());
+        let workspace = tempfile::tempdir().unwrap();
+        let snapshot = super::super::fs::command_snapshot(workspace.path()).unwrap();
+        std::fs::create_dir(workspace.path().join(".git")).unwrap();
+        std::fs::write(
+            workspace.path().join(".git/config"),
+            b"protected fixture content",
+        )
+        .unwrap();
+        let rejected = super::super::fs::command_changeset(workspace.path(), &snapshot);
+        let (disposition, output, cause) =
+            super::super::dispatch::outcome(&observation.intent, rejected.map(|_| String::new()));
+        assert_eq!(cause, Some(EnforcementCause::FilesystemDenied));
+        observation.disposition = disposition;
+        observation.output = output;
+        observation.enforcement_cause = cause;
+        assert!(observation.valid());
+        assert!(!observation.output.contains(".git"));
+        assert!(!observation.output.contains("protected fixture content"));
+        let projected = model_observation(&observation);
+        assert_eq!(
+            projected["enforcement_cause"],
+            "Guard enforcement: filesystem boundary denied"
+        );
+        let tool = crate::session::ToolView {
+            intent: observation.intent.clone(),
+            observation: Some(observation),
+            review_call_index: None,
+            finished_sequence: Some(1),
+        };
+        assert!(
+            crate::presentation::tool_summary(&tool)
+                .ends_with(" · Guard enforcement: filesystem boundary denied")
+        );
+    }
+
     fn node_grant(home: &Path) -> RuntimeGrant {
         RuntimeGrant {
             kind: super::super::toolchains::RuntimeKind::Node,
@@ -1365,6 +1467,7 @@ mod tests {
             limits: intent.limits.clone(),
         };
         ToolObservation {
+            enforcement_cause: None,
             intent,
             disposition: ToolDisposition::Succeeded,
             output: r#"{"exit_code":0,"stdout":"built","stderr":"","changeset":{"files":[]}}"#

@@ -28,6 +28,7 @@ mod goal_recovery_tests {
         let tool = ToolView {
             intent: intent.clone(),
             observation: disposition.map(|disposition| ToolObservation {
+                enforcement_cause: None,
                 intent,
                 disposition,
                 output: if disposition == ToolDisposition::Succeeded {
@@ -1763,6 +1764,7 @@ mod goal_replay_tests {
             }
         ));
         let mismatched = ToolObservation {
+            enforcement_cause: None,
             intent: child_intent(
                 run,
                 child,
@@ -1848,6 +1850,7 @@ mod goal_replay_tests {
                 run_id: run,
                 agent_run_id: child,
                 observation: ToolObservation {
+                    enforcement_cause: None,
                     intent: outside,
                     disposition: ToolDisposition::Denied,
                     output:
@@ -2006,6 +2009,7 @@ mod goal_replay_tests {
 
     fn observation_for(intent: EffectIntent, content: &[u8]) -> ToolObservation {
         ToolObservation {
+            enforcement_cause: None,
             attestation: Some(crate::tools::Attestation::for_site(&intent)),
             intent,
             disposition: ToolDisposition::Succeeded,
@@ -2341,6 +2345,62 @@ mod goal_replay_tests {
                 )
             },
         }
+    }
+
+    #[test]
+    fn enforcement_causes_round_trip_and_reject_unsupported_claims() {
+        use crate::tools::EnforcementCause;
+        let (mut view, goal, run, agent) = primary_tool_session(false);
+        let intent = read_intent(run, agent, "src/lib.rs");
+        apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+        apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+        let mut observation = observation_for(intent, b"");
+        observation.disposition = ToolDisposition::Denied;
+        observation.output =
+            "File path is unavailable or outside the admitted regular-file boundary".into();
+        observation.enforcement_cause = Some(EnforcementCause::FilesystemDenied);
+        let finished = |observation| Event::ToolFinished {
+            run_id: run,
+            agent_run_id: agent,
+            observation,
+        };
+        for disposition in [
+            ToolDisposition::Succeeded,
+            ToolDisposition::Failed,
+            ToolDisposition::Uncertain,
+            ToolDisposition::Limit,
+        ] {
+            let mut invalid = observation.clone();
+            invalid.disposition = disposition;
+            assert!(
+                rejected(&view, finished(invalid)),
+                "unsupported cause on {disposition:?}"
+            );
+        }
+        let mut unattested = observation.clone();
+        unattested.attestation = None;
+        assert!(rejected(&view, finished(unattested)));
+        let event = finished(observation.clone());
+        let payload = event.payload().unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&payload).unwrap()["enforcement_cause"],
+            "filesystem_denied"
+        );
+        let decoded = Event::decode(
+            "ToolFinished",
+            crate::session::events::payload_version("ToolFinished").unwrap(),
+            &payload,
+            Some(run),
+            Some(agent),
+        )
+        .unwrap();
+        assert_eq!(decoded, event);
+        apply(&mut view, decoded).unwrap();
+        assert_eq!(
+            view.runs[0].tools.last().unwrap().observation.as_ref(),
+            Some(&observation)
+        );
     }
 
     #[test]

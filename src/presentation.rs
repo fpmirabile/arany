@@ -84,13 +84,22 @@ pub(crate) fn tool_summary(tool: &crate::session::ToolView) -> String {
         .observation
         .as_ref()
         .and_then(|observation| cache_update_label(observation.cache_update));
-    match cache_update {
+    let mut summary = match cache_update {
         Some(cache_update) => format!(
             "Tool · {} · {state} · {cache_update}",
             safe_truncate(&operation, 160)
         ),
         None => format!("Tool · {} · {state}", safe_truncate(&operation, 160)),
+    };
+    if let Some(cause) = tool
+        .observation
+        .as_ref()
+        .and_then(|value| value.enforcement_cause)
+    {
+        summary.push_str(" · ");
+        summary.push_str(cause.diagnostic());
     }
+    summary
 }
 
 fn cache_update_label(update: crate::tools::CacheUpdate) -> Option<&'static str> {
