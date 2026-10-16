@@ -4977,6 +4977,9 @@
       "name": "arany_command"
     },
     {
+      "cache_control": {
+        "type": "ephemeral"
+      },
       "description": "Invoke an admitted MCP tool in the disposable offline snapshot.",
       "input_schema": {
         "additionalProperties": false,
@@ -5824,6 +5827,9 @@
       "name": "arany_read"
     },
     {
+      "cache_control": {
+        "type": "ephemeral"
+      },
       "description": "Search literal UTF-8 content in a Workspace file or directory. Use Read or an include for edit SHA-256.",
       "input_schema": {
         "additionalProperties": false,
@@ -6125,6 +6131,9 @@
       "name": "arany_skill"
     },
     {
+      "cache_control": {
+        "type": "ephemeral"
+      },
       "description": "List an admitted local MCP server's bounded tool catalog.",
       "input_schema": {
         "additionalProperties": false,
