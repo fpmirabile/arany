@@ -1,7 +1,6 @@
 use super::{
     AgentStatus, AgentView, RunView, SessionView, ToolView, active_run, active_run_goal,
     all_children_finished, current_goal_mut, is_delegated_synthesis, is_tool_continuation,
-    is_tool_review,
 };
 use crate::provider::AgentPhase;
 use crate::session::events::{
@@ -430,4 +429,23 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
         _ => return Err(ReplayError::InvalidTransition),
     }
     Ok(())
+}
+
+fn is_tool_review(run: &RunView, agent: &AgentView, record: &ProviderCallRecord) -> bool {
+    agent.role == AgentRole::Primary
+        && record.phase == AgentPhase::ToolReview
+        && agent.provider_calls.last().is_some_and(|call| {
+            call.disposition == ProviderCallDisposition::ToolRequested
+                || call.phase == AgentPhase::ToolReview
+                    && run.tools.last().is_some_and(|tool| {
+                        matches!(
+                            tool.intent.call,
+                            crate::tools::ToolCall::ApplyChangeset { .. }
+                        )
+                    })
+        })
+        && run
+            .tools
+            .last()
+            .is_some_and(|tool| tool.observation.is_none() && tool.review_call_index.is_none())
 }

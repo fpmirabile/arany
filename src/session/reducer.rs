@@ -231,26 +231,6 @@ fn pending_tool_requests(run: &RunView) -> Option<usize> {
     requested_tool_total(run.primary()?).checked_sub(model_tool_count(run))
 }
 
-/// A covered prefix may not end inside a step: its model Tool count must be a cumulative step total.
-fn ends_whole_step(run: &RunView, covered_count: usize) -> bool {
-    let Some(primary) = run.primary() else {
-        return false;
-    };
-    let covered = run.tools[..covered_count]
-        .iter()
-        .filter(|tool| !is_integration_tool(tool))
-        .count();
-    let step_ends = primary
-        .provider_calls
-        .iter()
-        .filter(|call| call.disposition == ProviderCallDisposition::ToolRequested)
-        .scan(0, |total, call| {
-            *total += usize::from(call.requested_tools);
-            Some(*total)
-        });
-    step_ends.into_iter().any(|end| end == covered)
-}
-
 fn observed_command_changeset(
     observation: &crate::tools::ToolObservation,
 ) -> Option<crate::tools::CommandChangeset> {
@@ -269,34 +249,6 @@ fn observed_command_changeset(
         .ok()
         .filter(|result| result.valid())
         .map(|result| result.changeset)
-}
-
-fn valid_integration_source(run: &RunView, intent: &crate::tools::EffectIntent) -> bool {
-    let crate::tools::ToolCall::ApplyChangeset {
-        source_intent_digest,
-        changeset,
-    } = &intent.call
-    else {
-        return false;
-    };
-    let Some(primary) = run.primary() else {
-        return false;
-    };
-    if primary.provider_calls.last().is_none_or(|call| {
-        call.disposition != ProviderCallDisposition::ToolRequested
-            && call.phase != AgentPhase::ToolReview
-    }) || pending_tool_requests(run) != Some(0)
-    {
-        return false;
-    }
-    run.tools
-        .last()
-        .and_then(|tool| tool.observation.as_ref())
-        .is_some_and(|observation| {
-            observation.intent.digest() == *source_intent_digest
-                && observed_command_changeset(observation)
-                    .is_some_and(|source| source == *changeset)
-        })
 }
 
 fn is_tool_continuation(run: &RunView, agent: &AgentView, record: &ProviderCallRecord) -> bool {
@@ -329,25 +281,6 @@ fn is_delegated_synthesis(run: &RunView, agent: &AgentView, record: &ProviderCal
             .is_some_and(|call| call.disposition == ProviderCallDisposition::Delegated)
         && record.phase == AgentPhase::RootSynthesis
         && all_children_finished(run)
-}
-
-fn is_tool_review(run: &RunView, agent: &AgentView, record: &ProviderCallRecord) -> bool {
-    agent.role == AgentRole::Primary
-        && record.phase == AgentPhase::ToolReview
-        && agent.provider_calls.last().is_some_and(|call| {
-            call.disposition == ProviderCallDisposition::ToolRequested
-                || call.phase == AgentPhase::ToolReview
-                    && run.tools.last().is_some_and(|tool| {
-                        matches!(
-                            tool.intent.call,
-                            crate::tools::ToolCall::ApplyChangeset { .. }
-                        )
-                    })
-        })
-        && run
-            .tools
-            .last()
-            .is_some_and(|tool| tool.observation.is_none() && tool.review_call_index.is_none())
 }
 
 impl RunView {

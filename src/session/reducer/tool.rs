@@ -1,8 +1,9 @@
 use super::agent::names_child;
 use super::{
-    AgentStatus, SessionView, ToolView, active_run, active_run_goal, current_goal_mut,
-    pending_tool_requests, valid_integration_source,
+    AgentStatus, RunView, SessionView, ToolView, active_run, active_run_goal, current_goal_mut,
+    observed_command_changeset, pending_tool_requests,
 };
+use crate::provider::AgentPhase;
 use crate::session::events::{Event, GoalPhase, ProviderCallDisposition, ReplayError};
 
 pub(super) fn apply(
@@ -190,4 +191,32 @@ pub(super) fn apply(
         _ => return Err(ReplayError::InvalidTransition),
     }
     Ok(())
+}
+
+fn valid_integration_source(run: &RunView, intent: &crate::tools::EffectIntent) -> bool {
+    let crate::tools::ToolCall::ApplyChangeset {
+        source_intent_digest,
+        changeset,
+    } = &intent.call
+    else {
+        return false;
+    };
+    let Some(primary) = run.primary() else {
+        return false;
+    };
+    if primary.provider_calls.last().is_none_or(|call| {
+        call.disposition != ProviderCallDisposition::ToolRequested
+            && call.phase != AgentPhase::ToolReview
+    }) || pending_tool_requests(run) != Some(0)
+    {
+        return false;
+    }
+    run.tools
+        .last()
+        .and_then(|tool| tool.observation.as_ref())
+        .is_some_and(|observation| {
+            observation.intent.digest() == *source_intent_digest
+                && observed_command_changeset(observation)
+                    .is_some_and(|source| source == *changeset)
+        })
 }

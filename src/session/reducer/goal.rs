@@ -1,6 +1,6 @@
 use super::{
     AgentStatus, GoalView, RunStatus, RunView, SessionView, active_run, current_goal_mut,
-    current_run, ends_whole_step, pending_tool_requests,
+    current_run, is_integration_tool, pending_tool_requests,
 };
 use crate::provider::AgentPhase;
 use crate::session::events::{
@@ -722,4 +722,24 @@ pub(super) fn apply(
         _ => return Err(ReplayError::InvalidTransition),
     }
     Ok(())
+}
+
+/// A covered prefix may not end inside a step: its model Tool count must be a cumulative step total.
+fn ends_whole_step(run: &RunView, covered_count: usize) -> bool {
+    let Some(primary) = run.primary() else {
+        return false;
+    };
+    let covered = run.tools[..covered_count]
+        .iter()
+        .filter(|tool| !is_integration_tool(tool))
+        .count();
+    let step_ends = primary
+        .provider_calls
+        .iter()
+        .filter(|call| call.disposition == ProviderCallDisposition::ToolRequested)
+        .scan(0, |total, call| {
+            *total += usize::from(call.requested_tools);
+            Some(*total)
+        });
+    step_ends.into_iter().any(|end| end == covered)
 }
