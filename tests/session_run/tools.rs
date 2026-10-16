@@ -374,7 +374,7 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
             .iter()
             .all(
                 |observation| observation.disposition == ToolDisposition::Succeeded
-                    && observation.guard.is_some()
+                    && observation.attestation.is_some()
             )
     );
     assert!(
@@ -393,7 +393,7 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
         "ordinary successful Workspace, Skill and MCP observations do not become cache uncertainty"
     );
     assert_eq!(observations[13].disposition, ToolDisposition::Denied);
-    assert!(observations[13].guard.is_none());
+    assert!(observations[13].attestation.is_none());
     let read: Value = serde_json::from_str(&observations[3].output).unwrap();
     assert_eq!(read["text"], "int main(void) { return 0; }\n");
     let command: Value = serde_json::from_str(&observations[6].output).unwrap();
@@ -492,24 +492,29 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
             .iter()
             .filter(|event| matches!(event.event, arany::Event::GoalActiveTimeReserved { .. }))
             .count();
-        if observation
+        match observation
             .observation
             .as_ref()
-            .is_some_and(|observation| observation.guard.is_some())
+            .and_then(|observation| observation.attestation.as_ref())
         {
-            assert_eq!(
-                active_reservations, 1,
-                "an admitted Tool reserves its Goal action after ToolStarted and before Guard setup"
-            );
-            assert!(matches!(
-                events.get(finish + 1).map(|event| &event.event),
-                Some(arany::Event::GoalActiveTimeSettled { run_id, .. }) if *run_id == outcome.run.id
-            ));
-        } else {
-            assert_eq!(
+            Some(arany::Attestation::Guard(_)) => {
+                assert_eq!(
+                    active_reservations, 1,
+                    "an admitted Tool reserves its Goal action after ToolStarted and before Guard setup"
+                );
+                assert!(matches!(
+                    events.get(finish + 1).map(|event| &event.event),
+                    Some(arany::Event::GoalActiveTimeSettled { run_id, .. }) if *run_id == outcome.run.id
+                ));
+            }
+            Some(arany::Attestation::InProcess { .. }) => assert_eq!(
+                active_reservations, 0,
+                "an in-process read carries its time into the next active segment"
+            ),
+            None => assert_eq!(
                 active_reservations, 0,
                 "a denied Tool that never reaches Guard has no action reservation"
-            );
+            ),
         }
     }
     store.close().await.unwrap();
@@ -730,7 +735,7 @@ async fn over_max_command_is_closed_as_a_non_dispatched_limit() {
     let observation = tool.observation.as_ref().unwrap();
     assert_eq!(tool.intent.limits.runtime_ms, 2_000);
     assert_eq!(observation.disposition, ToolDisposition::Limit);
-    assert!(observation.guard.is_none());
+    assert!(observation.attestation.is_none());
     assert_eq!(observation.cache_update, arany::CacheUpdate::NotApplicable);
     assert!(
         observation
@@ -764,7 +769,7 @@ async fn over_max_command_is_closed_as_a_non_dispatched_limit() {
     assert!(matches!(
         &events[finished].event,
         arany::Event::ToolFinished { observation, .. }
-            if observation.disposition == ToolDisposition::Limit && observation.guard.is_none()
+            if observation.disposition == ToolDisposition::Limit && observation.attestation.is_none()
     ));
     assert!(!events[started + 1..finished].iter().any(|event| matches!(
         &event.event,
@@ -784,6 +789,143 @@ async fn over_max_command_is_closed_as_a_non_dispatched_limit() {
             .any(|item| item.contains("Lower request or change /settings"))
     );
     store.close().await.unwrap();
+}
+
+const IN_PROCESS_READS: usize = 24;
+
+struct InProcessReads;
+#[async_trait::async_trait]
+impl Provider for InProcessReads {
+    fn identity(&self) -> &arany::ProviderIdentity {
+        static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::new("scripted", "read-model", arany::Provenance::native())
+            });
+        &IDENTITY
+    }
+
+    async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        let step = request
+            .input
+            .tools
+            .as_ref()
+            .ok_or(ProviderError::InvalidOutcome)?
+            .observation_count();
+        let outcome = match step % 3 {
+            _ if step == IN_PROCESS_READS => ProviderOutcome::Finish(Finish {
+                summary: "Inspected the Workspace".into(),
+                result: "Read, listed and searched in process.".into(),
+            }),
+            0 => crate::tool_outcome(
+                ToolCall::Read {
+                    path: "src/main.c".into(),
+                    offset: 0,
+                    limit: 65536,
+                },
+                None,
+            ),
+            1 => crate::tool_outcome(ToolCall::List { path: "src".into() }, None),
+            _ => crate::tool_outcome(
+                ToolCall::Search {
+                    path: "src".into(),
+                    query: "main".into(),
+                },
+                None,
+            ),
+        };
+        Ok(ProviderResponse {
+            turn: arany::ProviderTurn::scripted(),
+            outcome,
+            response_id: None,
+            usage: arany::Usage {
+                input_tokens: None,
+                output_tokens: None,
+                ..Default::default()
+            },
+            wire_provenance: None,
+        })
+    }
+
+    async fn compact(&self, _: CompactionRequest) -> Result<CompactionResponse, ProviderError> {
+        Err(ProviderError::InvalidOutcome)
+    }
+}
+
+#[tokio::test]
+async fn in_process_reads_are_attested_and_replay_after_exit_or_a_crash() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    private_file(
+        &workspace.join("src/main.c"),
+        b"int main(void) { return 0; }\n",
+    );
+    private_file(&workspace.join("src/.env"), b"TOKEN=secret-canary\n");
+    let state_path = temp.path().join("state");
+    let state = StateRoot::admit(&state_path).unwrap();
+    private_file(
+        &state_path.join("tools.json"),
+        br#"{"version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+    );
+    let mut engine = Engine::open(state, InProcessReads).unwrap();
+    engine
+        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
+        .unwrap();
+    let outcome = engine.run(proposal_request(&workspace)).await.unwrap();
+    engine.close().await.unwrap();
+    assert_eq!(
+        outcome.run.status,
+        RunStatus::Finished,
+        "{}",
+        crate::safe_run_diagnostics(&outcome.run)
+    );
+    assert_eq!(outcome.run.tools.len(), IN_PROCESS_READS);
+    for tool in &outcome.run.tools {
+        let observation = tool.observation.as_ref().unwrap();
+        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+        assert!(matches!(
+            observation.attestation,
+            Some(arany::Attestation::InProcess { .. })
+        ));
+        assert!(!observation.output.contains("secret-canary"));
+        assert!(!observation.output.contains(".env"));
+    }
+
+    // A fresh read-only Store stands in for the next process.
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+    let events = store.load_session(outcome.session_id).await.unwrap();
+    store.close().await.unwrap();
+    let replay = SessionView::replay(outcome.session_id, &events)
+        .unwrap()
+        .unwrap();
+    assert_eq!(replay.runs[0], outcome.run);
+
+    let mut durations = Vec::new();
+    let mut started_at = None;
+    for envelope in &events {
+        match &envelope.event {
+            arany::Event::ToolStarted { .. } => started_at = Some(envelope.created_at_ms),
+            arany::Event::ToolFinished { .. } => {
+                durations.push(envelope.created_at_ms - started_at.take().unwrap());
+            }
+            _ => {}
+        }
+    }
+    durations.sort_unstable();
+    let p95 = durations[(durations.len() * 95).div_ceil(100) - 1];
+    eprintln!("in-process read journal latency ms: p95={p95} all={durations:?}");
+    assert!(p95 <= 50, "Read p95 {p95} ms exceeds 50 ms: {durations:?}");
+
+    let last_started = events
+        .iter()
+        .rposition(|envelope| matches!(envelope.event, arany::Event::ToolStarted { .. }))
+        .unwrap();
+    let crashed = SessionView::replay(outcome.session_id, &events[..=last_started])
+        .unwrap()
+        .unwrap();
+    assert_eq!(crashed.runs[0].status, RunStatus::Interrupted);
+    assert_eq!(crashed.goals[0].status, arany::GoalStatus::Interrupted);
+    assert!(crashed.runs[0].tools.last().unwrap().observation.is_none());
 }
 
 fn assert_goal_provider_request(request: &ProviderRequest, expected_budget: &arany::GoalBudget) {
@@ -1406,7 +1548,7 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
                 ToolDisposition::Failed,
                 "a helper that never receives GO cannot edit the file"
             );
-            assert!(observation.guard.is_none());
+            assert!(observation.attestation.is_none());
             assert!(observation.output.contains("no operation was dispatched"));
             assert_eq!(
                 failed_requests.lock().unwrap().len(),
@@ -1922,7 +2064,7 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
         let observation = outcome.run.tools[0].observation.as_ref().unwrap();
         assert_eq!(observation.disposition, expected, "case {name}");
         assert_proposal_requests(&requests.lock().unwrap(), 3);
-        assert!(observation.guard.is_some());
+        assert!(observation.attestation.is_some());
         if name == "descendant" {
             let unit = format!("arany-tool-{}.service", observation.intent.id);
             let mut command = std::process::Command::new("/usr/bin/systemctl");
@@ -2760,7 +2902,7 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
                 .observation
                 .as_ref()
                 .unwrap()
-                .guard
+                .attestation
                 .is_some()
                 == allowed
         );
@@ -2947,7 +3089,7 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
     for index in 0..3 {
         let observation = outcome.run.tools[index].observation.as_ref().unwrap();
         assert_eq!(observation.disposition, ToolDisposition::Succeeded);
-        assert!(observation.guard.is_some());
+        assert!(observation.attestation.is_some());
         assert!(
             output(index).get("failed").is_none(),
             "{}",
@@ -2975,7 +3117,7 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
     assert_eq!(subjects, ["second commit", "first commit"]);
     let failed = outcome.run.tools[3].observation.as_ref().unwrap();
     assert_eq!(failed.disposition, ToolDisposition::Failed);
-    assert!(failed.guard.is_some());
+    assert!(failed.attestation.is_some());
 
     let requests = requests.lock().unwrap().clone();
     let catalog: Value =

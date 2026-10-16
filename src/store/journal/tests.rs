@@ -195,10 +195,23 @@ fn run_start_admission_reserves_the_current_version_payload_exceptions() {
     assert_eq!(
         crate::store::RUN_START_EXTRA_BYTES,
         event_payload_limit("MessageAccepted", message) + event_payload_limit("GoalStarted", goal)
-            - 2 * crate::store::MAX_EVENT_BYTES
+            - 2 * crate::store::MAX_EVENT_SLOT_BYTES
     );
     assert_eq!(
         event_payload_limit("MessageAccepted", message - 1),
+        crate::store::MAX_EVENT_BYTES
+    );
+}
+
+#[test]
+fn every_event_slot_admits_a_current_tool_observation() {
+    let finished = payload_version("ToolFinished").expect("payload version");
+    assert_eq!(
+        event_payload_limit("ToolFinished", finished),
+        crate::tools::types::MAX_TOOL_OBSERVATION_BYTES
+    );
+    assert_eq!(
+        event_payload_limit("ToolFinished", finished - 1),
         crate::store::MAX_EVENT_BYTES
     );
 }

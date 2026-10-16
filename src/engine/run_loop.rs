@@ -1531,12 +1531,14 @@ impl<'a> RunLoop<'a> {
                     intent: intent.clone(),
                     disposition: crate::tools::ToolDisposition::Succeeded,
                     output: String::new(),
-                    guard: Some(crate::tools::GuardReceipt {
-                        contract_version: 1,
-                        intent_digest: intent.digest(),
-                        enforcement_digest: intent.enforcement_digest,
-                        limits: intent.limits.clone(),
-                    }),
+                    attestation: Some(crate::tools::Attestation::Guard(
+                        crate::tools::GuardReceipt {
+                            contract_version: 1,
+                            intent_digest: intent.digest(),
+                            enforcement_digest: intent.enforcement_digest,
+                            limits: intent.limits.clone(),
+                        },
+                    )),
                     cache_update: crate::tools::CacheUpdate::NotApplicable,
                 });
             if command {
@@ -1551,12 +1553,14 @@ impl<'a> RunLoop<'a> {
                 reserved_step
                     .observations
                     .push(crate::tools::ToolObservation {
-                        guard: Some(crate::tools::GuardReceipt {
-                            contract_version: 1,
-                            intent_digest: integration.digest(),
-                            enforcement_digest: integration.enforcement_digest,
-                            limits: integration.limits.clone(),
-                        }),
+                        attestation: Some(crate::tools::Attestation::Guard(
+                            crate::tools::GuardReceipt {
+                                contract_version: 1,
+                                intent_digest: integration.digest(),
+                                enforcement_digest: integration.enforcement_digest,
+                                limits: integration.limits.clone(),
+                            },
+                        )),
                         intent: integration,
                         disposition: crate::tools::ToolDisposition::Succeeded,
                         output: String::new(),
@@ -1597,7 +1601,7 @@ impl<'a> RunLoop<'a> {
                 return Ok(false);
             }
             let changeset = if command
-                && observation.guard.is_some()
+                && observation.attestation.is_some()
                 && matches!(
                     observation.disposition,
                     crate::tools::ToolDisposition::Succeeded
@@ -2053,7 +2057,7 @@ impl<'a> RunLoop<'a> {
                     disposition: crate::tools::ToolDisposition::Denied,
                     output: "Goal Provider-call budget exhausted; no operation was dispatched"
                         .into(),
-                    guard: None,
+                    attestation: None,
                     cache_update: crate::tools::CacheUpdate::NotApplicable,
                 },
                 false,
@@ -2071,7 +2075,7 @@ impl<'a> RunLoop<'a> {
                 intent,
                 disposition: crate::tools::ToolDisposition::Limit,
                 output: crate::tools::types::command_timeout_limit_message(requested, maximum),
-                guard: None,
+                attestation: None,
                 cache_update: crate::tools::CacheUpdate::NotApplicable,
             };
             self.append(Event::ToolFinished {
@@ -2124,7 +2128,10 @@ impl<'a> RunLoop<'a> {
                 }
             }
         }
+        // An in-process read waits for no Guard capacity; its time stays carried active time.
+        let guard_site = intent.call.facts().site == crate::tools::catalog::Site::Guard;
         let mut queue_pause = if approved
+            && guard_site
             && goal_allows
             && !active_time_exhausted
             && self.controls.goal_budget.can_start_provider_call()
@@ -2151,7 +2158,7 @@ impl<'a> RunLoop<'a> {
                     output:
                         "The effect is outside the active Goal plan; no operation was dispatched"
                             .into(),
-                    guard: None,
+                    attestation: None,
                     cache_update: crate::tools::CacheUpdate::NotApplicable,
                 },
                 None,
@@ -2167,7 +2174,7 @@ impl<'a> RunLoop<'a> {
                     intent,
                     disposition: crate::tools::ToolDisposition::Denied,
                     output: "Goal paused before this operation; no operation was dispatched".into(),
-                    guard: None,
+                    attestation: None,
                     cache_update: crate::tools::CacheUpdate::NotApplicable,
                 },
                 None,
@@ -2178,13 +2185,15 @@ impl<'a> RunLoop<'a> {
                     intent,
                     disposition: crate::tools::ToolDisposition::Limit,
                     output: "Goal token budget exhausted; no operation was dispatched".into(),
-                    guard: None,
+                    attestation: None,
                     cache_update: crate::tools::CacheUpdate::NotApplicable,
                 },
                 None,
             )
         } else if approved {
-            let mut queue_pause = Some(queue_pause.ok_or(EngineError::CoordinatorFailed)?);
+            if guard_site && queue_pause.is_none() {
+                return Err(EngineError::CoordinatorFailed);
+            }
             let runtime =
                 runtime.with_queue_progress(self.progress.map(ProgressPublisher::tool_queue));
             let (active_sender, mut active_receiver) =
@@ -2286,7 +2295,7 @@ impl<'a> RunLoop<'a> {
                     intent,
                     disposition: crate::tools::ToolDisposition::Denied,
                     output: "Approval was not granted; no operation was dispatched".into(),
-                    guard: None,
+                    attestation: None,
                     cache_update: crate::tools::CacheUpdate::NotApplicable,
                 },
                 None,
@@ -2611,7 +2620,7 @@ fn active_time_limit_observation(
         intent,
         disposition: crate::tools::ToolDisposition::Limit,
         output: "Goal active-time budget exhausted; no operation was dispatched".into(),
-        guard: None,
+        attestation: None,
         cache_update: crate::tools::CacheUpdate::NotApplicable,
     }
 }

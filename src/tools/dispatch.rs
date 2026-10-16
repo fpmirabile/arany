@@ -1,6 +1,6 @@
 use super::catalog::Family;
 use super::guard::GuardContext;
-use super::types::ToolCall;
+use super::types::{EffectIntent, ToolCall, ToolDisposition};
 use super::{ToolError, fs, git, mcp, process, skills};
 
 pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
@@ -31,5 +31,43 @@ pub(super) fn failed(call: &ToolCall, output: &str) -> bool {
         ToolCall::McpCall { .. } => value().map_or(true, |value| value["is_error"] == true),
         _ if call.is_git_read() => value().map_or(true, |value| value.get("failed").is_some()),
         _ => false,
+    }
+}
+
+/// The journaled disposition and output of one executed call; output over its budget is a `Limit`.
+pub(super) fn outcome(
+    intent: &EffectIntent,
+    result: Result<String, ToolError>,
+) -> (ToolDisposition, String) {
+    match result {
+        Ok(output) if output.len() <= intent.limits.result_bytes as usize => {
+            let disposition = if failed(&intent.call, &output) {
+                ToolDisposition::Failed
+            } else {
+                ToolDisposition::Succeeded
+            };
+            (disposition, output)
+        }
+        Ok(_) | Err(ToolError::Limit) => (
+            ToolDisposition::Limit,
+            "Tool result or resource limit reached".into(),
+        ),
+        Err(ToolError::Conflict) => (
+            ToolDisposition::Conflict,
+            "File changed or edit did not match exactly once; read it again".into(),
+        ),
+        Err(ToolError::Path) => (
+            ToolDisposition::Denied,
+            "File path is unavailable or outside the admitted regular-file boundary".into(),
+        ),
+        Err(ToolError::Uncertain) => (
+            ToolDisposition::Uncertain,
+            "Filesystem change may have occurred; inspect current state before another attempt"
+                .into(),
+        ),
+        Err(_) => (
+            ToolDisposition::Failed,
+            "Tool operation failed; no automatic retry".into(),
+        ),
     }
 }

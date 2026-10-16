@@ -288,7 +288,7 @@ pub(crate) fn event_failure(event: &crate::session::Event) {
                 "tool operation={} disposition={:?} receipt={} stops_run={}",
                 observation.intent.call.label(),
                 observation.disposition,
-                observation.guard.is_some(),
+                observation.attestation.is_some(),
                 observation.stops_run()
             );
         }
@@ -543,7 +543,7 @@ mod tests {
                 },
                 disposition: crate::tools::ToolDisposition::Uncertain,
                 output: CANARY.into(),
-                guard: None,
+                attestation: None,
                 cache_update: crate::tools::CacheUpdate::NotApplicable,
             },
         });

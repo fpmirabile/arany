@@ -72,13 +72,14 @@ pub(crate) fn workspace_identity(workspace: &Path) -> Result<(u64, u64), ToolErr
     let root = fs::open_directory(workspace)?;
     fs::identity(&root)
 }
+use catalog::Site;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub use types::{
-    CacheUpdate, CommandChangeset, EffectIntent, FileChange, FileVersion, GuardReceipt, MAX_SKILLS,
-    NetworkGrant, ToolCall, ToolContext, ToolDisposition, ToolLimits, ToolObservation,
-    ToolPolicyReceipt, ToolRequest, ToolResourceClass, ToolResourceProfile, ToolResourceSettings,
-    ToolStep,
+    Attestation, CacheUpdate, CommandChangeset, EffectIntent, FileChange, FileVersion,
+    GuardReceipt, MAX_SKILLS, NetworkGrant, ToolCall, ToolContext, ToolDisposition, ToolLimits,
+    ToolObservation, ToolPolicyReceipt, ToolRequest, ToolResourceClass, ToolResourceProfile,
+    ToolResourceSettings, ToolStep,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -113,6 +114,8 @@ pub enum ToolError {
 pub(crate) struct ToolRuntime {
     config: Config,
     workspace: PathBuf,
+    // Opened once at admission; `None` only in a runtime rebuilt inside a Guard unit, which never reads in process.
+    workspace_root: Option<std::sync::Arc<cap_std::fs::Dir>>,
     workspace_identity: (u64, u64),
     guard_executable: PathBuf,
     enforcement_digest: [u8; 32],
@@ -348,6 +351,7 @@ impl ToolRuntime {
                     .map_err(|_| ToolError::ProtectionUnavailable)?,
             )),
             workspace: workspace.to_owned(),
+            workspace_root: Some(std::sync::Arc::new(root)),
             workspace_identity,
             guard_executable,
             enforcement_digest,
@@ -446,6 +450,14 @@ impl ToolRuntime {
         }
     }
 
+    /// Native preparation and handshake time the Engine adds to a Tool's action deadline.
+    pub(crate) fn reservation_overhead(&self, call: &ToolCall) -> Duration {
+        match call.facts().site {
+            Site::InProcess => Duration::ZERO,
+            Site::Guard => guard::RESERVATION_OVERHEAD,
+        }
+    }
+
     pub(crate) async fn execute(
         &self,
         intent: EffectIntent,
@@ -456,18 +468,109 @@ impl ToolRuntime {
                 intent,
                 disposition: ToolDisposition::Denied,
                 output: "Tool operation is outside the pinned grant".into(),
-                guard: None,
+                attestation: None,
                 cache_update: crate::tools::CacheUpdate::NotApplicable,
             };
         }
-        match guard::execute(self, &intent, cancellation).await {
-            Ok(observation) => observation,
-            Err(error) => {
-                let cache_update =
-                    guard_error_cache_update(&intent.call, self.cache_state.is_some());
-                uncertain_observation(intent, error, cache_update)
-            }
+        match intent.call.facts().site {
+            Site::InProcess => self.run_in_process(intent, cancellation).await,
+            Site::Guard => match guard::execute(self, &intent, cancellation).await {
+                Ok(observation) => observation,
+                Err(error) => {
+                    let cache_update =
+                        guard_error_cache_update(&intent.call, self.cache_state.is_some());
+                    uncertain_observation(intent, error, cache_update)
+                }
+            },
         }
+    }
+
+    /// The admitted Workspace handle, after the checks the Guard helper applies before Ready.
+    fn pinned_root(
+        &self,
+        intent: &EffectIntent,
+    ) -> Result<std::sync::Arc<cap_std::fs::Dir>, ToolError> {
+        let root = self
+            .workspace_root
+            .clone()
+            .ok_or(ToolError::ProtectionUnavailable)?;
+        if !intent.valid()
+            || intent.policy_digest != self.config.digest()
+            || intent.expires_at_ms <= now_ms()
+        {
+            return Err(ToolError::Configuration);
+        }
+        if fs::identity(&root)? != (intent.workspace_device, intent.workspace_inode) {
+            return Err(ToolError::ChangedInput);
+        }
+        fs::validate_workspace(self)?;
+        Ok(root)
+    }
+
+    /// Runs a read-only operation on the Workspace handle pinned at admission, with the Guard's
+    /// intent, expiry and device/inode checks; nothing it reads can change the Workspace.
+    async fn run_in_process(
+        &self,
+        intent: EffectIntent,
+        mut cancellation: Cancellation,
+    ) -> ToolObservation {
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_millis(u64::from(intent.limits.runtime_ms));
+        if cancellation.is_cancelled() {
+            return cancelled_read(intent);
+        }
+        let root = match self.pinned_root(&intent) {
+            Ok(root) => root,
+            Err(error) => return unstarted_observation(intent, error),
+        };
+        let (call, config) = (intent.call.clone(), self.config.clone());
+        let result_bytes = intent.limits.result_bytes as usize;
+        let read =
+            tokio::task::spawn_blocking(move || fs::inspect(&root, &call, &config, result_bytes));
+        let result = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return cancelled_read(intent),
+            joined = tokio::time::timeout_at(deadline, read) => match joined {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err(ToolError::Operation),
+                Err(_) => {
+                    return ToolObservation {
+                        intent,
+                        disposition: ToolDisposition::Limit,
+                        output: "Tool result or resource limit reached".into(),
+                        attestation: None,
+                        cache_update: CacheUpdate::NotApplicable,
+                    };
+                }
+            },
+        };
+        let (disposition, output) = dispatch::outcome(&intent, result);
+        let mut observation = ToolObservation {
+            attestation: Some(Attestation::InProcess {
+                policy_digest: intent.policy_digest,
+                workspace_device: intent.workspace_device,
+                workspace_inode: intent.workspace_inode,
+            }),
+            intent,
+            disposition,
+            output,
+            cache_update: CacheUpdate::NotApplicable,
+        };
+        if !observation.valid() {
+            observation.disposition = ToolDisposition::Limit;
+            observation.output = "Tool result exceeded its reserved serialized capacity".into();
+        }
+        observation
+    }
+}
+
+fn cancelled_read(intent: EffectIntent) -> ToolObservation {
+    ToolObservation {
+        intent,
+        disposition: ToolDisposition::Cancelled,
+        output: "Read cancelled; nothing in the Workspace changed".into(),
+        attestation: None,
+        cache_update: CacheUpdate::NotApplicable,
     }
 }
 
@@ -493,17 +596,21 @@ pub(crate) fn failure_stage(error: &ToolError) -> &'static str {
 
 fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservation {
     crate::diagnostics::guard_failure(&error);
+    let site = match intent.call.facts().site {
+        Site::InProcess => "Tool",
+        Site::Guard => "Guard",
+    };
     ToolObservation {
-        intent,
-        disposition: ToolDisposition::Failed,
         output: match error {
             ToolError::QueueFull => format!("{error}. No operation was dispatched."),
             _ => format!(
-                "Guard {} unavailable before dispatch; no operation was dispatched.",
+                "{site} {} unavailable before dispatch; no operation was dispatched.",
                 failure_stage(&error)
             ),
         },
-        guard: None,
+        intent,
+        disposition: ToolDisposition::Failed,
+        attestation: None,
         cache_update: crate::tools::CacheUpdate::NotApplicable,
     }
 }
@@ -521,7 +628,7 @@ fn uncertain_observation(
         output: format!(
             "Guard {stage} unconfirmed; effects may have occurred. Do not retry automatically."
         ),
-        guard: None,
+        attestation: None,
         cache_update,
     }
 }

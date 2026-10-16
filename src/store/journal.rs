@@ -43,7 +43,7 @@ pub(super) fn admit_operation(
     let page_count: i64 = transaction.query_row("PRAGMA page_count", [], |row| row.get(0))?;
     let page_size: i64 = transaction.query_row("PRAGMA page_size", [], |row| row.get(0))?;
     let event_bytes = i64::try_from(event_slots).map_err(|_| StoreError::ReplayLimit)?
-        * (super::MAX_EVENT_BYTES as i64 + EVENT_SQLITE_OVERHEAD_PAGES * page_size);
+        * (super::MAX_EVENT_SLOT_BYTES as i64 + EVENT_SQLITE_OVERHEAD_PAGES * page_size);
     let run_start_extra = if run_start {
         super::RUN_START_EXTRA_BYTES as i64
     } else {

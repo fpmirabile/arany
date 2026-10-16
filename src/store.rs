@@ -41,13 +41,18 @@ const MAX_ESCAPED_OBJECTIVE_BYTES: usize = 6 * crate::session::MAX_USER_MESSAGE_
 const MAX_GOAL_STARTED_BYTES: usize = MAX_ESCAPED_OBJECTIVE_BYTES + 16 * 1024;
 const MAX_MESSAGE_ACCEPTED_BYTES: usize =
     MAX_ESCAPED_OBJECTIVE_BYTES + crate::provider::MAX_IMAGE_BYTES.div_ceil(3) * 4 + 16 * 1024;
+const MAX_TOOL_FINISHED_BYTES: usize = crate::tools::types::MAX_TOOL_OBSERVATION_BYTES;
+/// Bytes admission reserves per Event slot: the largest payload any Event outside Run start may carry.
+const MAX_EVENT_SLOT_BYTES: usize = MAX_TOOL_FINISHED_BYTES;
+const _: () = assert!(MAX_EVENT_SLOT_BYTES >= MAX_EVENT_BYTES);
 /// Run start writes one `GoalStarted` and one `MessageAccepted` beyond the per-slot bound.
 const RUN_START_EXTRA_BYTES: usize =
-    MAX_GOAL_STARTED_BYTES + MAX_MESSAGE_ACCEPTED_BYTES - 2 * MAX_EVENT_BYTES;
+    MAX_GOAL_STARTED_BYTES + MAX_MESSAGE_ACCEPTED_BYTES - 2 * MAX_EVENT_SLOT_BYTES;
 fn event_payload_limit(kind: &str, version: i64) -> usize {
     match kind {
         "MessageAccepted" if payload_version(kind) == Some(version) => MAX_MESSAGE_ACCEPTED_BYTES,
         "GoalStarted" if payload_version(kind) == Some(version) => MAX_GOAL_STARTED_BYTES,
+        "ToolFinished" if payload_version(kind) == Some(version) => MAX_TOOL_FINISHED_BYTES,
         _ => MAX_EVENT_BYTES,
     }
 }

@@ -79,12 +79,12 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             "changeset": {"files": []}
         })
         .to_string(),
-        guard: Some(arany::GuardReceipt {
+        attestation: Some(arany::Attestation::Guard(arany::GuardReceipt {
             contract_version: 1,
             intent_digest: Sha256::digest(serde_json::to_vec(&intent).unwrap()).into(),
             enforcement_digest: intent.enforcement_digest,
             limits: intent.limits.clone(),
-        }),
+        })),
         cache_update: arany::CacheUpdate::NotApplicable,
     };
     let record = |disposition| Event::ProviderCallRecorded {
@@ -310,7 +310,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                     observation.intent.limits.cache_transfer_ms = 0;
                     observation.disposition = ToolDisposition::Limit;
                     observation.output = "Timeout 2000 ms exceeds pinned max 1000 ms. Lower request or change /settings; Goal remains pinned.".into();
-                    observation.guard = None;
+                    observation.attestation = None;
                     observation.cache_update = arany::CacheUpdate::NotApplicable;
                 }
                 _ => {}
@@ -334,12 +334,12 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             "changeset": {"files": []}
         })
         .to_string();
-        observation.guard = Some(arany::GuardReceipt {
+        observation.attestation = Some(arany::Attestation::Guard(arany::GuardReceipt {
             contract_version: 1,
             intent_digest: digest,
             enforcement_digest: observation.intent.enforcement_digest,
             limits: observation.intent.limits.clone(),
-        });
+        }));
     }
     assert!(
         replay(dispatched_over_max).is_err(),
@@ -459,7 +459,11 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             }
             5 => {
                 if let Event::ToolFinished { observation, .. } = &mut row[TOOL_FINISHED] {
-                    observation.guard.as_mut().unwrap().intent_digest = [9; 32];
+                    let Some(arany::Attestation::Guard(receipt)) = &mut observation.attestation
+                    else {
+                        unreachable!()
+                    };
+                    receipt.intent_digest = [9; 32];
                 }
             }
             6 => {
@@ -491,7 +495,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             10 => {
                 if let Event::ToolFinished { observation, .. } = &mut row[TOOL_FINISHED] {
                     observation.disposition = ToolDisposition::Failed;
-                    observation.guard = None;
+                    observation.attestation = None;
                 }
             }
             _ => unreachable!(),
@@ -504,7 +508,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             observation.disposition = ToolDisposition::Denied;
             observation.output = "UNTRUSTED_TOOL_ERROR_CANARY".into();
             if !guarded {
-                observation.guard = None;
+                observation.attestation = None;
             }
         }
         if later_failure {
@@ -586,12 +590,12 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         observation: arany::ToolObservation {
             disposition,
             output,
-            guard: Some(arany::GuardReceipt {
+            attestation: Some(arany::Attestation::Guard(arany::GuardReceipt {
                 contract_version: 1,
                 intent_digest: Sha256::digest(serde_json::to_vec(&intent).unwrap()).into(),
                 enforcement_digest: intent.enforcement_digest,
                 limits: intent.limits.clone(),
-            }),
+            })),
             intent,
             cache_update: arany::CacheUpdate::NotApplicable,
         },
@@ -789,7 +793,10 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                     unreachable!()
                 };
                 observation.intent = altered;
-                observation.guard.as_mut().unwrap().intent_digest =
+                let Some(arany::Attestation::Guard(receipt)) = &mut observation.attestation else {
+                    unreachable!()
+                };
+                receipt.intent_digest =
                     Sha256::digest(serde_json::to_vec(&observation.intent).unwrap()).into();
             }
             "missing-command" => {
@@ -800,7 +807,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                     unreachable!()
                 };
                 if case == "unattested" {
-                    observation.guard = None;
+                    observation.attestation = None;
                 } else {
                     observation.disposition = ToolDisposition::Denied;
                 }
@@ -816,7 +823,10 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                     unreachable!()
                 };
                 observation.intent = altered;
-                observation.guard.as_mut().unwrap().intent_digest =
+                let Some(arany::Attestation::Guard(receipt)) = &mut observation.attestation else {
+                    unreachable!()
+                };
+                receipt.intent_digest =
                     Sha256::digest(serde_json::to_vec(&observation.intent).unwrap()).into();
                 row.splice(
                     INTEGRATED_NEXT_CALL_RESERVED..INTEGRATED_NEXT_CALL_RESERVED,
@@ -883,7 +893,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         observation.intent = out_of_plan_intent.clone();
         observation.disposition = ToolDisposition::Denied;
         observation.output = "The effect is outside the active Goal plan".into();
-        observation.guard = None;
+        observation.attestation = None;
         observation.cache_update = arany::CacheUpdate::NotApplicable;
     }
     out_of_plan_integration.truncate(INTEGRATION_FINISHED + 1);
@@ -910,7 +920,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     assert_eq!(view.runs[0].status, RunStatus::Failed);
     let denied = view.runs[0].tools[1].observation.as_ref().unwrap();
     assert_eq!(denied.disposition, ToolDisposition::Denied);
-    assert!(denied.guard.is_none());
+    assert!(denied.attestation.is_none());
     assert_eq!(denied.cache_update, arany::CacheUpdate::NotApplicable);
 
     let mut forged_out_of_plan_publication = out_of_plan_integration;
@@ -924,12 +934,12 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     {
         observation.disposition = ToolDisposition::Succeeded;
         observation.output = "{\"applied\":1}".into();
-        observation.guard = Some(arany::GuardReceipt {
+        observation.attestation = Some(arany::Attestation::Guard(arany::GuardReceipt {
             contract_version: 1,
             intent_digest: Sha256::digest(serde_json::to_vec(&intent).unwrap()).into(),
             enforcement_digest: intent.enforcement_digest,
             limits: intent.limits.clone(),
-        });
+        }));
     }
     assert!(
         replay(forged_out_of_plan_publication).is_err(),
@@ -949,8 +959,10 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             };
             observation.intent = intent.clone();
             observation.output.clear();
-            observation.guard.as_mut().unwrap().intent_digest =
-                Sha256::digest(serde_json::to_vec(intent).unwrap()).into();
+            let Some(arany::Attestation::Guard(receipt)) = &mut observation.attestation else {
+                unreachable!()
+            };
+            receipt.intent_digest = Sha256::digest(serde_json::to_vec(intent).unwrap()).into();
             rows.extend([
                 Event::GoalProviderCallReserved {
                     goal_id: goal,
@@ -1552,7 +1564,10 @@ pub(super) async fn native_command_changeset_corpus(
         );
         let command = tools[0].observation.as_ref().unwrap();
         assert_eq!(command.intent.call, call);
-        assert!(command.guard.is_some(), "{case}: native command receipt");
+        assert!(
+            command.attestation.is_some(),
+            "{case}: native command receipt"
+        );
         assert_eq!(
             command.disposition,
             rejected.unwrap_or(if case == "nonzero" {
@@ -1596,7 +1611,7 @@ pub(super) async fn native_command_changeset_corpus(
                 "{case}: publication outcome"
             );
             assert_eq!(
-                integration.guard.is_some(),
+                integration.attestation.is_some(),
                 !human_denied && !matches!(case, "scope" | "scope-auto")
             );
         }
@@ -1661,7 +1676,7 @@ pub(super) async fn native_command_changeset_corpus(
                 );
                 let fresh = tools[2].observation.as_ref().unwrap();
                 assert_eq!(fresh.disposition, ToolDisposition::Succeeded);
-                assert!(fresh.guard.is_some());
+                assert!(fresh.attestation.is_some());
                 let result: serde_json::Value = serde_json::from_str(&fresh.output).unwrap();
                 assert_eq!(result["exit_code"], 0);
                 assert_eq!(result["stdout"], "fresh-binary-snapshot");

@@ -35,7 +35,7 @@ mod goal_recovery_tests {
                 } else {
                     String::new()
                 },
-                guard: None,
+                attestation: None,
                 cache_update: crate::tools::CacheUpdate::NotApplicable,
             }),
             review_call_index: None,
@@ -125,8 +125,8 @@ mod goal_replay_tests {
     use crate::provider::{AgentPhase, OutputTokenBound};
     use crate::session::events::{ChildGrant, CollaborationPolicy, GoalSuccessCriterion};
     use crate::tools::{
-        CacheUpdate, EffectIntent, GuardReceipt, ToolCall, ToolDisposition, ToolLimits,
-        ToolObservation, ToolPolicyReceipt,
+        CacheUpdate, EffectIntent, ToolCall, ToolDisposition, ToolLimits, ToolObservation,
+        ToolPolicyReceipt,
     };
 
     const GOAL_OBJECTIVE: &str = "Goal";
@@ -1853,7 +1853,7 @@ mod goal_replay_tests {
                     output:
                         "The effect is outside the active Goal plan; no operation was dispatched"
                             .into(),
-                    guard: None,
+                    attestation: None,
                     cache_update: CacheUpdate::NotApplicable,
                 },
             },
@@ -2006,12 +2006,7 @@ mod goal_replay_tests {
 
     fn observation_for(intent: EffectIntent, content: &[u8]) -> ToolObservation {
         ToolObservation {
-            guard: Some(GuardReceipt {
-                contract_version: 1,
-                intent_digest: intent.digest(),
-                enforcement_digest: intent.enforcement_digest,
-                limits: intent.limits.clone(),
-            }),
+            attestation: Some(crate::tools::Attestation::for_site(&intent)),
             intent,
             disposition: ToolDisposition::Succeeded,
             output: serde_json::json!({
@@ -2370,6 +2365,38 @@ mod goal_replay_tests {
             rejected(&view, tool_started(run, agent, &third)),
             "every declared request is already started"
         );
+    }
+
+    #[test]
+    fn an_in_process_attestation_cannot_finish_a_write() {
+        let (mut view, goal, run, agent) = primary_tool_session(true);
+        let write = child_intent(
+            run,
+            agent,
+            ToolCall::Write {
+                path: "src/lib.rs".into(),
+                expected_digest: None,
+                content: "after".into(),
+            },
+        );
+        apply(&mut view, reserve_child_call(goal, run, agent)).expect("primary call");
+        apply(&mut view, requesting_step(run, agent, 1)).expect("one-request step");
+        apply(&mut view, tool_started(run, agent, &write)).expect("write starts");
+        let mut read_attested = observation_for(write.clone(), b"after");
+        read_attested.attestation = Some(crate::tools::Attestation::InProcess {
+            policy_digest: write.policy_digest,
+            workspace_device: write.workspace_device,
+            workspace_inode: write.workspace_inode,
+        });
+        assert!(rejected(
+            &view,
+            Event::ToolFinished {
+                run_id: run,
+                agent_run_id: agent,
+                observation: read_attested,
+            }
+        ));
+        apply(&mut view, tool_finished(run, agent, &write, b"after")).expect("Guard receipt");
     }
 
     #[test]

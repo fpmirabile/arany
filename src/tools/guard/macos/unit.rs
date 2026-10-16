@@ -1699,6 +1699,7 @@ done
                 git: None,
             },
             workspace: workspace.to_path_buf(),
+            workspace_root: None,
             workspace_identity: crate::tools::fs::identity(&directory).unwrap(),
             guard_executable: std::env::current_exe().unwrap(),
             enforcement_digest: super::super::super::enforcement_digest(&[]).unwrap(),

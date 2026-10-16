@@ -539,7 +539,7 @@ mod tests {
             intent,
             disposition: crate::tools::ToolDisposition::Succeeded,
             output: String::new(),
-            guard: Some(guard),
+            attestation: Some(crate::tools::Attestation::Guard(guard)),
             cache_update: crate::tools::CacheUpdate::NotApplicable,
         });
         {

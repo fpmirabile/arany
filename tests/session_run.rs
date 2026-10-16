@@ -43,7 +43,7 @@ fn safe_run_diagnostics(run: &arany::RunView) -> String {
                 let result = serde_json::from_str::<serde_json::Value>(&observation.output).ok();
                 (
                     observation.disposition,
-                    observation.guard.is_some(),
+                    observation.attestation.is_some(),
                     observation.cache_update,
                     result
                         .as_ref()

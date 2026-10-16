@@ -646,13 +646,34 @@ async fn native_file_journey_helper() {
             observation.intent.limits.resource_profile,
             ToolResourceProfile::MacosSupervised
         );
-        let receipt = observation.guard.as_ref().unwrap();
-        assert_eq!(receipt.contract_version, 1);
-        assert_eq!(
-            receipt.enforcement_digest,
-            observation.intent.enforcement_digest
-        );
-        assert_eq!(receipt.limits, observation.intent.limits);
+        match observation.attestation.as_ref().unwrap() {
+            arany::Attestation::InProcess {
+                policy_digest,
+                workspace_device,
+                workspace_inode,
+            } => {
+                assert!(matches!(
+                    observation.intent.call,
+                    ToolCall::Read { .. } | ToolCall::List { .. } | ToolCall::Search { .. }
+                ));
+                assert_eq!(*policy_digest, observation.intent.policy_digest);
+                assert_eq!(
+                    (*workspace_device, *workspace_inode),
+                    (
+                        observation.intent.workspace_device,
+                        observation.intent.workspace_inode
+                    )
+                );
+            }
+            arany::Attestation::Guard(receipt) => {
+                assert_eq!(receipt.contract_version, 1);
+                assert_eq!(
+                    receipt.enforcement_digest,
+                    observation.intent.enforcement_digest
+                );
+                assert_eq!(receipt.limits, observation.intent.limits);
+            }
+        }
     }
     let command: serde_json::Value =
         serde_json::from_str(&run.tools[9].observation.as_ref().unwrap().output).unwrap();
@@ -1046,7 +1067,7 @@ async fn native_runtime_mount_journey_helper() {
     assert_eq!(refused_requests.lock().unwrap().len(), 1);
     let refused_observation = refused.run.tools[0].observation.as_ref().unwrap();
     assert_eq!(refused_observation.disposition, ToolDisposition::Failed);
-    assert!(refused_observation.guard.is_none());
+    assert!(refused_observation.attestation.is_none());
     assert!(
         refused_observation
             .output
@@ -1172,7 +1193,7 @@ async fn native_runtime_mount_journey_helper() {
         0,
         "cache seed disposition {:?}; Guard receipt {}; cache update {:?}; stdout bytes {}; stderr bytes {}; stderr stage {}; no space {}; permission denied {}; operation denied {}; missing command {}; trace {:?}",
         seed_observation.disposition,
-        seed_observation.guard.is_some(),
+        seed_observation.attestation.is_some(),
         seed_observation.cache_update,
         seed_result["stdout"].as_str().map_or(0, str::len),
         seed_stderr.len(),
@@ -1334,7 +1355,11 @@ async fn native_runtime_mount_journey_helper() {
         assert!(limits.cache_bytes >= 40 * 1024 * 1024);
         assert!(limits.cache_bytes <= limits.cache_requested_bytes);
         assert!(limits.cache_candidate_bytes <= limits.cache_bytes);
-        let receipt = observation.guard.as_ref().expect("Build Guard receipt");
+        let receipt = observation
+            .attestation
+            .as_ref()
+            .and_then(arany::Attestation::guard)
+            .expect("Build Guard receipt");
         assert_eq!(receipt.limits, *limits);
         assert_eq!(
             receipt.enforcement_digest,
@@ -1874,7 +1899,7 @@ int main(void) {
             },
             "{case}"
         );
-        assert_eq!(observation.guard.is_some(), attested, "{case}");
+        assert_eq!(observation.attestation.is_some(), attested, "{case}");
     }
 }
 
@@ -2164,7 +2189,7 @@ async fn native_git_journey_helper() {
     for index in 0..3 {
         let observation = outcome.run.tools[index].observation.as_ref().unwrap();
         assert_eq!(observation.disposition, ToolDisposition::Succeeded);
-        assert!(observation.guard.is_some());
+        assert!(observation.attestation.is_some());
         assert!(
             output(index).get("failed").is_none(),
             "{}",
@@ -2192,7 +2217,7 @@ async fn native_git_journey_helper() {
     assert_eq!(subjects, ["second commit", "first commit"]);
     let failed = outcome.run.tools[3].observation.as_ref().unwrap();
     assert_eq!(failed.disposition, ToolDisposition::Failed);
-    assert!(failed.guard.is_some());
+    assert!(failed.attestation.is_some());
 
     let requests = requests.lock().unwrap().clone();
     let catalog: serde_json::Value =

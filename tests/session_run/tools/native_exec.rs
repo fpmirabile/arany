@@ -166,7 +166,7 @@ fn cache_run_return(result: &Result<arany::RunOutcome, arany::EngineError>) -> S
                     tool.observation.as_ref().map(|observation| {
                         (
                             observation.disposition,
-                            observation.guard.is_some(),
+                            observation.attestation.is_some(),
                             observation.cache_update,
                             cache_public_failure_stage(&observation.output),
                             observation.output.len(),
@@ -466,7 +466,7 @@ async fn selected_cache_canary_helper_inner() {
         "cache seed status {:?}; tool disposition {:?}; guard receipt {}; cache update {:?}; exit {:?}; stdout bytes {}; stderr bytes {}",
         seed_outcome.run.status,
         seed_observation.map(|observation| observation.disposition),
-        seed_observation.is_some_and(|observation| observation.guard.is_some()),
+        seed_observation.is_some_and(|observation| observation.attestation.is_some()),
         seed_observation.map(|observation| observation.cache_update),
         seed_result
             .as_ref()
@@ -482,7 +482,7 @@ async fn selected_cache_canary_helper_inner() {
     );
     let seed_observation = seed_observation.unwrap();
     assert_eq!(seed_observation.disposition, ToolDisposition::Succeeded);
-    assert!(seed_observation.guard.is_some());
+    assert!(seed_observation.attestation.is_some());
     let seed_result = seed_result.unwrap();
     assert_eq!(seed_result["exit_code"], 0);
     cache_progress("seed-complete");
@@ -629,8 +629,9 @@ async fn selected_cache_canary_helper_inner() {
         assert!(limits.cache_bytes <= limits.cache_requested_bytes);
         assert!(limits.cache_candidate_bytes <= limits.cache_bytes);
         let receipt = observation
-            .guard
+            .attestation
             .as_ref()
+            .and_then(arany::Attestation::guard)
             .expect("successful cache command has a Guard receipt");
         let expected_digest: [u8; 32] =
             Sha256::digest(serde_json::to_vec(&observation.intent).unwrap()).into();
@@ -1106,7 +1107,7 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                     assert_eq!(observations[0]["workspace_effect"], "none");
                     assert!(
                         observations[0].get("intent").is_none()
-                            && observations[0].get("guard").is_none()
+                            && observations[0].get("attestation").is_none()
                     );
                     assert_eq!(
                         observations[0]["output"],

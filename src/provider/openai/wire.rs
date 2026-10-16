@@ -177,7 +177,9 @@ pub(crate) fn outcome_failure_diagnostic(
             Err(_) => (Stage::OutcomeFields, None),
             Ok(call) => {
                 let stage = match &call {
-                    crate::tools::ToolCall::Read { limit, .. } if !(1..=4096).contains(limit) => {
+                    crate::tools::ToolCall::Read { limit, .. }
+                        if !(1..=crate::tools::types::MAX_READ_PAGE_BYTES).contains(limit) =>
+                    {
                         Stage::OutcomeReadBounds
                     }
                     _ if !call.valid() => tool_failure_stage(&call),

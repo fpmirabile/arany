@@ -682,12 +682,12 @@ mod goal_report_tests {
             use_count: 1,
         };
         let command_observation = crate::tools::ToolObservation {
-            guard: Some(GuardReceipt {
+            attestation: Some(crate::tools::Attestation::Guard(GuardReceipt {
                 contract_version: 1,
                 intent_digest: command_intent.digest(),
                 enforcement_digest: command_intent.enforcement_digest,
                 limits: command_intent.limits.clone(),
-            }),
+            })),
             intent: command_intent.clone(),
             disposition: ToolDisposition::Succeeded,
             output: serde_json::json!({
@@ -724,12 +724,7 @@ mod goal_report_tests {
                 use_count: 1,
             };
             let observation = crate::tools::ToolObservation {
-                guard: Some(GuardReceipt {
-                    contract_version: 1,
-                    intent_digest: intent.digest(),
-                    enforcement_digest: intent.enforcement_digest,
-                    limits: intent.limits.clone(),
-                }),
+                attestation: Some(crate::tools::Attestation::for_site(&intent)),
                 intent: intent.clone(),
                 disposition: ToolDisposition::Succeeded,
                 output: serde_json::json!({
@@ -861,11 +856,11 @@ mod goal_report_tests {
             .as_mut()
             .expect("attested Command result");
         rejected_observation.intent = late_rejected_command.intent.clone();
-        rejected_observation
-            .guard
-            .as_mut()
-            .expect("Guard receipt")
-            .intent_digest = rejected_digest;
+        let Some(crate::tools::Attestation::Guard(receipt)) = &mut rejected_observation.attestation
+        else {
+            panic!("Guard receipt");
+        };
+        receipt.intent_digest = rejected_digest;
         rejected_observation.cache_update = CacheUpdate::Rejected;
         assert!(rejected_observation.valid());
         assert!(rejected_observation.attested_for(&late_rejected_command.intent));
@@ -888,12 +883,12 @@ mod goal_report_tests {
             use_count: 1,
         };
         let uncertain_observation = crate::tools::ToolObservation {
-            guard: Some(GuardReceipt {
+            attestation: Some(crate::tools::Attestation::Guard(GuardReceipt {
                 contract_version: 1,
                 intent_digest: uncertain_intent.digest(),
                 enforcement_digest: uncertain_intent.enforcement_digest,
                 limits: uncertain_intent.limits.clone(),
-            }),
+            })),
             intent: uncertain_intent.clone(),
             disposition: ToolDisposition::Uncertain,
             output: run.tools[0]
@@ -984,7 +979,7 @@ mod goal_report_tests {
             intent: failed_intent.clone(),
             disposition: ToolDisposition::Denied,
             output: String::new(),
-            guard: None,
+            attestation: None,
             cache_update: CacheUpdate::NotApplicable,
         };
         assert!(failed_observation.valid());
@@ -1042,11 +1037,11 @@ mod goal_report_tests {
                 let digest = command.intent.digest();
                 let observation = command.observation.as_mut().expect("successful Command");
                 observation.intent = command.intent.clone();
-                observation
-                    .guard
-                    .as_mut()
-                    .expect("Command Guard receipt")
-                    .intent_digest = digest;
+                let Some(crate::tools::Attestation::Guard(receipt)) = &mut observation.attestation
+                else {
+                    panic!("Command Guard receipt");
+                };
+                receipt.intent_digest = digest;
                 observation.cache_update = CacheUpdate::NotApplicable;
                 assert!(observation.valid());
                 assert!(observation.attested_for(&command.intent));
@@ -1074,7 +1069,7 @@ mod goal_report_tests {
                     intent: intent.clone(),
                     disposition: ToolDisposition::Denied,
                     output: String::new(),
-                    guard: None,
+                    attestation: None,
                     cache_update: CacheUpdate::NotApplicable,
                 };
                 assert!(observation.valid());
@@ -1142,7 +1137,7 @@ mod goal_report_tests {
             intent: timeout_intent.clone(),
             disposition: ToolDisposition::Limit,
             output: crate::tools::types::command_timeout_limit_message(2_000, 1_000),
-            guard: None,
+            attestation: None,
             cache_update: CacheUpdate::NotApplicable,
         };
         assert!(timeout_observation.valid());

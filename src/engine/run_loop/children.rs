@@ -13,7 +13,8 @@ use crate::session::{
 };
 use crate::telemetry::{AgentTrace, ProviderTrace, TraceOutcome};
 use crate::tools::{
-    CacheUpdate, GuardReceipt, ToolContext, ToolDisposition, ToolObservation, ToolRequest, ToolStep,
+    Attestation, CacheUpdate, GuardReceipt, ToolContext, ToolDisposition, ToolObservation,
+    ToolRequest, ToolStep,
 };
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -709,12 +710,12 @@ impl RunLoop<'_> {
                 intent: intent.clone(),
                 disposition: ToolDisposition::Succeeded,
                 output: String::new(),
-                guard: Some(GuardReceipt {
+                attestation: Some(Attestation::Guard(GuardReceipt {
                     contract_version: 1,
                     intent_digest: intent.digest(),
                     enforcement_digest: intent.enforcement_digest,
                     limits: intent.limits.clone(),
-                }),
+                })),
                 cache_update: CacheUpdate::NotApplicable,
             }],
             facts: None,
@@ -768,7 +769,7 @@ impl RunLoop<'_> {
                 disposition: ToolDisposition::Denied,
                 output: "The effect is outside the active Goal plan; no operation was dispatched"
                     .into(),
-                guard: None,
+                attestation: None,
                 cache_update: CacheUpdate::NotApplicable,
             }
         };

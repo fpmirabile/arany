@@ -1,4 +1,4 @@
-use super::catalog::Family;
+use super::catalog::{Family, Site};
 use crate::session::{AgentRunId, RunId};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -8,7 +8,11 @@ use std::path::{Component, Path};
 use uuid::Uuid;
 
 pub const MAX_TOOL_ARGUMENT_BYTES: usize = 16 * 1024;
-pub const MAX_TOOL_RESULT_BYTES: usize = 16 * 1024;
+pub const MAX_TOOL_RESULT_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_READ_PAGE_BYTES: u32 = 64 * 1024;
+/// A finished observation: the intent with its call plus an output that JSON escaping at most doubles.
+pub(crate) const MAX_TOOL_OBSERVATION_BYTES: usize =
+    2 * MAX_TOOL_RESULT_BYTES + MAX_TOOL_ARGUMENT_BYTES;
 pub const MAX_TOOL_CONTEXT_BYTES: usize = crate::session::MAX_CONTEXT_CONTENT_BYTES;
 pub const MAX_SKILLS: usize = 64;
 pub(crate) const MAX_TOOL_CATALOG_BYTES: usize = 16 * 1024;
@@ -588,43 +592,102 @@ impl GuardReceipt {
     }
 }
 
+/// Who executed an operation: the Engine in process, or the Guard with its receipt.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Attestation {
+    InProcess {
+        policy_digest: [u8; 32],
+        workspace_device: u64,
+        workspace_inode: u64,
+    },
+    Guard(GuardReceipt),
+}
+
+impl Attestation {
+    /// An attestation is valid only from the site the operation's facts name, so a read
+    /// attestation never authorizes a mutation.
+    pub(crate) fn valid_for(&self, intent: &EffectIntent) -> bool {
+        match self {
+            Self::InProcess {
+                policy_digest,
+                workspace_device,
+                workspace_inode,
+            } => {
+                intent.call.facts().site == Site::InProcess
+                    && *policy_digest == intent.policy_digest
+                    && *workspace_device == intent.workspace_device
+                    && *workspace_inode == intent.workspace_inode
+            }
+            Self::Guard(receipt) => {
+                intent.call.facts().site == Site::Guard && receipt.valid_for(intent)
+            }
+        }
+    }
+
+    /// The attestation the operation's own site issues for `intent`.
+    #[cfg(test)]
+    pub(crate) fn for_site(intent: &EffectIntent) -> Self {
+        match intent.call.facts().site {
+            Site::InProcess => Self::InProcess {
+                policy_digest: intent.policy_digest,
+                workspace_device: intent.workspace_device,
+                workspace_inode: intent.workspace_inode,
+            },
+            Site::Guard => Self::Guard(GuardReceipt {
+                contract_version: 1,
+                intent_digest: intent.digest(),
+                enforcement_digest: intent.enforcement_digest,
+                limits: intent.limits.clone(),
+            }),
+        }
+    }
+
+    pub fn guard(&self) -> Option<&GuardReceipt> {
+        match self {
+            Self::Guard(receipt) => Some(receipt),
+            Self::InProcess { .. } => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolObservation {
     pub intent: EffectIntent,
     pub disposition: ToolDisposition,
     pub output: String,
-    pub guard: Option<GuardReceipt>,
+    pub attestation: Option<Attestation>,
     pub cache_update: CacheUpdate,
 }
 
 impl ToolObservation {
     pub(crate) fn attested_for(&self, intent: &EffectIntent) -> bool {
-        self.intent == *intent && self.valid() && self.guard.is_some()
+        self.intent == *intent && self.valid() && self.attestation.is_some()
     }
     pub(crate) fn stops_run(&self) -> bool {
         matches!(
             self.disposition,
             ToolDisposition::Uncertain | ToolDisposition::Cancelled
-        ) || (self.disposition == ToolDisposition::Failed && self.guard.is_none())
+        ) || (self.disposition == ToolDisposition::Failed && self.attestation.is_none())
             || self.cache_update == CacheUpdate::Uncertain
     }
 
     pub(crate) fn valid(&self) -> bool {
         self.intent.valid()
             && self.output.len() <= self.intent.limits.result_bytes as usize
-            && serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= 48 * 1024)
+            && serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_OBSERVATION_BYTES)
             && self
-                .guard
+                .attestation
                 .as_ref()
-                .is_none_or(|guard| guard.valid_for(&self.intent))
-            && (self.disposition != ToolDisposition::Succeeded || self.guard.is_some())
+                .is_none_or(|attestation| attestation.valid_for(&self.intent))
+            && (self.disposition != ToolDisposition::Succeeded || self.attestation.is_some())
             && match self.cache_update {
                 CacheUpdate::NotApplicable => true,
                 CacheUpdate::NotAttempted | CacheUpdate::Uncertain => self.intent.call.is_process(),
                 CacheUpdate::Published | CacheUpdate::Rejected | CacheUpdate::Failed => {
                     self.intent.call.is_process()
-                        && self.guard.is_some()
+                        && self.attestation.is_some()
                         && self.disposition == ToolDisposition::Succeeded
                 }
             }
@@ -760,9 +823,9 @@ pub(crate) fn model_observation(observation: &ToolObservation) -> Value {
         match observation.disposition {
             ToolDisposition::Succeeded
                 if observation
-                    .guard
+                    .attestation
                     .as_ref()
-                    .is_some_and(|guard| guard.valid_for(&observation.intent)) =>
+                    .is_some_and(|attestation| attestation.valid_for(&observation.intent)) =>
             {
                 "applied"
             }

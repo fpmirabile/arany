@@ -41,6 +41,9 @@ const SYSTEM_PROGRAMS_CAP: usize = 2048;
 const PROFILE_BYTES_CAP: usize = 96 * 1024;
 pub(super) const SUPERVISION_INTERVAL: Duration = Duration::from_millis(10);
 pub(super) const PREPARATION_DEADLINE: Duration = Duration::from_secs(30);
+/// Native preparation and handshake time the Engine adds to a Guard call's action deadline.
+pub(in crate::tools) const RESERVATION_OVERHEAD: Duration =
+    PREPARATION_DEADLINE.saturating_add(Duration::from_secs(5));
 const PROCESS_LIMITS: &[(rustix::process::Resource, u64)] = &[
     (rustix::process::Resource::Nofile, 64),
     (rustix::process::Resource::Core, 0),
@@ -897,6 +900,7 @@ impl Task {
             cache_state: None,
             config: self.config,
             workspace: self.workspace,
+            workspace_root: None,
             workspace_identity: (self.intent.workspace_device, self.intent.workspace_inode),
             guard_executable: self.guard_executable,
             enforcement_digest: self.intent.enforcement_digest,

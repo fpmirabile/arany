@@ -379,7 +379,7 @@ pub fn render_run_feedback(run: &RunView) -> Option<String> {
             if run.tools.last().is_some_and(|tool| {
                 tool.observation.as_ref().is_some_and(|observation| {
                     observation.disposition == crate::tools::ToolDisposition::Failed
-                        && observation.guard.is_none()
+                        && observation.attestation.is_none()
                 })
             }) {
                 return Some("Error: Native Tool protection failed before the action started. That action did not run; earlier completed actions remain. Use /agents to inspect the Guard stage before submitting again.".into());
@@ -395,7 +395,7 @@ pub fn render_run_feedback(run: &RunView) -> Option<String> {
             if run.tools.last().is_some_and(|tool| {
                 tool.observation.as_ref().is_some_and(|observation| {
                     observation.disposition == crate::tools::ToolDisposition::Denied
-                        && observation.guard.is_none()
+                        && observation.attestation.is_none()
                 })
             }) {
                 return Some("Action denied or approval expired. No further action ran; earlier completed actions remain. Use /permissions or Shift+Tab to review approval settings.".into());
