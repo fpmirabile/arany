@@ -1,4 +1,6 @@
 use crate::session::{Event, SessionId};
+#[cfg(test)]
+use crate::store::BuildCacheIdentity;
 use std::io;
 use std::sync::Mutex;
 use tokio::sync::oneshot;
@@ -13,7 +15,9 @@ enum Fault {
         oneshot::Sender<()>,
         std::sync::mpsc::Receiver<()>,
     ),
+    #[cfg_attr(not(test), allow(dead_code))]
     CandidateSync(String),
+    #[cfg_attr(not(test), allow(dead_code))]
     CommitMarker(String),
 }
 
@@ -56,13 +60,15 @@ impl FaultPlan {
     }
 
     /// Makes the next candidate sync for this cache token fail once.
-    pub fn fail_candidate_sync(token: &str) {
-        plan().push(Fault::CandidateSync(token.to_owned()));
+    #[cfg(test)]
+    pub(crate) fn fail_candidate_sync(identity: &BuildCacheIdentity) {
+        plan().push(Fault::CandidateSync(identity.token()));
     }
 
     /// Makes the next committed-marker write for this cache token fail once.
-    pub fn fail_commit_marker(token: &str) {
-        plan().push(Fault::CommitMarker(token.to_owned()));
+    #[cfg(test)]
+    pub(crate) fn fail_commit_marker(identity: &BuildCacheIdentity) {
+        plan().push(Fault::CommitMarker(identity.token()));
     }
 
     pub(crate) fn append_fails(session_id: SessionId, event: &Event) -> bool {

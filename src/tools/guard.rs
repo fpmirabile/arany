@@ -1599,7 +1599,7 @@ mod tests {
         valid.write_all(&candidate).unwrap();
         valid.sync_all().unwrap();
         drop(valid);
-        crate::fault::FaultPlan::fail_commit_marker(&identity.token());
+        crate::fault::FaultPlan::fail_commit_marker(&identity);
         let mut observation = command_observation();
         publish_cache_candidate(
             &mut observation,
@@ -1631,7 +1631,7 @@ mod tests {
         stream.extend(&candidate);
         stream.extend(b"CACHE_DONE\n");
         let mut reader = tokio::io::BufReader::new(stream.as_slice());
-        crate::fault::FaultPlan::fail_candidate_sync(&identity.token());
+        crate::fault::FaultPlan::fail_candidate_sync(&identity);
         let outcome = receive_cache_candidate(&mut reader, &lease).await.unwrap();
         assert!(matches!(outcome, CacheCandidate::Failed));
         let mut trailer = String::new();
