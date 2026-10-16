@@ -132,7 +132,6 @@ fn percentiles(samples: &mut [Duration]) -> (Duration, Duration, Duration) {
 struct FastProvider;
 
 #[async_trait::async_trait]
-
 impl Provider for FastProvider {
     fn profile_name(&self) -> &str {
         "scripted"

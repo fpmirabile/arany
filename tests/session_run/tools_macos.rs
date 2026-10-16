@@ -156,8 +156,6 @@ pub(super) fn reset_tool_trace_stages(root: &Path) {
         }
     }
 }
-
-#[async_trait::async_trait]
 #[async_trait::async_trait]
 impl Provider for Journey {
     fn profile_name(&self) -> &str {
@@ -804,8 +802,6 @@ fn build_goal_request() -> arany::GoalRequest {
 }
 
 const RUNTIME_CACHE_CANARY: &str = "ARANY_RUNTIME_CACHE_PERSISTENCE_CANARY";
-
-#[async_trait::async_trait]
 #[async_trait::async_trait]
 impl Provider for RuntimeJourney {
     fn profile_name(&self) -> &str {

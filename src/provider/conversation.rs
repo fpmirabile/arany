@@ -157,10 +157,21 @@ pub(crate) fn max_turn_bytes(max_output_tokens: u32) -> usize {
 /// The assistant output of one call exactly as its adapter must replay it: an Anthropic `content`
 /// array or the Responses `output` items. It lives only in memory inside one live Run and is never
 /// journaled; Arany never interprets it.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ProviderTurn {
     adapter: &'static str,
     json: String,
+}
+
+/// Opaque model output, possibly carrying ciphertext or private reasoning; never printed.
+impl std::fmt::Debug for ProviderTurn {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderTurn")
+            .field("adapter", &self.adapter)
+            .field("bytes", &self.json.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl ProviderTurn {
@@ -197,6 +208,28 @@ impl ProviderTurn {
         Self {
             adapter: "scripted",
             json: "[]".into(),
+        }
+    }
+
+    /// Drops Anthropic thinking blocks, whose signatures bind the history before them. Compaction
+    /// rewrites that history, so the kept turns must stop carrying them.
+    pub(crate) fn without_thinking(&mut self) {
+        if self.adapter != "anthropic" {
+            return;
+        }
+        let Some(mut items) = self.items("anthropic") else {
+            return;
+        };
+        items.retain(|item| {
+            !matches!(
+                item["type"].as_str(),
+                Some("thinking" | "redacted_thinking")
+            )
+        });
+        if !items.is_empty()
+            && let Ok(json) = serde_json::to_string(&items)
+        {
+            self.json = json;
         }
     }
 
@@ -296,6 +329,26 @@ mod tests {
             .unwrap();
         assert_eq!(turn.items("anthropic").unwrap().len(), 1);
         assert!(turn.items("openai").is_none());
+    }
+
+    #[test]
+    fn compaction_strips_signed_thinking_from_anthropic_turns_only() {
+        let content = r#"[{"type":"thinking","thinking":"t","signature":"s"},{"type":"redacted_thinking","data":"d"},{"type":"tool_use","id":"t1","name":"arany_read","input":{}}]"#;
+        let mut turn = ProviderTurn::new("anthropic", content, SECRET, 4096).unwrap();
+        turn.without_thinking();
+        let kept = turn.items("anthropic").unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0]["type"], "tool_use");
+        let mut reasoning = ProviderTurn::new(
+            "openai",
+            r#"[{"type":"reasoning","encrypted_content":"c"}]"#,
+            SECRET,
+            4096,
+        )
+        .unwrap();
+        let before = reasoning.clone();
+        reasoning.without_thinking();
+        assert_eq!(reasoning, before);
     }
 
     #[test]

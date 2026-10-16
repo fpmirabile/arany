@@ -157,7 +157,6 @@ impl ScriptedProvider {
 }
 
 #[async_trait::async_trait]
-
 impl Provider for ScriptedProvider {
     fn profile_name(&self) -> &str {
         &self.profile
@@ -255,7 +254,6 @@ struct GatedProvider {
 }
 
 #[async_trait::async_trait]
-
 impl Provider for GatedProvider {
     fn profile_name(&self) -> &str {
         "gated"
@@ -334,7 +332,6 @@ struct WaitingCompactionProvider {
 }
 
 #[async_trait::async_trait]
-
 impl Provider for WaitingCompactionProvider {
     fn profile_name(&self) -> &str {
         "waiting-compaction"
@@ -383,7 +380,6 @@ impl Provider for WaitingCompactionProvider {
 }
 
 #[async_trait::async_trait]
-
 impl Provider for WaitingProvider {
     fn profile_name(&self) -> &str {
         "waiting"
@@ -5369,7 +5365,6 @@ struct PreviewProvider {
 }
 
 #[async_trait::async_trait]
-
 impl Provider for PreviewProvider {
     fn max_concurrent_calls(&self) -> u8 {
         1

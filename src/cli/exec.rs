@@ -530,7 +530,6 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-
     impl Provider for Scripted {
         fn profile_name(&self) -> &str {
             "openai"

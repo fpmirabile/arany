@@ -63,7 +63,6 @@ struct WaitingTraceProvider {
 }
 
 #[async_trait::async_trait]
-
 impl Provider for WaitingTraceProvider {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -85,7 +84,6 @@ impl Provider for WaitingTraceProvider {
 }
 
 #[async_trait::async_trait]
-
 impl Provider for GatedFailureProvider {
     fn profile_name(&self) -> &str {
         "scripted"

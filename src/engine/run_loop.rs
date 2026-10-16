@@ -1352,6 +1352,12 @@ impl<'a> RunLoop<'a> {
         ) else {
             return false;
         };
+        // Restating the recorded contract is a no-op; only a different one is a widening attempt.
+        let plan_contract = if existing.as_ref() == plan_contract.as_deref() {
+            &None
+        } else {
+            plan_contract
+        };
         let plan_and_call_fit = plan_contract.as_ref().is_none_or(|contract| {
             serde_json::to_vec(&(call, contract))
                 .is_ok_and(|bytes| bytes.len() <= crate::tools::types::MAX_TOOL_ARGUMENT_BYTES)
@@ -1404,6 +1410,7 @@ impl<'a> RunLoop<'a> {
             return Ok(false);
         }
         if let Some(contract) = requests[0].plan_contract.take()
+            && self.controls.goal_budget.plan_contract()?.as_ref() != Some(&*contract)
             && !self.admit_plan_contract(*contract).await?
         {
             return Ok(false);
@@ -1420,6 +1427,7 @@ impl<'a> RunLoop<'a> {
                 observations: Vec::new(),
                 facts: None,
                 steering_notes: Vec::new(),
+                calls_remaining: None,
             });
         Ok(true)
     }
@@ -2000,6 +2008,9 @@ impl<'a> RunLoop<'a> {
             for step in context.steps.drain(..prefix_steps) {
                 input.steering_notes.extend(step.steering_notes);
             }
+            for step in &mut context.steps {
+                step.turn.without_thinking();
+            }
         }
         self.settle_active_segment(active_segment).await?;
         if self.controls.goal_budget.active_time_exhausted() {
@@ -2570,7 +2581,7 @@ fn call_record(phase: AgentPhase, result: &CallResult, valid_response: bool) -> 
                 outcome: ProviderOutcome::Tools(requests),
                 ..
             }) if disposition == ProviderCallDisposition::ToolRequested => {
-                u8::try_from(requests.len()).unwrap_or(u8::MAX)
+                u8::try_from(requests.len()).expect("a valid step carries one Tool request")
             }
             _ => 0,
         },

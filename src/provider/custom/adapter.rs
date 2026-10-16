@@ -65,7 +65,6 @@ impl CustomProvider {
 }
 
 #[async_trait::async_trait]
-
 impl Provider for CustomProvider {
     fn profile_name(&self) -> &str {
         &self.profile_label

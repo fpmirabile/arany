@@ -523,7 +523,6 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-
     impl Provider for ProbeFixture {
         fn profile_name(&self) -> &str {
             "openai"

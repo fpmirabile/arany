@@ -214,7 +214,6 @@ fn valid_usage(usage: Usage, output_cap: u32) -> bool {
 }
 
 #[async_trait::async_trait]
-
 impl Provider for OpenAiProvider {
     fn profile_name(&self) -> &str {
         "openai"

@@ -217,7 +217,6 @@ fn build_goal_request() -> arany::GoalRequest {
 }
 
 #[async_trait::async_trait]
-
 impl Provider for CacheCanary {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -1094,7 +1093,7 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                         .as_array()
                         .unwrap()
                         .iter()
-                        .inspect(|tool| assert_eq!(tool["strict"], true))
+                        .inspect(|tool| assert!(tool.get("strict").is_none()))
                         .map(|tool| tool["name"].as_str().unwrap().to_owned())
                         .collect();
                     for expected in ["arany_read", "arany_edit", "arany_command"] {
@@ -1102,6 +1101,18 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                     }
                 }
                 assert_eq!(observations.len(), step);
+                if step == 1 {
+                    assert_eq!(observations[0]["disposition"], "succeeded");
+                    assert_eq!(observations[0]["workspace_effect"], "none");
+                    assert!(
+                        observations[0].get("intent").is_none()
+                            && observations[0].get("guard").is_none()
+                    );
+                    assert_eq!(
+                        observations[0]["output"],
+                        json!({"exit_code":0,"stdout":"native command passed","stderr":"","changeset":{"files":[]}})
+                    );
+                }
                 assert_eq!(context["tools"]["catalog"]["write"], true);
                 let outcome = match step {
                     0 => {
@@ -1111,14 +1122,14 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                         json!({"outcome":{"type":"tool","call":{"operation":"read","path":"src/note.txt","offset":0,"limit":4096}}})
                     }
                     2 => {
-                        assert_eq!(observations[1]["call"]["operation"], "read");
+                        assert!(observations[1].get("call").is_none());
                         assert_eq!(observations[1]["workspace_effect"], "none");
                         assert_eq!(observations[1]["output"]["text"], "native note\n");
                         assert_eq!(observations[1]["output"]["sha256"], hash(b"native note\n"));
                         json!({"outcome":{"type":"tool","call":{"operation":"edit","path":"src/note.txt","expected_digest":observations[1]["output"]["sha256"],"old":"native note\n","new":"native note\n2026-10-06\n"}}})
                     }
                     3 => {
-                        assert_eq!(observations[2]["call"]["operation"], "edit");
+                        assert!(observations[2].get("call").is_none());
                         assert_eq!(observations[2]["disposition"], "succeeded");
                         assert_eq!(observations[2]["workspace_effect"], "applied");
                         assert_eq!(

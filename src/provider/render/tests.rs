@@ -47,6 +47,7 @@ fn step(id: &str, path: &str) -> ToolStep {
         observations: vec![observation(read(path), "result canary")],
         facts: Some(GoalContextFacts::maximum()),
         steering_notes: Vec::new(),
+        calls_remaining: None,
     }
 }
 
@@ -246,6 +247,7 @@ fn delegate_step_carries_child_results_once() {
         observations: Vec::new(),
         facts: None,
         steering_notes: Vec::new(),
+        calls_remaining: None,
     }]);
     delegated.phase = AgentPhase::RootSynthesis;
     delegated.input.child_results = vec![ChildResult {

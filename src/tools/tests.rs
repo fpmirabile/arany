@@ -1195,22 +1195,22 @@ fn host_runtime_roots_can_only_come_from_remembered_folder_trust() {
 #[test]
 fn typed_tool_schema_and_receipts_have_exact_bounds() {
     let rows: Vec<Value> =
-        serde_json::from_str(include_str!("../../tests/fixtures/tool-outcomes.json")).unwrap();
+        serde_json::from_str(include_str!("../../tests/fixtures/tool-calls.json")).unwrap();
     assert_eq!(rows.len(), 10);
     let schema = jsonschema::options()
         .offline()
         .build(&json!({"anyOf": call_schemas()}))
         .unwrap();
     for row in &rows {
-        assert!(schema.is_valid(&row["outcome"]["call"]));
-        let call: ToolCall = serde_json::from_value(row["outcome"]["call"].clone()).unwrap();
+        assert!(schema.is_valid(row));
+        let call: ToolCall = serde_json::from_value(row.clone()).unwrap();
         assert!(call.valid());
-        let mut unknown = row["outcome"]["call"].clone();
+        let mut unknown = row.clone();
         unknown["network"] = json!(true);
         assert!(serde_json::from_value::<ToolCall>(unknown).is_err());
     }
     for (index, key) in [(4, "expected_digest"), (7, "resource")] {
-        let mut missing = rows[index]["outcome"]["call"].clone();
+        let mut missing = rows[index].clone();
         missing.as_object_mut().unwrap().remove(key);
         assert!(
             serde_json::from_value::<ToolCall>(missing).is_err(),

@@ -61,7 +61,6 @@ impl ChatGptProvider {
 }
 
 #[async_trait::async_trait]
-
 impl Provider for ChatGptProvider {
     fn profile_name(&self) -> &str {
         "chatgpt"
@@ -539,7 +538,16 @@ fn subscription_body(
     effort: Effort,
 ) -> Result<Vec<u8>, ProviderError> {
     super::super::image::validate_images(request)?;
-    streaming_body(wire::run_body_with_effort(request, conversation, effort)?)
+    let mut body = wire::run_body_with_effort(request, conversation, effort)?;
+    // The ChatGPT route is stateless, so replayed items drop their server ids and keep their content.
+    for item in body["input"].as_array_mut().into_iter().flatten() {
+        if matches!(item["type"].as_str(), Some("reasoning" | "function_call"))
+            && let Some(fields) = item.as_object_mut()
+        {
+            fields.remove("id");
+        }
+    }
+    streaming_body(body)
 }
 
 fn subscription_compaction_body(

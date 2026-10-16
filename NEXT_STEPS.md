@@ -37,6 +37,11 @@ history. Implementation status and verified support are separate claims.
 - Native Linux linear-mode PTY journeys ([steering](tests/session_run/active_terminal/steering.rs)) show a steering note reaching synthesis, controls running while a note waits, and `/goal pause` pausing at the next boundary. Native Linux tmux journeys ([steering and pause](tests/session_run/active_terminal/tmux.rs), `classic_steering_note_and_pause_in_tmux` and `fullscreen_steering_note_and_pause_in_tmux`) cover the same behavior in a real pane for Classic and Fullscreen. macOS attached journeys remain unverified; their evidence is the Engine corpus, reducer tests and terminal unit tests.
 - Check `--screen-reader`, `/transcript`, monochrome labels and managed following with real assistive technology. These usability claims remain unverified.
 
+## Message-native Provider request: owner-run live probes
+
+- **P1: Anthropic native Tools with structured Finish/Delegate.** With explicit usage consent, send one request on the selected model with the full Tool catalog (non-strict definitions with the optional nested `plan_contract`), `output_config.format` set to the Finish/Delegate schema, `tool_choice: {"type":"auto","disable_parallel_tool_use":true}` and thinking on. Confirm the request is accepted, a `tool_use` stop and an `end_turn` JSON stop both occur, a replayed thinking block is accepted on the next call, and `usage.cache_read_input_tokens` appears on a second call. Offline wire corpora prove only the encoding.
+- **P2: Anthropic parallel Tool use.** Before enabling more than one Tool call per step, confirm with `disable_parallel_tool_use: false` that the model respects the four-call cap in practice; an over-cap response fails the Run without retry.
+
 ## Beta 1: final user-owned checks
 
 Perform these after implementation handoff with deliberate consent for usage.

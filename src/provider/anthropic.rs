@@ -257,7 +257,6 @@ impl AnthropicProvider {
 }
 
 #[async_trait::async_trait]
-
 impl Provider for AnthropicProvider {
     fn profile_name(&self) -> &str {
         "anthropic"

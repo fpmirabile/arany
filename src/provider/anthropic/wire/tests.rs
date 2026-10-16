@@ -121,7 +121,7 @@ fn outbound_conversation_renders_system_tools_and_native_tool_results() {
         ]
     );
     assert!(body["tools"].as_array().unwrap().iter().all(|tool| {
-        tool["strict"] == true
+        tool.get("strict").is_none()
             && tool["input_schema"]["additionalProperties"] == false
             && tool["input_schema"]["required"]
                 .as_array()
@@ -147,7 +147,10 @@ fn outbound_conversation_renders_system_tools_and_native_tool_results() {
     assert_eq!(results[0]["tool_use_id"], "toolu_1");
     assert_eq!(results[0]["is_error"], false);
     let result: Value = serde_json::from_str(results[0]["content"].as_str().unwrap()).unwrap();
-    assert_eq!(result["call"]["operation"], "read");
+    assert!(
+        result.get("call").is_none(),
+        "the replayed turn carries the call"
+    );
     assert_eq!(result["workspace_effect"], "none");
     assert!(
         results[1]["text"]
@@ -1029,11 +1032,11 @@ fn child_research_request_offers_only_read_only_tools_and_finish() {
     let mut spent = catalog();
     spent["tool_calls_remaining"] = json!(0);
     exhausted.input.tools = Some(tool_context(spent));
-    assert_eq!(
-        tool_names(&body(&exhausted, Effort::Low)),
-        tool_names(&rendered),
-        "the Tool set is fixed; the Engine refuses calls past the budget"
-    );
+    let spent_body = body(&exhausted, Effort::Low);
+    assert_eq!(tool_names(&spent_body), tool_names(&rendered));
+    assert_eq!(spent_body["tool_choice"], json!({"type": "none"}));
+    assert_eq!(rendered["tool_choice"]["type"], "auto");
+    assert_eq!(outcome_types(&spent_body), ["finish"]);
 }
 
 #[test]
@@ -1064,5 +1067,179 @@ fn git_reads_join_the_native_tools_when_cataloged() {
     assert_eq!(
         tool_names(&plain),
         ["arany_list", "arany_read", "arany_search"]
+    );
+}
+
+fn count_unions(value: &Value) -> usize {
+    match value {
+        Value::Object(map) => {
+            usize::from(map.contains_key("anyOf") || map.get("type").is_some_and(Value::is_array))
+                + map.values().map(count_unions).sum::<usize>()
+        }
+        Value::Array(items) => items.iter().map(count_unions).sum(),
+        _ => 0,
+    }
+}
+
+fn count_optional(value: &Value) -> usize {
+    match value {
+        Value::Object(map) => {
+            let own = match (map.get("properties"), map.get("required")) {
+                (Some(Value::Object(properties)), Some(Value::Array(required))) => {
+                    properties.len().saturating_sub(required.len())
+                }
+                _ => 0,
+            };
+            own + map.values().map(count_optional).sum::<usize>()
+        }
+        Value::Array(items) => items.iter().map(count_optional).sum(),
+        _ => 0,
+    }
+}
+
+#[test]
+fn full_catalog_request_stays_within_the_strict_schema_limits() {
+    let mut request = primary_request(MODEL);
+    request.collaboration = CollaborationPolicy::Auto {
+        max_active_children: 3,
+    };
+    let rendered = body(&request, Effort::Low);
+    let strict: Vec<&Value> = rendered["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|tool| tool["strict"] == true)
+        .map(|tool| &tool["input_schema"])
+        .chain([&rendered["output_config"]["format"]["schema"]])
+        .collect();
+    assert!(
+        strict.len() <= 21,
+        "at most 20 strict tools plus the format"
+    );
+    assert!(
+        strict
+            .iter()
+            .map(|schema| count_unions(schema))
+            .sum::<usize>()
+            <= 16
+    );
+    assert!(
+        strict
+            .iter()
+            .map(|schema| count_optional(schema))
+            .sum::<usize>()
+            <= 24
+    );
+    assert!(
+        rendered["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|tool| tool.get("strict").is_none()),
+        "the plan-contract unions keep Tool definitions non-strict"
+    );
+}
+
+fn thinking_tool_reply(id: &str) -> Value {
+    response(
+        "tool_use",
+        json!([
+            {"type": "thinking", "thinking": "private", "signature": format!("sig-{id}")},
+            tool_use(id, "arany_read", read_input())
+        ]),
+    )
+}
+
+fn assert_extends(earlier: &Value, later: &Value) {
+    assert_eq!(earlier["system"], later["system"]);
+    assert_eq!(earlier["tools"], later["tools"]);
+    let (earlier, later) = (
+        earlier["messages"].as_array().unwrap(),
+        later["messages"].as_array().unwrap(),
+    );
+    assert!(later.len() > earlier.len());
+    assert_eq!(earlier[..], later[..earlier.len()]);
+}
+
+#[test]
+fn researcher_requests_extend_each_other_across_calls() {
+    let mut request = researcher_request(MODEL);
+    let mut bodies = vec![body(&request, Effort::Low)];
+    for (index, remaining) in [(1, 3), (2, 2), (3, 1)] {
+        let reply = thinking_tool_reply(&format!("toolu_{index}"));
+        let mut step = observed_step(decode(&request, &reply).unwrap(), "{}");
+        step.facts = None;
+        step.calls_remaining = Some(remaining);
+        request.input.tools.as_mut().unwrap().steps.push(step);
+        bodies.push(body(&request, Effort::Low));
+    }
+    for pair in bodies.windows(2) {
+        assert_extends(&pair[0], &pair[1]);
+    }
+    assert!(
+        bodies[3]["messages"]
+            .to_string()
+            .contains("tool_calls_remaining")
+    );
+}
+
+#[test]
+fn post_compaction_requests_drop_signed_thinking_and_then_extend() {
+    let mut request = primary_request(MODEL);
+    for index in 1..=3 {
+        let reply = thinking_tool_reply(&format!("toolu_{index}"));
+        let step = observed_step(decode(&request, &reply).unwrap(), "{}");
+        request.input.tools.as_mut().unwrap().steps.push(step);
+    }
+    // Compaction replaces the first step with a summary and unsigns the kept turns.
+    let tools = request.input.tools.as_mut().unwrap();
+    tools.steps.remove(0);
+    tools.history_summary = Some("summary of the first step".into());
+    for step in &mut tools.steps {
+        step.turn.without_thinking();
+    }
+    let compacted = body(&request, Effort::Low);
+    assert!(!compacted["messages"].to_string().contains("thinking"));
+    let reply = thinking_tool_reply("toolu_4");
+    let step = observed_step(decode(&request, &reply).unwrap(), "{}");
+    request.input.tools.as_mut().unwrap().steps.push(step);
+    assert_extends(&compacted, &body(&request, Effort::Low));
+}
+
+#[test]
+fn a_quoted_preamble_before_tool_use_does_not_break_the_stream() {
+    use crate::provider::ResponsePreview;
+    let preamble = r#"I will read "src/main.rs" and {not json} first"#;
+    let events = [
+        message_start(),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":preamble}}),
+        json!({"type":"content_block_stop","index":0}),
+        json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"arany_read","input":{}}}),
+        json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"a\",\"offset\":0,\"limit\":10,\"plan_contract\":null}"}}),
+        json!({"type":"content_block_stop","index":1}),
+        json!({"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":8}}),
+        json!({"type":"message_stop"}),
+    ];
+    let (publisher, observed) = ResponsePreview::new();
+    let completed = run_stream(&sse(&events), publisher).unwrap().unwrap();
+    assert!(observed.borrow().answer.is_empty());
+    let request = primary_request("model-1");
+    let conversation = render::conversation(&request).unwrap();
+    let scope = RunScope {
+        model: "model-1",
+        output_cap: 4096,
+        secret: KEY,
+        offered: conversation.tools.as_deref().unwrap(),
+    };
+    assert!(decode_run(&completed, &scope).is_ok());
+    let leaked = r#"I hold synthetic-key here"#;
+    let mut secret_events = events.to_vec();
+    secret_events[2] =
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":leaked}});
+    let (publisher, _) = ResponsePreview::new();
+    assert!(
+        run_stream(&sse(&secret_events), publisher).is_err(),
+        "the credential check stays fatal"
     );
 }

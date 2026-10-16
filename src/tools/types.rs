@@ -767,6 +767,8 @@ pub struct ToolStep {
     pub facts: Option<crate::provider::GoalContextFacts>,
     /// Notes first delivered with this step's results.
     pub steering_notes: Vec<String>,
+    /// Researcher Tool calls left once this step is answered; `None` for the primary.
+    pub calls_remaining: Option<usize>,
 }
 
 /// Live Run state only: replayed turns are never serialized or journaled.
@@ -798,6 +800,19 @@ impl ToolStep {
 const RESULT_ENVELOPE_BYTES: usize = 128;
 
 impl ToolContext {
+    /// Researcher Tool calls the next request may still make: the newest step's count, else the
+    /// catalog's own; `None` for the primary.
+    pub fn calls_remaining(&self) -> Option<usize> {
+        match self.steps.last() {
+            Some(step) => step.calls_remaining,
+            None => serde_json::from_str::<Value>(&self.catalog)
+                .ok()?
+                .get("tool_calls_remaining")?
+                .as_u64()
+                .and_then(|count| usize::try_from(count).ok()),
+        }
+    }
+
     /// Every observation of the live steps, in order.
     pub fn observations(&self) -> Vec<&ToolObservation> {
         self.steps

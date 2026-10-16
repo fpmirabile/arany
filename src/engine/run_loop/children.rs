@@ -468,6 +468,7 @@ impl RunLoop<'_> {
                 observations: Vec::new(),
                 facts: None,
                 steering_notes: Vec::new(),
+                calls_remaining: None,
             });
         }
         loop {
@@ -592,9 +593,16 @@ impl RunLoop<'_> {
                 if !room {
                     child.tool_calls_remaining = 0;
                 }
-                tools.catalog = runtime
-                    .research_context(child.tool_calls_remaining)?
-                    .catalog;
+                // The catalog is the request head and stays as first sent; later calls carry the
+                // remaining budget in their newest step.
+                match tools.steps.last_mut() {
+                    Some(step) => step.calls_remaining = Some(child.tool_calls_remaining),
+                    None => {
+                        tools.catalog = runtime
+                            .research_context(child.tool_calls_remaining)?
+                            .catalog;
+                    }
+                }
             }
             let provider = Arc::clone(&self.provider);
             let cancellation = self.controls.cancellation.clone();
@@ -713,6 +721,7 @@ impl RunLoop<'_> {
             }],
             facts: None,
             steering_notes: Vec::new(),
+            calls_remaining: Some(child.tool_calls_remaining.saturating_sub(1)),
         });
         let overhead = reserved.rendered_len();
         let Some(capacity) = runtime.result_capacity(overhead, 0) else {
@@ -777,6 +786,7 @@ impl RunLoop<'_> {
             observations: vec![observation],
             facts: None,
             steering_notes: Vec::new(),
+            calls_remaining: Some(child.tool_calls_remaining.saturating_sub(1)),
         });
         Ok(continues && tools.rendered_len() <= runtime.context_limit_bytes())
     }

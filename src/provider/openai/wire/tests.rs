@@ -378,7 +378,7 @@ fn image_attachments_admit_only_bounded_png_and_render_as_labelled_content() {
 }
 
 #[test]
-fn outbound_requests_encrypted_reasoning_include_and_replays_items_byte_exact() {
+fn outbound_requests_encrypted_reasoning_include_and_replays_items_adjacent_and_unchanged() {
     let mut request = primary_request(MODEL);
     let call = function_call("arany_read", &read_arguments());
     let reply = response("completed", json!([reasoning(), call.clone()]));
@@ -435,7 +435,10 @@ fn outbound_input_items_replay_turns_and_function_outputs_once() {
     assert_eq!(input[1]["type"], "function_call");
     assert_eq!(input[2]["type"], "function_call_output");
     let output: Value = serde_json::from_str(input[2]["output"].as_str().unwrap()).unwrap();
-    assert_eq!(output["call"]["operation"], "read");
+    assert!(
+        output.get("call").is_none(),
+        "the replayed turn carries the call"
+    );
     assert_eq!(output["workspace_effect"], "none");
     assert_eq!(input[3]["role"], "user");
     assert!(
@@ -494,6 +497,7 @@ fn delegate_function_call_is_answered_by_a_fixed_output_before_the_child_results
             observations: Vec::new(),
             facts: None,
             steering_notes: Vec::new(),
+            calls_remaining: None,
         });
     let input = body(&request)["input"].as_array().unwrap().clone();
     assert_eq!(input[1]["type"], "function_call");
@@ -621,10 +625,8 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
         "only the outcome functions follow the phase"
     );
 
-    let rows: Vec<Value> = serde_json::from_str(include_str!(
-        "../../../../tests/fixtures/tool-outcomes.json"
-    ))
-    .unwrap();
+    let rows: Vec<Value> =
+        serde_json::from_str(include_str!("../../../../tests/fixtures/tool-calls.json")).unwrap();
     assert_eq!(rows.len(), 10);
     for (catalog, accepted) in [
         (
@@ -647,7 +649,7 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
         request.input.tools = Some(tool_context(catalog));
         let rendered = body(&request);
         let valid = |row: &Value| {
-            let mut arguments = row["outcome"]["call"].clone();
+            let mut arguments = row.clone();
             let operation = arguments
                 .as_object_mut()
                 .unwrap()
@@ -681,7 +683,7 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
                     7 => "name",
                     _ => "server",
                 };
-                unnamed["outcome"]["call"][field] = json!("");
+                unnamed[field] = json!("");
                 assert!(
                     !valid(&unnamed),
                     "unconfigured/empty Tool name must not be offered"
@@ -697,12 +699,10 @@ fn inbound_function_calls_decode_one_native_request_or_outcome() {
     request.collaboration = CollaborationPolicy::Auto {
         max_active_children: 2,
     };
-    let rows: Vec<Value> = serde_json::from_str(include_str!(
-        "../../../../tests/fixtures/tool-outcomes.json"
-    ))
-    .unwrap();
+    let rows: Vec<Value> =
+        serde_json::from_str(include_str!("../../../../tests/fixtures/tool-calls.json")).unwrap();
     for row in rows {
-        let mut arguments = row["outcome"]["call"].clone();
+        let mut arguments = row.clone();
         let operation = arguments
             .as_object_mut()
             .unwrap()
@@ -729,10 +729,7 @@ fn inbound_function_calls_decode_one_native_request_or_outcome() {
             assert_eq!(requests.len(), 1);
             assert_eq!(requests[0].id.as_str(), "call_test");
             assert!(requests[0].plan_contract.is_none());
-            assert_eq!(
-                serde_json::to_value(&requests[0].call).unwrap(),
-                row["outcome"]["call"]
-            );
+            assert_eq!(serde_json::to_value(&requests[0].call).unwrap(), row);
             assert_eq!(
                 decoded.turn.items("openai").unwrap().len(),
                 2,
@@ -1295,7 +1292,13 @@ fn child_research_request_offers_only_read_only_functions_and_finish() {
     spent["tool_calls_remaining"] = json!(0);
     let mut exhausted = request.clone();
     exhausted.input.tools = Some(tool_context(spent));
-    assert_eq!(function_names(&body(&exhausted)), function_names(&rendered));
+    let spent_body = body(&exhausted);
+    assert_eq!(function_names(&spent_body), function_names(&rendered));
+    assert_eq!(
+        spent_body["tool_choice"],
+        json!({"type": "allowed_tools", "mode": "required", "tools": [{"type": "function", "name": "arany_finish"}]})
+    );
+    assert_eq!(rendered["tool_choice"], "required");
 }
 
 #[test]

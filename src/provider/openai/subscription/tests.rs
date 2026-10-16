@@ -1168,3 +1168,65 @@ fn subscription_accept_rejects_cached_tokens_above_input() {
     };
     assert!(accept_result(false, usage, 4096, StreamCounts::default()).is_err());
 }
+
+#[test]
+fn chatgpt_replay_drops_item_ids_and_keeps_ciphertext() {
+    let mut coding = request();
+    coding.input.role = PromptRole::Primary;
+    coding.input.tools = Some(crate::tools::ToolContext {
+        catalog: json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]}).to_string(),
+        history_summary: None,
+        steps: Vec::new(),
+    });
+    let reply = json!({"id":"resp_1","status":"completed","model":"model-a","output":[
+        {"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"CIPHERTEXT=="},
+        {"type":"function_call","id":"fc_1","call_id":"call_1","name":"arany_read",
+         "arguments":json!({"path":"README.md","offset":0,"limit":10,"plan_contract":null}).to_string(),"status":"completed"}
+    ],"usage":{"input_tokens":1,"output_tokens":1}});
+    let conversation = render::conversation(&coding).unwrap();
+    let decoded = wire::decode_run(
+        &serde_json::to_vec(&reply).unwrap(),
+        &wire::RunScope::new(&coding, &conversation, TOKEN),
+    )
+    .unwrap();
+    coding
+        .input
+        .tools
+        .as_mut()
+        .unwrap()
+        .steps
+        .push(crate::tools::ToolStep {
+            turn: decoded.turn,
+            requests: match decoded.outcome {
+                ProviderOutcome::Tools(requests) => requests,
+                _ => panic!("Tool request"),
+            },
+            observations: vec![],
+            facts: None,
+            steering_notes: Vec::new(),
+            calls_remaining: None,
+        });
+    coding.input.tools.as_mut().unwrap().steps[0]
+        .observations
+        .push(crate::provider::test_support::observation(
+            crate::tools::ToolCall::Read {
+                path: "README.md".into(),
+                offset: 0,
+                limit: 10,
+            },
+            "{}",
+        ));
+    let value: Value = serde_json::from_slice(&body_for(&coding, Effort::Low).unwrap()).unwrap();
+    let items = value["input"].as_array().unwrap();
+    let reasoning = items
+        .iter()
+        .find(|item| item["type"] == "reasoning")
+        .unwrap();
+    let call = items
+        .iter()
+        .find(|item| item["type"] == "function_call")
+        .unwrap();
+    assert!(reasoning.get("id").is_none() && call.get("id").is_none());
+    assert_eq!(reasoning["encrypted_content"], "CIPHERTEXT==");
+    assert_eq!(call["call_id"], "call_1");
+}

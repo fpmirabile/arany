@@ -93,8 +93,6 @@ struct Journey {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
     compactions: Arc<Mutex<Vec<CompactionRequest>>>,
 }
-
-#[async_trait::async_trait]
 #[async_trait::async_trait]
 impl Provider for Journey {
     fn profile_name(&self) -> &str {
@@ -523,8 +521,6 @@ struct Proposal {
     plan_on_inspection: bool,
     omit_plan: bool,
 }
-
-#[async_trait::async_trait]
 #[async_trait::async_trait]
 impl Provider for Proposal {
     fn profile_name(&self) -> &str {
@@ -630,8 +626,6 @@ fn proposal_request(workspace: &Path) -> RunRequest {
 struct OverTimeoutCommand {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
 }
-
-#[async_trait::async_trait]
 #[async_trait::async_trait]
 impl Provider for OverTimeoutCommand {
     fn profile_name(&self) -> &str {
@@ -942,8 +936,6 @@ async fn exact_goal_token_cap_fails_before_a_tool_request_is_journaled() {
 struct GoalWorkspaceLease {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
 }
-
-#[async_trait::async_trait]
 #[async_trait::async_trait]
 impl Provider for GoalWorkspaceLease {
     fn profile_name(&self) -> &str {
@@ -1290,8 +1282,6 @@ fn bounded_loop_plan() -> arany::GoalPlanContract {
         budget: arany::GoalBudget::default(),
     }
 }
-
-#[async_trait::async_trait]
 #[async_trait::async_trait]
 impl Provider for BoundedLoop {
     fn profile_name(&self) -> &str {
@@ -2477,8 +2467,6 @@ struct ApprovalJourney {
     call: ToolCall,
     review: &'static str,
 }
-
-#[async_trait::async_trait]
 #[async_trait::async_trait]
 impl Provider for ApprovalJourney {
     fn profile_name(&self) -> &str {
@@ -2866,8 +2854,6 @@ fn tree_snapshot(root: &Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
 struct GitJourney {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
 }
-
-#[async_trait::async_trait]
 #[async_trait::async_trait]
 impl Provider for GitJourney {
     fn profile_name(&self) -> &str {

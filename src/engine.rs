@@ -1243,7 +1243,6 @@ mod goal_workspace_lease_tests {
     struct NeverProvider;
 
     #[async_trait::async_trait]
-
     impl Provider for NeverProvider {
         fn profile_name(&self) -> &str {
             "scripted"

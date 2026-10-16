@@ -775,7 +775,6 @@ struct FiniteTokenTeam {
 }
 
 #[async_trait::async_trait]
-
 impl Provider for FiniteTokenTeam {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -1230,7 +1229,6 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
 struct ExactCapToolReview;
 
 #[async_trait::async_trait]
-
 impl Provider for ExactCapToolReview {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -1374,7 +1372,6 @@ impl Drop for InFlightCall {
 }
 
 #[async_trait::async_trait]
-
 impl Provider for PendingChildren {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -1825,7 +1822,6 @@ struct MeteredProvider {
 }
 
 #[async_trait::async_trait]
-
 impl Provider for MeteredProvider {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -3433,8 +3429,15 @@ async fn read_only_child_reads_the_workspace_and_its_report_reaches_synthesis() 
     assert_eq!(first["write"], false);
     assert_eq!(first["commands"], serde_json::json!([]));
     assert_eq!(first["tool_calls_remaining"], 2);
-    let second = child_catalog(&calls[2]);
-    assert_eq!(second["tool_calls_remaining"], 1);
+    assert_eq!(
+        child_catalog(&calls[2]),
+        first,
+        "the child catalog is frozen at spawn"
+    );
+    let remaining =
+        |call: &arany::ProviderRequest| call.input.tools.as_ref().unwrap().calls_remaining();
+    assert_eq!(remaining(&calls[1]), Some(2));
+    assert_eq!(remaining(&calls[2]), Some(1));
     let observations = &calls[2]
         .input
         .tools
@@ -3654,7 +3657,10 @@ async fn child_tool_bound_offers_only_finish_and_rejects_a_further_tool() {
             )));
         } else {
             assert_eq!(outcome.run.status, RunStatus::Finished);
-            assert_eq!(child_catalog(&calls[17])["tool_calls_remaining"], 0);
+            assert_eq!(
+                calls[17].input.tools.as_ref().unwrap().calls_remaining(),
+                Some(0)
+            );
             assert_eq!(calls[17].phase, AgentPhase::ChildWork);
         }
     }
@@ -4004,7 +4010,7 @@ async fn delegation_turn_is_replayed_before_synthesis() {
 }
 
 #[tokio::test]
-async fn crash_mid_step_replays_interrupted_and_retry_starts_fresh() {
+async fn interrupted_prefix_replays_and_a_new_run_starts_without_steps() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
@@ -4102,4 +4108,43 @@ async fn step_facts_and_notes_are_written_before_render() {
         ["mid-run note"],
         "the note rides the newest step"
     );
+}
+
+#[tokio::test]
+async fn restating_the_recorded_plan_contract_is_a_no_op_and_a_different_one_is_refused() {
+    for (restated_plan, expected) in [
+        (facts_plan(facts_digest("v1")), RunStatus::Finished),
+        (
+            arany::GoalPlanContract {
+                mission: "A different mission".into(),
+                ..facts_plan(facts_digest("v1"))
+            },
+            RunStatus::Failed,
+        ),
+    ] {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = facts_workspace(temp.path(), "v1");
+        let state_path = temp.path().join("state");
+        let provider = ScriptedProvider::new(vec![
+            crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v1"))))),
+            crate::tool_outcome(facts_read(), Some(Box::new(restated_plan))),
+            finish_with("done"),
+        ]);
+        let mut engine = facts_engine(
+            StateRoot::admit(&state_path).expect("state"),
+            &state_path,
+            provider,
+        );
+        let mut input = request(&workspace, "Read twice");
+        input.include_paths.clear();
+        let outcome = engine.run(input).await.expect("Run");
+        assert_eq!(outcome.run.status, expected);
+        engine.close().await.expect("engine shutdown");
+        let (events, _) = replayed(&state_path, outcome.session_id).await;
+        let recorded = events
+            .iter()
+            .filter(|event| matches!(event.event, Event::GoalPlanContractRecorded { .. }))
+            .count();
+        assert_eq!(recorded, 1, "the contract is journaled once");
+    }
 }

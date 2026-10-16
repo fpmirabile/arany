@@ -204,9 +204,14 @@ fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>
             ));
         } else {
             let tool_request = requests.next().ok_or(ProviderError::Rejected)?;
+            // The replayed turn already carries the call; the result adds only what was observed.
+            let mut output = model_observation(observation);
+            if let Some(fields) = output.as_object_mut() {
+                fields.remove("call");
+            }
             results.push(Block::ToolResult {
                 id: tool_request.id.clone(),
-                output: model_observation(observation),
+                output,
                 is_error: observation.disposition != ToolDisposition::Succeeded,
             });
         }
@@ -221,6 +226,9 @@ fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>
     }
     if let Some(facts) = step.facts {
         blocks.push(data_block("goal_context_facts", json!(facts)));
+    }
+    if let Some(remaining) = step.calls_remaining {
+        blocks.push(data_block("tool_calls_remaining", json!(remaining)));
     }
     Ok(blocks)
 }

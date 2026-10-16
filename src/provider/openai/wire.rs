@@ -324,7 +324,17 @@ fn run_body_inner(
             .chain(outcome_specs(&conversation.outcome))
             .map(function_json)
             .collect();
-        body["tool_choice"] = json!("required");
+        let exhausted = request
+            .input
+            .tools
+            .as_ref()
+            .and_then(|context| context.calls_remaining())
+            == Some(0);
+        body["tool_choice"] = if exhausted {
+            json!({"type": "allowed_tools", "mode": "required", "tools": [{"type": "function", "name": "arany_finish"}]})
+        } else {
+            json!("required")
+        };
         body["parallel_tool_calls"] = json!(false);
         body["include"] = json!(["reasoning.encrypted_content"]);
     }

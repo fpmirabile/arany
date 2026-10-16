@@ -29,6 +29,7 @@ pub(super) struct MessageStream<'a> {
     stopped: bool,
     /// Tool input fragments of the open `tool_use` block; never previewed.
     tool_input: String,
+    preview_failed: bool,
 }
 
 impl<'a> MessageStream<'a> {
@@ -48,6 +49,7 @@ impl<'a> MessageStream<'a> {
             delta_seen: false,
             stopped: false,
             tool_input: String::new(),
+            preview_failed: false,
         }
     }
 
@@ -61,6 +63,25 @@ impl<'a> MessageStream<'a> {
             }
         }
         Ok(None)
+    }
+
+    /// Text beside a Tool call need not be the structured answer, so a preview that cannot decode
+    /// it stops previewing. The assembled message is still scanned for the credential at its end.
+    fn publish_preview(&mut self, fragment: &str) {
+        if self.preview_failed {
+            return;
+        }
+        let published = self
+            .result
+            .feed(fragment, self.secret)
+            .map(str::to_owned)
+            .and_then(|answer| {
+                self.preview.publish(crate::provider::PreviewText {
+                    answer,
+                    ..Default::default()
+                })
+            });
+        self.preview_failed = published.is_err();
     }
 
     fn event(&mut self, event: Value) -> Result<Option<Vec<u8>>, ProviderError> {
@@ -127,11 +148,7 @@ impl<'a> MessageStream<'a> {
                         .get("text")
                         .and_then(Value::as_str)
                         .ok_or_else(invalid)?;
-                    let answer = self.result.feed(initial, self.secret)?.to_owned();
-                    self.preview.publish(crate::provider::PreviewText {
-                        answer,
-                        ..Default::default()
-                    })?;
+                    self.publish_preview(initial);
                 }
             }
             "content_block_delta" => {
@@ -194,11 +211,7 @@ impl<'a> MessageStream<'a> {
                 }
                 current.push_str(fragment);
                 if kind == "text_delta" {
-                    let answer = self.result.feed(fragment, self.secret)?.to_owned();
-                    self.preview.publish(crate::provider::PreviewText {
-                        answer,
-                        ..Default::default()
-                    })?;
+                    self.publish_preview(fragment);
                 }
             }
             "content_block_stop" => {
@@ -389,12 +402,24 @@ pub(super) fn run_body(
         "output_config": {"format": {"type": "json_schema", "schema": conversation.outcome}, "effort": effort.as_str()},
         "stream": false,
     });
+    // Tool definitions are not strict: the plan-contract unions would exceed the strict-schema
+    // complexity limit, and the Engine validates every call. Only the outcome format is strict.
     if let Some(tools) = &conversation.tools {
         body["tools"] = tools
             .iter()
-            .map(|tool| json!({"name": tool.name, "description": tool.description, "input_schema": tool.parameters, "strict": true}))
+            .map(|tool| json!({"name": tool.name, "description": tool.description, "input_schema": tool.parameters}))
             .collect();
-        body["tool_choice"] = json!({"type": "auto", "disable_parallel_tool_use": true});
+        let exhausted = request
+            .input
+            .tools
+            .as_ref()
+            .and_then(|context| context.calls_remaining())
+            == Some(0);
+        body["tool_choice"] = if exhausted {
+            json!({"type": "none"})
+        } else {
+            json!({"type": "auto", "disable_parallel_tool_use": true})
+        };
     }
     Ok(body)
 }
