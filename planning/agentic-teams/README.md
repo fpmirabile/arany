@@ -398,7 +398,7 @@ any admitted model of each in any role.
    model and effort), each with a capability class: `agent` (Finish, Delegate
    and Tool outcomes) or `judge` (typed verdicts only). Judge-only Providers
    never act as agents. Per-profile Tool capability still follows
-   [Provider rules](../../agents/provider.md); exact custom profiles stay
+   [Provider spec](../../docs/specs/provider.md); exact custom profiles stay
    read-only until tool-capable conformance exists.
    The roster is a private, owner-only file outside the Workspace.
 2. **Role binding.** The user binds a default profile per role (primary,
@@ -516,7 +516,7 @@ execution contracts own the resulting behavior.
     - Global: default mode, timeouts and maxima, worker cap, fallback
       profiles, unlimited usage, disruptive Git operations.
 13. **Telemetry.** Opt-in OTLP gains Goal, phase, agent and Supervisor spans
-    under the existing [telemetry rules](../../agents/telemetry.md): no
+    under the existing [telemetry spec](../../docs/specs/telemetry.md): no
     content, bounded attributes.
 
 ## OS impact
@@ -666,7 +666,7 @@ ownership rules and delivery order; the remaining questions are data-dependent:
 - [Tools](../../docs/specs/tools.md): grants, effects, changesets, Guard and native differences.
 - [Terminal](../../docs/specs/terminal.md): interaction, Supervisor prompts and accessibility.
 - [Credentials](../../docs/specs/credentials.md): account scope, storage, recovery and roster accounts.
-- [Provider rules](../../agents/provider.md): profile admission, capability classes and conformance.
+- [Provider spec](../../docs/specs/provider.md): profile admission, capability classes and conformance.
 - [Diagnostics](../../docs/specs/diagnostics.md): bounded private failure inspection.
 - [System overview](../../docs/architecture/system-overview.md): ownership and data flow.
 

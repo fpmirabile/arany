@@ -57,7 +57,7 @@ catalogue per command/MCP-enabled Run. Process intents bind that catalogue into
 their enforcement digest; the controller passes it through the authenticated
 unit Task channel, and each Seatbelt worker revalidates its no-follow metadata
 pins before Ready. File/Skill workers retain the compiled policy digest without
-carrying a catalogue. The [Guard rules](../../agents/guard.md) own cache and
+carrying a catalogue. The [Tool spec](../specs/tools.md) own cache and
 admission constraints.
 
 ```mermaid
@@ -124,24 +124,24 @@ current private file layout; this document does not mirror the repository tree.
 
 | Responsibility | Entry point | Editing rules |
 |---|---|---|
-| CLI grammar and composition | [main](../../src/main.rs), [CLI](../../src/cli.rs) | [CLI](../../agents/cli.md) |
-| Run and Session orchestration | [Engine](../../src/engine.rs) | [Engine](../../agents/engine.md) |
-| Events, replay and context | [Session](../../src/session.rs) | [Session](../../agents/session.md) |
-| Semantic inference and wire adapters | [Provider](../../src/provider.rs) | [Provider](../../agents/provider.md) |
-| Saved API and subscription accounts | [Credentials](../../src/cli/credentials.rs), [ChatGPT](../../src/cli/chatgpt.rs) | [Credentials](../../agents/credentials.md), [ChatGPT](../../agents/chatgpt.md) |
-| Tool admission, Policy and dispatch | [Tools](../../src/tools.rs) | [Tools](../../agents/tools.md) |
-| Separate native effect enforcement | [Guard](../../src/tools/guard.rs) | [Guard](../../agents/guard.md) |
-| Canonical SQLite and private records | [Store](../../src/store.rs) | [Store](../../agents/store.md) |
-| Shared no-follow and ACL admission | [Private filesystem](../../src/private_fs.rs) | [Private filesystem](../../agents/private-fs.md) |
-| Semantic presentation and terminal ownership | [Presentation](../../src/presentation.rs), [terminal](../../src/terminal.rs) | [Terminal](../../agents/terminal.md) |
-| Lossy export and private failure inspection | [Telemetry](../../src/telemetry.rs), [diagnostics](../../src/diagnostics.rs) | [Telemetry](../../agents/telemetry.md), [diagnostics](../../agents/diagnostics.md) |
+| CLI grammar and composition | [main](../../src/main.rs), [CLI](../../src/cli.rs) | [Terminal spec](../specs/terminal.md) |
+| Run and Session orchestration | [Engine](../../src/engine.rs) | [Execution spec](../specs/execution.md) |
+| Events, replay and context | [Session](../../src/session.rs) | [Session spec](../specs/session.md) |
+| Semantic inference and wire adapters | [Provider](../../src/provider.rs) | [Provider spec](../specs/provider.md) |
+| Saved API and subscription accounts | [Credentials](../../src/cli/credentials.rs), [ChatGPT](../../src/cli/chatgpt.rs) | [Credential spec](../specs/credentials.md), [ChatGPT spec](../specs/chatgpt.md) |
+| Tool admission, Policy and dispatch | [Tools](../../src/tools.rs) | [Tool spec](../specs/tools.md) |
+| Separate native effect enforcement | [Guard](../../src/tools/guard.rs) | [Tool spec](../specs/tools.md) |
+| Canonical SQLite and private records | [Store](../../src/store.rs) | [Execution spec](../specs/execution.md#admission-persistence-and-recovery) |
+| Shared no-follow and ACL admission | [Private filesystem](../../src/private_fs.rs) | [Tool spec](../specs/tools.md) |
+| Semantic presentation and terminal ownership | [Presentation](../../src/presentation.rs), [terminal](../../src/terminal.rs) | [Terminal spec](../specs/terminal.md) |
+| Lossy export and private failure inspection | [Telemetry](../../src/telemetry.rs), [diagnostics](../../src/diagnostics.rs) | [Telemetry spec](../specs/telemetry.md), [Diagnostics spec](../specs/diagnostics.md) |
 | Product acceptance and Engine evidence | [Session journey](../../tests/session_run.rs), [Engine corpus](../../tests/engine_run.rs) | [Testing](../../agents/testing.md) |
 
 This remains one package and one long-lived process. OS credentials use a supervised same-binary helper; explicitly requested clipboard access uses a bounded trusted OS-client child under terminal ownership. Neither becomes an agent Tool. The private `tools` implementation is one concrete router with deterministic Policy and a native Guard privilege seam, not a generic execution framework or fakeable second Engine behavior seam. The `session/` files remain one deep module, and ChatGPT's stream remains private OpenAI implementation. `engine.rs` holds orchestration behind `Engine::run`, keeping `lib.rs` readable. Add a crate only after measured release, privilege, ownership, dependency or compile pressure.
 
 ## 4. Public command contract
 
-[The terminal spec](../specs/terminal.md#entry-modes-and-channels) owns attached entry, interactive controls, deterministic channels and their acceptance scenarios. [Account setup](../setup.md) and [local tools](../tools.md) are user procedures; the compiled CLI/command registry owns exact syntax. [CLI rules](../../agents/cli.md) own admission ordering, typed error classification and command-specific composition.
+[The terminal spec](../specs/terminal.md#entry-modes-and-channels) owns attached entry, interactive controls, deterministic channels and their acceptance scenarios. [Account setup](../setup.md) and [local tools](../tools.md) are user procedures; the compiled CLI/command registry owns exact syntax. [Terminal spec](../specs/terminal.md) own admission ordering, typed error classification and command-specific composition.
 
 `main.rs` selects attached chat, setup, `exec`, `show` or Provider operations. Private CLI callers resolve trusted inputs and call Engine operations; they do not implement Run transitions or wire decoding. Attached new/clear entry keeps a bounded empty conversation projection and its selected defaults/title local, with zero creation and last sequence; the first task submission delegates creation to the Engine before Run admission. Exit and resume discard that unsaved projection without deleting canonical state. No Events or resumable ID are invented. Continue/resume/fork delegate to the Engine, which revalidates the pinned Workspace and canonical lineage. Headless `exec` creates one Run in a new Session by default; append requires an explicit Session ID. `show` uses strict read-only replay. There is no `run` alias.
 
@@ -258,7 +258,7 @@ Provider/profile, collaboration policy, limits, instruction digest, and Workspac
 
 Recognized typed Provider failures retain an optional closed reason for account access, usage limits, temporary usage or service unavailability, stream protocol, response contract, structured outcome contract or local output acceptance. Every call uses the current Event version with an explicit nullable reason. Strict admission rejects a reason inconsistent with its disposition. Raw HTTP status, stream code, upstream text/body and request IDs are excluded. Chat feedback and agent details translate the last call of a failed AgentRun into compiled recovery guidance; cancelled siblings and successful calls cannot supply its cause. Linear modes append the same feedback after their confirmed receipt. This metadata does not enter Provider context or traces, prove a billing diagnosis, trigger retry or switch account routes. Compaction keeps its separate existing failure categories.
 
-Idle rename/default changes may follow an interrupted prefix without submitting another objective. Their committed Session-only facts seal the unfinished predecessor, preserve its observations and prevent later transitions under that abandoned Run ID. The [Session reducer contract](../../agents/session.md#persistence-and-proof) owns this recovery rule; lifecycle operations hold the existing per-Session lock to exclude a live Run. No interruption Event or synthetic terminal outcome is added, and fork/compaction still require their existing committed boundary.
+Idle rename/default changes may follow an interrupted prefix without submitting another objective. Their committed Session-only facts seal the unfinished predecessor, preserve its observations and prevent later transitions under that abandoned Run ID. The [Session reducer contract](../specs/session.md#persistence-facts) owns this recovery rule; lifecycle operations hold the existing per-Session lock to exclude a live Run. No interruption Event or synthetic terminal outcome is added, and fork/compaction still require their existing committed boundary.
 
 Before Run effects or Provider usage, the Store strictly checks the resolved lineage count plus the complete worst-case lifecycle/children/Tool Event envelope in an immediate transaction. Its database byte preflight covers each slot's maximum ordinary payload and bounded SQLite page/index overhead, one larger image Message, and the unchanged per-append floor; the floor alone cannot fund the later receipt/closure writes. Engine retains operation locks for the Session and all ancestors because replay counts their full journals, including suffixes outside a fork boundary. Compaction additionally checks its direct Session's lifetime attempt quota; inherited summaries do not charge that quota. Finish admission measures the exact serialized terminal payload, not only raw text. Event-count admission is stabilized by those locks; the byte allowance is a conservative preflight, not a lease against concurrent independent writers or a physical disk reservation. Disk faults and process death still require interrupted/uncertain recovery. Independent lineages remain concurrent.
 
@@ -266,7 +266,7 @@ The sole connection opens no-follow in a private owner-verified local state dire
 
 ## 8. Terminal presentation
 
-[The terminal spec](../specs/terminal.md) owns modes, layout, keys, draft retention, selectors, setup presentation, paste, accessibility, process channels and acceptance scenarios. [Terminal](../../agents/terminal.md), [history](../../agents/history.md), [clipboard](../../agents/clipboard.md) and [image](../../agents/image.md) rules own their implementation invariants.
+[The terminal spec](../specs/terminal.md) owns modes, layout, keys, draft retention, selectors, setup presentation, paste, accessibility, process channels and acceptance scenarios. [Terminal spec](../specs/terminal.md), [Terminal spec](../specs/terminal.md), [clipboard](../specs/terminal.md) and [image](../specs/terminal.md) rules own their implementation invariants.
 
 `presentation.rs` maps committed SessionView/RunView facts to bounded semantic rows and append-only lines. The private terminal module owns the primary-screen viewport, Composer, history index, raw/canonical readers, keys, focus, mouse and one RAII lifecycle owner. None of these presentation types enters the Engine.
 
@@ -288,7 +288,7 @@ owns defaults, configuration, resource bounds and interruption semantics.
 
 A terminal-owned clipboard worker has bounded trusted OS-client ownership distinct from the reader and Engine. Immutable image values cross semantic Provider/Session boundaries; human drawing receives metadata. Canonical image bytes, multimodal context and compaction remain under the image/Session/Store owners.
 
-The released terminal owner retains signal listeners through committed output and transfers them to reacquisition. Raw/canonical input is stopped and joined before modes/flags are restored; suspension retains the pinned Run future and bounded draft. Lifecycle failures cannot manufacture a committed outcome. Detailed fault ownership remains in [terminal rules](../../agents/terminal.md); [next steps](../../NEXT_STEPS.md) owns unverified claims.
+The released terminal owner retains signal listeners through committed output and transfers them to reacquisition. Raw/canonical input is stopped and joined before modes/flags are restored; suspension retains the pinned Run future and bounded draft. Lifecycle failures cannot manufacture a committed outcome. Detailed fault ownership remains in [Terminal spec](../specs/terminal.md); [next steps](../../NEXT_STEPS.md) owns unverified claims.
 
 ### Display observations and terminal continuity
 

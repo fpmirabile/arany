@@ -2,7 +2,7 @@
 
 Source baseline: 2026-10-04. The initial review used primary sources without launching a server, installing dependencies, accessing credentials or running live inference. A later same-day review inspected fetched package sources and the offline dependency graph; it did not execute dependency code.
 
-[Tool behavior](../specs/tools.md), [Tool rules](../../agents/tools.md) and [Guard rules](../../agents/guard.md) own the advertised profile, admission, resource bounds and lifecycle. This report retains source comparisons and failure modes; the original implementation plan and proposed limits are absorbed there. [Project skill setup](../../agents/skills/README.md) separately owns development Skills.
+[Tool behavior](../specs/tools.md), [Tool spec](../specs/tools.md) and [Tool spec](../specs/tools.md) own the advertised profile, admission, resource bounds and lifecycle. This report retains source comparisons and failure modes; the original implementation plan and proposed limits are absorbed there. [Project skill setup](../../agents/skills/README.md) separately owns development Skills.
 
 ## Protocol-era differences
 

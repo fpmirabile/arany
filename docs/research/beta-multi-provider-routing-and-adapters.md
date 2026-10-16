@@ -2,8 +2,8 @@
 
 **Source baseline:** 2026-09-29; documentation consolidation is not a fresh API or live-account check.
 
-[Provider rules](../../agents/provider.md) own admission, supported profiles and
-strict outcomes; [streaming rules](../../agents/provider-streaming.md) own
+[Provider spec](../specs/provider.md) own admission, supported profiles and
+strict outcomes; [Provider spec](../specs/provider.md) own
 transport validation. This report retains the source comparison behind exact
 profile admission. [The subscription review](./subscription-provider-routes-2026-10.md)
 owns the later plan-access investigation. Recheck changing service capabilities
@@ -38,7 +38,7 @@ The reviewed [response-caching documentation](https://openrouter.ai/docs/guides/
 describes replay of stored successful responses, with different inference and
 billing provenance from a fresh upstream generation. That explains why route,
 cache and privacy evidence cannot collapse into one compatibility flag.
-Current broker admission remains in [Provider rules](../../agents/provider.md).
+Current broker admission remains in [Provider spec](../specs/provider.md).
 
 ## Usage and privacy claims have different owners
 
@@ -51,7 +51,7 @@ to disclose arbitrary Workspace data.
 
 Provider-reported usage is evidence only for returned fields. Missing usage is
 not zero cost; cancellation or a lost response cannot prove that remote work
-never occurred. [Provider reliability rules](../../agents/provider.md#reliability-and-evidence)
+never occurred. [Provider spec](../specs/provider.md#usage-provenance-and-reliability)
 own current recording and failure behavior.
 
 ## Scope of this evidence

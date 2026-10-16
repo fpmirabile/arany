@@ -10,8 +10,8 @@ Start with the task, then read the owning contract and editing rules. [AGENTS.md
 | Human contribution workflow, issues and pull requests | [Contribution guide](../CONTRIBUTING.md) |
 | Shared development commands and prerequisites | [Development guide](./development.md) |
 | Shared development rules and conditional loading | [AGENTS.md](../AGENTS.md) |
-| Module editing constraints, ownership invariants and recurring failure modes | `agents/<module>.md`, reached through AGENTS.md; task-specific details are linked from each module under `agents/references/` |
-| Agreed observable product behavior | [Domain specs](./specs/README.md); unmigrated contracts remain in their existing owners |
+| Implementation invariants and pitfalls the code does not show | `//!`/`///` docs on the owning Rust file; fixture procedures in [testing details](../agents/references/testing-details.md) |
+| Agreed observable product behavior | [Domain specs](./specs/README.md); every domain has one |
 | Physical architecture, data model and dependency direction | [System overview](./architecture/system-overview.md) |
 | Architectural decisions, reasons and trade-offs | [Decision register](./research/next-step-decision-register.md), or a focused ADR when warranted |
 | Source investigation, alternatives and research retention | [Research index](./research/README.md) and its [completion policy](./research/README.md#retention-and-completion) |
@@ -30,17 +30,15 @@ Specs state the agreed contract. Source and tests establish implementation and e
 
 | Task | Read first | Related boundary |
 |---|---|---|
-| Terminal interaction, draft retention, selectors, accessibility or output | [Terminal spec](./specs/terminal.md), [terminal rules](../agents/terminal.md) | [CLI](../agents/cli.md), [history](../agents/history.md); clipboard/image rules when involved |
-| Goal lifecycle, task budgets, plan contracts or recovery | [Goals spec](./specs/goals.md), [Engine rules](../agents/engine.md) | [Session](../agents/session.md), [Store](../agents/store.md), [CLI](../agents/cli.md), Provider and Tools for cross-boundary changes |
-| Run coordination, teams, context or compaction | [Execution spec](./specs/execution.md), [Session rules](../agents/session.md), [Engine rules](../agents/engine.md) | [Store](../agents/store.md), Provider and terminal for cross-boundary changes |
-| Provider, model or billing route | [Provider rules](../agents/provider.md) | [Credential spec](./specs/credentials.md), [ChatGPT](../agents/chatgpt.md), [security](../agents/security.md) |
-| Saved accounts, OS-store authorization, storage or recovery | [Credential spec](./specs/credentials.md), [credential rules](../agents/credentials.md) | [ChatGPT](../agents/chatgpt.md), [Store](../agents/store.md), [terminal](./specs/terminal.md), [security](../agents/security.md) |
-| Model-driven Tools, commands, Skills or MCP | [Tool spec](./specs/tools.md), [Tool rules](../agents/tools.md), [Guard rules](../agents/guard.md), [tool guide](./tools.md) | Engine, Provider, Session, Store and security |
-| Persistent Workspace build cache, quota or recovery | [Tool spec](./specs/tools.md#persistent-workspace-build-cache), [build-cache rules](../agents/build-cache.md) | [Store](../agents/store.md), [Guard](../agents/guard.md), [Tools](../agents/tools.md) |
-| Runtime profile discovery, toolchain identity or optional host-cache selection | [Tool spec](./specs/tools.md), [runtime profile rules](../agents/toolchains.md) | [Tools](../agents/tools.md) for grants and [Guard](../agents/guard.md) for native enforcement |
-| Trace export or local diagnostics | [Diagnostic spec](./specs/diagnostics.md), [Telemetry rules](../agents/telemetry.md) or [diagnostic rules](../agents/diagnostics.md) | Security and CLI admission |
-| Behavior change, defect fix or release claim | The owning contract and [testing rules](../agents/testing.md) | Existing evidence owner and current handoff |
-| Architecture or ownership change | [System overview](./architecture/system-overview.md) | Relevant module rules and [planning workflow](../planning/PLANNING.md) |
+| Terminal interaction, draft retention, selectors, accessibility or output | [Terminal spec](./specs/terminal.md) | Session and Tool specs for cross-boundary changes; [security rules](../agents/security.md) for untrusted rendering |
+| Goal lifecycle, task budgets, plan contracts or recovery | [Goals spec](./specs/goals.md) | [Execution spec](./specs/execution.md), [Session spec](./specs/session.md); Provider and Tools for cross-boundary changes |
+| Run coordination, teams, context or compaction | [Execution spec](./specs/execution.md), [Session spec](./specs/session.md) | Provider and terminal for cross-boundary changes |
+| Provider, model or billing route | [Provider spec](./specs/provider.md) | [Credential spec](./specs/credentials.md), [ChatGPT spec](./specs/chatgpt.md), [security rules](../agents/security.md) |
+| Saved accounts, OS-store authorization, storage or recovery | [Credential spec](./specs/credentials.md) | [ChatGPT spec](./specs/chatgpt.md), [Execution spec](./specs/execution.md#admission-persistence-and-recovery), [Terminal spec](./specs/terminal.md), [security rules](../agents/security.md) |
+| Model-driven Tools, commands, Skills, MCP, Guard, folder trust or build cache | [Tool spec](./specs/tools.md), [tool guide](./tools.md) | Engine, Provider, Session, Execution and security |
+| Trace export or local diagnostics | [Telemetry spec](./specs/telemetry.md), [Diagnostics spec](./specs/diagnostics.md) | Security and CLI admission |
+| Behavior change, defect fix or release claim | The owning spec and [testing rules](../agents/testing.md) | Existing evidence owner and current handoff |
+| Architecture or ownership change | [System overview](./architecture/system-overview.md) | Relevant domain specs and [planning workflow](../planning/PLANNING.md) |
 | Development instructions or skill setup | [AGENTS.md](../AGENTS.md), [project skills](../agents/skills/README.md) | [Development commands](./development.md), [planning workflow](../planning/PLANNING.md); runtime Skill behavior remains in the Tool contract |
 
 Follow relevant cross-boundary links before editing. A harmless prose correction does not require loading every contract. A linked file must actually be opened when its trigger applies; Markdown links and `@` text are not portable automatic imports.
@@ -53,4 +51,4 @@ Read the owning contract and the rules [AGENTS.md](../AGENTS.md) triggers, then 
 
 The current milestone is a personal Linux beta. [Next steps](../NEXT_STEPS.md) owns open defects, unperformed checks and release work; [the active beta plan](../planning/arany-beta/README.md) holds remaining Beta 1 execution; [the agentic coding teams plan](../planning/agentic-teams/README.md) owns the remaining Beta 1 implementation work; accepted behavior belongs in specs. Keep specs independent of test totals, artifact hashes and past run logs.
 
-The executable snapshots the exact Workspace-root AGENTS.md, with CLAUDE.md only as an absence fallback. This documentation workflow does not make Arany discover nested rules, follow spec links, or expand outbound content. Its admission contract remains in [Session input rules](../agents/session.md) and [security rules](../agents/security.md).
+The executable snapshots the exact Workspace-root AGENTS.md, with CLAUDE.md only as an absence fallback. This documentation workflow does not make Arany discover nested rules, follow spec links, or expand outbound content. Its admission contract remains in [Session spec](./specs/session.md) and [security rules](../agents/security.md).
