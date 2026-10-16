@@ -57,7 +57,8 @@ claimed until each lands.
 - **One Seatbelt profile builder.** `install`, `install_command` and `install_git` in `src/tools/guard/macos.rs` repeat rules, ancestors, grants, port detach, install and attestation; one private builder with a single install-and-attest tail keeps digest-relevant logic in one place.
 - **One executable-identity table.** Platform root, shell and executable magic for trusted system executables are spread across `git.rs`, `config.rs`, `workspace.rs` and `macos.rs::system_file`; a single per-platform table makes a second Git root (for example Xcode.app) a one-row change.
 - **Researcher children with Tools.** They still have no native macOS owner.
-- **Native Git profile probe hardening (needs a Mac).** Extend the Seatbelt Git probe to deny exec of a sibling Command Line Tools binary and of the `/usr/bin/git` shim; deny writes outside the view and allow them inside; deny reading `~/.gitconfig`; and exercise a Mach-lookup denial. Current probes cover only the pinned Git exec and the workspace read.
+- **Native Git profile probe hardening (needs a Mac).** Add a service-specific Mach-lookup denial with an unsandboxed success baseline to the Seatbelt Git probe. A direct lookup needs new test-only `unsafe` FFI, which requires the dedicated review in [AGENTS.md](./AGENTS.md#global-rules) rule 7.
+- **Linux Git journey denial parity.** `typed_git_reads_run_in_the_guard_without_repository_code` does not assert that exec of other binaries, writes outside the Git view and reads of a host gitconfig are denied, as the macOS probe now does; extend its execution fixture to assert them.
 
 ## Terminal continuity evidence
 
