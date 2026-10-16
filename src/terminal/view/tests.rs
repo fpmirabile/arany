@@ -1514,7 +1514,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
                         assert!(labels.iter().any(|row| row.starts_with("> Skill /skill-")));
                     }
                     if width >= 79 && height == 24 && !skills_tab && !last {
-                        let shown = help_len() - 1;
+                        let shown = 18;
                         assert_eq!(
                             labels.len(),
                             shown + 1,

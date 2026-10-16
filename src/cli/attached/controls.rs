@@ -577,7 +577,8 @@ pub(super) async fn select_model(
 }
 
 pub(super) enum ActiveSubmission {
-    RetainedDraft,
+    SteeringNote(String),
+    Pause,
     Rejected(String),
     Notice(String),
     OpenAgents,
@@ -599,7 +600,14 @@ pub(super) fn handle_active_submission(
             composer.take();
             return ActiveSubmission::OpenTranscript;
         }
-        Ok(Submission::Objective(_)) => return ActiveSubmission::RetainedDraft,
+        Ok(Submission::Objective(text)) => return ActiveSubmission::SteeringNote(text.to_owned()),
+        Ok(Submission::Command {
+            command: InteractiveCommand::Pause,
+            argument: None,
+        }) => {
+            composer.take();
+            return ActiveSubmission::Pause;
+        }
         Ok(Submission::Command {
             command: InteractiveCommand::Paste,
             argument: None,
@@ -882,6 +890,7 @@ pub(super) async fn handle_command(
         InteractiveCommand::Help => {
             return Err("Help requires the terminal command registry".into());
         }
+        InteractiveCommand::Pause => "No Goal is running; /pause works during a Run".into(),
         InteractiveCommand::Permissions => {
             if admission.tools {
                 "Tools requested from private tools.json; native protection must be admitted before a Run. File mutation requires the write grant; command changes are discarded. Primary only; commands/MCP have no network, host home or account state. Arany requests: selected Provider; OS TLS checks may connect separately.".into()
@@ -1068,9 +1077,31 @@ mod tests {
         }
         assert!(matches!(
             handle_active_submission(&mut composer, &view, starting_sequence),
-            ActiveSubmission::RetainedDraft
+            ActiveSubmission::SteeringNote(ref text) if text == "/literal"
         ));
         assert_eq!(composer.text(), "//literal");
+
+        composer.clear();
+        for character in "/pause".chars() {
+            composer.apply(TerminalInput::Character(character));
+        }
+        assert!(matches!(
+            handle_active_submission(&mut composer, &view, starting_sequence),
+            ActiveSubmission::Pause
+        ));
+        assert!(
+            composer.is_empty(),
+            "/pause is a control, not steering text"
+        );
+        for character in "/pause now".chars() {
+            composer.apply(TerminalInput::Character(character));
+        }
+        let ActiveSubmission::Rejected(notice) =
+            handle_active_submission(&mut composer, &view, starting_sequence)
+        else {
+            panic!("/pause takes no argument")
+        };
+        assert_eq!(notice, "Usage: /pause");
 
         composer.clear();
         for character in "/provder".chars() {
@@ -1308,7 +1339,7 @@ mod tests {
         composer.attach_image(image.clone()).unwrap();
         assert!(matches!(
             handle_active_submission(&mut composer, &view, starting_sequence),
-            ActiveSubmission::RetainedDraft
+            ActiveSubmission::SteeringNote(_)
         ));
         for command in ["/help", "/agents", "/paste", "/provider"] {
             composer.insert_paste(command).unwrap();

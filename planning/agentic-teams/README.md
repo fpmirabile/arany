@@ -38,7 +38,8 @@ the user-owned checks in [next steps](../../NEXT_STEPS.md).
 
 - **Goal.** A durable, Engine-owned unit of user intent that spans one or more
   Runs and ends Completed or Failed with a final report (E11). Cancellation
-  (Ctrl+C) pauses it as Interrupted until `/goal resume`.
+  (Ctrl+C) pauses it as Interrupted until `/goal resume`; `/pause` pauses it at
+  its next step.
 - **RPI.** Research → Plan → Implementation, the default mode (B6).
 - **Plan contract.** An agent's declared scope (paths, command names), success
   criterion and budget; the anchor for every Supervisor signal (B1).
@@ -63,7 +64,7 @@ the user-owned checks in [next steps](../../NEXT_STEPS.md).
 - **Wave.** A group of workers that starts after the previous group integrates
   (C3).
 - **Steering note.** A user message delivered to a running Goal's primary at
-  its next call boundary (E1).
+  its next call boundary (E1, landed).
 
 ## Current facts
 
@@ -519,7 +520,7 @@ triggered and evidence under [testing rules](../../agents/testing.md).
    [next steps](../../NEXT_STEPS.md#beta-1-final-user-owned-checks). Every
    later slice is exercised through real use, which supplies the shadow-mode
    calibration data B2 needs.
-6. **Goal completion.** E1–E4 steering, context reinjection, Workspace
+6. **Goal completion.** E2–E4 context reinjection, Workspace
    checkpoints and rewind, E8 compaction and E10 `exec` integration. This
    follows dogfooding and extends Goal Foundation with the remaining durable
    workflows and UI.

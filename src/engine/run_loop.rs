@@ -889,6 +889,10 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         let Some(steering) = &self.controls.steering else {
             return Ok(());
         };
+        // A cancelled call never dispatches, so its note must not be journaled as delivered.
+        if self.controls.cancellation.is_cancelled() {
+            return Ok(());
+        }
         let Some(text) = steering.take_note() else {
             return Ok(());
         };
@@ -898,7 +902,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             text: text.clone(),
         })
         .await?;
-        steering.note_recorded(text.len());
+        steering.note_recorded();
         request.steering_notes.push(text);
         Ok(())
     }
@@ -1998,7 +2002,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                 }
             }
         }
-        let queue_pause = if approved
+        let mut queue_pause = if approved
             && goal_allows
             && !active_time_exhausted
             && self.controls.goal_budget.can_start_provider_call()
@@ -2036,6 +2040,22 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                     intent,
                     disposition: crate::tools::ToolDisposition::Limit,
                     output: "Goal token budget exhausted; no operation was dispatched".into(),
+                    guard: None,
+                    cache_update: crate::tools::CacheUpdate::NotApplicable,
+                },
+                None,
+            )
+        } else if approved && self.pause_at_boundary() {
+            // A pause requested during review or the approval wait stops the Run before dispatch.
+            approved = false;
+            if let Some(pause) = queue_pause.take() {
+                self.settle_active_pause(pause, None).await?;
+            }
+            (
+                crate::tools::ToolObservation {
+                    intent,
+                    disposition: crate::tools::ToolDisposition::Denied,
+                    output: "Goal paused before this operation; no operation was dispatched".into(),
                     guard: None,
                     cache_update: crate::tools::CacheUpdate::NotApplicable,
                 },

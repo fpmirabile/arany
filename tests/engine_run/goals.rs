@@ -2892,6 +2892,18 @@ async fn pause_waits_for_the_in_flight_call_and_pauses_before_its_tool() {
             .any(|event| matches!(event.event, Event::ToolStarted { .. })),
         "the paused Run starts no requested Tool"
     );
+    let dispositions: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            Event::ProviderCallRecorded { record, .. } => Some(record.disposition),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        dispositions,
+        [ProviderCallDisposition::ToolRequested],
+        "the in-flight call completes as the observed Tool request"
+    );
     assert_eq!(
         view.goal(outcome.goal_id).expect("Goal").status,
         arany::GoalStatus::Interrupted
@@ -2959,4 +2971,237 @@ async fn pause_between_autonomous_runs_starts_no_next_run() {
         view.goal(outcome.goal_id).expect("Goal").status,
         arany::GoalStatus::Interrupted
     );
+}
+
+#[tokio::test]
+async fn pause_during_approval_wait_dispatches_no_tool() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let steering = RunSteering::new();
+    let pause = steering.clone();
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Tool {
+            call: arany::ToolCall::Write {
+                path: "notes/facts.txt".into(),
+                expected_digest: None,
+                content: "changed".into(),
+            },
+            plan_contract: Some(Box::new(arany::GoalPlanContract {
+                mission: "Change the facts".into(),
+                resource_class: arany::ToolResourceClass::Default,
+                command_timeout_ms: None,
+                paths: vec!["notes".into()],
+                commands: Vec::new(),
+                skills: Vec::new(),
+                mcp_tools: Vec::new(),
+                success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
+                    path: "notes/facts.txt".into(),
+                    content: "changed".into(),
+                },
+                budget: arany::GoalBudget::default(),
+            })),
+        },
+        finish_with("never reached"),
+    ]);
+    let requests = provider.requests.clone();
+    let mut engine =
+        Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+    let config = state_path.join("tools.json");
+    std::fs::write(
+        &config,
+        br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+    )
+    .expect("tool configuration");
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
+        .expect("tool configuration mode");
+    engine
+        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
+        .expect("Guard enabled");
+    let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+    engine.set_tool_approvals(approvals);
+    engine.set_steering(steering);
+    let mut input = request(&workspace, "Change the facts");
+    input.include_paths.clear();
+
+    // The approval wait is the only point where the caller can pause before dispatch.
+    let decide = async {
+        let approval = inbox.next().await.expect("approval requested");
+        assert!(pause.pause(), "first pause");
+        approval.decide(true);
+    };
+    let (run, ()) = tokio::join!(engine.run(input), decide);
+    let outcome = run.expect("paused Run");
+    assert_eq!(outcome.run.status, RunStatus::Cancelled);
+    engine.close().await.expect("engine shutdown");
+
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("notes/facts.txt")).expect("facts"),
+        "v1",
+        "a Tool approved during a pause is not dispatched"
+    );
+    assert_eq!(requests.lock().expect("requests").len(), 1);
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    let observed: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            Event::ToolFinished { observation, .. } => Some(observation.disposition),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(observed, [arany::ToolDisposition::Denied]);
+    assert_eq!(
+        view.goal(outcome.goal_id).expect("Goal").status,
+        arany::GoalStatus::Interrupted
+    );
+}
+
+#[tokio::test]
+async fn pause_at_the_delegate_boundary_spawns_no_child() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let steering = RunSteering::new();
+    let pause = steering.clone();
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Delegate(Delegate {
+            children: vec!["Inspect facts".into()],
+        }),
+        finish_with("never reached"),
+    ])
+    .with_before_call(0, move || assert!(pause.pause(), "first pause"));
+    let requests = provider.requests.clone();
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    engine.set_steering(steering);
+    let mut input = request(&workspace, "Check the facts");
+    input.include_paths.clear();
+    input.policy = CollaborationPolicy::Auto {
+        max_active_children: 1,
+    };
+    let outcome = engine.run(input).await.expect("paused Run");
+    assert_eq!(outcome.run.status, RunStatus::Cancelled);
+    engine.close().await.expect("engine shutdown");
+
+    assert_eq!(requests.lock().expect("requests").len(), 1);
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    assert!(
+        !events.iter().any(|event| matches!(
+            event.event,
+            Event::AgentSpawned {
+                role: arany::AgentRole::Child,
+                ..
+            }
+        )),
+        "a paused Delegate spawns no child"
+    );
+    assert_eq!(
+        view.goal(outcome.goal_id).expect("Goal").status,
+        arany::GoalStatus::Interrupted
+    );
+}
+
+#[tokio::test]
+async fn pause_before_synthesis_starts_no_synthesis_call() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let steering = RunSteering::new();
+    let pause = steering.clone();
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Delegate(Delegate {
+            children: vec!["Inspect facts".into()],
+        }),
+        finish_with("child result"),
+        finish_with("never synthesized"),
+    ])
+    .with_before_call(1, move || assert!(pause.pause(), "first pause"));
+    let requests = provider.requests.clone();
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    engine.set_steering(steering);
+    let mut input = request(&workspace, "Check the facts");
+    input.include_paths.clear();
+    input.policy = CollaborationPolicy::Auto {
+        max_active_children: 1,
+    };
+    let outcome = engine.run(input).await.expect("paused Run");
+    assert_eq!(outcome.run.status, RunStatus::Cancelled);
+    engine.close().await.expect("engine shutdown");
+
+    let calls = requests.lock().expect("requests").clone();
+    assert_eq!(
+        calls.len(),
+        2,
+        "the in-flight child call completes, synthesis does not start"
+    );
+    assert_eq!(calls[1].phase, AgentPhase::ChildWork);
+    let (_, view) = replayed(&state_path, outcome.session_id).await;
+    assert_eq!(
+        view.goal(outcome.goal_id).expect("Goal").status,
+        arany::GoalStatus::Interrupted
+    );
+}
+
+#[tokio::test]
+async fn steering_note_waits_for_the_next_autonomous_run_primary_call() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let steering = RunSteering::new();
+    let offer = steering.clone();
+    // The first Run's Finish is unsatisfied against the planned digest, so the Goal starts a second Run.
+    // The note is offered while the first Run's Finish is in flight: it has no primary call left in
+    // that Run, so it waits for the second Run's first primary call.
+    let mut plan = facts_plan(facts_digest("v2"));
+    plan.budget.max_runs = 2;
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Tool {
+            call: facts_read(),
+            plan_contract: Some(Box::new(plan)),
+        },
+        finish_with("first pass"),
+        finish_with("second pass"),
+    ])
+    .with_before_call(1, move || {
+        steering_note_at(&offer, "carry this into the next Run")
+    });
+    let requests = provider.requests.clone();
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    engine.set_steering(steering.clone());
+    let budget = arany::GoalBudget {
+        max_runs: 2,
+        ..arany::GoalBudget::default()
+    };
+    let mut input = request(&workspace, AUTONOMOUS_OBJECTIVE);
+    input.include_paths.clear();
+    input.goal = arany::GoalRequest::autonomous(budget, arany::GoalPhase::Implementation);
+    let outcome = engine.run(input).await.expect("terminal Run");
+    assert_eq!(outcome.run.status, RunStatus::Failed);
+    engine.close().await.expect("engine shutdown");
+
+    let calls = requests.lock().expect("requests").clone();
+    assert_eq!(calls.len(), 3);
+    assert!(calls[1].steering_notes.is_empty());
+    assert_eq!(calls[2].steering_notes, ["carry this into the next Run"]);
+    assert_eq!(steering.delivered_notes(), 1);
+    let (_, view) = replayed(&state_path, outcome.session_id).await;
+    assert_eq!(view.runs.len(), 2);
+    assert!(view.runs[0].steering_notes.is_empty());
+    assert_eq!(
+        view.runs[1].steering_notes,
+        ["carry this into the next Run"]
+    );
+    assert_eq!(view.runs[1].id, outcome.run.id);
 }

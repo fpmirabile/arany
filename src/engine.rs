@@ -353,20 +353,25 @@ impl RunSteering {
         }
     }
 
-    /// Takes the waiting note only if it still fits this Run's quota.
+    /// Takes the waiting note only if it still fits this Run's quota. Taking reserves the quota,
+    /// so an accepted offer always stays deliverable within this Run.
     pub(crate) fn take_note(&self) -> Option<String> {
         let mut state = self.lock()?;
         let fits = state.waiting.as_ref().is_some_and(|text| {
             state.run_notes < crate::session::MAX_GOAL_STEERING_NOTES_PER_RUN
                 && state.run_bytes + text.len() <= MAX_OBJECTIVE_BYTES
         });
-        if fits { state.waiting.take() } else { None }
+        if !fits {
+            return None;
+        }
+        let text = state.waiting.take()?;
+        state.run_notes += 1;
+        state.run_bytes += text.len();
+        Some(text)
     }
 
-    pub(crate) fn note_recorded(&self, bytes: usize) {
+    pub(crate) fn note_recorded(&self) {
         if let Some(mut state) = self.lock() {
-            state.run_notes += 1;
-            state.run_bytes += bytes;
             state.recorded += 1;
         }
     }
@@ -1961,6 +1966,8 @@ impl<P: Provider + 'static> Engine<P> {
         self.tool_approvals = Some(approvals);
     }
 
+    /// Installs the caller's handle. Its pause request is sticky for the handle's lifetime, so a
+    /// caller creates one `RunSteering` per submission.
     pub fn set_steering(&mut self, steering: RunSteering) {
         self.steering = Some(steering);
     }
@@ -2640,13 +2647,13 @@ mod run_steering_tests {
             "a note the Engine took cannot be withdrawn"
         );
         assert_eq!(steering.delivered_notes(), 0);
-        steering.note_recorded(5);
+        steering.note_recorded();
         assert_eq!(steering.delivered_notes(), 1);
 
         for _ in 0..3 {
             steering.offer_note("n".into()).expect("within quota");
             assert!(steering.take_note().is_some());
-            steering.note_recorded(1);
+            steering.note_recorded();
         }
         assert_eq!(
             steering.offer_note("fifth".into()),
@@ -2658,7 +2665,7 @@ mod run_steering_tests {
             .offer_note("x".repeat(MAX_OBJECTIVE_BYTES))
             .expect("a new Run has its own byte quota");
         assert!(steering.take_note().is_some());
-        steering.note_recorded(MAX_OBJECTIVE_BYTES);
+        steering.note_recorded();
         assert_eq!(
             steering.offer_note("y".into()),
             Err(SteeringRefused::RunFull)
@@ -2667,5 +2674,32 @@ mod run_steering_tests {
         assert!(steering.pause());
         assert!(!steering.pause(), "only the first pause request is new");
         assert!(steering.pause_requested());
+    }
+
+    #[test]
+    fn run_steering_take_reserves_quota_and_poisoned_lock_fails_closed() {
+        let steering = RunSteering::new();
+        for _ in 0..crate::session::MAX_GOAL_STEERING_NOTES_PER_RUN {
+            steering.offer_note("n".into()).expect("within quota");
+            assert!(steering.take_note().is_some());
+        }
+        assert_eq!(
+            steering.offer_note("unrecorded takes still count".into()),
+            Err(SteeringRefused::RunFull)
+        );
+
+        let poisoned = RunSteering::new();
+        let handle = poisoned.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = handle.state.lock().expect("unpoisoned");
+            panic!("poison the steering lock");
+        })
+        .join();
+        assert_eq!(
+            poisoned.offer_note("x".into()),
+            Err(SteeringRefused::Unavailable)
+        );
+        assert!(poisoned.take_note().is_none());
+        assert_eq!(poisoned.delivered_notes(), 0);
     }
 }
