@@ -2,6 +2,8 @@
 
 Load when continuing beta 1, adding or changing behavior, fixing a defect, editing tests or fixtures, changing user-visible output, or making a correctness, security, durability, provider, performance, or platform-support claim. For documentation-only work, use [documentation and instruction checks](#documentation-and-instruction-changes). The [testing strategy](../docs/research/testing-strategy-for-rust-cli-harness.md) explains the design rationale; keep this file as the concise working contract.
 
+Until a stable pre-beta, synthetic tests plus a green CI run on the final head are sufficient evidence for a change. Live-account, native-host and manual checklists in `NEXT_STEPS.md` do not block day-to-day changes; they remain the only basis for a native, live or accessibility support claim.
+
 ## Load for the affected task
 
 - Local verification or CI reproduction → [commands and native prerequisites](./references/testing-details.md#local-verification-and-ci).
@@ -71,7 +73,7 @@ consistency, not measured agent quality or runtime/platform support.
 
 ## Failure and maintenance discipline
 
-- After a hosted CI failure, consolidate the confirmed failures and review findings from that exact head before correcting. Dispatch a [focused CI lane](./references/testing-details.md#local-verification-and-ci) only after diagnosis identifies the OS and profile; its pass is diagnostic, not verification. Before marking a change ready, require the complete `ci.yml` workflow on the exact final head: an automatic PR/push run or a manual dispatch of that workflow.
+- After a hosted CI failure, consolidate the confirmed failures and review findings from that exact head before correcting. Dispatch a [focused CI lane](./references/testing-details.md#local-verification-and-ci) only after diagnosis identifies the OS and profile; its pass is diagnostic, not verification. Before marking a change ready, require the complete `ci.yml` workflow on the exact final head: an automatic PR run (any base branch), a push run or a manual dispatch. A red CI blocks handoff; fix it rather than reporting around it. Local verification is targeted (fmt, Clippy and the owning tests of the change); the workspace suite is CI's job.
 - Focused Cargo and test-binary invocations must report their intended nonzero test count. A self-spawned helper filtered with `--exact` must assert exactly one completed test and have a bounded parent wait/output plus kill/reap cleanup. Helper-only tests are explicitly ignored by default and require their parent's private fixture when activated; returning early without assertions is not a default passing test. Zero-test or ignored-child success provides no evidence.
 - Failure output names the scenario and case, expected and observed exit, bounded escaped stdout/stderr, semantic Event difference, and safe fixture identifier. It never dumps secrets, raw hostile controls, provider bodies, or database payloads.
 - Every test runs independently and owns its directories, files, ports, runtime, database, and processes. Do not mutate shared process environment from parallel tests.
