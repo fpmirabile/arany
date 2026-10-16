@@ -559,8 +559,11 @@ mod tests {
             Ok(ProviderResponse {
                 outcome: ProviderOutcome::Finish(answer),
                 response_id: Some("resp_test".into()),
-                input_tokens: Some(20),
-                output_tokens: Some(10),
+                usage: arany::Usage {
+                    input_tokens: Some(20),
+                    output_tokens: Some(10),
+                    ..Default::default()
+                },
                 wire_provenance: None,
             })
         }
@@ -967,7 +970,7 @@ mod tests {
         for (line, event) in run_lines.into_iter().zip(run_events) {
             assert_eq!(line["sequence"], event.sequence);
             assert_eq!(line["created_at_ms"], event.created_at_ms);
-            assert_eq!(line["event_version"], 5);
+            assert_eq!(line["event_version"], 6);
         }
         store.close().await.expect("closed store");
 

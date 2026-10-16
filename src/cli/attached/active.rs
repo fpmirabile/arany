@@ -1099,6 +1099,8 @@ mod tests {
                 summary_bytes,
                 summary_tokens_estimate: summary_bytes.div_ceil(4),
             },
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
         };
         assert_eq!(
             compaction_notice(&record),

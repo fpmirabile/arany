@@ -215,7 +215,7 @@ async fn probe<P: Provider>(provider: &P) -> Result<(), NativeCheckError> {
         .await
         .map_err(|_| NativeCheckError::ConformanceFailed)?;
     if !matches!(&response.outcome, ProviderOutcome::Finish(value) if !observed.borrow().answer.is_empty() && value.result.starts_with(&observed.borrow().answer) && !value.summary.trim().is_empty() && !value.result.trim().is_empty() && value.summary.len() <= 8 * 1024 && value.result.len() <= 8 * 1024)
-        || !valid_usage(response.input_tokens, response.output_tokens)
+        || !valid_usage(response.usage.input_tokens, response.usage.output_tokens)
     {
         return Err(NativeCheckError::ConformanceFailed);
     }
@@ -235,7 +235,7 @@ async fn probe<P: Provider>(provider: &P) -> Result<(), NativeCheckError> {
         .await
         .map_err(|_| NativeCheckError::ConformanceFailed)?;
     if !matches!(&response.outcome, ProviderOutcome::Delegate(value) if value.children.len() == 1 && !value.children[0].trim().is_empty())
-        || !valid_usage(response.input_tokens, response.output_tokens)
+        || !valid_usage(response.usage.input_tokens, response.usage.output_tokens)
     {
         return Err(NativeCheckError::ConformanceFailed);
     }
@@ -263,7 +263,7 @@ async fn probe<P: Provider>(provider: &P) -> Result<(), NativeCheckError> {
         .map_err(|_| NativeCheckError::ConformanceFailed)?;
     if response.summary.trim().is_empty()
         || response.summary.len() > 8 * 1024
-        || !valid_usage(response.input_tokens, response.output_tokens)
+        || !valid_usage(response.usage.input_tokens, response.usage.output_tokens)
         || response.response_id.as_deref() == Some(&direct_id)
         || response.response_id.as_deref() == Some(&delegate_id)
         || response.response_id.is_none()
@@ -584,12 +584,15 @@ mod tests {
                     }
                     .into(),
                 ),
-                input_tokens: if matches!(self.case, ProbeCase::MissingUsage) {
-                    None
-                } else {
-                    Some(12)
+                usage: crate::provider::Usage {
+                    input_tokens: if matches!(self.case, ProbeCase::MissingUsage) {
+                        None
+                    } else {
+                        Some(12)
+                    },
+                    output_tokens: Some(8),
+                    ..Default::default()
                 },
-                output_tokens: Some(8),
                 wire_provenance: None,
             })
         }
@@ -625,8 +628,11 @@ mod tests {
                     "safe summary".into()
                 },
                 response_id: Some("compaction".into()),
-                input_tokens: Some(12),
-                output_tokens: Some(8),
+                usage: crate::provider::Usage {
+                    input_tokens: Some(12),
+                    output_tokens: Some(8),
+                    ..Default::default()
+                },
                 wire_provenance: None,
             })
         }

@@ -2,7 +2,7 @@ use super::{CustomProfileError, PinnedDestination};
 use crate::provider::ProviderError;
 use crate::provider::{
     CompactionRequest, CompactionResponse, Effort, MAX_REPORTED_INPUT_TOKENS, MAX_RESPONSE_BYTES,
-    ProviderRequest, ProviderResponse, openai::wire, raw_reflects_secret,
+    ProviderRequest, ProviderResponse, Usage, openai::wire, raw_reflects_secret,
 };
 use reqwest::{Client, header};
 use serde_json::Value;
@@ -84,11 +84,7 @@ impl CustomTransport {
         } else {
             wire::decode_run(&bytes, &request.model).map_err(|_| TransportError::InvalidOutcome)?
         };
-        if !valid_usage(
-            response.input_tokens,
-            response.output_tokens,
-            request.max_output_tokens,
-        ) {
+        if !valid_usage(response.usage, request.max_output_tokens) {
             return Err(TransportError::InvalidOutcome);
         }
         if response.reflects_secret(&self.key) {
@@ -112,11 +108,7 @@ impl CustomTransport {
         let bytes = self.send(body).await?;
         let response = wire::decode_compaction(&bytes, &request.model)
             .map_err(|_| TransportError::InvalidOutcome)?;
-        if !valid_usage(
-            response.input_tokens,
-            response.output_tokens,
-            request.max_output_tokens,
-        ) {
+        if !valid_usage(response.usage, request.max_output_tokens) {
             return Err(TransportError::InvalidOutcome);
         }
         if response.reflects_secret(&self.key) {
@@ -196,7 +188,12 @@ impl CustomTransport {
     }
 }
 
-fn valid_usage(input: Option<u32>, output: Option<u32>, cap: u32) -> bool {
-    input.is_some_and(|value| (1..=MAX_REPORTED_INPUT_TOKENS).contains(&value))
-        && output.is_some_and(|value| value > 0 && value <= cap)
+fn valid_usage(usage: Usage, cap: u32) -> bool {
+    usage
+        .input_tokens
+        .is_some_and(|value| (1..=MAX_REPORTED_INPUT_TOKENS).contains(&value))
+        && usage
+            .output_tokens
+            .is_some_and(|value| value > 0 && value <= cap)
+        && usage.cache_consistent()
 }
