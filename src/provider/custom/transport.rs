@@ -2,7 +2,7 @@ use super::{CustomProfileError, PinnedDestination};
 use crate::provider::ProviderError;
 use crate::provider::{
     CompactionRequest, CompactionResponse, Effort, MAX_REPORTED_INPUT_TOKENS, MAX_RESPONSE_BYTES,
-    ProviderRequest, ProviderResponse, Usage, openai::wire, raw_reflects_secret,
+    ProviderRequest, ProviderResponse, Usage, openai::wire, raw_reflects_secret, render,
 };
 use reqwest::{Client, header};
 use serde_json::Value;
@@ -59,8 +59,8 @@ impl CustomTransport {
         stream: bool,
         preview: Option<crate::provider::ResponsePreview>,
     ) -> Result<ProviderResponse, TransportError> {
-        if request.tools.is_some()
-            || !request.images.is_empty()
+        if request.input.tools.is_some()
+            || !request.input.images.is_empty()
             || request.validate_scope().is_err()
         {
             return Err(TransportError::Rejected);
@@ -68,10 +68,13 @@ impl CustomTransport {
         if !(1..=4096).contains(&request.max_output_tokens) {
             return Err(TransportError::InvalidOutcome);
         }
-        let mut body = effort.map_or_else(
-            || wire::run_body(request),
-            |value| wire::run_body_with_effort(request, value),
-        );
+        let conversation = render::conversation(request).map_err(|_| TransportError::Rejected)?;
+        let mut body = match effort {
+            Some(value) => wire::run_body_with_effort(request, &conversation, value),
+            None => wire::run_body(request, &conversation),
+        }
+        .map_err(|_| TransportError::Rejected)?;
+        let scope = wire::RunScope::new(request, &conversation, &self.key);
         let bytes = if stream {
             body["stream"] = Value::Bool(true);
             self.send_streamed(body, &request.model, preview).await?
@@ -79,10 +82,9 @@ impl CustomTransport {
             self.send(body).await?
         };
         let response = if stream {
-            wire::decode_streamed_run(&bytes, &request.model)
-                .map_err(|_| TransportError::InvalidOutcome)?
+            wire::decode_streamed_run(&bytes, &scope).map_err(|_| TransportError::InvalidOutcome)?
         } else {
-            wire::decode_run(&bytes, &request.model).map_err(|_| TransportError::InvalidOutcome)?
+            wire::decode_run(&bytes, &scope).map_err(|_| TransportError::InvalidOutcome)?
         };
         if !valid_usage(response.usage, request.max_output_tokens) {
             return Err(TransportError::InvalidOutcome);

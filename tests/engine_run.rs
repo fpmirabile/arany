@@ -2,10 +2,11 @@ use arany::{
     AgentPhase, AgentRunId, AgentStatus, ChatGptAdmission, ChatGptProvenance, CollaborationPolicy,
     CompactionFailure, CompactionItem, CompactionRequest, CompactionResponse, CompactionStatus,
     ContextUsage, Delegate, Effort, Engine, EngineError, Event, Finish, ImageAttachment,
-    ImageOrigin, OutputTokenBound, Provider, ProviderCallDisposition, ProviderError, ProviderImage,
-    ProviderOutcome, ProviderRequest, ProviderResponse, RunCancellation, RunId, RunProgress,
-    RunRequest, RunStatus, RunSteering, SessionId, SessionView, StateRoot, Store, UnansweredStatus,
-    continue_session, fork_session, list_sessions, rename_session, resume_session,
+    ImageOrigin, OutputTokenBound, PromptRole, Provider, ProviderCallDisposition, ProviderError,
+    ProviderImage, ProviderOutcome, ProviderRequest, ProviderResponse, RunCancellation, RunId,
+    RunInput, RunProgress, RunRequest, RunStatus, RunSteering, SessionId, SessionView, StateRoot,
+    Store, UnansweredStatus, continue_session, fork_session, list_sessions, rename_session,
+    resume_session,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
@@ -31,6 +32,18 @@ pub mod process;
 #[cfg(unix)]
 #[path = "engine_run/workspace_security.rs"]
 mod workspace_security;
+
+/// A scripted one-request Tool step; the id only has to be unique within its step.
+fn tool_outcome(
+    call: arany::ToolCall,
+    plan_contract: Option<Box<arany::GoalPlanContract>>,
+) -> arany::ProviderOutcome {
+    arany::ProviderOutcome::Tools(vec![arany::ToolRequest {
+        id: arany::ToolUseId::new("call_1").expect("scripted Tool id"),
+        call,
+        plan_contract,
+    }])
+}
 
 struct ScriptedProvider {
     profile: String,
@@ -143,6 +156,8 @@ impl ScriptedProvider {
     }
 }
 
+#[async_trait::async_trait]
+
 impl Provider for ScriptedProvider {
     fn profile_name(&self) -> &str {
         &self.profile
@@ -203,6 +218,7 @@ impl Provider for ScriptedProvider {
         }
         let input = self.known_input_tokens.then_some(self.cached_input_tokens);
         Ok(ProviderResponse {
+            turn: arany::ProviderTurn::scripted(),
             outcome: outcome?,
             response_id: None,
             usage: self.usage_override.unwrap_or(arany::Usage {
@@ -238,6 +254,8 @@ struct GatedProvider {
     capacity: u8,
 }
 
+#[async_trait::async_trait]
+
 impl Provider for GatedProvider {
     fn profile_name(&self) -> &str {
         "gated"
@@ -264,15 +282,15 @@ impl Provider for GatedProvider {
             AgentPhase::ChildWork => {
                 let (release, gate) = oneshot::channel();
                 self.started
-                    .send((request.objective.clone(), release))
+                    .send((request.input.objective.clone(), release))
                     .map_err(|_| ProviderError::Unavailable)?;
                 gate.await.map_err(|_| ProviderError::Unavailable)?;
-                if self.fail_child == Some(request.objective.as_str()) {
+                if self.fail_child == Some(request.input.objective.as_str()) {
                     return Err(ProviderError::RemoteHttp(403));
                 }
                 ProviderOutcome::Finish(Finish {
                     summary: "done".into(),
-                    result: format!("result:{}", request.objective),
+                    result: format!("result:{}", request.input.objective),
                 })
             }
             AgentPhase::RootSynthesis => ProviderOutcome::Finish(Finish {
@@ -281,6 +299,7 @@ impl Provider for GatedProvider {
             }),
         };
         Ok(ProviderResponse {
+            turn: arany::ProviderTurn::scripted(),
             outcome,
             response_id: None,
             usage: arany::Usage {
@@ -314,6 +333,8 @@ struct WaitingCompactionProvider {
     compact_requests: Arc<Mutex<Vec<CompactionRequest>>>,
 }
 
+#[async_trait::async_trait]
+
 impl Provider for WaitingCompactionProvider {
     fn profile_name(&self) -> &str {
         "waiting-compaction"
@@ -330,6 +351,7 @@ impl Provider for WaitingCompactionProvider {
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         self.requests.lock().expect("requests").push(request);
         Ok(ProviderResponse {
+            turn: arany::ProviderTurn::scripted(),
             outcome: ProviderOutcome::Finish(Finish {
                 summary: "seed".into(),
                 result: "Seed answer".into(),
@@ -359,6 +381,8 @@ impl Provider for WaitingCompactionProvider {
         std::future::pending().await
     }
 }
+
+#[async_trait::async_trait]
 
 impl Provider for WaitingProvider {
     fn profile_name(&self) -> &str {
@@ -490,20 +514,26 @@ fn assert_test_call(
 ) {
     assert_eq!(actual.phase, phase, "call phase");
     assert!(actual.model == "test-model", "call model");
-    assert!(actual.objective == objective, "call objective");
-    assert!(actual.images.is_empty(), "call images");
-    assert!(actual.instructions.is_none(), "call instructions");
+    assert!(actual.input.objective == objective, "call objective");
+    assert!(actual.input.images.is_empty(), "call images");
     assert!(
-        actual.includes
+        actual.input.workspace_guidance.is_none(),
+        "call instructions"
+    );
+    assert!(
+        actual.input.includes
             == includes
                 .iter()
                 .map(|text| include_data("notes/facts.txt", text))
                 .collect::<Vec<_>>(),
         "call includes"
     );
-    assert!(actual.history == history, "call history");
-    assert!(actual.context_summary.as_deref() == summary, "call summary");
-    assert!(actual.child_results == children, "call child results");
+    assert!(actual.input.history == history, "call history");
+    assert!(
+        actual.input.context_summary.as_deref() == summary,
+        "call summary"
+    );
+    assert!(actual.input.child_results == children, "call child results");
     assert_eq!(actual.max_output_tokens, 4096, "call output cap");
 }
 
@@ -695,33 +725,33 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             ]) {
                 assert_eq!(call.phase, AgentPhase::RootPlan);
                 assert!(call.model == "gpt-5.4", "selected model");
-                assert!(call.objective == objective, "exact objective");
-                assert!(call.context_summary.is_none(), "no derived summary");
-                assert!(call.child_results.is_empty(), "no child context");
-                assert_eq!(call.goal_budget, Some(arany::GoalBudget::default()));
-                assert_eq!(call.goal_plan_contract, None);
+                assert!(call.input.objective == objective, "exact objective");
+                assert!(call.input.context_summary.is_none(), "no derived summary");
+                assert!(call.input.child_results.is_empty(), "no child context");
+                assert_eq!(call.input.goal_budget, Some(arany::GoalBudget::default()));
+                assert_eq!(call.input.goal_plan_contract, None);
                 assert_eq!(call.max_output_tokens, 4096);
                 assert_eq!(call.run_id, run.id);
                 assert_eq!(call.agent_run_id, run.agents[0].id);
             }
             assert_eq!(
-                requests[0].instructions.as_deref(),
+                requests[0].input.workspace_guidance.as_deref(),
                 Some("Primary instruction")
             );
-            assert_eq!(requests[0].includes, [include_data("notes/facts.txt", "Fact one")]);
-            assert_eq!(requests[0].images, vec![ProviderImage {
+            assert_eq!(requests[0].input.includes, [include_data("notes/facts.txt", "Fact one")]);
+            assert_eq!(requests[0].input.images, vec![ProviderImage {
                 origin: ImageOrigin::Objective, image: first_image.clone(),
             }]);
-            assert!(requests[0].history.is_empty());
+            assert!(requests[0].input.history.is_empty());
             assert_eq!(
-                requests[1].instructions.as_deref(),
+                requests[1].input.workspace_guidance.as_deref(),
                 Some("Changed instruction")
             );
-            assert_eq!(requests[1].includes, [include_data("notes/facts.txt", "Fact two")]);
-            assert_eq!(requests[1].history.len(), 1);
-            assert_eq!(requests[1].history[0].user, "First question");
-            assert_eq!(requests[1].history[0].assistant, "First result");
-            assert_eq!(requests[1].images, vec![
+            assert_eq!(requests[1].input.includes, [include_data("notes/facts.txt", "Fact two")]);
+            assert_eq!(requests[1].input.history.len(), 1);
+            assert_eq!(requests[1].input.history[0].user, "First question");
+            assert_eq!(requests[1].input.history[0].assistant, "First result");
+            assert_eq!(requests[1].input.images, vec![
                 ProviderImage { origin: ImageOrigin::History { turn_index: 0 }, image: first_image.clone() },
                 ProviderImage { origin: ImageOrigin::Objective, image: second_image.clone() },
             ]);
@@ -859,17 +889,8 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 (5, AgentPhase::RootPlan, "After fork", [history, vec![arany::HistoryTurn { user: "".into(), assistant: "Team answer".into() }]].concat(), [historical_images, vec![ProviderImage { origin: ImageOrigin::History { turn_index: 2 }, image: second_image.clone() }]].concat(), Vec::new()),
             ] {
                 let mut actual = calls[index].clone();
-                let facts = actual.goal_context_facts.take();
-                assert_eq!(actual, ProviderRequest {
-                    run_id: calls[index].run_id, agent_run_id: calls[index].agent_run_id,
-                    phase, model: "test-model".into(), instructions: Some("Changed instruction".into()),
-                    collaboration: if index == 0 || index == 2 { CollaborationPolicy::Team { max_active_children: 1 } } else { CollaborationPolicy::Single },
-                    objective: objective.into(), images: expected_images, includes: vec![include_data("notes/facts.txt", "Fact two")],
-                    history: expected_history,
-                    context_summary: (index == 4).then(|| "Image conversation summary".into()),
-                    child_results, goal_budget: Some(arany::GoalBudget::default()),
-                    goal_plan_contract: None, goal_context_facts: None, steering_notes: Vec::new(), max_output_tokens: 4096, tools: None,
-                }, "image request {index}");
+                let facts = actual.input.goal_context_facts.take();
+                assert_eq!(actual, ProviderRequest { run_id: calls[index].run_id, agent_run_id: calls[index].agent_run_id, phase, collaboration: if index == 0 || index == 2 { CollaborationPolicy::Team { max_active_children: 1 } } else { CollaborationPolicy::Single }, model: "test-model".into(), max_output_tokens: 4096, input: RunInput { images: expected_images, goal_budget: Some(arany::GoalBudget::default()), workspace_guidance: Some("Changed instruction".into()), includes: vec![include_data("notes/facts.txt", "Fact two")], history: expected_history, context_summary: (index == 4).then(|| "Image conversation summary".into()), child_results, ..RunInput::new(PromptRole::ReadOnly, objective.into()) } }, "image request {index}");
                 if phase == AgentPhase::ChildWork {
                     assert!(facts.is_none(), "child calls do not receive primary Goal state");
                 } else {
@@ -1285,9 +1306,9 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
         {
             let observed = requests.lock().expect("request lock");
             assert_eq!(observed.len(), 3);
-            assert_eq!(observed[2].history.len(), 1);
-            assert_eq!(observed[2].history[0].user, "First question");
-            assert_eq!(observed[2].history[0].assistant, "first answer");
+            assert_eq!(observed[2].input.history.len(), 1);
+            assert_eq!(observed[2].input.history[0].user, "First question");
+            assert_eq!(observed[2].input.history[0].assistant, "first answer");
         }
         engine.close().await.expect("engine shutdown");
 
@@ -1642,16 +1663,16 @@ fn compaction_is_derived_durable_context_and_failure_keeps_the_prior_summary() {
             let requests = observed.lock().expect("request lock");
             assert_eq!(requests.len(), 2);
             assert_eq!(
-                requests[0].context_summary.as_deref(),
+                requests[0].input.context_summary.as_deref(),
                 Some("Derived summary")
             );
-            assert!(requests[0].history.is_empty());
+            assert!(requests[0].input.history.is_empty());
             assert_eq!(
-                requests[1].context_summary.as_deref(),
+                requests[1].input.context_summary.as_deref(),
                 Some("Derived summary")
             );
-            assert_eq!(requests[1].history.len(), 1);
-            assert_eq!(requests[1].history[0].user, "Question three");
+            assert_eq!(requests[1].input.history.len(), 1);
+            assert_eq!(requests[1].input.history[0].user, "Question three");
         }
         engine.close().await.expect("resumed engine shutdown");
 
@@ -1742,9 +1763,9 @@ fn a_fork_before_the_snapshot_event_recompiles_from_canonical_history() {
         {
             let requests = observed.lock().expect("request lock");
             assert_eq!(requests.len(), 2);
-            assert!(requests[1].context_summary.is_none());
-            assert_eq!(requests[1].history.len(), 1);
-            assert_eq!(requests[1].history[0].assistant, "Source answer");
+            assert!(requests[1].input.context_summary.is_none());
+            assert_eq!(requests[1].input.history.len(), 1);
+            assert_eq!(requests[1].input.history[0].assistant, "Source answer");
         }
         engine.close().await.expect("engine shutdown");
         let store = Store::open(StateRoot::admit(&state_path).expect("state readmission"))
@@ -1993,11 +2014,11 @@ fn compaction_input_limit_rejects_before_provider_egress() {
                 let requests = requests.lock().expect("observed requests");
                 let request = requests.last().expect("post-maintenance request");
                 assert_eq!(
-                    request.context_summary.as_deref(),
+                    request.input.context_summary.as_deref(),
                     Some("s".repeat(8 * 1024).as_str())
                 );
                 assert!(
-                    request.history.is_empty(),
+                    request.input.history.is_empty(),
                     "summary replaces covered context, not canonical history"
                 );
             }
@@ -2034,12 +2055,15 @@ fn compaction_input_limit_rejects_before_provider_egress() {
                 assert_eq!(request.model, "test-model");
                 assert_eq!(request.max_output_tokens, 4096);
                 assert_eq!(
-                    request.objective,
+                    request.input.objective,
                     format!("{index:02}{}", "Q".repeat(8 * 1024 - 2))
                 );
-                assert_eq!(request.includes, [include_data("notes/facts.txt", "Fact")]);
-                assert!(request.instructions.is_none());
-                assert!(request.child_results.is_empty());
+                assert_eq!(
+                    request.input.includes,
+                    [include_data("notes/facts.txt", "Fact")]
+                );
+                assert!(request.input.workspace_guidance.is_none());
+                assert!(request.input.child_results.is_empty());
             }
             let compactions = compactions.lock().expect("observed compactions");
             assert_eq!(compactions.len(), 3);
@@ -2169,8 +2193,8 @@ fn oversized_compaction_output_is_recorded_as_failure_without_a_snapshot() {
         {
             let observed = requests.lock().expect("request lock");
             assert_eq!(observed.len(), 2);
-            assert!(observed[1].context_summary.is_none());
-            assert_eq!(observed[1].history.len(), 1);
+            assert!(observed[1].input.context_summary.is_none());
+            assert_eq!(observed[1].input.history.len(), 1);
         }
         engine.close().await.expect("engine shutdown");
 
@@ -2773,15 +2797,15 @@ fn database_capacity_is_admitted_before_provider_usage() {
             assert_eq!(request.phase, AgentPhase::RootPlan);
             assert_eq!(request.collaboration, CollaborationPolicy::Single);
             assert_eq!(request.model, "test-model");
-            assert_eq!(request.objective, "Recovered");
-            assert!(request.images.is_empty());
-            assert!(request.instructions.is_none());
-            assert_eq!(request.includes, vec![include_data("notes/facts.txt", "Fact")]);
-            assert_eq!(request.history, vec![arany::HistoryTurn { user: "Source".into(), assistant: "answer".into() }]);
-            assert!(request.context_summary.is_none());
-            assert!(request.child_results.is_empty());
+            assert_eq!(request.input.objective, "Recovered");
+            assert!(request.input.images.is_empty());
+            assert!(request.input.workspace_guidance.is_none());
+            assert_eq!(request.input.includes, vec![include_data("notes/facts.txt", "Fact")]);
+            assert_eq!(request.input.history, vec![arany::HistoryTurn { user: "Source".into(), assistant: "answer".into() }]);
+            assert!(request.input.context_summary.is_none());
+            assert!(request.input.child_results.is_empty());
             assert_eq!(request.max_output_tokens, 4096);
-            assert!(request.tools.is_none());
+            assert!(request.input.tools.is_none());
         }
         {
             let requests = compactions.lock().unwrap();
@@ -3176,11 +3200,11 @@ fn one_child_team_finishes_only_after_child_result_is_committed() {
             assert_eq!(requests.len(), 3);
             assert_eq!(requests[0].phase, AgentPhase::RootPlan);
             assert_eq!(requests[1].phase, AgentPhase::ChildWork);
-            assert_eq!(requests[1].objective, "Check fact");
-            assert!(requests[1].history.is_empty());
+            assert_eq!(requests[1].input.objective, "Check fact");
+            assert!(requests[1].input.history.is_empty());
             assert_eq!(requests[2].phase, AgentPhase::RootSynthesis);
-            assert_eq!(requests[2].child_results.len(), 1);
-            assert_eq!(requests[2].child_results[0].result, "Fact is true");
+            assert_eq!(requests[2].input.child_results.len(), 1);
+            assert_eq!(requests[2].input.child_results[0].result, "Fact is true");
         }
         engine.close().await.expect("engine shutdown");
         let store = Store::open(StateRoot::admit(&state_path).expect("state readmission"))
@@ -3561,7 +3585,7 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
                 &requests[0], AgentPhase::RootPlan, "Question", &["Fact"], &[], Some("Derived summary"), &[],
             );
             let mut children = requests[1..4].iter().collect::<Vec<_>>();
-            children.sort_by(|left, right| left.objective.cmp(&right.objective));
+            children.sort_by(|left, right| left.input.objective.cmp(&right.input.objective));
             for (call, objective) in children.into_iter().zip(["A", "B", "C"]) {
                 assert_test_call(call, AgentPhase::ChildWork, objective, &["Fact"], &[], None, &[]);
                 let agent = outcome.run.agents.iter().find(|agent| agent.objective.as_deref() == Some(objective)).expect("assigned child");
@@ -3738,8 +3762,8 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
             assert_eq!(requests.len(), 4);
             assert!(!requests.iter().any(|request| request.phase == AgentPhase::RootSynthesis));
             let primary = requests.iter().find(|request| request.phase == AgentPhase::RootPlan).expect("cancelled primary");
-            assert_eq!(primary.context_summary.as_deref(), Some("Derived summary"));
-            assert_eq!(primary.history.iter().map(|turn| turn.user.as_str()).collect::<Vec<_>>(), ["Question", "Continue parent"]);
+            assert_eq!(primary.input.context_summary.as_deref(), Some("Derived summary"));
+            assert_eq!(primary.input.history.iter().map(|turn| turn.user.as_str()).collect::<Vec<_>>(), ["Question", "Continue parent"]);
         }
 
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("final State")).expect("closed journal reopen");
@@ -5038,6 +5062,7 @@ fn eight_children_use_the_same_ordered_loop() {
             assert_eq!(synthesis.phase, AgentPhase::RootSynthesis);
             assert_eq!(
                 synthesis
+                    .input
                     .child_results
                     .iter()
                     .map(|child| child.objective.as_str())
@@ -5343,6 +5368,8 @@ struct PreviewProvider {
     completion: Option<ProviderOutcome>,
 }
 
+#[async_trait::async_trait]
+
 impl Provider for PreviewProvider {
     fn max_concurrent_calls(&self) -> u8 {
         1
@@ -5364,6 +5391,7 @@ impl Provider for PreviewProvider {
         preview.publish(self.text.clone())?;
         match &self.completion {
             Some(outcome) => Ok(ProviderResponse {
+                turn: arany::ProviderTurn::scripted(),
                 outcome: outcome.clone(),
                 response_id: None,
                 usage: arany::Usage {

@@ -1,6 +1,7 @@
+use super::conversation::Conversation;
 use super::{
     CompactionRequest, CompactionResponse, Effort, MAX_REPORTED_INPUT_TOKENS, MAX_RESPONSE_BYTES,
-    Provider, ProviderError, ProviderRequest, ProviderResponse, Usage, raw_reflects_secret,
+    Provider, ProviderError, ProviderRequest, ProviderResponse, Usage, raw_reflects_secret, render,
     resolve_native_effort, resolve_native_effort_for_run, valid_saved_api_account_id,
     validate_native_api_key,
 };
@@ -173,9 +174,19 @@ impl OpenAiProvider {
         Ok(bytes)
     }
 
-    fn decode_run(&self, bytes: &[u8], output_cap: u32) -> Result<ProviderResponse, ProviderError> {
-        let response = wire::decode_run(bytes, &self.model)?;
-        if !valid_usage(response.usage, output_cap) || response.reflects_secret(&self.key) {
+    fn decode_run(
+        &self,
+        bytes: &[u8],
+        request: &ProviderRequest,
+        conversation: &Conversation,
+    ) -> Result<ProviderResponse, ProviderError> {
+        let response = wire::decode_run(
+            bytes,
+            &wire::RunScope::new(request, conversation, &self.key),
+        )?;
+        if !valid_usage(response.usage, request.max_output_tokens)
+            || response.reflects_secret(&self.key)
+        {
             return Err(ProviderError::InvalidOutcome);
         }
         Ok(response)
@@ -201,6 +212,8 @@ fn valid_usage(usage: Usage, output_cap: u32) -> bool {
         && usage.output_tokens.is_none_or(|count| count <= output_cap)
         && usage.cache_consistent()
 }
+
+#[async_trait::async_trait]
 
 impl Provider for OpenAiProvider {
     fn profile_name(&self) -> &str {
@@ -229,20 +242,10 @@ impl Provider for OpenAiProvider {
         if request.model != self.model || !(1..=4096).contains(&request.max_output_tokens) {
             return Err(ProviderError::Rejected);
         }
-        let response = self
-            .send(wire::run_body_with_effort(&request, self.effort))
-            .await?;
-        if request.tools.is_some() {
-            let decoded = wire::decode_tool_run(&response, &self.model)?;
-            if !valid_usage(decoded.usage, request.max_output_tokens)
-                || decoded.reflects_secret(&self.key)
-            {
-                return Err(ProviderError::InvalidOutcome);
-            }
-            Ok(decoded)
-        } else {
-            self.decode_run(&response, request.max_output_tokens)
-        }
+        let conversation = render::conversation(&request)?;
+        let body = wire::run_body_with_effort(&request, &conversation, self.effort)?;
+        let response = self.send(body).await?;
+        self.decode_run(&response, &request, &conversation)
     }
 
     async fn invoke_with_preview(
@@ -255,7 +258,8 @@ impl Provider for OpenAiProvider {
         if request.model != self.model || !(1..=4096).contains(&request.max_output_tokens) {
             return Err(ProviderError::Rejected);
         }
-        let mut body = wire::run_body_with_effort(&request, self.effort);
+        let conversation = render::conversation(&request)?;
+        let mut body = wire::run_body_with_effort(&request, &conversation, self.effort)?;
         body["stream"] = Value::Bool(true);
         let mut response = self
             .client
@@ -277,11 +281,10 @@ impl Provider for OpenAiProvider {
         }
         let bytes =
             read_streamed_reply(&mut response, &self.key, &self.model, Some(preview)).await?;
-        let decoded = if request.tools.is_some() {
-            wire::decode_streamed_tool_run(&bytes, &self.model)
-        } else {
-            wire::decode_streamed_run(&bytes, &self.model)
-        }
+        let decoded = wire::decode_streamed_run(
+            &bytes,
+            &wire::RunScope::new(&request, &conversation, &self.key),
+        )
         .map_err(wire::ResponseError::provider_error)?;
         if !valid_usage(decoded.usage, request.max_output_tokens)
             || decoded.reflects_secret(&self.key)
@@ -393,6 +396,13 @@ mod tests {
         let provider =
             OpenAiProvider::from_api_key_with_effort("gpt-5.4".into(), None, secret.into())
                 .expect("selected key");
+        let read_only = crate::provider::test_support::read_only_request("gpt-5.4");
+        let read_only_conversation = render::conversation(&read_only).unwrap();
+        let decode_run = |bytes: &[u8], cap: u32| {
+            let mut request = read_only.clone();
+            request.max_output_tokens = cap;
+            provider.decode_run(bytes, &request, &read_only_conversation)
+        };
         let good_run =
             synthetic_reply(r#"{"outcome":{"type":"finish","summary":"safe","result":"answer"}}"#);
         let good_compaction = synthetic_reply(r#"{"summary":"safe"}"#);
@@ -425,7 +435,7 @@ mod tests {
                 }
                 let bytes = serde_json::to_vec(&fixture).unwrap();
                 let actual = if operation == "Run" {
-                    provider.decode_run(&bytes, cap).is_ok()
+                    decode_run(&bytes, cap).is_ok()
                 } else {
                     provider.decode_compaction(&bytes, cap).is_ok()
                 };
@@ -437,15 +447,29 @@ mod tests {
         );
         assert!(!raw_reflects_secret(&reflected_run, secret));
         assert!(matches!(
-            provider.decode_run(&reflected_run, 4096),
+            decode_run(&reflected_run, 4096),
             Err(ProviderError::InvalidOutcome)
         ));
 
-        let tool_rows: Vec<Value> =
-            serde_json::from_str(include_str!("../../tests/fixtures/tool-outcomes.json")).unwrap();
-        let mut tool = tool_rows[9].clone();
-        let good_tool = synthetic_reply(&tool.to_string());
-        assert!(provider.decode_run(&good_tool, 4096).is_ok());
+        let tool_request = crate::provider::test_support::primary_request("gpt-5.4");
+        let conversation = render::conversation(&tool_request).unwrap();
+        let decode_tool = |arguments: &str| {
+            let call = serde_json::json!({
+                "type": "function_call", "id": "fc_safe", "status": "completed",
+                "call_id": "call_safe", "name": "arany_mcp_call",
+                "arguments": serde_json::json!({
+                    "server": "example", "tool": "echo", "schema_digest": "0".repeat(64),
+                    "arguments": arguments, "plan_contract": null
+                }).to_string(),
+            });
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "id": "resp_safe", "status": "completed", "model": "gpt-5.4",
+                "output": [call], "usage": {"input_tokens": 12, "output_tokens": 8}
+            }))
+            .unwrap();
+            provider.decode_run(&bytes, &tool_request, &conversation)
+        };
+        assert!(decode_tool(r#"{"value":"safe"}"#).is_ok());
         for (case, arguments) in [
             (
                 "escaped value",
@@ -471,13 +495,10 @@ mod tests {
             ("non-object arguments", "[]"),
             ("null arguments", "null"),
         ] {
-            tool["outcome"]["call"]["arguments"] = serde_json::json!(arguments);
-            let reflected_tool = synthetic_reply(&tool.to_string());
-            assert!(!raw_reflects_secret(&reflected_tool, secret));
             assert!(
                 matches!(
-                    provider.decode_run(&reflected_tool, 4096),
-                    Err(ProviderError::InvalidOutcome)
+                    decode_tool(arguments),
+                    Err(ProviderError::InvalidOutcome | ProviderError::InvalidOutcomeContract)
                 ),
                 "MCP argument rejection: {case}"
             );

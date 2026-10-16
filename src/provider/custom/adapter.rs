@@ -64,6 +64,8 @@ impl CustomProvider {
     }
 }
 
+#[async_trait::async_trait]
+
 impl Provider for CustomProvider {
     fn profile_name(&self) -> &str {
         &self.profile_label
@@ -91,8 +93,8 @@ impl Provider for CustomProvider {
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         request.validate_scope()?;
-        if request.tools.is_some()
-            || !request.images.is_empty()
+        if request.input.tools.is_some()
+            || !request.input.images.is_empty()
             || request.model != self.model
             || !(1..=4096).contains(&request.max_output_tokens)
         {
@@ -110,8 +112,8 @@ impl Provider for CustomProvider {
         preview: crate::provider::ResponsePreview,
     ) -> Result<ProviderResponse, ProviderError> {
         request.validate_scope()?;
-        if request.tools.is_some()
-            || !request.images.is_empty()
+        if request.input.tools.is_some()
+            || !request.input.images.is_empty()
             || request.model != self.model
             || !(1..=4096).contains(&request.max_output_tokens)
         {
@@ -148,7 +150,7 @@ fn transport_error(error: TransportError) -> ProviderError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AgentPhase, AgentRunId, CollaborationPolicy, RunId};
+    use crate::{AgentPhase, AgentRunId, CollaborationPolicy, PromptRole, RunId, RunInput};
 
     #[tokio::test]
     async fn readonly_custom_admission_cannot_dispatch_tools_or_child_authority() {
@@ -179,7 +181,7 @@ mod tests {
                 Some(crate::tools::ToolContext {
                     catalog: "NO_DISCLOSURE".into(),
                     history_summary: None,
-                    observations: Vec::new(),
+                    steps: Vec::new(),
                 }),
             ),
             (
@@ -203,19 +205,11 @@ mod tests {
                 phase,
                 collaboration,
                 model: "model-1".into(),
-                instructions: None,
-                objective: "NO_DISCLOSURE".into(),
-                images: Vec::new(),
-                includes: Vec::new(),
-                history: Vec::new(),
-                context_summary: None,
-                goal_budget: None,
-                goal_plan_contract: None,
-                goal_context_facts: None,
-                child_results: Vec::new(),
-                tools,
-                steering_notes: Vec::new(),
                 max_output_tokens: 4096,
+                input: RunInput {
+                    tools,
+                    ..RunInput::new(PromptRole::ReadOnly, "NO_DISCLOSURE".into())
+                },
             };
             assert!(matches!(
                 tokio::time::timeout(std::time::Duration::from_secs(5), provider.invoke(request))

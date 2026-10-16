@@ -109,6 +109,7 @@ fn team_two_core_latency_on_named_host() {
             );
             assert_eq!(
                 calls[3]
+                    .input
                     .child_results
                     .iter()
                     .map(|child| child.objective.as_str())

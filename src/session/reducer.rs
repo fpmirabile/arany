@@ -476,25 +476,6 @@ impl RunView {
                 .and_then(|agent| agent.provider_calls.last())
                 .is_some_and(|call| call.disposition == ProviderCallDisposition::ToolRequested)
     }
-
-    pub(crate) fn tool_context(&self) -> String {
-        if self.tools.is_empty() && self.tool_compaction_summary.is_none() {
-            return String::new();
-        }
-        let records: Vec<_> = self
-            .tools
-            .iter()
-            .skip(self.tool_compaction_covered_count as usize)
-            .map(|tool| serde_json::json!({
-            "intent":tool.intent,
-            "disposition":tool.observation.as_ref().map(|observation| observation.disposition),
-            "cache_update":tool.observation.as_ref().map(|observation| observation.cache_update),
-            "output":tool.observation.as_ref().map(|observation| &observation.output),
-            "execution":if tool.observation.is_none() { "uncertain; never replay" } else { "observed; never replay" },
-        })).collect();
-        serde_json::json!({"scope":"historical Run; no pending Tool in the current Run; never replay intents or approvals; fresh inspection may establish present state", "run_status":format!("{:?}", self.status),"summary_untrusted":self.tool_compaction_summary,"tool_records":records})
-            .to_string()
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

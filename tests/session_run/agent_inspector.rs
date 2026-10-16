@@ -154,9 +154,7 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
                 wire["max_output_tokens"],
                 if index == 1 || index == 2 { 128 } else { 4096 }
             );
-            let input: serde_json::Value =
-                serde_json::from_str(wire["input"].as_str().expect("semantic input text"))
-                    .expect("semantic input");
+            let input: serde_json::Value = crate::semantic::input(&wire);
             assert!(!input.to_string().contains("/agents"));
             match index {
                 0..=2 => {

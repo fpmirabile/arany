@@ -157,6 +157,8 @@ pub(super) fn reset_tool_trace_stages(root: &Path) {
     }
 }
 
+#[async_trait::async_trait]
+#[async_trait::async_trait]
 impl Provider for Journey {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -304,14 +306,12 @@ impl Provider for Journey {
                     })
                     .flatten()
                     .map(Box::new);
-                ProviderOutcome::Tool {
-                    call,
-                    plan_contract,
-                }
+                crate::tool_outcome(call, plan_contract)
             },
         );
         requests.push(request);
         Ok(ProviderResponse {
+            turn: arany::ProviderTurn::scripted(),
             outcome,
             response_id: None,
             usage: arany::Usage::default(),
@@ -571,16 +571,16 @@ async fn native_file_journey_helper() {
             assert_eq!(request.phase, arany::AgentPhase::RootPlan);
             assert_eq!(request.model, "file-tool-model");
             assert_eq!(
-                request.objective,
+                request.input.objective,
                 "Complete the synthetic native file journey"
             );
             assert!(
-                request.instructions.is_none()
-                    && request.includes.is_empty()
-                    && request.history.is_empty()
-                    && request.context_summary.is_none()
-                    && request.images.is_empty()
-                    && request.child_results.is_empty()
+                request.input.workspace_guidance.is_none()
+                    && request.input.includes.is_empty()
+                    && request.input.history.is_empty()
+                    && request.input.context_summary.is_none()
+                    && request.input.images.is_empty()
+                    && request.input.child_results.is_empty()
             );
         }
     }
@@ -804,6 +804,8 @@ fn build_goal_request() -> arany::GoalRequest {
 
 const RUNTIME_CACHE_CANARY: &str = "ARANY_RUNTIME_CACHE_PERSISTENCE_CANARY";
 
+#[async_trait::async_trait]
+#[async_trait::async_trait]
 impl Provider for RuntimeJourney {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -858,10 +860,7 @@ impl Provider for RuntimeJourney {
             } else {
                 None
             };
-            ProviderOutcome::Tool {
-                call,
-                plan_contract,
-            }
+            crate::tool_outcome(call, plan_contract)
         } else {
             ProviderOutcome::Finish(Finish {
                 summary: "Runtime profile checked".into(),
@@ -869,6 +868,7 @@ impl Provider for RuntimeJourney {
             })
         };
         Ok(ProviderResponse {
+            turn: arany::ProviderTurn::scripted(),
             outcome,
             response_id: None,
             usage: arany::Usage::default(),
@@ -1389,10 +1389,10 @@ async fn native_runtime_mount_journey_helper() {
                 .observations
                 .is_empty()
         );
-        let first_output = &accepted_requests[1].tools.as_ref().unwrap().observations[0].output;
+        let first_output = &accepted_requests[1].tools.as_ref().unwrap().observations()[0].output;
         let first_command: serde_json::Value = serde_json::from_str(first_output).unwrap();
         assert!(first_command["stdout"].as_str().is_some_and(str::is_empty));
-        let overflow_observation = &accepted_requests[3].tools.as_ref().unwrap().observations[2];
+        let overflow_observation = &accepted_requests[3].tools.as_ref().unwrap().observations()[2];
         let overflow_output = &overflow_observation.output;
         let overflow_result: serde_json::Value = serde_json::from_str(overflow_output).unwrap();
         assert_eq!(overflow_result["exit_code"], 0);

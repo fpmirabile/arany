@@ -2,8 +2,9 @@ use super::progress::{ProgressPublisher, append_observed};
 use super::{EngineError, RunCancellation, RunSteering};
 use crate::provider::{
     AgentPhase, CompactionItem, CompactionRequest, Finish, HistoryTurn, MAX_REPORTED_INPUT_TOKENS,
-    PreviewText, Provider, ProviderFailureClass, ProviderFailureReason, ProviderOutcome,
-    ProviderRequest, ProviderResponse, ResponsePreview, Usage,
+    PreviewText, PromptRole, Provider, ProviderFailureClass, ProviderFailureReason,
+    ProviderOutcome, ProviderRequest, ProviderResponse, ProviderTurn, ResponsePreview, RunInput,
+    Usage,
 };
 use crate::session::{
     AgentDisposition, AgentRunId, CollaborationPolicy, CompactionFailure, CompactionRecord,
@@ -33,16 +34,18 @@ const TOOL_PREPARATION_OVERHEAD: Duration = Duration::from_secs(35);
 
 fn compaction_context_input(
     request: &ProviderRequest,
+    budget: GoalBudget,
+    plan_contract: Option<&crate::session::GoalPlanContract>,
     facts: crate::provider::GoalContextFacts,
     observations: &[serde_json::Value],
 ) -> serde_json::Value {
     serde_json::json!({
         "pinned_goal": {
-            "objective": &request.objective,
-            "project_instructions": &request.instructions,
-            "includes": &request.includes,
-            "budget": &request.goal_budget,
-            "plan_contract": &request.goal_plan_contract,
+            "objective": &request.input.objective,
+            "project_instructions": &request.input.workspace_guidance,
+            "includes": &request.input.includes,
+            "budget": budget,
+            "plan_contract": plan_contract,
             "facts": facts,
         },
         "tool_observations": observations,
@@ -123,9 +126,9 @@ impl DisplayCheckpoint {
     }
 }
 
-pub(super) struct RunLoop<'a, P: Provider> {
+pub(super) struct RunLoop<'a> {
     store: &'a Store,
-    provider: Arc<P>,
+    provider: Arc<dyn Provider>,
     session_id: SessionId,
     run_id: RunId,
     goal_id: crate::session::GoalId,
@@ -264,6 +267,22 @@ impl GoalRunBudget {
         *current = Some(contract);
         self.criterion_satisfied.store(satisfied, Ordering::Release);
         Ok(())
+    }
+
+    fn plan_contract(&self) -> Result<Option<crate::session::GoalPlanContract>, EngineError> {
+        self.plan_contract
+            .lock()
+            .map(|plan| plan.clone())
+            .map_err(|_| EngineError::CoordinatorFailed)
+    }
+
+    /// The pinned budget, narrowed to the recorded plan contract.
+    fn effective_budget(&self) -> Result<GoalBudget, EngineError> {
+        let plan = self
+            .plan_contract
+            .lock()
+            .map_err(|_| EngineError::CoordinatorFailed)?;
+        Ok(self.pinned_budget.effective(plan.as_ref()))
     }
 
     fn allows_tool(&self, call: &crate::tools::ToolCall) -> bool {
@@ -620,10 +639,10 @@ impl GoalRunBudget {
     }
 }
 
-impl<'a, P: Provider + 'static> RunLoop<'a, P> {
+impl<'a> RunLoop<'a> {
     pub(super) fn new(
         store: &'a Store,
-        provider: Arc<P>,
+        provider: Arc<dyn Provider>,
         identity: RunIdentity,
         controls: RunControls<'a>,
         progress: Option<&'a ProgressPublisher>,
@@ -884,7 +903,8 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         Ok(())
     }
 
-    /// Journals the waiting steering note inside the open primary reservation and adds it to this call.
+    /// Journals the waiting steering note inside the open primary reservation and adds it to this call,
+    /// after the step whose results it accompanies.
     async fn record_steering_note(&self, request: &mut ProviderRequest) -> Result<(), EngineError> {
         let Some(steering) = &self.controls.steering else {
             return Ok(());
@@ -903,7 +923,15 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         })
         .await?;
         steering.note_recorded();
-        request.steering_notes.push(text);
+        match request
+            .input
+            .tools
+            .as_mut()
+            .and_then(|tools| tools.steps.last_mut())
+        {
+            Some(step) => step.steering_notes.push(text),
+            None => request.input.steering_notes.push(text),
+        }
         Ok(())
     }
 
@@ -925,9 +953,9 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
     }
 
     /// Records an admitted Plan contract and narrows this Run to it; `false` means the Run must fail.
+    /// The request's own goal block stays as the Run began, so every later request extends the last.
     pub(super) async fn admit_plan_contract(
         &self,
-        root_request: &mut ProviderRequest,
         contract: crate::session::GoalPlanContract,
     ) -> Result<bool, EngineError> {
         if !self.controls.goal_budget.can_narrow(&contract) {
@@ -958,8 +986,6 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         {
             return Ok(false);
         }
-        root_request.goal_budget = Some(contract.budget);
-        root_request.goal_plan_contract = Some(contract);
         Ok(true)
     }
 
@@ -1005,13 +1031,9 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                         ..
                     }) => self.valid_delegation(&delegation.children),
                     CallResult::Response(ProviderResponse {
-                        outcome:
-                            ProviderOutcome::Tool {
-                                call,
-                                plan_contract,
-                            },
+                        outcome: ProviderOutcome::Tools(requests),
                         ..
-                    }) => self.valid_tool(&root_request, call, plan_contract),
+                    }) => self.valid_tools(requests),
                     _ => false,
                 };
             if let Some(first_trace) = first_trace {
@@ -1060,37 +1082,33 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                 }) if valid_response => return self.finish_primary(finish, primary).await,
                 CallResult::Response(ProviderResponse {
                     outcome: ProviderOutcome::Delegate(delegation),
+                    turn,
                     ..
                 }) if valid_response => {
                     if self.pause_at_boundary() {
                         return self.fail_known_budget_exhaustion(primary).await;
                     }
                     return self
-                        .run_children(&mut root_request, delegation.children, primary)
+                        .run_children(&mut root_request, delegation.children, turn, primary)
                         .await;
                 }
                 CallResult::Response(ProviderResponse {
-                    outcome:
-                        ProviderOutcome::Tool {
-                            call,
-                            plan_contract,
-                        },
+                    outcome: ProviderOutcome::Tools(requests),
+                    turn,
                     ..
                 }) if valid_response => {
                     if self.pause_at_boundary() {
                         return self.fail_known_budget_exhaustion(primary).await;
                     }
-                    if let Some(contract) = plan_contract
-                        && !self
-                            .admit_plan_contract(&mut root_request, *contract)
-                            .await?
+                    if !self
+                        .begin_tool_step(&mut root_request, requests, turn)
+                        .await?
                     {
                         return self.fail_primary(primary).await;
                     }
                     let continuation = self
                         .execute_tool(
                             &mut root_request,
-                            call,
                             self.controls
                                 .goal_budget
                                 .remaining_calls()
@@ -1147,8 +1165,17 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             return Err(error);
         }
         self.record_steering_note(root).await?;
-        let mut request = root.clone();
-        request.goal_context_facts = Some(self.controls.goal_budget.context_facts()?);
+        let facts = self.controls.goal_budget.context_facts()?;
+        match root
+            .input
+            .tools
+            .as_mut()
+            .and_then(|tools| tools.steps.last_mut())
+        {
+            Some(step) => step.facts = Some(facts),
+            None => root.input.goal_context_facts = Some(facts),
+        }
+        let request = root.clone();
         let context = self
             .progress
             .map(|progress| progress.preview_context(self.primary_id))
@@ -1305,17 +1332,27 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         Ok(())
     }
 
+    /// The Engine accepts exactly one Tool request per step.
+    fn valid_tools(&self, requests: &[crate::tools::ToolRequest]) -> bool {
+        matches!(requests, [request] if self.valid_tool(&request.call, &request.plan_contract))
+    }
+
     fn valid_tool(
         &self,
-        request: &ProviderRequest,
         call: &crate::tools::ToolCall,
         plan_contract: &Option<Box<crate::session::GoalPlanContract>>,
     ) -> bool {
+        let (Ok(existing), Ok(budget)) = (
+            self.controls.goal_budget.plan_contract(),
+            self.controls.goal_budget.effective_budget(),
+        ) else {
+            return false;
+        };
         let plan_and_call_fit = plan_contract.as_ref().is_none_or(|contract| {
             serde_json::to_vec(&(call, contract))
                 .is_ok_and(|bytes| bytes.len() <= crate::tools::types::MAX_TOOL_ARGUMENT_BYTES)
         });
-        let plan_valid = if let Some(existing) = &request.goal_plan_contract {
+        let plan_valid = if let Some(existing) = &existing {
             plan_contract.is_none()
                 && existing.allows_call(call)
                 && self
@@ -1323,10 +1360,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                     .tools
                     .is_some_and(|tools| tools.allows_goal_contract(existing))
         } else if let Some(contract) = plan_contract {
-            request
-                .goal_budget
-                .as_ref()
-                .is_some_and(|budget| contract.budget.is_within(budget))
+            contract.budget.is_within(&budget)
                 && contract.validate().is_ok()
                 && contract.allows_call(call)
                 && self
@@ -1355,14 +1389,58 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                 .is_none_or(|remaining| remaining > 0)
     }
 
+    /// Admits the request's Plan contract, then records the step its turn opened; `false` means the Run must fail.
+    pub(super) async fn begin_tool_step(
+        &self,
+        request: &mut ProviderRequest,
+        mut requests: Vec<crate::tools::ToolRequest>,
+        turn: ProviderTurn,
+    ) -> Result<bool, EngineError> {
+        if requests.len() != 1 {
+            return Ok(false);
+        }
+        if let Some(contract) = requests[0].plan_contract.take()
+            && !self.admit_plan_contract(*contract).await?
+        {
+            return Ok(false);
+        }
+        request
+            .input
+            .tools
+            .as_mut()
+            .ok_or(EngineError::InvalidRequest)?
+            .steps
+            .push(crate::tools::ToolStep {
+                turn,
+                requests,
+                observations: Vec::new(),
+                facts: None,
+                steering_notes: Vec::new(),
+            });
+        Ok(true)
+    }
+
+    /// Executes the last step's next unobserved request, then any integration it produces.
     async fn execute_tool(
         &self,
         request: &mut ProviderRequest,
-        mut call: crate::tools::ToolCall,
         review_allowed: bool,
         primary: &AgentTrace,
     ) -> Result<bool, EngineError> {
         let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
+        let mut call = {
+            let step = request
+                .input
+                .tools
+                .as_ref()
+                .and_then(|tools| tools.steps.last())
+                .ok_or(EngineError::InvalidRequest)?;
+            step.requests
+                .get(step.observations.len())
+                .ok_or(EngineError::InvalidRequest)?
+                .call
+                .clone()
+        };
         loop {
             let command = matches!(call, crate::tools::ToolCall::Command { .. });
             let timeout_limit = self.controls.goal_budget.command_timeout_limit(&call);
@@ -1431,19 +1509,29 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             };
             intent.expires_at_ms =
                 crate::tools::now_ms().saturating_add(u64::from(intent.limits.runtime_ms));
-            let mut reserved = request.tools.clone().ok_or(EngineError::InvalidRequest)?;
-            reserved.observations.push(crate::tools::ToolObservation {
-                intent: intent.clone(),
-                disposition: crate::tools::ToolDisposition::Succeeded,
-                output: String::new(),
-                guard: Some(crate::tools::GuardReceipt {
-                    contract_version: 1,
-                    intent_digest: intent.digest(),
-                    enforcement_digest: intent.enforcement_digest,
-                    limits: intent.limits.clone(),
-                }),
-                cache_update: crate::tools::CacheUpdate::NotApplicable,
-            });
+            let mut reserved = request
+                .input
+                .tools
+                .clone()
+                .ok_or(EngineError::InvalidRequest)?;
+            let reserved_step = reserved
+                .steps
+                .last_mut()
+                .ok_or(EngineError::InvalidRequest)?;
+            reserved_step
+                .observations
+                .push(crate::tools::ToolObservation {
+                    intent: intent.clone(),
+                    disposition: crate::tools::ToolDisposition::Succeeded,
+                    output: String::new(),
+                    guard: Some(crate::tools::GuardReceipt {
+                        contract_version: 1,
+                        intent_digest: intent.digest(),
+                        enforcement_digest: intent.enforcement_digest,
+                        limits: intent.limits.clone(),
+                    }),
+                    cache_update: crate::tools::CacheUpdate::NotApplicable,
+                });
             if command {
                 let integration = runtime.intent(
                     self.run_id,
@@ -1453,22 +1541,22 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                         changeset: crate::tools::types::CommandChangeset { files: Vec::new() },
                     },
                 );
-                reserved.observations.push(crate::tools::ToolObservation {
-                    guard: Some(crate::tools::GuardReceipt {
-                        contract_version: 1,
-                        intent_digest: integration.digest(),
-                        enforcement_digest: integration.enforcement_digest,
-                        limits: integration.limits.clone(),
-                    }),
-                    intent: integration,
-                    disposition: crate::tools::ToolDisposition::Succeeded,
-                    output: String::new(),
-                    cache_update: crate::tools::CacheUpdate::NotApplicable,
-                });
+                reserved_step
+                    .observations
+                    .push(crate::tools::ToolObservation {
+                        guard: Some(crate::tools::GuardReceipt {
+                            contract_version: 1,
+                            intent_digest: integration.digest(),
+                            enforcement_digest: integration.enforcement_digest,
+                            limits: integration.limits.clone(),
+                        }),
+                        intent: integration,
+                        disposition: crate::tools::ToolDisposition::Succeeded,
+                        output: String::new(),
+                        cache_update: crate::tools::CacheUpdate::NotApplicable,
+                    });
             }
-            let overhead = serde_json::to_vec(&reserved)
-                .map_err(|_| EngineError::InvalidRequest)?
-                .len();
+            let overhead = reserved.rendered_len();
             let integration_capacity = if command {
                 crate::tools::types::MAX_TOOL_ARGUMENT_BYTES + 128 * 6 + 512
             } else {
@@ -1520,7 +1608,11 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             } else {
                 None
             };
-            let tools = request.tools.as_mut().ok_or(EngineError::InvalidRequest)?;
+            let tools = request
+                .input
+                .tools
+                .as_mut()
+                .ok_or(EngineError::InvalidRequest)?;
             if self
                 .controls
                 .goal_budget
@@ -1529,19 +1621,23 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             {
                 return Ok(false);
             }
-            tools.observations.push(observation);
+            tools
+                .steps
+                .last_mut()
+                .ok_or(EngineError::InvalidRequest)?
+                .observations
+                .push(observation);
             let changeset = changeset.filter(|changeset| !changeset.files.is_empty());
-            self.compact_tool_context_if_needed(request, 1).await?;
+            if changeset.is_none() {
+                self.compact_tool_context_if_needed(request, 1).await?;
+            }
             if self.controls.cancellation.is_cancelled() {
                 return Ok(false);
             }
-            let Some(tools) = request.tools.as_ref() else {
+            let Some(tools) = request.input.tools.as_ref() else {
                 return Ok(false);
             };
-            if !tools
-                .serialized_len()
-                .is_ok_and(|bytes| bytes <= context_limit)
-            {
+            if tools.rendered_len() > context_limit {
                 return Ok(false);
             }
             let Some(changeset) = changeset else {
@@ -1570,20 +1666,18 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             covered_tool_count,
             covered_sequence,
             source_digest,
-            prefix_count,
+            prefix_steps,
             preflight_source_len,
             previous_summary,
             compaction_user,
             selected_observations,
         ) = {
-            let Some(context) = request.tools.as_ref() else {
+            let Some(context) = request.input.tools.as_ref() else {
                 return Ok(());
             };
-            let context_bytes = context
-                .serialized_len()
-                .map_err(|_| EngineError::InvalidRequest)?;
-            if context_bytes.saturating_mul(3) < context_limit.saturating_mul(2)
-                || context.observations.is_empty()
+            let total_observations = context.observation_count();
+            if context.rendered_len().saturating_mul(3) < context_limit.saturating_mul(2)
+                || total_observations == 0
             {
                 return Ok(());
             }
@@ -1597,8 +1691,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             let previously_covered = run.tool_compaction_covered_count;
             let total_tools =
                 u32::try_from(run.tools.len()).map_err(|_| EngineError::InvalidHistory)?;
-            if total_tools.saturating_sub(previously_covered) as usize != context.observations.len()
-            {
+            if total_tools.saturating_sub(previously_covered) as usize != total_observations {
                 return Err(EngineError::InvalidHistory);
             }
             let summary_placeholder = "x".repeat(8 * 1024);
@@ -1622,24 +1715,39 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                     .saturating_add(1),
             )
             .map_err(|_| EngineError::InvalidHistory)?;
-            if minimum_prefix_count > context.observations.len() {
+            if minimum_prefix_count > total_observations {
                 return Ok(());
             }
-            let first_prefix_count = context
-                .observations
-                .len()
-                .saturating_sub(1)
-                .max(minimum_prefix_count);
-            let mut selected = None;
-            for prefix_count in (minimum_prefix_count..=first_prefix_count)
+            // A covered prefix ends on a step boundary; the newest results stay uncompacted when possible.
+            let mut boundaries = Vec::new();
+            let mut observed = 0;
+            for (index, step) in context.steps.iter().enumerate() {
+                observed += step.observations.len();
+                if !step.observations.is_empty() {
+                    boundaries.push((index + 1, observed));
+                }
+            }
+            let candidates: Vec<_> = boundaries
+                .iter()
                 .rev()
-                .chain((first_prefix_count + 1..=context.observations.len()).rev())
-            {
-                let selected_observations = context
-                    .model_observations(prefix_count)
-                    .ok_or(EngineError::InvalidRequest)?;
+                .filter(|(_, count)| (minimum_prefix_count..total_observations).contains(count))
+                .chain(
+                    boundaries
+                        .iter()
+                        .rev()
+                        .filter(|(_, count)| *count == total_observations),
+                )
+                .copied()
+                .collect();
+            let plan_contract = self.controls.goal_budget.plan_contract()?;
+            let budget = self.controls.goal_budget.effective_budget()?;
+            let mut selected = None;
+            for (steps, observation_count) in candidates {
+                let selected_observations = context.model_observations(steps);
                 let assistant = serde_json::to_string(&compaction_context_input(
                     request,
+                    budget,
+                    plan_contract.as_ref(),
                     crate::provider::GoalContextFacts::maximum(),
                     &selected_observations,
                 ))
@@ -1660,18 +1768,14 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                 if source_len > crate::session::MAX_COMPACTION_INPUT_BYTES {
                     continue;
                 }
-                let projected_len = context
-                    .projected_len(
-                        Some(&summary_placeholder),
-                        &context.observations[prefix_count..],
-                    )
-                    .map_err(|_| EngineError::InvalidRequest)?;
-                if projected_len <= context_limit {
-                    selected = Some((prefix_count, source_len, selected_observations));
+                if context.projected_len(Some(&summary_placeholder), steps) <= context_limit {
+                    selected = Some((steps, observation_count, source_len, selected_observations));
                     break;
                 }
             }
-            let Some((prefix_count, preflight_source_len, selected_observations)) = selected else {
+            let Some((prefix_steps, prefix_count, preflight_source_len, selected_observations)) =
+                selected
+            else {
                 return Ok(());
             };
             let covered_tool_count = previously_covered
@@ -1694,7 +1798,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                 covered_tool_count,
                 covered_sequence,
                 source_digest,
-                prefix_count,
+                prefix_steps,
                 preflight_source_len,
                 previous_summary,
                 user.to_owned(),
@@ -1743,6 +1847,8 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
 
         let assistant = serde_json::to_string(&compaction_context_input(
             request,
+            self.controls.goal_budget.effective_budget()?,
+            self.controls.goal_budget.plan_contract()?.as_ref(),
             self.controls.goal_budget.context_facts()?,
             &selected_observations,
         ))
@@ -1813,12 +1919,12 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             ),
         };
         if let CompactionStatus::Succeeded { summary, .. } = &status {
-            let context = request.tools.as_ref().ok_or(EngineError::InvalidRequest)?;
-            if context
-                .projected_len(Some(summary), &context.observations[prefix_count..])
-                .map_err(|_| EngineError::InvalidRequest)?
-                > context_limit
-            {
+            let context = request
+                .input
+                .tools
+                .as_ref()
+                .ok_or(EngineError::InvalidRequest)?;
+            if context.projected_len(Some(summary), prefix_steps) > context_limit {
                 status = CompactionStatus::Failed {
                     reason: CompactionFailure::InvalidOutcome,
                 };
@@ -1884,9 +1990,12 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             .goal_budget
             .account_usage(usage.input_tokens, usage.output_tokens);
         if let CompactionStatus::Succeeded { summary, .. } = &record.status {
-            let context = request.tools.as_mut().ok_or(EngineError::InvalidRequest)?;
+            let input = &mut request.input;
+            let context = input.tools.as_mut().ok_or(EngineError::InvalidRequest)?;
             context.history_summary = Some(summary.clone());
-            context.observations.drain(..prefix_count);
+            for step in context.steps.drain(..prefix_steps) {
+                input.steering_notes.extend(step.steering_notes);
+            }
         }
         self.settle_active_segment(active_segment).await?;
         if self.controls.goal_budget.active_time_exhausted() {
@@ -2198,21 +2307,16 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             phase: AgentPhase::ToolReview,
             collaboration: CollaborationPolicy::Single,
             model: request.model.clone(),
-            instructions: Some(crate::provider::prompts::TOOL_REVIEW_INSTRUCTIONS.into()),
-            objective:
-                serde_json::json!({"user_request":request.objective,"proposed_action":intent})
-                    .to_string(),
-            images: Vec::new(),
-            includes: Vec::new(),
-            history: Vec::new(),
-            context_summary: None,
-            goal_budget: request.goal_budget,
-            goal_plan_contract: request.goal_plan_contract.clone(),
-            goal_context_facts: None,
-            child_results: Vec::new(),
-            steering_notes: Vec::new(),
-            tools: None,
             max_output_tokens: 256,
+            input: RunInput {
+                goal_budget: Some(self.controls.goal_budget.effective_budget()?),
+                goal_plan_contract: self.controls.goal_budget.plan_contract()?,
+                ..RunInput::new(
+                    PromptRole::ToolReview,
+                    serde_json::json!({"user_request":request.input.objective,"proposed_action":intent})
+                        .to_string(),
+                )
+            },
         };
         let trace = primary.begin_provider(AgentPhase::ToolReview, &review.model);
         let active_segment = self.reserve_active_segment(CALL_DEADLINE).await?;
@@ -2223,7 +2327,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             }
             return Err(error);
         }
-        review.goal_context_facts = Some(self.controls.goal_budget.context_facts()?);
+        review.input.goal_context_facts = Some(self.controls.goal_budget.context_facts()?);
         let result = invoke_bounded(
             self.provider.as_ref(),
             review,
@@ -2326,8 +2430,8 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
     }
 }
 
-async fn invoke_bounded<P: Provider>(
-    provider: &P,
+async fn invoke_bounded(
+    provider: &dyn Provider,
     request: ProviderRequest,
     run_deadline: Instant,
     cancellation: RunCancellation,
@@ -2335,8 +2439,8 @@ async fn invoke_bounded<P: Provider>(
     invoke_bounded_with_preview(provider, request, run_deadline, cancellation, None).await
 }
 
-async fn invoke_bounded_with_preview<P: Provider>(
-    provider: &P,
+async fn invoke_bounded_with_preview(
+    provider: &dyn Provider,
     request: ProviderRequest,
     run_deadline: Instant,
     mut cancellation: RunCancellation,
@@ -2432,7 +2536,7 @@ fn call_record(phase: AgentPhase, result: &CallResult, valid_response: bool) -> 
             ..
         }) if valid_response => ProviderCallDisposition::Delegated,
         CallResult::Response(ProviderResponse {
-            outcome: ProviderOutcome::Tool { .. },
+            outcome: ProviderOutcome::Tools(_),
             ..
         }) if valid_response => ProviderCallDisposition::ToolRequested,
         CallResult::Response(_) => ProviderCallDisposition::InvalidResponse,
@@ -2457,7 +2561,15 @@ fn call_record(phase: AgentPhase, result: &CallResult, valid_response: bool) -> 
     ProviderCallRecord {
         phase,
         disposition,
-        requested_tools: u8::from(disposition == ProviderCallDisposition::ToolRequested),
+        requested_tools: match result {
+            CallResult::Response(ProviderResponse {
+                outcome: ProviderOutcome::Tools(requests),
+                ..
+            }) if disposition == ProviderCallDisposition::ToolRequested => {
+                u8::try_from(requests.len()).unwrap_or(u8::MAX)
+            }
+            _ => 0,
+        },
         response_id,
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,

@@ -1,4 +1,6 @@
-use crate::provider::{AgentPhase, ImageAttachment, Provider, ProviderRequest};
+use crate::provider::{
+    AgentPhase, ImageAttachment, PromptRole, Provider, ProviderRequest, RunInput,
+};
 use crate::session::input::{InputError, WorkspaceInputs};
 use crate::session::{
     AgentRole, AgentRunId, CollaborationPolicy, CompiledContext, Event, GoalBudget, GoalId,
@@ -1238,6 +1240,8 @@ mod goal_workspace_lease_tests {
 
     struct NeverProvider;
 
+    #[async_trait::async_trait]
+
     impl Provider for NeverProvider {
         fn profile_name(&self) -> &str {
             "scripted"
@@ -1292,7 +1296,7 @@ mod goal_workspace_lease_tests {
             .await
             .expect("install acknowledgment gate");
         let mut leases = WorkspaceLeases::new();
-        Engine::<NeverProvider>::retain_goal_workspace(
+        Engine::retain_goal_workspace(
             &mut leases,
             goal_id,
             workspace_identity,
@@ -1409,7 +1413,7 @@ mod goal_workspace_lease_tests {
     const RESUMABLE_OBJECTIVE: &str = "Resume the paused Goal after a failed append";
 
     async fn paused_goal_session(
-        engine: &mut Engine<NeverProvider>,
+        engine: &mut Engine,
         workspace: &std::path::Path,
     ) -> (SessionId, GoalId) {
         let session_id = SessionId::new();
@@ -1792,10 +1796,10 @@ fn resolve_goal_admission(
     }
 }
 
-pub struct Engine<P: Provider> {
+pub struct Engine {
     state: StateRoot,
     store: Store,
-    provider: Arc<P>,
+    provider: Arc<dyn Provider>,
     telemetry: Telemetry,
     tools: Option<(crate::tools::config::Config, PathBuf)>,
     workspace_permissions: Option<crate::tools::WorkspacePermissions>,
@@ -1811,7 +1815,7 @@ struct GoalWorkspaceLock {
     _lock: WorkspaceRunLock,
 }
 
-impl<P: Provider + 'static> Engine<P> {
+impl Engine {
     async fn lock_lineage(
         &self,
         view: &crate::session::SessionView,
@@ -1941,13 +1945,13 @@ impl<P: Provider + 'static> Engine<P> {
         Ok(())
     }
 
-    pub fn open(state: StateRoot, provider: P) -> Result<Self, EngineError> {
+    pub fn open(state: StateRoot, provider: impl Provider + 'static) -> Result<Self, EngineError> {
         Self::open_with_telemetry(state, provider, Telemetry::disabled())
     }
 
     pub fn open_with_telemetry(
         state: StateRoot,
-        provider: P,
+        provider: impl Provider + 'static,
         telemetry: Telemetry,
     ) -> Result<Self, EngineError> {
         let store = Store::open(state.try_clone()?)?;
@@ -2436,29 +2440,33 @@ impl<P: Provider + 'static> Engine<P> {
         )
         .await?;
 
+        let role = if tool_context.is_some() {
+            PromptRole::Primary
+        } else {
+            PromptRole::ReadOnly
+        };
         let provider_request = ProviderRequest {
             run_id,
             agent_run_id,
             phase: AgentPhase::RootPlan,
             collaboration: request.policy,
             model: selection.model,
-            instructions: inputs.instructions.map(|(_, snapshot)| snapshot.content),
-            objective,
-            images: context.images,
-            includes: inputs
-                .includes
-                .into_iter()
-                .map(|snapshot| snapshot.model_include())
-                .collect(),
-            history: context.history,
-            context_summary: context.summary,
-            goal_budget: Some(budget),
-            goal_plan_contract: goal.plan_contract.clone(),
-            goal_context_facts: None,
-            child_results: Vec::new(),
-            steering_notes: Vec::new(),
             max_output_tokens: OUTPUT_TOKEN_CAP,
-            tools: tool_context,
+            input: RunInput {
+                images: context.images,
+                goal_budget: Some(budget),
+                goal_plan_contract: goal.plan_contract.clone(),
+                workspace_guidance: inputs.instructions.map(|(_, snapshot)| snapshot.content),
+                includes: inputs
+                    .includes
+                    .into_iter()
+                    .map(|snapshot| snapshot.model_include())
+                    .collect(),
+                history: context.history,
+                context_summary: context.summary,
+                tools: tool_context,
+                ..RunInput::new(role, objective)
+            },
         };
         if let Some(steering) = &self.steering {
             steering.begin_run();

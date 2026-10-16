@@ -1,8 +1,8 @@
 use super::{
     AgentPhase, AnthropicProvider, CompactionItem, CompactionRequest, Effort, HistoryTurn,
-    MAX_REPORTED_INPUT_TOKENS, NativeApiCredentials, OpenAiProvider, Provider, ProviderError,
-    ProviderOutcome, ProviderRequest, catalog::valid_model_id, list_native_models_with_credentials,
-    valid_saved_api_account_id, validate_native_api_key,
+    MAX_REPORTED_INPUT_TOKENS, NativeApiCredentials, OpenAiProvider, PromptRole, Provider,
+    ProviderError, ProviderOutcome, ProviderRequest, RunInput, catalog::valid_model_id,
+    list_native_models_with_credentials, valid_saved_api_account_id, validate_native_api_key,
 };
 use crate::session::{AgentRunId, RunId, SessionId};
 use crate::store::{NativeEvidenceRecord, StateRoot, Store};
@@ -195,19 +195,8 @@ async fn probe<P: Provider>(provider: &P) -> Result<(), NativeCheckError> {
         phase: AgentPhase::RootPlan,
         collaboration: crate::session::CollaborationPolicy::Single,
         model: model.clone(),
-        images: Vec::new(),
-        instructions: None,
-        objective: "Synthetic conformance check: finish directly with a short factual sentence. No Workspace content is supplied.".into(),
-        includes: Vec::new(),
-        history: Vec::new(),
-        context_summary: None,
-        goal_budget: None,
-        goal_plan_contract: None,
-        goal_context_facts: None,
-        child_results: Vec::new(),
-        steering_notes: Vec::new(),
         max_output_tokens: PROBE_OUTPUT_CAP,
-        tools: None,
+        input: RunInput::new(PromptRole::ReadOnly, "Synthetic conformance check: finish directly with a short factual sentence. No Workspace content is supplied.".into()),
     };
     let (preview, observed) = super::ResponsePreview::new();
     let response = provider
@@ -227,7 +216,7 @@ async fn probe<P: Provider>(provider: &P) -> Result<(), NativeCheckError> {
         collaboration: crate::session::CollaborationPolicy::Team { max_active_children: 1 },
         run_id: RunId::new(),
         agent_run_id: AgentRunId::new(),
-        objective: "Synthetic conformance check: delegate exactly one independent read-only question about the number two. No Workspace content is supplied.".into(),
+        input: RunInput::new(PromptRole::ReadOnly, "Synthetic conformance check: delegate exactly one independent read-only question about the number two. No Workspace content is supplied.".into()),
         ..direct
     };
     let response = provider
@@ -533,6 +522,8 @@ mod tests {
         calls: AtomicUsize,
     }
 
+    #[async_trait::async_trait]
+
     impl Provider for ProbeFixture {
         fn profile_name(&self) -> &str {
             "openai"
@@ -553,11 +544,11 @@ mod tests {
             assert_eq!(request.model, "synthetic-model");
             assert_eq!(request.max_output_tokens, PROBE_OUTPUT_CAP);
             assert!(
-                request.instructions.is_none()
-                    && request.includes.is_empty()
-                    && request.history.is_empty()
-                    && request.context_summary.is_none()
-                    && request.child_results.is_empty()
+                request.input.workspace_guidance.is_none()
+                    && request.input.includes.is_empty()
+                    && request.input.history.is_empty()
+                    && request.input.context_summary.is_none()
+                    && request.input.child_results.is_empty()
             );
             let step = self.calls.fetch_add(1, Ordering::SeqCst);
             let outcome = if step == 0 || matches!(self.case, ProbeCase::WrongDelegation) {
@@ -575,6 +566,7 @@ mod tests {
                 })
             };
             Ok(ProviderResponse {
+                turn: crate::provider::ProviderTurn::scripted(),
                 outcome,
                 response_id: Some(
                     if step == 0 || step == 1 && matches!(self.case, ProbeCase::DuplicateId) {

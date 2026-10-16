@@ -476,10 +476,7 @@ struct SignalledRun {
 }
 
 /// Drives one Run with stop signals installed only while it is in flight.
-async fn run_signalled<P: Provider + 'static>(
-    engine: &mut Engine<P>,
-    request: RunRequest,
-) -> Result<SignalledRun, String> {
+async fn run_signalled(engine: &mut Engine, request: RunRequest) -> Result<SignalledRun, String> {
     let cancellation = RunCancellation::new();
     let mut signals =
         StopSignals::install().map_err(|_| "signal handling unavailable".to_owned())?;
@@ -532,6 +529,8 @@ mod tests {
         observed: Arc<Mutex<Vec<ProviderRequest>>>,
     }
 
+    #[async_trait::async_trait]
+
     impl Provider for Scripted {
         fn profile_name(&self) -> &str {
             "openai"
@@ -557,6 +556,7 @@ mod tests {
                 .pop_front()
                 .expect("one scripted call")?;
             Ok(ProviderResponse {
+                turn: arany::ProviderTurn::scripted(),
                 outcome: ProviderOutcome::Finish(answer),
                 response_id: Some("resp_test".into()),
                 usage: arany::Usage {
@@ -1135,13 +1135,13 @@ mod tests {
         ] {
             assert_eq!(call.phase, AgentPhase::RootPlan, "exec call phase");
             assert!(call.model == "gpt-5.4", "exec model");
-            assert!(call.objective == objective, "exec objective");
-            assert!(call.images.is_empty(), "exec images");
-            assert!(call.history == expected_history, "exec history");
-            assert!(call.instructions.is_none(), "exec instructions");
-            assert!(call.includes.is_empty(), "exec includes");
-            assert!(call.context_summary.is_none(), "exec summary");
-            assert!(call.child_results.is_empty(), "exec children");
+            assert!(call.input.objective == objective, "exec objective");
+            assert!(call.input.images.is_empty(), "exec images");
+            assert!(call.input.history == expected_history, "exec history");
+            assert!(call.input.workspace_guidance.is_none(), "exec instructions");
+            assert!(call.input.includes.is_empty(), "exec includes");
+            assert!(call.input.context_summary.is_none(), "exec summary");
+            assert!(call.input.child_results.is_empty(), "exec children");
             assert_eq!(call.max_output_tokens, 4096, "exec output cap");
         }
         for (call, run) in calls.iter().zip(&final_view.runs) {

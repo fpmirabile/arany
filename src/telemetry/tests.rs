@@ -62,6 +62,8 @@ struct WaitingTraceProvider {
     requests: Arc<std::sync::Mutex<Vec<ProviderRequest>>>,
 }
 
+#[async_trait::async_trait]
+
 impl Provider for WaitingTraceProvider {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -81,6 +83,8 @@ impl Provider for WaitingTraceProvider {
         pending().await
     }
 }
+
+#[async_trait::async_trait]
 
 impl Provider for GatedFailureProvider {
     fn profile_name(&self) -> &str {
@@ -107,14 +111,15 @@ impl Provider for GatedFailureProvider {
             AgentPhase::ChildWork => {
                 let (release, gate) = oneshot::channel();
                 self.started
-                    .send((request.objective.clone(), release))
+                    .send((request.input.objective.clone(), release))
                     .map_err(|_| ProviderError::Unavailable)?;
                 gate.await.map_err(|_| ProviderError::Unavailable)?;
-                if request.objective == "B" {
+                if request.input.objective == "B" {
                     match self.failure {
                         ChildFailureCase::Rejected => return Err(ProviderError::Rejected),
                         ChildFailureCase::NestedDelegation => {
                             return Ok(ProviderResponse {
+                                turn: crate::provider::ProviderTurn::scripted(),
                                 outcome: ProviderOutcome::Delegate(Delegate {
                                     children: vec!["not permitted".into()],
                                 }),
@@ -129,6 +134,7 @@ impl Provider for GatedFailureProvider {
                         }
                         ChildFailureCase::OutputLimit => {
                             return Ok(ProviderResponse {
+                                turn: crate::provider::ProviderTurn::scripted(),
                                 outcome: ProviderOutcome::Finish(Finish {
                                     summary: "done".into(),
                                     result: "done".into(),
@@ -144,6 +150,7 @@ impl Provider for GatedFailureProvider {
                         }
                         ChildFailureCase::InputUsageOverflow => {
                             return Ok(ProviderResponse {
+                                turn: crate::provider::ProviderTurn::scripted(),
                                 outcome: ProviderOutcome::Finish(Finish {
                                     summary: "done".into(),
                                     result: "done".into(),
@@ -169,6 +176,7 @@ impl Provider for GatedFailureProvider {
             }
         };
         Ok(ProviderResponse {
+            turn: crate::provider::ProviderTurn::scripted(),
             outcome,
             response_id: None,
             usage: crate::provider::Usage {
@@ -257,7 +265,7 @@ fn failed_child_aborts_sibling_provider_span_as_cancelled() {
                 assert_trace_call(&calls[0], AgentPhase::RootPlan, "synthetic task");
                 assert_eq!(calls[0].agent_run_id, outcome.run.agents[0].id);
                 let mut children = calls[1..].iter().collect::<Vec<_>>();
-                children.sort_by(|left, right| left.objective.cmp(&right.objective));
+                children.sort_by(|left, right| left.input.objective.cmp(&right.input.objective));
                 for (call, (objective, agent)) in children
                     .into_iter()
                     .zip([("A", &outcome.run.agents[1]), ("B", &outcome.run.agents[2])])
@@ -415,13 +423,16 @@ fn timed_out_provider_call_exports_closed_error_type() {
 fn assert_trace_call(actual: &ProviderRequest, phase: AgentPhase, objective: &str) {
     assert_eq!(actual.phase, phase, "trace call phase");
     assert!(actual.model == "test-model", "trace call model");
-    assert!(actual.objective == objective, "trace call objective");
-    assert!(actual.images.is_empty(), "trace call images");
-    assert!(actual.instructions.is_none(), "trace call instructions");
-    assert!(actual.includes.is_empty(), "trace call includes");
-    assert!(actual.history.is_empty(), "trace call history");
-    assert!(actual.context_summary.is_none(), "trace call summary");
-    assert!(actual.child_results.is_empty(), "trace call children");
+    assert!(actual.input.objective == objective, "trace call objective");
+    assert!(actual.input.images.is_empty(), "trace call images");
+    assert!(
+        actual.input.workspace_guidance.is_none(),
+        "trace call instructions"
+    );
+    assert!(actual.input.includes.is_empty(), "trace call includes");
+    assert!(actual.input.history.is_empty(), "trace call history");
+    assert!(actual.input.context_summary.is_none(), "trace call summary");
+    assert!(actual.input.child_results.is_empty(), "trace call children");
     assert_eq!(actual.max_output_tokens, 4096, "trace call output cap");
 }
 

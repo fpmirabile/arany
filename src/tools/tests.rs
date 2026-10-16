@@ -1035,16 +1035,10 @@ fn project_skill_discovery_preserves_grants_and_reports_missing_installation() {
             if layout == "many-installed" {
                 assert!(catalog.len() > 8 * 1024);
             }
-            let context = ToolContext {
-                catalog,
-                history_summary: None,
-                observations: Vec::new(),
-            };
-            assert!(context.model_input()["catalog"].is_object());
-            let branch = context.outcome_branch_with_plan(false, None).remove(0);
-            let skill = branch["properties"]["call"]["anyOf"]
-                .as_array()
-                .unwrap()
+            let parsed = parse_json(catalog.as_bytes(), MAX_TOOL_CATALOG_BYTES).unwrap();
+            assert!(parsed.is_object());
+            let calls = catalog_call_schemas(&parsed);
+            let skill = calls
                 .iter()
                 .find(|call| call["properties"]["operation"]["enum"][0] == "skill")
                 .unwrap();
@@ -1203,10 +1197,12 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
     let rows: Vec<Value> =
         serde_json::from_str(include_str!("../../tests/fixtures/tool-outcomes.json")).unwrap();
     assert_eq!(rows.len(), 10);
-    let branch = outcome_branch();
-    let schema = jsonschema::options().offline().build(&branch).unwrap();
+    let schema = jsonschema::options()
+        .offline()
+        .build(&json!({"anyOf": call_schemas()}))
+        .unwrap();
     for row in &rows {
-        assert!(schema.is_valid(&row["outcome"]));
+        assert!(schema.is_valid(&row["outcome"]["call"]));
         let call: ToolCall = serde_json::from_value(row["outcome"]["call"].clone()).unwrap();
         assert!(call.valid());
         let mut unknown = row["outcome"]["call"].clone();
@@ -1480,37 +1476,22 @@ fn guard_error_after_dispatch_marks_only_a_selected_command_cache_not_attempted(
 
 #[test]
 fn goal_success_criterion_offers_only_admitted_calls() {
-    let context = ToolContext {
-        catalog: json!({
-            "write": false,
-            "commands": [{"name": "cargo"}],
-            "skills": [],
-            "mcp_servers": []
-        })
-        .to_string(),
-        history_summary: None,
-        observations: Vec::new(),
-    };
-    let budget = crate::session::GoalBudget::default();
-    let branches = context.outcome_branch_with_plan(true, Some(&budget));
-    let success_calls: Vec<Value> = branches
-        .iter()
-        .filter_map(|branch| {
-            let contract = &branch["properties"]["plan_contract"];
-            let contract = contract
-                .get("properties")
-                .or_else(|| contract["anyOf"][0].get("properties"))?;
-            contract["success_criterion"]["anyOf"][0]["properties"]["call"]["anyOf"].as_array()
-        })
-        .flatten()
-        .cloned()
-        .collect();
+    let calls = catalog_call_schemas(&json!({
+        "write": false,
+        "commands": [{"name": "cargo"}],
+        "skills": [],
+        "mcp_servers": []
+    }));
+    let property = plan_contract_property(&calls);
+    let success_calls = property["anyOf"][0]["properties"]["success_criterion"]["anyOf"][0]
+        ["properties"]["call"]["anyOf"]
+        .as_array()
+        .expect("admitted success calls");
     let operations: Vec<&str> = success_calls
         .iter()
         .filter_map(|call| call["properties"]["operation"]["enum"][0].as_str())
         .collect();
-    assert!(!operations.is_empty());
-    assert!(operations.iter().all(|operation| *operation == "command"));
+    assert_eq!(operations, ["command"]);
     assert!(
         success_calls
             .iter()
@@ -1536,77 +1517,21 @@ fn goal_success_criterion_without_admitted_calls_omits_the_call_alternative() {
         }
     }
 
-    let context = ToolContext {
-        catalog: json!({
-            "write": false,
-            "commands": [],
-            "skills": [],
-            "mcp_servers": []
-        })
-        .to_string(),
-        history_summary: None,
-        observations: Vec::new(),
-    };
-    let budget = crate::session::GoalBudget::default();
-    let branches = context.outcome_branch_with_plan(true, Some(&budget));
-    assert_no_empty_any_of(&Value::Array(branches.clone()));
-    let criteria: Vec<Value> = branches
-        .iter()
-        .map(|branch| {
-            let contract = &branch["properties"]["plan_contract"];
-            let contract = if contract.get("properties").is_some() {
-                contract
-            } else {
-                &contract["anyOf"][0]
-            };
-            contract["properties"]["success_criterion"].clone()
-        })
-        .collect();
-    assert!(!criteria.is_empty());
-    for criterion in criteria {
-        let kinds: Vec<&str> = criterion["anyOf"]
-            .as_array()
-            .expect("success criterion alternatives")
-            .iter()
-            .filter_map(|alternative| alternative["properties"]["kind"]["enum"][0].as_str())
-            .collect();
-        assert_eq!(kinds, ["workspace_file_digest", "workspace_file_content"]);
-    }
-}
-
-#[test]
-fn goal_without_pinned_budget_offers_only_the_plan_free_prelude() {
-    let context = ToolContext {
-        catalog: json!({
-            "write": true,
-            "commands": [{"name": "cargo"}],
-            "skills": [{"name": "review"}],
-            "mcp_servers": [{"name": "local"}]
-        })
-        .to_string(),
-        history_summary: None,
-        observations: Vec::new(),
-    };
-    let branches = context.outcome_branch_with_plan(true, None);
-    assert_eq!(branches.len(), 1);
-    let operations: Vec<&str> = branches[0]["properties"]["call"]["anyOf"]
+    let calls = catalog_call_schemas(&json!({
+        "write": false,
+        "commands": [],
+        "skills": [],
+        "mcp_servers": []
+    }));
+    let property = plan_contract_property(&calls);
+    assert_no_empty_any_of(&property);
+    let kinds: Vec<&str> = property["anyOf"][0]["properties"]["success_criterion"]["anyOf"]
         .as_array()
-        .unwrap()
+        .expect("success criterion alternatives")
         .iter()
-        .filter_map(|call| call["properties"]["operation"]["enum"][0].as_str())
+        .filter_map(|alternative| alternative["properties"]["kind"]["enum"][0].as_str())
         .collect();
-    assert!(operations.contains(&"list"));
-    assert!(operations.contains(&"read"));
-    assert!(
-        operations
-            .iter()
-            .all(|operation| ["list", "read", "search", "skill", "mcp_list"].contains(operation)),
-        "{operations:?}"
-    );
-    assert_eq!(
-        branches[0]["properties"]["plan_contract"],
-        json!({"type": "null"})
-    );
+    assert_eq!(kinds, ["workspace_file_digest", "workspace_file_content"]);
 }
 
 #[tokio::test]
@@ -1714,39 +1639,6 @@ async fn cache_receipt_states_preserve_success_without_publication_uncertainty()
             expected_update == CacheUpdate::Uncertain
         );
     }
-}
-
-#[test]
-fn research_branches_offer_only_read_only_operations_until_exhausted() {
-    let context = |remaining: Option<u64>| {
-        let mut catalog = json!({
-            "write": true,
-            "commands": [{"name": "cargo"}],
-            "skills": [{"name": "guide"}],
-            "mcp_servers": [{"name": "local", "tools": ["probe"]}],
-            "git": {"operations": ["git_status", "git_diff", "git_log"]}
-        });
-        if let Some(remaining) = remaining {
-            catalog["tool_calls_remaining"] = json!(remaining);
-        }
-        ToolContext {
-            catalog: catalog.to_string(),
-            history_summary: None,
-            observations: Vec::new(),
-        }
-    };
-    let branches = context(Some(2)).research_branches();
-    assert_eq!(branches.len(), 1);
-    let operations: Vec<&str> = branches[0]["properties"]["call"]["anyOf"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|call| call["properties"]["operation"]["enum"][0].as_str())
-        .collect();
-    assert_eq!(operations, ["list", "read", "search", "skill", "mcp_list"]);
-    assert!(branches[0]["properties"].get("plan_contract").is_none());
-    assert!(context(Some(0)).research_branches().is_empty());
-    assert!(context(None).research_branches().is_empty());
 }
 
 #[test]
@@ -1948,67 +1840,20 @@ fn git_pin_is_optional_closed_and_linux_only() {
 }
 
 #[test]
-fn git_operations_are_offered_only_when_cataloged_and_join_the_prelude() {
+fn git_operations_are_offered_only_when_cataloged() {
     let git_operations = ["git_status", "git_diff", "git_log"];
-    let plain_names = |branches: &[Value]| -> Vec<String> {
-        branches
+    let offered = |catalog: Value| -> Vec<String> {
+        catalog_call_schemas(&catalog)
             .iter()
-            .flat_map(|branch| {
-                branch["properties"]["call"]["anyOf"]
-                    .as_array()
-                    .cloned()
-                    .unwrap()
-            })
-            .filter_map(|call| {
-                call["properties"]["operation"]["enum"][0]
-                    .as_str()
-                    .map(str::to_owned)
-            })
+            .filter_map(|call| call["properties"]["operation"]["enum"][0].as_str())
+            .map(str::to_owned)
             .collect()
-    };
-    let operations = |catalog: Value| -> (Vec<Value>, Vec<String>) {
-        let context = ToolContext {
-            catalog: catalog.to_string(),
-            history_summary: None,
-            observations: Vec::new(),
-        };
-        let budget = crate::session::GoalBudget::default();
-        let planned = context.outcome_branch_with_plan(true, Some(&budget));
-        (
-            planned,
-            plain_names(&context.outcome_branch_with_plan(false, None)),
-        )
     };
     let base = json!({"write": false, "commands": [], "skills": [], "mcp_servers": []});
     let mut cataloged = base.clone();
     cataloged["git"] = json!({"operations": git_operations});
-    let (planned, plain) = operations(cataloged.clone());
     assert_eq!(
-        plain,
-        [
-            "list",
-            "read",
-            "search",
-            "git_status",
-            "git_diff",
-            "git_log"
-        ]
-    );
-    assert_eq!(planned.len(), 1);
-    assert!(
-        planned[0]["properties"]["plan_contract"]["anyOf"]
-            .as_array()
-            .unwrap()
-            .contains(&json!({"type": "null"}))
-    );
-    let prelude: Vec<&str> = planned[0]["properties"]["call"]["anyOf"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|call| call["properties"]["operation"]["enum"][0].as_str())
-        .collect();
-    assert_eq!(
-        prelude,
+        offered(cataloged),
         [
             "list",
             "read",
@@ -2023,9 +1868,8 @@ fn git_operations_are_offered_only_when_cataloged_and_join_the_prelude() {
         if let Some(git) = git {
             value["git"] = git;
         }
-        let (_, plain) = operations(value);
         assert!(
-            plain
+            offered(value)
                 .iter()
                 .all(|name| !git_operations.contains(&name.as_str()))
         );

@@ -1,6 +1,7 @@
 use super::{CustomProfile, CustomProfileError, PinnedDestination, transport::CustomTransport};
 use crate::provider::{
-    AgentPhase, CompactionItem, CompactionRequest, HistoryTurn, ProviderOutcome, ProviderRequest,
+    AgentPhase, CompactionItem, CompactionRequest, HistoryTurn, PromptRole, ProviderOutcome,
+    ProviderRequest, RunInput,
 };
 use crate::session::{AgentRunId, RunId, SessionId};
 use crate::store::{ProviderEvidenceRecord, StateRoot, Store};
@@ -80,19 +81,8 @@ async fn probe(
         phase: AgentPhase::RootPlan,
         collaboration: crate::session::CollaborationPolicy::Single,
         model: profile.model().to_owned(),
-        instructions: None,
-        images: Vec::new(),
-        objective: "Synthetic conformance check: finish directly with a short factual sentence. No Workspace content is supplied.".into(),
-        includes: Vec::new(),
-        history: Vec::new(),
-        context_summary: None,
-        goal_budget: None,
-        goal_plan_contract: None,
-        goal_context_facts: None,
-        child_results: Vec::new(),
-        steering_notes: Vec::new(),
         max_output_tokens: profile.max_output_tokens(),
-        tools: None,
+        input: RunInput::new(PromptRole::ReadOnly, "Synthetic conformance check: finish directly with a short factual sentence. No Workspace content is supplied.".into()),
     };
     let (preview, observed) = crate::provider::ResponsePreview::new();
     let direct_response = transport
@@ -113,19 +103,8 @@ async fn probe(
         phase: AgentPhase::RootPlan,
         collaboration: crate::session::CollaborationPolicy::Team { max_active_children: 1 },
         model: profile.model().to_owned(),
-        instructions: None,
-        images: Vec::new(),
-        objective: "Synthetic conformance check: delegate exactly one independent read-only question about the number two. No Workspace content is supplied.".into(),
-        includes: Vec::new(),
-        history: Vec::new(),
-        context_summary: None,
-        goal_budget: None,
-        goal_plan_contract: None,
-        goal_context_facts: None,
-        child_results: Vec::new(),
-        steering_notes: Vec::new(),
         max_output_tokens: 128,
-        tools: None,
+        input: RunInput::new(PromptRole::ReadOnly, "Synthetic conformance check: delegate exactly one independent read-only question about the number two. No Workspace content is supplied.".into()),
     };
     let (preview, observed) = crate::provider::ResponsePreview::new();
     let delegate_response = transport
@@ -535,19 +514,13 @@ mod tests {
             phase: AgentPhase::RootPlan,
             collaboration: crate::session::CollaborationPolicy::Single,
             model: "model-1".into(),
-            instructions: None,
-            images: Vec::new(),
-            objective: "Synthetic conformance check: finish directly".into(),
-            includes: Vec::new(),
-            history: Vec::new(),
-            context_summary: None,
-            goal_budget: None,
-            goal_plan_contract: None,
-            goal_context_facts: None,
-            child_results: Vec::new(),
-            steering_notes: Vec::new(),
             max_output_tokens: 4096,
-            tools: None,
+            input: RunInput {
+                ..RunInput::new(
+                    PromptRole::ReadOnly,
+                    "Synthetic conformance check: finish directly".into(),
+                )
+            },
         };
         let result = if compaction {
             let request = CompactionRequest {

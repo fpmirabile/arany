@@ -1246,6 +1246,7 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    #[async_trait::async_trait]
     impl Provider for Greeting {
         fn profile_name(&self) -> &str {
             self.profile
@@ -1279,6 +1280,7 @@ mod tests {
         ) -> Result<ProviderResponse, ProviderError> {
             self.observed.lock().unwrap().push(request);
             Ok(ProviderResponse {
+                turn: arany::ProviderTurn::scripted(),
                 outcome: ProviderOutcome::Finish(Finish {
                     summary: "Greeting complete".into(),
                     result: "Hola".into(),
