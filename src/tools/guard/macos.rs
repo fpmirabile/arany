@@ -166,6 +166,17 @@ const COMMAND_PROFILE: &str = "(allow file-read-metadata (literal \"/\") (litera
 (allow signal (target self) (target children))
 ";
 
+const GIT_PROFILE: &str = "(allow file-read-metadata (literal \"/\") (literal \"/System\") (literal \"/usr\") (literal \"/dev\"))
+(allow file-read-metadata (literal \"/System/Cryptexes\") (literal \"/System/Cryptexes/OS\"))
+(allow file-read* file-map-executable (subpath \"/System/Library\") (subpath \"/usr/lib\"))
+(allow file-read* (literal \"/\") (literal \"/dev/random\") (literal \"/dev/urandom\"))
+(allow file-read* file-write* (literal \"/dev/null\"))
+(allow process-fork)
+(deny process-fork (require-entitlement \"com.apple.private.coalition-spawn\") (require-entitlement \"com.apple.private.persona-mgmt\"))
+(deny process-exec-update-label)
+(allow signal (target self) (target children))
+";
+
 fn profile(rules: &str, denied_syscalls: &[i32]) -> String {
     let mut profile =
         String::from("(version 1)\n(deny default)\n(allow syscall-unix)\n(deny syscall-unix");
@@ -193,9 +204,11 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
         return Err(ToolError::ProtectionUnavailable);
     }
-    let mut bytes = b"arany-macos-guard-v14:shared-fifo-capacity;durable-observed-attachment;boot-bound-locked-root-recovery;persisted-supervisor-before-task;image-inode-device-mount-ownership;no-buffered-go-before-ready;typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;metadata-only-directory-ancestors;workspace-call-write;guard-read-only;file-cpu-default-unblocked-immutable;supervised-resources;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;strict-bounded-no-follow-command-changeset-after-coalition-emptiness-before-detach;bounded-go-receipt;versioned-exact-ro-runtime-and-cache-grants;admitted-cache-volume-grant;mount-table-no-descendant-under-selected-physical-runtime-before-seatbelt-and-before-go".to_vec();
+    let mut bytes = b"arany-macos-guard-v15:shared-fifo-capacity;durable-observed-attachment;boot-bound-locked-root-recovery;persisted-supervisor-before-task;image-inode-device-mount-ownership;no-buffered-go-before-ready;typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;metadata-only-directory-ancestors;workspace-call-write;guard-read-only;file-cpu-default-unblocked-immutable;supervised-resources;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;strict-bounded-no-follow-command-changeset-after-coalition-emptiness-before-detach;bounded-go-receipt;versioned-exact-ro-runtime-and-cache-grants;admitted-cache-volume-grant;mount-table-no-descendant-under-selected-physical-runtime-before-seatbelt-and-before-go".to_vec();
     bytes.extend_from_slice(profile(PROFILE, FILE_DENIED_SYSCALLS).as_bytes());
     bytes.extend_from_slice(profile(COMMAND_PROFILE, COMMAND_DENIED_SYSCALLS).as_bytes());
+    bytes.extend_from_slice(profile(GIT_PROFILE, COMMAND_DENIED_SYSCALLS).as_bytes());
+    bytes.extend_from_slice(b";typed-git-read-pinned-clt-git-after-go-read-only-workspace-unit-root-view-no-repository-config-closed-env-coalition-supervised");
     bytes.extend_from_slice(b"native-commands-mcp:checked-private-cwd;fixed-capacity-nosuid-project-scratch;fresh-selected-snapshot;read-only-pinned-runtime;bounded-positive-root-owned-non-setid-unentitled-system-exec;stamp-bound-process-signature-verdicts;admission-catalogue-bound-to-enforcement;per-worker-pinned-system-directories-no-follow-metadata-revalidation;exact-literal-union-profile;dynamic-coalition-persona-entitlement-fork-denial;null-bootstrap-registered-ports;child-only-signals;supervised-cpu;physical-footprint-memory");
     bytes.extend_from_slice(&CPU_LIMIT.as_nanos().to_le_bytes());
     bytes.extend_from_slice(&SUPERVISION_INTERVAL.as_nanos().to_le_bytes());
@@ -283,6 +296,9 @@ pub(super) fn install(
     if task.intent.call.is_process() {
         return install_command(task, stage);
     }
+    if task.intent.call.is_git_read() {
+        return install_git(task, stage);
+    }
     configure_file_cpu()?;
     let mut profile = profile(PROFILE, FILE_DENIED_SYSCALLS);
     ancestors(&mut profile, &task.workspace)?;
@@ -334,7 +350,7 @@ fn install_profile(profile: String) -> Result<(), ToolError> {
     Ok(())
 }
 
-fn command_root(task: &Task) -> Result<PathBuf, ToolError> {
+fn unit_root(task: &Task) -> Result<PathBuf, ToolError> {
     let root = std::env::current_dir().map_err(|_| ToolError::Path)?;
     crate::private_fs::open_directory(&root, false).map_err(|_| ToolError::Path)?;
     crate::tools::fs::reject_overlap(&root, &task.workspace)?;
@@ -343,6 +359,11 @@ fn command_root(task: &Task) -> Result<PathBuf, ToolError> {
     {
         return Err(ToolError::ChangedInput);
     }
+    Ok(root)
+}
+
+fn command_root(task: &Task) -> Result<PathBuf, ToolError> {
+    let root = unit_root(task)?;
     storage::verify_storage(&root, &task.intent.limits)?;
     Ok(root)
 }
@@ -405,15 +426,20 @@ fn system_file(is_file: bool, uid: u32, nlink: u64, mode: u32) -> bool {
     is_file && uid == 0 && nlink == 1 && mode & 0o6022 == 0
 }
 
-fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<PathBuf, ToolError> {
-    use std::os::unix::fs::MetadataExt;
-
+fn unprivileged_helper() -> Result<(), ToolError> {
     if rustix::process::geteuid().as_raw() == 0
         || rustix::process::getuid() != rustix::process::geteuid()
         || rustix::process::getgid() != rustix::process::getegid()
     {
         return Err(ToolError::ProtectionUnavailable);
     }
+    Ok(())
+}
+
+fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<PathBuf, ToolError> {
+    use std::os::unix::fs::MetadataExt;
+
+    unprivileged_helper()?;
     let root = command_root(task)?;
     let mut required_system_programs = Vec::new();
     for program in task
@@ -483,6 +509,55 @@ fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<Pat
         "(deny file-write* (literal {}))\n",
         quoted(&task.guard_executable)?
     ));
+    if !ffi::detach_bootstrap_ports() {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    install_profile(profile)?;
+    attest_policy(
+        &[
+            (c"process-fork", 0),
+            (c"network-outbound", 1),
+            (c"mach-lookup", 1),
+            (c"iokit-open-user-client", 1),
+            (c"process-exec-update-label", 1),
+        ],
+        COMMAND_DENIED_SYSCALLS,
+    )?;
+    Ok(root)
+}
+
+fn install_git(task: &Task, stage: &mut super::BootstrapStage) -> Result<PathBuf, ToolError> {
+    unprivileged_helper()?;
+    let root = unit_root(task)?;
+    let git = task.config.git.as_ref().ok_or(ToolError::Configuration)?;
+    crate::tools::git::verify_host_executable(git)?;
+    let git_path = Path::new(&git.executable);
+    let mut profile = profile(GIT_PROFILE, COMMAND_DENIED_SYSCALLS);
+    ancestors(&mut profile, git_path)?;
+    profile.push_str(&format!(
+        "(allow file-read* file-map-executable process-exec (literal {}))\n",
+        quoted(git_path)?
+    ));
+    ancestors(&mut profile, &task.workspace)?;
+    profile.push_str(&format!(
+        "(allow file-read* (subpath {}))\n",
+        quoted(&task.workspace)?
+    ));
+    let view = root.join(crate::tools::git::VIEW);
+    ancestors(&mut profile, &view)?;
+    profile.push_str(&format!(
+        "(allow file-read* file-write* (subpath {}))\n",
+        quoted(&view)?
+    ));
+    profile.push_str(&format!(
+        "(allow file-read* (subpath {}))\n",
+        quoted(&root.join(crate::tools::git::HOME))?
+    ));
+    profile.push_str(&format!(
+        "(deny file-write* (literal {}))\n",
+        quoted(&task.guard_executable)?
+    ));
+    *stage = super::BootstrapStage::Capabilities;
     if !ffi::detach_bootstrap_ports() {
         return Err(ToolError::ProtectionUnavailable);
     }
@@ -845,7 +920,7 @@ async fn execute_worker(
     let mut child = Command::new(&runtime.guard_executable)
         .arg("--internal-tool-guard")
         .env_clear()
-        .current_dir(if intent.call.is_process() {
+        .current_dir(if intent.call.is_process() || intent.call.is_git_read() {
             root
         } else {
             Path::new("/")
@@ -981,6 +1056,7 @@ mod tests {
     use crate::tools::types::ToolLimits;
     use nix::libc;
     use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::ExitStatusExt;
 
     #[test]
@@ -1204,5 +1280,183 @@ mod tests {
                 std::hint::spin_loop();
             }
         }
+    }
+
+    #[test]
+    fn native_git_profile_runs_pinned_git_and_denies_host_access() {
+        let git = crate::tools::git::discover().expect("pinned git");
+        let temp = std::env::temp_dir().canonicalize().unwrap();
+        let root = tempfile::Builder::new()
+            .prefix("arany-git-root-")
+            .tempdir_in(&temp)
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let workspace = tempfile::Builder::new()
+            .prefix("arany-git-workspace-")
+            .tempdir_in(&temp)
+            .unwrap();
+        let home = tempfile::tempdir_in(&temp).unwrap();
+        let git_in_workspace = |args: &[&str]| {
+            let output = std::process::Command::new(&git.executable)
+                .args(args)
+                .current_dir(workspace.path())
+                .env_clear()
+                .env("HOME", home.path())
+                .env("PATH", "/usr/bin:/bin")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "Arany Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+                .env("GIT_COMMITTER_NAME", "Arany Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git_in_workspace(&["init", "-q"]);
+        std::fs::write(workspace.path().join("a.txt"), "one\n").unwrap();
+        git_in_workspace(&["add", "a.txt"]);
+        git_in_workspace(&["commit", "-q", "-m", "first commit"]);
+        std::fs::write(workspace.path().join("a.txt"), "two\n").unwrap();
+        std::fs::write(root.path().join("outside"), b"synthetic excluded data").unwrap();
+        let network = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tools::guard::macos::tests::native_git_profile_helper",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("ARANY_TEST_GIT_PROFILE_ROOT", root.path())
+            .env("ARANY_TEST_GIT_PROFILE_WORKSPACE", workspace.path())
+            .env(
+                "ARANY_TEST_GIT_PROFILE_PORT",
+                network.local_addr().unwrap().port().to_string(),
+            )
+            .current_dir(root.path())
+            .bounded_output_for(Duration::from_secs(90), 32 * 1024)
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "native git profile: {:?}; stdout={:?}; stderr={:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        crate::test_process::assert_single_test_completed(&output.stdout, "native git profile");
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    #[ignore = "isolated native git profile helper"]
+    fn native_git_profile_helper() {
+        let root = PathBuf::from(
+            std::env::var_os("ARANY_TEST_GIT_PROFILE_ROOT").expect("private fixture root"),
+        );
+        let workspace = PathBuf::from(
+            std::env::var_os("ARANY_TEST_GIT_PROFILE_WORKSPACE").expect("fixture workspace"),
+        );
+        let port = std::env::var("ARANY_TEST_GIT_PROFILE_PORT")
+            .unwrap()
+            .parse::<u16>()
+            .unwrap();
+        let git = crate::tools::git::discover().expect("pinned git");
+        let (device, inode) =
+            crate::tools::fs::identity(&crate::tools::fs::open_directory(&workspace).unwrap())
+                .unwrap();
+        let config: Config = serde_json::from_value(serde_json::json!({"version":1,
+            "workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[],
+            "git": git}))
+        .unwrap();
+        let call = ToolCall::GitStatus { path: ".".into() };
+        let task = Task {
+            intent: EffectIntent {
+                id: uuid::Uuid::now_v7(),
+                run_id: crate::session::RunId::default(),
+                agent_run_id: crate::session::AgentRunId::default(),
+                policy_digest: config.digest(),
+                enforcement_digest: enforcement_digest().unwrap(),
+                workspace_device: device,
+                workspace_inode: inode,
+                call: call.clone(),
+                limits: ToolLimits::default(),
+                expires_at_ms: crate::tools::now_ms() + 60_000,
+                use_count: 1,
+            },
+            config,
+            cache: None,
+            workspace: workspace.clone(),
+            guard_executable: std::env::current_exe().unwrap(),
+            system_programs: None,
+        };
+        configure_resources().unwrap();
+        let mut stage = super::BootstrapStage::Workspace;
+        assert_eq!(install(&task, &mut stage).unwrap(), root);
+        assert_eq!(
+            std::fs::read(root.join("outside")).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            std::fs::read_dir(&root).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(matches!(
+            std::process::Command::new("/usr/bin/true")
+                .status()
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
+        ));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let output = runtime
+            .block_on(crate::tools::git::execute(
+                &workspace,
+                &root,
+                &git,
+                &call,
+                16 * 1024,
+                Duration::from_secs(20),
+            ))
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert!(value.get("failed").is_none(), "{output}");
+        assert!(
+            value["entries"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!({"path": "a.txt", "state": ".M"}))
+        );
+        std::fs::remove_dir_all(root.join("git-view")).unwrap();
+        let log = ToolCall::GitLog {
+            path: ".".into(),
+            revision: None,
+            max_count: 5,
+        };
+        let output = runtime
+            .block_on(crate::tools::git::execute(
+                &workspace,
+                &root,
+                &git,
+                &log,
+                16 * 1024,
+                Duration::from_secs(20),
+            ))
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["commits"].as_array().unwrap().len(), 1, "{output}");
     }
 }
