@@ -435,8 +435,14 @@ pub(crate) fn valid_relative(value: &str, root: bool) -> bool {
             .all(|part| matches!(part, Component::Normal(_)))
 }
 
+/// ASCII-case-insensitive so `.ENV` and `.Env` match `.env` on case-insensitive volumes such as APFS.
 pub(crate) fn forbidden(value: &str) -> bool {
-    FORBIDDEN_NAMES.contains(&value) || value.starts_with(".env.")
+    FORBIDDEN_NAMES
+        .iter()
+        .any(|name| value.eq_ignore_ascii_case(name))
+        || value
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(".env."))
 }
 
 pub(crate) fn valid_name(value: &str) -> bool {

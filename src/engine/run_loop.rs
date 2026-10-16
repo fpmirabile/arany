@@ -16,6 +16,7 @@ use crate::session::{
 };
 use crate::store::Store;
 use crate::telemetry::{AgentTrace, ProviderTraceOutcome, RunTrace, TraceFailure, TraceOutcome};
+use crate::tools::PREPARATION_OVERHEAD;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
@@ -27,10 +28,6 @@ const MAX_FINISH_SUMMARY_BYTES: usize = 2 * 1024;
 const TOOL_CLEANUP_OVERHEAD: Duration = Duration::from_secs(10);
 /// Wall-clock bound of one Tool-review call, excluding its Store overhead.
 const TOOL_REVIEW_DEADLINE: Duration = Duration::from_secs(20);
-#[cfg(target_os = "linux")]
-const TOOL_PREPARATION_OVERHEAD: Duration = Duration::from_secs(5);
-#[cfg(target_os = "macos")]
-const TOOL_PREPARATION_OVERHEAD: Duration = Duration::from_secs(35);
 
 fn compaction_context_input(
     request: &ProviderRequest,
@@ -1485,7 +1482,7 @@ impl<'a> RunLoop<'a> {
                 }
             }
             let fixed_overhead_ms = duration_ms(
-                TOOL_PREPARATION_OVERHEAD
+                PREPARATION_OVERHEAD
                     .saturating_add(TOOL_CLEANUP_OVERHEAD)
                     .saturating_add(STORE_ACTION_OVERHEAD),
             );
@@ -2216,7 +2213,7 @@ impl<'a> RunLoop<'a> {
                             let cache_transfer = Duration::from_millis(u64::from(
                                 intent.limits.cache_transfer_ms,
                             ));
-                            let action_bound = TOOL_PREPARATION_OVERHEAD
+                            let action_bound = PREPARATION_OVERHEAD
                                 .saturating_add(cache_transfer.saturating_mul(2))
                                 .saturating_add(Duration::from_millis(u64::from(intent.limits.runtime_ms)))
                                 .saturating_add(TOOL_CLEANUP_OVERHEAD);

@@ -141,6 +141,14 @@ pub(crate) fn compaction_input(request: &CompactionRequest) -> Value {
     input
 }
 
+/// The request body ceiling each wire adapter enforces before sending (`encode_request`).
+pub(crate) const MAX_PROVIDER_REQUEST_BYTES: usize = 512 * 1024;
+/// Both adapters send the compaction input as one JSON string, so each quote and backslash of
+/// the serialized input is escaped again: at most two request bytes per input byte.
+pub(crate) const COMPACTION_INPUT_EXPANSION: usize = 2;
+/// Bytes of a compaction request outside its input string: instructions, schema and fixed fields.
+pub(crate) const COMPACTION_REQUEST_ENVELOPE_BYTES: usize = 8 * 1024;
+
 pub(crate) fn compaction_input_bytes(
     request: &CompactionRequest,
 ) -> Result<usize, serde_json::Error> {

@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 const ADAPTER: &str = "openai";
-const MAX_REQUEST_BYTES: usize = 512 * 1024;
+const MAX_REQUEST_BYTES: usize = crate::provider::MAX_PROVIDER_REQUEST_BYTES;
 const DELEGATED_OUTPUT: &str = "Arany recorded this call; its result follows in a later message.";
 
 pub(crate) fn encode_request(request: &Value) -> Result<Vec<u8>, ProviderError> {

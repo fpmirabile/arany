@@ -1,9 +1,9 @@
 mod approval;
 pub(crate) mod config;
 mod fs;
-#[cfg(target_os = "linux")]
 mod git;
 mod guard;
+pub(crate) use guard::PREPARATION_OVERHEAD;
 mod mcp;
 mod skills;
 pub(crate) mod toolchains;
@@ -313,7 +313,6 @@ impl ToolRuntime {
         {
             program.verify()?;
         }
-        #[cfg(target_os = "linux")]
         if let Some(git) = &config.git {
             git::verify_host_executable(git)?;
         }

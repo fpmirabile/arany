@@ -859,8 +859,10 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         let third = engine.run(next).await.expect("image-only team after reopen");
         let fork_id = engine.fork_session(first.session_id, workspace.clone(), Some("Image fork".into())).await.unwrap();
         let large_image = image_fixture(arany::MAX_IMAGE_BYTES);
-        let maximal_objective = "\0".repeat(8 * 1024);
-        let mut next = request(&workspace, &maximal_objective);
+        let maximal_objective = "\0".repeat(64 * 1024);
+        // Mixed prose escapes about 1x; control characters would exceed the compaction bound.
+        let realistic_objective = "Review the module and keep its contract. ".repeat(1_600);
+        let mut next = request(&workspace, &realistic_objective[..64 * 1024]);
         next.title = None;
         next.session_id = Some(first.session_id);
         next.images = vec![large_image.clone()];
@@ -896,7 +898,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 (2, AgentPhase::RootSynthesis, "", history.clone(), all_images, vec![arany::ChildResult {
                     objective: "Inspect current image".into(), summary: "inspected".into(), result: "Child answer".into(),
                 }]),
-                (3, AgentPhase::RootPlan, maximal_objective.as_str(), Vec::new(), vec![ProviderImage { origin: ImageOrigin::Objective, image: large_image.clone() }], Vec::new()),
+                (3, AgentPhase::RootPlan, &realistic_objective[..64 * 1024], Vec::new(), vec![ProviderImage { origin: ImageOrigin::Objective, image: large_image.clone() }], Vec::new()),
                 (4, AgentPhase::RootPlan, maximal_objective.as_str(), Vec::new(), Vec::new(), Vec::new()),
                 (5, AgentPhase::RootPlan, "After fork", [history, vec![arany::HistoryTurn { user: "".into(), assistant: "Team answer".into() }]].concat(), [historical_images, vec![ProviderImage { origin: ImageOrigin::History { turn_index: 2 }, image: second_image.clone() }]].concat(), Vec::new()),
             ] {
@@ -928,7 +930,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 ("First question", "First result", &first_image),
                 ("Second question", "Second result", &second_image),
                 ("", "Team answer", &second_image),
-                (maximal_objective.as_str(), "Large image answer", &large_image),
+                (&realistic_objective[..64 * 1024], "Large image answer", &large_image),
             ]) {
                 let digest: String = image.digest().iter().map(|byte| format!("{byte:02x}")).collect();
                 let user = format!("{objective}\nImage 1: PNG 1x1, {} bytes, SHA-256 {digest}", image.byte_len());
@@ -1003,7 +1005,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         assert_eq!(view.runs.len(), 5);
         assert_eq!(view.runs[0].images, std::slice::from_ref(&first_image));
         assert_eq!(view.runs[3].images, [large_image]);
-        assert!(view.runs[3].objective == maximal_objective, "image objective survives escaping");
+        assert!(view.runs[3].objective == realistic_objective[..64 * 1024], "image objective survives");
         assert!(view.runs[4].objective == maximal_objective, "text-only objective survives escaping");
         assert_eq!(view.runs[2].objective, "", "image-only objective is not invented text");
         assert_eq!(view.compactions[0].record, compacted);
@@ -1037,12 +1039,10 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 assert_eq!(accepted[0]["payload"]["images"][0]["media_type"], "image/png");
                 assert_eq!(accepted[0]["payload"]["images"][0]["data"], view.runs[0].images[0].base64());
                 assert_eq!(accepted[2]["payload"]["text"], "");
-                assert!(accepted[3]["payload"]["text"].as_str() == Some(maximal_objective.as_str()));
-                let image_payload_bytes = accepted[3]["payload"].to_string().len();
-                assert!((300 * 1024..=320 * 1024).contains(&image_payload_bytes), "maximally escaped image input fits its Event");
+                assert!(accepted[3]["payload"]["text"].as_str() == Some(&realistic_objective[..64 * 1024]));
                 assert_eq!(accepted[4]["event_version"], 6);
                 assert!(accepted[4]["payload"]["text"].as_str() == Some(maximal_objective.as_str()));
-                assert_eq!(accepted[4]["payload"].to_string().len(), 6 * 8 * 1024 + 23, "maximally escaped text-only input fits its Event");
+                assert_eq!(accepted[4]["payload"].to_string().len(), 6 * 64 * 1024 + 23, "maximally escaped text-only input fits its Event");
                 assert_eq!(accepted[4]["payload"]["images"], serde_json::json!([]), "text-only input retains the current Message shape");
             }
         }
@@ -1074,8 +1074,8 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 "corrupted image" => invalid["images"][0]["data"] = "not PNG".into(),
                 "URL" => invalid["images"][0]["data"] = "https://example.invalid/image.png".into(),
                 "extra field" => invalid["images"][0]["path"] = "/outside.png".into(),
-                "text overflow" => invalid["text"] = "x".repeat(8 * 1024 + 1).into(),
-                "payload overflow" => invalid["text"] = "x".repeat(320 * 1024).into(),
+                "text overflow" => invalid["text"] = "x".repeat(64 * 1024 + 1).into(),
+                "payload overflow" => invalid["text"] = "x".repeat(656 * 1024).into(),
                 "agent scope" => agent_scope = Some(AgentRunId::new().to_string()),
                 _ => unreachable!(),
             }
@@ -1460,10 +1460,10 @@ fn compaction_is_derived_durable_context_and_failure_keeps_the_prior_summary() {
             (80, 100, 9, false),
             (80, 100, 10, true),
             (100, 100, 10, true),
-            // The automatic threshold is 162_176: steering headroom (2 x MAX_STEERING_CONTEXT_BYTES) lowered it from 179_072.
-            (162_175, 376 * 1024, 162_175, false),
-            (162_176, 376 * 1024, 162_176, true),
-            (162_176, 376 * 1024, 0, false),
+            // The automatic threshold is 158_080: the input bound less room for two 8 KiB-draft turns.
+            (158_079, 376 * 1024, 158_079, false),
+            (158_080, 376 * 1024, 158_080, true),
+            (158_080, 376 * 1024, 0, false),
         ] {
             pressure.context_usage = Some(ContextUsage {
                 used_bytes: used,
@@ -1480,7 +1480,7 @@ fn compaction_is_derived_durable_context_and_failure_keeps_the_prior_summary() {
         pressure.context_usage = None;
         assert!(!pressure.auto_compaction_due(), "unknown footprint");
         for (tool_history, bytes, due) in
-            [(1, 162_175, false), (1, 162_176, true), (0, 162_176, true)]
+            [(1, 158_079, false), (1, 158_080, true), (0, 158_080, true)]
         {
             pressure.context_usage = Some(ContextUsage {
                 used_bytes: bytes,
@@ -1918,7 +1918,7 @@ fn compaction_input_limit_rejects_before_provider_egress() {
                 summary: "done".into(),
                 result: "x".repeat(32 * 1024),
             });
-            7
+            10
         ]);
         let compact_requests = Arc::clone(&provider.compact_requests);
         let mut engine = Engine::open(
@@ -1927,7 +1927,7 @@ fn compaction_input_limit_rejects_before_provider_egress() {
         )
         .expect("engine");
         let mut session_id = None;
-        for _ in 0..7 {
+        for _ in 0..10 {
             let mut next = request(&workspace, &"Q".repeat(8 * 1024));
             next.session_id = session_id;
             if session_id.is_some() {
@@ -1949,20 +1949,20 @@ fn compaction_input_limit_rejects_before_provider_egress() {
             .load_session(session_id)
             .await
             .expect("durable Events");
-        assert_eq!(events.len(), 92);
+        assert_eq!(events.len(), 131);
         assert_eq!(
             events
                 .iter()
                 .filter(|event| matches!(event.event, Event::GoalStarted { .. }))
                 .count(),
-            7
+            10
         );
         assert_eq!(
             events
                 .iter()
                 .filter(|event| matches!(event.event, Event::ProviderCallRecorded { .. }))
                 .count(),
-            7
+            10
         );
         assert!(
             !events
@@ -2001,7 +2001,7 @@ fn compaction_input_limit_rejects_before_provider_egress() {
             .expect("maintained Engine");
         let mut session_id = None;
         let mut maintenance_sequences = Vec::new();
-        // Steering headroom lowers the automatic threshold to 162_176, so each maintenance cycle covers five turns.
+        // The automatic threshold is 158_080, so 8 KiB-draft turns trigger maintenance every five turns and each cycle fits the input bound.
         for index in 0..16 {
             let objective = format!("{index:02}{}", "Q".repeat(8 * 1024 - 2));
             let mut next = request(&workspace, &objective);
@@ -5420,9 +5420,9 @@ fn workspace_paths_fail_closed_before_a_run_is_accepted() {
             (String::new(), Vec::new()),
             (String::new(), vec![image_fixture(69); 5]),
             (String::new(), vec![image_fixture(64 * 1024); 4]),
-            ("x".repeat(8 * 1024 + 1), Vec::new()),
+            ("x".repeat(64 * 1024 + 1), Vec::new()),
             (
-                "x".repeat(8 * 1024 + 1),
+                "x".repeat(64 * 1024 + 1),
                 vec![image_fixture(arany::MAX_IMAGE_BYTES)],
             ),
         ] {
@@ -5991,4 +5991,122 @@ async fn display_limits_preserve_a_maximal_answer_and_record_omitted_commentary(
         1
     );
     engine.close().await.unwrap();
+}
+
+#[test]
+fn maximal_escaped_objective_with_the_largest_image_fits_its_events() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
+        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let state_path = temp.path().join("state");
+        let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
+            summary: "done".into(),
+            result: "ok".into(),
+        })]);
+        let mut engine = Engine::open(
+            StateRoot::admit(&state_path).expect("private state"),
+            provider,
+        )
+        .expect("engine");
+        let mut next = request(&workspace, &"\0".repeat(64 * 1024));
+        next.images = vec![image_fixture(arany::MAX_IMAGE_BYTES)];
+        let outcome = engine
+            .run(next)
+            .await
+            .expect("maximal objective and image Run");
+        assert_eq!(outcome.run.status, RunStatus::Finished);
+        let session_id = outcome.session_id;
+        engine.close().await.expect("engine shutdown");
+
+        let store = Store::open(StateRoot::admit(&state_path).expect("state readmission"))
+            .expect("reopened store");
+        let events = store
+            .load_session(session_id)
+            .await
+            .expect("durable Events");
+        let accepted = events
+            .iter()
+            .filter(|envelope| matches!(envelope.event, Event::MessageAccepted { .. }))
+            .count();
+        let started = events
+            .iter()
+            .filter(|envelope| matches!(envelope.event, Event::GoalStarted { .. }))
+            .count();
+        assert_eq!(
+            (accepted, started),
+            (1, 1),
+            "the maximal Run is durably admitted and replayable"
+        );
+        store.close().await.expect("store shutdown");
+    });
+}
+
+#[test]
+fn escape_heavy_session_over_the_compaction_bound_fails_closed_and_keeps_its_journal() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
+        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let state_path = temp.path().join("state");
+        let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
+            summary: "done".into(),
+            result: "ok".into(),
+        })]);
+        let mut engine = Engine::open(
+            StateRoot::admit(&state_path).expect("private state"),
+            provider,
+        )
+        .expect("engine");
+        // Each control character serializes to six bytes, so this objective exceeds the compaction bound.
+        let session_id = engine
+            .run(request(&workspace, &"\u{1}".repeat(64 * 1024)))
+            .await
+            .expect("bounded Run")
+            .session_id;
+        engine.close().await.expect("engine shutdown");
+
+        let store = Store::open(StateRoot::admit(&state_path).expect("state readmission"))
+            .expect("reopened store");
+        let before = store
+            .load_session(session_id)
+            .await
+            .expect("durable Events")
+            .len();
+        store.close().await.expect("store shutdown");
+
+        let provider = ScriptedProvider::new(Vec::new());
+        let compact_requests = Arc::clone(&provider.compact_requests);
+        let mut engine = Engine::open(
+            StateRoot::admit(&state_path).expect("state readmission"),
+            provider,
+        )
+        .expect("engine");
+        assert!(matches!(
+            engine.compact_session(session_id, workspace.clone()).await,
+            Err(EngineError::CompactionInputTooLarge)
+        ));
+        assert!(compact_requests.lock().expect("request lock").is_empty());
+        engine.close().await.expect("engine shutdown");
+
+        let store = Store::open(StateRoot::admit(&state_path).expect("state readmission"))
+            .expect("reopened store");
+        let after = store
+            .load_session(session_id)
+            .await
+            .expect("durable Events")
+            .len();
+        assert_eq!(after, before, "a refused compaction appends no Event");
+        store.close().await.expect("store shutdown");
+    });
 }

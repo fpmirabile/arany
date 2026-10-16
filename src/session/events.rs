@@ -814,7 +814,7 @@ mod goal_success_tests {
 
         assert!(note("").validate().is_err());
         assert!(note(" \n\t").validate().is_err());
-        let limit = crate::session::MAX_USER_MESSAGE_BYTES;
+        let limit = crate::session::MAX_STEERING_NOTE_BYTES;
         assert!(note(&"x".repeat(limit)).validate().is_ok());
         assert!(note(&"x".repeat(limit + 1)).validate().is_err());
 
@@ -3191,7 +3191,7 @@ impl Event {
                 Ok(())
             }
             Self::GoalSteeringNoteRecorded { text, .. } => {
-                if text.trim().is_empty() || text.len() > super::MAX_USER_MESSAGE_BYTES {
+                if text.trim().is_empty() || text.len() > super::MAX_STEERING_NOTE_BYTES {
                     return Err(ReplayError::InvalidPayload);
                 }
                 Ok(())

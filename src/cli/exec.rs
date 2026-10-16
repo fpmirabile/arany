@@ -172,7 +172,7 @@ impl ExecArgs {
                 );
             }
         };
-        if !resumes_without_text && (objective.trim().is_empty() || objective.len() > 8 * 1024) {
+        if !resumes_without_text && (objective.trim().is_empty() || objective.len() > 64 * 1024) {
             return Err("invalid objective");
         }
         let (workspace, state_dir) =
@@ -709,6 +709,23 @@ mod tests {
         );
         assert_eq!(
             parse(&["--goal", " "]).expect("parses").admit().err(),
+            Some("invalid objective")
+        );
+        let largest = "x".repeat(64 * 1024);
+        assert_eq!(
+            parse(&["--goal", &largest])
+                .expect("parses")
+                .admit()
+                .expect("64 KiB objective")
+                .objective
+                .len(),
+            64 * 1024
+        );
+        assert_eq!(
+            parse(&["--goal", &format!("{largest}x")])
+                .expect("parses")
+                .admit()
+                .err(),
             Some("invalid objective")
         );
         for tail in [

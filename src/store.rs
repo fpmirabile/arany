@@ -34,11 +34,19 @@ pub(crate) use state::{capture_archive_with_limit, restore_archive_with_limit};
 
 const DATABASE_FILE: &str = "events.sqlite3";
 pub(crate) const MAX_EVENT_BYTES: usize = 64 * 1024;
+// JSON escaping writes at most six bytes (`\u00XX`) per objective byte.
+const MAX_ESCAPED_OBJECTIVE_BYTES: usize = 6 * crate::session::MAX_USER_MESSAGE_BYTES;
+const MAX_GOAL_STARTED_BYTES: usize = MAX_ESCAPED_OBJECTIVE_BYTES + 16 * 1024;
+const MAX_MESSAGE_ACCEPTED_BYTES: usize =
+    MAX_ESCAPED_OBJECTIVE_BYTES + crate::provider::MAX_IMAGE_BYTES.div_ceil(3) * 4 + 16 * 1024;
+/// Run start writes one `GoalStarted` and one `MessageAccepted` beyond the per-slot bound.
+const RUN_START_EXTRA_BYTES: usize =
+    MAX_GOAL_STARTED_BYTES + MAX_MESSAGE_ACCEPTED_BYTES - 2 * MAX_EVENT_BYTES;
 fn event_payload_limit(kind: &str, version: i64) -> usize {
-    if kind == "MessageAccepted" && version == EVENT_PAYLOAD_VERSION {
-        320 * 1024
-    } else {
-        MAX_EVENT_BYTES
+    match kind {
+        "MessageAccepted" if version == EVENT_PAYLOAD_VERSION => MAX_MESSAGE_ACCEPTED_BYTES,
+        "GoalStarted" if version == EVENT_PAYLOAD_VERSION => MAX_GOAL_STARTED_BYTES,
+        _ => MAX_EVENT_BYTES,
     }
 }
 const MAX_DATABASE_BYTES: i64 = 256 * 1024 * 1024;
@@ -135,7 +143,7 @@ enum Request {
     AdmitOperation {
         session_id: SessionId,
         event_slots: usize,
-        message_extra: bool,
+        run_start: bool,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
     Append {
@@ -269,7 +277,7 @@ impl Store {
                         Request::AdmitOperation {
                             session_id,
                             event_slots,
-                            message_extra,
+                            run_start,
                             reply,
                         } => {
                             let result = if read_only {
@@ -279,7 +287,7 @@ impl Store {
                                     &mut connection,
                                     session_id,
                                     event_slots,
-                                    message_extra,
+                                    run_start,
                                 )
                             };
                             let _ = reply.send(result);
@@ -568,7 +576,7 @@ impl Store {
         self.admit(session_id, event_slots, false).await
     }
 
-    /// Admits the Run start, the only operation that precedes `MessageAccepted` and so reserves its image envelope.
+    /// Admits the Run start, the only operation that precedes `GoalStarted` and `MessageAccepted`, so it reserves their objective and image envelopes.
     pub(crate) async fn admit_run_start(
         &self,
         session_id: SessionId,
@@ -581,12 +589,12 @@ impl Store {
         &self,
         session_id: SessionId,
         event_slots: usize,
-        message_extra: bool,
+        run_start: bool,
     ) -> Result<(), StoreError> {
         self.call(|reply| Request::AdmitOperation {
             session_id,
             event_slots,
-            message_extra,
+            run_start,
             reply,
         })
         .await

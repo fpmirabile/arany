@@ -1,3 +1,4 @@
+use crate::git::{host_git, tree_snapshot};
 use crate::{hash, private_file};
 use arany::{
     AgentPhase, CollaborationPolicy, CompactionItem, CompactionRequest, CompactionResponse, Engine,
@@ -7,6 +8,8 @@ use arany::{
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+
+const GIT: &str = "/usr/bin/git";
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -1095,37 +1098,6 @@ async fn paused_implementation_goal_does_not_hold_the_workspace_writer() {
 fn mcp_definition() -> Value {
     let schema = json!({"type":"object","properties":{"value":{"type":"integer"}},"required":["value"],"additionalProperties":false});
     json!({"name":"echo","description":"Return a synthetic value; no host I/O","inputSchema":schema,"outputSchema":schema})
-}
-
-#[test]
-fn exec_tool_configuration_rejects_before_workspace_content_or_provider_egress() {
-    use std::os::unix::fs::symlink;
-    let temp = tempfile::tempdir().unwrap();
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir_all(workspace.join("src")).unwrap();
-    let omitted = temp.path().join("omitted");
-    private_file(&omitted, b"OMITTED_CONFIG_CANARY");
-    symlink(&omitted, workspace.join("AGENTS.md")).unwrap();
-    for (name, bytes, expected) in [
-        ("missing", None, "tools require a private tools.json; see docs/tools.md"),
-        ("unknown", Some(b"{\"version\":1,\"workspace_paths\":[\"src\"],\"write\":false,\"commands\":[],\"skills\":[],\"mcp\":[],\"network\":true}".as_slice()), "Tool configuration is invalid or unsafe"),
-        ("duplicates", Some(b"{\"version\":1,\"version\":1}".as_slice()), "Tool configuration is invalid or unsafe"),
-    ] {
-        let state_path = temp.path().join(format!("state-{name}"));
-        StateRoot::admit(&state_path).unwrap();
-        if let Some(bytes) = bytes { private_file(&state_path.join("tools.json"), bytes); }
-        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_arany"));
-        command.env_clear().current_dir(temp.path()).env("OPENAI_API_KEY", "synthetic-never-sent-key")
-            .args(["exec", "--tools", "--provider", "openai", "--model", "gpt-5.4", "--state-dir"]).arg(&state_path)
-            .arg("--workspace").arg(&workspace).arg("Must reject before hostile Workspace input");
-        let output = super::process_output_before_deadline(command);
-        assert_eq!(output.status.code(), Some(1), "configuration case {name}");
-        assert!(output.stdout.is_empty());
-        assert_eq!(String::from_utf8(output.stderr).unwrap(), format!("error: {expected}\n"));
-        let connection = rusqlite::Connection::open(state_path.join("events.sqlite3")).unwrap();
-        assert_eq!(connection.query_row("SELECT COUNT(*) FROM events", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
-        assert_eq!(std::fs::read(&omitted).unwrap(), b"OMITTED_CONFIG_CANARY");
-    }
 }
 
 #[tokio::test]
@@ -2800,57 +2772,6 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
     }
 }
 
-fn host_git(repository: &Path, home: &Path, args: &[&str]) {
-    let status = std::process::Command::new("/usr/bin/git")
-        .args(args)
-        .current_dir(repository)
-        .env_clear()
-        .env("HOME", home)
-        .env("PATH", "/usr/bin:/bin")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_COUNT", "2")
-        .env("GIT_CONFIG_KEY_0", "gc.auto")
-        .env("GIT_CONFIG_VALUE_0", "0")
-        .env("GIT_CONFIG_KEY_1", "maintenance.auto")
-        .env("GIT_CONFIG_VALUE_1", "false")
-        .env("GIT_AUTHOR_NAME", "Arany Test")
-        .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
-        .env("GIT_COMMITTER_NAME", "Arany Test")
-        .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
-        .env("GIT_AUTHOR_DATE", "1700000000 +0000")
-        .env("GIT_COMMITTER_DATE", "1700000000 +0000")
-        .status()
-        .expect("host /usr/bin/git");
-    assert!(status.success(), "git {args:?}");
-}
-
-fn tree_snapshot(root: &Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
-    fn walk(root: &Path, dir: &Path, out: &mut Vec<(std::path::PathBuf, Vec<u8>)>) {
-        let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .collect();
-        entries.sort();
-        for entry in entries {
-            let metadata = std::fs::symlink_metadata(&entry).unwrap();
-            let relative = entry.strip_prefix(root).unwrap().to_owned();
-            if metadata.file_type().is_symlink() {
-                let target = std::fs::read_link(&entry).unwrap();
-                out.push((relative, target.to_string_lossy().into_owned().into_bytes()));
-            } else if metadata.is_dir() {
-                out.push((relative, Vec::new()));
-                walk(root, &entry, out);
-            } else {
-                out.push((relative, std::fs::read(&entry).unwrap()));
-            }
-        }
-    }
-    let mut out = Vec::new();
-    walk(root, root, &mut out);
-    out
-}
-
 struct GitJourney {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
 }
@@ -2935,12 +2856,22 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src")).unwrap();
     std::fs::create_dir_all(&home).unwrap();
-    host_git(&workspace, &home, &["init", "-q", "-b", "main"]);
+    host_git(GIT, &workspace, &home, &["init", "-q", "-b", "main"]);
     std::fs::write(workspace.join("src/a.txt"), "alpha\n").unwrap();
-    host_git(&workspace, &home, &["add", "-A"]);
-    host_git(&workspace, &home, &["commit", "-q", "-m", "first commit"]);
+    host_git(GIT, &workspace, &home, &["add", "-A"]);
+    host_git(
+        GIT,
+        &workspace,
+        &home,
+        &["commit", "-q", "-m", "first commit"],
+    );
     std::fs::write(workspace.join("src/a.txt"), "bravo\n").unwrap();
-    host_git(&workspace, &home, &["commit", "-q", "-am", "second commit"]);
+    host_git(
+        GIT,
+        &workspace,
+        &home,
+        &["commit", "-q", "-am", "second commit"],
+    );
     std::fs::write(workspace.join("src/a.txt"), "delta\n").unwrap();
     std::fs::write(workspace.join("src/new.txt"), "new\n").unwrap();
     {

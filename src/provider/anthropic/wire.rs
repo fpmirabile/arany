@@ -14,8 +14,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 const ADAPTER: &str = "anthropic";
-
-const MAX_REQUEST_BYTES: usize = 512 * 1024;
+const MAX_REQUEST_BYTES: usize = crate::provider::MAX_PROVIDER_REQUEST_BYTES;
 const MAX_CONTENT_BLOCKS: usize = 16;
 
 pub(super) struct MessageStream<'a> {
