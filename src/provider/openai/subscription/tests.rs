@@ -33,6 +33,10 @@ fn checked_provider_declares_local_bound_and_exact_account_provenance() {
     assert_eq!(provider.max_concurrent_calls(), 1);
     assert_eq!(provider.chatgpt_provenance(), Some(provenance.clone()));
     assert_eq!(
+        provider.call_deadline(),
+        std::time::Duration::from_secs(120)
+    );
+    assert_eq!(
         provider.output_token_bound(),
         OutputTokenBound::LocalAcceptanceOnly
     );

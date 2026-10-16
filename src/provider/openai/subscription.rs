@@ -1,4 +1,4 @@
-use super::{DEADLINE, ENDPOINT, wire};
+use super::{ENDPOINT, wire};
 use crate::diagnostics::{
     ResponseShape, StreamCounts, SubscriptionFailureStage as Stage, subscription_failure,
 };
@@ -21,6 +21,7 @@ use tokio::time::timeout;
 
 const MAX_ACCESS_TOKEN_BYTES: usize = 16 * 1024;
 const MAX_EVENTS: usize = 8192;
+const DEADLINE: Duration = Duration::from_secs(120);
 const PROBE_DEADLINE: Duration = Duration::from_secs(180);
 const PROBE_OUTPUT_CAP: u32 = 1024;
 
@@ -82,6 +83,10 @@ impl Provider for ChatGptProvider {
 
     fn output_token_bound(&self) -> OutputTokenBound {
         OutputTokenBound::LocalAcceptanceOnly
+    }
+
+    fn call_deadline(&self) -> Duration {
+        DEADLINE
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
@@ -284,7 +289,7 @@ async fn invoke_at_with_preview(
     effort: Effort,
     preview: Option<ResponsePreview>,
 ) -> Result<ProviderResponse, ProviderError> {
-    if !(1..=4096).contains(&request.max_output_tokens) {
+    if !(1..=crate::provider::DEFAULT_OUTPUT_TOKEN_CAP).contains(&request.max_output_tokens) {
         return Err(ProviderError::Rejected);
     }
     let body = subscription_body(request, effort)?;

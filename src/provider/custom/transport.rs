@@ -65,7 +65,7 @@ impl CustomTransport {
         {
             return Err(TransportError::Rejected);
         }
-        if !(1..=4096).contains(&request.max_output_tokens) {
+        if !(1..=super::OUTPUT_CAP).contains(&request.max_output_tokens) {
             return Err(TransportError::InvalidOutcome);
         }
         let mut body = effort.map_or_else(
