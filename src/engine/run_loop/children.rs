@@ -38,6 +38,7 @@ struct ActiveChild {
 
 enum AbortReason {
     Failed,
+    Budget,
     Cancelled,
 }
 
@@ -108,15 +109,37 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         &self,
         root_request: &mut ProviderRequest,
         objectives: Vec<String>,
-        mut deadline: Instant,
         primary: AgentTrace,
     ) -> Result<(), EngineError> {
-        // Reserves room for every child and synthesis, so fill_slots is never refused by count.
-        if self.controls.goal_budget.remaining_calls()
-            < u32::try_from(objectives.len().saturating_add(1)).unwrap_or(u32::MAX)
+        if self
+            .controls
+            .goal_budget
+            .remaining_calls()
+            .is_some_and(|remaining| {
+                remaining < u32::try_from(objectives.len().saturating_add(1)).unwrap_or(u32::MAX)
+            })
         {
-            return self.fail_primary(primary).await;
+            return self.fail_known_budget_exhaustion(primary).await;
         }
+        let parallel = self.controls.goal_budget.provider_concurrency(
+            usize::from(self.controls.concurrency)
+                .min(usize::from(self.controls.policy.max_children())),
+        );
+        let waves = objectives.len().div_ceil(parallel.max(1));
+        let active_bound =
+            super::CALL_DEADLINE.saturating_mul(u32::try_from(waves).unwrap_or(u32::MAX));
+        // Covers this wave's Events and the largest later child admission, so a refusal precedes AgentSpawned.
+        let active_event_tail = 4 * objectives.len() + 10;
+        let active_segment = match self
+            .reserve_active_segment_with_tail(active_bound, active_event_tail)
+            .await
+        {
+            Ok(segment) => segment,
+            Err(EngineError::GoalBudgetExhausted) => {
+                return self.fail_known_budget_exhaustion(primary).await;
+            }
+            Err(error) => return Err(error),
+        };
         let mut children = Vec::with_capacity(objectives.len());
         for (index, objective) in objectives.into_iter().enumerate() {
             if self.controls.cancellation.is_cancelled() {
@@ -138,8 +161,9 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
             });
         }
         if self.controls.cancellation.is_cancelled() {
+            self.settle_active_segment(active_segment).await?;
             for mut child in children {
-                self.finish_child(child.agent_run_id, AgentDisposition::Cancelled, None)
+                self.finish_child(child.agent_run_id, AgentDisposition::Cancelled, None, false)
                     .await?;
                 child
                     .trace
@@ -147,13 +171,12 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                     .expect("child trace exists")
                     .finish(TraceOutcome::Cancelled);
             }
-            return self.cancel_primary(primary).await;
+            return self.fail_known_budget_exhaustion(primary).await;
         }
 
         let mut results = vec![None; children.len()];
-        let parallel = usize::from(self.controls.concurrency)
-            .min(usize::from(self.controls.policy.max_children()));
         let mut queue = ChildQueue::new(children.len(), parallel);
+        let deadline = active_segment.deadline();
         if let Err(error) = self
             .fill_slots(&mut queue, &children, root_request, deadline)
             .await
@@ -162,7 +185,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         }
         let mut abort_reason = (!queue.pending.is_empty()
             && !self.controls.goal_budget.can_start_provider_call())
-        .then_some(AbortReason::Failed);
+        .then_some(AbortReason::Budget);
         let mut drain_deadline = None;
 
         while !queue.active.is_empty() {
@@ -198,7 +221,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 return Err(queue.abort_with(error).await);
             }
             if let Err(error) = self
-                .finish_child(children[index].agent_run_id, disposition, finish)
+                .finish_child(children[index].agent_run_id, disposition, finish, true)
                 .await
             {
                 return Err(queue.abort_with(error).await);
@@ -244,8 +267,13 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
             }
         }
 
-        if abort_reason.is_none() && self.controls.cancellation.is_cancelled() {
+        self.settle_active_segment(active_segment).await?;
+
+        if self.controls.cancellation.is_cancelled() {
             abort_reason = Some(AbortReason::Cancelled);
+        }
+        if abort_reason.is_none() && self.controls.goal_budget.active_time_exhausted() {
+            abort_reason = Some(AbortReason::Budget);
         }
         if abort_reason.is_none() && !queue.pending.is_empty() {
             abort_reason = Some(AbortReason::Failed);
@@ -256,6 +284,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                     children[index].agent_run_id,
                     AgentDisposition::Cancelled,
                     None,
+                    false,
                 )
                 .await?;
                 children[index]
@@ -265,24 +294,33 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                     .finish(TraceOutcome::Cancelled);
             }
             return match reason {
+                AbortReason::Failed if self.controls.goal_budget.active_time_exhausted() => {
+                    self.fail_known_budget_exhaustion(primary).await
+                }
                 AbortReason::Failed => self.fail_primary(primary).await,
-                AbortReason::Cancelled => self.cancel_primary(primary).await,
+                AbortReason::Budget => self.fail_known_budget_exhaustion(primary).await,
+                AbortReason::Cancelled => self.fail_known_budget_exhaustion(primary).await,
             };
         }
         if !self.controls.goal_budget.can_start_provider_call() {
-            return self.fail_primary(primary).await;
+            return self.fail_known_budget_exhaustion(primary).await;
         }
         root_request.phase = AgentPhase::RootSynthesis;
         root_request.child_results = results
             .into_iter()
             .collect::<Option<Vec<_>>>()
             .ok_or(EngineError::CoordinatorFailed)?;
-        for _ in 0..=crate::tools::MAX_TOOL_CALLS {
+        loop {
             let synthesis_trace =
                 primary.begin_provider(AgentPhase::RootSynthesis, &root_request.model);
-            let Some(synthesis) = self.invoke_primary(root_request.clone(), deadline).await? else {
-                synthesis_trace.finish_refused();
-                return self.fail_primary(primary).await;
+            let (synthesis, active_segment) = match self.invoke_primary(root_request.clone()).await
+            {
+                Ok(result) => result,
+                Err(EngineError::GoalBudgetExhausted) => {
+                    synthesis_trace.finish_refused();
+                    return self.fail_known_budget_exhaustion(primary).await;
+                }
+                Err(error) => return Err(error),
             };
             let (input_tokens, output_tokens) = call_trace_usage(&synthesis);
             let valid_response = self.controls.goal_budget.tokens_within_limit()
@@ -304,6 +342,16 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 record: call_record(AgentPhase::RootSynthesis, &synthesis, valid_response),
             })
             .await?;
+            self.settle_active_segment(active_segment).await?;
+            if self.controls.cancellation.is_cancelled() {
+                return self.fail_known_budget_exhaustion(primary).await;
+            }
+            if matches!(&synthesis, CallResult::Cancelled) {
+                return self.cancel_primary(primary).await;
+            }
+            if self.controls.goal_budget.active_time_exhausted() {
+                return self.fail_known_budget_exhaustion(primary).await;
+            }
             match synthesis {
                 CallResult::Response(ProviderResponse {
                     outcome: ProviderOutcome::Finish(finish),
@@ -317,27 +365,35 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                         },
                     ..
                 }) if valid_response => {
-                    if let Some(contract) = plan_contract {
-                        let Some(narrowed) = self
-                            .admit_plan_contract(root_request, *contract, deadline)
-                            .await?
-                        else {
-                            return self.fail_primary(primary).await;
-                        };
-                        deadline = narrowed;
-                    }
-                    if !self
-                        .execute_tool(root_request, call, deadline, false, &primary)
-                        .await?
+                    if let Some(contract) = plan_contract
+                        && !self.admit_plan_contract(root_request, *contract).await?
                     {
                         return self.fail_primary(primary).await;
+                    }
+                    match self.execute_tool(root_request, call, false, &primary).await {
+                        Ok(true) => {}
+                        Ok(false) if self.controls.cancellation.is_cancelled() => {
+                            return self.fail_known_budget_exhaustion(primary).await;
+                        }
+                        Ok(false) if self.controls.goal_budget.active_time_exhausted() => {
+                            return self.fail_known_budget_exhaustion(primary).await;
+                        }
+                        Ok(false) => return self.fail_primary(primary).await,
+                        Err(EngineError::GoalBudgetExhausted)
+                            if self.controls.cancellation.is_cancelled() =>
+                        {
+                            return self.fail_known_budget_exhaustion(primary).await;
+                        }
+                        Err(EngineError::GoalBudgetExhausted) => {
+                            return self.fail_known_budget_exhaustion(primary).await;
+                        }
+                        Err(error) => return Err(error),
                     }
                 }
                 CallResult::Cancelled => return self.cancel_primary(primary).await,
                 _ => return self.fail_primary(primary).await,
             }
         }
-        self.fail_primary(primary).await
     }
 
     async fn fill_slots(
@@ -377,8 +433,9 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 includes: root_request.includes.clone(),
                 history: Vec::new(),
                 context_summary: None,
-                goal_budget: root_request.goal_budget.clone(),
+                goal_budget: root_request.goal_budget,
                 goal_plan_contract: None,
+                goal_context_facts: None,
                 child_results: Vec::new(),
                 max_output_tokens: OUTPUT_TOKEN_CAP,
                 tools: None,
@@ -413,6 +470,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         agent_run_id: AgentRunId,
         disposition: AgentDisposition,
         finish: Option<&Finish>,
+        call_reserved: bool,
     ) -> Result<(), EngineError> {
         self.append(Event::AgentFinished {
             run_id: self.run_id,
@@ -422,6 +480,9 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
             result: finish.map(|value| value.result.clone()),
         })
         .await?;
+        if call_reserved {
+            self.controls.goal_budget.child_call_finished()?;
+        }
         Ok(())
     }
 }

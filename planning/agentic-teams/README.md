@@ -111,7 +111,7 @@ unsupported enforcement fails closed. Child authority remains
 
 ### A. Coding foundation
 
-3. **Flexible limits.** Today's ceilings are compile-time constants
+3. **Flexible limits.** Before A4, the ceilings were compile-time constants
    (`MAX_TOOL_CALLS = 16` and a 64 KiB Tool context in
    [src/tools/types.rs](../../src/tools/types.rs), plus the 300-second Run).
    Follow the established harness pattern instead of inventing one:
@@ -121,10 +121,13 @@ unsupported enforcement fails closed. Child authority remains
      compaction instead of a fixed 64 KiB.
    - Commands default to 120 seconds and may request up to the approved
      user-configurable maximum of 600 seconds.
-   - The plan contract may request a larger resource profile or timeout;
-     Plan-gate approval grants it. In Accept edits and Auto, requests within
-     the settings maxima are granted without a prompt; beyond them always
-     asks. The Engine never exceeds user-set maxima.
+   - The plan contract may declare a Build profile and command timeout within
+     the saved Goal settings. The Engine binds the exact selected resource
+     values into each immutable Tool intent and receipt. A request above the
+     pinned timeout maximum gets a durable non-dispatched `Limit` with clear
+     guidance to lower the request or change `/settings`; approval never
+     exceeds a Goal's pinned settings. Prospective approved revisions belong
+     to the later RPI/modes slice.
    - Runs remain the durable recovery unit, closed at milestone or wave
      boundaries, never because an arbitrary cap was hit.
    - Named, closed resource profiles (current `default` plus a larger
@@ -509,7 +512,8 @@ triggered and evidence under [testing rules](../../agents/testing.md).
    agreed command timeout and finite build resource profile settings. Guard
    resource ceilings remain finite. This slice builds on the landed
    [Goal Foundation](../../docs/specs/goals.md) and must not make the current
-   fixed Run loop unlimited by itself.
+   fixed Run loop unlimited by itself. The implementation is complete on the
+   current branch and awaits full review and hosted CI.
 5. **Dogfooding milestone: Arany develops Arany.** Use Arany for this
    repository's own work from here on. Requires Beta 1 check 7 (live
    validation of the chosen model's strict Tool encoding) in
@@ -536,17 +540,15 @@ per-slice specification and evidence cost slows delivery.
 
 E13 telemetry spans land with the slice that introduces each span's subject.
 
-Next action: A4 flexible limits, then dogfooding before the remaining Goal
-workflows. The A3 per-Workspace cache has a 64 MiB initial
-archive/view limit and shares an 8 GiB StateRoot aggregate; A4 binds the
-effective admitted cache quota to the native build profile. The planned A4 build
-profile proposes 4 GiB memory, 8 GiB requested cache, 1 GiB writable project
-storage and a 256 process/thread ceiling. That ceiling is separate from the
-ordinary command Guard limit of 64 processes/threads in
-[the Tools spec](../../docs/specs/tools.md), which stays in force until A4 admits
-a build profile. These remain finite policy ceilings, not support evidence.
-Native build verification and named-host measurements remain required before
-support claims.
+Next action: after A4's full review and hosted CI pass, complete the authorized
+dogfooding milestone before the remaining Goal workflows. The A3 per-Workspace
+cache retains its 64 MiB default and shares an 8 GiB StateRoot aggregate; A4
+derives the effective admitted cache quota from remaining aggregate headroom,
+so the 8 GiB requested maximum is not guaranteed usable capacity. Approved
+Build maxima are 4 GiB memory, 8 GiB requested cache, 1 GiB writable project
+storage and 256 processes/threads. These are finite policy ceilings, not
+support evidence. Native build verification and named-host measurements remain
+required before support claims.
 
 ## Open questions
 

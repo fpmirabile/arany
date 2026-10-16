@@ -31,6 +31,13 @@ const MAX_OBJECTIVE_BYTES: usize = 8 * 1024;
 const EMPTY_INTERRUPT_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 const STATE_UNAVAILABLE: &str = "state directory unavailable or unsafe";
 
+pub(super) async fn execution_limits(
+    state_dir: &Path,
+) -> Result<(arany::GoalBudget, arany::ToolResourceSettings), String> {
+    let settings = controls::restore_settings_at(state_dir).await?;
+    Ok((settings.goal_budget, settings.resources))
+}
+
 #[derive(Args, Default)]
 pub(crate) struct AttachedArgs {
     #[arg(long)]

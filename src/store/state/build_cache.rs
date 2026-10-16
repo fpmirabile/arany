@@ -29,8 +29,12 @@ const IDENTITY_FILE_KINDS: [(&str, &str); 8] = [
 const NAMESPACE_LOCK: &str = "namespace.lock";
 const AGGREGATE_LOCK: &str = "aggregate.lock";
 const MAX_IDENTITIES: usize = 128;
-pub(crate) const MAX_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
-const RESERVED_TRANSIENT_BYTES: u64 = MAX_ARCHIVE_BYTES * 2;
+const MEBIBYTE_BYTES: u64 = 1024 * 1024;
+pub(crate) const MAX_ARCHIVE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+pub(crate) const DEFAULT_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
+#[cfg(test)]
+const RESERVED_TRANSIENT_BYTES: u64 = DEFAULT_ARCHIVE_BYTES * 2;
+const MAX_RESERVATION_BYTES: u64 = MAX_ARCHIVE_BYTES * 2;
 pub(crate) const AGGREGATE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const IDENTITY_METADATA_BYTES: u64 = 1024;
 const MAX_DIRECTORY_ENTRIES: usize = MAX_IDENTITIES * 8 + 2;
@@ -110,20 +114,25 @@ fn valid_identity_path(path: &Path) -> bool {
     normalized == value
 }
 
+// Publication runs on a blocking thread, so the fault is keyed by cache identity, not thread.
 #[cfg(test)]
-thread_local! {
-    static COMMIT_MARKER_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+static COMMIT_MARKER_FAULT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Makes the next committed-marker write for this identity fail once.
+#[cfg(test)]
+pub(crate) fn fail_next_commit_marker(identity: &BuildCacheIdentity) {
+    *COMMIT_MARKER_FAULT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(identity.token());
 }
 
-/// Makes the next committed-marker write on this thread fail once.
 #[cfg(test)]
-pub(crate) fn fail_next_commit_marker() {
-    COMMIT_MARKER_FAULT.with(|fault| fault.set(true));
-}
-
-#[cfg(test)]
-fn commit_marker_fault() -> io::Result<()> {
-    if COMMIT_MARKER_FAULT.with(|fault| fault.replace(false)) {
+fn commit_marker_fault(token: &str) -> io::Result<()> {
+    let mut fault = COMMIT_MARKER_FAULT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if fault.as_deref() == Some(token) {
+        *fault = None;
         return Err(io::Error::other("injected commit marker failure"));
     }
     Ok(())
@@ -158,15 +167,21 @@ pub(crate) struct BuildCacheLease {
     identity: BuildCacheIdentity,
     token: String,
     archive: Option<File>,
+    archive_limit: u64,
+    candidate_limit: u64,
     defer_recovery: bool,
 }
 
 impl BuildCacheLease {
+    pub(crate) fn candidate_limit(&self) -> u64 {
+        self.candidate_limit
+    }
+
     pub(crate) fn archive(&self) -> Result<Option<(File, u64)>, StoreError> {
         let Some(file) = self.archive.as_ref() else {
             return Ok(None);
         };
-        let opened = open_regular(&self.dir, &archive_name(&self.token), MAX_ARCHIVE_BYTES)?;
+        let opened = open_regular(&self.dir, &archive_name(&self.token), self.archive_limit)?;
         let opened_metadata = opened.metadata()?;
         let file_metadata = file.metadata()?;
         if opened_metadata.dev() != file_metadata.dev()
@@ -182,14 +197,21 @@ impl BuildCacheLease {
         candidate: &mut R,
         exclusions: &[String],
     ) -> Result<(), StoreError> {
+        if self.candidate_limit == 0 {
+            return Err(StoreError::StorageFull);
+        }
+        #[cfg(not(test))]
         let _aggregate = lock_file(&self.dir, AGGREGATE_LOCK, true)?;
+        #[cfg(test)]
+        let _aggregate = retry_busy(|| lock_file(&self.dir, AGGREGATE_LOCK, true))?;
         let old = self.archive.as_ref().map(|_| archive_name(&self.token));
         let staged = stage_name(&self.token);
         let mut stage = create_private_file(&self.dir, &staged)?;
-        let mut candidate = ArchiveReader::new(candidate, &self.identity)?;
+        let mut candidate =
+            ArchiveReader::with_limit(candidate, &self.identity, self.candidate_limit)?;
         let mut old_file = old
             .as_ref()
-            .map(|name| open_regular(&self.dir, name, MAX_ARCHIVE_BYTES))
+            .map(|name| open_regular(&self.dir, name, self.archive_limit))
             .transpose()?;
         if let (Some(expected), Some(current)) = (self.archive.as_ref(), old_file.as_ref()) {
             let expected = expected.metadata()?;
@@ -199,7 +221,11 @@ impl BuildCacheLease {
             }
         }
         let mut previous = match old_file.as_mut() {
-            Some(file) => Some(ArchiveReader::new(file, &self.identity)?),
+            Some(file) => Some(ArchiveReader::with_limit(
+                file,
+                &self.identity,
+                self.archive_limit,
+            )?),
             None => None,
         };
         write_header(&mut stage, &self.identity)?;
@@ -224,7 +250,13 @@ impl BuildCacheLease {
                         .take()
                         .ok_or(StoreError::InvalidBuildCache)?;
                     if !is_excluded(&entry.path, exclusions) {
-                        write_entry(&mut stage, &mut entry, &mut bytes, &mut entries)?;
+                        write_entry(
+                            &mut stage,
+                            &mut entry,
+                            &mut bytes,
+                            &mut entries,
+                            self.candidate_limit,
+                        )?;
                     } else {
                         entry.skip()?;
                     }
@@ -233,7 +265,13 @@ impl BuildCacheLease {
                 std::cmp::Ordering::Greater => {
                     let mut entry = previous_entry.take().ok_or(StoreError::InvalidBuildCache)?;
                     if is_excluded(&entry.path, exclusions) {
-                        write_entry(&mut stage, &mut entry, &mut bytes, &mut entries)?;
+                        write_entry(
+                            &mut stage,
+                            &mut entry,
+                            &mut bytes,
+                            &mut entries,
+                            self.candidate_limit,
+                        )?;
                     } else {
                         entry.skip()?;
                     }
@@ -249,10 +287,22 @@ impl BuildCacheLease {
                         .ok_or(StoreError::InvalidBuildCache)?;
                     let mut old = previous_entry.take().ok_or(StoreError::InvalidBuildCache)?;
                     if is_excluded(&old.path, exclusions) {
-                        write_entry(&mut stage, &mut old, &mut bytes, &mut entries)?;
+                        write_entry(
+                            &mut stage,
+                            &mut old,
+                            &mut bytes,
+                            &mut entries,
+                            self.candidate_limit,
+                        )?;
                         current.skip()?;
                     } else if !is_excluded(&current.path, exclusions) {
-                        write_entry(&mut stage, &mut current, &mut bytes, &mut entries)?;
+                        write_entry(
+                            &mut stage,
+                            &mut current,
+                            &mut bytes,
+                            &mut entries,
+                            self.candidate_limit,
+                        )?;
                         old.skip()?;
                     } else {
                         old.skip()?;
@@ -272,7 +322,7 @@ impl BuildCacheLease {
             previous.finish()?;
         }
         write_terminator(&mut stage)?;
-        if bytes.checked_add(12).ok_or(StoreError::StorageFull)? > MAX_ARCHIVE_BYTES {
+        if bytes.checked_add(12).ok_or(StoreError::StorageFull)? > self.candidate_limit {
             self.dir.remove_file(&staged)?;
             return Err(StoreError::StorageFull);
         }
@@ -295,11 +345,15 @@ impl BuildCacheLease {
             }
             self.dir.rename(&staged, &self.dir, &name)?;
             sync_directory(&self.dir)?;
-            set_reservation(&self.dir, &self.token, MAX_ARCHIVE_BYTES)?;
+            set_reservation(
+                &self.dir,
+                &self.token,
+                self.candidate_limit.saturating_mul(2),
+            )?;
             sync_directory(&self.dir)?;
             commit_marker_attempted = true;
             #[cfg(test)]
-            commit_marker_fault()?;
+            commit_marker_fault(&self.token)?;
             write_transaction(
                 &self.dir,
                 &self.token,
@@ -331,11 +385,21 @@ impl BuildCacheLease {
     }
 
     pub(crate) fn candidate_writer(&self) -> Result<File, StoreError> {
+        if self.candidate_limit == 0 {
+            return Err(StoreError::StorageFull);
+        }
         create_private_file(&self.dir, &candidate_name(&self.token))
     }
 
     pub(crate) fn open_candidate(&self) -> Result<File, StoreError> {
-        open_regular(&self.dir, &candidate_name(&self.token), MAX_ARCHIVE_BYTES)
+        if self.candidate_limit == 0 {
+            return Err(StoreError::StorageFull);
+        }
+        open_regular(
+            &self.dir,
+            &candidate_name(&self.token),
+            self.candidate_limit,
+        )
     }
 
     pub(crate) fn publication_uncertain(&self) -> bool {
@@ -355,10 +419,79 @@ impl Drop for BuildCacheLease {
 }
 
 impl StateRoot {
+    #[cfg(test)]
     pub(crate) fn begin_build_cache(
         &self,
         identity: BuildCacheIdentity,
     ) -> Result<BuildCacheLease, StoreError> {
+        self.begin_build_cache_with_limits(identity, DEFAULT_ARCHIVE_BYTES, DEFAULT_ARCHIVE_BYTES)
+    }
+
+    pub(crate) fn effective_build_cache_bytes(
+        &self,
+        identity: &BuildCacheIdentity,
+        requested: u64,
+    ) -> Result<(u64, u64), StoreError> {
+        if requested > MAX_ARCHIVE_BYTES
+            || requested != 0 && !requested.is_multiple_of(MEBIBYTE_BYTES)
+            || !valid_identity_path(Path::new(&identity.path))
+            || identity.inode == 0
+        {
+            return Err(StoreError::InvalidStateDirectory);
+        }
+        if requested == 0 {
+            return Ok((0, 0));
+        }
+        let workspace = crate::private_fs::open_workspace_directory(Path::new(&identity.path))
+            .map_err(StoreError::from)?;
+        self.ensure_outside_workspace(&workspace)?;
+        let metadata = workspace.dir_metadata()?;
+        if metadata.dev() != identity.device || metadata.ino() != identity.inode {
+            return Err(StoreError::InvalidStateDirectory);
+        }
+        let dir = cache_directory(self, true)?;
+        let _aggregate = lock_file(&dir, AGGREGATE_LOCK, true)?;
+        let token = identity.token();
+        let archive_size = match open_regular(&dir, &archive_name(&token), MAX_ARCHIVE_BYTES) {
+            Ok(file) => file.metadata()?.len(),
+            Err(error) if io_kind(&error) == Some(io::ErrorKind::NotFound) => 0,
+            Err(error) => return Err(error),
+        };
+        let metadata_reserve = if contains_cache_identity(&dir, &token)? {
+            0
+        } else {
+            IDENTITY_METADATA_BYTES
+        };
+        let available = AGGREGATE_BYTES
+            .saturating_sub(inventory(&dir)?)
+            .saturating_sub(metadata_reserve);
+        if archive_size > requested {
+            return Ok((0, 0));
+        }
+        let candidate = effective_candidate_capacity(requested, available);
+        Ok((
+            requested,
+            if archive_size > candidate {
+                0
+            } else {
+                candidate
+            },
+        ))
+    }
+
+    pub(crate) fn begin_build_cache_with_limits(
+        &self,
+        identity: BuildCacheIdentity,
+        archive_limit: u64,
+        candidate_limit: u64,
+    ) -> Result<BuildCacheLease, StoreError> {
+        if archive_limit == 0
+            || archive_limit > MAX_ARCHIVE_BYTES
+            || candidate_limit > archive_limit
+            || candidate_limit > MAX_ARCHIVE_BYTES
+        {
+            return Err(StoreError::InvalidBuildCache);
+        }
         if !valid_identity_path(Path::new(&identity.path)) || identity.inode == 0 {
             return Err(StoreError::InvalidStateDirectory);
         }
@@ -386,26 +519,27 @@ impl StateRoot {
             recover_transaction(&dir, &token)?;
             remove_stale_candidates(&dir)?;
             let archive_name = archive_name(&token);
-            let archive = match open_regular(&dir, &archive_name, MAX_ARCHIVE_BYTES) {
-                Ok(file) => {
-                    let mut validation_file = file.try_clone()?;
-                    ArchiveReader::new(&mut validation_file, &identity)?.validate_all()?;
-                    Some(file)
-                }
+            let archive = match open_regular(&dir, &archive_name, archive_limit) {
+                Ok(file) => Some(file),
                 Err(error) if io_kind(&error) == Some(io::ErrorKind::NotFound) => None,
                 Err(error) => return Err(error),
             };
-            let projected = inventory(&dir)?
-                .checked_add(RESERVED_TRANSIENT_BYTES)
-                .ok_or(StoreError::StorageFull)?;
-            if projected > AGGREGATE_BYTES {
-                return Err(StoreError::StorageFull);
+            if candidate_limit > 0 {
+                let reservation_bytes = candidate_limit
+                    .checked_mul(2)
+                    .ok_or(StoreError::StorageFull)?;
+                let projected = inventory(&dir)?
+                    .checked_add(reservation_bytes)
+                    .ok_or(StoreError::StorageFull)?;
+                if projected > AGGREGATE_BYTES {
+                    return Err(StoreError::StorageFull);
+                }
+                let mut reservation = create_private_file(&dir, &reservation_name(&token))?;
+                reservation_created = true;
+                write_reservation(&mut reservation, &token, reservation_bytes)?;
+                reservation.sync_all()?;
+                sync_directory(&dir)?;
             }
-            let mut reservation = create_private_file(&dir, &reservation_name(&token))?;
-            reservation_created = true;
-            write_reservation(&mut reservation, &token, RESERVED_TRANSIENT_BYTES)?;
-            reservation.sync_all()?;
-            sync_directory(&dir)?;
             Ok(archive)
         })();
         let archive = match archive_result {
@@ -431,6 +565,8 @@ impl StateRoot {
             identity,
             token,
             archive,
+            archive_limit,
+            candidate_limit,
             defer_recovery: false,
         })
     }
@@ -534,14 +670,29 @@ impl StateRoot {
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
+fn effective_candidate_capacity(requested: u64, available: u64) -> u64 {
+    requested.min(available / 2) / MEBIBYTE_BYTES * MEBIBYTE_BYTES
+}
+
+#[cfg(test)]
 pub(crate) fn restore_archive<R: Read>(
     input: &mut R,
     destination: &Dir,
     identity: &BuildCacheIdentity,
     exclusions: &[String],
 ) -> Result<(), StoreError> {
-    let mut archive = ArchiveReader::new(input, identity)?;
+    restore_archive_with_limit(input, destination, identity, exclusions, MAX_ARCHIVE_BYTES)
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn restore_archive_with_limit<R: Read>(
+    input: &mut R,
+    destination: &Dir,
+    identity: &BuildCacheIdentity,
+    exclusions: &[String],
+    max_bytes: u64,
+) -> Result<(), StoreError> {
+    let mut archive = ArchiveReader::with_limit(input, identity, max_bytes)?;
     while let Some(mut entry) = archive.next()? {
         if is_excluded(&entry.path, exclusions) {
             entry.skip()?;
@@ -577,11 +728,12 @@ pub(crate) fn restore_archive<R: Read>(
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) async fn restore_archive_async<R: tokio::io::AsyncRead + Unpin>(
+pub(crate) async fn restore_archive_async_with_limit<R: tokio::io::AsyncRead + Unpin>(
     input: &mut R,
     destination: &Dir,
     identity: &BuildCacheIdentity,
     exclusions: &[String],
+    max_bytes: u64,
 ) -> Result<(), StoreError> {
     use tokio::io::AsyncReadExt;
 
@@ -597,7 +749,7 @@ pub(crate) async fn restore_archive_async<R: tokio::io::AsyncRead + Unpin>(
     let mut path = vec![0; path_len];
     input.read_exact(&mut path).await?;
     check_header(&path, device, inode, identity)?;
-    let mut cursor = ArchiveCursor::new(identity)?;
+    let mut cursor = ArchiveCursor::new(identity, max_bytes)?;
     loop {
         let path_len = read_u16_async(input).await? as usize;
         let kind = read_u8_async(input).await?;
@@ -680,14 +832,25 @@ async fn discard_async<R: tokio::io::AsyncRead + Unpin>(
     Ok(())
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(test)]
 pub(crate) fn capture_archive<W: Write>(
     source: &Dir,
     identity: &BuildCacheIdentity,
     exclusions: &[String],
     writer: &mut W,
 ) -> Result<u64, StoreError> {
-    let expected_size = archive_size(source, identity, exclusions)?;
+    capture_archive_with_limit(source, identity, exclusions, writer, MAX_ARCHIVE_BYTES)
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn capture_archive_with_limit<W: Write>(
+    source: &Dir,
+    identity: &BuildCacheIdentity,
+    exclusions: &[String],
+    writer: &mut W,
+    max_bytes: u64,
+) -> Result<u64, StoreError> {
+    let expected_size = archive_size_with_limit(source, identity, exclusions, max_bytes)?;
     write_header(writer, identity)?;
     let mut total = header_size(identity)?;
     let paths = cache_paths(source, exclusions)?;
@@ -699,10 +862,10 @@ pub(crate) fn capture_archive<W: Write>(
             check_source_file(&metadata)?;
         }
         let size = if directory { 0 } else { metadata.len() };
-        if !directory && size > MAX_ARCHIVE_BYTES {
+        if !directory && size > max_bytes {
             return Err(StoreError::StorageFull);
         }
-        total = account_entry(total, path, size)?;
+        total = account_entry(total, path, size, max_bytes)?;
         write_entry_header(writer, path, directory, executable, size)?;
         if !directory {
             let mut file = open_nofollow(source, path)?;
@@ -726,11 +889,15 @@ pub(crate) fn capture_archive<W: Write>(
     Ok(total)
 }
 
-pub(crate) fn archive_size(
+pub(crate) fn archive_size_with_limit(
     source: &Dir,
     identity: &BuildCacheIdentity,
     exclusions: &[String],
+    max_bytes: u64,
 ) -> Result<u64, StoreError> {
+    if max_bytes == 0 || max_bytes > MAX_ARCHIVE_BYTES {
+        return Err(StoreError::InvalidBuildCache);
+    }
     let paths = cache_paths(source, exclusions)?;
     let mut total = header_size(identity)?;
     for path in paths {
@@ -740,7 +907,7 @@ pub(crate) fn archive_size(
             check_source_file(&metadata)?;
         }
         let size = if directory { 0 } else { metadata.len() };
-        total = account_entry(total, &path, size)?;
+        total = account_entry(total, &path, size, max_bytes)?;
     }
     total.checked_add(12).ok_or(StoreError::StorageFull)
 }
@@ -752,7 +919,7 @@ fn check_source_file(metadata: &cap_std::fs::Metadata) -> Result<(), StoreError>
     Ok(())
 }
 
-fn account_entry(total: u64, path: &str, size: u64) -> Result<u64, StoreError> {
+fn account_entry(total: u64, path: &str, size: u64, max_bytes: u64) -> Result<u64, StoreError> {
     let total = total
         .checked_add(
             entry_header_size(path)?
@@ -760,22 +927,23 @@ fn account_entry(total: u64, path: &str, size: u64) -> Result<u64, StoreError> {
                 .ok_or(StoreError::StorageFull)?,
         )
         .ok_or(StoreError::StorageFull)?;
-    if total.checked_add(12).ok_or(StoreError::StorageFull)? > MAX_ARCHIVE_BYTES {
+    if total.checked_add(12).ok_or(StoreError::StorageFull)? > max_bytes {
         return Err(StoreError::StorageFull);
     }
     Ok(total)
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) async fn capture_archive_async<W: tokio::io::AsyncWrite + Unpin>(
+pub(crate) async fn capture_archive_async_with_limit<W: tokio::io::AsyncWrite + Unpin>(
     source: &Dir,
     identity: &BuildCacheIdentity,
     exclusions: &[String],
     writer: &mut W,
+    max_bytes: u64,
 ) -> Result<u64, StoreError> {
     use tokio::io::AsyncWriteExt;
 
-    let expected_size = archive_size(source, identity, exclusions)?;
+    let expected_size = archive_size_with_limit(source, identity, exclusions, max_bytes)?;
     let mut header = Vec::with_capacity(MAGIC.len() + 2 + 16 + identity.path.len());
     write_header(&mut header, identity)?;
     writer.write_all(&header).await?;
@@ -790,7 +958,7 @@ pub(crate) async fn capture_archive_async<W: tokio::io::AsyncWrite + Unpin>(
             check_source_file(&metadata)?;
         }
         let size = if directory { 0 } else { metadata.len() };
-        total = account_entry(total, path, size)?;
+        total = account_entry(total, path, size, max_bytes)?;
         let mut entry_header = Vec::with_capacity(12 + path.len());
         write_entry_header(&mut entry_header, path, directory, executable, size)?;
         writer.write_all(&entry_header).await?;
@@ -884,14 +1052,16 @@ struct ArchiveCursor {
     last: Option<String>,
     total: u64,
     entries: usize,
+    max_bytes: u64,
 }
 
 impl ArchiveCursor {
-    fn new(identity: &BuildCacheIdentity) -> Result<Self, StoreError> {
+    fn new(identity: &BuildCacheIdentity, max_bytes: u64) -> Result<Self, StoreError> {
         Ok(Self {
             last: None,
             total: header_size(identity)?,
             entries: 0,
+            max_bytes,
         })
     }
 
@@ -924,7 +1094,7 @@ impl ArchiveCursor {
         if self.entries > MAX_ARCHIVE_ENTRIES {
             return Err(StoreError::StorageFull);
         }
-        self.total = account_entry(self.total, &path, size)?;
+        self.total = account_entry(self.total, &path, size, self.max_bytes)?;
         Ok(AdmittedEntry {
             path,
             directory,
@@ -937,7 +1107,7 @@ impl ArchiveCursor {
             return Err(StoreError::InvalidBuildCache);
         }
         self.total = self.total.checked_add(12).ok_or(StoreError::StorageFull)?;
-        if self.total > MAX_ARCHIVE_BYTES {
+        if self.total > self.max_bytes {
             return Err(StoreError::StorageFull);
         }
         Ok(())
@@ -965,6 +1135,17 @@ fn check_path_len(len: usize) -> Result<(), StoreError> {
 
 impl<'a, R: Read> ArchiveReader<'a, R> {
     fn new(input: &'a mut R, identity: &BuildCacheIdentity) -> Result<Self, StoreError> {
+        Self::with_limit(input, identity, MAX_ARCHIVE_BYTES)
+    }
+
+    fn with_limit(
+        input: &'a mut R,
+        identity: &BuildCacheIdentity,
+        max_bytes: u64,
+    ) -> Result<Self, StoreError> {
+        if max_bytes == 0 || max_bytes > MAX_ARCHIVE_BYTES {
+            return Err(StoreError::InvalidBuildCache);
+        }
         let mut magic = [0; MAGIC.len()];
         input.read_exact(&mut magic)?;
         if &magic != MAGIC {
@@ -979,7 +1160,7 @@ impl<'a, R: Read> ArchiveReader<'a, R> {
         check_header(&path, device, inode, identity)?;
         Ok(Self {
             input,
-            cursor: ArchiveCursor::new(identity)?,
+            cursor: ArchiveCursor::new(identity, max_bytes)?,
             done: false,
         })
     }
@@ -1050,12 +1231,13 @@ fn write_entry<R: Read, W: Write>(
     entry: &mut ArchiveEntry<'_, R>,
     total: &mut u64,
     count: &mut usize,
+    archive_limit: u64,
 ) -> Result<(), StoreError> {
     *count += 1;
     if *count > MAX_ARCHIVE_ENTRIES {
         return Err(StoreError::StorageFull);
     }
-    *total = account_entry(*total, &entry.path, entry.size)?;
+    *total = account_entry(*total, &entry.path, entry.size, archive_limit)?;
     write_entry_header(
         output,
         &entry.path,
@@ -1912,7 +2094,7 @@ fn transaction_next_name(token: &str) -> String {
 }
 
 fn write_reservation(file: &mut File, token: &str, reserved: u64) -> Result<(), StoreError> {
-    if reserved != MAX_ARCHIVE_BYTES && reserved != RESERVED_TRANSIENT_BYTES {
+    if reserved == 0 || reserved > MAX_RESERVATION_BYTES {
         return Err(StoreError::StorageFull);
     }
     file.set_len(0)?;
@@ -1923,15 +2105,20 @@ fn write_reservation(file: &mut File, token: &str, reserved: u64) -> Result<(), 
 fn validate_reservation(file: &File, token: &str) -> Result<u64, StoreError> {
     let mut bytes = Vec::with_capacity(96);
     file.try_clone()?.take(97).read_to_end(&mut bytes)?;
-    let transient = format!("{token}\n{RESERVED_TRANSIENT_BYTES}\n");
-    let archive = format!("{token}\n{MAX_ARCHIVE_BYTES}\n");
-    if bytes == transient.as_bytes() {
-        Ok(RESERVED_TRANSIENT_BYTES)
-    } else if bytes == archive.as_bytes() {
-        Ok(MAX_ARCHIVE_BYTES)
-    } else {
-        Err(StoreError::StateNotPrivate)
+    let record = std::str::from_utf8(&bytes).map_err(|_| StoreError::StateNotPrivate)?;
+    let mut lines = record.lines();
+    if lines.next() != Some(token) {
+        return Err(StoreError::StateNotPrivate);
     }
+    let reserved = lines
+        .next()
+        .and_then(|line| line.parse::<u64>().ok())
+        .filter(|reserved| *reserved > 0 && *reserved <= MAX_RESERVATION_BYTES)
+        .ok_or(StoreError::StateNotPrivate)?;
+    if lines.next().is_some() || !record.ends_with('\n') {
+        return Err(StoreError::StateNotPrivate);
+    }
+    Ok(reserved)
 }
 
 fn compare_paths(left: &str, right: &str) -> std::cmp::Ordering {
@@ -2148,6 +2335,81 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn candidate_capacity_rounds_derived_headroom_down_to_mebibytes() {
+        assert_eq!(
+            effective_candidate_capacity(DEFAULT_ARCHIVE_BYTES, DEFAULT_ARCHIVE_BYTES + 3),
+            DEFAULT_ARCHIVE_BYTES / 2
+        );
+    }
+
+    #[test]
+    fn old_archive_is_restored_read_only_when_aggregate_headroom_cannot_stage_candidate() {
+        let temp = tempfile::tempdir().expect("fixture");
+        let state_path = temp.path().join("state");
+        let workspace = temp.path().join("workspace");
+        private_dir(&state_path);
+        private_dir(&workspace);
+        let state = StateRoot::admit(&state_path).expect("StateRoot");
+        let identity = identity(&workspace);
+        let source = workspace.join("old");
+        std::fs::create_dir(&source).expect("old cache source");
+        std::fs::create_dir(source.join("target")).expect("old target directory");
+        std::fs::write(source.join("target/marker"), b"preserve this archive")
+            .expect("old cache data");
+        let old = archive(&identity, &source, &[]);
+        publish(&state, identity.clone(), &old, &[]);
+
+        let dir = cache_directory(&state, false).expect("cache directory");
+        let occupied = inventory(&dir).expect("current aggregate inventory");
+        let token = format!("{:064x}", MAX_IDENTITIES - 1);
+        let (lock, _) = open_lock_file(&dir, &identity_lock_name(&token)).expect("other lock");
+        let mut reservation =
+            create_private_file(&dir, &reservation_name(&token)).expect("other reservation");
+        let reserved = AGGREGATE_BYTES
+            .checked_sub(occupied)
+            .and_then(|remaining| remaining.checked_sub(IDENTITY_METADATA_BYTES))
+            .expect("aggregate headroom");
+        write_reservation(&mut reservation, &token, reserved).expect("fill aggregate");
+        reservation.sync_all().expect("reservation sync");
+        dir.open_with(".", OpenOptions::new().read(true))
+            .expect("cache directory")
+            .sync_all()
+            .expect("directory sync");
+
+        let (view_bytes, candidate_bytes) = state
+            .effective_build_cache_bytes(&identity, DEFAULT_ARCHIVE_BYTES)
+            .expect("bounded cache capacity");
+        assert_eq!(view_bytes, DEFAULT_ARCHIVE_BYTES);
+        assert_eq!(candidate_bytes, 0);
+        let lease = state
+            .begin_build_cache_with_limits(identity.clone(), view_bytes, candidate_bytes)
+            .expect("read-only restore lease");
+        let (mut preserved, size) = lease.archive().expect("archive lookup").expect("archive");
+        let mut bytes = Vec::new();
+        preserved.read_to_end(&mut bytes).expect("read old archive");
+        assert_eq!(size, old.len() as u64);
+        assert_eq!(bytes, old);
+        assert!(matches!(
+            lease.candidate_writer(),
+            Err(StoreError::StorageFull)
+        ));
+        drop(lease);
+
+        let (mut still_preserved, _) = state
+            .begin_build_cache_with_limits(identity, view_bytes, 0)
+            .expect("prior archive remains available")
+            .archive()
+            .expect("archive lookup")
+            .expect("archive");
+        let mut bytes = Vec::new();
+        still_preserved
+            .read_to_end(&mut bytes)
+            .expect("read preserved archive");
+        assert_eq!(bytes, old);
+        drop(lock);
     }
 
     #[test]

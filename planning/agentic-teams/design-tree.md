@@ -85,8 +85,9 @@ Applied as workstream D in the plan.
 
 ## Round 6 — settled 2026-10-13
 
-Fact: `MAX_TOOL_CALLS = 16`, a 64 KiB Tool context and the 300-second Run are
-compile-time constants ([src/tools/types.rs](../../src/tools/types.rs)).
+At the time of this decision, `MAX_TOOL_CALLS = 16`, a 64 KiB Tool context
+and the 300-second Run were compile-time constants
+([src/tools/types.rs](../../src/tools/types.rs)).
 Mainstream coding harnesses do not cap tool calls per turn: their loop runs
 until the model finishes, context is managed by compaction, commands have a
 default timeout with a configurable maximum (Claude Code: 2-minute default,
@@ -97,7 +98,7 @@ headless use offers an optional turn limit.
 |---|---|---|---|
 | R6-1 | Remove the 16-proposal and 300-second caps as product constants: a Run's loop continues until Finish, bounded by context compaction, the Goal budget and cancellation; the Tool context grows to the model's admitted context with compaction instead of a fixed 64 KiB | Yes. Matches established harnesses; Goal budgets and Supervisor signals replace arbitrary small caps as the safety mechanism | Yes; applied to A4/B6 |
 | R6-2 | Command timeout: 2-minute default, per-command request up to a user-configurable maximum (default 10 minutes) | Yes. Proven defaults from Claude Code; large builds raise the maximum in settings | Yes; applied to A4/B6 |
-| R6-3 | The plan contract may request a larger resource profile or timeout; Plan-gate approval grants it; in Accept edits and Auto, requests within settings maxima are granted without a prompt; beyond the maxima always asks. The Engine never exceeds user-set maxima on its own | Yes. Gives the Engine the flexibility you asked for while the user keeps the outer bound | Yes; applied to A4/B6 |
+| R6-3 | The plan contract may declare the Build profile and command timeout within the Goal's pinned settings. Above-maximum requests get a durable non-dispatched `Limit` with guidance to lower the request or change `/settings`; approval cannot exceed pinned settings. Prospective approved revisions belong to the later RPI/modes slice | Yes, amended: changing saved settings does not silently widen a running Goal | Yes; applied to A4, with approved revisions in B6 |
 | R6-4 | Settings can set Goal usage dimensions (tokens, calls, time) to unlimited; Arany then shows running usage visibly; per-request Provider caps and finite Guard resource ceilings (CPU, memory, storage, processes) always remain. AGENTS.md rule 4 gains this documented exception | Yes. Honors the user's choice without removing the bounds that protect the machine and parsers | Yes; applied to A4/B6 |
 | R6-5 | Runs remain the durable checkpoint unit: the Engine closes a Run at a milestone or wave boundary, never because an arbitrary cap was hit | Yes. Keeps recovery granularity independent of limits | Yes; applied to A4/B6 |
 

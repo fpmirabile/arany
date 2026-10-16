@@ -190,8 +190,6 @@ impl Config {
         ToolPolicyReceipt {
             contract_version: 1,
             config_digest: self.digest(),
-            max_tool_calls: MAX_TOOL_CALLS as u32,
-            max_model_steps: MAX_MODEL_STEPS as u32,
             max_context_bytes: MAX_TOOL_CONTEXT_BYTES as u32,
         }
     }

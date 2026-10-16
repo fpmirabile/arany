@@ -15,6 +15,12 @@ const PIP_HOST_HTTP_CACHE: &str = ".cache/pip/http-v2";
 #[cfg(not(target_os = "macos"))]
 const PIP_HOST_WHEEL_CACHE: &str = ".cache/pip/wheels";
 
+/// Sandbox root for host-cache grants; the payload's package-manager cache base must match it.
+#[cfg(target_os = "linux")]
+pub(crate) fn sandbox_cache_root(cache_enabled: bool) -> &'static str {
+    if cache_enabled { "/cache" } else { "/scratch" }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RuntimeKind {
@@ -177,7 +183,7 @@ impl RuntimeGrant {
 
     /// Linux mounts a toolchain at its exact host path so absolute shebangs resolve.
     #[cfg(target_os = "linux")]
-    pub(crate) fn mounted_path(&self) -> Result<PathBuf, ToolError> {
+    pub(crate) fn mounted_path(&self, cache_enabled: bool) -> Result<PathBuf, ToolError> {
         if self.kind.is_toolchain() {
             Ok(self.path.clone())
         } else {
@@ -185,7 +191,7 @@ impl RuntimeGrant {
                 .kind
                 .sandbox_cache_path()
                 .ok_or(ToolError::Configuration)?;
-            Ok(Path::new("/scratch").join(relative))
+            Ok(Path::new(sandbox_cache_root(cache_enabled)).join(relative))
         }
     }
 

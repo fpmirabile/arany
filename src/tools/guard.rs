@@ -14,7 +14,6 @@ use tokio::process::{Child, Command};
 
 const CAPTURE_BYTES: usize = 48 * 1024;
 const TASK_BYTES_CAP: usize = 96 * 1024;
-const PAYLOAD_DEADLINE: Duration = Duration::from_secs(50);
 pub(super) const RUNTIME_ROOT: &str = "/usr";
 
 #[cfg(target_os = "linux")]
@@ -73,12 +72,25 @@ struct Task {
 pub(super) struct BuildCacheTransfer {
     pub(super) identity: BuildCacheIdentity,
     pub(super) exclusions: Vec<String>,
+    pub(super) view_bytes: u64,
+    pub(super) candidate_bytes: u64,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum CacheCandidate {
     Received,
     Rejected,
     Failed,
+    Uncertain,
+}
+
+pub(super) fn cache_transfer_deadline(
+    intent: &EffectIntent,
+    ceiling: Option<tokio::time::Instant>,
+) -> tokio::time::Instant {
+    let deadline = tokio::time::Instant::now()
+        + Duration::from_millis(u64::from(intent.limits.cache_transfer_ms));
+    ceiling.map_or(deadline, |ceiling| deadline.min(ceiling))
 }
 
 impl BuildCacheTransfer {
@@ -87,6 +99,9 @@ impl BuildCacheTransfer {
         if !matches!(intent.call, ToolCall::Command { .. })
             || self.identity.device != intent.workspace_device
             || self.identity.inode != intent.workspace_inode
+            || self.view_bytes > intent.limits.cache_bytes
+            || self.candidate_bytes > intent.limits.cache_candidate_bytes
+            || self.candidate_bytes > self.view_bytes
             || self.exclusions != expected
         {
             return Err(ToolError::Configuration);
@@ -107,6 +122,9 @@ pub(super) fn build_cache_session(
     if !matches!(intent.call, ToolCall::Command { .. }) {
         return Ok(None);
     }
+    if intent.limits.cache_bytes == 0 {
+        return Ok(None);
+    }
     let Some(state) = runtime.cache_state.as_ref() else {
         return Ok(None);
     };
@@ -117,14 +135,34 @@ pub(super) fn build_cache_session(
     )
     .map_err(map_cache_error)?;
     let exclusions = cache_exclusions(&runtime.config.runtime_grants)?;
-    let lease = state
-        .begin_build_cache(identity.clone())
-        .map_err(map_cache_error)?;
+    let lease = match state.begin_build_cache_with_limits(
+        identity.clone(),
+        intent.limits.cache_bytes,
+        intent.limits.cache_candidate_bytes,
+    ) {
+        Ok(lease) => lease,
+        Err(StoreError::StorageFull) if intent.limits.cache_candidate_bytes > 0 => {
+            match state.begin_build_cache_with_limits(
+                identity.clone(),
+                intent.limits.cache_bytes,
+                0,
+            ) {
+                Ok(lease) => lease,
+                Err(StoreError::StorageFull) => return Ok(None),
+                Err(error) => return Err(map_cache_error(error)),
+            }
+        }
+        Err(StoreError::StorageFull) => return Ok(None),
+        Err(error) => return Err(map_cache_error(error)),
+    };
+    let candidate_bytes = lease.candidate_limit();
     Ok(Some(BuildCacheSession {
         lease,
         transfer: BuildCacheTransfer {
             identity,
             exclusions,
+            view_bytes: intent.limits.cache_bytes,
+            candidate_bytes,
         },
     }))
 }
@@ -154,34 +192,60 @@ pub(super) fn map_cache_error(error: StoreError) -> ToolError {
     }
 }
 
-pub(super) fn publish_cache_candidate(
+pub(super) async fn publish_cache_candidate(
     observation: &mut ToolObservation,
     candidate: CacheCandidate,
-    cache: Option<&mut BuildCacheSession>,
+    cache: Option<BuildCacheSession>,
+    deadline: tokio::time::Instant,
 ) {
     if observation.disposition != ToolDisposition::Succeeded {
         return;
     }
-    let Some(cache) = cache else {
-        return;
-    };
-    let update = match candidate {
-        CacheCandidate::Rejected => CacheUpdate::Rejected,
-        CacheCandidate::Failed => CacheUpdate::Failed,
-        CacheCandidate::Received => match cache.lease.open_candidate().and_then(|mut candidate| {
-            cache
-                .lease
-                .publish(&mut candidate, &cache.transfer.exclusions)
-        }) {
-            Ok(()) => CacheUpdate::Published,
-            Err(StoreError::StorageFull) if !cache.lease.publication_uncertain() => {
-                CacheUpdate::Rejected
+    let update = match (candidate, cache) {
+        (CacheCandidate::Uncertain, _) => CacheUpdate::Uncertain,
+        (CacheCandidate::Rejected, _) => CacheUpdate::Rejected,
+        (CacheCandidate::Failed, _) => CacheUpdate::Failed,
+        (CacheCandidate::Received, None) if !observation.intent.call.is_process() => {
+            CacheUpdate::NotApplicable
+        }
+        (CacheCandidate::Received, None) if observation.intent.limits.cache_requested_bytes > 0 => {
+            CacheUpdate::Rejected
+        }
+        (CacheCandidate::Received, None) => CacheUpdate::NotApplicable,
+        (CacheCandidate::Received, Some(cache)) => {
+            let publication = tokio::task::spawn_blocking(move || {
+                let mut cache = cache;
+                let mut candidate = match cache.lease.open_candidate() {
+                    Ok(candidate) => candidate,
+                    Err(StoreError::StorageFull) if !cache.lease.publication_uncertain() => {
+                        return CacheUpdate::Rejected;
+                    }
+                    Err(_) if cache.lease.publication_uncertain() => return CacheUpdate::Uncertain,
+                    Err(_) => return CacheUpdate::Failed,
+                };
+                match cache
+                    .lease
+                    .publish(&mut candidate, &cache.transfer.exclusions)
+                {
+                    Ok(()) => CacheUpdate::Published,
+                    Err(StoreError::StorageFull) if !cache.lease.publication_uncertain() => {
+                        CacheUpdate::Rejected
+                    }
+                    Err(_) if cache.lease.publication_uncertain() => CacheUpdate::Uncertain,
+                    Err(_) => CacheUpdate::Failed,
+                }
+            });
+            match tokio::time::timeout_at(deadline, publication).await {
+                Ok(Ok(update)) => update,
+                Ok(Err(_)) | Err(_) => CacheUpdate::Uncertain,
             }
-            Err(_) if cache.lease.publication_uncertain() => CacheUpdate::Uncertain,
-            Err(_) => CacheUpdate::Failed,
-        },
+        }
     };
     observation.cache_update = update;
+    if !observation.valid() {
+        observation.cache_update = CacheUpdate::Uncertain;
+        observation.disposition = ToolDisposition::Uncertain;
+    }
     debug_assert!(observation.valid());
 }
 
@@ -369,10 +433,13 @@ fn bind_runtime_grants(
     Ok(digest(&bytes))
 }
 
-fn verify_runtime_grants(config: &Config) -> Result<(), ToolError> {
+fn verify_runtime_grants(
+    config: &Config,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] cache_enabled: bool,
+) -> Result<(), ToolError> {
     for grant in &config.runtime_grants {
         #[cfg(target_os = "linux")]
-        grant.verify_at(&grant.mounted_path()?)?;
+        grant.verify_at(&grant.mounted_path(cache_enabled)?)?;
         #[cfg(target_os = "macos")]
         grant.verify_host()?;
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -383,7 +450,7 @@ fn verify_runtime_grants(config: &Config) -> Result<(), ToolError> {
 
 fn verify_intent_runtime_grants(intent: &EffectIntent, config: &Config) -> Result<(), ToolError> {
     if intent.call.is_process() {
-        verify_runtime_grants(config)
+        verify_runtime_grants(config, intent.limits.cache_bytes > 0)
     } else {
         Ok(())
     }
@@ -392,6 +459,7 @@ fn verify_intent_runtime_grants(intent: &EffectIntent, config: &Config) -> Resul
 fn attest_runtime_mounts(
     call: &ToolCall,
     grants: &[RuntimeGrant],
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] cache_enabled: bool,
     stage: &mut BootstrapStage,
 ) -> Result<(), ToolError> {
     if !call.is_process() {
@@ -399,7 +467,7 @@ fn attest_runtime_mounts(
     }
     *stage = BootstrapStage::RuntimeMounts;
     #[cfg(target_os = "linux")]
-    linux::verify_runtime_mounts(grants)?;
+    linux::verify_runtime_mounts(grants, cache_enabled)?;
     #[cfg(target_os = "macos")]
     macos::verify_runtime_mounts(grants)?;
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -535,18 +603,19 @@ pub(super) async fn send_cache_archive<W: tokio::io::AsyncWrite + Unpin>(
     writer: &mut W,
     lease: &BuildCacheLease,
 ) -> Result<(), ToolError> {
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let Some((mut file, size)) = lease.archive().map_err(map_cache_error)? else {
+    let Some((file, size)) = lease.archive().map_err(map_cache_error)? else {
         writer
             .write_all(&0u64.to_le_bytes())
             .await
             .map_err(|_| ToolError::Operation)?;
         return Ok(());
     };
-    if size > crate::store::BUILD_CACHE_ARCHIVE_BYTES {
+    if size > crate::tools::types::MAX_BUILD_CACHE_BYTES {
         return Err(ToolError::Limit);
     }
+    let mut file = tokio::fs::File::from_std(file.into_std());
     writer
         .write_all(&size.to_le_bytes())
         .await
@@ -557,6 +626,7 @@ pub(super) async fn send_cache_archive<W: tokio::io::AsyncWrite + Unpin>(
         let wanted = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
         let count = file
             .read(&mut buffer[..wanted])
+            .await
             .map_err(|_| ToolError::Operation)?;
         if count == 0 {
             return Err(ToolError::Operation);
@@ -603,7 +673,7 @@ pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
         .await
         .map_err(|_| ToolError::Operation)?;
     let length = u64::from_le_bytes(length);
-    if length == 0 || length > crate::store::BUILD_CACHE_ARCHIVE_BYTES {
+    if length == 0 || length > lease.candidate_limit() {
         return Err(ToolError::Limit);
     }
     // A host-side staging failure keeps the command result: stop staging but keep draining
@@ -782,7 +852,12 @@ pub(super) fn helper_main() -> ExitCode {
             return Err(ToolError::Configuration);
         }
         let (root, workspace) = bootstrap_locations(&task, &mut stage)?;
-        attest_runtime_mounts(&task.intent.call, &task.config.runtime_grants, &mut stage)?;
+        attest_runtime_mounts(
+            &task.intent.call,
+            &task.config.runtime_grants,
+            task.intent.limits.cache_bytes > 0,
+            &mut stage,
+        )?;
         #[cfg(target_os = "linux")]
         if let Some(cache) = &task.cache {
             let mut stdout = std::io::stdout().lock();
@@ -795,17 +870,18 @@ pub(super) fn helper_main() -> ExitCode {
                 .read_exact(&mut length)
                 .map_err(|_| ToolError::Operation)?;
             let length = u64::from_le_bytes(length);
-            if length > crate::store::BUILD_CACHE_ARCHIVE_BYTES {
+            if length > cache.view_bytes {
                 return Err(ToolError::Limit);
             }
             if length > 0 {
-                let scratch = super::fs::open_directory(&root.join("scratch"))?;
+                let cache_dir = super::fs::open_directory(&root.join("cache"))?;
                 let mut archive = Read::take(&mut stdin, length);
-                crate::store::restore_archive(
+                crate::store::restore_archive_with_limit(
                     &mut archive,
-                    &scratch,
+                    &cache_dir,
                     &cache.identity,
                     &cache.exclusions,
+                    cache.view_bytes,
                 )
                 .map_err(map_cache_error)?;
             }
@@ -866,7 +942,12 @@ pub(super) fn helper_main() -> ExitCode {
             return Err(ToolError::Configuration);
         }
         verify_intent_runtime_grants(&task.intent, &task.config)?;
-        attest_runtime_mounts(&task.intent.call, &task.config.runtime_grants, &mut stage)?;
+        attest_runtime_mounts(
+            &task.intent.call,
+            &task.config.runtime_grants,
+            task.intent.limits.cache_bytes > 0,
+            &mut stage,
+        )?;
         drop(stdin);
         stage = BootstrapStage::Payload;
         #[cfg(not(target_os = "macos"))]
@@ -888,12 +969,18 @@ pub(super) fn helper_main() -> ExitCode {
                         .ok_or(ToolError::Configuration)?;
                     #[cfg(target_os = "linux")]
                     let before = super::fs::command_snapshot(workspace)?;
-                    let mut command =
-                        payload(definition, args, cwd, &root, &task.config.runtime_grants)?;
+                    let mut command = payload(
+                        definition,
+                        args,
+                        cwd,
+                        &root,
+                        &task.config.runtime_grants,
+                        task.intent.limits.cache_bytes > 0,
+                    )?;
                     let (status, out, err) = capture(
                         command.spawn().map_err(|_| ToolError::Operation)?,
                         (task.intent.limits.result_bytes as usize / 2).saturating_sub(128),
-                        PAYLOAD_DEADLINE,
+                        Duration::from_millis(u64::from(task.intent.limits.runtime_ms)),
                     )
                     .await?;
                     #[cfg(target_os = "linux")]
@@ -920,7 +1007,13 @@ pub(super) fn helper_main() -> ExitCode {
                     skill.ok_or(ToolError::Configuration)?,
                 ),
                 ToolCall::McpList { .. } | ToolCall::McpCall { .. } => {
-                    super::mcp::execute(&task.intent.call, &task.config, &root).await
+                    super::mcp::execute(
+                        &task.intent.call,
+                        &task.config,
+                        &root,
+                        task.intent.limits.cache_bytes > 0,
+                    )
+                    .await
                 }
                 call => super::fs::native(workspace, call, &task.config),
             }
@@ -1002,9 +1095,19 @@ pub(super) fn helper_main() -> ExitCode {
                     .write_all(b"CACHE_REJECTED\n")
                     .and_then(|()| stdout.flush())
                     .map_err(|_| ToolError::Operation)?;
+            } else if cache.candidate_bytes == 0 {
+                stdout
+                    .write_all(b"CACHE_REJECTED\n")
+                    .and_then(|()| stdout.flush())
+                    .map_err(|_| ToolError::Operation)?;
             } else {
-                let scratch = super::fs::open_directory(&root.join("scratch"))?;
-                match crate::store::archive_size(&scratch, &cache.identity, &cache.exclusions) {
+                let cache_dir = super::fs::open_directory(&root.join("cache"))?;
+                match crate::store::archive_size_with_limit(
+                    &cache_dir,
+                    &cache.identity,
+                    &cache.exclusions,
+                    cache.candidate_bytes,
+                ) {
                     Ok(size) => {
                         stdout
                             .write_all(b"CACHE_CANDIDATE\n")
@@ -1013,11 +1116,12 @@ pub(super) fn helper_main() -> ExitCode {
                         stdout
                             .write_all(&size.to_le_bytes())
                             .map_err(|_| ToolError::Operation)?;
-                        let captured = crate::store::capture_archive(
-                            &scratch,
+                        let captured = crate::store::capture_archive_with_limit(
+                            &cache_dir,
                             &cache.identity,
                             &cache.exclusions,
                             &mut stdout,
+                            cache.candidate_bytes,
                         )
                         .map_err(map_cache_error)?;
                         if captured != size {
@@ -1117,6 +1221,7 @@ pub(super) fn payload(
     cwd: &str,
     root: &Path,
     runtime_grants: &[RuntimeGrant],
+    cache_enabled: bool,
 ) -> Result<Command, ToolError> {
     let resources = if cfg!(target_os = "macos") {
         root.join("runtime")
@@ -1125,6 +1230,8 @@ pub(super) fn payload(
     };
     let workspace = root.join("workspace");
     let scratch = root.join("scratch");
+    let cache = root.join("cache");
+    let cache_base = if cache_enabled { &cache } else { &scratch };
     let executable = if native_system_program(&program.executable)? {
         Path::new(&program.executable).to_owned()
     } else {
@@ -1145,6 +1252,7 @@ pub(super) fn payload(
                 for (alias, target) in [
                     ("workspace", &workspace),
                     ("scratch", &scratch),
+                    ("cache", &cache),
                     ("inputs", &resources.join("inputs")),
                     ("skills", &resources.join("skills")),
                     ("programs", &resources.join("programs")),
@@ -1161,10 +1269,10 @@ pub(super) fn payload(
         .env("PATH", path)
         .env("HOME", &scratch)
         .env("TMPDIR", &scratch)
-        .env("CARGO_HOME", scratch.join("cargo"))
-        .env("CARGO_TARGET_DIR", scratch.join("target"))
-        .env("npm_config_cache", scratch.join(".npm"))
-        .env("PIP_CACHE_DIR", scratch.join(".cache/pip"))
+        .env("CARGO_HOME", cache_base.join("cargo"))
+        .env("CARGO_TARGET_DIR", cache_base.join("target"))
+        .env("npm_config_cache", cache_base.join(".npm"))
+        .env("PIP_CACHE_DIR", cache_base.join(".cache/pip"))
         .env("ARANY_TOOL_WORKSPACE", &workspace)
         .env("ARANY_TOOL_INPUTS", resources.join("inputs"))
         .env("ARANY_TOOL_SKILLS", resources.join("skills"))
@@ -1363,21 +1471,29 @@ mod tests {
         state: &crate::store::StateRoot,
         identity: &BuildCacheIdentity,
     ) -> BuildCacheSession {
+        let lease = crate::store::begin_released(state, identity.clone()).unwrap();
+        let candidate_bytes = lease.candidate_limit();
         BuildCacheSession {
-            lease: crate::store::begin_released(state, identity.clone()).unwrap(),
+            lease,
             transfer: BuildCacheTransfer {
                 identity: identity.clone(),
                 exclusions: Vec::new(),
+                view_bytes: crate::store::BUILD_CACHE_ARCHIVE_BYTES,
+                candidate_bytes,
             },
         }
     }
 
-    #[test]
-    fn cache_publication_never_replaces_a_succeeded_command() {
+    fn far_deadline() -> tokio::time::Instant {
+        tokio::time::Instant::now() + Duration::from_secs(60)
+    }
+
+    #[tokio::test]
+    async fn cache_publication_never_replaces_a_succeeded_command() {
         let temp = tempfile::tempdir().unwrap();
         let (state, identity) = cache_fixture(temp.path());
 
-        let mut session = cache_session(&state, &identity);
+        let session = cache_session(&state, &identity);
         let mut corrupt = session.lease.candidate_writer().unwrap();
         corrupt.write_all(b"not an archive").unwrap();
         drop(corrupt);
@@ -1385,13 +1501,14 @@ mod tests {
         publish_cache_candidate(
             &mut observation,
             CacheCandidate::Received,
-            Some(&mut session),
-        );
+            Some(session),
+            far_deadline(),
+        )
+        .await;
         assert_eq!(observation.disposition, ToolDisposition::Succeeded);
         assert_eq!(observation.cache_update, CacheUpdate::Failed);
-        drop(session);
 
-        let mut session = cache_session(&state, &identity);
+        let session = cache_session(&state, &identity);
         let mut valid = session.lease.candidate_writer().unwrap();
         valid.write_all(&empty_archive(&identity)).unwrap();
         valid.sync_all().unwrap();
@@ -1400,8 +1517,10 @@ mod tests {
         publish_cache_candidate(
             &mut observation,
             CacheCandidate::Received,
-            Some(&mut session),
-        );
+            Some(session),
+            far_deadline(),
+        )
+        .await;
         assert_eq!(observation.disposition, ToolDisposition::Succeeded);
         assert_eq!(observation.cache_update, CacheUpdate::Published);
         assert!(observation.valid());
@@ -1418,12 +1537,12 @@ mod tests {
         bytes
     }
 
-    fn publish_archive(
+    async fn publish_archive(
         state: &crate::store::StateRoot,
         identity: &BuildCacheIdentity,
         bytes: &[u8],
     ) {
-        let mut session = cache_session(state, identity);
+        let session = cache_session(state, identity);
         let mut candidate = session.lease.candidate_writer().unwrap();
         candidate.write_all(bytes).unwrap();
         candidate.sync_all().unwrap();
@@ -1432,8 +1551,10 @@ mod tests {
         publish_cache_candidate(
             &mut observation,
             CacheCandidate::Received,
-            Some(&mut session),
-        );
+            Some(session),
+            far_deadline(),
+        )
+        .await;
         assert_eq!(observation.cache_update, CacheUpdate::Published);
     }
 
@@ -1449,33 +1570,33 @@ mod tests {
         bytes
     }
 
-    #[test]
-    fn uncertain_commit_marker_keeps_the_command_and_recovers_the_prior_archive() {
+    #[tokio::test]
+    async fn uncertain_commit_marker_keeps_the_command_and_recovers_the_prior_archive() {
         let temp = tempfile::tempdir().unwrap();
         let (state, identity) = cache_fixture(temp.path());
         let prior = captured_archive(temp.path(), &identity, b"prior");
         let candidate = captured_archive(temp.path(), &identity, b"candidate");
         assert_ne!(prior, candidate);
-        publish_archive(&state, &identity, &prior);
+        publish_archive(&state, &identity, &prior).await;
 
-        let mut session = cache_session(&state, &identity);
+        let session = cache_session(&state, &identity);
         let mut valid = session.lease.candidate_writer().unwrap();
         valid.write_all(&candidate).unwrap();
         valid.sync_all().unwrap();
         drop(valid);
-        crate::store::fail_next_commit_marker();
+        crate::store::fail_next_commit_marker(&identity);
         let mut observation = command_observation();
         publish_cache_candidate(
             &mut observation,
             CacheCandidate::Received,
-            Some(&mut session),
-        );
+            Some(session),
+            far_deadline(),
+        )
+        .await;
         assert_eq!(observation.disposition, ToolDisposition::Succeeded);
         assert_eq!(observation.cache_update, CacheUpdate::Uncertain);
         assert!(observation.valid());
         assert!(observation.stops_run());
-        assert!(session.lease.publication_uncertain());
-        drop(session);
 
         // The commit marker never reached disk, so recovery rolls back to the prior archive.
         assert_eq!(committed_archive(&state, &identity), prior);
@@ -1487,7 +1608,7 @@ mod tests {
         let (state, identity) = cache_fixture(temp.path());
         let prior = captured_archive(temp.path(), &identity, b"prior");
         let candidate = captured_archive(temp.path(), &identity, b"candidate");
-        publish_archive(&state, &identity, &prior);
+        publish_archive(&state, &identity, &prior).await;
 
         let lease = crate::store::begin_released(&state, identity.clone()).unwrap();
         let mut stream = b"CACHE_CANDIDATE\n".to_vec();
@@ -1546,7 +1667,7 @@ mod tests {
     async fn candidate_staging_failure_drains_the_archive_and_keeps_the_prior_archive() {
         let temp = tempfile::tempdir().unwrap();
         let (state, identity) = cache_fixture(temp.path());
-        let mut session = cache_session(&state, &identity);
+        let session = cache_session(&state, &identity);
         let mut valid = session.lease.candidate_writer().unwrap();
         valid.write_all(&empty_archive(&identity)).unwrap();
         valid.sync_all().unwrap();
@@ -1555,10 +1676,11 @@ mod tests {
         publish_cache_candidate(
             &mut observation,
             CacheCandidate::Received,
-            Some(&mut session),
-        );
+            Some(session),
+            far_deadline(),
+        )
+        .await;
         assert_eq!(observation.cache_update, CacheUpdate::Published);
-        drop(session);
 
         let lease = crate::store::begin_released(&state, identity.clone()).unwrap();
         // Occupies the candidate name, so the create_new staging step fails.

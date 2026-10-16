@@ -1,6 +1,7 @@
 use super::{
     active_terminal::{ProductGuard, product_child_of, tty_settings},
     loopback::ChildGuard,
+    saved_ui_preferences,
     session_picker::{pump, tail},
 };
 use arany::{CollaborationPolicy, SessionDefaults, SessionId, StateRoot, Store, list_sessions};
@@ -233,7 +234,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         &mut transcript,
         &mut answered,
         settings_at,
-        b"empty Enter saves, q closes; type a choice name: tabs or combined or fullscreen or classic\r\nInput:\r\n",
+        b"Current menu: tabs (tabs|combined); view: fullscreen (fullscreen|classic).\r\nSettings: calls=64 tokens=unlimited active-ms=1800000 default-timeout-ms=120000 max-timeout-ms=600000 build-memory-bytes=4294967296 build-processes=256 build-project-bytes=1073741824 build-cache-bytes=8589934592.\r\nSet a listed key=value or exact menu/view choice; Enter saves; q cancels.\r\nInput:\r\n",
     );
     let invalid_at = transcript.len();
     input
@@ -245,7 +246,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         &mut transcript,
         &mut answered,
         invalid_at,
-        b"Notice: Type tabs, combined, fullscreen or classic; q closes\r\nInput:\r\n",
+        b"Notice: Type a valid setting and value; q cancels\r\nInput:\r\n",
     );
     let selected_at = transcript.len();
     input
@@ -257,7 +258,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         &mut transcript,
         &mut answered,
         selected_at,
-        "Notice: Settings: slash menu combined · chat view fullscreen (visual sessions) · saved\r\nInput:\r\n".as_bytes(),
+        "Notice: Settings saved · calls 64 · active ms 1800000 · command max 600000 ms · visual sessions\r\nInput:\r\n".as_bytes(),
     );
     assert_eq!(
         StateRoot::open_existing(&state)
@@ -265,7 +266,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
             .read_ui_preferences_record()
             .unwrap()
             .unwrap(),
-        br#"{"version":2,"preferences":{"completion":"combined","view":"fullscreen"}}"#
+        saved_ui_preferences("combined", "fullscreen")
     );
     for (command, feedback) in [
         ("/provider anthropic", "Provider: anthropic; set /model"),
@@ -376,6 +377,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
                     budget: arany::GoalBudget::default(),
                     phase: arany::GoalPhase::Implementation,
                     autonomous: false,
+                    resource_settings: arany::ToolResourceSettings::default(),
                 },
             )
             .await
@@ -988,7 +990,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut transcript,
         &mut answered,
         settings_at,
-        b"closes",
+        b"> Slash",
     );
     let saved_at = transcript.len();
     input.write_all(b"\x1b[C\r").expect("save combined menu");
@@ -1014,7 +1016,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
             .read_ui_preferences_record()
             .unwrap()
             .unwrap(),
-        br#"{"version":2,"preferences":{"completion":"combined","view":"fullscreen"}}"#,
+        saved_ui_preferences("combined", "fullscreen"),
         "--classic must not leak into the saved chat view"
     );
     let menu_at = transcript.len();
@@ -1359,7 +1361,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
             .read_ui_preferences_record()
             .unwrap()
             .unwrap(),
-        br#"{"version":2,"preferences":{"completion":"combined","view":"fullscreen"}}"#
+        saved_ui_preferences("combined", "fullscreen")
     );
     assert_eq!(std::fs::read(&outside).unwrap(), b"unchanged");
     assert!(
@@ -1412,11 +1414,9 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
             .read_ui_preferences_record()
             .unwrap()
             .unwrap(),
-        br#"{"version":2,"preferences":{"completion":"tabs","view":"fullscreen"}}"#
+        saved_ui_preferences("tabs", "fullscreen")
     );
-    let record = |view: &str| {
-        format!(r#"{{"version":2,"preferences":{{"completion":"tabs","view":"{view}"}}}}"#)
-    };
+    let record = |view: &str| saved_ui_preferences("tabs", view);
     for (view, pinned) in [("classic", false), ("fullscreen", true), ("classic", false)] {
         let chosen_at = transcript.len();
         input
@@ -1444,7 +1444,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
                 .read_ui_preferences_record()
                 .unwrap()
                 .unwrap(),
-            record(view).as_bytes()
+            record(view)
         );
         let frames = &transcript[chosen_at..];
         assert!(
@@ -1526,7 +1526,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
             .read_ui_preferences_record()
             .unwrap()
             .unwrap(),
-        record("fullscreen").as_bytes()
+        record("fullscreen")
     );
     let draft_at = transcript.len();
     input

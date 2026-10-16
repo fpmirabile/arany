@@ -351,10 +351,16 @@ impl Provider for WaitingProvider {
 
 async fn wait_for_child_finish(store: &Store, session_id: SessionId, objective: &str) {
     loop {
-        let events = store
-            .load_session(session_id)
-            .await
-            .expect("observable Events");
+        // The Engine's journal commit can briefly lock this observer's separate connection.
+        let events = match store.load_session(session_id).await {
+            Err(arany::StoreError::Sqlite(rusqlite::Error::SqliteFailure(error, _)))
+                if error.code == rusqlite::ErrorCode::DatabaseBusy =>
+            {
+                tokio::task::yield_now().await;
+                continue;
+            }
+            events => events.expect("observable Events"),
+        };
         let target = events.iter().find_map(|envelope| match &envelope.event {
             Event::AgentSpawned {
                 agent_run_id,
@@ -382,6 +388,26 @@ fn request(workspace: &Path, objective: &str) -> RunRequest {
         policy: CollaborationPolicy::Single,
         goal: arany::GoalRequest::default(),
     }
+}
+
+/// Context bytes the Engine reserves for an unplanned Goal's metadata: pinned budget, maximum facts, plan allowance and framing.
+fn unplanned_goal_metadata_bytes() -> u32 {
+    let facts = arany::GoalContextFacts {
+        provider_calls: u32::MAX,
+        known_tokens: u64::MAX,
+        token_usage_unknown: true,
+        active_ms: u64::MAX,
+        reserved_active_ms: u64::MAX,
+        uncertain_active_ms: u64::MAX,
+        success_criterion_satisfied: Some(true),
+    };
+    let encoded = serde_json::to_vec(&(
+        arany::GoalBudget::default(),
+        None::<arany::GoalPlanContract>,
+        facts,
+    ))
+    .expect("Goal metadata");
+    u32::try_from(encoded.len() + 8 * 1024 + 64).expect("bounded Goal metadata")
 }
 
 fn include_data(path: &str, text: &str) -> String {
@@ -793,7 +819,9 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 (4, AgentPhase::RootPlan, maximal_objective.as_str(), Vec::new(), Vec::new(), Vec::new()),
                 (5, AgentPhase::RootPlan, "After fork", [history, vec![arany::HistoryTurn { user: "".into(), assistant: "Team answer".into() }]].concat(), [historical_images, vec![ProviderImage { origin: ImageOrigin::History { turn_index: 2 }, image: second_image.clone() }]].concat(), Vec::new()),
             ] {
-                assert_eq!(calls[index], ProviderRequest {
+                let mut actual = calls[index].clone();
+                let facts = actual.goal_context_facts.take();
+                assert_eq!(actual, ProviderRequest {
                     run_id: calls[index].run_id, agent_run_id: calls[index].agent_run_id,
                     phase, model: "test-model".into(), instructions: Some("Changed instruction".into()),
                     collaboration: if index == 0 || index == 2 { CollaborationPolicy::Team { max_active_children: 1 } } else { CollaborationPolicy::Single },
@@ -801,8 +829,13 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                     history: expected_history,
                     context_summary: (index == 4).then(|| "Image conversation summary".into()),
                     child_results, goal_budget: Some(arany::GoalBudget::default()),
-                    goal_plan_contract: None, max_output_tokens: 4096, tools: None,
+                    goal_plan_contract: None, goal_context_facts: None, max_output_tokens: 4096, tools: None,
                 }, "image request {index}");
+                if phase == AgentPhase::ChildWork {
+                    assert!(facts.is_none(), "child calls do not receive primary Goal state");
+                } else {
+                    assert!(facts.is_some(), "primary calls receive current Goal state");
+                }
             }
             assert!(calls[..3].iter().all(|call| call.run_id == third.run.id));
             assert_eq!(calls[0].agent_run_id, third.run.agents[0].id);
@@ -818,7 +851,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             assert_eq!(compact.max_output_tokens, 1024);
             assert!(compact.previous_summary.is_none());
             assert_eq!(compact.items.len(), 4);
-            let mut source_bytes = 0;
+            let mut source_items = Vec::new();
             for (item, (objective, answer, image)) in compact.items.iter().zip([
                 ("First question", "First result", &first_image),
                 ("Second question", "Second result", &second_image),
@@ -829,9 +862,14 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 let user = format!("{objective}\nImage 1: PNG 1x1, {} bytes, SHA-256 {digest}", image.byte_len());
                 assert_eq!(item, &CompactionItem::Completed(arany::HistoryTurn { user: user.clone(), assistant: answer.into() }));
                 assert!(!user.contains(image.base64()), "compaction excludes image bytes");
-                source_bytes += user.len() + answer.len() + 64;
+                source_items.push(serde_json::json!({"status": "completed", "user": user, "assistant": answer}));
             }
-            assert_eq!(compacted.source_bytes as usize, source_bytes);
+            // The recorded source is the serialized compaction input: no previous summary, then the completed items.
+            let source = serde_json::json!({"previous_derived_summary": null, "items": source_items});
+            assert_eq!(
+                compacted.source_bytes as usize,
+                serde_json::to_vec(&source).unwrap().len()
+            );
         }
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
         let events = store.load_session(first.session_id).await.unwrap();
@@ -861,7 +899,8 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 .filter(|event| matches!(event.event, Event::GoalFinished { .. }))
                 .count(),
         ];
-        assert_eq!(goal_event_counts, [5, 5, 5, 7, 5, 5]);
+        // Each Provider call reserves and settles its own active time; the Run lifecycle reserves its own tail once at Run start.
+        assert_eq!(goal_event_counts, [5, 5, 7, 7, 7, 5]);
         let non_goal_events = events
             .iter()
             .filter(|event| {
@@ -877,7 +916,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             })
             .count();
         assert_eq!(non_goal_events, 41);
-        assert_eq!(events.len(), 73);
+        assert_eq!(events.len(), 77);
         let view = SessionView::replay(first.session_id, &events).unwrap().unwrap();
         for (run_id, phase) in [
             (first.run.id, AgentPhase::RootPlan),
@@ -922,14 +961,14 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 assert_eq!(lines.len(), events.len());
                 let accepted = lines.iter().filter(|line| line["kind"] == "MessageAccepted").collect::<Vec<_>>();
                 assert_eq!(accepted.len(), 5);
-                assert_eq!(accepted[0]["event_version"], 3);
+                assert_eq!(accepted[0]["event_version"], 4);
                 assert_eq!(accepted[0]["payload"]["images"][0]["media_type"], "image/png");
                 assert_eq!(accepted[0]["payload"]["images"][0]["data"], view.runs[0].images[0].base64());
                 assert_eq!(accepted[2]["payload"]["text"], "");
                 assert!(accepted[3]["payload"]["text"].as_str() == Some(maximal_objective.as_str()));
                 let image_payload_bytes = accepted[3]["payload"].to_string().len();
                 assert!((300 * 1024..=320 * 1024).contains(&image_payload_bytes), "maximally escaped image input fits its Event");
-                assert_eq!(accepted[4]["event_version"], 3);
+                assert_eq!(accepted[4]["event_version"], 4);
                 assert!(accepted[4]["payload"]["text"].as_str() == Some(maximal_objective.as_str()));
                 assert_eq!(accepted[4]["payload"].to_string().len(), 6 * 8 * 1024 + 23, "maximally escaped text-only input fits its Event");
                 assert_eq!(accepted[4]["payload"]["images"], serde_json::json!([]), "text-only input retains the current Message shape");
@@ -950,11 +989,11 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         let original: serde_json::Value = serde_json::from_str(&payload).unwrap();
         for fault in ["unsupported version", "unknown version", "missing images", "empty Message", "five images", "aggregate bytes", "non-PNG", "corrupted image", "URL", "extra field", "text overflow", "payload overflow", "agent scope"] {
             let mut invalid = original.clone();
-            let mut version = 3;
+            let mut version = 4;
             let mut agent_scope = None;
             match fault {
                 "unsupported version" => version = 1,
-                "unknown version" => version = 4,
+                "unknown version" => version = 5,
                 "missing images" => { invalid.as_object_mut().unwrap().remove("images"); }
                 "empty Message" => { invalid["text"] = "".into(); invalid["images"] = serde_json::json!([]); },
                 "five images" => invalid["images"] = serde_json::to_value(vec![second_image.clone(); 5]).unwrap(),
@@ -974,7 +1013,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             assert!(matches!(store.load_view(first.session_id).await, Err(arany::StoreError::InvalidHistory)), "image replay fault: {fault}");
             store.close().await.unwrap();
         }
-        connection.execute("UPDATE events SET event_version=3, payload=?1, agent_run_id=NULL WHERE sequence=?2", rusqlite::params![payload, sequence]).unwrap();
+        connection.execute("UPDATE events SET event_version=4, payload=?1, agent_run_id=NULL WHERE sequence=?2", rusqlite::params![payload, sequence]).unwrap();
         drop(connection);
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
         assert_eq!(store.load_view(first.session_id).await.unwrap().unwrap(), view);
@@ -1332,7 +1371,7 @@ fn compaction_is_derived_durable_context_and_failure_keeps_the_prior_summary() {
                 used_bytes: ("Question two".len()
                     + include_data("notes/facts.txt", "Fact").len()
                     + 86) as u32,
-                budget_bytes: 376 * 1024,
+                budget_bytes: 376 * 1024 - unplanned_goal_metadata_bytes(),
                 compactable_bytes: 86,
                 tool_history_bytes: 0,
             })
@@ -1362,7 +1401,7 @@ fn compaction_is_derived_durable_context_and_failure_keeps_the_prior_summary() {
         pressure.context_usage = None;
         assert!(!pressure.auto_compaction_due(), "unknown footprint");
         for (tool_history, bytes, due) in
-            [(1, 43_903, false), (1, 43_904, true), (0, 43_904, false)]
+            [(1, 179_071, false), (1, 179_072, true), (0, 179_072, true)]
         {
             pressure.context_usage = Some(ContextUsage {
                 used_bytes: bytes,
@@ -1370,7 +1409,11 @@ fn compaction_is_derived_durable_context_and_failure_keeps_the_prior_summary() {
                 compactable_bytes: bytes,
                 tool_history_bytes: tool_history,
             });
-            assert_eq!(pressure.auto_compaction_due(), due, "Tool source headroom");
+            assert_eq!(
+                pressure.auto_compaction_due(),
+                due,
+                "Tool history shares the compaction threshold"
+            );
         }
         pressure.context_usage = None;
         pressure.history_run_ids = vec![RunId::new(); 22];
@@ -2175,6 +2218,7 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
                     budget: arany::GoalBudget::default(),
                     phase: arany::GoalPhase::Implementation,
                     autonomous: false,
+                    resource_settings: arany::ToolResourceSettings::default(),
                 },
             )
             .await
@@ -2267,18 +2311,19 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(workspace.join("notes")).unwrap();
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").unwrap();
-        // Finite one-Run budgets reserve 77/83/82/141 Events for single/team/Tools/previews.
+        // Each admitted action reserves its worst-case Event envelope before dispatch; the boundary is the
+        // largest prefix that still admits the Run: 13 Events for a single plain Run, 23 for one Team child.
         for (index, (prefix, policy, admitted, tools, branch, previews)) in [
-            (9924, CollaborationPolicy::Single, false, false, false, false),
-            (9923, CollaborationPolicy::Single, true, false, false, false),
-            (9918, CollaborationPolicy::Team { max_active_children: 1 }, false, false, false, false),
-            (9917, CollaborationPolicy::Team { max_active_children: 1 }, true, false, false, false),
-            (9919, CollaborationPolicy::Single, false, true, false, false),
-            (9918, CollaborationPolicy::Single, true, true, false, false),
-            (9923, CollaborationPolicy::Single, false, false, true, false),
-            (9922, CollaborationPolicy::Single, true, false, true, false),
-            (9860, CollaborationPolicy::Single, false, false, false, true),
-            (9859, CollaborationPolicy::Single, true, false, false, true),
+            (9988, CollaborationPolicy::Single, false, false, false, false),
+            (9987, CollaborationPolicy::Single, true, false, false, false),
+            (9978, CollaborationPolicy::Team { max_active_children: 1 }, false, false, false, false),
+            (9977, CollaborationPolicy::Team { max_active_children: 1 }, true, false, false, false),
+            (9988, CollaborationPolicy::Single, false, true, false, false),
+            (9987, CollaborationPolicy::Single, true, true, false, false),
+            (9987, CollaborationPolicy::Single, false, false, true, false),
+            (9986, CollaborationPolicy::Single, true, false, true, false),
+            (9924, CollaborationPolicy::Single, false, false, false, true),
+            (9923, CollaborationPolicy::Single, true, false, false, true),
         ].into_iter().enumerate() {
             let path = temp.path().join(format!("state-{index}"));
             let finish = || ProviderOutcome::Finish(Finish { summary: "done".into(), result: "answer".into() });
@@ -2293,7 +2338,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
                 })
                 .unwrap();
             for sequence in first_padding_sequence..=i64::from(prefix) {
-                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',3,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string()]).unwrap();
+                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',4,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string()]).unwrap();
             }
             transaction.commit().unwrap();
             drop(connection);
@@ -2323,9 +2368,9 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             next.title = None;
             next.policy = policy;
             next.goal.budget = Some(arany::GoalBudget {
-                max_provider_calls,
+                max_provider_calls: Some(max_provider_calls),
                 max_tokens: None,
-                max_active_ms: 30 * 60 * 1000,
+                max_active_ms: Some(30 * 60 * 1000),
                 max_runs: 1,
             });
             let result = if previews {
@@ -2338,19 +2383,33 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             }
             engine.close().await.unwrap();
             let phases: Vec<_> = requests.lock().unwrap().iter().map(|request| request.phase).collect();
-            assert_eq!(phases, if !admitted { vec![] } else if matches!(policy, CollaborationPolicy::Single) { vec![AgentPhase::RootPlan] } else { vec![AgentPhase::RootPlan, AgentPhase::ChildWork, AgentPhase::RootSynthesis] }, "case {index}");
+            // Each action is admitted before its own dispatch: a Team refused at its child wave has already dispatched the root plan.
+            let expected_phases = match (admitted, policy) {
+                (true, CollaborationPolicy::Single) => vec![AgentPhase::RootPlan],
+                (true, _) => vec![AgentPhase::RootPlan, AgentPhase::ChildWork, AgentPhase::RootSynthesis],
+                (false, CollaborationPolicy::Single) => vec![],
+                (false, _) => vec![AgentPhase::RootPlan],
+            };
+            assert_eq!(phases, expected_phases, "case {index}");
             let store = Store::open_read_only(StateRoot::open_existing(&path).unwrap()).unwrap();
             let expected_event_count = if branch {
+                // The fork's own Event plus the Single Run's admitted or refused prefix.
                 if admitted { 14 } else { 1 }
             } else if admitted {
                 prefix as usize
                     + if matches!(policy, CollaborationPolicy::Single) {
                         13
                     } else {
-                        19
+                        23
                     }
             } else {
+                // A Single Run refused at Run start commits nothing; a Team refused at its child wave keeps its
+                // Run start and root plan but no child AgentSpawned.
                 prefix as usize
+                    + match policy {
+                        CollaborationPolicy::Single => 0,
+                        _ => 9,
+                    }
             };
             assert_eq!(
                 store.load_session(id).await.unwrap().len(),
@@ -2358,8 +2417,69 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
                 "case {index}: exact committed Event count"
             );
             let view = store.load_view(id).await.unwrap().unwrap();
-            assert_eq!(view.runs.len(), if admitted { 2 } else { 1 });
-            assert!(view.runs.iter().all(|run| run.status == RunStatus::Finished));
+            let linked = if admitted || !matches!(policy, CollaborationPolicy::Single) { 2 } else { 1 };
+            assert_eq!(view.runs.len(), linked, "case {index}: a refused Single Run is never linked");
+            assert_eq!(view.runs[0].status, RunStatus::Finished);
+            if linked == 2 {
+                // A refused Run is an interrupted prefix: replay labels it interrupted, never Finished.
+                assert_eq!(view.runs[1].status == RunStatus::Finished, admitted, "case {index}");
+            }
+            store.close().await.unwrap();
+        }
+        // Two children in two slots form one wave with a 4N+10 = 18 Event tail: 9973 admits to exactly 10,000 Events.
+        for (prefix, admitted) in [(9973_i64, true), (9974, false)] {
+            let path = temp.path().join(format!("two-child-{prefix}"));
+            let finish = || ProviderOutcome::Finish(Finish { summary: "done".into(), result: "answer".into() });
+            let mut engine = Engine::open(StateRoot::admit(&path).unwrap(), ScriptedProvider::new(vec![finish()])).unwrap();
+            let id = engine.run(request(&workspace, "Initial")).await.unwrap().session_id;
+            engine.close().await.unwrap();
+            let mut connection = rusqlite::Connection::open(path.join("events.sqlite3")).unwrap();
+            let transaction = connection.transaction().unwrap();
+            let first_padding_sequence: i64 = transaction
+                .query_row("SELECT COALESCE(MAX(sequence), 0) + 1 FROM events", [], |row| row.get(0))
+                .unwrap();
+            for sequence in first_padding_sequence..=prefix {
+                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',4,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string()]).unwrap();
+            }
+            transaction.commit().unwrap();
+            drop(connection);
+            let provider = ScriptedProvider::new(vec![
+                ProviderOutcome::Delegate(Delegate { children: vec!["Child one".into(), "Child two".into()] }),
+                finish(),
+                finish(),
+                finish(),
+            ]);
+            let requests = provider.requests.clone();
+            let mut engine = Engine::open(StateRoot::admit(&path).unwrap(), provider).unwrap();
+            let mut next = request(&workspace, "Next");
+            next.session_id = Some(id);
+            next.title = None;
+            next.policy = CollaborationPolicy::Team { max_active_children: 2 };
+            next.goal.budget = Some(arany::GoalBudget {
+                max_provider_calls: Some(4),
+                max_tokens: None,
+                max_active_ms: Some(30 * 60 * 1000),
+                max_runs: 1,
+            });
+            let result = engine.run(next).await;
+            if admitted {
+                assert_eq!(result.unwrap().run.status, RunStatus::Finished, "two children at {prefix}");
+            } else {
+                assert!(matches!(result, Err(EngineError::Store(arany::StoreError::ReplayLimit))), "two children at {prefix}");
+            }
+            engine.close().await.unwrap();
+            let phases: Vec<_> = requests.lock().unwrap().iter().map(|request| request.phase).collect();
+            let expected_phases = if admitted {
+                vec![AgentPhase::RootPlan, AgentPhase::ChildWork, AgentPhase::ChildWork, AgentPhase::RootSynthesis]
+            } else {
+                vec![AgentPhase::RootPlan]
+            };
+            assert_eq!(phases, expected_phases, "two children at {prefix}");
+            let store = Store::open_read_only(StateRoot::open_existing(&path).unwrap()).unwrap();
+            let events = store.load_session(id).await.unwrap();
+            let spawned = events.iter().filter(|event| matches!(event.event, Event::AgentSpawned { role: arany::AgentRole::Child, .. })).count();
+            assert_eq!(spawned, if admitted { 2 } else { 0 }, "two children at {prefix}: AgentSpawned");
+            assert_eq!(events.len(), if admitted { 10_000 } else { prefix as usize + 9 }, "two children at {prefix}: committed Events");
             store.close().await.unwrap();
         }
         for (index, (prefix, prior_forks, admitted)) in [
@@ -2381,7 +2501,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
                 .unwrap();
             if let Some(prefix) = prefix {
                 for sequence in first_padding_sequence..=prefix {
-                    transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',3,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, root.to_string()]).unwrap();
+                    transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',4,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, root.to_string()]).unwrap();
                 }
             }
             let event_count_before_forks = prefix.unwrap_or(first_padding_sequence - 1);
@@ -2421,26 +2541,25 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
         }
         let path = temp.path().join("compactions");
         let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish { summary: "source".into(), result: "answer".into() }), ProviderOutcome::Finish(Finish { summary: "later".into(), result: "later answer".into() })])
-            .with_compactions((0..65).map(|_| Err(ProviderError::RemoteHttp(403))).collect());
+            .with_compactions((0..66).map(|_| Err(ProviderError::RemoteHttp(403))).collect());
         let calls = provider.compact_requests.clone();
         let mut engine = Engine::open(StateRoot::admit(&path).unwrap(), provider).unwrap();
         let id = engine.run(request(&workspace, "Source")).await.unwrap().session_id;
-        for _ in 0..64 {
+        for _ in 0..65 {
             assert!(matches!(engine.compact_session(id, workspace.clone()).await.unwrap().status, CompactionStatus::Failed { .. }));
         }
-        assert!(matches!(engine.compact_session(id, workspace.clone()).await, Err(EngineError::CompactionLimit)));
-        assert_eq!(calls.lock().unwrap().len(), 64, "quota rejection must precede inference");
+        assert_eq!(calls.lock().unwrap().len(), 65);
         let mut later = request(&workspace, "Later");
         later.session_id = Some(id);
         later.title = None;
         engine.run(later).await.unwrap();
         let branch = engine.fork_session(id, workspace.clone(), None).await.unwrap();
-        assert!(matches!(engine.compact_session(branch, workspace.clone()).await.unwrap().status, CompactionStatus::Failed { .. }), "inherited compactions do not consume the fork's direct quota");
-        assert_eq!(calls.lock().unwrap().len(), 65);
+        assert!(matches!(engine.compact_session(branch, workspace.clone()).await.unwrap().status, CompactionStatus::Failed { .. }), "inherited compactions do not block the fork's own compaction attempt");
+        assert_eq!(calls.lock().unwrap().len(), 66);
         engine.close().await.unwrap();
         let store = Store::open_read_only(StateRoot::open_existing(&path).unwrap()).unwrap();
-        assert_eq!(store.load_view(id).await.unwrap().unwrap().compactions.len(), 64);
-        assert_eq!(store.load_view(branch).await.unwrap().unwrap().compactions.len(), 65);
+        assert_eq!(store.load_view(id).await.unwrap().unwrap().compactions.len(), 65);
+        assert_eq!(store.load_view(branch).await.unwrap().unwrap().compactions.len(), 66);
         store.close().await.unwrap();
     });
 }
@@ -2924,7 +3043,7 @@ fn one_child_team_finishes_only_after_child_result_is_committed() {
             Some(ContextUsage {
                 used_bytes: ("Question".len() + include_data("notes/facts.txt", "Fact").len())
                     as u32,
-                budget_bytes: 376 * 1024 - (20 * 1024 + 64),
+                budget_bytes: 376 * 1024 - (20 * 1024 + 64) - unplanned_goal_metadata_bytes(),
                 compactable_bytes: 0,
                 tool_history_bytes: 0,
             })
@@ -2951,7 +3070,8 @@ fn one_child_team_finishes_only_after_child_result_is_committed() {
             .load_session(outcome.session_id)
             .await
             .expect("durable Events");
-        assert_eq!(events.len(), 20);
+        // Each action reserves and settles its own active time: primary, child wave and synthesis.
+        assert_eq!(events.len(), 24);
         assert_eq!(
             events
                 .iter()
@@ -4147,7 +4267,7 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                         if let Event::ProviderCallRecorded { record, .. } = &envelope.event {
                             let document: serde_json::Value =
                                 serde_json::from_str(line).expect("canonical JSONL");
-                            assert_eq!(document["event_version"], 3);
+                            assert_eq!(document["event_version"], 4);
                             assert_eq!(document["payload"], serde_json::to_value(record).unwrap());
                         }
                     }
