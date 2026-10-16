@@ -212,8 +212,7 @@ pub(super) fn respond_after_catalog(
     assert!(direct.get("previous_response_id").is_none());
     assert_eq!(direct["text"]["format"]["name"], "arany_outcome");
     assert_eq!(direct["text"]["format"]["strict"], true);
-    let context: serde_json::Value =
-        serde_json::from_str(direct["input"][0]["content"].as_str().unwrap()).unwrap();
+    let context: serde_json::Value = crate::semantic::input(&direct);
     assert_eq!(
         context,
         serde_json::json!({
@@ -277,9 +276,8 @@ pub(super) fn respond_after_catalog(
         assert!(body.get("max_output_tokens").is_none());
         assert!(body.get("previous_response_id").is_none());
         assert_eq!(body["text"]["format"]["name"], format);
-        let content = body["input"][0]["content"]
-            .as_str()
-            .expect("structured input");
+        let rendered_input = body["input"].to_string();
+        let content = rendered_input.as_str();
         assert!(content.contains(expected_input), "wrong probe or Run input");
         assert_eq!(content.contains(OBJECTIVE), index >= 3);
         assert_eq!(content.contains(FOLLOWUP_OBJECTIVE), index == 4);
@@ -327,12 +325,9 @@ pub(super) fn respond_after_catalog(
         assert!(body.get("max_output_tokens").is_none());
         assert!(body.get("previous_response_id").is_none());
         assert_eq!(body["text"]["format"]["name"], "arany_outcome");
-        let content = body["input"][0]["content"]
-            .as_str()
-            .expect("team structured input");
+        let content = body["input"].to_string();
         assert!(!content.contains("Synthetic conformance"));
-        let context: serde_json::Value =
-            serde_json::from_str(content).expect("team structured context");
+        let context: serde_json::Value = crate::semantic::input(&body);
         assert_eq!(context["phase"], phase);
         assert_eq!(context["objective"], objective);
         assert_eq!(
@@ -367,12 +362,7 @@ pub(super) fn respond_after_catalog(
     assert_eq!(body["stream"], true);
     assert!(body.get("max_output_tokens").is_none());
     assert!(body.get("previous_response_id").is_none());
-    let context: serde_json::Value = serde_json::from_str(
-        body["input"][0]["content"]
-            .as_str()
-            .expect("failed Run input"),
-    )
-    .expect("failed Run context");
+    let context: serde_json::Value = crate::semantic::input(&body);
     assert_eq!(context["objective"], FAILED_OBJECTIVE);
     assert_eq!(context["phase"], "root_plan");
     assert_eq!(
@@ -429,19 +419,6 @@ pub(super) fn respond_after_catalog(
                 serde_json::json!({"outcome": {"type": "finish", "summary": "missing result"}}),
             ),
         ),
-        (
-            "OutcomeReadBounds",
-            completed("gpt-6.1-sol", serde_json::json!({"outcome": {"type": "tool", "call": {
-                "operation": "read", "path": FAILURE_BODY_CANARY, "offset": 0, "limit": 4097
-            }}})),
-        ),
-        (
-            "OutcomeToolDigest",
-            completed("gpt-6.1-sol", serde_json::json!({"outcome": {"type": "tool", "call": {
-                "operation": "edit", "path": FAILURE_BODY_CANARY, "expected_digest": FAILURE_BODY_CANARY,
-                "old": FAILURE_BODY_CANARY, "new": FAILURE_BODY_CANARY
-            }}})),
-        ),
     ]
     .into_iter()
     .chain(
@@ -459,7 +436,7 @@ pub(super) fn respond_after_catalog(
         assert_eq!(body["text"]["format"]["name"], "arany_outcome");
         assert_eq!(body["text"]["format"]["strict"], true);
         let context: serde_json::Value =
-            serde_json::from_str(body["input"][0]["content"].as_str().unwrap()).unwrap();
+            crate::semantic::input(&body);
         assert_eq!(
             context,
             serde_json::json!({
@@ -828,16 +805,6 @@ pub(super) fn accept_check_and_run(
             arany::ProviderFailureReason::OutcomeContract,
             2,
         ),
-        (
-            "OutcomeReadBounds",
-            arany::ProviderFailureReason::OutcomeContract,
-            2,
-        ),
-        (
-            "OutcomeToolDigest",
-            arany::ProviderFailureReason::OutcomeContract,
-            2,
-        ),
     ]
     .into_iter()
     .chain(
@@ -913,14 +880,6 @@ pub(super) fn accept_check_and_run(
             assert!(bytes > 0 && bytes <= 1024 * 1024);
             assert_eq!(fields[3], format!("events={events}"));
             assert_eq!(fields[4], "http_status=Some(200)");
-            if stage == "OutcomeReadBounds" {
-                assert!(text.contains("tool_arguments ToolArgumentShape { operation: \"read\""));
-                assert!(text.contains("read_limit: Some(4097)"));
-            }
-            if stage == "OutcomeToolDigest" {
-                assert!(text.contains("tool_arguments ToolArgumentShape { operation: \"edit\""));
-                assert!(text.contains("digest_valid: Some(false)"));
-            }
             if let Some((_, phases)) = FINAL_MESSAGE_FAILURES
                 .iter()
                 .find(|(name, _)| *name == stage)

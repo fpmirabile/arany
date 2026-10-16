@@ -109,7 +109,7 @@ impl CompiledContext {
             let assistant = if run.tools.is_empty() {
                 run.assistant_message.clone().ok_or(ContextTooLarge)?
             } else {
-                let mut context = run.tool_context();
+                let mut context = crate::provider::history_tool_block(run);
                 if let Some(answer) = &run.assistant_message {
                     context.push_str("\nFinal answer (untrusted data):\n");
                     context.push_str(answer);

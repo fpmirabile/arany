@@ -125,8 +125,7 @@ fn semantic_input(stream: &mut std::net::TcpStream) -> serde_json::Value {
     );
     let wire: serde_json::Value = serde_json::from_slice(&body).expect("Responses request");
     assert_eq!(wire["model"], "model-1");
-    serde_json::from_str(wire["input"].as_str().expect("semantic input text"))
-        .expect("semantic input")
+    crate::semantic::input(&wire)
 }
 
 // The provider check consumes three requests: finish, delegate and summary.

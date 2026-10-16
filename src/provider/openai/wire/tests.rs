@@ -1,345 +1,146 @@
 use super::*;
-use crate::provider::{AgentPhase, ChildResult, CompactionItem, HistoryTurn, UnansweredStatus};
-use crate::session::{AgentRunId, RunId, SessionId};
+use crate::provider::test_support::{
+    catalog, goal_plan_contract, observed_step, primary_request, read_only_request,
+    researcher_request, tool_context,
+};
+use crate::provider::{
+    AgentPhase, CompactionItem, Delegate, Finish, HistoryTurn, UnansweredStatus, render,
+};
+use crate::session::{CollaborationPolicy, RunId, SessionId};
 
-fn run_request() -> ProviderRequest {
-    ProviderRequest {
-        run_id: RunId::new(),
-        agent_run_id: AgentRunId::new(),
-        phase: AgentPhase::RootSynthesis,
-        collaboration: crate::session::CollaborationPolicy::Auto {
-            max_active_children: 3,
-        },
-        model: "gpt-5.4".into(),
-        instructions: Some("workspace guidance canary".into()),
-        objective: "objective canary".into(),
-        images: Vec::new(),
-        includes: vec!["include canary".into()],
-        history: vec![HistoryTurn {
-            user: "previous user canary".into(),
-            assistant: "previous assistant canary".into(),
-        }],
-        context_summary: Some("derived summary canary".into()),
-        goal_budget: None,
-        goal_plan_contract: None,
-        goal_context_facts: None,
-        child_results: vec![ChildResult {
-            objective: "child objective canary".into(),
-            summary: "child summary canary".into(),
-            result: "child result canary".into(),
-        }],
-        steering_notes: Vec::new(),
-        max_output_tokens: 4096,
-        tools: None,
+const KEY: &str = "synthetic-key";
+const MODEL: &str = "gpt-5.4";
+
+fn run_body_for(request: &ProviderRequest, effort: Option<Effort>) -> Value {
+    let conversation = render::conversation(request).unwrap();
+    match effort {
+        Some(effort) => run_body_with_effort(request, &conversation, effort),
+        None => run_body(request, &conversation),
     }
+    .unwrap()
 }
 
-fn goal_plan_contract() -> crate::session::GoalPlanContract {
-    crate::session::GoalPlanContract {
-        mission: "Verify the requested Workspace update".into(),
-        paths: vec!["src".into()],
-        commands: vec!["bash".into()],
-        resource_class: crate::tools::ToolResourceClass::Default,
-        command_timeout_ms: None,
-        skills: vec![crate::session::GoalSkillBinding {
-            name: "review".into(),
-            resource: Some("references/checklist.md".into()),
-        }],
-        mcp_tools: vec![crate::session::GoalMcpTool {
-            server: "local".into(),
-            tool: "inspect".into(),
-        }],
-        success_criterion: crate::session::GoalSuccessCriterion::WorkspaceFileContent {
-            path: "src/main.rs".into(),
-            content: "verified\n".into(),
-        },
-        budget: crate::session::GoalBudget::default(),
-    }
+fn body(request: &ProviderRequest) -> Value {
+    run_body_for(request, None)
 }
 
-#[test]
-fn first_effect_requires_a_plan_and_bounded_read_only_prelude_is_available() {
-    let mut request = run_request();
-    request.collaboration = crate::session::CollaborationPolicy::Single;
-    request.goal_budget = Some(crate::session::GoalBudget::default());
-    request.tools = Some(crate::tools::ToolContext {
-        catalog: json!({
-            "write": true,
-            "commands": [{"name":"bash"}],
-            "skills": [{"name":"sample"}],
-            "mcp_servers": [{"name":"local"}]
-        })
-        .to_string(),
-        history_summary: None,
-        observations: Vec::new(),
-    });
-    for phase in [AgentPhase::RootPlan, AgentPhase::RootSynthesis] {
-        request.phase = phase;
-        let body = run_body_with_effort(&request, Effort::Low);
-        assert!(
-            body["instructions"]
-                .as_str()
-                .unwrap()
-                .contains("MCP catalog listing is the only process-backed prelude")
-        );
-        let functions = body["tools"].as_array().unwrap();
-        assert!(
-            functions
-                .iter()
-                .any(|function| function["name"] == "arany_mcp_list")
-        );
-        assert!(
-            functions
-                .iter()
-                .any(|function| function["name"] == "arany_mcp_call")
-        );
-        for function in functions {
-            if !function["parameters"]["properties"]["operation"].is_object() {
-                continue;
-            }
-            let name = function["name"].as_str().unwrap();
-            let required = function["parameters"]["required"].as_array().unwrap();
-            let prelude = matches!(
-                name,
-                "arany_list" | "arany_read" | "arany_search" | "arany_skill" | "arany_mcp_list"
-            );
-            assert!(
-                required.iter().any(|field| field == "plan_contract"),
-                "{name}"
-            );
-            let contract = &function["parameters"]["properties"]["plan_contract"];
-            let contract = if prelude {
-                assert!(
-                    contract["anyOf"]
-                        .as_array()
-                        .unwrap()
-                        .contains(&json!({"type":"null"}))
-                );
-                &contract["anyOf"][0]
-            } else {
-                assert_eq!(contract["type"], "object");
-                contract
-            };
-            assert!(
-                contract["required"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!("skills"))
-            );
-            let skill = &contract["properties"]["skills"]["items"];
-            assert_eq!(skill["required"], json!(["name", "resource"]));
-            let eligible_calls = contract["properties"]["success_criterion"]["anyOf"][0]
-                ["properties"]["call"]["anyOf"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|call| {
-                    call["properties"]["operation"]["enum"][0]
-                        .as_str()
-                        .unwrap()
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(
-                eligible_calls,
-                vec!["mkdir", "write", "edit", "command", "skill", "mcp_call"]
-            );
-        }
-    }
-    request.phase = AgentPhase::RootSynthesis;
-    request.goal_plan_contract = Some(goal_plan_contract());
-    let continued = run_body_with_effort(&request, Effort::Low);
-    assert!(
-        continued["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|function| !function["parameters"]["required"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|field| field == "plan_contract"))
-    );
+fn scope<'a>(request: &'a ProviderRequest) -> RunScope<'a> {
+    RunScope::new(request, &render::conversation(request).unwrap(), KEY)
 }
 
-#[test]
-fn structured_and_native_tool_outcomes_preserve_the_sibling_goal_contract() {
-    let call = crate::tools::ToolCall::Write {
-        path: "src/new.rs".into(),
-        expected_digest: None,
-        content: "verified\n".into(),
-    };
-    let contract = goal_plan_contract();
-    let text = json!({
-        "outcome": {
-            "type": "tool",
-            "call": call.clone(),
-            "plan_contract": contract.clone()
-        }
+fn decode(request: &ProviderRequest, fixture: &Value) -> Result<ProviderResponse, ProviderError> {
+    decode_run(&serde_json::to_vec(fixture).unwrap(), &scope(request))
+}
+
+fn decode_streamed(
+    request: &ProviderRequest,
+    fixture: &Value,
+) -> Result<ProviderResponse, ResponseError> {
+    let event = json!({"type": "response.completed", "response": fixture});
+    decode_streamed_run(&serde_json::to_vec(&event).unwrap(), &scope(request))
+}
+
+fn response(status: &str, output: Value) -> Value {
+    json!({
+        "id": "resp_example",
+        "status": status,
+        "model": MODEL,
+        "output": output,
+        "usage": {"input_tokens": 12, "output_tokens": 8}
     })
-    .to_string();
-    let decoded = decode_run(
-        &serde_json::to_vec(&response("completed", json!([message(&text)]))).unwrap(),
-        "gpt-5.4",
-    )
-    .unwrap();
-    assert!(matches!(
-        decoded.outcome,
-        ProviderOutcome::Tool {
-            plan_contract: Some(_),
-            ..
-        }
-    ));
-
-    let mut arguments = serde_json::to_value(call).unwrap();
-    let operation = arguments
-        .as_object_mut()
-        .unwrap()
-        .remove("operation")
-        .unwrap();
-    arguments["plan_contract"] = serde_json::to_value(contract).unwrap();
-    let decoded = decode_tool_run(
-        &serde_json::to_vec(&response(
-            "completed",
-            json!([function_call(
-                &format!("arany_{}", operation.as_str().unwrap()),
-                &arguments
-            )]),
-        ))
-        .unwrap(),
-        "gpt-5.4",
-    )
-    .unwrap();
-    assert!(matches!(
-        decoded.outcome,
-        ProviderOutcome::Tool {
-            plan_contract: Some(_),
-            ..
-        }
-    ));
-
-    let prelude = crate::tools::ToolCall::Read {
-        path: "src/main.rs".into(),
-        offset: 0,
-        limit: 4096,
-    };
-    let text = json!({
-        "outcome": {
-            "type": "tool",
-            "call": prelude.clone(),
-            "plan_contract": null
-        }
-    })
-    .to_string();
-    let decoded = decode_run(
-        &serde_json::to_vec(&response("completed", json!([message(&text)]))).unwrap(),
-        "gpt-5.4",
-    )
-    .unwrap();
-    assert!(matches!(
-        decoded.outcome,
-        ProviderOutcome::Tool {
-            plan_contract: None,
-            ..
-        }
-    ));
-
-    let mut arguments = serde_json::to_value(prelude).unwrap();
-    let operation = arguments
-        .as_object_mut()
-        .unwrap()
-        .remove("operation")
-        .unwrap();
-    arguments["plan_contract"] = Value::Null;
-    let decoded = decode_tool_run(
-        &serde_json::to_vec(&response(
-            "completed",
-            json!([function_call(
-                &format!("arany_{}", operation.as_str().unwrap()),
-                &arguments
-            )]),
-        ))
-        .unwrap(),
-        "gpt-5.4",
-    )
-    .unwrap();
-    assert!(matches!(
-        decoded.outcome,
-        ProviderOutcome::Tool {
-            plan_contract: None,
-            ..
-        }
-    ));
 }
 
-#[test]
-fn run_instructions_join_without_an_empty_plan_contract_part() {
-    let request = run_request();
-    let body = run_body(&request);
-    assert_eq!(
-        body["instructions"],
-        format!(
-            "{} {}",
-            crate::provider::prompts::READ_ONLY_INSTRUCTIONS,
-            crate::provider::prompts::COLLABORATION_INSTRUCTIONS
-        )
-    );
+fn message(text: &str) -> Value {
+    json!({"type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": text}]})
+}
+
+fn function_call(name: &str, arguments: &Value) -> Value {
+    function_call_with("call_test", "fc_test", name, arguments)
+}
+
+fn function_call_with(call_id: &str, id: &str, name: &str, arguments: &Value) -> Value {
+    json!({"type":"function_call","id":id,"call_id":call_id,"name":name,"arguments":arguments.to_string(),"status":"completed"})
+}
+
+fn reasoning() -> Value {
+    json!({"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "CIPHERTEXT=="})
+}
+
+fn finish_text() -> &'static str {
+    r#"{"outcome":{"type":"finish","summary":"done","result":"answer"}}"#
+}
+
+fn read_arguments() -> Value {
+    json!({"path": "README.md", "offset": 0, "limit": 4096, "plan_contract": null})
+}
+
+fn function_names(body: &Value) -> Vec<String> {
+    body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|function| function["name"].as_str().unwrap().to_owned())
+        .collect()
 }
 
 #[test]
 fn outbound_documents_pin_privacy_schema_and_scope() {
-    let request = run_request();
-    let body = run_body(&request);
-    assert_eq!(body["model"], "gpt-5.4");
-    assert!(
-        body["instructions"]
-            .as_str()
-            .unwrap()
-            .contains(crate::provider::prompts::COLLABORATION_INSTRUCTIONS)
-    );
-    assert_eq!(body["store"], false);
-    assert_eq!(body["truncation"], "disabled");
-    assert_eq!(body["max_output_tokens"], 4096);
-    assert_eq!(body["tools"], json!([]));
-    assert_eq!(body["tool_choice"], "none");
-    assert_eq!(body["text"]["format"]["type"], "json_schema");
-    assert_eq!(body["text"]["format"]["strict"], true);
-    assert_eq!(body["text"]["format"]["schema"]["type"], "object");
+    let request = read_only_request(MODEL);
+    let rendered = body(&request);
+    assert_eq!(rendered["model"], MODEL);
+    assert_eq!(rendered["store"], false);
+    assert_eq!(rendered["truncation"], "disabled");
+    assert_eq!(rendered["max_output_tokens"], 4096);
+    assert_eq!(rendered["tools"], json!([]));
+    assert_eq!(rendered["tool_choice"], "none");
+    assert!(rendered.get("include").is_none() && rendered.get("parallel_tool_calls").is_none());
+    assert_eq!(rendered["text"]["format"]["type"], "json_schema");
+    assert_eq!(rendered["text"]["format"]["strict"], true);
+    assert_eq!(rendered["text"]["format"]["schema"]["type"], "object");
     assert_eq!(
-        body["text"]["format"]["schema"]["additionalProperties"],
+        rendered["text"]["format"]["schema"]["additionalProperties"],
         false
     );
-    let input: Value = serde_json::from_str(body["input"].as_str().unwrap()).unwrap();
-    assert_eq!(input["phase"], "root_synthesis");
-    assert_eq!(input["workspace_guidance"], "workspace guidance canary");
-    assert_eq!(
-        input["history"][0]["assistant"],
-        "previous assistant canary"
-    );
-    assert_eq!(input["child_results"][0]["result"], "child result canary");
-    assert!(input.get("run_id").is_none());
-    assert!(input.get("agent_run_id").is_none());
-    assert!(body.get("previous_response_id").is_none());
-    assert!(body.get("metadata").is_none());
-    assert!(body.get("user").is_none());
-    assert!(body.get("reasoning").is_none());
-    assert!(encode_request(&body).is_ok());
+    let instructions = rendered["instructions"].as_str().unwrap();
+    assert!(instructions.starts_with(crate::provider::prompts::READ_ONLY_INSTRUCTIONS));
+    assert!(instructions.contains("Pinned collaboration policy"));
+    assert!(!instructions.contains("canary"));
+    let input = rendered["input"].as_array().unwrap();
+    assert!(input.iter().all(|item| item["role"] == "user"));
+    let text = rendered["input"].to_string();
+    for canary in [
+        "workspace guidance canary",
+        "include canary",
+        "previous user canary",
+        "previous assistant canary",
+        "derived summary canary",
+        "child result canary",
+        "objective canary",
+    ] {
+        assert!(text.contains(canary), "{canary}");
+    }
+    assert!(!text.contains("run_id") && !text.contains("agent_run_id"));
+    for absent in ["previous_response_id", "metadata", "user", "reasoning"] {
+        assert!(rendered.get(absent).is_none(), "{absent}");
+    }
+    assert!(encode_request(&rendered).is_ok());
 
     for (collaboration, planning) in [
-        (crate::session::CollaborationPolicy::Single, vec!["finish"]),
+        (CollaborationPolicy::Single, vec!["finish"]),
         (
-            crate::session::CollaborationPolicy::Auto {
+            CollaborationPolicy::Auto {
                 max_active_children: 0,
             },
             vec!["finish"],
         ),
         (
-            crate::session::CollaborationPolicy::Auto {
+            CollaborationPolicy::Auto {
                 max_active_children: 3,
             },
             vec!["finish", "delegate"],
         ),
         (
-            crate::session::CollaborationPolicy::Team {
+            CollaborationPolicy::Team {
                 max_active_children: 3,
             },
             vec!["delegate"],
@@ -349,19 +150,14 @@ fn outbound_documents_pin_privacy_schema_and_scope() {
             let mut scoped = request.clone();
             scoped.phase = phase;
             scoped.collaboration = collaboration;
-            let body = run_body(&scoped);
-            let input: Value = serde_json::from_str(body["input"].as_str().unwrap()).unwrap();
-            assert_eq!(
-                input["collaboration"],
-                serde_json::to_value(collaboration).unwrap()
-            );
-            let branches: Vec<_> =
-                body["text"]["format"]["schema"]["properties"]["outcome"]["anyOf"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|branch| branch["properties"]["type"]["enum"][0].as_str().unwrap())
-                    .collect();
+            let scoped_body = body(&scoped);
+            let branches: Vec<_> = scoped_body["text"]["format"]["schema"]["properties"]["outcome"]
+                ["anyOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|branch| branch["properties"]["type"]["enum"][0].as_str().unwrap())
+                .collect();
             assert_eq!(
                 branches,
                 if phase == AgentPhase::RootPlan {
@@ -374,167 +170,18 @@ fn outbound_documents_pin_privacy_schema_and_scope() {
     }
     let mut child = request.clone();
     child.phase = AgentPhase::ChildWork;
-    child.collaboration = crate::session::CollaborationPolicy::Single;
+    child.collaboration = CollaborationPolicy::Single;
     assert_eq!(
-        run_body(&child)["text"]["format"]["schema"]["properties"]["outcome"]["anyOf"]
+        body(&child)["text"]["format"]["schema"]["properties"]["outcome"]["anyOf"]
             .as_array()
             .unwrap()
             .len(),
         1
     );
 
-    let native_body = run_body_with_effort(&request, Effort::Xhigh);
+    let native_body = run_body_for(&request, Some(Effort::Xhigh));
     assert_eq!(native_body["reasoning"]["effort"], "xhigh");
-    assert_eq!(native_body["text"], body["text"]);
-    {
-        use crate::provider::{ImageAttachment, ImageOrigin, ProviderImage};
-        use base64::{Engine as _, engine::general_purpose::STANDARD};
-        let encoded = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
-        let png = STANDARD.decode(encoded).expect("synthetic PNG");
-        let image = ImageAttachment::from_png(&png).expect("bounded PNG container");
-        assert_eq!(image.dimensions(), (1, 1));
-        assert_eq!(image.byte_len(), png.len());
-        assert_eq!(image.base64(), encoded);
-        assert!(
-            !format!("{image:?}").contains(encoded),
-            "debug excludes image bytes"
-        );
-        let serialized = serde_json::to_value(&image).expect("image payload");
-        assert_eq!(
-            serialized,
-            json!({"media_type": "image/png", "data": encoded})
-        );
-        assert_eq!(
-            serde_json::from_value::<ImageAttachment>(serialized).unwrap(),
-            image
-        );
-        for malformed in [
-            json!({"media_type": "image/jpeg", "data": encoded}),
-            json!({"media_type": "image/png", "data": "data:image/png;base64,forged"}),
-            json!({"media_type": "image/png", "data": encoded, "url": "https://example.invalid/image"}),
-        ] {
-            assert!(
-                serde_json::from_value::<ImageAttachment>(malformed).is_err(),
-                "closed image payload"
-            );
-        }
-        for invalid in [
-            png[..png.len() - 1].to_vec(),
-            {
-                let mut corrupted = png.clone();
-                corrupted[40] ^= 1;
-                corrupted
-            },
-            {
-                let mut trailing = png.clone();
-                trailing.push(0);
-                trailing
-            },
-            vec![0; crate::provider::MAX_IMAGE_BYTES + 1],
-            b"/tmp/screenshot.png".to_vec(),
-        ] {
-            assert!(
-                ImageAttachment::from_png(&invalid).is_err(),
-                "complete bounded image admission"
-            );
-        }
-        let chunk = |kind: &[u8; 4], data: &[u8]| {
-            let mut output = (data.len() as u32).to_be_bytes().to_vec();
-            output.extend(kind);
-            output.extend(data);
-            let mut crc = u32::MAX;
-            for byte in kind.iter().chain(data) {
-                crc ^= u32::from(*byte);
-                for _ in 0..8 {
-                    crc = if crc & 1 != 0 {
-                        (crc >> 1) ^ 0xedb8_8320
-                    } else {
-                        crc >> 1
-                    };
-                }
-            }
-            output.extend((crc ^ u32::MAX).to_be_bytes());
-            output
-        };
-        for (width, height, valid) in [
-            (0_u32, 1_u32, false),
-            (4097, 1, false),
-            (4096, 4096, false),
-            (2048, 2048, true),
-        ] {
-            let mut header = png[16..29].to_vec();
-            header[..4].copy_from_slice(&width.to_be_bytes());
-            header[4..8].copy_from_slice(&height.to_be_bytes());
-            let mut candidate = png[..8].to_vec();
-            candidate.extend(chunk(b"IHDR", &header));
-            candidate.extend(&png[33..]);
-            assert_eq!(
-                ImageAttachment::from_png(&candidate).is_ok(),
-                valid,
-                "dimension/pixel admission, not raster decoding"
-            );
-        }
-        let mut animated = png[..33].to_vec();
-        animated.extend(chunk(b"acTL", &[0, 0, 0, 1, 0, 0, 0, 0]));
-        animated.extend(&png[33..]);
-        assert!(
-            ImageAttachment::from_png(&animated).is_err(),
-            "animation is not admitted"
-        );
-        let mut capped = png[..33].to_vec();
-        capped.extend(chunk(
-            b"tEXt",
-            &vec![b'x'; crate::provider::MAX_IMAGE_BYTES - png.len() - 12],
-        ));
-        capped.extend(&png[33..]);
-        assert_eq!(capped.len(), crate::provider::MAX_IMAGE_BYTES);
-        let capped = ImageAttachment::from_png(&capped).expect("exact raw-image cap");
-        assert_eq!(
-            capped.base64().len(),
-            crate::provider::MAX_IMAGE_BYTES.div_ceil(3) * 4
-        );
-        let mut selected = request.clone();
-        selected.images = vec![
-            ProviderImage {
-                origin: ImageOrigin::History { turn_index: 0 },
-                image: image.clone(),
-            },
-            ProviderImage {
-                origin: ImageOrigin::Objective,
-                image,
-            },
-        ];
-        let multimodal = run_body_with_effort(&selected, Effort::Low);
-        assert_eq!(
-            multimodal["input"][0]["role"], "user",
-            "images must be actual content, not JSON text"
-        );
-        assert_eq!(
-            multimodal["input"][0]["content"][0],
-            json!({"type": "input_text", "text": "Image 1 (history turn 1): PNG 1x1"})
-        );
-        assert_eq!(
-            multimodal["input"][0]["content"][1],
-            json!({"type": "input_image", "image_url": format!("data:image/png;base64,{encoded}"), "detail": "auto"})
-        );
-        assert_eq!(
-            multimodal["input"][0]["content"][2],
-            json!({"type": "input_text", "text": "Image 2 (objective): PNG 1x1"})
-        );
-        assert_eq!(
-            multimodal["input"][0]["content"][3],
-            multimodal["input"][0]["content"][1]
-        );
-        assert_eq!(
-            multimodal["input"][0]["content"][4],
-            json!({"type": "input_text", "text": body["input"]})
-        );
-        assert_eq!(multimodal["store"], false);
-        assert_eq!(multimodal["max_output_tokens"], 4096);
-        assert_eq!(multimodal["reasoning"]["effort"], "low");
-        assert_eq!(multimodal["text"], body["text"]);
-        assert!(encode_request(&multimodal).is_ok());
-    }
+    assert_eq!(native_body["text"], rendered["text"]);
     for (model, effort) in [
         ("gpt-6-astra", Effort::Low),
         ("gpt-6.1-sol", Effort::Max),
@@ -542,10 +189,10 @@ fn outbound_documents_pin_privacy_schema_and_scope() {
     ] {
         let mut selected = request.clone();
         selected.model = model.into();
-        let selected_body = run_body_with_effort(&selected, effort);
+        let selected_body = run_body_for(&selected, Some(effort));
         assert_eq!(selected_body["model"], model);
         assert_eq!(selected_body["reasoning"]["effort"], effort.as_str());
-        assert_eq!(selected_body["text"]["format"], body["text"]["format"]);
+        assert_eq!(selected_body["text"]["format"], rendered["text"]["format"]);
         assert_eq!(selected_body["max_output_tokens"], 4096);
         assert!(encode_request(&selected_body).is_ok());
     }
@@ -580,113 +227,406 @@ fn outbound_documents_pin_privacy_schema_and_scope() {
     assert_eq!(native_compact["reasoning"]["effort"], "low");
 }
 
-fn response(status: &str, output: Value) -> Value {
-    json!({
-        "id": "resp_example",
-        "status": status,
-        "model": "gpt-5.4",
-        "output": output,
-        "usage": {"input_tokens": 12, "output_tokens": 8}
-    })
+#[test]
+fn image_attachments_admit_only_bounded_png_and_render_as_labelled_content() {
+    use crate::provider::{ImageAttachment, ImageOrigin, ProviderImage};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let encoded = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+    let png = STANDARD.decode(encoded).expect("synthetic PNG");
+    let image = ImageAttachment::from_png(&png).expect("bounded PNG container");
+    assert_eq!(image.dimensions(), (1, 1));
+    assert_eq!(image.byte_len(), png.len());
+    assert_eq!(image.base64(), encoded);
+    assert!(
+        !format!("{image:?}").contains(encoded),
+        "debug excludes image bytes"
+    );
+    let serialized = serde_json::to_value(&image).expect("image payload");
+    assert_eq!(
+        serialized,
+        json!({"media_type": "image/png", "data": encoded})
+    );
+    assert_eq!(
+        serde_json::from_value::<ImageAttachment>(serialized).unwrap(),
+        image
+    );
+    for malformed in [
+        json!({"media_type": "image/jpeg", "data": encoded}),
+        json!({"media_type": "image/png", "data": "data:image/png;base64,forged"}),
+        json!({"media_type": "image/png", "data": encoded, "url": "https://example.invalid/image"}),
+    ] {
+        assert!(
+            serde_json::from_value::<ImageAttachment>(malformed).is_err(),
+            "closed image payload"
+        );
+    }
+    for invalid in [
+        png[..png.len() - 1].to_vec(),
+        {
+            let mut corrupted = png.clone();
+            corrupted[40] ^= 1;
+            corrupted
+        },
+        {
+            let mut trailing = png.clone();
+            trailing.push(0);
+            trailing
+        },
+        vec![0; crate::provider::MAX_IMAGE_BYTES + 1],
+        b"/tmp/screenshot.png".to_vec(),
+    ] {
+        assert!(
+            ImageAttachment::from_png(&invalid).is_err(),
+            "complete bounded image admission"
+        );
+    }
+    let chunk = |kind: &[u8; 4], data: &[u8]| {
+        let mut output = (data.len() as u32).to_be_bytes().to_vec();
+        output.extend(kind);
+        output.extend(data);
+        let mut crc = u32::MAX;
+        for byte in kind.iter().chain(data) {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xedb8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        output.extend((crc ^ u32::MAX).to_be_bytes());
+        output
+    };
+    for (width, height, valid) in [
+        (0_u32, 1_u32, false),
+        (4097, 1, false),
+        (4096, 4096, false),
+        (2048, 2048, true),
+    ] {
+        let mut header = png[16..29].to_vec();
+        header[..4].copy_from_slice(&width.to_be_bytes());
+        header[4..8].copy_from_slice(&height.to_be_bytes());
+        let mut candidate = png[..8].to_vec();
+        candidate.extend(chunk(b"IHDR", &header));
+        candidate.extend(&png[33..]);
+        assert_eq!(
+            ImageAttachment::from_png(&candidate).is_ok(),
+            valid,
+            "dimension/pixel admission, not raster decoding"
+        );
+    }
+    let mut animated = png[..33].to_vec();
+    animated.extend(chunk(b"acTL", &[0, 0, 0, 1, 0, 0, 0, 0]));
+    animated.extend(&png[33..]);
+    assert!(
+        ImageAttachment::from_png(&animated).is_err(),
+        "animation is not admitted"
+    );
+    let mut capped = png[..33].to_vec();
+    capped.extend(chunk(
+        b"tEXt",
+        &vec![b'x'; crate::provider::MAX_IMAGE_BYTES - png.len() - 12],
+    ));
+    capped.extend(&png[33..]);
+    assert_eq!(capped.len(), crate::provider::MAX_IMAGE_BYTES);
+    let capped = ImageAttachment::from_png(&capped).expect("exact raw-image cap");
+    assert_eq!(
+        capped.base64().len(),
+        crate::provider::MAX_IMAGE_BYTES.div_ceil(3) * 4
+    );
+
+    let mut selected = read_only_request(MODEL);
+    selected.input.images = vec![
+        ProviderImage {
+            origin: ImageOrigin::History { turn_index: 0 },
+            image: image.clone(),
+        },
+        ProviderImage {
+            origin: ImageOrigin::Objective,
+            image,
+        },
+    ];
+    let multimodal = run_body_for(&selected, Some(Effort::Low));
+    let parts = multimodal["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["content"].as_array())
+        .find(|parts| {
+            parts
+                .iter()
+                .any(|part| part["text"] == "Image 1 (history turn 1): PNG 1x1")
+        })
+        .expect("image message");
+    let at = parts
+        .iter()
+        .position(|part| part["text"] == "Image 1 (history turn 1): PNG 1x1")
+        .unwrap();
+    assert_eq!(
+        parts[at + 1],
+        json!({"type": "input_image", "image_url": format!("data:image/png;base64,{encoded}"), "detail": "auto"})
+    );
+    assert_eq!(
+        parts[at + 2],
+        json!({"type": "input_text", "text": "Image 2 (objective): PNG 1x1"})
+    );
+    assert_eq!(parts[at + 3], parts[at + 1]);
+    assert_eq!(multimodal["store"], false);
+    assert_eq!(multimodal["reasoning"]["effort"], "low");
+    assert!(encode_request(&multimodal).is_ok());
 }
 
-fn message(text: &str) -> Value {
-    json!({"type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": text}]})
+#[test]
+fn outbound_requests_encrypted_reasoning_include_and_replays_items_adjacent_and_unchanged() {
+    let mut request = primary_request(MODEL);
+    let call = function_call("arany_read", &read_arguments());
+    let reply = response("completed", json!([reasoning(), call.clone()]));
+    let step = observed_step(decode(&request, &reply).unwrap(), "{\"text\":\"ok\"}");
+    request.input.tools.as_mut().unwrap().steps.push(step);
+    let rendered = body(&request);
+    assert_eq!(rendered["include"], json!(["reasoning.encrypted_content"]));
+    assert_eq!(rendered["store"], false);
+    assert_eq!(rendered["tool_choice"], "required");
+    assert_eq!(rendered["parallel_tool_calls"], false);
+    let input = rendered["input"].as_array().unwrap();
+    let at = input
+        .iter()
+        .position(|item| item["type"] == "reasoning")
+        .expect("reasoning item replays");
+    assert_eq!(input[at], reasoning(), "ciphertext survives untouched");
+    assert_eq!(
+        input[at + 1],
+        call,
+        "the call sits right behind its reasoning"
+    );
+    assert_eq!(input[at + 2]["type"], "function_call_output");
+    assert_eq!(input[at + 2]["call_id"], "call_test");
+    let encoded = String::from_utf8(encode_request(&rendered).unwrap()).unwrap();
+    let reasoning_text = serde_json::to_string(&reasoning()).unwrap();
+    let call_text = serde_json::to_string(&call).unwrap();
+    assert!(
+        encoded.contains(&format!("{reasoning_text},{call_text}")),
+        "the raw items are adjacent in the request bytes"
+    );
+    assert_eq!(rendered["tools"].as_array().unwrap().len(), 14);
+}
+
+#[test]
+fn outbound_input_items_replay_turns_and_function_outputs_once() {
+    let mut request = primary_request(MODEL);
+    let reply = response(
+        "completed",
+        json!([function_call("arany_read", &read_arguments())]),
+    );
+    let step = observed_step(
+        decode(&request, &reply).unwrap(),
+        "{\"text\":\"RESULT_CANARY\"}",
+    );
+    request.input.tools.as_mut().unwrap().steps.push(step);
+    let rendered = body(&request);
+    let input = rendered["input"].as_array().unwrap();
+    assert_eq!(
+        input.len(),
+        4,
+        "current message, call, output, trailing facts"
+    );
+    assert_eq!(input[0]["role"], "user");
+    assert_eq!(input[1]["type"], "function_call");
+    assert_eq!(input[2]["type"], "function_call_output");
+    let output: Value = serde_json::from_str(input[2]["output"].as_str().unwrap()).unwrap();
+    assert!(
+        output.get("call").is_none(),
+        "the replayed turn carries the call"
+    );
+    assert_eq!(output["workspace_effect"], "none");
+    assert_eq!(input[3]["role"], "user");
+    assert!(
+        input[3]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("goal_context_facts")
+    );
+    let encoded = encode_request(&rendered).unwrap();
+    assert_eq!(
+        encoded
+            .windows(b"RESULT_CANARY".len())
+            .filter(|part| *part == b"RESULT_CANARY")
+            .count(),
+        1,
+        "each observation appears once"
+    );
+    assert!(
+        !rendered["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("RESULT_CANARY")
+    );
+}
+
+#[test]
+fn delegate_function_call_is_answered_by_a_fixed_output_before_the_child_results() {
+    let mut request = primary_request(MODEL);
+    request.collaboration = CollaborationPolicy::Auto {
+        max_active_children: 2,
+    };
+    let reply = response(
+        "completed",
+        json!([function_call(
+            "arany_delegate",
+            &json!({"children": ["inspect"]})
+        )]),
+    );
+    let delegated = decode(&request, &reply).unwrap();
+    assert!(matches!(delegated.outcome, ProviderOutcome::Delegate(_)));
+    request.phase = AgentPhase::RootSynthesis;
+    request.input.child_results = vec![crate::provider::ChildResult {
+        objective: "inspect".into(),
+        summary: "s".into(),
+        result: "child canary".into(),
+    }];
+    request
+        .input
+        .tools
+        .as_mut()
+        .unwrap()
+        .steps
+        .push(crate::tools::ToolStep {
+            turn: delegated.turn,
+            requests: Vec::new(),
+            observations: Vec::new(),
+            facts: None,
+            steering_notes: Vec::new(),
+            calls_remaining: None,
+        });
+    let input = body(&request)["input"].as_array().unwrap().clone();
+    assert_eq!(input[1]["type"], "function_call");
+    assert_eq!(
+        input[2],
+        json!({"type": "function_call_output", "call_id": "call_test", "output": DELEGATED_OUTPUT})
+    );
+    assert!(
+        input[3]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("child canary")
+    );
+    let wrong_route = crate::provider::ProviderTurn::scripted();
+    let mut foreign = request.clone();
+    foreign.input.tools.as_mut().unwrap().steps[0].turn = wrong_route;
+    let conversation = render::conversation(&foreign).unwrap();
+    assert!(
+        run_body(&foreign, &conversation).is_err(),
+        "a turn replays only on its own route"
+    );
+}
+
+#[test]
+fn reconcile_keeps_raw_output_items_and_checks_the_typed_view() {
+    let call = function_call("arany_read", &read_arguments());
+    let done: Vec<(WireItem, Value)> = [reasoning(), call.clone()]
+        .into_iter()
+        .map(|raw| (serde_json::from_value(raw.clone()).unwrap(), raw))
+        .collect();
+    let mut completed =
+        json!({"type": "response.completed", "response": response("completed", json!([]))});
+    completed["response"]["id"] = json!("resp_1");
+    let bytes = serde_json::to_vec(&completed).unwrap();
+    let reconciled = reconcile_streamed_output(&bytes, "resp_1", done.clone()).unwrap();
+    let value: Value = serde_json::from_slice(&reconciled).unwrap();
+    assert_eq!(
+        value["response"]["output"],
+        json!([reasoning(), call]),
+        "ciphertext is not dropped"
+    );
+    assert!(matches!(
+        reconcile_streamed_output(&bytes, "resp_2", done.clone()),
+        Err(ResponseError::Identifier)
+    ));
+    let mut explicit = completed.clone();
+    explicit["response"]["output"] = json!([reasoning(), call.clone()]);
+    assert!(
+        reconcile_streamed_output(
+            &serde_json::to_vec(&explicit).unwrap(),
+            "resp_1",
+            done.clone()
+        )
+        .is_ok()
+    );
+    explicit["response"]["output"] = json!([reasoning()]);
+    assert!(matches!(
+        reconcile_streamed_output(&serde_json::to_vec(&explicit).unwrap(), "resp_1", done),
+        Err(ResponseError::Message)
+    ));
 }
 
 #[test]
 fn openai_usage_maps_cached_tokens() {
-    let mut finish = response(
-        "completed",
-        json!([message(
-            r#"{"outcome":{"type":"finish","summary":"done","result":"answer"}}"#
-        )]),
-    );
+    let request = read_only_request(MODEL);
+    let mut finish = response("completed", json!([message(finish_text())]));
     finish["usage"] = json!({
         "input_tokens": 12,
         "output_tokens": 8,
         "input_tokens_details": {"cached_tokens": 5}
     });
-    let cached = decode_run(&serde_json::to_vec(&finish).unwrap(), "gpt-5.4")
-        .expect("cached Responses result");
+    let cached = decode(&request, &finish).expect("cached Responses result");
     assert_eq!(cached.usage.input_tokens, Some(12));
     assert_eq!(cached.usage.cache_read_input_tokens, Some(5));
     assert_eq!(cached.usage.cache_creation_input_tokens, None);
     assert!(cached.usage.cache_consistent());
     finish["usage"] = json!({"input_tokens": 12, "output_tokens": 8});
-    let uncached = decode_run(&serde_json::to_vec(&finish).unwrap(), "gpt-5.4")
-        .expect("usage without cache details");
+    let uncached = decode(&request, &finish).expect("usage without cache details");
     assert_eq!(uncached.usage.cache_read_input_tokens, None);
 }
 
 #[test]
-fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
-    let mut request = run_request();
-    request.phase = AgentPhase::RootPlan;
-    request.tools = Some(crate::tools::ToolContext {
-        catalog: "UNTRUSTED_TOOL_CATALOG_CANARY".into(),
-        history_summary: None,
-        observations: Vec::new(),
-    });
-    let body = run_body_with_effort(&request, Effort::Low);
-    assert!(
-        body["instructions"]
-            .as_str()
-            .unwrap()
-            .contains(crate::provider::prompts::COLLABORATION_INSTRUCTIONS)
-    );
-    let input: Value = serde_json::from_str(body["input"][0]["content"].as_str().unwrap()).unwrap();
-    assert_eq!(input["tools"]["catalog"], "UNTRUSTED_TOOL_CATALOG_CANARY");
-    assert!(!body["instructions"].as_str().unwrap().contains("CANARY"));
-    assert_eq!(body["tool_choice"], "required");
-    assert_eq!(body["parallel_tool_calls"], false);
-    assert_eq!(body["store"], false);
-    assert_eq!(body["max_output_tokens"], 4096);
-    let names = |body: &Value| {
-        body["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|function| function["name"].as_str().unwrap().to_owned())
-            .collect::<Vec<_>>()
-    };
+fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
+    let mut request = primary_request(MODEL);
+    request.input.tools = Some(tool_context(
+        json!({"write":false,"commands":[],"skills":[],"mcp_servers":[]}),
+    ));
+    let rendered = run_body_for(&request, Some(Effort::Low));
+    assert_eq!(rendered["tool_choice"], "required");
+    assert_eq!(rendered["parallel_tool_calls"], false);
+    assert_eq!(rendered["store"], false);
+    assert_eq!(rendered["max_output_tokens"], 4096);
+    assert!(rendered.get("text").is_none());
     assert_eq!(
-        names(&body),
-        [
-            "arany_finish",
-            "arany_delegate",
-            "arany_list",
-            "arany_read",
-            "arany_search"
-        ]
+        function_names(&rendered),
+        ["arany_list", "arany_read", "arany_search", "arany_finish"]
     );
-    assert!(body.get("text").is_none());
     assert!(
-        body["tools"]
+        rendered["tools"]
             .as_array()
             .unwrap()
             .iter()
             .all(|function| function["strict"] == true)
     );
-    request.phase = AgentPhase::RootSynthesis;
-    let synthesis = run_body_with_effort(&request, Effort::Low);
+    let instructions = rendered["instructions"].as_str().unwrap();
+    assert!(instructions.starts_with(crate::provider::prompts::PRIMARY_INSTRUCTIONS));
+    assert!(!instructions.contains("canary"));
+    request.collaboration = CollaborationPolicy::Auto {
+        max_active_children: 2,
+    };
     assert_eq!(
-        names(&synthesis),
-        ["arany_finish", "arany_list", "arany_read", "arany_search"]
+        function_names(&body(&request)),
+        [
+            "arany_list",
+            "arany_read",
+            "arany_search",
+            "arany_finish",
+            "arany_delegate"
+        ]
     );
-    assert!(
-        !synthesis["instructions"]
-            .as_str()
-            .unwrap()
-            .contains("synthesis must Finish"),
-        "primary synthesis must be able to read and edit before finishing"
+    request.phase = AgentPhase::RootSynthesis;
+    assert_eq!(
+        function_names(&body(&request)),
+        ["arany_list", "arany_read", "arany_search", "arany_finish"],
+        "only the outcome functions follow the phase"
     );
-    request.goal_budget = Some(crate::session::GoalBudget::default());
-    request.goal_plan_contract = Some(goal_plan_contract());
-    let rows: Vec<Value> = serde_json::from_str(include_str!(
-        "../../../../tests/fixtures/tool-outcomes.json"
-    ))
-    .unwrap();
+
+    let rows: Vec<Value> =
+        serde_json::from_str(include_str!("../../../../tests/fixtures/tool-calls.json")).unwrap();
     assert_eq!(rows.len(), 10);
     for (catalog, accepted) in [
         (
@@ -706,17 +646,18 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
             3,
         ),
     ] {
-        request.tools.as_mut().unwrap().catalog = catalog.to_string();
-        let body = run_body_with_effort(&request, Effort::Low);
+        request.input.tools = Some(tool_context(catalog));
+        let rendered = body(&request);
         let valid = |row: &Value| {
-            let mut arguments = row["outcome"]["call"].clone();
+            let mut arguments = row.clone();
             let operation = arguments
                 .as_object_mut()
                 .unwrap()
                 .remove("operation")
                 .unwrap();
+            arguments["plan_contract"] = Value::Null;
             let name = format!("arany_{}", operation.as_str().unwrap());
-            body["tools"]
+            rendered["tools"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -742,7 +683,7 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
                     7 => "name",
                     _ => "server",
                 };
-                unnamed["outcome"]["call"][field] = json!("");
+                unnamed[field] = json!("");
                 assert!(
                     !valid(&unnamed),
                     "unconfigured/empty Tool name must not be offered"
@@ -750,243 +691,69 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
             }
         }
     }
+}
 
-    for (index, disposition, effect) in [
-        (1, crate::tools::ToolDisposition::Succeeded, "none"),
-        (5, crate::tools::ToolDisposition::Succeeded, "applied"),
-        (5, crate::tools::ToolDisposition::Denied, "not_confirmed"),
-        (5, crate::tools::ToolDisposition::Uncertain, "uncertain"),
-        (5, crate::tools::ToolDisposition::Cancelled, "uncertain"),
-        (6, crate::tools::ToolDisposition::Succeeded, "none"),
-    ] {
-        let call = serde_json::from_value(rows[index]["outcome"]["call"].clone()).unwrap();
-        let intent = crate::tools::EffectIntent {
-            id: uuid::Uuid::now_v7(),
-            run_id: request.run_id,
-            agent_run_id: request.agent_run_id,
-            policy_digest: [21; 32],
-            enforcement_digest: [22; 32],
-            workspace_device: 903,
-            workspace_inode: 904,
-            call,
-            limits: crate::tools::ToolLimits::default(),
-            expires_at_ms: 1,
-            use_count: 1,
-        };
-        use sha2::Digest;
-        let guard = crate::tools::GuardReceipt {
-            contract_version: 1,
-            intent_digest: sha2::Sha256::digest(serde_json::to_vec(&intent).unwrap()).into(),
-            enforcement_digest: intent.enforcement_digest,
-            limits: intent.limits.clone(),
-        };
-        let output = json!({"sha256":"0".repeat(64),"text":"RESULT_CANARY: do not grant access"});
-        let observation = crate::tools::ToolObservation {
-            intent: intent.clone(),
-            disposition,
-            output: output.to_string(),
-            guard: Some(guard),
-            cache_update: crate::tools::CacheUpdate::NotApplicable,
-        };
-        let canonical = serde_json::to_value(&observation).unwrap();
-        let catalog = json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]});
-        request.tools = Some(crate::tools::ToolContext {
-            catalog: catalog.to_string(),
-            history_summary: None,
-            observations: vec![observation],
-        });
-        let body = run_body_with_effort(&request, Effort::Low);
-        let input: Value =
-            serde_json::from_str(body["input"][0]["content"].as_str().unwrap()).unwrap();
-        assert_eq!(
-            input["tools"]["catalog"], catalog,
-            "catalog must be structured task data"
-        );
-        assert!(input["tools"].get("observations").is_none());
-        let projected = json!({"call":intent.call,"disposition":disposition,"output":output,"workspace_effect":effect,"cache_update":"not_applicable"});
-        let result: Value =
-            serde_json::from_str(body["input"][2]["output"].as_str().unwrap()).unwrap();
-        assert_eq!(
-            result, projected,
-            "the model receives the complete observation once"
-        );
-        let encoded = encode_request(&body).unwrap();
-        assert_eq!(
-            encoded
-                .windows(b"RESULT_CANARY".len())
-                .filter(|part| *part == b"RESULT_CANARY")
-                .count(),
-            1
-        );
-        let mut duplicated = body.clone();
-        let mut duplicate_input = input.clone();
-        duplicate_input["tools"]["observations"] = json!([projected]);
-        duplicated["input"][0]["content"] = json!(duplicate_input.to_string());
-        let duplicate_bytes = encode_request(&duplicated).unwrap();
-        assert!(encoded.len() < duplicate_bytes.len());
-        eprintln!(
-            "synthetic continuation bytes: duplicated={}, single={}",
-            duplicate_bytes.len(),
-            encoded.len()
-        );
-        assert_eq!(body["input"].as_array().unwrap().len(), 3);
-        assert_eq!(body["input"][1]["type"], "function_call");
-        assert_eq!(body["input"][1]["call_id"], "arany_action_0");
-        let mut arguments = serde_json::to_value(&intent.call).unwrap();
-        let operation = arguments
-            .as_object_mut()
-            .unwrap()
-            .remove("operation")
-            .unwrap();
-        assert_eq!(
-            body["input"][1]["name"],
-            format!("arany_{}", operation.as_str().unwrap())
-        );
-        assert_eq!(body["input"][1]["arguments"], arguments.to_string());
-        assert_eq!(
-            body["input"][2],
-            json!({"type":"function_call_output","call_id":"arany_action_0","output":projected.to_string()})
-        );
-        assert_eq!(
-            serde_json::to_value(&request.tools.as_ref().unwrap().observations[0]).unwrap(),
-            canonical,
-            "projection cannot change canonical facts"
-        );
-        assert!(
-            !body["instructions"]
-                .as_str()
-                .unwrap()
-                .contains("RESULT_CANARY")
-        );
-    }
-    let integration = crate::tools::ToolCall::ApplyChangeset {
-        source_intent_digest: [9; 32],
-        changeset: crate::tools::CommandChangeset {
-            files: vec![crate::tools::FileChange {
-                path: "src/generated.rs".into(),
-                before: None,
-                after: Some(crate::tools::FileVersion::from_bytes(
-                    b"RESULT_CANARY",
-                    false,
-                )),
-            }],
-        },
+#[test]
+fn inbound_function_calls_decode_one_native_request_or_outcome() {
+    let mut request = primary_request(MODEL);
+    request.collaboration = CollaborationPolicy::Auto {
+        max_active_children: 2,
     };
-    let mut observation = request.tools.as_ref().unwrap().observations[0].clone();
-    observation.intent.call = integration.clone();
-    observation.output = json!({"applied":1}).to_string();
-    observation.disposition = crate::tools::ToolDisposition::Succeeded;
-    observation.guard.as_mut().unwrap().intent_digest = observation.intent.digest();
-    request.tools.as_mut().unwrap().observations = vec![observation.clone()];
-    let body = run_body_with_effort(&request, Effort::Low);
-    let data: Value = serde_json::from_str(body["input"][1]["content"].as_str().unwrap()).unwrap();
-    assert_eq!(data["engine_integration"]["workspace_effect"], "applied");
-    let mut projected_integration = json!(integration);
-    projected_integration
-        .as_object_mut()
-        .unwrap()
-        .remove("source_intent_digest");
-    assert_eq!(data["engine_integration"]["call"], projected_integration);
-    assert!(
-        data["engine_integration"]["call"]
-            .get("source_intent_digest")
-            .is_none()
-    );
-    assert_eq!(body["input"].as_array().unwrap().len(), 2);
-    assert!(
-        body["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|function| function["name"] != "arany_apply_changeset")
-    );
-    assert_eq!(request.tools.as_ref().unwrap().observations[0], observation);
-    let text = json!({"outcome":{"type":"tool","call":integration}}).to_string();
-    let forbidden = response("completed", json!([message(&text)]));
-    assert!(decode_run(&serde_json::to_vec(&forbidden).unwrap(), "gpt-5.4").is_err());
-    let mut arguments = json!(integration);
-    arguments.as_object_mut().unwrap().remove("operation");
-    let forbidden = response(
-        "completed",
-        json!([function_call("arany_apply_changeset", &arguments)]),
-    );
-    assert!(decode_tool_run(&serde_json::to_vec(&forbidden).unwrap(), "gpt-5.4").is_err());
+    let rows: Vec<Value> =
+        serde_json::from_str(include_str!("../../../../tests/fixtures/tool-calls.json")).unwrap();
     for row in rows {
-        let mut arguments = row["outcome"]["call"].clone();
+        let mut arguments = row.clone();
         let operation = arguments
             .as_object_mut()
             .unwrap()
             .remove("operation")
             .unwrap();
+        arguments["plan_contract"] = Value::Null;
         let fixture = response(
             "completed",
-            json!([function_call(
-                &format!("arany_{}", operation.as_str().unwrap()),
-                &arguments
-            )]),
+            json!([
+                reasoning(),
+                function_call(
+                    &format!("arany_{}", operation.as_str().unwrap()),
+                    &arguments
+                )
+            ]),
         );
-        let bytes = serde_json::to_vec(&fixture).unwrap();
-        let decoded = decode_tool_run(&bytes, "gpt-5.4").unwrap();
-        assert!(
-            matches!(decoded.outcome, ProviderOutcome::Tool { call, .. } if serde_json::to_value(&call).unwrap() == row["outcome"]["call"])
-        );
-        let streamed = json!({"type":"response.completed","response":fixture});
-        assert!(matches!(
-            decode_streamed_tool_run(&serde_json::to_vec(&streamed).unwrap(), "gpt-5.4")
-                .unwrap()
-                .outcome,
-            ProviderOutcome::Tool { .. }
-        ));
+        for decoded in [
+            decode(&request, &fixture).unwrap(),
+            decode_streamed(&request, &fixture).unwrap(),
+        ] {
+            let ProviderOutcome::Tools(requests) = decoded.outcome else {
+                panic!("native Tool request");
+            };
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].id.as_str(), "call_test");
+            assert!(requests[0].plan_contract.is_none());
+            assert_eq!(serde_json::to_value(&requests[0].call).unwrap(), row);
+            assert_eq!(
+                decoded.turn.items("openai").unwrap().len(),
+                2,
+                "reasoning stays in the turn"
+            );
+        }
     }
-    let read = function_call(
-        "arany_read",
-        &json!({"path":"README.md","offset":0,"limit":4096}),
-    );
-    for output in [
-        json!([]),
-        json!([read.clone(), read.clone()]),
-        json!([read.clone(), message("ignored final answer")]),
-        json!([function_call("arany_unknown", &json!({}))]),
-        json!([function_call(
-            "arany_read",
-            &json!({"path":"README.md","offset":0,"limit":4097})
-        )]),
-        json!([function_call(
-            "arany_read",
-            &json!({"path":"../outside","offset":0,"limit":4096})
-        )]),
-    ] {
-        assert!(
-            decode_tool_run(
-                &serde_json::to_vec(&response("completed", output)).unwrap(),
-                "gpt-5.4"
-            )
-            .is_err()
-        );
-    }
-    for (field, value) in [
-        ("status", json!("in_progress")),
-        ("call_id", json!("")),
-        ("id", Value::Null),
-        (
-            "arguments",
-            json!("{\"path\":\"one\",\"path\":\"two\",\"offset\":0,\"limit\":4096}"),
+    let contract = serde_json::to_value(goal_plan_contract()).unwrap();
+    let mut with_contract =
+        json!({"path": "src/new.rs", "expected_digest": null, "content": "verified\n"});
+    with_contract["plan_contract"] = contract.clone();
+    let planned = decode(
+        &request,
+        &response(
+            "completed",
+            json!([function_call("arany_write", &with_contract)]),
         ),
-        (
-            "arguments",
-            json!("{\"operation\":\"edit\",\"path\":\"README.md\",\"offset\":0,\"limit\":4096}"),
-        ),
-    ] {
-        let mut bad = read.clone();
-        bad[field] = value;
-        assert!(
-            decode_tool_run(
-                &serde_json::to_vec(&response("completed", json!([bad]))).unwrap(),
-                "gpt-5.4"
-            )
-            .is_err()
-        );
-    }
+    )
+    .unwrap();
+    assert!(matches!(
+        planned.outcome,
+        ProviderOutcome::Tools(requests) if serde_json::to_value(requests[0].plan_contract.as_deref().unwrap()).unwrap() == contract
+    ));
+
     for (name, arguments) in [
         ("arany_finish", json!({"summary":"done","result":"applied"})),
         (
@@ -999,147 +766,222 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
         ),
     ] {
         let fixture = response("completed", json!([function_call(name, &arguments)]));
-        assert!(decode_tool_run(&serde_json::to_vec(&fixture).unwrap(), "gpt-5.4").is_ok());
-        let streamed =
-            serde_json::to_vec(&json!({"type":"response.completed","response":fixture})).unwrap();
-        assert!(decode_streamed_tool_run(&streamed, "gpt-5.4").is_ok());
+        let decoded = decode(&request, &fixture).unwrap();
+        assert!(!matches!(decoded.outcome, ProviderOutcome::Tools(_)));
+        assert!(decode_streamed(&request, &fixture).is_ok());
         assert!(
-            decode_run(&serde_json::to_vec(&fixture).unwrap(), "gpt-5.4").is_err(),
+            decode(&read_only_request(MODEL), &fixture).is_err(),
             "read-only encoding must not accept functions"
         );
     }
+    let read = function_call("arany_read", &read_arguments());
+    for (case, output) in [
+        ("no output", json!([])),
+        (
+            "two calls",
+            json!([
+                read.clone(),
+                function_call_with("call_2", "fc_2", "arany_read", &read_arguments())
+            ]),
+        ),
+        (
+            "call and message",
+            json!([read.clone(), message("ignored final answer")]),
+        ),
+        (
+            "unknown name",
+            json!([function_call("arany_unknown", &json!({}))]),
+        ),
+        (
+            "read bounds",
+            json!([function_call(
+                "arany_read",
+                &json!({"path":"README.md","offset":0,"limit":4097,"plan_contract":null})
+            )]),
+        ),
+        (
+            "path escape",
+            json!([function_call(
+                "arany_read",
+                &json!({"path":"../outside","offset":0,"limit":4096,"plan_contract":null})
+            )]),
+        ),
+        (
+            "apply_changeset",
+            json!([function_call("arany_apply_changeset", &json!({}))]),
+        ),
+        (
+            "operation injected",
+            json!([function_call(
+                "arany_read",
+                &json!({"operation":"edit","path":"README.md","offset":0,"limit":4096,"plan_contract":null})
+            )]),
+        ),
+        (
+            "duplicate keys",
+            json!([function_call_raw(
+                "arany_read",
+                "{\"path\":\"one\",\"path\":\"two\",\"offset\":0,\"limit\":4096,\"plan_contract\":null}"
+            )]),
+        ),
+        (
+            "non-object arguments",
+            json!([function_call_raw("arany_read", "[]")]),
+        ),
+        (
+            "unoffered outcome",
+            json!([function_call("arany_delegate", &json!({"children":["x"]}))]),
+        ),
+    ] {
+        let mut scoped = request.clone();
+        if case == "unoffered outcome" {
+            scoped.collaboration = CollaborationPolicy::Single;
+        }
+        assert!(
+            decode(&scoped, &response("completed", output.clone())).is_err(),
+            "{case}"
+        );
+    }
+    for (field, value) in [
+        ("status", json!("in_progress")),
+        ("call_id", json!("")),
+        ("id", Value::Null),
+    ] {
+        let mut bad = read.clone();
+        bad[field] = value;
+        assert!(
+            decode(&request, &response("completed", json!([bad]))).is_err(),
+            "{field}"
+        );
+    }
+}
+
+fn function_call_raw(name: &str, arguments: &str) -> Value {
+    json!({"type":"function_call","id":"fc_test","call_id":"call_test","name":name,"arguments":arguments,"status":"completed"})
+}
+
+#[test]
+fn rejected_native_calls_report_their_diagnostic_stage() {
+    use crate::diagnostics::SubscriptionFailureStage as Stage;
+    let request = primary_request(MODEL);
     for (call, expected) in [
         (
             json!({"operation":"read","path":"README.md","offset":0,"limit":4097}),
-            crate::diagnostics::SubscriptionFailureStage::OutcomeReadBounds,
+            Stage::OutcomeReadBounds,
         ),
         (
             json!({"operation":"edit","path":"README.md","expected_digest":"unavailable","old":"old","new":"new"}),
-            crate::diagnostics::SubscriptionFailureStage::OutcomeToolDigest,
+            Stage::OutcomeToolDigest,
         ),
         (
             json!({"operation":"edit","path":"README.md","expected_digest":"0".repeat(64),"old":"","new":"date"}),
-            crate::diagnostics::SubscriptionFailureStage::OutcomeToolEmptyEdit,
+            Stage::OutcomeToolEmptyEdit,
         ),
         (
             json!({"operation":"read","path":"./README.md","offset":0,"limit":4096}),
-            crate::diagnostics::SubscriptionFailureStage::OutcomeToolPath,
+            Stage::OutcomeToolPath,
         ),
         (
             json!({"operation":"edit","path":"README.md","expected_digest":"0".repeat(64),"old":"x".repeat(4096),"new":"x".repeat(4097)}),
-            crate::diagnostics::SubscriptionFailureStage::OutcomeToolTextSize,
+            Stage::OutcomeToolTextSize,
         ),
         (
             json!({"operation":"command","program":"/usr/bin/date","args":[],"cwd":""}),
-            crate::diagnostics::SubscriptionFailureStage::OutcomeToolProgram,
+            Stage::OutcomeToolProgram,
         ),
         (
             json!({"operation":"write","path":"README.md","expected_digest":"0".repeat(64),"content":"x".repeat(16385)}),
-            crate::diagnostics::SubscriptionFailureStage::OutcomeToolArgumentSize,
+            Stage::OutcomeToolArgumentSize,
         ),
     ] {
-        let text = json!({"outcome":{"type":"tool","call":call}}).to_string();
-        let fixture = json!({"type":"response.completed","response":response("completed", json!([message(&text)]))});
-        let bytes = serde_json::to_vec(&fixture).unwrap();
-        assert_eq!(
-            decode_streamed_run(&bytes, "gpt-5.4").unwrap_err(),
-            ResponseError::Outcome
-        );
-        assert!(matches!(
-            ResponseError::Outcome.provider_error(),
-            ProviderError::InvalidOutcomeContract
-        ));
-        assert_eq!(outcome_failure_stage(&bytes, "gpt-5.4"), expected);
-        let (stage, shape) = outcome_failure_diagnostic(&bytes, "gpt-5.4");
-        assert_eq!(stage, expected);
         let mut arguments = call.clone();
         let operation = arguments
             .as_object_mut()
             .unwrap()
             .remove("operation")
             .unwrap();
-        let native = json!({"type":"response.completed","response":response("completed", json!([function_call(&format!("arany_{}", operation.as_str().unwrap()), &arguments)]))});
-        let native = serde_json::to_vec(&native).unwrap();
-        assert!(decode_streamed_tool_run(&native, "gpt-5.4").is_err());
-        assert_eq!(outcome_failure_stage(&native, "gpt-5.4"), expected);
-        let shape = format!(
-            "{:?}",
-            shape.expect("rejected typed Tool keeps numeric shape")
+        arguments["plan_contract"] = Value::Null;
+        let fixture = response(
+            "completed",
+            json!([function_call(
+                &format!("arany_{}", operation.as_str().unwrap()),
+                &arguments
+            )]),
         );
-        assert!(shape.contains(&format!(
-            "operation: {:?}",
-            call["operation"].as_str().unwrap()
-        )));
-        assert!(
-            !shape.contains("README.md")
-                && !shape.contains("/usr/bin/date")
-                && !shape.contains("unavailable")
+        assert_eq!(
+            decode_streamed(&request, &fixture).unwrap_err(),
+            ResponseError::Outcome
         );
+        assert!(matches!(
+            ResponseError::Outcome.provider_error(),
+            ProviderError::InvalidOutcomeContract
+        ));
+        let bytes =
+            serde_json::to_vec(&json!({"type":"response.completed","response":fixture})).unwrap();
+        assert_eq!(outcome_failure_stage(&bytes, MODEL), expected);
+        let (stage, shape) = outcome_failure_diagnostic(&bytes, MODEL);
+        assert_eq!(stage, expected);
+        if expected != Stage::OutcomeToolArgumentSize {
+            let shape = format!(
+                "{:?}",
+                shape.expect("rejected typed Tool keeps numeric shape")
+            );
+            assert!(shape.contains(&format!(
+                "operation: {:?}",
+                call["operation"].as_str().unwrap()
+            )));
+            assert!(
+                !shape.contains("README.md")
+                    && !shape.contains("/usr/bin/date")
+                    && !shape.contains("unavailable")
+            );
+        }
     }
     for (text, expected) in [
-        (
-            "Pending read result",
-            crate::diagnostics::SubscriptionFailureStage::OutcomeEncoding,
-        ),
+        ("Pending read result", Stage::OutcomeEncoding),
         (
             r#"{"outcome":{"type":"tool","call":{"operation":"read","path":"README.md","limit":4096}}}"#,
-            crate::diagnostics::SubscriptionFailureStage::OutcomeFields,
+            Stage::OutcomeFields,
         ),
     ] {
         let fixture = json!({"type":"response.completed","response":response("completed", json!([message(text)]))});
         let bytes = serde_json::to_vec(&fixture).unwrap();
         assert_eq!(
-            decode_streamed_run(&bytes, "gpt-5.4").unwrap_err(),
+            decode_streamed(&read_only_request(MODEL), &fixture["response"]).unwrap_err(),
             ResponseError::Outcome
         );
-        assert_eq!(outcome_failure_stage(&bytes, "gpt-5.4"), expected);
-    }
-    for call in [
-        json!({"operation":"write","path":"src/new","content":"missing required nullable"}),
-        json!({"operation":"read","path":"../outside","offset":0,"limit":1}),
-        json!({"operation":"command","program":"bash","args":[],"cwd":"","network":true}),
-    ] {
-        let text = json!({"outcome":{"type":"tool","call":call}}).to_string();
-        let fixture = response("completed", json!([message(&text)]));
-        assert!(decode_run(&serde_json::to_vec(&fixture).unwrap(), "gpt-5.4").is_err());
+        assert_eq!(outcome_failure_stage(&bytes, MODEL), expected);
     }
 }
 
 #[test]
 fn inbound_wire_corpus_requires_one_completed_structured_answer() {
+    let request = read_only_request(MODEL);
     let finish = response(
         "completed",
-        json!([
-            {"type": "reasoning"},
-            message(r#"{"outcome":{"type":"finish","summary":"done","result":"answer"}}"#)
-        ]),
+        json!([{"type": "reasoning"}, message(finish_text())]),
     );
     let parsed: WireResponse = serde_json::from_value(finish).unwrap();
-    let (id, usage, text) = parsed.completed_text("gpt-5.4").unwrap();
+    let (id, usage, text) = parsed.completed_text(MODEL).unwrap();
     assert_eq!(id, "resp_example");
     assert_eq!(usage.unwrap().output_tokens, 8);
-    let envelope: OutcomeEnvelope = serde_json::from_str(&text).unwrap();
-    assert!(
-        matches!(envelope.outcome, WireOutcome::Finish { summary, result } if summary == "done" && result == "answer")
-    );
-    let finish_response = response(
-        "completed",
-        json!([message(
-            r#"{"outcome":{"type":"finish","summary":"done","result":"answer"}}"#
-        )]),
-    );
-    let accepted = decode_run(&serde_json::to_vec(&finish_response).unwrap(), "gpt-5.4")
-        .expect("completed Responses result");
+    assert!(matches!(
+        structured_outcome(&text).unwrap(),
+        ProviderOutcome::Finish(Finish { summary, result }) if summary == "done" && result == "answer"
+    ));
+    let finish_response = response("completed", json!([message(finish_text())]));
+    let accepted = decode(&request, &finish_response).expect("completed Responses result");
     assert_eq!(
         accepted.wire_provenance,
         Some(ProviderWireProvenance::ResponsesCompletedStoreFalseRequested)
     );
     assert_eq!(accepted.usage.input_tokens, Some(12));
+    assert_eq!(accepted.turn.items("openai").unwrap().len(), 1);
     for compaction in [false, true] {
         let text = if compaction {
             r#"{"summary":"short"}"#
         } else {
-            r#"{"outcome":{"type":"finish","summary":"done","result":"answer"}}"#
+            finish_text()
         };
         let mut final_message = message(text);
         final_message["phase"] = json!("final_answer");
@@ -1164,20 +1006,17 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
                 serde_json::to_vec(&json!({"type":"response.completed","response":fixture}))
                     .unwrap();
             if compaction {
+                assert_eq!(decode_compaction(&bytes, MODEL).unwrap().summary, "short");
                 assert_eq!(
-                    decode_compaction(&bytes, "gpt-5.4").unwrap().summary,
-                    "short"
-                );
-                assert_eq!(
-                    decode_streamed_compaction(&streamed, "gpt-5.4")
+                    decode_streamed_compaction(&streamed, MODEL)
                         .unwrap()
                         .summary,
                     "short"
                 );
             } else {
                 for accepted in [
-                    decode_run(&bytes, "gpt-5.4").unwrap(),
-                    decode_streamed_run(&streamed, "gpt-5.4").unwrap(),
+                    decode(&request, &fixture).unwrap(),
+                    decode_streamed(&request, &fixture).unwrap(),
                 ] {
                     assert!(
                         matches!(accepted.outcome, ProviderOutcome::Finish(Finish { result, .. }) if result == "answer")
@@ -1226,41 +1065,32 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
                 serde_json::to_vec(&json!({"type":"response.completed","response":fixture}))
                     .unwrap();
             if compaction {
-                assert!(decode_compaction(&bytes, "gpt-5.4").is_err());
+                assert!(decode_compaction(&bytes, MODEL).is_err());
                 assert_eq!(
                     format!(
                         "{:?}",
-                        decode_streamed_compaction(&streamed, "gpt-5.4").unwrap_err()
+                        decode_streamed_compaction(&streamed, MODEL).unwrap_err()
                     ),
                     expected,
                 );
             } else {
-                assert!(decode_run(&bytes, "gpt-5.4").is_err());
+                assert!(decode(&request, &fixture).is_err());
                 assert_eq!(
-                    format!(
-                        "{:?}",
-                        decode_streamed_run(&streamed, "gpt-5.4").unwrap_err()
-                    ),
+                    format!("{:?}", decode_streamed(&request, &fixture).unwrap_err()),
                     expected,
                 );
             }
         }
     }
     let compact_response = response("completed", json!([message(r#"{"summary":"short"}"#)]));
-    let compact = decode_compaction(&serde_json::to_vec(&compact_response).unwrap(), "gpt-5.4")
+    let compact = decode_compaction(&serde_json::to_vec(&compact_response).unwrap(), MODEL)
         .expect("completed Responses compaction");
     assert_eq!(compact.summary, "short");
     for malformed in [
         json!({"type":"output_text"}),
         json!({"type":"output_text","text":null}),
     ] {
-        for (compaction, valid) in [
-            (
-                false,
-                r#"{"outcome":{"type":"finish","summary":"done","result":"answer"}}"#,
-            ),
-            (true, r#"{"summary":"short"}"#),
-        ] {
+        for (compaction, valid) in [(false, finish_text()), (true, r#"{"summary":"short"}"#)] {
             let fixture = response(
                 "completed",
                 json!([
@@ -1269,21 +1099,17 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
                 ]),
             );
             let bytes = serde_json::to_vec(&fixture).unwrap();
-            let streamed =
-                serde_json::to_vec(&json!({"type":"response.completed","response":fixture}))
-                    .unwrap();
             if compaction {
                 assert!(
-                    decode_compaction(&bytes, "gpt-5.4").is_err(),
+                    decode_compaction(&bytes, MODEL).is_err(),
                     "malformed text precedes valid summary"
                 );
-                assert!(decode_streamed_compaction(&streamed, "gpt-5.4").is_err());
             } else {
                 assert!(
-                    decode_run(&bytes, "gpt-5.4").is_err(),
+                    decode(&request, &fixture).is_err(),
                     "malformed text precedes valid outcome"
                 );
-                assert!(decode_streamed_run(&streamed, "gpt-5.4").is_err());
+                assert!(decode_streamed(&request, &fixture).is_err());
             }
         }
     }
@@ -1292,30 +1118,23 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
         Some(ProviderWireProvenance::ResponsesCompletedStoreFalseRequested)
     );
     for model in ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"] {
-        let mut fixture = response(
-            "completed",
-            json!([message(
-                r#"{"outcome":{"type":"finish","summary":"done","result":"answer"}}"#
-            )]),
-        );
+        let mut fixture = response("completed", json!([message(finish_text())]));
         fixture["model"] = json!(model);
-        let bytes = serde_json::to_vec(&fixture).unwrap();
+        let mut scoped = request.clone();
+        scoped.model = model.into();
         assert!(matches!(
-            decode_run(&bytes, model),
+            decode(&scoped, &fixture),
             Ok(ProviderResponse {
                 outcome: ProviderOutcome::Finish(_),
                 ..
             })
         ));
-        assert!(decode_run(&bytes, "gpt-5.4").is_err());
+        assert!(decode(&request, &fixture).is_err());
     }
-
-    let delegate: OutcomeEnvelope =
-        serde_json::from_str(r#"{"outcome":{"type":"delegate","children":["a","b"]}}"#).unwrap();
-    assert!(
-        matches!(delegate.outcome, WireOutcome::Delegate { children } if children == ["a", "b"])
-    );
-
+    assert!(matches!(
+        structured_outcome(r#"{"outcome":{"type":"delegate","children":["a","b"]}}"#).unwrap(),
+        ProviderOutcome::Delegate(Delegate { children }) if children == ["a", "b"]
+    ));
     let bad_outputs = [
         response("incomplete", json!([message("{}")])),
         response("completed", json!([message("{}"), message("{}")])),
@@ -1329,7 +1148,7 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
     for (index, fixture) in bad_outputs.into_iter().enumerate() {
         let parsed: WireResponse = serde_json::from_value(fixture).unwrap();
         assert!(
-            parsed.completed_text("gpt-5.4").is_err(),
+            parsed.completed_text(MODEL).is_err(),
             "bad wire case {index}"
         );
     }
@@ -1339,18 +1158,10 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
             json!(false),
             json!("invalid"),
         ] {
-            let mut fixture = response(
-                "completed",
-                json!([message(
-                    r#"{"outcome":{"type":"finish","summary":"done","result":"answer"}}"#
-                )]),
-            );
+            let mut fixture = response("completed", json!([message(finish_text())]));
             fixture[field] = value;
-            let streamed =
-                serde_json::to_vec(&json!({"type":"response.completed","response":fixture}))
-                    .unwrap();
             assert_eq!(
-                decode_streamed_run(&streamed, "gpt-5.4").unwrap_err(),
+                decode_streamed(&request, &fixture).unwrap_err(),
                 ResponseError::Status,
                 "contradictory completed response {field}"
             );
@@ -1361,18 +1172,12 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
         r#"{"outcome":{"type":"finish","summary":"x","result":"y","extra":1}}"#,
         r#"{"outcome":{"type":"delegate","children":[],"result":"x"}}"#,
         r#"{"outcome":{"type":"unknown"}}"#,
+        r#"{"outcome":{"type":"tool","call":{"operation":"list","path":"."}}}"#,
     ] {
-        assert!(
-            serde_json::from_str::<OutcomeEnvelope>(text).is_err(),
-            "bad outcome shape"
-        );
+        assert!(structured_outcome(text).is_err(), "bad outcome shape");
     }
     assert!(serde_json::from_str::<SummaryEnvelope>(r#"{"summary":"ok","extra":1}"#).is_err());
     assert!(encode_request(&json!({"oversize": "x".repeat(MAX_REQUEST_BYTES)})).is_err());
-}
-
-fn function_call(name: &str, arguments: &Value) -> Value {
-    json!({"type":"function_call","id":"fc_test","call_id":"call_test","name":name,"arguments":arguments.to_string(),"status":"completed"})
 }
 
 const SCHEMA_BOUND_KEYWORDS: [&str; 6] = [
@@ -1405,108 +1210,73 @@ fn assert_no_schema_bounds(value: &Value, at: &str) {
 
 #[test]
 fn provider_bound_schemas_carry_no_validation_keywords() {
-    let mut request = run_request();
-    request.collaboration = crate::session::CollaborationPolicy::Single;
-    assert_no_schema_bounds(&run_body_with_effort(&request, Effort::Low), "read_only");
-    request.goal_budget = Some(crate::session::GoalBudget::default());
-    request.tools = Some(crate::tools::ToolContext {
-        catalog: json!({
-            "write": true,
-            "commands": [{"name":"bash"}],
-            "skills": [{"name":"sample"}],
-            "mcp_servers": [{"name":"local"}],
-            "git": {"operations": ["git_status", "git_diff", "git_log"]}
-        })
-        .to_string(),
-        history_summary: None,
-        observations: Vec::new(),
-    });
+    assert_no_schema_bounds(
+        &run_body_for(&read_only_request(MODEL), Some(Effort::Low)),
+        "read_only",
+    );
+    let mut request = primary_request(MODEL);
     for (label, phase) in [
         ("plan", AgentPhase::RootPlan),
         ("synthesis", AgentPhase::RootSynthesis),
     ] {
         request.phase = phase;
-        assert_no_schema_bounds(&run_body_with_effort(&request, Effort::Low), label);
+        assert_no_schema_bounds(&run_body_for(&request, Some(Effort::Low)), label);
     }
-    request.goal_plan_contract = Some(goal_plan_contract());
-    assert_no_schema_bounds(&run_body_with_effort(&request, Effort::Low), "continued");
+    request.input.goal_plan_contract = Some(goal_plan_contract());
+    assert_no_schema_bounds(&run_body_for(&request, Some(Effort::Low)), "continued");
 }
 
 #[test]
 fn steering_notes_are_user_input_data_never_instructions() {
-    let mut request = run_request();
-    request.steering_notes = vec!["steering canary".into()];
-    let body = run_body(&request);
-    let instructions = body["instructions"].as_str().unwrap();
-    assert!(instructions.contains(crate::provider::prompts::STEERING_INSTRUCTIONS));
+    let mut request = read_only_request(MODEL);
+    request.input.steering_notes = vec!["steering canary".into()];
+    let rendered = body(&request);
+    let instructions = rendered["instructions"].as_str().unwrap();
+    assert!(instructions.contains("Steering notes are messages"));
     assert!(!instructions.contains("steering canary"));
-    let input: Value = serde_json::from_str(body["input"].as_str().unwrap()).unwrap();
-    assert_eq!(input["steering_notes"], json!(["steering canary"]));
-
-    let plain = run_body(&run_request());
+    assert!(rendered["input"].to_string().contains("steering canary"));
+    let plain = body(&read_only_request(MODEL));
     assert!(
-        !plain["instructions"]
-            .as_str()
-            .unwrap()
-            .contains(crate::provider::prompts::STEERING_INSTRUCTIONS)
+        !plain["input"]
+            .to_string()
+            .contains("Steering notes the user sent")
     );
-    let plain_input: Value = serde_json::from_str(plain["input"].as_str().unwrap()).unwrap();
-    assert!(plain_input.get("steering_notes").is_none());
 }
 
 #[test]
 fn child_research_request_offers_only_read_only_functions_and_finish() {
-    let mut request = run_request();
-    request.phase = AgentPhase::ChildWork;
-    request.collaboration = crate::session::CollaborationPolicy::Single;
-    let catalog = |remaining: u64| crate::tools::ToolContext {
-        catalog: json!({
-            "write": false,
-            "commands": [{"name": "cargo"}],
-            "skills": [{"name": "guide"}],
-            "mcp_servers": [{"name": "local", "tools": ["probe"]}],
-            "tool_calls_remaining": remaining
-        })
-        .to_string(),
-        history_summary: None,
-        observations: Vec::new(),
-    };
-    let names = |body: &Value| {
-        let mut names: Vec<String> = body["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|function| function["name"].as_str().unwrap().to_owned())
-            .collect();
-        names.sort();
-        names
-    };
-    request.tools = Some(catalog(2));
-    let body = run_body(&request);
-    assert_eq!(body["tool_choice"], "required");
-    assert_eq!(body["parallel_tool_calls"], false);
+    let request = researcher_request(MODEL);
+    let rendered = body(&request);
+    assert_eq!(rendered["tool_choice"], "required");
+    assert_eq!(rendered["parallel_tool_calls"], false);
     assert!(
-        body["instructions"]
+        rendered["instructions"]
             .as_str()
             .unwrap()
             .starts_with(crate::provider::prompts::RESEARCH_INSTRUCTIONS)
     );
     assert_eq!(
-        names(&body),
+        function_names(&rendered),
         [
-            "arany_finish",
             "arany_list",
-            "arany_mcp_list",
             "arany_read",
             "arany_search",
-            "arany_skill"
+            "arany_skill",
+            "arany_mcp_list",
+            "arany_finish"
         ]
     );
-    assert!(body["tools"].as_array().unwrap().iter().all(|function| {
-        function["parameters"]["properties"]
-            .get("plan_contract")
-            .is_none()
-    }));
+    assert!(
+        rendered["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|function| {
+                function["parameters"]["properties"]
+                    .get("plan_contract")
+                    .is_none()
+            })
+    );
     let read = response(
         "completed",
         json!([function_call(
@@ -1515,43 +1285,36 @@ fn child_research_request_offers_only_read_only_functions_and_finish() {
         )]),
     );
     assert!(matches!(
-        decode_tool_run(&serde_json::to_vec(&read).unwrap(), "gpt-5.4")
-            .unwrap()
-            .outcome,
-        ProviderOutcome::Tool {
-            plan_contract: None,
-            ..
-        }
+        decode(&request, &read).unwrap().outcome,
+        ProviderOutcome::Tools(requests) if requests[0].plan_contract.is_none()
     ));
-
-    request.tools = Some(catalog(0));
-    assert_eq!(names(&run_body(&request)), ["arany_finish"]);
+    let mut spent = catalog();
+    spent["tool_calls_remaining"] = json!(0);
+    let mut exhausted = request.clone();
+    exhausted.input.tools = Some(tool_context(spent));
+    let spent_body = body(&exhausted);
+    assert_eq!(function_names(&spent_body), function_names(&rendered));
+    assert_eq!(
+        spent_body["tool_choice"],
+        json!({"type": "allowed_tools", "mode": "required", "tools": [{"type": "function", "name": "arany_finish"}]})
+    );
+    assert_eq!(rendered["tool_choice"], "required");
 }
 
 #[test]
-fn git_reads_encode_as_strict_native_prelude_functions() {
+fn git_reads_encode_as_strict_native_functions() {
     use crate::tools::ToolCall;
-    let mut request = run_request();
-    request.collaboration = crate::session::CollaborationPolicy::Single;
-    request.phase = AgentPhase::RootPlan;
-    request.goal_budget = Some(crate::session::GoalBudget::default());
-    let git_catalog = |git: Value| crate::tools::ToolContext {
-        catalog: json!({
-            "write": false,
-            "commands": [],
-            "skills": [],
-            "mcp_servers": [],
-            "git": git
-        })
-        .to_string(),
-        history_summary: None,
-        observations: Vec::new(),
+    let mut request = primary_request(MODEL);
+    let git_catalog = |git: Value| {
+        tool_context(
+            json!({"write": false, "commands": [], "skills": [], "mcp_servers": [], "git": git}),
+        )
     };
-    request.tools = Some(git_catalog(
+    request.input.tools = Some(git_catalog(
         json!({"operations": ["git_status", "git_diff", "git_log"]}),
     ));
-    let body = run_body_with_effort(&request, Effort::Low);
-    let functions = body["tools"].as_array().unwrap();
+    let rendered = run_body_for(&request, Some(Effort::Low));
+    let functions = rendered["tools"].as_array().unwrap();
     for name in ["arany_git_status", "arany_git_diff", "arany_git_log"] {
         let function = functions
             .iter()
@@ -1566,7 +1329,6 @@ fn git_reads_encode_as_strict_native_prelude_functions() {
                 .contains(&json!({"type": "null"}))
         );
     }
-
     for (call, name) in [
         (ToolCall::GitStatus { path: ".".into() }, "arany_git_status"),
         (
@@ -1590,35 +1352,25 @@ fn git_reads_encode_as_strict_native_prelude_functions() {
         let mut arguments = serde_json::to_value(&call).unwrap();
         arguments.as_object_mut().unwrap().remove("operation");
         arguments["plan_contract"] = Value::Null;
-        let decoded = decode_tool_run(
-            &serde_json::to_vec(&response(
-                "completed",
-                json!([function_call(name, &arguments)]),
-            ))
-            .unwrap(),
-            "gpt-5.4",
+        let decoded = decode(
+            &request,
+            &response("completed", json!([function_call(name, &arguments)])),
         )
         .unwrap();
-        let ProviderOutcome::Tool {
-            call: decoded_call,
-            plan_contract,
-        } = decoded.outcome
-        else {
-            panic!("{name} did not decode as a Tool outcome");
+        let ProviderOutcome::Tools(requests) = decoded.outcome else {
+            panic!("{name} did not decode as a Tool request");
         };
-        assert_eq!(decoded_call, call);
-        assert!(plan_contract.is_none());
+        assert_eq!(requests[0].call, call);
+        assert!(requests[0].plan_contract.is_none());
     }
-
     for catalog in [json!("unavailable"), Value::Null] {
-        let mut request = request.clone();
-        request.tools = Some(git_catalog(catalog.clone()));
-        let body = run_body_with_effort(&request, Effort::Low);
-        assert!(!body["tools"].as_array().unwrap().iter().any(|function| {
-            function["name"]
-                .as_str()
-                .is_some_and(|name| name.starts_with("arany_git_"))
-        }));
+        request.input.tools = Some(git_catalog(catalog));
+        let rendered = run_body_for(&request, Some(Effort::Low));
+        assert!(
+            !function_names(&rendered)
+                .iter()
+                .any(|name| name.starts_with("arany_git_"))
+        );
     }
 }
 

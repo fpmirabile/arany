@@ -290,9 +290,7 @@ fn start_response_server(replies: NativeReplies) -> Server {
         assert_eq!(body["store"], false);
         assert_eq!(body["reasoning"]["effort"], "low");
         assert_eq!(body["max_output_tokens"], 4096);
-        let provider_input: serde_json::Value =
-            serde_json::from_str(body["input"].as_str().expect("structured Provider input"))
-                .expect("structured Provider input JSON");
+        let provider_input: serde_json::Value = crate::semantic::input(&body);
         assert_eq!(provider_input["objective"], "offline objective");
         let response = std::fs::read("/fixture/v1/responses").expect("synthetic response");
         input.write_all(&response).expect("HTTPS response write");
@@ -342,8 +340,7 @@ fn respond_unreviewed_native(input: &mut impl Write, output: &mut impl Read) {
         assert_eq!(body["max_output_tokens"], 4096);
         assert_eq!(body["text"]["format"]["name"], "arany_outcome");
         assert_eq!(body["text"]["format"]["strict"], true);
-        let content = body["input"].as_str().expect("native input");
-        let context: serde_json::Value = serde_json::from_str(content).unwrap();
+        let context = crate::semantic::input(&body);
         assert_eq!(context["objective"], "offline objective");
         let response = serde_json::to_vec(&serde_json::json!({
             "id": format!("resp_native_{index}"), "status": "completed", "model": "gpt-offline-new",

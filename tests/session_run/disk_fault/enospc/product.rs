@@ -131,9 +131,7 @@ fn tmpfs_enospc_exec_child() {
             let body = read_request(&mut stream);
             let body: serde_json::Value =
                 serde_json::from_slice(&body).expect("synthetic request JSON");
-            let input: serde_json::Value =
-                serde_json::from_str(body["input"].as_str().expect("semantic input"))
-                    .expect("semantic JSON");
+            let input: serde_json::Value = crate::semantic::input(&body);
             assert!(
                 input
                     .get("workspace_guidance")

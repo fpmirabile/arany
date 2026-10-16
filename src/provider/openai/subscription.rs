@@ -3,12 +3,13 @@ use crate::diagnostics::{
     ResponseShape, StreamCounts, SubscriptionFailureStage as Stage, subscription_failure,
 };
 use crate::provider::ResponsePreview;
+use crate::provider::conversation::Conversation;
 use crate::provider::streaming::{FramingStage, ResponsesPreview, SseEvent, SseFramer};
 use crate::provider::{
     AgentPhase, ChatGptProvenance, CompactionItem, CompactionRequest, CompactionResponse, Effort,
-    HistoryTurn, MAX_REPORTED_INPUT_TOKENS, MAX_RESPONSE_BYTES, OutputTokenBound, Provider,
-    ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse, Usage,
-    catalog::valid_model_id,
+    HistoryTurn, MAX_REPORTED_INPUT_TOKENS, MAX_RESPONSE_BYTES, OutputTokenBound, PromptRole,
+    Provider, ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse, RunInput, Usage,
+    catalog::valid_model_id, render,
 };
 use crate::session::{AgentRunId, RunId, SessionId};
 #[cfg(test)]
@@ -60,6 +61,7 @@ impl ChatGptProvider {
     }
 }
 
+#[async_trait::async_trait]
 impl Provider for ChatGptProvider {
     fn profile_name(&self) -> &str {
         "chatgpt"
@@ -202,19 +204,8 @@ async fn probe_model_at(
         phase: AgentPhase::RootPlan,
         collaboration: crate::session::CollaborationPolicy::Single,
         model: model.to_owned(),
-        images: Vec::new(),
-        instructions: None,
-        objective: "Synthetic conformance check: finish directly with a short factual sentence. No Workspace content is supplied.".into(),
-        includes: Vec::new(),
-        history: Vec::new(),
-        context_summary: None,
-        goal_budget: None,
-        goal_plan_contract: None,
-        goal_context_facts: None,
-        child_results: Vec::new(),
-        steering_notes: Vec::new(),
         max_output_tokens: PROBE_OUTPUT_CAP,
-        tools: None,
+        input: RunInput::new(PromptRole::ReadOnly, "Synthetic conformance check: finish directly with a short factual sentence. No Workspace content is supplied.".into()),
     };
     let response = invoke_at(client, endpoint.clone(), access_token, &direct, effort).await?;
     if !matches!(&response.outcome, ProviderOutcome::Finish(value) if !value.summary.trim().is_empty() && !value.result.trim().is_empty() && value.summary.len() <= 8 * 1024 && value.result.len() <= 8 * 1024)
@@ -227,7 +218,7 @@ async fn probe_model_at(
         collaboration: crate::session::CollaborationPolicy::Team { max_active_children: 1 },
         run_id: RunId::new(),
         agent_run_id: AgentRunId::new(),
-        objective: "Synthetic conformance check: delegate exactly one independent read-only question about the number two. No Workspace content is supplied.".into(),
+        input: RunInput::new(PromptRole::ReadOnly, "Synthetic conformance check: delegate exactly one independent read-only question about the number two. No Workspace content is supplied.".into()),
         ..direct
     };
     let response = invoke_at(client, endpoint.clone(), access_token, &delegate, effort).await?;
@@ -292,7 +283,8 @@ async fn invoke_at_with_preview(
     if !(1..=crate::provider::DEFAULT_OUTPUT_TOKEN_CAP).contains(&request.max_output_tokens) {
         return Err(ProviderError::Rejected);
     }
-    let body = subscription_body(request, effort)?;
+    let conversation = render::conversation(request)?;
+    let body = subscription_body(request, &conversation, effort)?;
     let (completed, counts) = completed_at_with_preview(
         client,
         endpoint,
@@ -301,11 +293,10 @@ async fn invoke_at_with_preview(
         preview.map(|preview| (preview, request.model.as_str())),
     )
     .await?;
-    let decoded = if request.tools.is_some() {
-        wire::decode_streamed_tool_run(&completed, &request.model)
-    } else {
-        wire::decode_streamed_run(&completed, &request.model)
-    };
+    let decoded = wire::decode_streamed_run(
+        &completed,
+        &wire::RunScope::new(request, &conversation, access_token),
+    );
     let result = decoded.map_err(|error| {
         if cfg!(debug_assertions) && error == wire::ResponseError::Outcome {
             let (stage, shape) = wire::outcome_failure_diagnostic(&completed, &request.model);
@@ -546,9 +537,34 @@ fn response_failure(error: wire::ResponseError, counts: StreamCounts) -> Provide
     failure(stage, error.provider_error(), counts)
 }
 
-fn subscription_body(request: &ProviderRequest, effort: Effort) -> Result<Vec<u8>, ProviderError> {
+fn subscription_body(
+    request: &ProviderRequest,
+    conversation: &Conversation,
+    effort: Effort,
+) -> Result<Vec<u8>, ProviderError> {
     super::super::image::validate_images(request)?;
-    streaming_body(wire::run_body_with_effort(request, effort))
+    let mut body = wire::run_body_with_effort(request, conversation, effort)?;
+    // The ChatGPT route is stateless, so replayed items drop their server ids and keep their content.
+    for item in body["input"].as_array_mut().into_iter().flatten() {
+        if matches!(item["type"].as_str(), Some("reasoning" | "function_call"))
+            && let Some(fields) = item.as_object_mut()
+        {
+            fields.remove("id");
+        }
+    }
+    // `allowed_tools` is unproven on this route (probe P3), so a spent researcher is offered Finish alone.
+    if request
+        .input
+        .tools
+        .as_ref()
+        .is_some_and(crate::tools::ToolContext::finish_only)
+    {
+        if let Some(tools) = body["tools"].as_array_mut() {
+            tools.retain(|tool| tool["name"] == "arany_finish");
+        }
+        body["tool_choice"] = json!("required");
+    }
+    streaming_body(body)
 }
 
 fn subscription_compaction_body(
@@ -580,7 +596,7 @@ struct StreamDecoder<'a> {
     stage: Stage,
     response_shape: ResponseShape,
     response_id: Option<String>,
-    done_items: Vec<wire::WireItem>,
+    done_items: Vec<(wire::WireItem, Value)>,
 }
 
 #[derive(Deserialize)]
@@ -756,11 +772,15 @@ impl<'a> StreamDecoder<'a> {
                     || self
                         .done_items
                         .iter()
-                        .any(|item| item.completed_id() == done.item.completed_id())
+                        .any(|(item, _)| item.completed_id() == done.item.completed_id())
                 {
                     return Err(ProviderError::InvalidResponseContract);
                 }
-                self.done_items.push(done.item);
+                let raw = value
+                    .get("item")
+                    .cloned()
+                    .ok_or(ProviderError::InvalidResponseContract)?;
+                self.done_items.push((done.item, raw));
                 Ok(None)
             }
             "response.failed" | "error" => {

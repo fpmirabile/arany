@@ -74,7 +74,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub use types::{
     CacheUpdate, CommandChangeset, EffectIntent, FileChange, FileVersion, GuardReceipt, MAX_SKILLS,
     NetworkGrant, ToolCall, ToolContext, ToolDisposition, ToolLimits, ToolObservation,
-    ToolPolicyReceipt, ToolResourceClass, ToolResourceProfile, ToolResourceSettings,
+    ToolPolicyReceipt, ToolRequest, ToolResourceClass, ToolResourceProfile, ToolResourceSettings,
+    ToolStep,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -390,7 +391,7 @@ impl ToolRuntime {
         Ok(ToolContext {
             catalog,
             history_summary: None,
-            observations: Vec::new(),
+            steps: Vec::new(),
         })
     }
 
@@ -416,7 +417,7 @@ impl ToolRuntime {
         Ok(ToolContext {
             catalog,
             history_summary: None,
-            observations: Vec::new(),
+            steps: Vec::new(),
         })
     }
 

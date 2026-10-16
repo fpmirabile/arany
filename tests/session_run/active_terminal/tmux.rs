@@ -1025,9 +1025,7 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
                 3 => {
                     let wire: serde_json::Value =
                         serde_json::from_slice(&body).expect("run request JSON");
-                    let input: serde_json::Value =
-                        serde_json::from_str(wire["input"].as_str().expect("semantic input text"))
-                            .expect("semantic input JSON");
+                    let input: serde_json::Value = crate::semantic::input(&wire);
                     assert_eq!(input["objective"], "first\nsecond");
                     request_sender.send(()).expect("active Provider gate");
                     response_ready
@@ -1038,9 +1036,7 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
                 _ => {
                     let wire: serde_json::Value =
                         serde_json::from_slice(&body).expect("summary request");
-                    let input: serde_json::Value =
-                        serde_json::from_str(wire["input"].as_str().expect("summary input"))
-                            .expect("semantic summary input");
+                    let input: serde_json::Value = crate::semantic::input(&wire);
                     assert_eq!(wire["max_output_tokens"], 1024);
                     assert_eq!(input["items"].as_array().expect("accepted turns").len(), 1);
                     assert!(input.get("workspace_guidance").is_none());
@@ -2339,8 +2335,7 @@ fn accept_provider_request(
     stream.set_nonblocking(false).expect("blocking request");
     let body = read_request(&mut stream);
     let wire: serde_json::Value = serde_json::from_slice(&body).expect("Responses request");
-    let input = serde_json::from_str(wire["input"].as_str().expect("semantic input text"))
-        .expect("semantic input JSON");
+    let input = crate::semantic::input(&wire);
     (stream, input)
 }
 

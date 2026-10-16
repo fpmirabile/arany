@@ -1,6 +1,7 @@
+use super::conversation::Conversation;
 use super::{
     CompactionRequest, CompactionResponse, Effort, MAX_RESPONSE_BYTES, NativeApiCredentials,
-    Provider, ProviderError, ProviderRequest, ProviderResponse, raw_reflects_secret,
+    Provider, ProviderError, ProviderRequest, ProviderResponse, raw_reflects_secret, render,
     resolve_native_effort, resolve_native_effort_for_run, valid_saved_api_account_id,
     validate_native_api_key,
 };
@@ -221,8 +222,21 @@ impl AnthropicProvider {
         Ok(bytes)
     }
 
-    fn decode_run(&self, bytes: &[u8], output_cap: u32) -> Result<ProviderResponse, ProviderError> {
-        let response = wire::decode_run(bytes, &self.model, output_cap)?;
+    fn decode_run(
+        &self,
+        bytes: &[u8],
+        request: &ProviderRequest,
+        conversation: &Conversation,
+    ) -> Result<ProviderResponse, ProviderError> {
+        let response = wire::decode_run(
+            bytes,
+            &wire::RunScope {
+                model: &self.model,
+                output_cap: request.max_output_tokens,
+                secret: &self.key,
+                offered: conversation.tools.as_deref().unwrap_or_default(),
+            },
+        )?;
         if response.reflects_secret(&self.key) {
             return Err(ProviderError::InvalidOutcome);
         }
@@ -242,6 +256,7 @@ impl AnthropicProvider {
     }
 }
 
+#[async_trait::async_trait]
 impl Provider for AnthropicProvider {
     fn profile_name(&self) -> &str {
         "anthropic"
@@ -279,8 +294,10 @@ impl Provider for AnthropicProvider {
         {
             return Err(ProviderError::Rejected);
         }
-        let response = self.send(wire::run_body(&request, self.effort)).await?;
-        self.decode_run(&response, request.max_output_tokens)
+        let conversation = render::conversation(&request)?;
+        let body = wire::run_body(&request, &conversation, self.effort)?;
+        let response = self.send(body).await?;
+        self.decode_run(&response, &request, &conversation)
     }
 
     async fn invoke_with_preview(
@@ -295,7 +312,8 @@ impl Provider for AnthropicProvider {
         {
             return Err(ProviderError::Rejected);
         }
-        let mut body = wire::run_body(&request, self.effort);
+        let conversation = render::conversation(&request)?;
+        let mut body = wire::run_body(&request, &conversation, self.effort)?;
         body["stream"] = Value::Bool(true);
         let mut response = self
             .request(body)?
@@ -322,7 +340,7 @@ impl Provider for AnthropicProvider {
             .map_err(|_| ProviderError::Unavailable)?
         {
             if let Some(bytes) = decoder.feed(&chunk)? {
-                return self.decode_run(&bytes, request.max_output_tokens);
+                return self.decode_run(&bytes, &request, &conversation);
             }
         }
         Err(ProviderError::InvalidStream)
@@ -470,6 +488,24 @@ mod tests {
         ));
     }
 
+    fn synthetic_tool_reply(arguments: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "id": "msg_safe",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-5",
+            "stop_reason": "tool_use",
+            "stop_details": null,
+            "stop_sequence": null,
+            "content": [{"type": "tool_use", "id": "toolu_safe", "name": "arany_mcp_call", "input": {
+                "server": "example", "tool": "echo", "schema_digest": "0".repeat(64),
+                "arguments": arguments, "plan_contract": null
+            }}],
+            "usage": {"input_tokens": 12, "output_tokens": 8}
+        }))
+        .expect("synthetic reply")
+    }
+
     #[test]
     fn decoded_native_outcomes_reject_escaped_key_reflection() {
         let secret = "synthetic-native-secret";
@@ -479,23 +515,22 @@ mod tests {
             secret.into(),
         )
         .expect("selected key");
+        let request = crate::provider::test_support::primary_request("claude-sonnet-5");
+        let conversation = render::conversation(&request).unwrap();
+        let decode = |bytes: &[u8]| provider.decode_run(bytes, &request, &conversation);
         let good_run =
             synthetic_reply(r#"{"outcome":{"type":"finish","summary":"safe","result":"answer"}}"#);
-        assert!(provider.decode_run(&good_run, 4096).is_ok());
+        assert!(decode(&good_run).is_ok());
         let reflected_run = synthetic_reply(
             r#"{"outcome":{"type":"finish","summary":"\u0073ynthetic-native-secret","result":"answer"}}"#,
         );
         assert!(!raw_reflects_secret(&reflected_run, secret));
         assert!(matches!(
-            provider.decode_run(&reflected_run, 4096),
+            decode(&reflected_run),
             Err(ProviderError::InvalidOutcome)
         ));
 
-        let tool_rows: Vec<Value> =
-            serde_json::from_str(include_str!("../../tests/fixtures/tool-outcomes.json")).unwrap();
-        let mut tool = tool_rows[9].clone();
-        let good_tool = synthetic_reply(&tool.to_string());
-        assert!(provider.decode_run(&good_tool, 4096).is_ok());
+        assert!(decode(&synthetic_tool_reply(r#"{"value":"safe"}"#)).is_ok());
         for (case, arguments) in [
             (
                 "escaped value",
@@ -521,14 +556,10 @@ mod tests {
             ("non-object arguments", "[]"),
             ("null arguments", "null"),
         ] {
-            tool["outcome"]["call"]["arguments"] = serde_json::json!(arguments);
-            let reflected_tool = synthetic_reply(&tool.to_string());
+            let reflected_tool = synthetic_tool_reply(arguments);
             assert!(!raw_reflects_secret(&reflected_tool, secret));
             assert!(
-                matches!(
-                    provider.decode_run(&reflected_tool, 4096),
-                    Err(ProviderError::InvalidOutcome)
-                ),
+                matches!(decode(&reflected_tool), Err(ProviderError::InvalidOutcome)),
                 "MCP argument rejection: {case}"
             );
         }

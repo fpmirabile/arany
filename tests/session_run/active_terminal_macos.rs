@@ -768,8 +768,7 @@ fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
                     let wire: serde_json::Value = serde_json::from_slice(&body).unwrap();
                     assert_eq!(wire["model"], "model-1");
                     assert_eq!(wire["text"]["format"]["strict"], true);
-                    let input: serde_json::Value =
-                        serde_json::from_str(wire["input"].as_str().unwrap()).unwrap();
+                    let input: serde_json::Value = crate::semantic::input(&wire);
                     if index == 3 {
                         assert_eq!(input["objective"], "cancel");
                         assert_eq!(input["phase"], "root_plan");

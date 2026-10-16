@@ -96,7 +96,7 @@ struct Journey {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
     compactions: Arc<Mutex<Vec<CompactionRequest>>>,
 }
-
+#[async_trait::async_trait]
 impl Provider for Journey {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -112,6 +112,7 @@ impl Provider for Journey {
         let mut requests = self.requests.lock().unwrap();
         let step = requests.len();
         let context = request
+            .input
             .tools
             .as_ref()
             .ok_or(ProviderError::InvalidOutcome)?;
@@ -163,7 +164,7 @@ impl Provider for Journey {
                 server: "synthetic".into(),
             },
             11 => {
-                let catalog: Value = serde_json::from_str(&context.observations.iter().find(|observation| matches!(observation.intent.call, ToolCall::McpList { .. })).ok_or(ProviderError::InvalidOutcome)?.output)
+                let catalog: Value = serde_json::from_str(&context.observations().iter().find(|observation| matches!(observation.intent.call, ToolCall::McpList { .. })).ok_or(ProviderError::InvalidOutcome)?.output)
                     .map_err(|_| ProviderError::InvalidOutcome)?;
                 ToolCall::McpCall {
                     server: "synthetic".into(),
@@ -182,7 +183,7 @@ impl Provider for Journey {
             },
             13 => {
                 requests.push(request);
-                return Ok(ProviderResponse {
+                return Ok(ProviderResponse { turn: arany::ProviderTurn::scripted(),
                     outcome: ProviderOutcome::Finish(Finish {
                         summary: "Completed actual tool journey".into(),
                         result: "Built, tested, loaded Skill and called local MCP.".into(),
@@ -200,10 +201,11 @@ impl Provider for Journey {
         };
         requests.push(request);
         Ok(ProviderResponse {
-            outcome: ProviderOutcome::Tool {
+            turn: arany::ProviderTurn::scripted(),
+            outcome: crate::tool_outcome(
                 call,
-                plan_contract: (step == 0).then(|| Box::new(journey_plan_contract())),
-            },
+                (step == 0).then(|| Box::new(journey_plan_contract())),
+            ),
             response_id: None,
             usage: arany::Usage {
                 input_tokens: None,
@@ -344,29 +346,28 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
     for (step, request) in requests.iter().enumerate() {
         assert_eq!(request.phase, AgentPhase::RootPlan);
         assert_eq!(request.model, "tool-model");
-        assert_eq!(request.objective, "Complete the synthetic coding journey");
+        assert_eq!(
+            request.input.objective,
+            "Complete the synthetic coding journey"
+        );
         assert!(
-            request.instructions.is_none()
-                && request.includes.is_empty()
-                && request.history.is_empty()
-                && request.context_summary.is_none()
-                && request.images.is_empty()
-                && request.child_results.is_empty()
+            request.input.workspace_guidance.is_none()
+                && request.input.includes.is_empty()
+                && request.input.history.is_empty()
+                && request.input.context_summary.is_none()
+                && request.input.images.is_empty()
+                && request.input.child_results.is_empty()
         );
         assert_eq!(request.max_output_tokens, 4096);
-        let context = request.tools.as_ref().unwrap();
-        assert_eq!(context.observations.len(), step + usize::from(step > 6));
-        assert!(
-            !serde_json::to_string(context)
-                .unwrap()
-                .contains("OMITTED_TOOL_CANARY")
-        );
-        for observation in &context.observations {
+        let context = request.input.tools.as_ref().unwrap();
+        assert_eq!(context.observations().len(), step + usize::from(step > 6));
+        assert!(!format!("{context:?}").contains("OMITTED_TOOL_CANARY"));
+        for observation in context.observations() {
             assert_eq!(observation.intent.run_id, request.run_id);
             assert_eq!(observation.intent.agent_run_id, request.agent_run_id);
         }
     }
-    let observations = &requests[13].tools.as_ref().unwrap().observations;
+    let observations = &requests[13].input.tools.as_ref().unwrap().observations();
     for observation in observations {
         assert_seed_retired(observation.intent.id);
     }
@@ -523,7 +524,7 @@ struct Proposal {
     plan_on_inspection: bool,
     omit_plan: bool,
 }
-
+#[async_trait::async_trait]
 impl Provider for Proposal {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -540,18 +541,19 @@ impl Provider for Proposal {
         if self.inspect_first && request_index == 0 {
             requests.push(request);
             return Ok(ProviderResponse {
-                outcome: ProviderOutcome::Tool {
-                    call: ToolCall::Read {
+                turn: arany::ProviderTurn::scripted(),
+                outcome: crate::tool_outcome(
+                    ToolCall::Read {
                         path: "src/current.txt".into(),
                         offset: 0,
                         limit: 64,
                     },
-                    plan_contract: if self.plan_on_inspection {
+                    if self.plan_on_inspection {
                         proposal_plan_contract(&self.call).map(Box::new)
                     } else {
                         None
                     },
-                },
+                ),
                 response_id: None,
                 usage: arany::Usage {
                     input_tokens: None,
@@ -563,32 +565,33 @@ impl Provider for Proposal {
         }
         let step = request_index.saturating_sub(if self.inspect_first { 1 } else { 0 });
         let outcome = match (step, &self.call) {
-            (0, call) => ProviderOutcome::Tool {
-                call: call.clone(),
-                plan_contract: if self.omit_plan || self.plan_on_inspection {
+            (0, call) => crate::tool_outcome(
+                call.clone(),
+                if self.omit_plan || self.plan_on_inspection {
                     None
                 } else {
                     proposal_plan_contract(call).map(Box::new)
                 },
-            },
+            ),
             (1, ToolCall::McpList { .. } | ToolCall::McpCall { .. }) | (2, _) => {
                 ProviderOutcome::Finish(Finish {
                     summary: "Observed result".into(),
                     result: "Observed the Tool result without retrying.".into(),
                 })
             }
-            (1, _) => ProviderOutcome::Tool {
-                call: ToolCall::Read {
+            (1, _) => crate::tool_outcome(
+                ToolCall::Read {
                     path: "src/current.txt".into(),
                     offset: 0,
                     limit: 64,
                 },
-                plan_contract: None,
-            },
+                None,
+            ),
             _ => return Err(ProviderError::InvalidOutcome),
         };
         requests.push(request);
         Ok(ProviderResponse {
+            turn: arany::ProviderTurn::scripted(),
             outcome,
             response_id: None,
             usage: arany::Usage {
@@ -626,7 +629,7 @@ fn proposal_request(workspace: &Path) -> RunRequest {
 struct OverTimeoutCommand {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
 }
-
+#[async_trait::async_trait]
 impl Provider for OverTimeoutCommand {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -653,9 +656,9 @@ impl Provider for OverTimeoutCommand {
                 args: vec!["-c".into(), "touch src/not-dispatched".into()],
                 cwd: "".into(),
             };
-            ProviderOutcome::Tool {
-                call: call.clone(),
-                plan_contract: Some(Box::new(arany::GoalPlanContract {
+            crate::tool_outcome(
+                call.clone(),
+                Some(Box::new(arany::GoalPlanContract {
                     mission: "Run the bounded command only within the saved limit".into(),
                     paths: vec!["src".into()],
                     commands: vec!["bash".into()],
@@ -669,7 +672,7 @@ impl Provider for OverTimeoutCommand {
                     },
                     budget: arany::GoalBudget::default(),
                 })),
-            }
+            )
         } else {
             ProviderOutcome::Finish(arany::Finish {
                 summary: "The requested command exceeded the pinned timeout".into(),
@@ -677,6 +680,7 @@ impl Provider for OverTimeoutCommand {
             })
         };
         Ok(ProviderResponse {
+            turn: arany::ProviderTurn::scripted(),
             outcome,
             response_id: None,
             usage: arany::Usage {
@@ -788,16 +792,17 @@ async fn over_max_command_is_closed_as_a_non_dispatched_limit() {
 fn assert_goal_provider_request(request: &ProviderRequest, expected_budget: &arany::GoalBudget) {
     assert_eq!(request.phase, AgentPhase::RootPlan);
     assert_eq!(request.collaboration, CollaborationPolicy::Single);
-    assert_eq!(request.objective, "Guard corpus");
-    assert_eq!(request.goal_budget.as_ref(), Some(expected_budget));
-    assert!(request.goal_plan_contract.is_none());
-    assert!(request.tools.is_some());
+    assert_eq!(request.input.objective, "Guard corpus");
+    assert_eq!(request.input.goal_budget.as_ref(), Some(expected_budget));
+    assert!(request.input.goal_plan_contract.is_none());
+    assert!(request.input.tools.is_some());
 }
 
 struct ExactTokenTool {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
 }
 
+#[async_trait::async_trait]
 impl arany::Provider for ExactTokenTool {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -817,14 +822,15 @@ impl arany::Provider for ExactTokenTool {
     ) -> Result<arany::ProviderResponse, arany::ProviderError> {
         self.requests.lock().unwrap().push(request);
         Ok(arany::ProviderResponse {
-            outcome: ProviderOutcome::Tool {
-                call: ToolCall::Edit {
+            turn: arany::ProviderTurn::scripted(),
+            outcome: crate::tool_outcome(
+                ToolCall::Edit {
                     path: "src/current.txt".into(),
                     expected_digest: hash(b"current"),
                     old: "current".into(),
                     new: "after".into(),
                 },
-                plan_contract: Some(Box::new(arany::GoalPlanContract {
+                Some(Box::new(arany::GoalPlanContract {
                     mission: "Change the exact selected file".into(),
                     paths: vec!["src".into()],
                     commands: Vec::new(),
@@ -841,7 +847,7 @@ impl arany::Provider for ExactTokenTool {
                         ..arany::GoalBudget::default()
                     },
                 })),
-            },
+            ),
             response_id: None,
             usage: arany::Usage {
                 input_tokens: Some(0),
@@ -933,7 +939,7 @@ async fn exact_goal_token_cap_fails_before_a_tool_request_is_journaled() {
 struct GoalWorkspaceLease {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
 }
-
+#[async_trait::async_trait]
 impl Provider for GoalWorkspaceLease {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -950,6 +956,7 @@ impl Provider for GoalWorkspaceLease {
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         self.requests.lock().unwrap().push(request);
         Ok(ProviderResponse {
+            turn: arany::ProviderTurn::scripted(),
             outcome: ProviderOutcome::Finish(Finish {
                 summary: "The selected task is complete".into(),
                 result: "No Workspace mutation was needed".into(),
@@ -1211,17 +1218,17 @@ fn assert_proposal_requests(requests: &[ProviderRequest], count: usize) {
     for (index, request) in requests.iter().enumerate() {
         assert_eq!(request.phase, AgentPhase::RootPlan);
         assert_eq!(request.model, "guard-model");
-        assert_eq!(request.objective, "Guard corpus");
+        assert_eq!(request.input.objective, "Guard corpus");
         assert!(
-            request.instructions.is_none()
-                && request.includes.is_empty()
-                && request.images.is_empty()
-                && request.child_results.is_empty()
-                && request.history.is_empty()
-                && request.context_summary.is_none()
+            request.input.workspace_guidance.is_none()
+                && request.input.includes.is_empty()
+                && request.input.images.is_empty()
+                && request.input.child_results.is_empty()
+                && request.input.history.is_empty()
+                && request.input.context_summary.is_none()
         );
         assert_eq!(request.max_output_tokens, 4096);
-        let observations = request.tools.as_ref().unwrap().observations.len();
+        let observations = request.input.tools.as_ref().unwrap().observations().len();
         assert_eq!(observations, index);
     }
 }
@@ -1247,7 +1254,7 @@ fn bounded_loop_plan() -> arany::GoalPlanContract {
         budget: arany::GoalBudget::default(),
     }
 }
-
+#[async_trait::async_trait]
 impl Provider for BoundedLoop {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -1269,22 +1276,23 @@ impl Provider for BoundedLoop {
                     summary: "Child reasoning".into(),
                     result: "Read-only child result".into(),
                 }),
-                2 => ProviderOutcome::Tool {
-                    call: ToolCall::Edit {
+                2 => crate::tool_outcome(
+                    ToolCall::Edit {
                         path: "src/current.txt".into(),
                         expected_digest: hash(b"current"),
                         old: "current".into(),
                         new: "current\n2026-10-06\n".into(),
                     },
-                    plan_contract: Some(Box::new(bounded_loop_plan())),
-                },
+                    Some(Box::new(bounded_loop_plan())),
+                ),
                 3 => {
                     assert_eq!(
                         request
+                            .input
                             .tools
                             .as_ref()
                             .unwrap()
-                            .observations
+                            .observations()
                             .last()
                             .unwrap()
                             .disposition,
@@ -1299,13 +1307,13 @@ impl Provider for BoundedLoop {
                 _ => return Err(ProviderError::InvalidOutcome),
             }
         } else {
-            ProviderOutcome::Tool {
-                call: ToolCall::Read {
+            crate::tool_outcome(
+                ToolCall::Read {
                     path: "src/unselected.txt".into(),
                     offset: 0,
                     limit: 1,
                 },
-                plan_contract: (requests.is_empty()).then(|| {
+                (requests.is_empty()).then(|| {
                     Box::new(arany::GoalPlanContract {
                         mission: "Verify the requested Workspace file without following links"
                             .into(),
@@ -1322,10 +1330,11 @@ impl Provider for BoundedLoop {
                         budget: arany::GoalBudget::default(),
                     })
                 }),
-            }
+            )
         };
         requests.push(request);
         Ok(ProviderResponse {
+            turn: arany::ProviderTurn::scripted(),
             outcome,
             response_id: None,
             usage: arany::Usage {
@@ -1470,7 +1479,7 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
                 );
                 assert_eq!(request.model, "guard-model");
                 assert_eq!(request.max_output_tokens, 4096);
-                if let Some(tools) = &request.tools {
+                if let Some(tools) = &request.input.tools {
                     let catalog: Value = serde_json::from_str(&tools.catalog).unwrap();
                     assert_eq!(catalog["host_clock"]["timezone"], "UTC");
                     let timestamp = catalog["host_clock"]["unix_ms"].as_u64().unwrap();
@@ -1481,30 +1490,42 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
                     assert!(timestamp <= current && current - timestamp < 20_000);
                 }
                 assert!(
-                    request.instructions.is_none()
-                        && request.images.is_empty()
-                        && request.context_summary.is_none()
+                    request.input.workspace_guidance.is_none()
+                        && request.input.images.is_empty()
+                        && request.input.context_summary.is_none()
                 );
                 assert_eq!(
-                    request.includes,
+                    request.input.includes,
                     vec![format!(
                         "File: \"src/current.txt\"\nSHA-256: {}\nContent (untrusted data):\ncurrent",
                         hash(b"current")
                     )]
                 );
                 if index == 1 {
-                    assert!(request.history.is_empty());
-                    assert_eq!(request.objective, "Review the stated task without effects");
-                    assert!(request.child_results.is_empty());
+                    assert!(request.input.history.is_empty());
+                    assert_eq!(
+                        request.input.objective,
+                        "Review the stated task without effects"
+                    );
+                    assert!(request.input.child_results.is_empty());
                     let research: Value =
-                        serde_json::from_str(&request.tools.as_ref().unwrap().catalog).unwrap();
+                        serde_json::from_str(&request.input.tools.as_ref().unwrap().catalog)
+                            .unwrap();
                     assert_eq!(research["write"], false);
                     assert_eq!(research["commands"], serde_json::json!([]));
-                    assert!(request.tools.as_ref().unwrap().observations.is_empty());
+                    assert!(
+                        request
+                            .input
+                            .tools
+                            .as_ref()
+                            .unwrap()
+                            .observations()
+                            .is_empty()
+                    );
                 } else {
-                    assert_eq!(request.history.len(), 1);
+                    assert_eq!(request.input.history.len(), 1);
                     let history: Value =
-                        serde_json::from_str(&request.history[0].assistant).unwrap();
+                        serde_json::from_str(&request.input.history[0].assistant).unwrap();
                     assert!(
                         history["scope"]
                             .as_str()
@@ -1514,14 +1535,17 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
                     assert_eq!(history["run_status"], "Failed");
                     assert_eq!(history["tool_records"][0]["disposition"], "failed");
                     assert!(history["tool_records"][0]["cache_update"].is_string());
-                    assert_eq!(request.objective, "Guard corpus");
+                    assert_eq!(request.input.objective, "Guard corpus");
                     assert_eq!(
-                        request.tools.as_ref().unwrap().observations.len(),
+                        request.input.tools.as_ref().unwrap().observations().len(),
                         index.saturating_sub(2)
                     );
-                    assert_eq!(request.child_results.len(), usize::from(index >= 2));
+                    assert_eq!(request.input.child_results.len(), usize::from(index >= 2));
                     if index >= 2 {
-                        assert_eq!(request.child_results[0].result, "Read-only child result");
+                        assert_eq!(
+                            request.input.child_results[0].result,
+                            "Read-only child result"
+                        );
                     }
                 }
             }
@@ -2376,9 +2400,17 @@ async fn resource_quotas_apply_to_payload_descendants_and_oom_is_uncertain() {
             {
                 let calls = fresh_requests.lock().unwrap();
                 assert_eq!(calls.len(), 6);
-                assert!(calls[0].tools.as_ref().unwrap().observations.is_empty());
+                assert!(
+                    calls[0]
+                        .input
+                        .tools
+                        .as_ref()
+                        .unwrap()
+                        .observations()
+                        .is_empty()
+                );
                 let historical: Value =
-                    serde_json::from_str(&calls[0].history[0].assistant).unwrap();
+                    serde_json::from_str(&calls[0].input.history[0].assistant).unwrap();
                 assert!(
                     historical["scope"]
                         .as_str()
@@ -2407,7 +2439,7 @@ struct ApprovalJourney {
     call: ToolCall,
     review: &'static str,
 }
-
+#[async_trait::async_trait]
 impl Provider for ApprovalJourney {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -2443,11 +2475,9 @@ impl Provider for ApprovalJourney {
             budget: arany::GoalBudget::default(),
         };
         Ok(ProviderResponse {
+            turn: arany::ProviderTurn::scripted(),
             outcome: if first {
-                ProviderOutcome::Tool {
-                    call: self.call.clone(),
-                    plan_contract: Some(Box::new(plan_contract)),
-                }
+                crate::tool_outcome(self.call.clone(), Some(Box::new(plan_contract)))
             } else {
                 ProviderOutcome::Finish(Finish {
                     summary: "Synthetic decision".into(),
@@ -2620,21 +2650,21 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
             "{name}"
         );
         assert_eq!(observed[0].phase, AgentPhase::RootPlan);
-        assert_eq!(observed[0].objective, "Guard corpus");
-        assert!(observed[0].tools.is_some());
+        assert_eq!(observed[0].input.objective, "Guard corpus");
+        assert!(observed[0].input.tools.is_some());
         if review_count == 1 {
             let request = &observed[1];
             assert_eq!(request.phase, AgentPhase::ToolReview);
             assert_eq!(request.max_output_tokens, 256);
             assert!(
-                request.tools.is_none()
-                    && request.includes.is_empty()
-                    && request.images.is_empty()
-                    && request.history.is_empty()
-                    && request.child_results.is_empty()
-                    && request.context_summary.is_none()
+                request.input.tools.is_none()
+                    && request.input.includes.is_empty()
+                    && request.input.images.is_empty()
+                    && request.input.history.is_empty()
+                    && request.input.child_results.is_empty()
+                    && request.input.context_summary.is_none()
             );
-            let payload: Value = serde_json::from_str(&request.objective).unwrap();
+            let payload: Value = serde_json::from_str(&request.input.objective).unwrap();
             assert_eq!(payload["user_request"], "Guard corpus");
             assert_eq!(
                 payload["proposed_action"]["call"],
@@ -2644,7 +2674,7 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
         if allowed {
             let continuation = observed.last().unwrap();
             assert_eq!(continuation.phase, AgentPhase::RootPlan);
-            let observations = &continuation.tools.as_ref().unwrap().observations;
+            let observations = &continuation.input.tools.as_ref().unwrap().observations();
             assert_eq!(observations.len(), if command { 2 } else { 1 });
             assert_eq!(observations[0].intent.call, call);
             assert_eq!(
@@ -2745,7 +2775,7 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
 struct GitJourney {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
 }
-
+#[async_trait::async_trait]
 impl Provider for GitJourney {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -2762,35 +2792,32 @@ impl Provider for GitJourney {
         let step = requests.len();
         requests.push(request);
         let outcome = match step {
-            0 => ProviderOutcome::Tool {
-                call: ToolCall::GitStatus { path: ".".into() },
-                plan_contract: None,
-            },
-            1 => ProviderOutcome::Tool {
-                call: ToolCall::GitDiff {
+            0 => crate::tool_outcome(ToolCall::GitStatus { path: ".".into() }, None),
+            1 => crate::tool_outcome(
+                ToolCall::GitDiff {
                     path: "src".into(),
                     base: None,
                     head: None,
                     staged: false,
                 },
-                plan_contract: None,
-            },
-            2 => ProviderOutcome::Tool {
-                call: ToolCall::GitLog {
+                None,
+            ),
+            2 => crate::tool_outcome(
+                ToolCall::GitLog {
                     path: ".".into(),
                     revision: None,
                     max_count: 5,
                 },
-                plan_contract: None,
-            },
-            3 => ProviderOutcome::Tool {
-                call: ToolCall::GitLog {
+                None,
+            ),
+            3 => crate::tool_outcome(
+                ToolCall::GitLog {
                     path: ".".into(),
                     revision: Some("missing-branch".into()),
                     max_count: 1,
                 },
-                plan_contract: None,
-            },
+                None,
+            ),
             4 => ProviderOutcome::Finish(Finish {
                 summary: "Inspected".into(),
                 result: "Git state observed".into(),
@@ -2798,6 +2825,7 @@ impl Provider for GitJourney {
             _ => return Err(ProviderError::InvalidOutcome),
         };
         Ok(ProviderResponse {
+            turn: arany::ProviderTurn::scripted(),
             outcome,
             response_id: None,
             usage: arany::Usage {
@@ -2958,7 +2986,7 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
 
     let requests = requests.lock().unwrap().clone();
     let catalog: Value =
-        serde_json::from_str(&requests[0].tools.as_ref().unwrap().catalog).unwrap();
+        serde_json::from_str(&requests[0].input.tools.as_ref().unwrap().catalog).unwrap();
     assert_eq!(
         catalog["git"]["operations"],
         json!(["git_status", "git_diff", "git_log"])

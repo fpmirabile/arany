@@ -216,6 +216,7 @@ fn build_goal_request() -> arany::GoalRequest {
     goal
 }
 
+#[async_trait::async_trait]
 impl Provider for CacheCanary {
     fn profile_name(&self) -> &str {
         "scripted"
@@ -268,10 +269,7 @@ impl Provider for CacheCanary {
             } else {
                 None
             };
-            ProviderOutcome::Tool {
-                call,
-                plan_contract,
-            }
+            crate::tool_outcome(call, plan_contract)
         } else {
             ProviderOutcome::Finish(Finish {
                 summary: "Selected cache output was explicit".into(),
@@ -279,6 +277,7 @@ impl Provider for CacheCanary {
             })
         };
         Ok(ProviderResponse {
+            turn: arany::ProviderTurn::scripted(),
             outcome,
             response_id: None,
             usage: arany::Usage {
@@ -691,6 +690,7 @@ async fn selected_cache_canary_helper_inner() {
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 4);
         let _initial_tools = requests[0]
+            .input
             .tools
             .as_ref()
             .expect("first cache canary request includes Tool context");
@@ -699,20 +699,20 @@ async fn selected_cache_canary_helper_inner() {
             !initial.contains(CACHE_CANARY),
             "cache canary was present in the initial Provider request"
         );
-        let first_output = &requests[1].tools.as_ref().unwrap().observations[0].output;
+        let first_output = &requests[1].input.tools.as_ref().unwrap().observations()[0].output;
         let first_command: serde_json::Value = serde_json::from_str(first_output).unwrap();
         assert!(first_command["stdout"].as_str().is_some_and(str::is_empty));
         assert!(!first_output.contains(PRIVATE_CACHE_CANARY));
         assert!(
-            requests[2].tools.as_ref().unwrap().observations[1]
+            requests[2].input.tools.as_ref().unwrap().observations()[1]
                 .output
                 .contains(PRIVATE_CACHE_CANARY)
-                && requests[2].tools.as_ref().unwrap().observations[1]
+                && requests[2].input.tools.as_ref().unwrap().observations()[1]
                     .output
                     .contains(CACHE_CANARY),
             "explicit cache output missing from the later Provider request"
         );
-        let overflow_observation = &requests[3].tools.as_ref().unwrap().observations[2];
+        let overflow_observation = &requests[3].input.tools.as_ref().unwrap().observations()[2];
         let overflow = overflow_observation.output.as_str();
         let overflow_result: serde_json::Value = serde_json::from_str(overflow).unwrap();
         assert_eq!(overflow_result["exit_code"], 0);
@@ -1055,47 +1055,51 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                 }
                 let body: Value = serde_json::from_slice(&bytes[end..]).unwrap();
                 assert_eq!(body["model"], model);
-                let context: Value = serde_json::from_str(if profile == "openai" {
-                    body["input"][0]["content"].as_str().unwrap()
-                } else {
-                    body["messages"][0]["content"].as_str().unwrap()
-                })
-                .unwrap();
+                let context = crate::semantic::input(&body);
                 assert_eq!(context["phase"], "root_plan");
                 assert_eq!(context["collaboration"], json!({"mode":"single"}));
                 assert_eq!(context["objective"], "Native Tool CLI");
                 assert_eq!(context["goal_budget"], json!(arany::GoalBudget::default()));
                 assert_eq!(
                     context["goal_plan_contract"],
-                    if step == 0 {
-                        Value::Null
-                    } else {
-                        json!(shipped_exec_plan_contract())
-                    }
+                    Value::Null,
+                    "the goal block stays as the Run began"
                 );
                 assert_eq!(context["history"], json!([]));
                 assert_eq!(context["includes"], json!([]));
                 assert!(context["workspace_guidance"].is_null());
-                let observations: Vec<Value> = if profile == "openai" {
-                    assert!(context["tools"].get("observations").is_none());
-                    let items = body["input"].as_array().unwrap();
-                    assert_eq!(items.len(), 1 + step * 2);
-                    items[1..]
-                        .as_chunks::<2>()
-                        .0
+                let observations = crate::semantic::tool_results(&body);
+                if profile == "openai" {
+                    assert!(
+                        body["include"]
+                            .as_array()
+                            .unwrap()
+                            .contains(&json!("reasoning.encrypted_content"))
+                    );
+                    let calls: Vec<_> = body["input"]
+                        .as_array()
+                        .unwrap()
                         .iter()
-                        .enumerate()
-                        .map(|(index, pair)| {
-                            assert_eq!(pair[0]["type"], "function_call");
-                            assert_eq!(pair[1]["type"], "function_call_output");
-                            assert_eq!(pair[0]["call_id"], format!("arany_action_{index}"));
-                            assert_eq!(pair[1]["call_id"], pair[0]["call_id"]);
-                            serde_json::from_str(pair[1]["output"].as_str().unwrap()).unwrap()
-                        })
-                        .collect()
+                        .filter(|item| item["type"] == "function_call")
+                        .collect();
+                    assert_eq!(calls.len(), step);
+                    for (index, call) in calls.iter().enumerate() {
+                        assert_eq!(call["call_id"], format!("call_native_{index}"));
+                    }
                 } else {
-                    context["tools"]["observations"].as_array().unwrap().clone()
-                };
+                    assert_eq!(body["tool_choice"]["type"], "auto");
+                    assert_eq!(body["tool_choice"]["disable_parallel_tool_use"], true);
+                    let names: Vec<_> = body["tools"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .inspect(|tool| assert!(tool.get("strict").is_none()))
+                        .map(|tool| tool["name"].as_str().unwrap().to_owned())
+                        .collect();
+                    for expected in ["arany_read", "arany_edit", "arany_command"] {
+                        assert!(names.iter().any(|name| name == expected), "{names:?}");
+                    }
+                }
                 assert_eq!(observations.len(), step);
                 if step == 1 {
                     assert_eq!(observations[0]["disposition"], "succeeded");
@@ -1104,9 +1108,8 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                         observations[0].get("intent").is_none()
                             && observations[0].get("guard").is_none()
                     );
-                    let command = observations[0]["output"].clone();
                     assert_eq!(
-                        command,
+                        observations[0]["output"],
                         json!({"exit_code":0,"stdout":"native command passed","stderr":"","changeset":{"files":[]}})
                     );
                 }
@@ -1119,14 +1122,14 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                         json!({"outcome":{"type":"tool","call":{"operation":"read","path":"src/note.txt","offset":0,"limit":4096}}})
                     }
                     2 => {
-                        assert_eq!(observations[1]["call"]["operation"], "read");
+                        assert!(observations[1].get("call").is_none());
                         assert_eq!(observations[1]["workspace_effect"], "none");
                         assert_eq!(observations[1]["output"]["text"], "native note\n");
                         assert_eq!(observations[1]["output"]["sha256"], hash(b"native note\n"));
                         json!({"outcome":{"type":"tool","call":{"operation":"edit","path":"src/note.txt","expected_digest":observations[1]["output"]["sha256"],"old":"native note\n","new":"native note\n2026-10-06\n"}}})
                     }
                     3 => {
-                        assert_eq!(observations[2]["call"]["operation"], "edit");
+                        assert!(observations[2].get("call").is_none());
                         assert_eq!(observations[2]["disposition"], "succeeded");
                         assert_eq!(observations[2]["workspace_effect"], "applied");
                         assert_eq!(
@@ -1138,19 +1141,36 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                     _ => unreachable!(),
                 };
                 contexts.push(context);
-                let response = if profile == "openai" {
-                    assert_eq!(body["tool_choice"], "required");
-                    assert_eq!(body["parallel_tool_calls"], false);
-                    assert_eq!(body["input"].as_array().unwrap().len(), 1 + step*2);
-                    let mut arguments = if outcome["outcome"]["type"] == "tool" { outcome["outcome"]["call"].clone() } else { outcome["outcome"].clone() };
-                    if let Some(plan_contract) = outcome["outcome"].get("plan_contract") {
-                        arguments["plan_contract"] = plan_contract.clone();
+                let response = {
+                    let tool = outcome["outcome"]["type"] == "tool";
+                    let mut arguments = if tool {
+                        outcome["outcome"]["call"].clone()
+                    } else {
+                        outcome["outcome"].clone()
+                    };
+                    if tool {
+                        arguments["plan_contract"] = outcome["outcome"]
+                            .get("plan_contract")
+                            .cloned()
+                            .unwrap_or(Value::Null);
                     }
-                    let key = if outcome["outcome"]["type"] == "tool" { "operation" } else { "type" };
+                    let key = if tool { "operation" } else { "type" };
                     let operation = arguments.as_object_mut().unwrap().remove(key).unwrap();
-                    json!({"id":format!("resp_native_{step}"),"status":"completed","model":model,"output":[{"type":"function_call","id":format!("fc_native_{step}"),"call_id":format!("call_native_{step}"),"name":format!("arany_{}", operation.as_str().unwrap()),"arguments":arguments.to_string(),"status":"completed"}],"usage":{"input_tokens":12,"output_tokens":8}})
-                } else {
-                    json!({"id":format!("msg_native_{step}"),"type":"message","role":"assistant","model":model,"stop_reason":"end_turn","stop_sequence":null,"content":[{"type":"text","text":outcome.to_string()}],"usage":{"input_tokens":12,"output_tokens":8}})
+                    if profile == "openai" {
+                        assert_eq!(body["tool_choice"], "required");
+                        assert_eq!(body["parallel_tool_calls"], false);
+                        json!({"id":format!("resp_native_{step}"),"status":"completed","model":model,"output":[
+                            {"type":"reasoning","id":format!("rs_native_{step}"),"summary":[],"encrypted_content":"CIPHERTEXT=="},
+                            {"type":"function_call","id":format!("fc_native_{step}"),"call_id":format!("call_native_{step}"),"name":format!("arany_{}", operation.as_str().unwrap()),"arguments":arguments.to_string(),"status":"completed"}
+                        ],"usage":{"input_tokens":12,"output_tokens":8}})
+                    } else if tool {
+                        json!({"id":format!("msg_native_{step}"),"type":"message","role":"assistant","model":model,"stop_reason":"tool_use","stop_sequence":null,"content":[
+                            {"type":"thinking","thinking":"private","signature":"sig"},
+                            {"type":"tool_use","id":format!("toolu_native_{step}"),"name":format!("arany_{}", operation.as_str().unwrap()),"input":arguments}
+                        ],"usage":{"input_tokens":12,"output_tokens":8}})
+                    } else {
+                        json!({"id":format!("msg_native_{step}"),"type":"message","role":"assistant","model":model,"stop_reason":"end_turn","stop_sequence":null,"content":[{"type":"text","text":outcome.to_string()}],"usage":{"input_tokens":12,"output_tokens":8}})
+                    }
                 }.to_string();
                 write!(input, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
                 input.flush().unwrap();

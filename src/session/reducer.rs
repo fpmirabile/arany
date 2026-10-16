@@ -249,35 +249,6 @@ mod goal_recovery_tests {
     }
 
     #[test]
-    fn historical_tool_context_projects_the_call_without_intent_internals() {
-        let view = pending_plan_view(Some(ToolDisposition::Succeeded));
-        let text = view.runs[0].tool_context();
-        let context: serde_json::Value = serde_json::from_str(&text).expect("JSON context");
-        let record = &context["tool_records"][0];
-        assert_eq!(
-            record["call"],
-            serde_json::json!({"operation": "read", "path": "src/main.rs", "offset": 0, "limit": 32})
-        );
-        assert_eq!(record["disposition"], "succeeded");
-        assert_eq!(record["output"], "{}");
-        assert_eq!(record["execution"], "observed; never replay");
-        for internal in [
-            "\"intent\"",
-            "policy_digest",
-            "enforcement_digest",
-            "expires_at_ms",
-            "use_count",
-            "workspace_inode",
-            "result_bytes",
-        ] {
-            assert!(
-                !text.contains(internal),
-                "historical context leaks {internal}"
-            );
-        }
-    }
-
-    #[test]
     fn pending_plan_recovery_accepts_closed_inspection_and_refuses_open_or_uncertain_tools() {
         let closed = pending_plan_view(Some(ToolDisposition::Succeeded));
         assert!(closed.goals[0].can_resume(&closed));
@@ -504,25 +475,6 @@ impl RunView {
                 .first()
                 .and_then(|agent| agent.provider_calls.last())
                 .is_some_and(|call| call.disposition == ProviderCallDisposition::ToolRequested)
-    }
-
-    pub(crate) fn tool_context(&self) -> String {
-        if self.tools.is_empty() && self.tool_compaction_summary.is_none() {
-            return String::new();
-        }
-        let records: Vec<_> = self
-            .tools
-            .iter()
-            .skip(self.tool_compaction_covered_count as usize)
-            .map(|tool| serde_json::json!({
-            "call":crate::tools::types::model_call(&tool.intent.call),
-            "disposition":tool.observation.as_ref().map(|observation| observation.disposition),
-            "cache_update":tool.observation.as_ref().map(|observation| observation.cache_update),
-            "output":tool.observation.as_ref().map(|observation| &observation.output),
-            "execution":if tool.observation.is_none() { "uncertain; never replay" } else { "observed; never replay" },
-        })).collect();
-        serde_json::json!({"scope":"historical Run; no pending Tool in the current Run; never replay intents or approvals; fresh inspection may establish present state", "run_status":format!("{:?}", self.status),"summary_untrusted":self.tool_compaction_summary,"tool_records":records})
-            .to_string()
     }
 }
 

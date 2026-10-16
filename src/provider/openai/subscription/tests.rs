@@ -61,20 +61,19 @@ fn request() -> ProviderRequest {
         phase: AgentPhase::RootPlan,
         collaboration: crate::session::CollaborationPolicy::Single,
         model: "model-a".into(),
-        instructions: None,
-        objective: "Synthetic objective".into(),
-        images: Vec::new(),
-        includes: Vec::new(),
-        history: Vec::new(),
-        context_summary: None,
-        goal_budget: None,
-        goal_plan_contract: None,
-        goal_context_facts: None,
-        child_results: Vec::new(),
-        steering_notes: Vec::new(),
         max_output_tokens: 64,
-        tools: None,
+        input: RunInput {
+            ..RunInput::new(PromptRole::ReadOnly, "Synthetic objective".into())
+        },
     }
+}
+
+fn body_for(request: &ProviderRequest, effort: Effort) -> Result<Vec<u8>, ProviderError> {
+    subscription_body(request, &render::conversation(request)?, effort)
+}
+
+fn scope_for(request: &ProviderRequest) -> wire::RunScope<'_> {
+    wire::RunScope::new(request, &render::conversation(request).unwrap(), TOKEN)
 }
 
 fn compaction_request() -> CompactionRequest {
@@ -138,32 +137,31 @@ fn completed_with_id(id: &str, output_tokens: Option<u32>, text: &str) -> Vec<u8
 
 #[test]
 fn subscription_body_is_streaming_and_omits_unsupported_remote_cap() {
-    let body = subscription_body(&request(), Effort::Medium).expect("bounded body");
+    let body = body_for(&request(), Effort::Medium).expect("bounded body");
     let value: Value = serde_json::from_slice(&body).expect("JSON");
     assert_eq!(value["model"], "model-a");
     assert_eq!(value["store"], false);
     assert_eq!(value["stream"], true);
     assert_eq!(value["reasoning"]["effort"], "medium");
     assert_eq!(value["input"][0]["role"], "user");
-    assert!(
-        value["input"][0]["content"]
-            .as_str()
-            .unwrap()
-            .contains("Synthetic objective")
+    assert_eq!(
+        value["input"][0]["content"][0]["text"],
+        "Synthetic objective"
     );
     assert_eq!(value["text"]["format"]["type"], "json_schema");
     for forbidden in ["max_output_tokens", "truncation", "previous_response_id"] {
         assert!(value.get(forbidden).is_none(), "{forbidden}");
     }
     let mut coding = request();
-    coding.goal_budget = Some(crate::session::GoalBudget::default());
-    coding.tools = Some(crate::tools::ToolContext {
+    coding.input.role = PromptRole::Primary;
+    coding.input.goal_budget = Some(crate::session::GoalBudget::default());
+    coding.input.tools = Some(crate::tools::ToolContext {
         catalog: json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]}).to_string(),
         history_summary: None,
-        observations: Vec::new(),
+        steps: Vec::new(),
     });
     let coding: Value =
-        serde_json::from_slice(&subscription_body(&coding, Effort::Medium).unwrap()).unwrap();
+        serde_json::from_slice(&body_for(&coding, Effort::Medium).unwrap()).unwrap();
     assert_eq!(coding["tool_choice"], "required");
     assert_eq!(coding["parallel_tool_calls"], false);
     assert!(coding.get("text").is_none());
@@ -183,18 +181,18 @@ fn subscription_body_is_streaming_and_omits_unsupported_remote_cap() {
         let encoded = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
         let image = ImageAttachment::from_png(&STANDARD.decode(encoded).unwrap()).unwrap();
         let mut selected = request();
-        selected.images = vec![ProviderImage {
+        selected.input.images = vec![ProviderImage {
             origin: ImageOrigin::Objective,
             image,
         }];
-        let body = subscription_body(&selected, Effort::Low).expect("streaming image input");
+        let body = body_for(&selected, Effort::Low).expect("streaming image input");
         let multimodal: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(
             multimodal["input"],
             json!([{"role": "user", "content": [
                 {"type": "input_text", "text": "Image 1 (objective): PNG 1x1"},
                 {"type": "input_image", "image_url": format!("data:image/png;base64,{encoded}"), "detail": "auto"},
-                {"type": "input_text", "text": value["input"][0]["content"]},
+                {"type": "input_text", "text": "Synthetic objective"},
             ]}])
         );
         assert_eq!(multimodal["store"], false);
@@ -204,37 +202,37 @@ fn subscription_body_is_streaming_and_omits_unsupported_remote_cap() {
         for forbidden in ["max_output_tokens", "truncation", "previous_response_id"] {
             assert!(multimodal.get(forbidden).is_none(), "{forbidden}");
         }
-        selected.images[0].origin = ImageOrigin::History { turn_index: 0 };
-        selected.history.push(crate::provider::HistoryTurn {
+        selected.input.images[0].origin = ImageOrigin::History { turn_index: 0 };
+        selected.input.history.push(crate::provider::HistoryTurn {
             user: "prior objective".into(),
             assistant: "prior result".into(),
         });
         assert!(
-            subscription_body(&selected, Effort::Low).is_ok(),
+            body_for(&selected, Effort::Low).is_ok(),
             "declared history origin"
         );
         selected.phase = AgentPhase::ChildWork;
         assert!(
             matches!(
-                subscription_body(&selected, Effort::Low),
+                body_for(&selected, Effort::Low),
                 Err(ProviderError::Rejected)
             ),
             "children cannot receive historical pixels"
         );
         selected.phase = AgentPhase::RootPlan;
-        selected.history.clear();
+        selected.input.history.clear();
         assert!(
             matches!(
-                subscription_body(&selected, Effort::Low),
+                body_for(&selected, Effort::Low),
                 Err(ProviderError::Rejected)
             ),
             "missing historical origin rejected before transport"
         );
-        selected.images[0].origin = ImageOrigin::Objective;
-        selected.images = vec![selected.images[0].clone(); 5];
+        selected.input.images[0].origin = ImageOrigin::Objective;
+        selected.input.images = vec![selected.input.images[0].clone(); 5];
         assert!(
             matches!(
-                subscription_body(&selected, Effort::Low),
+                body_for(&selected, Effort::Low),
                 Err(ProviderError::Rejected)
             ),
             "image count is bounded"
@@ -315,7 +313,8 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
                 }
                 let body = body.unwrap();
                 if operation == "Run" {
-                    wire::decode_streamed_run(&body, "model-a").expect("complete streamed Run");
+                    wire::decode_streamed_run(&body, &scope_for(&request()))
+                        .expect("complete streamed Run");
                 } else {
                     wire::decode_streamed_compaction(&body, "model-a")
                         .expect("complete streamed compaction");
@@ -387,7 +386,7 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
                 .unwrap()
                 .unwrap();
             assert!(
-                wire::decode_streamed_run(&body, "model-a").is_err(),
+                wire::decode_streamed_run(&body, &scope_for(&request())).is_err(),
                 "{label}"
             );
             assert!(
@@ -407,7 +406,7 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
                 .unwrap()
                 .unwrap();
             assert!(
-                wire::decode_streamed_run(&body, "model-a").is_err(),
+                wire::decode_streamed_run(&body, &scope_for(&request())).is_err(),
                 "{label}"
             );
             assert!(
@@ -439,7 +438,7 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
         .feed(&stream[split * 2..])
         .unwrap()
         .expect("complete response");
-    let decoded = wire::decode_streamed_run(&body, "model-a").expect("strict outcome");
+    let decoded = wire::decode_streamed_run(&body, &scope_for(&request())).expect("strict outcome");
     assert!(matches!(decoded.outcome, ProviderOutcome::Finish(_)));
     assert_eq!(decoded.usage.output_tokens, Some(12));
     for (name, ending, named) in [
@@ -472,7 +471,7 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
         assert_eq!(terminal.as_deref(), Some(body.as_slice()), "{name}");
     }
     let duplicate_field = br#"{"type":"response.completed","response":{"id":"resp_synthetic","status":"failed","status":"completed","model":"model-a","output":[]}}"#;
-    assert!(wire::decode_streamed_run(duplicate_field, "model-a").is_err());
+    assert!(wire::decode_streamed_run(duplicate_field, &scope_for(&request())).is_err());
 
     for (label, bytes) in [
         ("failed", b"event: response.failed\ndata: {\"type\":\"response.failed\"}\n\n".as_slice()),
@@ -643,12 +642,13 @@ fn client() -> Client {
 #[tokio::test]
 async fn streaming_transport_accepts_only_final_usage_within_local_cap() {
     let mut coding = request();
-    coding.tools = Some(crate::tools::ToolContext {
+    coding.input.role = PromptRole::Primary;
+    coding.input.tools = Some(crate::tools::ToolContext {
         catalog: json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]}).to_string(),
         history_summary: None,
-        observations: Vec::new(),
+        steps: Vec::new(),
     });
-    let response = json!({"id":"resp_function","status":"completed","model":"model-a","output":[{"type":"function_call","id":"fc_function","call_id":"call_function","name":"arany_read","arguments":json!({"path":"README.md","offset":0,"limit":4096}).to_string(),"status":"completed"}],"usage":{"input_tokens":12,"output_tokens":12}});
+    let response = json!({"id":"resp_function","status":"completed","model":"model-a","output":[{"type":"reasoning","id":"rs_function","summary":[],"encrypted_content":"CIPHERTEXT=="},{"type":"function_call","id":"fc_function","call_id":"call_function","name":"arany_read","arguments":json!({"path":"README.md","offset":0,"limit":4096,"plan_contract":null}).to_string(),"status":"completed"}],"usage":{"input_tokens":12,"output_tokens":12}});
     let stream = format!(
         "data: {}\n\n",
         json!({"type":"response.completed","response":response})
@@ -659,20 +659,22 @@ async fn streaming_transport_accepts_only_final_usage_within_local_cap() {
         .await
         .unwrap();
     assert!(matches!(
-        decoded.outcome,
-        ProviderOutcome::Tool {
-            call: crate::tools::ToolCall::Read {
-                offset: 0,
-                limit: 4096,
+        &decoded.outcome,
+        ProviderOutcome::Tools(requests) if matches!(
+            requests[..],
+            [crate::tools::ToolRequest {
+                call: crate::tools::ToolCall::Read { offset: 0, limit: 4096, .. },
+                plan_contract: None,
                 ..
-            },
-            ..
-        }
+            }]
+        )
     ));
+    assert_eq!(decoded.turn.items("openai").unwrap().len(), 2);
     let wire_request = server.await.unwrap();
     let body: Value = serde_json::from_str(wire_request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
     assert_eq!(body["tool_choice"], "required");
     assert_eq!(body["parallel_tool_calls"], false);
+    assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
     let stream = String::from_utf8(completed(Some(12)))
         .unwrap()
         .split_inclusive('\n')
@@ -1144,7 +1146,7 @@ fn attached_stream_preview_is_in_place_and_never_exposes_wire_arguments() {
     }
     assert_eq!(last, "hello\n🚀");
     assert_eq!(observed.borrow().commentary, vec!["Public progress"]);
-    assert!(wire::decode_streamed_run(&accepted.unwrap(), "model-a").is_ok());
+    assert!(wire::decode_streamed_run(&accepted.unwrap(), &scope_for(&request())).is_ok());
     for event in [
         json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"unknown","delta":"unsafe"}),
         json!({"type":"response.output_item.added","output_index":0,"item":{"id":"msg","type":"message","role":"assistant","phase":"reasoning","content":[]}}),
@@ -1169,4 +1171,84 @@ fn subscription_accept_rejects_cached_tokens_above_input() {
         cache_creation_input_tokens: None,
     };
     assert!(accept_result(false, usage, 4096, StreamCounts::default()).is_err());
+}
+
+#[test]
+fn chatgpt_replay_drops_item_ids_and_keeps_ciphertext() {
+    let mut coding = request();
+    coding.input.role = PromptRole::Primary;
+    coding.input.tools = Some(crate::tools::ToolContext {
+        catalog: json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]}).to_string(),
+        history_summary: None,
+        steps: Vec::new(),
+    });
+    let reply = json!({"id":"resp_1","status":"completed","model":"model-a","output":[
+        {"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"CIPHERTEXT=="},
+        {"type":"function_call","id":"fc_1","call_id":"call_1","name":"arany_read",
+         "arguments":json!({"path":"README.md","offset":0,"limit":10,"plan_contract":null}).to_string(),"status":"completed"}
+    ],"usage":{"input_tokens":1,"output_tokens":1}});
+    let conversation = render::conversation(&coding).unwrap();
+    let decoded = wire::decode_run(
+        &serde_json::to_vec(&reply).unwrap(),
+        &wire::RunScope::new(&coding, &conversation, TOKEN),
+    )
+    .unwrap();
+    coding
+        .input
+        .tools
+        .as_mut()
+        .unwrap()
+        .steps
+        .push(crate::tools::ToolStep {
+            turn: decoded.turn,
+            requests: match decoded.outcome {
+                ProviderOutcome::Tools(requests) => requests,
+                _ => panic!("Tool request"),
+            },
+            observations: vec![],
+            facts: None,
+            steering_notes: Vec::new(),
+            calls_remaining: None,
+        });
+    coding.input.tools.as_mut().unwrap().steps[0]
+        .observations
+        .push(crate::provider::test_support::observation(
+            crate::tools::ToolCall::Read {
+                path: "README.md".into(),
+                offset: 0,
+                limit: 10,
+            },
+            "{}",
+        ));
+    let value: Value = serde_json::from_slice(&body_for(&coding, Effort::Low).unwrap()).unwrap();
+    let items = value["input"].as_array().unwrap();
+    let reasoning = items
+        .iter()
+        .find(|item| item["type"] == "reasoning")
+        .unwrap();
+    let call = items
+        .iter()
+        .find(|item| item["type"] == "function_call")
+        .unwrap();
+    assert!(reasoning.get("id").is_none() && call.get("id").is_none());
+    assert_eq!(reasoning["encrypted_content"], "CIPHERTEXT==");
+    assert_eq!(call["call_id"], "call_1");
+}
+
+#[test]
+fn chatgpt_spent_researcher_is_offered_finish_alone() {
+    let mut spent = crate::provider::test_support::catalog();
+    spent["tool_calls_remaining"] = json!(0);
+    let mut researcher = crate::provider::test_support::researcher_request("model-a");
+    researcher.input.tools = Some(crate::provider::test_support::tool_context(spent));
+    let value: Value =
+        serde_json::from_slice(&body_for(&researcher, Effort::Low).unwrap()).unwrap();
+    let names: Vec<_> = value["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["arany_finish"]);
+    assert_eq!(value["tool_choice"], "required");
 }

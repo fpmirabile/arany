@@ -94,9 +94,7 @@ fn hostile_repository_startup_does_not_activate_git_or_disclose_omitted_inputs()
             let body: serde_json::Value =
                 serde_json::from_slice(&request).expect("bounded request JSON");
             assert_eq!(body["model"], "model-1");
-            let input: serde_json::Value =
-                serde_json::from_str(body["input"].as_str().expect("semantic input"))
-                    .expect("semantic JSON");
+            let input: serde_json::Value = crate::semantic::input(&body);
             if index == 3 {
                 assert_eq!(input["workspace_guidance"], "EXPECTED_ROOT_GUIDANCE");
                 assert_eq!(input["objective"], "answer");

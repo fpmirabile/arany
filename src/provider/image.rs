@@ -183,17 +183,18 @@ impl ProviderImage {
 pub(super) fn validate_images(
     request: &super::ProviderRequest,
 ) -> Result<(), super::ProviderError> {
-    if request.images.len() > MAX_MESSAGE_IMAGES
-        || request
+    let input = &request.input;
+    if input.images.len() > MAX_MESSAGE_IMAGES
+        || input
             .images
             .iter()
             .map(|value| value.image.byte_len())
             .sum::<usize>()
             > MAX_IMAGE_BYTES
-        || request.images.iter().any(|value| match value.origin {
+        || input.images.iter().any(|value| match value.origin {
             ImageOrigin::Objective => false,
             ImageOrigin::History { turn_index } => {
-                usize::from(turn_index) >= request.history.len()
+                usize::from(turn_index) >= input.history.len()
                     || request.phase == super::AgentPhase::ChildWork
             }
         })

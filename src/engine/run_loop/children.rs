@@ -4,7 +4,8 @@ use super::{
 };
 use crate::engine::{CHILD_OUTPUT_TOKEN_CAP, EngineError, RunCancellation, STORE_ACTION_OVERHEAD};
 use crate::provider::{
-    AgentPhase, ChildResult, Finish, Provider, ProviderOutcome, ProviderRequest, ProviderResponse,
+    AgentPhase, ChildResult, Finish, PromptRole, ProviderOutcome, ProviderRequest,
+    ProviderResponse, ProviderTurn, RunInput,
 };
 use crate::session::{
     AgentDisposition, AgentRole, AgentRunId, ChildGrant, CollaborationPolicy, Event,
@@ -13,7 +14,7 @@ use crate::session::{
 use crate::telemetry::{AgentTrace, ProviderTrace, TraceOutcome};
 use crate::tools::PREPARATION_OVERHEAD;
 use crate::tools::{
-    CacheUpdate, GuardReceipt, ToolCall, ToolContext, ToolDisposition, ToolObservation,
+    CacheUpdate, GuardReceipt, ToolContext, ToolDisposition, ToolObservation, ToolRequest, ToolStep,
 };
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -112,7 +113,7 @@ impl ChildQueue {
     }
 }
 
-impl<P: Provider + 'static> RunLoop<'_, P> {
+impl RunLoop<'_> {
     pub(super) fn valid_delegation(&self, children: &[String]) -> bool {
         self.controls.goal_budget.can_start_provider_call()
             && !matches!(self.controls.policy, CollaborationPolicy::Single)
@@ -127,6 +128,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         &self,
         root_request: &mut ProviderRequest,
         objectives: Vec<String>,
+        delegate_turn: ProviderTurn,
         primary: AgentTrace,
     ) -> Result<(), EngineError> {
         if self
@@ -254,13 +256,9 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                         ..
                     }) => valid_finish(finish, MAX_CHILD_RESULT_BYTES),
                     CallResult::Response(ProviderResponse {
-                        outcome:
-                            ProviderOutcome::Tool {
-                                call,
-                                plan_contract,
-                            },
+                        outcome: ProviderOutcome::Tools(requests),
                         ..
-                    }) => self.valid_child_tool(&children[index], call, plan_contract.is_some()),
+                    }) => self.valid_child_tools(&children[index], requests),
                     _ => false,
                 };
             if queue
@@ -305,7 +303,8 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                     Some(AgentDisposition::Finished)
                 }
                 CallResult::Response(ProviderResponse {
-                    outcome: ProviderOutcome::Tool { call, .. },
+                    outcome: ProviderOutcome::Tools(mut requests),
+                    turn,
                     ..
                 }) if valid_response => {
                     if let Err(error) = self.controls.goal_budget.child_call_finished() {
@@ -324,9 +323,11 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                         false
                     } else {
                         // Boxed: the Tool future is large and would overflow the caller's stack.
+                        let request = requests.pop().ok_or(EngineError::CoordinatorFailed)?;
                         match Box::pin(self.execute_child_tool(
                             &mut children[index],
-                            call,
+                            request,
+                            turn,
                             deadline,
                         ))
                         .await
@@ -452,10 +453,20 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
             return self.settle_stopped_primary(primary).await;
         }
         root_request.phase = AgentPhase::RootSynthesis;
-        root_request.child_results = results
+        root_request.input.child_results = results
             .into_iter()
             .collect::<Option<Vec<_>>>()
             .ok_or(EngineError::CoordinatorFailed)?;
+        if let Some(tools) = root_request.input.tools.as_mut() {
+            tools.steps.push(ToolStep {
+                turn: delegate_turn,
+                requests: Vec::new(),
+                observations: Vec::new(),
+                facts: None,
+                steering_notes: Vec::new(),
+                calls_remaining: None,
+            });
+        }
         loop {
             if self.pause_at_boundary() {
                 return self.settle_stopped_primary(primary).await;
@@ -478,7 +489,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                         outcome: ProviderOutcome::Finish(finish),
                         ..
                     }) if valid_finish(finish, MAX_PRIMARY_RESULT_BYTES)
-                ) || matches!(&synthesis, CallResult::Response(ProviderResponse { outcome: ProviderOutcome::Tool { call, plan_contract }, .. }) if self.valid_tool(root_request, call, plan_contract)));
+                ) || matches!(&synthesis, CallResult::Response(ProviderResponse { outcome: ProviderOutcome::Tools(requests), .. }) if self.valid_tools(requests)));
             synthesis_trace.finish_with_usage(
                 call_trace_result(&synthesis, valid_response),
                 input_tokens,
@@ -506,22 +517,17 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                     ..
                 }) if valid_response => return self.finish_primary(finish, primary).await,
                 CallResult::Response(ProviderResponse {
-                    outcome:
-                        ProviderOutcome::Tool {
-                            call,
-                            plan_contract,
-                        },
+                    outcome: ProviderOutcome::Tools(requests),
+                    turn,
                     ..
                 }) if valid_response => {
                     if self.pause_at_boundary() {
                         return self.settle_stopped_primary(primary).await;
                     }
-                    if let Some(contract) = plan_contract
-                        && !self.admit_plan_contract(root_request, *contract).await?
-                    {
+                    if !self.begin_tool_step(root_request, requests, turn).await? {
                         return self.fail_primary(primary).await;
                     }
-                    match self.execute_tool(root_request, call, false, &primary).await {
+                    match self.execute_tool(root_request, false, &primary).await {
                         Ok(true) => {}
                         Ok(false) if self.controls.cancellation.is_cancelled() => {
                             return self.settle_stopped_primary(primary).await;
@@ -577,48 +583,59 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
             let child = &mut children[index];
             if let Some(tools) = child.tools.as_mut() {
                 let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
-                let room = tools.serialized_len().is_ok_and(|bytes| {
-                    runtime
-                        .result_capacity(bytes + CHILD_INTENT_RESERVE_BYTES, 0)
-                        .is_some_and(|capacity| capacity >= MIN_CHILD_RESULT_BYTES)
-                });
+                let room = runtime
+                    .result_capacity(tools.rendered_len() + CHILD_INTENT_RESERVE_BYTES, 0)
+                    .is_some_and(|capacity| capacity >= MIN_CHILD_RESULT_BYTES);
                 if !room {
                     child.tool_calls_remaining = 0;
                 }
-                tools.catalog = runtime
-                    .research_context(child.tool_calls_remaining)?
-                    .catalog;
+                // The catalog is the request head and stays as first sent; later calls carry the
+                // remaining budget in their newest step.
+                match tools.steps.last_mut() {
+                    Some(step) => step.calls_remaining = Some(child.tool_calls_remaining),
+                    None => {
+                        tools.catalog = runtime
+                            .research_context(child.tool_calls_remaining)?
+                            .catalog;
+                    }
+                }
             }
             let provider = Arc::clone(&self.provider);
             let cancellation = self.controls.cancellation.clone();
+            let researcher = children[index].tools.is_some();
+            let root = &root_request.input;
             let request = ProviderRequest {
                 run_id: self.run_id,
                 agent_run_id: children[index].agent_run_id,
                 phase: AgentPhase::ChildWork,
                 collaboration: CollaborationPolicy::Single,
                 model: root_request.model.clone(),
-                instructions: root_request.instructions.clone(),
-                objective: children[index].objective.clone(),
-                images: root_request
-                    .images
-                    .iter()
-                    .filter(|value| value.origin == crate::provider::ImageOrigin::Objective)
-                    .cloned()
-                    .collect(),
-                includes: root_request.includes.clone(),
-                history: Vec::new(),
-                context_summary: None,
-                goal_budget: root_request.goal_budget,
-                goal_plan_contract: children[index]
-                    .tools
-                    .is_some()
-                    .then(|| root_request.goal_plan_contract.clone())
-                    .flatten(),
-                goal_context_facts: None,
-                child_results: Vec::new(),
-                steering_notes: Vec::new(),
                 max_output_tokens: CHILD_OUTPUT_TOKEN_CAP.min(root_request.max_output_tokens),
-                tools: children[index].tools.clone(),
+                input: RunInput {
+                    images: root
+                        .images
+                        .iter()
+                        .filter(|value| value.origin == crate::provider::ImageOrigin::Objective)
+                        .cloned()
+                        .collect(),
+                    goal_budget: Some(self.controls.goal_budget.effective_budget()?),
+                    goal_plan_contract: if researcher {
+                        self.controls.goal_budget.plan_contract()?
+                    } else {
+                        None
+                    },
+                    workspace_guidance: root.workspace_guidance.clone(),
+                    includes: root.includes.clone(),
+                    tools: children[index].tools.clone(),
+                    ..RunInput::new(
+                        if researcher {
+                            PromptRole::Researcher
+                        } else {
+                            PromptRole::ReadOnly
+                        },
+                        children[index].objective.clone(),
+                    )
+                },
             };
             self.reserve_provider_call(children[index].agent_run_id)
                 .await?;
@@ -645,31 +662,28 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         Ok(())
     }
 
-    fn valid_child_tool(
-        &self,
-        child: &ChildWork,
-        call: &ToolCall,
-        has_plan_contract: bool,
-    ) -> bool {
-        !has_plan_contract
-            && child.tools.is_some()
-            && child.tool_calls_remaining > 0
-            && call.valid()
-            && call.is_child_research()
+    fn valid_child_tools(&self, child: &ChildWork, requests: &[ToolRequest]) -> bool {
+        matches!(requests, [request]
+            if request.plan_contract.is_none()
+                && child.tools.is_some()
+                && child.tool_calls_remaining > 0
+                && request.call.valid()
+                && request.call.is_child_research())
     }
 
     /// Runs one read-only child Tool inside the delegation's active segment; `false` stops the child.
     async fn execute_child_tool(
         &self,
         child: &mut ChildWork,
-        call: ToolCall,
+        request: ToolRequest,
+        turn: ProviderTurn,
         deadline: Instant,
     ) -> Result<bool, EngineError> {
         // Copy the id first so the mutable borrow of `child.tools` below stays disjoint.
         let agent_run_id = child.agent_run_id;
         let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
         let tools = child.tools.as_mut().ok_or(EngineError::CoordinatorFailed)?;
-        let mut intent = runtime.intent(self.run_id, agent_run_id, call);
+        let mut intent = runtime.intent(self.run_id, agent_run_id, request.call.clone());
         let available = deadline
             .saturating_duration_since(Instant::now())
             .saturating_sub(PREPARATION_OVERHEAD + TOOL_CLEANUP_OVERHEAD + STORE_ACTION_OVERHEAD);
@@ -684,21 +698,27 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         intent.limits.runtime_ms = runtime_ms;
         intent.expires_at_ms = crate::tools::now_ms().saturating_add(u64::from(runtime_ms));
         let mut reserved = tools.clone();
-        reserved.observations.push(ToolObservation {
-            intent: intent.clone(),
-            disposition: ToolDisposition::Succeeded,
-            output: String::new(),
-            guard: Some(GuardReceipt {
-                contract_version: 1,
-                intent_digest: intent.digest(),
-                enforcement_digest: intent.enforcement_digest,
-                limits: intent.limits.clone(),
-            }),
-            cache_update: CacheUpdate::NotApplicable,
+        reserved.steps.push(ToolStep {
+            turn: turn.clone(),
+            requests: vec![request.clone()],
+            observations: vec![ToolObservation {
+                intent: intent.clone(),
+                disposition: ToolDisposition::Succeeded,
+                output: String::new(),
+                guard: Some(GuardReceipt {
+                    contract_version: 1,
+                    intent_digest: intent.digest(),
+                    enforcement_digest: intent.enforcement_digest,
+                    limits: intent.limits.clone(),
+                }),
+                cache_update: CacheUpdate::NotApplicable,
+            }],
+            facts: None,
+            steering_notes: Vec::new(),
+            // Only sizes the reservation; `fill_slots` rewrites the count before the next render.
+            calls_remaining: Some(child.tool_calls_remaining.saturating_sub(1)),
         });
-        let overhead = serde_json::to_vec(&reserved)
-            .map_err(|_| EngineError::InvalidRequest)?
-            .len();
+        let overhead = reserved.rendered_len();
         let Some(capacity) = runtime.result_capacity(overhead, 0) else {
             return Ok(false);
         };
@@ -755,11 +775,15 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         })
         .await?;
         let continues = !observation.stops_run() && !self.controls.cancellation.is_cancelled();
-        tools.observations.push(observation);
-        Ok(continues
-            && tools
-                .serialized_len()
-                .is_ok_and(|bytes| bytes <= runtime.context_limit_bytes()))
+        tools.steps.push(ToolStep {
+            turn,
+            requests: vec![request],
+            observations: vec![observation],
+            facts: None,
+            steering_notes: Vec::new(),
+            calls_remaining: Some(child.tool_calls_remaining.saturating_sub(1)),
+        });
+        Ok(continues && tools.rendered_len() <= runtime.context_limit_bytes())
     }
 
     async fn finish_child(

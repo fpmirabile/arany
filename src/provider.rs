@@ -1,12 +1,13 @@
-use crate::session::{AgentRunId, CollaborationPolicy, RunId, SessionId};
+use crate::session::{CollaborationPolicy, RunId, SessionId};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::future::Future;
 use uuid::{Uuid, Version};
 
 mod anthropic;
 mod catalog;
+mod conversation;
 mod custom;
+mod decode;
 mod effort;
 mod image;
 #[cfg(test)]
@@ -15,13 +16,17 @@ pub(crate) use image::{MAX_IMAGE_METADATA_BYTES, deserialize_images, valid_image
 mod native_check;
 mod openai;
 pub(crate) mod prompts;
+mod render;
 mod streaming;
+#[cfg(test)]
+mod test_support;
 mod tool_specs;
 pub use anthropic::AnthropicProvider;
 pub use catalog::{
     ModelEntry, list_native_models, list_native_models_with_api_key,
     list_native_models_with_credentials,
 };
+pub use conversation::{PromptRole, ProviderRequest, ProviderTurn, RunInput, ToolUseId};
 pub use custom::{
     CustomProfile, CustomProfileCheck, CustomProfileError, CustomProvider, check_custom_profile,
 };
@@ -32,10 +37,7 @@ pub use native_check::{
     check_native_model_with_credentials,
 };
 pub use openai::{ChatGptProvider, OpenAiProvider, probe_chatgpt_model};
-use prompts::{
-    COLLABORATION_INSTRUCTIONS, PLAN_CONTRACT_INSTRUCTIONS, READ_ONLY_INSTRUCTIONS,
-    RESEARCH_INSTRUCTIONS, STEERING_INSTRUCTIONS,
-};
+pub(crate) use render::history_tool_block;
 pub use streaming::{PreviewText, ResponsePreview};
 
 fn http_client(timeout: std::time::Duration) -> reqwest::ClientBuilder {
@@ -89,43 +91,6 @@ pub(crate) const MAX_OUTPUT_TOKEN_CAP: u32 = 16_384;
 pub(crate) const DEFAULT_OUTPUT_TOKEN_CAP: u32 = 4096;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
-/// Joins the non-empty parts, so an absent plan-contract part adds no separator.
-/// Instruction base: researcher children, Tool-enabled primaries or read-only calls.
-pub(super) fn instruction_base(
-    request: &ProviderRequest,
-    tool_instructions: &'static str,
-) -> &'static str {
-    match (request.phase, request.tools.is_some()) {
-        (AgentPhase::ChildWork, true) => RESEARCH_INSTRUCTIONS,
-        (_, true) => tool_instructions,
-        (_, false) => READ_ONLY_INSTRUCTIONS,
-    }
-}
-
-pub(super) fn run_instructions(base: &str, request: &ProviderRequest) -> String {
-    let child = request.phase == AgentPhase::ChildWork;
-    let plan = if request.tools.is_some() && request.goal_plan_contract.is_none() && !child {
-        PLAN_CONTRACT_INSTRUCTIONS
-    } else {
-        ""
-    };
-    let collaboration = if child {
-        ""
-    } else {
-        COLLABORATION_INSTRUCTIONS
-    };
-    let steering = if request.steering_notes.is_empty() {
-        ""
-    } else {
-        STEERING_INSTRUCTIONS
-    };
-    [base, plan, collaboration, steering]
-        .into_iter()
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 fn outcome_schema() -> Value {
     json!({
         "type": "object",
@@ -152,37 +117,6 @@ fn summary_schema() -> Value {
         "required": ["summary"],
         "additionalProperties": false
     })
-}
-
-fn run_input(request: &ProviderRequest) -> Value {
-    let phase = match request.phase {
-        AgentPhase::RootPlan => "root_plan",
-        AgentPhase::ToolReview => "tool_review",
-        AgentPhase::ChildWork => "child_work",
-        AgentPhase::RootSynthesis => "root_synthesis",
-    };
-    let mut input = json!({
-        "phase": phase,
-        "collaboration": request.collaboration,
-        "objective": request.objective,
-        "workspace_guidance": request.instructions,
-        "includes": request.includes,
-        "history": request.history.iter().map(|turn| json!({"user": turn.user, "assistant": turn.assistant})).collect::<Vec<_>>(),
-        "derived_context_summary": request.context_summary,
-        "goal_budget": request.goal_budget,
-        "goal_plan_contract": request.goal_plan_contract,
-        "child_results": request.child_results.iter().map(|item| json!({"objective": item.objective, "summary": item.summary, "result": item.result})).collect::<Vec<_>>(),
-    });
-    if let Some(facts) = request.goal_context_facts {
-        input["goal_context_facts"] = json!(facts);
-    }
-    if !request.steering_notes.is_empty() {
-        input["steering_notes"] = json!(request.steering_notes);
-    }
-    if let Some(tools) = &request.tools {
-        input["tools"] = tools.model_input();
-    }
-    input
 }
 
 pub(crate) fn compaction_input(request: &CompactionRequest) -> Value {
@@ -382,30 +316,6 @@ pub struct ChildResult {
     pub result: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProviderRequest {
-    pub run_id: RunId,
-    pub agent_run_id: AgentRunId,
-    pub phase: AgentPhase,
-    pub collaboration: CollaborationPolicy,
-    pub model: String,
-    pub instructions: Option<String>,
-    pub objective: String,
-    pub images: Vec<ProviderImage>,
-    pub includes: Vec<String>,
-    pub history: Vec<HistoryTurn>,
-    /// Model-authored derived data; adapters must render it as data, never instructions.
-    pub context_summary: Option<String>,
-    pub goal_budget: Option<crate::session::GoalBudget>,
-    pub goal_plan_contract: Option<crate::session::GoalPlanContract>,
-    pub goal_context_facts: Option<GoalContextFacts>,
-    pub child_results: Vec<ChildResult>,
-    /// User-sent steering notes for a primary call; adapters render them as user input data only.
-    pub steering_notes: Vec<String>,
-    pub tools: Option<crate::tools::ToolContext>,
-    pub max_output_tokens: u32,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GoalContextFacts {
@@ -437,14 +347,19 @@ impl ProviderRequest {
         self.collaboration
             .validate()
             .map_err(|_| ProviderError::Rejected)?;
-        if self.phase == AgentPhase::ChildWork
-            && (self.collaboration != CollaborationPolicy::Single
-                || self.goal_context_facts.is_some())
-        {
-            return Err(ProviderError::Rejected);
-        }
-        if !self.steering_notes.is_empty()
-            && !matches!(self.phase, AgentPhase::RootPlan | AgentPhase::RootSynthesis)
+        let input = &self.input;
+        let root = matches!(self.phase, AgentPhase::RootPlan | AgentPhase::RootSynthesis);
+        let role_fits = match input.role {
+            PromptRole::Primary => root && input.tools.is_some(),
+            PromptRole::Researcher => self.phase == AgentPhase::ChildWork && input.tools.is_some(),
+            PromptRole::ReadOnly => self.phase != AgentPhase::ToolReview && input.tools.is_none(),
+            PromptRole::ToolReview => self.phase == AgentPhase::ToolReview && input.tools.is_none(),
+        };
+        if !role_fits
+            || self.phase == AgentPhase::ChildWork
+                && (self.collaboration != CollaborationPolicy::Single
+                    || input.goal_context_facts.is_some())
+            || !input.steering_notes.is_empty() && !root
         {
             return Err(ProviderError::Rejected);
         }
@@ -452,6 +367,7 @@ impl ProviderRequest {
     }
 }
 
+/// Finish and Delegate only; Tools are offered natively and never selected through this schema.
 pub(crate) fn restrict_outcome_schema(
     mut schema: serde_json::Value,
     request: &ProviderRequest,
@@ -471,16 +387,6 @@ pub(crate) fn restrict_outcome_schema(
             _ => false,
         },
     );
-    if let Some(tools) = &request.tools {
-        if request.phase == AgentPhase::ChildWork {
-            branches.extend(tools.research_branches());
-        } else {
-            branches.extend(tools.outcome_branch_with_plan(
-                request.goal_plan_contract.is_none(),
-                request.goal_budget.as_ref(),
-            ));
-        }
-    }
     schema
 }
 
@@ -569,10 +475,8 @@ pub struct Delegate {
 pub enum ProviderOutcome {
     Finish(Finish),
     Delegate(Delegate),
-    Tool {
-        call: crate::tools::ToolCall,
-        plan_contract: Option<Box<crate::session::GoalPlanContract>>,
-    },
+    /// Non-empty, in model order; the Engine accepts exactly one per step.
+    Tools(Vec<crate::tools::ToolRequest>),
 }
 
 /// Accepted wire condition and local request control, not a remote retention guarantee.
@@ -581,6 +485,7 @@ pub enum ProviderOutcome {
 pub enum ProviderWireProvenance {
     ResponsesCompletedStoreFalseRequested,
     MessagesEndTurnStorageUnspecified,
+    MessagesToolUseStorageUnspecified,
 }
 
 impl ProviderWireProvenance {
@@ -591,7 +496,7 @@ impl ProviderWireProvenance {
         output_tokens: Option<u32>,
     ) -> bool {
         response_id.is_some()
-            && (self != Self::MessagesEndTurnStorageUnspecified
+            && (self == Self::ResponsesCompletedStoreFalseRequested
                 || input_tokens.is_some() && output_tokens.is_some())
     }
 }
@@ -599,6 +504,8 @@ impl ProviderWireProvenance {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderResponse {
     pub outcome: ProviderOutcome,
+    /// The exact assistant output, replayed by the next step of this live Run only.
+    pub turn: ProviderTurn,
     pub response_id: Option<String>,
     pub usage: Usage,
     pub wire_provenance: Option<ProviderWireProvenance>,
@@ -611,6 +518,7 @@ impl ProviderResponse {
                 .response_id
                 .as_ref()
                 .is_some_and(|id| id.contains(secret))
+            || self.turn.reflects_secret(secret)
             || match &self.outcome {
                 ProviderOutcome::Finish(value) => {
                     value.summary.contains(secret) || value.result.contains(secret)
@@ -618,38 +526,27 @@ impl ProviderResponse {
                 ProviderOutcome::Delegate(value) => {
                     value.children.iter().any(|child| child.contains(secret))
                 }
-                ProviderOutcome::Tool {
-                    call,
-                    plan_contract,
-                } => {
-                    serde_json::to_value(call)
-                        .is_ok_and(|value| tool_reflects_secret(&value, secret))
-                        || if let crate::tools::ToolCall::McpCall { arguments, .. } = call {
-                            crate::tools::types::parse_mcp_arguments(arguments)
-                                .map_or(true, |value| tool_reflects_secret(&value, secret))
-                        } else {
-                            false
-                        }
-                        || plan_contract.as_ref().is_some_and(|contract| {
-                            serde_json::to_value(contract)
-                                .is_ok_and(|value| tool_reflects_secret(&value, secret))
-                        })
-                }
+                ProviderOutcome::Tools(requests) => requests
+                    .iter()
+                    .any(|request| tool_request_reflects_secret(request, secret)),
             }
     }
 }
 
-fn tool_reflects_secret(value: &serde_json::Value, secret: &str) -> bool {
-    match value {
-        serde_json::Value::String(value) => value.contains(secret),
-        serde_json::Value::Array(values) => values
-            .iter()
-            .any(|value| tool_reflects_secret(value, secret)),
-        serde_json::Value::Object(values) => values
-            .iter()
-            .any(|(key, value)| key.contains(secret) || tool_reflects_secret(value, secret)),
-        _ => false,
-    }
+fn tool_request_reflects_secret(request: &crate::tools::ToolRequest, secret: &str) -> bool {
+    use streaming::reflects_secret as value_reflects_secret;
+    request.id.as_str().contains(secret)
+        || serde_json::to_value(&request.call)
+            .is_ok_and(|value| value_reflects_secret(&value, secret))
+        || if let crate::tools::ToolCall::McpCall { arguments, .. } = &request.call {
+            crate::tools::types::parse_mcp_arguments(arguments)
+                .map_or(true, |value| value_reflects_secret(&value, secret))
+        } else {
+            false
+        }
+        || request.plan_contract.as_ref().is_some_and(|contract| {
+            serde_json::to_value(contract).is_ok_and(|value| value_reflects_secret(&value, secret))
+        })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -797,6 +694,7 @@ impl CustomProfileProvenance {
 ///
 /// Dropping a call future stops local waiting but cannot undo disclosure, generation
 /// or remote usage. Implementations must not detach unowned effectful work.
+#[async_trait::async_trait]
 pub trait Provider: Send + Sync {
     fn profile_name(&self) -> &str;
 
@@ -837,71 +735,58 @@ pub trait Provider: Send + Sync {
 
     /// Returns one complete semantic outcome or an error, never an accepted partial result.
     /// The Engine independently validates its phase, bounds and durable transition.
-    fn invoke(
-        &self,
-        request: ProviderRequest,
-    ) -> impl Future<Output = Result<ProviderResponse, ProviderError>> + Send;
+    async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError>;
 
-    fn invoke_with_preview(
+    async fn invoke_with_preview(
         &self,
         request: ProviderRequest,
         _preview: ResponsePreview,
-    ) -> impl Future<Output = Result<ProviderResponse, ProviderError>> + Send {
-        self.invoke(request)
+    ) -> Result<ProviderResponse, ProviderError> {
+        self.invoke(request).await
     }
 
     /// Summarizes accepted conversation data without Workspace guidance or effects.
     /// Unsupported compaction returns `Unavailable`. Adapters enforce the declared
     /// output bound; a local-only bound requires explicit account consent and cannot
     /// guarantee a remote generation cap. Errors never publish a partial summary.
-    fn compact(
+    async fn compact(
         &self,
         _request: CompactionRequest,
-    ) -> impl Future<Output = Result<CompactionResponse, ProviderError>> + Send {
-        async { Err(ProviderError::Unavailable) }
+    ) -> Result<CompactionResponse, ProviderError> {
+        Err(ProviderError::Unavailable)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::prompts::{
-        COLLABORATION_INSTRUCTIONS, PLAN_CONTRACT_INSTRUCTIONS, READ_ONLY_INSTRUCTIONS,
-        RESEARCH_INSTRUCTIONS, STEERING_INSTRUCTIONS,
-    };
     use super::*;
+    use crate::session::AgentRunId;
 
-    #[test]
-    fn provider_input_carries_bounded_typed_goal_facts() {
-        let facts = GoalContextFacts {
-            provider_calls: 7,
-            known_tokens: 1_024,
-            token_usage_unknown: true,
-            active_ms: 2_000,
-            reserved_active_ms: 30_000,
-            uncertain_active_ms: 0,
-            success_criterion_satisfied: Some(false),
-        };
-        let request = ProviderRequest {
+    fn request(
+        role: PromptRole,
+        phase: AgentPhase,
+        tools: Option<crate::tools::ToolContext>,
+    ) -> ProviderRequest {
+        ProviderRequest {
             run_id: RunId::new(),
             agent_run_id: AgentRunId::new(),
-            phase: AgentPhase::RootPlan,
+            phase,
             collaboration: CollaborationPolicy::Single,
-            model: "bounded-context-model".into(),
-            instructions: Some("trusted project instructions".into()),
-            objective: "current objective".into(),
-            images: Vec::new(),
-            includes: vec!["pinned include".into()],
-            history: Vec::new(),
-            context_summary: None,
-            goal_budget: Some(crate::session::GoalBudget::default()),
-            goal_plan_contract: None,
-            goal_context_facts: Some(facts),
-            child_results: Vec::new(),
-            steering_notes: Vec::new(),
-            tools: None,
-            max_output_tokens: 4_096,
-        };
-        assert_eq!(run_input(&request)["goal_context_facts"], json!(facts));
+            model: "scope-model".into(),
+            max_output_tokens: 256,
+            input: RunInput {
+                tools,
+                ..RunInput::new(role, "objective".into())
+            },
+        }
+    }
+
+    fn context() -> crate::tools::ToolContext {
+        crate::tools::ToolContext {
+            catalog: json!({"write": false, "commands": [], "skills": [], "mcp_servers": [], "tool_calls_remaining": 2}).to_string(),
+            history_summary: None,
+            steps: Vec::new(),
+        }
     }
 
     #[test]
@@ -1015,6 +900,7 @@ mod tests {
                 summary: "safe".into(),
                 result: "safe".into(),
             }),
+            turn: ProviderTurn::scripted(),
             response_id: Some("safe-id".into()),
             usage: Usage {
                 input_tokens: Some(1),
@@ -1041,39 +927,77 @@ mod tests {
             children: vec![format!("child {secret}")],
         });
         assert!(response.reflects_secret(secret));
-        response.outcome = ProviderOutcome::Tool {
-            call: crate::tools::ToolCall::Write {
-                path: "src/main.rs".into(),
-                expected_digest: None,
-                content: "safe".into(),
-            },
-            plan_contract: Some(Box::new(crate::session::GoalPlanContract {
-                mission: format!("verified with {secret}"),
-                paths: vec!["src".into()],
-                commands: Vec::new(),
-                resource_class: crate::tools::ToolResourceClass::Default,
-                command_timeout_ms: None,
-                skills: vec![crate::session::GoalSkillBinding {
-                    name: format!("skill-{secret}"),
-                    resource: None,
-                }],
-                mcp_tools: Vec::new(),
-                success_criterion: crate::session::GoalSuccessCriterion::WorkspaceFileContent {
+        let tool = |contract: Option<crate::session::GoalPlanContract>| {
+            ProviderOutcome::Tools(vec![crate::tools::ToolRequest {
+                id: ToolUseId::new("call_1").unwrap(),
+                call: crate::tools::ToolCall::Write {
                     path: "src/main.rs".into(),
+                    expected_digest: None,
                     content: "safe".into(),
                 },
-                budget: crate::session::GoalBudget::default(),
-            })),
+                plan_contract: contract.map(Box::new),
+            }])
         };
+        let contract = |mission: String| crate::session::GoalPlanContract {
+            mission,
+            paths: vec!["src".into()],
+            commands: Vec::new(),
+            resource_class: crate::tools::ToolResourceClass::Default,
+            command_timeout_ms: None,
+            skills: vec![crate::session::GoalSkillBinding {
+                name: format!("skill-{secret}"),
+                resource: None,
+            }],
+            mcp_tools: Vec::new(),
+            success_criterion: crate::session::GoalSuccessCriterion::WorkspaceFileContent {
+                path: "src/main.rs".into(),
+                content: "safe".into(),
+            },
+            budget: crate::session::GoalBudget::default(),
+        };
+        response.outcome = tool(Some(contract(format!("verified with {secret}"))));
         assert!(response.reflects_secret(secret));
-        if let ProviderOutcome::Tool {
-            plan_contract: Some(contract),
-            ..
-        } = &mut response.outcome
-        {
-            contract.mission = "safe".into();
-        }
-        assert!(response.reflects_secret(secret));
+        response.outcome = tool(Some(contract("safe".into())));
+        assert!(
+            response.reflects_secret(secret),
+            "a skill name carries the secret"
+        );
+        response.outcome = tool(None);
+        assert!(!response.reflects_secret(secret));
+        let ProviderOutcome::Tools(requests) = &mut response.outcome else {
+            unreachable!("scripted Tool outcome");
+        };
+        requests[0].id = ToolUseId::new(format!("id-{secret}")).unwrap();
+        assert!(
+            response.reflects_secret(secret),
+            "a Tool call id carries the secret"
+        );
+        response.outcome = ProviderOutcome::Finish(Finish {
+            summary: "safe".into(),
+            result: "safe".into(),
+        });
+        response.turn = ProviderTurn::new(
+            "openai",
+            &format!(r#"[{{"type":"reasoning","summary":"{secret}"}}]"#),
+            "other",
+            4096,
+        )
+        .unwrap();
+        assert!(
+            response.reflects_secret(secret),
+            "the replayed turn carries the secret"
+        );
+        response.turn = ProviderTurn::new(
+            "openai",
+            r#"[{"type":"reasoning","summary":"\u0073ynthetic-secret"}]"#,
+            "other",
+            4096,
+        )
+        .unwrap();
+        assert!(
+            response.reflects_secret(secret),
+            "an escaped secret in the decoded turn is caught"
+        );
 
         let mut compact = CompactionResponse {
             summary: "safe".into(),
@@ -1094,105 +1018,140 @@ mod tests {
     }
 
     #[test]
-    fn child_scope_admits_only_a_research_context() {
-        let mut request = ProviderRequest {
-            run_id: RunId::new(),
-            agent_run_id: AgentRunId::new(),
-            phase: AgentPhase::ChildWork,
-            collaboration: CollaborationPolicy::Single,
-            model: "research-model".into(),
-            instructions: None,
-            objective: "objective".into(),
-            images: Vec::new(),
-            includes: Vec::new(),
-            history: Vec::new(),
-            context_summary: None,
-            goal_budget: None,
-            goal_plan_contract: None,
-            goal_context_facts: None,
-            child_results: Vec::new(),
-            steering_notes: Vec::new(),
-            max_output_tokens: 256,
-            tools: Some(crate::tools::ToolContext {
-                catalog: json!({
-                    "write": false,
-                    "commands": [],
-                    "skills": [],
-                    "mcp_servers": [],
-                    "tool_calls_remaining": 2
-                })
-                .to_string(),
-                history_summary: None,
-                observations: Vec::new(),
-            }),
-        };
-        assert!(request.validate_scope().is_ok());
-        let child = run_instructions(RESEARCH_INSTRUCTIONS, &request);
-        assert!(!child.contains(PLAN_CONTRACT_INSTRUCTIONS));
-        assert!(!child.contains(COLLABORATION_INSTRUCTIONS));
-        assert_eq!(instruction_base(&request, "tool"), RESEARCH_INSTRUCTIONS);
-        request.goal_context_facts = Some(GoalContextFacts {
-            provider_calls: 0,
-            known_tokens: 0,
-            token_usage_unknown: false,
-            active_ms: 0,
-            reserved_active_ms: 0,
-            uncertain_active_ms: 0,
-            success_criterion_satisfied: None,
-        });
-        assert!(request.validate_scope().is_err());
-        request.goal_context_facts = None;
-        request.collaboration = CollaborationPolicy::Auto {
+    fn role_scope_admits_only_matching_phase_and_tools() {
+        let mut researcher = request(
+            PromptRole::Researcher,
+            AgentPhase::ChildWork,
+            Some(context()),
+        );
+        assert!(researcher.validate_scope().is_ok());
+        researcher.input.goal_context_facts = Some(GoalContextFacts::maximum());
+        assert!(researcher.validate_scope().is_err());
+        researcher.input.goal_context_facts = None;
+        researcher.collaboration = CollaborationPolicy::Auto {
             max_active_children: 1,
         };
-        assert!(request.validate_scope().is_err());
-        request.collaboration = CollaborationPolicy::Single;
-        request.steering_notes = vec!["note".into()];
-        assert!(request.validate_scope().is_err());
-        request.steering_notes.clear();
-        request.phase = AgentPhase::RootPlan;
-        assert!(run_instructions("base", &request).contains(COLLABORATION_INSTRUCTIONS));
-        assert_eq!(instruction_base(&request, "tool"), "tool");
-        request.tools = None;
-        assert_eq!(instruction_base(&request, "tool"), READ_ONLY_INSTRUCTIONS);
-        request.phase = AgentPhase::ChildWork;
-        assert_eq!(instruction_base(&request, "tool"), READ_ONLY_INSTRUCTIONS);
+        assert!(researcher.validate_scope().is_err());
+        researcher.collaboration = CollaborationPolicy::Single;
+        researcher.input.steering_notes = vec!["note".into()];
+        assert!(researcher.validate_scope().is_err());
+
+        for (role, phase, tools, fits) in [
+            (
+                PromptRole::Primary,
+                AgentPhase::RootPlan,
+                Some(context()),
+                true,
+            ),
+            (
+                PromptRole::Primary,
+                AgentPhase::RootSynthesis,
+                Some(context()),
+                true,
+            ),
+            (PromptRole::Primary, AgentPhase::RootPlan, None, false),
+            (
+                PromptRole::Primary,
+                AgentPhase::ChildWork,
+                Some(context()),
+                false,
+            ),
+            (
+                PromptRole::Researcher,
+                AgentPhase::RootPlan,
+                Some(context()),
+                false,
+            ),
+            (PromptRole::ReadOnly, AgentPhase::RootPlan, None, true),
+            (PromptRole::ReadOnly, AgentPhase::ChildWork, None, true),
+            (
+                PromptRole::ReadOnly,
+                AgentPhase::RootPlan,
+                Some(context()),
+                false,
+            ),
+            (PromptRole::ReadOnly, AgentPhase::ToolReview, None, false),
+            (PromptRole::ToolReview, AgentPhase::ToolReview, None, true),
+            (PromptRole::ToolReview, AgentPhase::RootPlan, None, false),
+            (
+                PromptRole::ToolReview,
+                AgentPhase::ToolReview,
+                Some(context()),
+                false,
+            ),
+        ] {
+            assert_eq!(
+                request(role, phase, tools).validate_scope().is_ok(),
+                fits,
+                "{role:?} {phase:?}"
+            );
+        }
     }
 
     #[test]
     fn steering_notes_are_primary_only_and_never_child_or_review_scope() {
-        let mut request = ProviderRequest {
-            run_id: RunId::new(),
-            agent_run_id: AgentRunId::new(),
-            phase: AgentPhase::RootPlan,
-            collaboration: CollaborationPolicy::Single,
-            model: "scope-model".into(),
-            instructions: None,
-            objective: "objective".into(),
-            images: Vec::new(),
-            includes: Vec::new(),
-            history: Vec::new(),
-            context_summary: None,
-            goal_budget: None,
-            goal_plan_contract: None,
-            goal_context_facts: None,
-            child_results: Vec::new(),
-            steering_notes: vec!["note".into()],
-            max_output_tokens: 256,
-            tools: None,
-        };
+        let mut request = request(PromptRole::ReadOnly, AgentPhase::RootPlan, None);
+        request.input.steering_notes = vec!["note".into()];
         assert!(request.validate_scope().is_ok());
-        assert!(run_instructions("base", &request).contains(STEERING_INSTRUCTIONS));
-        assert!(run_input(&request)["steering_notes"] == json!(["note"]));
         request.phase = AgentPhase::RootSynthesis;
         assert!(request.validate_scope().is_ok());
         request.phase = AgentPhase::ChildWork;
         assert!(request.validate_scope().is_err());
         request.phase = AgentPhase::ToolReview;
+        request.input.role = PromptRole::ToolReview;
         assert!(request.validate_scope().is_err());
-        request.steering_notes.clear();
+        request.input.steering_notes.clear();
         assert!(request.validate_scope().is_ok());
-        assert!(!run_instructions("base", &request).contains(STEERING_INSTRUCTIONS));
-        assert!(run_input(&request).get("steering_notes").is_none());
+    }
+
+    #[test]
+    fn outcome_schema_offers_only_finish_and_delegate_by_phase_and_policy() {
+        let mut request = request(PromptRole::Primary, AgentPhase::RootPlan, Some(context()));
+        for (collaboration, phase, expected) in [
+            (
+                CollaborationPolicy::Single,
+                AgentPhase::RootPlan,
+                vec!["finish"],
+            ),
+            (
+                CollaborationPolicy::Auto {
+                    max_active_children: 0,
+                },
+                AgentPhase::RootPlan,
+                vec!["finish"],
+            ),
+            (
+                CollaborationPolicy::Auto {
+                    max_active_children: 3,
+                },
+                AgentPhase::RootPlan,
+                vec!["finish", "delegate"],
+            ),
+            (
+                CollaborationPolicy::Team {
+                    max_active_children: 3,
+                },
+                AgentPhase::RootPlan,
+                vec!["delegate"],
+            ),
+            (
+                CollaborationPolicy::Team {
+                    max_active_children: 3,
+                },
+                AgentPhase::RootSynthesis,
+                vec!["finish"],
+            ),
+        ] {
+            request.collaboration = collaboration;
+            request.phase = phase;
+            let schema = restrict_outcome_schema(outcome_schema(), &request);
+            let offered: Vec<_> = schema["properties"]["outcome"]["anyOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|branch| branch["properties"]["type"]["enum"][0].as_str().unwrap())
+                .collect();
+            assert_eq!(offered, expected, "{collaboration:?} {phase:?}");
+        }
     }
 }

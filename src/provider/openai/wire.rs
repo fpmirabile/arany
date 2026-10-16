@@ -1,14 +1,19 @@
+use crate::provider::conversation::{Block, Conversation, Role};
+use crate::provider::decode::{function_outcome, structured_outcome, tool_request, tools_outcome};
 use crate::provider::prompts::COMPACTION_INSTRUCTIONS;
-use crate::provider::tool_specs::{NAME_PREFIX, ToolSpec, name_of, specs};
+use crate::provider::tool_specs::{NAME_PREFIX, ToolSpec, outcome_specs};
 use crate::provider::{
-    CompactionRequest, CompactionResponse, Delegate, Effort, Finish, ProviderError,
-    ProviderOutcome, ProviderRequest, ProviderResponse, ProviderWireProvenance, Usage,
+    CompactionRequest, CompactionResponse, Effort, ProviderError, ProviderOutcome, ProviderRequest,
+    ProviderResponse, ProviderTurn, ProviderWireProvenance, ToolUseId, Usage,
 };
-use crate::provider::{compaction_input, outcome_schema, run_input, summary_schema};
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use crate::provider::{compaction_input, summary_schema};
+use crate::tools::ToolContext;
+use serde::Deserialize;
+use serde_json::{Map, Value, json};
 
+const ADAPTER: &str = "openai";
 const MAX_REQUEST_BYTES: usize = crate::provider::MAX_PROVIDER_REQUEST_BYTES;
+const DELEGATED_OUTPUT: &str = "Arany recorded this call; its result follows in a later message.";
 
 pub(crate) fn encode_request(request: &Value) -> Result<Vec<u8>, ProviderError> {
     let body = serde_json::to_vec(request).map_err(|_| ProviderError::Rejected)?;
@@ -18,41 +23,63 @@ pub(crate) fn encode_request(request: &Value) -> Result<Vec<u8>, ProviderError> 
     Ok(body)
 }
 
-pub(crate) fn decode_run(bytes: &[u8], model: &str) -> Result<ProviderResponse, ProviderError> {
+/// What a response must satisfy before any outcome is read from it.
+pub(crate) struct RunScope<'a> {
+    pub(crate) model: &'a str,
+    pub(crate) output_cap: u32,
+    pub(crate) secret: &'a str,
+    /// Names of the Tool and outcome functions the request offered; `None` for a text-only request.
+    functions: Option<Vec<String>>,
+}
+
+impl<'a> RunScope<'a> {
+    pub(crate) fn new(
+        request: &'a ProviderRequest,
+        conversation: &Conversation,
+        secret: &'a str,
+    ) -> Self {
+        Self {
+            model: &request.model,
+            output_cap: request.max_output_tokens,
+            secret,
+            functions: conversation.tools.as_ref().map(|tools| {
+                tools
+                    .iter()
+                    .cloned()
+                    .chain(outcome_specs(&conversation.outcome))
+                    .map(|spec| spec.name)
+                    .collect()
+            }),
+        }
+    }
+}
+
+pub(crate) fn decode_run(
+    bytes: &[u8],
+    scope: &RunScope,
+) -> Result<ProviderResponse, ProviderError> {
     let response: WireResponse =
         serde_json::from_slice(bytes).map_err(|_| ProviderError::InvalidOutcome)?;
-    decode_run_response(response, model).map_err(|_| ProviderError::InvalidOutcome)
+    let raw: Value = serde_json::from_slice(bytes).map_err(|_| ProviderError::InvalidOutcome)?;
+    decode(response, &raw["output"], scope).map_err(|error| {
+        if scope.functions.is_some() {
+            error.provider_error()
+        } else {
+            ProviderError::InvalidOutcome
+        }
+    })
 }
 
 pub(crate) fn decode_streamed_run(
     bytes: &[u8],
-    model: &str,
+    scope: &RunScope,
 ) -> Result<ProviderResponse, ResponseError> {
-    decode_run_response(decode_completed_event(bytes)?, model)
-}
-
-pub(crate) fn decode_tool_run(
-    bytes: &[u8],
-    model: &str,
-) -> Result<ProviderResponse, ProviderError> {
-    let response: WireResponse =
-        serde_json::from_slice(bytes).map_err(|_| ProviderError::InvalidOutcome)?;
-    decode_function_response(response, model).map_err(ResponseError::provider_error)
-}
-
-pub(crate) fn decode_streamed_tool_run(
-    bytes: &[u8],
-    model: &str,
-) -> Result<ProviderResponse, ResponseError> {
-    decode_function_response(decode_completed_event(bytes)?, model)
-}
-
-fn decode_function_response(
-    response: WireResponse,
-    model: &str,
-) -> Result<ProviderResponse, ResponseError> {
-    let (response_id, usage, text) = response.completed_function(model)?;
-    decode_outcome(response_id, usage, &text)
+    let raw: Value = serde_json::from_slice(bytes).map_err(|_| ResponseError::Envelope)?;
+    decode(
+        decode_completed_event(bytes)?,
+        &raw["response"]["output"],
+        scope,
+    )
 }
 
 fn decode_completed_event(bytes: &[u8]) -> Result<WireResponse, ResponseError> {
@@ -64,39 +91,27 @@ fn decode_completed_event(bytes: &[u8]) -> Result<WireResponse, ResponseError> {
     Ok(event.response)
 }
 
-fn decode_run_response(
+fn decode(
     response: WireResponse,
-    model: &str,
+    output: &Value,
+    scope: &RunScope,
 ) -> Result<ProviderResponse, ResponseError> {
-    let (response_id, usage, text) = response.completed_text(model)?;
-    decode_outcome(response_id, usage, &text)
-}
-
-fn decode_outcome(
-    response_id: String,
-    usage: Option<WireUsage>,
-    text: &str,
-) -> Result<ProviderResponse, ResponseError> {
-    let envelope: OutcomeEnvelope =
-        serde_json::from_str(text).map_err(|_| ResponseError::Outcome)?;
-    let outcome = match envelope.outcome {
-        WireOutcome::Finish { summary, result } => {
-            ProviderOutcome::Finish(Finish { summary, result })
+    let (response_id, usage, outcome) = match &scope.functions {
+        Some(offered) => {
+            let (id, usage, call) = response.completed_function(scope.model)?;
+            (id, usage, call.outcome(offered)?)
         }
-        WireOutcome::Delegate { children } => ProviderOutcome::Delegate(Delegate { children }),
-        WireOutcome::Tool {
-            call,
-            plan_contract,
-        } if call.valid() && !matches!(call, crate::tools::ToolCall::ApplyChangeset { .. }) => {
-            ProviderOutcome::Tool {
-                call,
-                plan_contract,
-            }
+        None => {
+            let (id, usage, text) = response.completed_text(scope.model)?;
+            let outcome = structured_outcome(&text).map_err(|_| ResponseError::Outcome)?;
+            (id, usage, outcome)
         }
-        WireOutcome::Tool { .. } => return Err(ResponseError::Outcome),
     };
+    let turn = ProviderTurn::new(ADAPTER, &output.to_string(), scope.secret, scope.output_cap)
+        .map_err(|_| ResponseError::Outcome)?;
     Ok(ProviderResponse {
         outcome,
+        turn,
         response_id: Some(response_id),
         usage: provider_usage(usage.as_ref()),
         wire_provenance: Some(ProviderWireProvenance::ResponsesCompletedStoreFalseRequested),
@@ -136,33 +151,48 @@ pub(crate) fn outcome_failure_diagnostic(
     }) {
         return (Stage::OutcomeToolArgumentSize, None);
     }
-    let decoded = if response
+    if response
         .output
         .iter()
         .any(|item| item.kind == "function_call")
     {
-        response.completed_function(model)
-    } else {
-        response.completed_text(model)
-    };
-    let Ok((_, _, text)) = decoded else {
+        let Ok((_, _, call)) = response.completed_function(model) else {
+            return (Stage::OutcomeContract, None);
+        };
+        let Some(operation) = call.name.strip_prefix(NAME_PREFIX) else {
+            return (Stage::OutcomeContract, None);
+        };
+        let Ok(mut fields) = call.fields() else {
+            return (Stage::OutcomeContract, None);
+        };
+        if matches!(operation, "finish" | "delegate") {
+            return match function_outcome(operation, fields) {
+                Err(_) => (Stage::OutcomeFields, None),
+                Ok(_) => (Stage::OutcomeContract, None),
+            };
+        }
+        fields.remove("plan_contract");
+        fields.insert("operation".into(), json!(operation));
+        return match serde_json::from_value::<crate::tools::ToolCall>(Value::Object(fields)) {
+            Err(_) => (Stage::OutcomeFields, None),
+            Ok(call) => {
+                let stage = match &call {
+                    crate::tools::ToolCall::Read { limit, .. } if !(1..=4096).contains(limit) => {
+                        Stage::OutcomeReadBounds
+                    }
+                    _ if !call.valid() => tool_failure_stage(&call),
+                    _ => Stage::OutcomeContract,
+                };
+                (stage, Some(ToolArgumentShape::from_call(&call)))
+            }
+        };
+    }
+    let Ok((_, _, text)) = response.completed_text(model) else {
         return (Stage::OutcomeContract, None);
     };
-    match serde_json::from_str::<OutcomeEnvelope>(&text) {
-        Err(error) if error.is_syntax() || error.is_eof() => (Stage::OutcomeEncoding, None),
-        Err(_) => (Stage::OutcomeFields, None),
-        Ok(OutcomeEnvelope {
-            outcome: WireOutcome::Tool { call, .. },
-        }) => {
-            let stage = match &call {
-                crate::tools::ToolCall::Read { limit, .. } if !(1..=4096).contains(limit) => {
-                    Stage::OutcomeReadBounds
-                }
-                _ if !call.valid() => tool_failure_stage(&call),
-                _ => Stage::OutcomeContract,
-            };
-            (stage, Some(ToolArgumentShape::from_call(&call)))
-        }
+    match serde_json::from_str::<Value>(&text) {
+        Err(_) => (Stage::OutcomeEncoding, None),
+        Ok(_) if structured_outcome(&text).is_err() => (Stage::OutcomeFields, None),
         Ok(_) => (Stage::OutcomeContract, None),
     }
 }
@@ -211,7 +241,7 @@ fn tool_failure_stage(
     }
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize)]
 struct CompletedEvent {
     #[serde(rename = "type")]
     kind: String,
@@ -250,90 +280,129 @@ pub(crate) fn decode_streamed_compaction(
     decode_compaction_response(response, model)
 }
 
-pub(crate) fn run_body(request: &ProviderRequest) -> Value {
-    run_body_inner(request, None)
+pub(crate) fn run_body(
+    request: &ProviderRequest,
+    conversation: &Conversation,
+) -> Result<Value, ProviderError> {
+    run_body_inner(request, conversation, None)
 }
 
-pub(crate) fn run_body_with_effort(request: &ProviderRequest, effort: Effort) -> Value {
-    run_body_inner(request, Some(effort))
+pub(crate) fn run_body_with_effort(
+    request: &ProviderRequest,
+    conversation: &Conversation,
+    effort: Effort,
+) -> Result<Value, ProviderError> {
+    run_body_inner(request, conversation, Some(effort))
 }
 
-fn run_body_inner(request: &ProviderRequest, effort: Option<Effort>) -> Value {
-    let mut input = run_input(request);
-    if request.tools.is_some() {
-        input["tools"]
-            .as_object_mut()
-            .expect("Tool projection")
-            .remove("observations");
-    }
-    let schema = crate::provider::restrict_outcome_schema(outcome_schema(), request);
-    let functions: Vec<Value> = if request.tools.is_some() {
-        specs(&schema).into_iter().map(function_json).collect()
-    } else {
-        Vec::new()
-    };
-    let instructions = crate::provider::run_instructions(
-        crate::provider::instruction_base(
-            request,
-            crate::provider::prompts::OPENAI_TOOL_INSTRUCTIONS,
-        ),
-        request,
-    );
+/// Tools lead the request and the outcome functions follow them. The outcome functions change with
+/// the phase, so the function list is not prefix-stable across a synthesis switch; keeping a
+/// constant list and restricting it with `allowed_tools` is Stage C cache work.
+fn run_body_inner(
+    request: &ProviderRequest,
+    conversation: &Conversation,
+    effort: Option<Effort>,
+) -> Result<Value, ProviderError> {
+    let instructions = conversation
+        .system
+        .iter()
+        .map(|block| block.text())
+        .collect::<Vec<_>>()
+        .join("\n\n");
     let mut body = response_body(
         &request.model,
         &instructions,
-        input,
+        json!(input_items(conversation)?),
         request.max_output_tokens,
         effort,
         "arany_outcome",
-        schema,
+        conversation.outcome.clone(),
     );
-    if !request.images.is_empty() {
-        let mut content = Vec::with_capacity(request.images.len() * 2 + 1);
-        for (index, value) in request.images.iter().enumerate() {
-            content.push(json!({"type": "input_text", "text": value.label(index)}));
-            content.push(json!({
-                "type": "input_image",
-                "image_url": format!("data:image/png;base64,{}", value.image.base64()),
-                "detail": "auto",
-            }));
-        }
-        content.push(json!({"type": "input_text", "text": body["input"].take()}));
-        body["input"] = json!([{"role": "user", "content": content}]);
-    }
-    if let Some(context) = &request.tools {
+    if let Some(tools) = &conversation.tools {
         body.as_object_mut().expect("request object").remove("text");
-        body["tools"] = json!(functions);
-        body["tool_choice"] = json!("required");
-        body["parallel_tool_calls"] = json!(false);
-        let mut input = match body["input"].take() {
-            Value::Array(items) => items,
-            text => vec![json!({"role":"user","content":text})],
-        };
-        let projection = context.model_input();
-        for (index, observation) in projection["observations"]
-            .as_array()
-            .expect("observation array")
+        body["tools"] = tools
             .iter()
-            .enumerate()
-        {
-            if observation["call"]["operation"] == "apply_changeset" {
-                input.push(json!({"role":"user","content":json!({"engine_integration":observation}).to_string()}));
-                continue;
-            }
-            let mut arguments = observation["call"].clone();
-            let operation = arguments
-                .as_object_mut()
-                .expect("typed call")
-                .remove("operation")
-                .expect("typed operation");
-            let call_id = format!("arany_action_{index}");
-            input.push(json!({"type":"function_call","call_id":call_id,"name":name_of(operation.as_str().expect("operation name")),"arguments":arguments.to_string(),"status":"completed"}));
-            input.push(json!({"type":"function_call_output","call_id":call_id,"output":observation.to_string()}));
-        }
-        body["input"] = json!(input);
+            .cloned()
+            .chain(outcome_specs(&conversation.outcome))
+            .map(function_json)
+            .collect();
+        let exhausted = request
+            .input
+            .tools
+            .as_ref()
+            .is_some_and(ToolContext::finish_only);
+        body["tool_choice"] = if exhausted {
+            json!({"type": "allowed_tools", "mode": "required", "tools": [{"type": "function", "name": "arany_finish"}]})
+        } else {
+            json!("required")
+        };
+        body["parallel_tool_calls"] = json!(false);
+        body["include"] = json!(["reasoning.encrypted_content"]);
     }
-    body
+    Ok(body)
+}
+
+fn input_items(conversation: &Conversation) -> Result<Vec<Value>, ProviderError> {
+    let mut items = Vec::new();
+    let mut unanswered: Vec<String> = Vec::new();
+    for message in &conversation.messages {
+        match message.role {
+            Role::Assistant => {
+                let [Block::AssistantTurn(turn)] = message.blocks.as_slice() else {
+                    return Err(ProviderError::Rejected);
+                };
+                let replay = turn.items(ADAPTER).ok_or(ProviderError::Rejected)?;
+                unanswered = replay
+                    .iter()
+                    .filter(|item| item["type"] == "function_call")
+                    .filter_map(|item| item["call_id"].as_str().map(str::to_owned))
+                    .collect();
+                items.extend(replay);
+            }
+            Role::User => {
+                let answered = |call_id: &str| {
+                    message.blocks.iter().any(
+                        |block| matches!(block, Block::ToolResult { id, .. } if id.as_str() == call_id),
+                    )
+                };
+                for call_id in std::mem::take(&mut unanswered) {
+                    if !answered(&call_id) {
+                        items.push(json!({"type": "function_call_output", "call_id": call_id, "output": DELEGATED_OUTPUT}));
+                    }
+                }
+                let mut parts = Vec::new();
+                for block in &message.blocks {
+                    match block {
+                        Block::Text(text) if text.is_empty() => {}
+                        Block::Text(text) => {
+                            parts.push(json!({"type": "input_text", "text": text}))
+                        }
+                        Block::Image { label, image } => {
+                            parts.push(json!({"type": "input_text", "text": label}));
+                            parts.push(json!({
+                                "type": "input_image",
+                                "image_url": format!("data:image/png;base64,{}", image.base64()),
+                                "detail": "auto",
+                            }));
+                        }
+                        Block::ToolResult { id, output, .. } => {
+                            if !parts.is_empty() {
+                                items.push(
+                                    json!({"role": "user", "content": std::mem::take(&mut parts)}),
+                                );
+                            }
+                            items.push(json!({"type": "function_call_output", "call_id": id.as_str(), "output": output.to_string()}));
+                        }
+                        Block::AssistantTurn(_) => return Err(ProviderError::Rejected),
+                    }
+                }
+                if !parts.is_empty() {
+                    items.push(json!({"role": "user", "content": parts}));
+                }
+            }
+        }
+    }
+    Ok(items)
 }
 
 fn function_json(spec: ToolSpec) -> Value {
@@ -353,7 +422,7 @@ fn compaction_body_inner(request: &CompactionRequest, effort: Option<Effort>) ->
     response_body(
         &request.model,
         COMPACTION_INSTRUCTIONS,
-        input,
+        json!(input.to_string()),
         request.max_output_tokens,
         effort,
         "arany_compaction",
@@ -373,7 +442,7 @@ fn response_body(
     let mut body = json!({
         "model": model,
         "instructions": instructions,
-        "input": input.to_string(),
+        "input": input,
         "max_output_tokens": max_output_tokens,
         "store": false,
         "truncation": "disabled",
@@ -387,7 +456,7 @@ fn response_body(
     body
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize)]
 struct WireResponse {
     id: String,
     status: String,
@@ -398,7 +467,7 @@ struct WireResponse {
     incomplete_details: Option<Value>,
 }
 
-#[derive(Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Deserialize, PartialEq)]
 pub(super) struct WireItem {
     id: Option<String>,
     #[serde(rename = "type")]
@@ -407,11 +476,8 @@ pub(super) struct WireItem {
     status: Option<String>,
     phase: Option<String>,
     content: Option<Vec<WireContent>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     arguments: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     call_id: Option<String>,
 }
 
@@ -440,14 +506,14 @@ impl ResponseError {
     }
 }
 
-#[derive(Deserialize, Serialize, PartialEq, Clone)]
+#[derive(Deserialize, PartialEq, Clone)]
 struct WireContent {
     #[serde(rename = "type")]
     kind: String,
     text: Option<String>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize)]
 struct WireUsage {
     input_tokens: u32,
     output_tokens: u32,
@@ -456,7 +522,7 @@ struct WireUsage {
 }
 
 /// `input_tokens` already includes the cached part; cache writes are not reported on this route.
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize)]
 struct WireInputTokensDetails {
     cached_tokens: u32,
 }
@@ -484,36 +550,93 @@ impl WireItem {
     }
 }
 
+/// Completed output items of a streamed response are kept raw beside their typed view, so the
+/// replayed turn carries everything the Provider sent, including opaque reasoning ciphertext.
 pub(super) fn reconcile_streamed_output(
     bytes: &[u8],
     response_id: &str,
-    items: Vec<WireItem>,
+    items: Vec<(WireItem, Value)>,
 ) -> Result<Vec<u8>, ResponseError> {
-    let mut event: CompletedEvent =
+    let typed: CompletedEvent =
         serde_json::from_slice(bytes).map_err(|_| ResponseError::Envelope)?;
-    if event.response.id != response_id {
+    if typed.response.id != response_id {
         return Err(ResponseError::Identifier);
     }
-    if event.response.output.is_empty() {
-        event.response.output = items;
-    } else if event.response.output != items {
+    let mut event: Value = serde_json::from_slice(bytes).map_err(|_| ResponseError::Envelope)?;
+    if typed.response.output.is_empty() {
+        event["response"]["output"] = Value::Array(items.into_iter().map(|(_, raw)| raw).collect());
+    } else if typed.response.output.len() != items.len()
+        || typed
+            .response
+            .output
+            .iter()
+            .zip(&items)
+            .any(|(completed, (done, _))| completed != done)
+    {
         return Err(ResponseError::Message);
     }
     serde_json::to_vec(&event).map_err(|_| ResponseError::Envelope)
+}
+
+/// The one completed function call of a Tool-enabled response.
+struct FunctionCall {
+    name: String,
+    arguments: String,
+    call_id: String,
+}
+
+impl FunctionCall {
+    fn operation(&self) -> Result<&str, ResponseError> {
+        self.name
+            .strip_prefix(NAME_PREFIX)
+            .ok_or(ResponseError::Outcome)
+    }
+
+    fn fields(&self) -> Result<Map<String, Value>, ResponseError> {
+        let limit = if matches!(self.operation()?, "finish" | "delegate") {
+            crate::store::MAX_EVENT_BYTES
+        } else {
+            crate::tools::types::MAX_TOOL_ARGUMENT_BYTES
+        };
+        let arguments = self.arguments.trim();
+        if arguments.len() > limit {
+            return Err(ResponseError::Outcome);
+        }
+        match crate::tools::parse_json(arguments.as_bytes(), crate::store::MAX_EVENT_BYTES) {
+            Ok(Value::Object(fields)) => Ok(fields),
+            _ => Err(ResponseError::Outcome),
+        }
+    }
+
+    fn outcome(&self, offered: &[String]) -> Result<ProviderOutcome, ResponseError> {
+        let operation = self.operation()?;
+        if !offered.contains(&self.name) {
+            return Err(ResponseError::Outcome);
+        }
+        let fields = self.fields()?;
+        match operation {
+            "finish" | "delegate" => function_outcome(operation, fields),
+            _ => ToolUseId::new(self.call_id.clone()).and_then(|id| {
+                tool_request(id, operation, Value::Object(fields))
+                    .and_then(|request| tools_outcome(vec![request]))
+            }),
+        }
+        .map_err(|_| ResponseError::Outcome)
+    }
 }
 
 impl WireResponse {
     fn completed_function(
         self,
         model: &str,
-    ) -> Result<(String, Option<WireUsage>, String), ResponseError> {
+    ) -> Result<(String, Option<WireUsage>, FunctionCall), ResponseError> {
         self.validate_envelope(model)?;
-        let mut outcome = None;
+        let mut call = None;
         for item in &self.output {
             match item.kind.as_str() {
                 "reasoning" => {}
                 "function_call"
-                    if outcome.is_none() && item.status.as_deref() == Some("completed") =>
+                    if call.is_none() && item.status.as_deref() == Some("completed") =>
                 {
                     if item.content.is_some()
                         || item.phase.is_some()
@@ -527,63 +650,18 @@ impl WireResponse {
                     {
                         return Err(ResponseError::Message);
                     }
-                    let operation = item
-                        .name
-                        .as_deref()
-                        .and_then(|name| name.strip_prefix(NAME_PREFIX))
-                        .ok_or(ResponseError::Outcome)?;
-                    let arguments = item
-                        .arguments
-                        .as_deref()
-                        .filter(|args| {
-                            args.len()
-                                <= if matches!(operation, "finish" | "delegate") {
-                                    crate::store::MAX_EVENT_BYTES
-                                } else {
-                                    crate::tools::types::MAX_TOOL_ARGUMENT_BYTES
-                                }
-                        })
-                        .ok_or(ResponseError::Outcome)?
-                        .trim();
-                    let Value::Object(mut fields) = crate::tools::parse_json(
-                        arguments.as_bytes(),
-                        crate::store::MAX_EVENT_BYTES,
-                    )
-                    .map_err(|_| ResponseError::Outcome)?
-                    else {
-                        return Err(ResponseError::Outcome);
-                    };
-                    let text = match operation {
-                        "finish" | "delegate" => {
-                            if fields.insert("type".into(), json!(operation)).is_some() {
-                                return Err(ResponseError::Outcome);
-                            }
-                            json!({"outcome": fields}).to_string()
-                        }
-                        "list" | "read" | "search" | "mkdir" | "write" | "edit" | "command"
-                        | "skill" | "mcp_list" | "mcp_call" | "git_status" | "git_diff"
-                        | "git_log" => {
-                            let plan_contract = fields.remove("plan_contract");
-                            if fields
-                                .insert("operation".into(), json!(operation))
-                                .is_some()
-                            {
-                                return Err(ResponseError::Outcome);
-                            }
-                            json!({"outcome": {"type": "tool", "call": fields, "plan_contract": plan_contract}}).to_string()
-                        }
-                        _ => return Err(ResponseError::Outcome),
-                    };
-                    outcome = Some(text);
+                    call = Some(FunctionCall {
+                        name: item.name.clone().ok_or(ResponseError::Outcome)?,
+                        arguments: item.arguments.clone().ok_or(ResponseError::Outcome)?,
+                        call_id: item.call_id.clone().unwrap_or_default(),
+                    });
                 }
                 _ => return Err(ResponseError::Message),
             }
         }
-        Ok((
-            self.id,
-            self.usage,
-            outcome.ok_or(ResponseError::MissingFinalMessage)?,
-        ))
+        let call = call.ok_or(ResponseError::MissingFinalMessage)?;
+        call.operation()?;
+        Ok((self.id, self.usage, call))
     }
 
     fn validate_envelope(&self, model: &str) -> Result<(), ResponseError> {
@@ -601,6 +679,7 @@ impl WireResponse {
         }
         Ok(())
     }
+
     fn completed_text(
         self,
         model: &str,
@@ -657,36 +736,12 @@ impl WireResponse {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct OutcomeEnvelope {
-    outcome: WireOutcome,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
-enum WireOutcome {
-    Finish {
-        summary: String,
-        result: String,
-    },
-    Delegate {
-        children: Vec<String>,
-    },
-    Tool {
-        call: crate::tools::ToolCall,
-        #[serde(default)]
-        plan_contract: Option<Box<crate::session::GoalPlanContract>>,
-    },
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct SummaryEnvelope {
     summary: String,
 }
 
 pub(super) fn is_structured_text(text: &str) -> bool {
-    serde_json::from_str::<OutcomeEnvelope>(text).is_ok()
-        || serde_json::from_str::<SummaryEnvelope>(text).is_ok()
+    structured_outcome(text).is_ok() || serde_json::from_str::<SummaryEnvelope>(text).is_ok()
 }
 
 #[cfg(test)]

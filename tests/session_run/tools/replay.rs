@@ -997,6 +997,7 @@ pub(super) async fn native_command_changeset_corpus(
         #[cfg(target_os = "macos")]
         trace_root: std::path::PathBuf,
     }
+    #[async_trait::async_trait]
     impl Provider for CommandJourney {
         fn profile_name(&self) -> &str {
             "scripted"
@@ -1018,6 +1019,7 @@ pub(super) async fn native_command_changeset_corpus(
                 .filter(|request| request.phase != AgentPhase::ToolReview)
                 .count();
             let catalog = request
+                .input
                 .tools
                 .as_ref()
                 .map(|tools| serde_json::from_str::<serde_json::Value>(&tools.catalog))
@@ -1085,10 +1087,7 @@ pub(super) async fn native_command_changeset_corpus(
                                 }
                             })
                             .map(Box::new);
-                        ProviderOutcome::Tool {
-                            call,
-                            plan_contract,
-                        }
+                        crate::tool_outcome(call, plan_contract)
                     },
                 )
             };
@@ -1098,6 +1097,7 @@ pub(super) async fn native_command_changeset_corpus(
             }
             requests.push(request);
             Ok(ProviderResponse {
+                turn: arany::ProviderTurn::scripted(),
                 outcome,
                 response_id: None,
                 usage: arany::Usage {
@@ -1423,16 +1423,17 @@ pub(super) async fn native_command_changeset_corpus(
             assert_eq!(request.model, "changeset-model");
             if request.phase == AgentPhase::ToolReview {
                 assert!(
-                    request.tools.is_none()
-                        && request.includes.is_empty()
-                        && request.images.is_empty()
-                        && request.history.is_empty()
-                        && request.child_results.is_empty()
-                        && request.context_summary.is_none()
+                    request.input.tools.is_none()
+                        && request.input.includes.is_empty()
+                        && request.input.images.is_empty()
+                        && request.input.history.is_empty()
+                        && request.input.child_results.is_empty()
+                        && request.input.context_summary.is_none()
                 );
-                assert!(request.instructions.is_some());
+                assert_eq!(request.input.role, arany::PromptRole::ToolReview);
                 assert_eq!(request.max_output_tokens, 256);
-                let payload: serde_json::Value = serde_json::from_str(&request.objective).unwrap();
+                let payload: serde_json::Value =
+                    serde_json::from_str(&request.input.objective).unwrap();
                 assert_eq!(
                     payload["user_request"],
                     "Exercise native changeset integration"
@@ -1440,14 +1441,17 @@ pub(super) async fn native_command_changeset_corpus(
                 continue;
             }
             assert_eq!(request.phase, AgentPhase::RootPlan);
-            assert_eq!(request.objective, "Exercise native changeset integration");
+            assert_eq!(
+                request.input.objective,
+                "Exercise native changeset integration"
+            );
             assert!(
-                request.instructions.is_none()
-                    && request.history.is_empty()
-                    && request.includes.is_empty()
-                    && request.context_summary.is_none()
-                    && request.child_results.is_empty()
-                    && request.images.is_empty()
+                request.input.workspace_guidance.is_none()
+                    && request.input.history.is_empty()
+                    && request.input.includes.is_empty()
+                    && request.input.context_summary.is_none()
+                    && request.input.child_results.is_empty()
+                    && request.input.images.is_empty()
             );
             assert_eq!(request.max_output_tokens, 4096);
         }
@@ -1491,7 +1495,7 @@ pub(super) async fn native_command_changeset_corpus(
                 goal.report
             );
             let catalog: serde_json::Value =
-                serde_json::from_str(&requests[0].tools.as_ref().unwrap().catalog).unwrap();
+                serde_json::from_str(&requests[0].input.tools.as_ref().unwrap().catalog).unwrap();
             assert_eq!(catalog["workspace_paths"], json!(["."]));
         }
         if case == "ai-approve" {
@@ -1501,7 +1505,8 @@ pub(super) async fn native_command_changeset_corpus(
                 .collect::<Vec<_>>();
             assert_eq!(reviews.len(), 2);
             for (request, tool) in reviews.iter().zip(tools) {
-                let payload: serde_json::Value = serde_json::from_str(&request.objective).unwrap();
+                let payload: serde_json::Value =
+                    serde_json::from_str(&request.input.objective).unwrap();
                 assert_eq!(
                     payload["proposed_action"]["call"],
                     serde_json::to_value(&tool.intent.call).unwrap()
@@ -1523,7 +1528,8 @@ pub(super) async fn native_command_changeset_corpus(
                 .filter(|request| request.phase == AgentPhase::ToolReview)
                 .collect::<Vec<_>>();
             assert_eq!(reviews.len(), 1, "in-scope command gets one AI review");
-            let payload: serde_json::Value = serde_json::from_str(&reviews[0].objective).unwrap();
+            let payload: serde_json::Value =
+                serde_json::from_str(&reviews[0].input.objective).unwrap();
             assert_eq!(
                 payload["proposed_action"]["call"],
                 serde_json::to_value(&call).unwrap(),
@@ -1608,10 +1614,14 @@ pub(super) async fn native_command_changeset_corpus(
                 requests
                     .last()
                     .unwrap()
+                    .input
                     .tools
                     .as_ref()
                     .unwrap()
-                    .observations,
+                    .observations()
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>(),
                 tools
                     .iter()
                     .map(|tool| tool.observation.as_ref().unwrap().clone())
@@ -1636,7 +1646,16 @@ pub(super) async fn native_command_changeset_corpus(
             assert!(view.runs[0].assistant_message.is_none());
         } else if matches!(case, "nonzero" | "ai-approve") {
             if case == "nonzero" {
-                assert_eq!(requests[1].tools.as_ref().unwrap().observations.len(), 2);
+                assert_eq!(
+                    requests[1]
+                        .input
+                        .tools
+                        .as_ref()
+                        .unwrap()
+                        .observations()
+                        .len(),
+                    2
+                );
                 let fresh = tools[2].observation.as_ref().unwrap();
                 assert_eq!(fresh.disposition, ToolDisposition::Succeeded);
                 assert!(fresh.guard.is_some());

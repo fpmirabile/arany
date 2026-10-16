@@ -173,9 +173,7 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
                 body["max_output_tokens"],
                 if index == 0 || index >= 3 { 4096 } else { 128 }
             );
-            let input: serde_json::Value =
-                serde_json::from_str(body["input"].as_str().expect("input string"))
-                    .expect("semantic input");
+            let input: serde_json::Value = crate::semantic::input(&body);
             if (3..8).contains(&index) {
                 assert_eq!(
                     input["phase"],
