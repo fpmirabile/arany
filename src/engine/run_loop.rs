@@ -654,7 +654,11 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         Ok(())
     }
 
-    async fn fail_known_budget_exhaustion(&self, primary: AgentTrace) -> Result<(), EngineError> {
+    /// Closes the primary after its loop stopped early. Exactly one exit applies: an uncertain
+    /// Tool, an open reservation or an unacknowledged action returns an error and leaves the Run
+    /// for recovery; a cancellation, including a pause, cancels the primary; otherwise the Goal
+    /// budget ran out and the primary fails.
+    async fn settle_stopped_primary(&self, primary: AgentTrace) -> Result<(), EngineError> {
         let view = self
             .store
             .load_open_view(self.session_id)
@@ -702,15 +706,16 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         {
             return Err(EngineError::GoalBudgetExhausted);
         }
-        if self.controls.cancellation.is_cancelled() || action_cancelled {
-            self.checkpoint_pending_active_time(5).await?;
-            return self.cancel_primary(primary).await;
-        }
-        if !actions_acknowledged {
+        let cancelled = self.controls.cancellation.is_cancelled() || action_cancelled;
+        if !cancelled && !actions_acknowledged {
             return Err(EngineError::GoalBudgetExhausted);
         }
         self.checkpoint_pending_active_time(5).await?;
-        self.fail_primary(primary).await
+        if cancelled {
+            self.cancel_primary(primary).await
+        } else {
+            self.fail_primary(primary).await
+        }
     }
 
     async fn checkpoint_pending_active_time(&self, event_tail: usize) -> Result<(), EngineError> {
@@ -971,7 +976,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         let mut first_call = true;
         loop {
             if self.pause_at_boundary() {
-                return self.fail_known_budget_exhaustion(primary).await;
+                return self.settle_stopped_primary(primary).await;
             }
             let first_trace = first_call.then(|| primary.begin_first_provider());
             let next_trace = (!first_call)
@@ -986,7 +991,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                     if let Some(next_trace) = next_trace {
                         next_trace.finish_refused();
                     }
-                    return self.fail_known_budget_exhaustion(primary).await;
+                    return self.settle_stopped_primary(primary).await;
                 }
                 Err(error) => return Err(error),
             };
@@ -1045,13 +1050,13 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             .await?;
             self.settle_active_segment(active_segment).await?;
             if self.controls.cancellation.is_cancelled() {
-                return self.fail_known_budget_exhaustion(primary).await;
+                return self.settle_stopped_primary(primary).await;
             }
             if matches!(&first, CallResult::Cancelled) {
                 return self.cancel_primary(primary).await;
             }
             if self.controls.goal_budget.active_time_exhausted() {
-                return self.fail_known_budget_exhaustion(primary).await;
+                return self.settle_stopped_primary(primary).await;
             }
             match first {
                 CallResult::Response(ProviderResponse {
@@ -1063,7 +1068,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                     ..
                 }) if valid_response => {
                     if self.pause_at_boundary() {
-                        return self.fail_known_budget_exhaustion(primary).await;
+                        return self.settle_stopped_primary(primary).await;
                     }
                     return self
                         .run_children(&mut root_request, delegation.children, primary)
@@ -1078,7 +1083,7 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                     ..
                 }) if valid_response => {
                     if self.pause_at_boundary() {
-                        return self.fail_known_budget_exhaustion(primary).await;
+                        return self.settle_stopped_primary(primary).await;
                     }
                     if let Some(contract) = plan_contract
                         && !self
@@ -1101,19 +1106,19 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
                     match continuation {
                         Ok(true) => {}
                         Ok(false) if self.controls.cancellation.is_cancelled() => {
-                            return self.fail_known_budget_exhaustion(primary).await;
+                            return self.settle_stopped_primary(primary).await;
                         }
                         Ok(false) if self.controls.goal_budget.active_time_exhausted() => {
-                            return self.fail_known_budget_exhaustion(primary).await;
+                            return self.settle_stopped_primary(primary).await;
                         }
                         Ok(false) => return self.fail_primary(primary).await,
                         Err(EngineError::GoalBudgetExhausted)
                             if self.controls.cancellation.is_cancelled() =>
                         {
-                            return self.fail_known_budget_exhaustion(primary).await;
+                            return self.settle_stopped_primary(primary).await;
                         }
                         Err(EngineError::GoalBudgetExhausted) => {
-                            return self.fail_known_budget_exhaustion(primary).await;
+                            return self.settle_stopped_primary(primary).await;
                         }
                         Err(error) => return Err(error),
                     }
