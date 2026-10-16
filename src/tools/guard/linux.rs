@@ -2051,6 +2051,7 @@ mod tests {
                         "/fixture/arany-test-bin",
                         "--exact",
                         "tools::guard::linux::tests::native_runtime_mount_attestation",
+                        "--include-ignored",
                         "--nocapture",
                     ]);
                 let child = command
