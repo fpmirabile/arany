@@ -902,20 +902,41 @@ impl Provider for RuntimeJourney {
     }
 }
 
-struct MountedRuntimeImage(std::path::PathBuf);
+struct MountedRuntimeImage(Option<std::path::PathBuf>);
 
 impl Drop for MountedRuntimeImage {
     fn drop(&mut self) {
         use crate::process::BoundedOutput;
 
+        let Some(mountpoint) = self.0.take() else {
+            return;
+        };
         let _ = std::process::Command::new("/usr/bin/hdiutil")
             .args(["detach", "-force", "-quiet"])
-            .arg(&self.0)
+            .arg(mountpoint)
             .env_clear()
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .bounded_output_for(Duration::from_secs(20), 4096);
+    }
+}
+
+fn runtime_mount_diagnostics(root: &Path, mountpoint: &Path, image: &Path) -> String {
+    let captured = std::panic::catch_unwind(|| {
+        std::process::Command::new("/usr/sbin/lsof")
+            .args(["-nP", "+D"])
+            .arg(mountpoint)
+            .arg("--")
+            .arg(image)
+            .env_clear()
+            .current_dir(root)
+            .bounded_output_for(Duration::from_secs(5), 2048)
+    });
+    match captured {
+        Ok(Ok(output)) => format!("{output:?}"),
+        Ok(Err(error)) => format!("lsof unavailable: {error}"),
+        Err(_) => "lsof exceeded its 5-second deadline or 2048-byte per-stream bound".into(),
     }
 }
 
@@ -975,7 +996,7 @@ async fn native_runtime_mount_journey_helper() {
         .bounded_output_for(Duration::from_secs(30), 4096)
         .unwrap();
     assert!(attached.status.success(), "hdiutil attach: {attached:?}");
-    let mounted = MountedRuntimeImage(mountpoint.clone());
+    let mut mounted = MountedRuntimeImage(Some(mountpoint.clone()));
 
     let permissions = arany::WorkspacePermissions::open(&workspace)
         .unwrap()
@@ -1092,6 +1113,7 @@ async fn native_runtime_mount_journey_helper() {
     assert_eq!(replay.runs.len(), 1);
     assert_eq!(replay.runs[0], refused.run, "closed runtime refusal replay");
     assert_eq!(replay.runs[0].status, RunStatus::Failed);
+    let mountpoint = mounted.0.take().expect("mounted runtime fixture");
     let detached = std::process::Command::new("/usr/bin/hdiutil")
         .args(["detach", "-force", "-quiet"])
         .arg(&mountpoint)
@@ -1099,7 +1121,11 @@ async fn native_runtime_mount_journey_helper() {
         .current_dir(root)
         .bounded_output_for(Duration::from_secs(20), 4096)
         .unwrap();
-    assert!(detached.status.success(), "hdiutil detach: {detached:?}");
+    assert!(
+        detached.status.success(),
+        "hdiutil detach: {detached:?}; mount and backing image references (current-user visibility only): {}",
+        runtime_mount_diagnostics(root, &mountpoint, &image)
+    );
     drop(mounted);
 
     let host_cache = root.join("home/.cargo/registry/cache");
