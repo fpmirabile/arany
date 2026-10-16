@@ -1277,3 +1277,22 @@ fn compaction_envelope_and_bound_fit_the_request_ceiling() {
     let bytes = encode_request(&body).expect("a compaction request at the bound is sent");
     assert!(bytes.len() <= crate::provider::MAX_PROVIDER_REQUEST_BYTES);
 }
+
+#[test]
+fn tool_surface_matches_the_checked_in_snapshot() {
+    let rendered: serde_json::Map<String, Value> =
+        crate::provider::test_support::tool_surface_requests(MODEL)
+            .into_iter()
+            .map(|(label, request)| {
+                (
+                    label.to_owned(),
+                    body(&request, Effort::High)["tools"].clone(),
+                )
+            })
+            .collect();
+    let rendered = serde_json::to_string_pretty(&rendered).unwrap() + "\n";
+    assert!(
+        rendered == include_str!("../../snapshots/anthropic_tools.json"),
+        "{rendered}"
+    );
+}
