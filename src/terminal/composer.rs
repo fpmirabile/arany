@@ -1,3 +1,8 @@
+//! After deletion, resegment the whole bounded draft: removing separators can merge graphemes or
+//! regroup regional indicators; snap to the first surviving boundary at or after the deletion
+//! point. Wrapping projects the caret without changing bytes. The Composer owns the sole bounded
+//! in-memory model catalog scoped to Provider/account; cached metadata and keystrokes grant no
+//! credential or Run authority.
 use super::{
     TerminalInput,
     commands::{

@@ -1,3 +1,8 @@
+//! Discovery is metadata-only and bounded: never execute a candidate or read package-manager
+//! configuration, project instructions or credential files. Tokens hash the exact path, device and
+//! inode, so a recreated root is a new candidate. Saved grants stay pinned even when they no longer
+//! verify; Guard rejects them with `ChangedInput` before dispatch rather than resolving a stale
+//! `cargo` to another toolchain.
 use super::{ToolError, fs};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};

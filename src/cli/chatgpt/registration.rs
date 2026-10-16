@@ -1,3 +1,5 @@
+//! Persist the issued client ID under the default-user account lock before `CodeExchange::redeem`
+//! sends the code; a competing registration cannot replace it silently.
 use super::{AuthorizationAttempt, AuthorizationError, CodeExchange, account, valid_client_id};
 use arany::StateRoot;
 use serde::{Deserialize, Serialize};

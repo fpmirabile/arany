@@ -1,3 +1,9 @@
+//! Root file mutation reopens `.` as a readable no-follow directory descriptor before syncing the
+//! parent: capability directory handles may be path-only and cannot prove durable completion
+//! through `fsync`. Whole-project Search accepts named regular files through the checked opened
+//! handle; directory enumeration is not a file-content reader. On macOS, absolute traversal opens
+//! intermediate directories with search-only descriptors and only the selected final directory
+//! readably; readable ancestors would expose sibling listings.
 use super::config::Config;
 use super::types::*;
 use super::{ToolError, ToolRuntime};

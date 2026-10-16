@@ -1,4 +1,13 @@
 //! Private unit records and quota-backed images for Workspace, scratch and cache.
+//!
+//! Two fixed-size case-sensitive HFS+ images with kernel-only attachment: killing a userspace
+//! disk-image helper before unmount causes an improper-eject warning. Validate opened mounts,
+//! ownership, writable `NOSUID` flags and exact capacity. Terminate and positively empty the
+//! payload coalition before detaching either mount, including partial preparation and unwind. Never
+//! recursively remove a mounted or uncertain control root and never sweep roots by filename prefix:
+//! deletion needs positive ownership and device/mount evidence. Create the unfinished-attachment
+//! marker immediately before attachment, after image creation and validation; pin backing image
+//! inodes before attachment.
 
 use super::super::CAPTURE_BYTES;
 use super::system_program;

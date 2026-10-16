@@ -122,6 +122,12 @@ impl std::fmt::Display for Feedback {
 }
 
 /// `Notice` keeps the Session; `Fatal` ends it through terminal restoration. Unclassified errors are `Fatal`.
+///
+/// Attached-loop failures are classified once here. `Fatal` covers terminal I/O, rendering and
+/// cleanup, signals, shutdown, `/setup`, Workspace, append/replay and integrity failures and
+/// first-Session materialization; State-directory and history-reload failures are `Notice`. New
+/// commands return `LoopError`, open State with `open_state` and reload with `reload_view_or_keep`
+/// instead of converting errors locally.
 #[derive(Debug)]
 enum LoopError {
     Fatal(String),
@@ -141,6 +147,8 @@ impl From<&str> for LoopError {
 }
 
 /// The attached loop's only decision point for command failures.
+///
+/// The single routing point for `LoopError` inside `run()`.
 fn feedback_or_end<T: Into<Feedback>>(result: Result<T, LoopError>) -> Result<Feedback, String> {
     match result {
         Ok(feedback) => Ok(feedback.into()),

@@ -1,3 +1,6 @@
+//! Enable Tokio's time and I/O drivers: Run deadlines and native HTTP adapters rely on them even
+//! for commands without explicit timers. Initialize opt-in telemetry before the runtime and shut it
+//! down after the runtime returns.
 #![forbid(unsafe_code)]
 
 mod cli;

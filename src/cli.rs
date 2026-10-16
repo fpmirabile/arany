@@ -1,3 +1,8 @@
+//! `main.rs` owns command selection and exit codes. Private CLI files select trusted inputs, call
+//! the Engine and project only committed facts; they never implement Run transitions or Provider
+//! wire logic. Label rejections once through the `Error:` feedback convention at the caller;
+//! validators return undecorated diagnostics. Classify failures at the operation boundary, never by
+//! matching display strings, and never restore a consumed command or retry.
 use arany::{Effort, Output, ProviderError, StateRoot, resolve_native_effort_for_run};
 use clap::ValueEnum;
 use serde::Deserialize;

@@ -1,3 +1,6 @@
+//! Always parse the body with the bounded SSE parser regardless of the response media label. The
+//! streaming conversion accepts the rendered message array directly; never nest it inside another
+//! message's content.
 use super::{ENDPOINT, wire};
 use crate::diagnostics::{
     ResponseShape, StreamCounts, SubscriptionFailureStage as Stage, subscription_failure,

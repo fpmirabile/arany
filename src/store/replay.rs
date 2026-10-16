@@ -1,3 +1,6 @@
+//! Replay consumes fully decoded, version-checked envelopes; unknown kinds, scope errors, gaps,
+//! oversized payloads and illegal transitions fail. Stored text never becomes instructions, policy
+//! or a later request.
 use super::{ResolvedSession, StoreError, event_payload_limit};
 use crate::session::{
     AgentDisposition, AgentRole, AgentRunId, Event, EventEnvelope, RunConfig, RunDisposition,

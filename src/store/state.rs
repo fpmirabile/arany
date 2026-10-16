@@ -1,3 +1,7 @@
+//! Private State records. Open every leaf nonblocking before checking its type: a private FIFO must
+//! fail admission rather than wait for a peer. `StateRoot` validates records structurally and never
+//! parses account JSON; the CLI credential owner does. Setup reset validates final and pending
+//! files before removing either and never touches history, trust or arbitrary paths.
 use super::{DATABASE_FILE, MAX_DATABASE_BYTES, StoreError};
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;

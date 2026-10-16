@@ -1,3 +1,6 @@
+//! Context compilation is deterministic over committed Messages, Events, instruction snapshots,
+//! exact budgets and the selected Provider capability snapshot. Provider-hosted conversation IDs,
+//! prompt-cache keys and opaque compaction items are accelerators, never canonical history.
 use super::input::WorkspaceInputs;
 use super::{
     CollaborationPolicy, CompactionStatus, ContextUsage, MAX_CONTEXT_CONTENT_BYTES,

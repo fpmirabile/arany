@@ -1,3 +1,7 @@
+//! Admit and persist child identities in ordinal order, run at most the pinned Provider
+//! concurrency, join every terminal disposition and pass results to synthesis in assignment order.
+//! A failed child aborts and drains siblings before primary failure; a store failure aborts and
+//! drains calls and leaves replay to label the prefix interrupted.
 use super::{
     CallFailure, CallResult, MAX_PRIMARY_RESULT_BYTES, RunLoop, TOOL_CLEANUP_OVERHEAD, call_record,
     call_trace_result, call_trace_usage, duration_ms, invoke_bounded, valid_finish,

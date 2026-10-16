@@ -1,3 +1,16 @@
+//! Start the unchanged Bubblewrap profile through the fixed root-owned `/usr/bin/unshare` user and
+//! mount namespace bootstrap with recursive-private propagation, cleared environment and fixed
+//! arguments, without `--keep-caps`: util-linux makes propagation private before exec, and retained
+//! capabilities make Bubblewrap reject a non-root real UID (util-linux v2.39.3 sys-utils/unshare.c;
+//! containers/bubblewrap bubblewrap.c). Explicitly unshare the user namespace before disabling
+//! nested namespaces; `--unshare-all` alone is only a try. Before Ready and again after GO parse
+//! bounded `/proc/self/mountinfo` and require a private root and one exact private entry per
+//! selected runtime mount with no propagation fields, stacked entries or descendant mounts. Keep
+//! `/lib` targeting `/usr/lib` and `/lib64` targeting `/usr/lib64`: mapping both to `/usr/lib`
+//! hides the x86-64 ELF loader even when ARM64 gates pass. After a typed Git read, only the
+//! digest-rechecked pinned Git runs; stop every other namespace process before the receipt.
+//! Validate effective cgroup limits including group OOM before releasing payloads and verify the
+//! owned group is empty or removed. Native fixtures preserve this loader layout.
 use super::{
     CAPTURE_BYTES, GuardStage, RUNTIME_ROOT, Task, bootstrap_failure, capture, drain_stderr,
     encode_task, parse_ready, profile, read_capped, read_line_capped, read_observation,

@@ -1,3 +1,9 @@
+//! The committed-Event transition here is shared with live Run observation. Closed replay labels an
+//! unfinished final Run Interrupted; ordinary in-process Run progress must not apply that
+//! end-of-history rule. Typed envelopes still need payload validation at this boundary, not only
+//! SQL decoding. Pin each accepted AI review to its pending Tool in the projection: inferring
+//! ownership from adjacent review calls permits duplicate integration reviews when approval modes
+//! change between command execution and publication.
 use super::events::{
     AgentDisposition, AgentRole, AgentRunId, ChildGrant, CompactionRecord, CompactionStatus, Event,
     EventEnvelope, ForkLineage, GoalBudget, GoalId, GoalPhase, GoalPlanContract, GoalReport,

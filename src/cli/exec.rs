@@ -1,3 +1,6 @@
+//! Tokio registers each signal once per process and never restores the default disposition: a
+//! SIGINT after the Run is absorbed, so only bounded output and shutdown remain. Signal handling
+//! never writes stdout.
 use super::{CommandOutput, OutputArg, chatgpt, native_run_key_from_env};
 use arany::{
     AnthropicProvider, CollaborationPolicy, CustomProvider, Effort, Engine, EngineError,
