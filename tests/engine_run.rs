@@ -6076,10 +6076,23 @@ fn escape_heavy_session_over_the_compaction_bound_fails_closed_and_keeps_its_jou
     });
 }
 
+/// How the step's Tool grant and approvals are configured.
+#[derive(Clone, Copy)]
+struct StepSetup {
+    write: bool,
+    approvals: Option<arany::ApprovalMode>,
+}
+
+const READ_ONLY: StepSetup = StepSetup {
+    write: false,
+    approvals: None,
+};
+
 /// The Events of one Run with a single Tool step, with each Tool intent's sizing and outcome.
 async fn tool_step_events(
     policy: CollaborationPolicy,
     outcomes: Vec<ProviderOutcome>,
+    setup: StepSetup,
 ) -> Vec<String> {
     use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir().expect("temporary root");
@@ -6095,14 +6108,22 @@ async fn tool_step_events(
     let config = state_path.join("tools.json");
     std::fs::write(
         &config,
-        br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        format!(
+            r#"{{"version":1,"workspace_paths":["notes"],"write":{},"commands":[],"skills":[],"mcp":[]}}"#,
+            setup.write
+        ),
     )
     .expect("Tool configuration");
     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
         .expect("private Tool configuration");
     engine
         .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-        .expect("read-only Tools");
+        .expect("Tools");
+    let mut inbox = setup.approvals.map(|mode| {
+        let (approvals, inbox) = arany::ToolApprovals::new(mode);
+        engine.set_tool_approvals(approvals);
+        inbox
+    });
     let mut input = request(&workspace, "Inspect the notes");
     input.policy = policy;
     input.goal.budget = Some(arany::GoalBudget {
@@ -6111,7 +6132,16 @@ async fn tool_step_events(
         max_active_ms: Some(30 * 60 * 1000),
         max_runs: 1,
     });
-    let outcome = engine.run(input).await.expect("Tool Run");
+    let outcome = match (setup.approvals, inbox.as_mut()) {
+        (Some(arany::ApprovalMode::Request), Some(inbox)) => {
+            let decide = async {
+                inbox.next().await.expect("approval requested").decide(true);
+            };
+            tokio::join!(engine.run(input), decide).0
+        }
+        _ => engine.run(input).await,
+    }
+    .expect("Tool Run");
     engine.close().await.expect("engine shutdown");
     let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
         .expect("read-only Store");
@@ -6133,6 +6163,9 @@ async fn tool_step_events(
             Event::ToolFinished { observation, .. } => {
                 format!("ToolFinished {:?}", observation.disposition)
             }
+            Event::ProviderCallRecorded { record, .. } => {
+                format!("ProviderCallRecorded {:?}", record.phase)
+            }
             event => format!("{event:?}")
                 .split([' ', '{', '('])
                 .next()
@@ -6142,157 +6175,18 @@ async fn tool_step_events(
         .collect()
 }
 
-const PRIMARY_READ: &str = "\
-SessionStarted
-GoalStarted
-GoalRunLinked
-MessageAccepted
-RunStarted
-AgentSpawned
-GoalActiveTimeReserved
-GoalProviderCallReserved
-ProviderCallRecorded
-GoalActiveTimeSettled
-ToolStarted result_bytes=62443 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
-GoalActiveTimeReserved
-ToolFinished Succeeded
-GoalActiveTimeSettled
-GoalActiveTimeReserved
-GoalProviderCallReserved
-ProviderCallRecorded
-GoalActiveTimeSettled
-AgentFinished
-MessageCommitted
-RunFinished
-GoalFinished";
-
-const PRIMARY_GIT: &str = "\
-SessionStarted
-GoalStarted
-GoalRunLinked
-MessageAccepted
-RunStarted
-AgentSpawned
-GoalActiveTimeReserved
-GoalProviderCallReserved
-ProviderCallRecorded
-GoalActiveTimeSettled
-ToolStarted result_bytes=62447 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
-GoalActiveTimeReserved
-GoalActiveTimeSettled
-ToolFinished Denied
-GoalActiveTimeReserved
-GoalProviderCallReserved
-ProviderCallRecorded
-GoalActiveTimeSettled
-AgentFinished
-MessageCommitted
-RunFinished
-GoalFinished";
-
-const PRIMARY_WRITE: &str = "\
-SessionStarted
-GoalStarted
-GoalRunLinked
-MessageAccepted
-RunStarted
-AgentSpawned
-GoalActiveTimeReserved
-GoalProviderCallReserved
-ProviderCallRecorded
-GoalActiveTimeSettled
-GoalPlanContractRecorded
-ToolStarted result_bytes=62439 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
-GoalActiveTimeReserved
-GoalActiveTimeSettled
-ToolFinished Denied
-GoalActiveTimeReserved
-GoalProviderCallReserved
-ProviderCallRecorded
-GoalActiveTimeSettled
-AgentFinished
-RunFinished
-GoalFinished";
-
-const RESEARCHER_READ: &str = "\
-SessionStarted
-GoalStarted
-GoalRunLinked
-MessageAccepted
-RunStarted
-AgentSpawned
-GoalActiveTimeReserved
-GoalProviderCallReserved
-ProviderCallRecorded
-GoalActiveTimeSettled
-GoalActiveTimeReserved
-AgentSpawned
-GoalProviderCallReserved
-ProviderCallRecorded
-ToolStarted result_bytes=59099 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
-ToolFinished Succeeded
-GoalProviderCallReserved
-ProviderCallRecorded
-AgentFinished
-GoalActiveTimeSettled
-GoalActiveTimeReserved
-GoalProviderCallReserved
-ProviderCallRecorded
-GoalActiveTimeSettled
-AgentFinished
-MessageCommitted
-RunFinished
-GoalFinished";
-
-const RESEARCHER_SKILL: &str = "\
-SessionStarted
-GoalStarted
-GoalRunLinked
-MessageAccepted
-RunStarted
-AgentSpawned
-GoalActiveTimeReserved
-GoalProviderCallReserved
-ProviderCallRecorded
-GoalActiveTimeSettled
-GoalActiveTimeReserved
-AgentSpawned
-GoalProviderCallReserved
-ProviderCallRecorded
-ToolStarted result_bytes=59101 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
-ToolFinished Denied
-GoalProviderCallReserved
-ProviderCallRecorded
-AgentFinished
-GoalActiveTimeSettled
-GoalActiveTimeReserved
-GoalProviderCallReserved
-ProviderCallRecorded
-GoalActiveTimeSettled
-AgentFinished
-MessageCommitted
-RunFinished
-GoalFinished";
-
-#[tokio::test]
-async fn primary_tool_step_events_match_the_snapshot() {
-    let finish = || {
-        ProviderOutcome::Finish(Finish {
-            summary: "done".into(),
-            result: "answer".into(),
-        })
-    };
-    let plan = arany::GoalPlanContract {
-        mission: "Rewrite the fact".into(),
+fn write_plan() -> arany::GoalPlanContract {
+    arany::GoalPlanContract {
+        mission: "Record a new fact".into(),
         resource_class: arany::ToolResourceClass::Default,
         command_timeout_ms: None,
-        paths: vec!["notes/facts.txt".into()],
+        paths: vec!["notes/new.txt".into()],
         commands: Vec::new(),
         skills: Vec::new(),
         mcp_tools: Vec::new(),
-        success_criterion: arany::GoalSuccessCriterion::WorkspaceFileDigest {
-            path: "notes/facts.txt".into(),
-            sha256: "0".repeat(64),
+        success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
+            path: "notes/new.txt".into(),
+            content: "New".into(),
         },
         budget: arany::GoalBudget {
             max_provider_calls: None,
@@ -6300,6 +6194,16 @@ async fn primary_tool_step_events_match_the_snapshot() {
             max_active_ms: Some(30 * 60 * 1000),
             max_runs: 1,
         },
+    }
+}
+
+#[tokio::test]
+async fn primary_tool_step_events_match_the_snapshot() {
+    let finish = |result: &str| {
+        ProviderOutcome::Finish(Finish {
+            summary: "done".into(),
+            result: result.into(),
+        })
     };
     let read = arany::ToolCall::Read {
         path: "notes/facts.txt".into(),
@@ -6309,23 +6213,61 @@ async fn primary_tool_step_events_match_the_snapshot() {
     let git = arany::ToolCall::GitStatus {
         path: "notes".into(),
     };
-    let write = arany::ToolCall::Write {
-        path: "notes/facts.txt".into(),
-        expected_digest: None,
-        content: "New".into(),
+    let write = || {
+        tool_outcome(
+            arany::ToolCall::Write {
+                path: "notes/new.txt".into(),
+                expected_digest: None,
+                content: "New".into(),
+            },
+            Some(Box::new(write_plan())),
+        )
     };
-    // Git and Write are Guard-site calls the read-only grant denies before any Guard launch; the
-    // Write still reserves the result size of an applied mutation.
-    for (case, step, expected) in [
-        ("in-process read", tool_outcome(read, None), PRIMARY_READ),
-        ("guard read", tool_outcome(git, None), PRIMARY_GIT),
+    let granted = |approvals| StepSetup {
+        write: true,
+        approvals,
+    };
+    // The read-only grant denies Git and the first Write before any Guard launch; the other Writes
+    // run in the Guard, after an AI review or a human approval where the mode asks for one.
+    for (case, outcomes, setup, expected) in [
+        (
+            "in-process read",
+            vec![tool_outcome(read, None), finish("answer")],
+            READ_ONLY,
+            PRIMARY_READ,
+        ),
+        (
+            "guard read",
+            vec![tool_outcome(git, None), finish("answer")],
+            READ_ONLY,
+            PRIMARY_GIT,
+        ),
+        (
+            "denied mutation",
+            vec![write(), finish("answer")],
+            READ_ONLY,
+            PRIMARY_DENIED_WRITE,
+        ),
         (
             "guard mutation",
-            tool_outcome(write, Some(Box::new(plan))),
+            vec![write(), finish("answer")],
+            granted(None),
             PRIMARY_WRITE,
         ),
+        (
+            "reviewed mutation",
+            vec![write(), finish("approve"), finish("answer")],
+            granted(Some(arany::ApprovalMode::Auto)),
+            PRIMARY_REVIEWED_WRITE,
+        ),
+        (
+            "approved mutation",
+            vec![write(), finish("answer")],
+            granted(Some(arany::ApprovalMode::Request)),
+            PRIMARY_APPROVED_WRITE,
+        ),
     ] {
-        let events = tool_step_events(CollaborationPolicy::Single, vec![step, finish()]).await;
+        let events = tool_step_events(CollaborationPolicy::Single, outcomes, setup).await;
         assert_eq!(events.join("\n"), expected, "primary {case} step");
     }
 }
@@ -6370,8 +6312,228 @@ async fn researcher_tool_step_events_match_the_snapshot() {
                 max_active_children: 1,
             },
             outcomes,
+            READ_ONLY,
         )
         .await;
         assert_eq!(events.join("\n"), expected, "researcher {case} step");
     }
 }
+
+const PRIMARY_READ: &str = "\
+SessionStarted
+GoalStarted
+GoalRunLinked
+MessageAccepted
+RunStarted
+AgentSpawned
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+GoalActiveTimeSettled
+ToolStarted result_bytes=62443 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+GoalActiveTimeReserved
+ToolFinished Succeeded
+GoalActiveTimeSettled
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+GoalActiveTimeSettled
+AgentFinished
+MessageCommitted
+RunFinished
+GoalFinished";
+
+const PRIMARY_GIT: &str = "\
+SessionStarted
+GoalStarted
+GoalRunLinked
+MessageAccepted
+RunStarted
+AgentSpawned
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+GoalActiveTimeSettled
+ToolStarted result_bytes=62447 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+GoalActiveTimeReserved
+GoalActiveTimeSettled
+ToolFinished Denied
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+GoalActiveTimeSettled
+AgentFinished
+MessageCommitted
+RunFinished
+GoalFinished";
+
+const PRIMARY_DENIED_WRITE: &str = "\
+SessionStarted
+GoalStarted
+GoalRunLinked
+MessageAccepted
+RunStarted
+AgentSpawned
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+GoalActiveTimeSettled
+GoalPlanContractRecorded
+ToolStarted result_bytes=62440 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+GoalActiveTimeReserved
+GoalActiveTimeSettled
+ToolFinished Denied
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+GoalActiveTimeSettled
+AgentFinished
+RunFinished
+GoalFinished";
+
+const PRIMARY_WRITE: &str = "\
+SessionStarted
+GoalStarted
+GoalRunLinked
+MessageAccepted
+RunStarted
+AgentSpawned
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+GoalActiveTimeSettled
+GoalPlanContractRecorded
+ToolStarted result_bytes=62440 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+GoalActiveTimeReserved
+GoalActiveTimeSettled
+GoalActiveTimeReserved
+ToolFinished Succeeded
+GoalActiveTimeSettled
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+GoalActiveTimeSettled
+AgentFinished
+MessageCommitted
+RunFinished
+GoalFinished";
+
+const PRIMARY_REVIEWED_WRITE: &str = "\
+SessionStarted
+GoalStarted
+GoalRunLinked
+MessageAccepted
+RunStarted
+AgentSpawned
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+GoalActiveTimeSettled
+GoalPlanContractRecorded
+ToolStarted result_bytes=62440 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded ToolReview
+GoalActiveTimeSettled
+GoalActiveTimeReserved
+GoalActiveTimeSettled
+GoalActiveTimeReserved
+ToolFinished Succeeded
+GoalActiveTimeSettled
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+GoalActiveTimeSettled
+AgentFinished
+MessageCommitted
+RunFinished
+GoalFinished";
+
+const PRIMARY_APPROVED_WRITE: &str = "\
+SessionStarted
+GoalStarted
+GoalRunLinked
+MessageAccepted
+RunStarted
+AgentSpawned
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+GoalActiveTimeSettled
+GoalPlanContractRecorded
+ToolStarted result_bytes=62440 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+GoalActiveTimeReserved
+GoalActiveTimeSettled
+GoalActiveTimeReserved
+GoalActiveTimeSettled
+GoalActiveTimeReserved
+ToolFinished Succeeded
+GoalActiveTimeSettled
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+GoalActiveTimeSettled
+AgentFinished
+MessageCommitted
+RunFinished
+GoalFinished";
+
+const RESEARCHER_READ: &str = "\
+SessionStarted
+GoalStarted
+GoalRunLinked
+MessageAccepted
+RunStarted
+AgentSpawned
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+GoalActiveTimeSettled
+GoalActiveTimeReserved
+AgentSpawned
+GoalProviderCallReserved
+ProviderCallRecorded ChildWork
+ToolStarted result_bytes=59099 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolFinished Succeeded
+GoalProviderCallReserved
+ProviderCallRecorded ChildWork
+AgentFinished
+GoalActiveTimeSettled
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded RootSynthesis
+GoalActiveTimeSettled
+AgentFinished
+MessageCommitted
+RunFinished
+GoalFinished";
+
+const RESEARCHER_SKILL: &str = "\
+SessionStarted
+GoalStarted
+GoalRunLinked
+MessageAccepted
+RunStarted
+AgentSpawned
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+GoalActiveTimeSettled
+GoalActiveTimeReserved
+AgentSpawned
+GoalProviderCallReserved
+ProviderCallRecorded ChildWork
+ToolStarted result_bytes=59101 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolFinished Denied
+GoalProviderCallReserved
+ProviderCallRecorded ChildWork
+AgentFinished
+GoalActiveTimeSettled
+GoalActiveTimeReserved
+GoalProviderCallReserved
+ProviderCallRecorded RootSynthesis
+GoalActiveTimeSettled
+AgentFinished
+MessageCommitted
+RunFinished
+GoalFinished";
