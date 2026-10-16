@@ -397,6 +397,9 @@ impl WorkspacePermissions {
             skills: Vec::new(),
             mcp: Vec::new(),
             runtime_grants: self.runtime_grants.clone(),
+            #[cfg(target_os = "linux")]
+            git: super::git::discover(),
+            #[cfg(not(target_os = "linux"))]
             git: None,
         };
         config.validate()?;

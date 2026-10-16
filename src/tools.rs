@@ -1,6 +1,8 @@
 mod approval;
 pub(crate) mod config;
 mod fs;
+#[cfg(target_os = "linux")]
+mod git;
 mod guard;
 mod mcp;
 mod skills;
@@ -309,6 +311,10 @@ impl ToolRuntime {
             .chain(config.mcp.iter().map(|server| &server.program))
         {
             program.verify()?;
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(git) = &config.git {
+            git::verify_host_executable(git)?;
         }
         for path in config.resource_paths() {
             fs::reject_overlap(Path::new(path), state.path())?;
