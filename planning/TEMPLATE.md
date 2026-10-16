@@ -1,9 +1,8 @@
 # Plan title
 
-Keep substantive sections only. Expand the boundary-specific questions in
-[PLANNING.md](./PLANNING.md) when the change needs them; a small task does not
-need a table for every possible interface or risk.
-Resolve relative links from the initiative's directory when copying this template.
+Keep substantive sections only; delete headings that do not apply. Expand the
+boundary-specific questions in [PLANNING.md](./PLANNING.md) only when the change
+affects a module boundary. Resolve relative links from the initiative's directory.
 
 ## Metadata
 
@@ -13,72 +12,45 @@ Resolve relative links from the initiative's directory when copying this templat
 
 ## Outcome and scope
 
-Describe the result, the harness responsibility it serves and the work included.
-Name exclusions only when they clarify an actual scope boundary. For development
-workflow changes, state that scope directly.
+The result, the harness responsibility it serves and the work included; exclusions only when they clarify a real boundary.
 
 ## Current facts and owners
 
-Link the affected contract, editing rules, implementation and evidence owner.
-Record verified facts needed for the decision; do not copy their full contents.
+Links to the affected contract, editing rules, implementation and evidence owner, plus verified facts needed for the decision.
 
-## Product contract and acceptance scenarios
+## Contract and scenarios
 
-- Owning spec or unmigrated contract:
-- Agreed behavior and proposed change:
+- Owning spec or unmigrated contract, and the proposed change:
 - Successful path and meaningful rejection/failure/recovery scenarios:
-- Existing evidence owner and deferred checks:
-- Contract review: required updates or why the existing contract covers the work:
+- Evidence owner and deferred checks:
 
-For work with no observable behavior impact, replace this section with that conclusion. Use the [spec workflow](../docs/specs/README.md) for contract review and changes.
+For work with no observable behavior impact, replace this section with that conclusion.
 
 ## Chosen direction
 
-- Simplest sufficient solution after Ponytail and why it fits:
+- Simplest sufficient solution after Ponytail:
 - Linux/macOS impact and native evidence, or no OS impact:
-- Ownership or interface changes, if any:
-- Alternatives for hard-to-reverse decisions and meaningful trade-offs:
-
-For an affected boundary, describe state ownership, adapters, ordering, errors,
-cancellation, compatibility and replay. Resolve material uncertainty or name it
-under `Open questions`; a proposal is not an accepted contract.
+- Ownership or interface changes, and alternatives for hard-to-reverse decisions:
 
 ## Security and resource model
 
-- Trust boundaries and attacker-controlled inputs:
-- Authorization and capabilities:
-- Secrets and sensitive data:
-- Bounds and backpressure:
-- Failure containment and cleanup:
-
-State when no security boundary or resource behavior changes. For triggered
-work, use the [security-pass requirements](../agents/security.md#security-pass-triggers).
+Trust boundaries, attacker-controlled inputs, authorization, secrets, bounds/backpressure and failure containment, or a statement that none change. Triggered work follows the [security-pass requirements](../agents/security.md#security-pass-triggers).
 
 ## Risks and mitigations
 
-- Risk:
-  Mitigation:
+- Risk → mitigation:
 
 ## Execution
 
-Use one ordered list for a cohesive PR. Split into tickets only when one PR would mix responsibilities or exceed a safe review boundary.
-
 1. First coherent step and its verification.
-2. Second coherent step and its verification.
-3. Final integration, documentation, and cleanup.
+2. Final integration, documentation and cleanup.
 
-For multiple slices, name each slice's owner, dependencies, verification and PR
-boundary. Keep only remaining work and the next action as execution progresses.
+For multiple slices, name each slice's dependencies, verification and PR boundary; keep only remaining work as execution progresses.
 
 ## Open questions
 
-- Include only material questions that cannot be answered from current sources.
-- Assign an owner or decision mechanism when known.
-- Delete this section when no open questions remain.
+Material questions that cannot be answered from current sources, with an owner. Delete the section when none remain.
 
 ## Exit criteria
 
-- Required successful and meaningful failure observations, with check owners:
-- Unavailable native/live/user checks and their handoff:
-- Contract and instruction updates, or why existing owners remain adequate:
-- Closeout under [planning lifecycle](./README.md#lifecycle): route durable knowledge and pending checks, update inbound links and remove completed execution work.
+Required successful and failure observations with their check owners; unavailable native/live/user checks and their handoff; contract updates or why existing owners remain adequate; closeout under the [planning lifecycle](./README.md#lifecycle).
