@@ -50,17 +50,6 @@ Progress and retained-draft cues remain transient; actual errors remain chat fee
 
 ## Verification
 
-| Lane | Current result and owned claim |
-|---|---|
-| Skill validation and portability | Frontmatter valid; pinned offline local install, byte-identical installed source and relocated local-manifest restoration passed. All three reviewers used the skill without material instruction ambiguity. |
-| Adapter regression owners | Existing OpenAI corpus and custom loopback transport owner demonstrated RED before the repairs and GREEN afterward for Run/compaction boundary rows; all 37 Provider tests passed. |
-| Terminal regression owners | Exact append-only/control-free linear output, accepted canonical-segment delivery/cancellation, three model-catalog process owners and held-Provider active-help cancellation passed. Active help covers inline and linear routing without a second input prompt or lost cancellation ownership. |
-| Consolidated default debug | `cargo test --quiet --locked --offline`: 296 passed, 53 ignored, zero failures. |
-| Consolidated default release | `cargo test --quiet --release --locked --offline`: 283 passed, 60 ignored, zero failures. |
-| Formatting and lint | `cargo fmt --all -- --check` and strict all-target Clippy passed in debug and release. The unchanged vendored Crossterm dependency still emits its pre-existing parentheses warning. |
-| Executable | Locked offline optimized build and the shipped binary's data-free `--help` passed. |
-| Final review | Independent review accepted the production fixes; root reviewed direct source/test/documentation diffs against pre-edit snapshots, skill provenance, security bounds and deferred claims. No commits, dependency or CI changes. |
-
-The first consolidated debug/release runs found an additional stale compact-help readiness marker in the existing rejected-command PTY journey. Its exact owner reproduced the failure. The gate now waits for the fresh complete `/exit` row and subsequent `Input:` while preserving rejection separation, terminal restoration and closed Run-free replay. Consolidation above passed after that change; completeness stays owned by the existing linear/catalog owners rather than duplicated in that journey.
+Tests: [`src/provider/openai/wire/tests.rs::inbound_wire_corpus_requires_one_completed_structured_answer`](../../src/provider/openai/wire/tests.rs); [`src/terminal/linear.rs::linear_presentation_is_labeled_append_only_and_control_free`](../../src/terminal/linear.rs); [`tests/session_run/model_catalog.rs::screen_reader_model_catalog_selects_exact_profile_without_provider_egress`](../../tests/session_run/model_catalog.rs).
 
 No real account, live Provider, native macOS or manual assistive-technology checks are claimed. No held compiled-native catalog fixture proved query completion precisely mid-segment or every suspension timing; reader and source evidence do not replace that integration evidence. Existing Guard, TLS, credential-service and performance lanes were not reactivated for this review because their implementation boundaries did not change. Ignored tests are not passing evidence.
