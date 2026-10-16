@@ -346,18 +346,6 @@ impl RunSteering {
     }
 }
 
-struct ProviderSelection {
-    name: String,
-    model: String,
-    effort: Option<crate::provider::Effort>,
-    concurrency: u8,
-    custom_profile_provenance: Option<crate::provider::CustomProfileProvenance>,
-    saved_api_account_id: Option<uuid::Uuid>,
-    chatgpt_provenance: Option<crate::provider::ChatGptProvenance>,
-    output_token_bound: crate::provider::OutputTokenBound,
-    max_output_tokens: u32,
-}
-
 struct GoalAdmission {
     id: GoalId,
     objective: String,
@@ -1204,16 +1192,16 @@ mod goal_workspace_lease_tests {
 
     #[async_trait::async_trait]
     impl Provider for NeverProvider {
-        fn profile_name(&self) -> &str {
-            "scripted"
-        }
-
-        fn model_name(&self) -> &str {
-            "lease-test"
-        }
-
-        fn max_concurrent_calls(&self) -> u8 {
-            1
+        fn identity(&self) -> &crate::provider::ProviderIdentity {
+            static IDENTITY: std::sync::LazyLock<crate::provider::ProviderIdentity> =
+                std::sync::LazyLock::new(|| {
+                    crate::provider::ProviderIdentity::new(
+                        "scripted",
+                        "lease-test",
+                        crate::provider::Provenance::native(),
+                    )
+                });
+            &IDENTITY
         }
 
         async fn invoke(&self, _: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
@@ -1249,13 +1237,10 @@ mod goal_workspace_lease_tests {
             .state
             .lock_workspace_in(&account_root, workspace_identity)
             .expect("provisional Workspace lock");
-        let (acknowledgment_entered, release_acknowledgment) = engine
-            .store
-            .gate_goal_append_acknowledgment(session_id, |event| {
+        let (acknowledgment_entered, release_acknowledgment) =
+            crate::fault::FaultPlan::gate_goal_append_acknowledgment(session_id, |event| {
                 matches!(event, Event::GoalStarted { .. } | Event::GoalResumed { .. })
-            })
-            .await
-            .expect("install acknowledgment gate");
+            });
         let mut leases = WorkspaceLeases::new();
         Engine::retain_goal_workspace(
             &mut leases,
@@ -1336,13 +1321,10 @@ mod goal_workspace_lease_tests {
             )
             .await
             .expect("Session start");
-        let (link_entered, release_link) = engine
-            .store
-            .gate_goal_append_acknowledgment(session_id, |event| {
+        let (link_entered, release_link) =
+            crate::fault::FaultPlan::gate_goal_append_acknowledgment(session_id, |event| {
                 matches!(event, Event::GoalRunLinked { .. })
-            })
-            .await
-            .expect("install acknowledgment gate");
+            });
         let request = RunRequest {
             session_id: Some(session_id),
             title: None,
@@ -1442,13 +1424,9 @@ mod goal_workspace_lease_tests {
         let state = StateRoot::admit(&temp.path().join("state")).expect("private State root");
         let mut engine = Engine::open(state, NeverProvider).expect("Engine");
         let (session_id, goal_id) = paused_goal_session(&mut engine, &workspace).await;
-        engine
-            .store
-            .fail_next_goal_append(session_id, |event| {
-                matches!(event, Event::GoalResumed { .. })
-            })
-            .await
-            .expect("install append failure");
+        crate::fault::FaultPlan::fail_goal_append(session_id, |event| {
+            matches!(event, Event::GoalResumed { .. })
+        });
         match engine
             .run(resume_request(session_id, goal_id, &workspace))
             .await
@@ -1474,13 +1452,10 @@ mod goal_workspace_lease_tests {
         let state = StateRoot::admit(&temp.path().join("state")).expect("private State root");
         let mut engine = Engine::open(state, NeverProvider).expect("Engine");
         let (session_id, goal_id) = paused_goal_session(&mut engine, &workspace).await;
-        let (resume_entered, release_resume) = engine
-            .store
-            .gate_goal_append_acknowledgment(session_id, |event| {
+        let (resume_entered, release_resume) =
+            crate::fault::FaultPlan::gate_goal_append_acknowledgment(session_id, |event| {
                 matches!(event, Event::GoalResumed { .. })
-            })
-            .await
-            .expect("install acknowledgment gate");
+            });
         let mut run = Box::pin(engine.run(resume_request(session_id, goal_id, &workspace)));
         tokio::time::timeout(Duration::from_secs(5), async {
             tokio::select! {
@@ -1507,13 +1482,9 @@ mod goal_workspace_lease_tests {
         let state = StateRoot::admit(&temp.path().join("state")).expect("private State root");
         let mut engine = Engine::open(state, NeverProvider).expect("Engine");
         let (session_id, goal_id) = paused_goal_session(&mut engine, &workspace).await;
-        engine
-            .store
-            .fail_next_goal_append(session_id, |event| {
-                matches!(event, Event::GoalRunLinked { .. })
-            })
-            .await
-            .expect("install append failure");
+        crate::fault::FaultPlan::fail_goal_append(session_id, |event| {
+            matches!(event, Event::GoalRunLinked { .. })
+        });
         match engine
             .run(resume_request(session_id, goal_id, &workspace))
             .await
@@ -2078,12 +2049,13 @@ impl Engine {
         if cancellation.is_cancelled() {
             return Err(EngineError::CancelledBeforeStart);
         }
-        let selection = self.select_provider()?;
+        let provider = Arc::clone(&self.provider);
+        let identity = checked_identity(provider.as_ref())?;
         self.validate_request(&request)?;
-        if self.tools.is_some() && selection.custom_profile_provenance.is_some() {
+        if self.tools.is_some() && identity.custom_provenance().is_some() {
             return Err(EngineError::InvalidRequest);
         }
-        if selection.custom_profile_provenance.is_some() && !request.images.is_empty() {
+        if identity.custom_provenance().is_some() && !request.images.is_empty() {
             return Err(EngineError::ImagesNotAdmitted);
         }
         let workspace_identity = crate::tools::workspace_identity(&request.workspace)?;
@@ -2213,28 +2185,25 @@ impl Engine {
         if let Some(runtime) = &mut tools {
             runtime.set_context_limit(context.tool_context_budget_bytes)?;
         }
-        if selection.custom_profile_provenance.is_some() && !context.images.is_empty() {
+        if identity.custom_provenance().is_some() && !context.images.is_empty() {
             return Err(EngineError::ImagesNotAdmitted);
         }
         let context_ended = SystemTime::now();
         let provider_concurrency = if budget.max_tokens.is_some() {
             1
         } else {
-            selection.concurrency
+            identity.limits.concurrency
         };
-        let compaction_provider_name = selection.name.clone();
-        let compaction_chatgpt_provenance = selection.chatgpt_provenance.clone();
-        let compaction_output_token_bound = selection.output_token_bound;
         let config = RunConfig {
-            provider: selection.name,
-            model: selection.model.clone(),
-            effort: selection.effort,
-            custom_profile_provenance: selection.custom_profile_provenance,
-            saved_api_account_id: selection.saved_api_account_id,
-            chatgpt_provenance: selection.chatgpt_provenance,
-            output_token_bound: selection.output_token_bound,
+            provider: identity.profile.clone(),
+            model: identity.model.clone(),
+            effort: identity.effort,
+            custom_profile_provenance: identity.custom_provenance().cloned(),
+            saved_api_account_id: identity.saved_api_account_id(),
+            chatgpt_provenance: identity.chatgpt_provenance().cloned(),
+            output_token_bound: identity.limits.output_token_bound,
             policy: request.policy,
-            output_token_cap: selection.max_output_tokens,
+            output_token_cap: identity.limits.max_output_tokens,
             provider_concurrency,
             workspace_device,
             workspace_inode,
@@ -2411,8 +2380,8 @@ impl Engine {
             agent_run_id,
             phase: AgentPhase::RootPlan,
             collaboration: request.policy,
-            model: selection.model,
-            max_output_tokens: selection.max_output_tokens,
+            model: identity.model.clone(),
+            max_output_tokens: identity.limits.max_output_tokens,
             input: RunInput {
                 images: context.images,
                 goal_budget: Some(budget),
@@ -2450,9 +2419,6 @@ impl Engine {
                 policy: request.policy,
                 concurrency: provider_concurrency,
                 goal_phase: goal.phase,
-                provider_name: compaction_provider_name,
-                chatgpt_provenance: compaction_chatgpt_provenance,
-                output_token_bound: compaction_output_token_bound,
                 cancellation,
                 tools: tools.as_ref(),
                 approvals: self.tool_approvals.as_ref(),
@@ -2570,38 +2536,20 @@ impl Engine {
         }
         Ok(())
     }
+}
 
-    fn select_provider(&self) -> Result<ProviderSelection, EngineError> {
-        let selection = ProviderSelection {
-            name: self.provider.profile_name().to_owned(),
-            model: self.provider.model_name().to_owned(),
-            effort: self.provider.reasoning_effort(),
-            concurrency: self.provider.max_concurrent_calls(),
-            custom_profile_provenance: self.provider.custom_profile_provenance(),
-            saved_api_account_id: self.provider.saved_api_account_id(),
-            chatgpt_provenance: self.provider.chatgpt_provenance(),
-            output_token_bound: self.provider.output_token_bound(),
-            max_output_tokens: self.provider.max_output_tokens(),
-        };
-        if !(crate::provider::ProviderIdentity {
-            profile: &selection.name,
-            model: &selection.model,
-            effort: selection.effort,
-            concurrency: selection.concurrency,
-            custom_profile_provenance: selection.custom_profile_provenance.as_ref(),
-            saved_api_account_id: selection.saved_api_account_id,
-            chatgpt_provenance: selection.chatgpt_provenance.as_ref(),
-            output_token_bound: selection.output_token_bound,
-        })
-        .valid()
-            || !(1..=crate::provider::MAX_OUTPUT_TOKEN_CAP).contains(&selection.max_output_tokens)
-            || (selection.output_token_bound
-                == crate::provider::OutputTokenBound::LocalAcceptanceOnly
-                && selection.max_output_tokens > crate::provider::DEFAULT_OUTPUT_TOKEN_CAP)
-        {
-            return Err(EngineError::InvalidRequest);
-        }
-        Ok(selection)
+fn checked_identity(
+    provider: &dyn Provider,
+) -> Result<&crate::provider::ProviderIdentity, EngineError> {
+    let identity = provider.identity();
+    let limits = &identity.limits;
+    if identity.valid()
+        && (limits.output_token_bound != crate::provider::OutputTokenBound::LocalAcceptanceOnly
+            || limits.max_output_tokens <= crate::provider::DEFAULT_OUTPUT_TOKEN_CAP)
+    {
+        Ok(identity)
+    } else {
+        Err(EngineError::InvalidRequest)
     }
 }
 

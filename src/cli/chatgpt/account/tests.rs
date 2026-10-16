@@ -1,5 +1,6 @@
 use super::*;
 use crate::cli::chatgpt::consent::RiskPrompt;
+use arany::RecordKind;
 
 fn credentials(client_id: &str, subject: &str) -> VerifiedCredentials {
     VerifiedCredentials {
@@ -357,7 +358,11 @@ fn terminal_refresh_error_clears_private_token_and_keeps_registration() {
         load_selected_private_file_at(&reopened, id),
         Err(AuthorizationError::NoSelectedAccount)
     ));
-    let record = reopened.read_chatgpt_accounts_record().unwrap().unwrap();
+    let record = reopened
+        .record(RecordKind::ChatgptAccounts)
+        .read()
+        .unwrap()
+        .unwrap();
     assert!(
         !record
             .windows(b"synthetic-refresh".len())
@@ -1370,7 +1375,8 @@ fn private_file_accounts_reopen_and_reject_cross_account_drift() {
     let mut stale = serde_json::to_value(AccountIndex::read(&reopened).unwrap()).unwrap();
     stale["accounts"][1]["token"]["consent"]["warning_version"] = 1.into();
     reopened
-        .replace_chatgpt_accounts_record(&serde_json::to_vec(&stale).unwrap())
+        .record(RecordKind::ChatgptAccounts)
+        .replace(&serde_json::to_vec(&stale).unwrap())
         .unwrap();
     assert!(matches!(
         load_selected_private_file_at(&reopened, second_id),
@@ -1456,7 +1462,11 @@ fn private_file_accounts_reopen_and_reject_cross_account_drift() {
         ),
         Err(AuthorizationError::PermissionMissing)
     ));
-    let before = reopened.read_chatgpt_accounts_record().unwrap().unwrap();
+    let before = reopened
+        .record(RecordKind::ChatgptAccounts)
+        .read()
+        .unwrap()
+        .unwrap();
     for (client, subject, host, storage, expected) in [
         (
             "oaiapp_second",
@@ -1503,7 +1513,12 @@ fn private_file_accounts_reopen_and_reject_cross_account_drift() {
             .is_err()
         );
         assert!(
-            before == reopened.read_chatgpt_accounts_record().unwrap().unwrap(),
+            before
+                == reopened
+                    .record(RecordKind::ChatgptAccounts)
+                    .read()
+                    .unwrap()
+                    .unwrap(),
             "rejected identity replaced the account"
         );
     }
@@ -1551,7 +1566,8 @@ fn private_file_accounts_reopen_and_reject_cross_account_drift() {
     let mut contradictory = valid.clone();
     contradictory["accounts"][1]["plan_permission_missing"] = true.into();
     reopened
-        .replace_chatgpt_accounts_record(&serde_json::to_vec(&contradictory).unwrap())
+        .record(RecordKind::ChatgptAccounts)
+        .replace(&serde_json::to_vec(&contradictory).unwrap())
         .unwrap();
     assert!(matches!(
         load_selected_private_file_at(&reopened, second_id),
@@ -1560,7 +1576,8 @@ fn private_file_accounts_reopen_and_reject_cross_account_drift() {
     let mut wrong_host = valid.clone();
     wrong_host["accounts"][0]["host_id"] = "123e4567-e89b-42d3-a456-426614174001".into();
     reopened
-        .replace_chatgpt_accounts_record(&serde_json::to_vec(&wrong_host).unwrap())
+        .record(RecordKind::ChatgptAccounts)
+        .replace(&serde_json::to_vec(&wrong_host).unwrap())
         .unwrap();
     assert!(matches!(
         load_selected_private_file_at(&reopened, second_id),
@@ -1570,7 +1587,8 @@ fn private_file_accounts_reopen_and_reject_cross_account_drift() {
     let mut malformed = valid;
     malformed["accounts"][0]["client_id"] = "oaiapp_second".into();
     reopened
-        .replace_chatgpt_accounts_record(&serde_json::to_vec(&malformed).unwrap())
+        .record(RecordKind::ChatgptAccounts)
+        .replace(&serde_json::to_vec(&malformed).unwrap())
         .unwrap();
     assert!(matches!(
         load_selected_private_file_at(&reopened, second_id),
@@ -1594,7 +1612,8 @@ fn private_file_accounts_reopen_and_reject_cross_account_drift() {
     .unwrap();
     let metadata_reopened = StateRoot::open_existing(metadata_state.path()).unwrap();
     let record = metadata_reopened
-        .read_chatgpt_accounts_record()
+        .record(RecordKind::ChatgptAccounts)
+        .read()
         .unwrap()
         .unwrap();
     for omitted in [

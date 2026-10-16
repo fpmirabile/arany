@@ -1,4 +1,5 @@
 use super::*;
+use arany::RecordKind;
 use security_framework::{
     item::{ItemClass, ItemSearchOptions},
     os::macos::keychain::{CreateOptions, SecKeychain},
@@ -36,7 +37,11 @@ pub(super) async fn roundtrip() {
             "native save must reach the isolated store"
         );
         let state = StateRoot::open_existing(&account_root).unwrap();
-        let marker = state.read_saved_account_record().unwrap().unwrap();
+        let marker = state
+            .record(RecordKind::SavedAccount)
+            .read()
+            .unwrap()
+            .unwrap();
         assert_eq!(
             StoredAccountFile::parse(&marker).unwrap().storage,
             AccountStorage::Keyring
@@ -113,7 +118,10 @@ pub(super) async fn roundtrip() {
             save_at(DEFAULT_ACCOUNT, &account_root, &workspace, rejected).await,
             Err(CredentialError::Locked)
         ));
-        assert_eq!(state.read_saved_account_record().unwrap(), Some(marker));
+        assert_eq!(
+            state.record(RecordKind::SavedAccount).read().unwrap(),
+            Some(marker)
+        );
         keychain.unlock(Some(PASSWORD)).unwrap();
         let loaded = load_at(DEFAULT_ACCOUNT).await.unwrap().unwrap();
         assert_eq!(loaded.id, replacement_id);

@@ -161,14 +161,16 @@ pub(super) fn reset_tool_trace_stages(root: &Path) {
 }
 #[async_trait::async_trait]
 impl Provider for Journey {
-    fn profile_name(&self) -> &str {
-        "scripted"
-    }
-    fn model_name(&self) -> &str {
-        "file-tool-model"
-    }
-    fn max_concurrent_calls(&self) -> u8 {
-        1
+    fn identity(&self) -> &arany::ProviderIdentity {
+        static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::new(
+                    "scripted",
+                    "file-tool-model",
+                    arany::Provenance::native(),
+                )
+            });
+        &IDENTITY
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
@@ -807,16 +809,16 @@ fn build_goal_request() -> arany::GoalRequest {
 const RUNTIME_CACHE_CANARY: &str = "ARANY_RUNTIME_CACHE_PERSISTENCE_CANARY";
 #[async_trait::async_trait]
 impl Provider for RuntimeJourney {
-    fn profile_name(&self) -> &str {
-        "scripted"
-    }
-
-    fn model_name(&self) -> &str {
-        "runtime-profile-model"
-    }
-
-    fn max_concurrent_calls(&self) -> u8 {
-        1
+    fn identity(&self) -> &arany::ProviderIdentity {
+        static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::new(
+                    "scripted",
+                    "runtime-profile-model",
+                    arany::Provenance::native(),
+                )
+            });
+        &IDENTITY
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
@@ -1982,14 +1984,12 @@ struct GitJourney {
 
 #[async_trait::async_trait]
 impl Provider for GitJourney {
-    fn profile_name(&self) -> &str {
-        "scripted"
-    }
-    fn model_name(&self) -> &str {
-        "tool-model"
-    }
-    fn max_concurrent_calls(&self) -> u8 {
-        1
+    fn identity(&self) -> &arany::ProviderIdentity {
+        static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::new("scripted", "tool-model", arany::Provenance::native())
+            });
+        &IDENTITY
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {

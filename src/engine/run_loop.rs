@@ -138,9 +138,6 @@ pub(super) struct RunControls<'a> {
     pub(super) policy: CollaborationPolicy,
     pub(super) concurrency: u8,
     pub(super) goal_phase: GoalPhase,
-    pub(super) provider_name: String,
-    pub(super) chatgpt_provenance: Option<crate::provider::ChatGptProvenance>,
-    pub(super) output_token_bound: crate::provider::OutputTokenBound,
     pub(super) cancellation: RunCancellation,
     pub(super) tools: Option<&'a crate::tools::ToolRuntime>,
     pub(super) approvals: Option<&'a crate::tools::ToolApprovals>,
@@ -1153,7 +1150,7 @@ impl<'a> RunLoop<'a> {
             .is_some_and(|progress| progress.previews_enabled());
         let event_tail = 8 + if previews { MAX_DISPLAY_CHUNKS } else { 0 };
         let active_segment = self
-            .reserve_active_segment_with_tail(self.provider.call_deadline(), event_tail)
+            .reserve_active_segment_with_tail(self.provider.identity().limits.deadline, event_tail)
             .await?;
         let deadline = active_segment
             .deadline()
@@ -1963,7 +1960,7 @@ impl<'a> RunLoop<'a> {
             covered_run_id: self.run_id,
             covered_sequence,
             source_digest,
-            provider: self.controls.provider_name.clone(),
+            provider: self.provider.identity().profile.clone(),
             model: request.model.clone(),
             prompt_version: 1,
             schema_version: 1,
@@ -1976,8 +1973,8 @@ impl<'a> RunLoop<'a> {
             cache_creation_input_tokens: usage.cache_creation_input_tokens,
             response_id,
             wire_provenance,
-            chatgpt_provenance: self.controls.chatgpt_provenance.clone(),
-            output_token_bound: self.controls.output_token_bound,
+            chatgpt_provenance: self.provider.identity().chatgpt_provenance().cloned(),
+            output_token_bound: self.provider.identity().limits.output_token_bound,
             status,
         };
         self.store.admit_operation(self.session_id, 2).await?;
@@ -2473,7 +2470,7 @@ async fn invoke_bounded_with_preview(
     if remaining.is_zero() {
         return CallResult::Failed(CallFailure::Timeout);
     }
-    let timeout = provider.call_deadline().min(remaining);
+    let timeout = provider.identity().limits.deadline.min(remaining);
     let output_cap = request.max_output_tokens;
     let invocation = async {
         match preview {

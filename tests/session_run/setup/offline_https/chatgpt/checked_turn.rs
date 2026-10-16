@@ -458,7 +458,8 @@ fn replace_selected_identity() -> (StateRoot, Vec<u8>) {
     let root = StateRoot::open_existing(Path::new("/root/.local/state/arany"))
         .expect("isolated account root");
     let record = root
-        .read_chatgpt_accounts_record()
+        .record(RecordKind::ChatgptAccounts)
+        .read()
         .expect("original record")
         .expect("saved account");
     let mut changed: serde_json::Value =
@@ -470,7 +471,8 @@ fn replace_selected_identity() -> (StateRoot, Vec<u8>) {
     for check in changed["model_checks"].as_array_mut().expect("checks") {
         check["account_id"] = replacement.clone().into();
     }
-    root.replace_chatgpt_accounts_record(&serde_json::to_vec(&changed).expect("replacement JSON"))
+    root.record(RecordKind::ChatgptAccounts)
+        .replace(&serde_json::to_vec(&changed).expect("replacement JSON"))
         .expect("synthetic identity drift");
     (root, record)
 }
@@ -566,7 +568,11 @@ pub(super) fn accept_check_and_run(
     );
     let root = StateRoot::open_existing(Path::new("/root/.local/state/arany"))
         .expect("isolated account root");
-    let record = root.read_chatgpt_accounts_record().unwrap().unwrap();
+    let record = root
+        .record(RecordKind::ChatgptAccounts)
+        .read()
+        .unwrap()
+        .unwrap();
     let index: serde_json::Value = serde_json::from_slice(&record).unwrap();
     assert!(index["model_checks"].as_array().unwrap().is_empty());
     let result = Command::new("/arany")
@@ -615,7 +621,13 @@ pub(super) fn accept_check_and_run(
         arany::ChatGptAdmission::AccountConsent
     );
     assert_ne!(provenance.evidence_fingerprint, [0; 32]);
-    assert!(root.read_chatgpt_accounts_record().unwrap().unwrap() == record);
+    assert!(
+        root.record(RecordKind::ChatgptAccounts)
+            .read()
+            .unwrap()
+            .unwrap()
+            == record
+    );
     let journal = std::fs::read("/root/state-without-check/events.sqlite3").unwrap();
     for secret in [ACCESS, REFRESH, signed, COMMENTARY_CANARY] {
         assert!(
@@ -958,7 +970,8 @@ pub(super) fn accept_check_and_run(
         b"Input:\r\n",
         Some(signed),
     );
-    root.replace_chatgpt_accounts_record(&record)
+    root.record(RecordKind::ChatgptAccounts)
+        .replace(&record)
         .expect("restore test-owned account");
 }
 

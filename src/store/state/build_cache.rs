@@ -79,7 +79,7 @@ impl BuildCacheIdentity {
         })
     }
 
-    fn token(&self) -> String {
+    pub(crate) fn token(&self) -> String {
         let mut digest = Sha256::new();
         digest.update(self.path.as_bytes());
         digest.update(self.device.to_le_bytes());
@@ -112,30 +112,6 @@ fn valid_identity_path(path: &Path) -> bool {
         }
     }
     normalized == value
-}
-
-// Publication runs on a blocking thread, so the fault is keyed by cache identity, not thread.
-#[cfg(test)]
-static COMMIT_MARKER_FAULT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-
-/// Makes the next committed-marker write for this identity fail once.
-#[cfg(test)]
-pub(crate) fn fail_next_commit_marker(identity: &BuildCacheIdentity) {
-    *COMMIT_MARKER_FAULT
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(identity.token());
-}
-
-#[cfg(test)]
-fn commit_marker_fault(token: &str) -> io::Result<()> {
-    let mut fault = COMMIT_MARKER_FAULT
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if fault.as_deref() == Some(token) {
-        *fault = None;
-        return Err(io::Error::other("injected commit marker failure"));
-    }
-    Ok(())
 }
 
 // flock release can lag behind a drop while another test thread spawns a child.
@@ -352,8 +328,8 @@ impl BuildCacheLease {
             )?;
             sync_directory(&self.dir)?;
             commit_marker_attempted = true;
-            #[cfg(test)]
-            commit_marker_fault(&self.token)?;
+            #[cfg(any(test, feature = "test-support"))]
+            crate::fault::FaultPlan::commit_marker(&self.token)?;
             write_transaction(
                 &self.dir,
                 &self.token,
@@ -382,6 +358,11 @@ impl BuildCacheLease {
         }
         let _ = finish_committed(&self.dir, &self.token);
         Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn token(&self) -> &str {
+        &self.token
     }
 
     pub(crate) fn candidate_writer(&self) -> Result<File, StoreError> {

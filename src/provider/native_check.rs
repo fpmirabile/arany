@@ -4,8 +4,9 @@ use super::{
     ProviderError, ProviderOutcome, ProviderRequest, RunInput, catalog::valid_model_id,
     list_native_models_with_credentials, valid_saved_api_account_id, validate_native_api_key,
 };
+use crate::provider::evidence::NativeEvidenceRecord;
 use crate::session::{AgentRunId, RunId, SessionId};
-use crate::store::{NativeEvidenceRecord, StateRoot, Store};
+use crate::store::{StateRoot, Store};
 use aws_lc_rs::hmac;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
@@ -188,7 +189,7 @@ pub(super) async fn verify_credentials_for_run(
 }
 
 async fn probe<P: Provider>(provider: &P) -> Result<(), NativeCheckError> {
-    let model = provider.model_name().to_owned();
+    let model = provider.identity().model.to_owned();
     let direct = ProviderRequest {
         run_id: RunId::new(),
         agent_run_id: AgentRunId::new(),
@@ -381,9 +382,9 @@ mod tests {
         )
         .await
         .expect("exact checked selection");
-        assert_eq!(provider.model_name(), "example-model");
-        assert_eq!(provider.reasoning_effort(), Some(Effort::High));
-        assert_eq!(provider.max_concurrent_calls(), 1);
+        assert_eq!(provider.identity().model, "example-model");
+        assert_eq!(provider.identity().effort, Some(Effort::High));
+        assert_eq!(provider.identity().limits.concurrency, 1);
         for (model, effort, selected_key, account_id) in [
             ("other-model", Effort::High, key, None),
             ("example-model", Effort::Low, key, None),
@@ -442,7 +443,7 @@ mod tests {
         .await
         .expect("saved account exact evidence");
         assert_eq!(
-            saved_provider.saved_api_account_id(),
+            saved_provider.identity().saved_api_account_id(),
             Some(saved_account_id)
         );
         assert!(matches!(
@@ -485,7 +486,7 @@ mod tests {
         )
         .await
         .expect("same workspace evidence");
-        assert_eq!(selected.max_concurrent_calls(), 1);
+        assert_eq!(selected.identity().limits.concurrency, 1);
         for workspace in [None, Some("wrkspc_Two")] {
             let credentials =
                 NativeApiCredentials::new("anthropic", key.into(), workspace.map(str::to_owned))
@@ -524,16 +525,16 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Provider for ProbeFixture {
-        fn profile_name(&self) -> &str {
-            "openai"
-        }
-
-        fn model_name(&self) -> &str {
-            "synthetic-model"
-        }
-
-        fn max_concurrent_calls(&self) -> u8 {
-            1
+        fn identity(&self) -> &crate::provider::ProviderIdentity {
+            static IDENTITY: std::sync::LazyLock<crate::provider::ProviderIdentity> =
+                std::sync::LazyLock::new(|| {
+                    crate::provider::ProviderIdentity::new(
+                        "openai",
+                        "synthetic-model",
+                        crate::provider::Provenance::native(),
+                    )
+                });
+            &IDENTITY
         }
 
         async fn invoke(

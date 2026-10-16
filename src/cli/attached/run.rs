@@ -323,7 +323,7 @@ async fn run_with_provider<P: Provider + 'static>(
     steering: RunSteering,
 ) -> Result<RunOutcome, RunAttemptError> {
     let trusted_tools =
-        !tools.configured && super::permissions::supports_tools(Some(provider.profile_name()));
+        !tools.configured && super::permissions::supports_tools(Some(&provider.identity().profile));
     let root = StateRoot::admit(state_dir)
         .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
     let mut engine = Engine::open_with_telemetry(root, provider, telemetry.clone())
@@ -403,10 +403,10 @@ mod tests {
     #[cfg(target_os = "macos")]
     use arany::{
         AgentPhase, ApprovalMode, AttachedTerminal, ChatGptAdmission, ChatGptProvenance,
-        CollaborationPolicy, Composer, Finish, OutputTokenBound, ProviderError, ProviderOutcome,
-        ProviderRequest, ProviderResponse, RunStatus,
+        CollaborationPolicy, Composer, Finish, OutputTokenBound, Provenance, ProviderError,
+        ProviderIdentity, ProviderOutcome, ProviderRequest, ProviderResponse, RunStatus,
     };
-    use arany::{SessionView, Store};
+    use arany::{RecordKind, SessionView, Store};
     #[cfg(target_os = "macos")]
     use std::sync::{Arc, Mutex};
     use std::{
@@ -888,9 +888,8 @@ mod tests {
                 ("forbidden", "forbidden".into(), "exit 1".into())
             } else {
                 state
-                    .replace_saved_account_record(
-                        br#"{"schema":1,"storage":"keyring","account":null}"#,
-                    )
+                    .record(RecordKind::SavedAccount)
+                    .replace(br#"{"schema":1,"storage":"keyring","account":null}"#)
                     .unwrap();
                 let record = serde_json::to_string(&account)
                     .unwrap()
@@ -916,7 +915,7 @@ mod tests {
             }
         } else {
             state
-                .replace_chatgpt_accounts_record(
+                .record(RecordKind::ChatgptAccounts).replace(
                     &serde_json::to_vec(&serde_json::json!({
                         "schema": 1, "selected": id, "accounts": [{
                             "id": id, "host_id": "11111111-1111-4111-8111-111111111111",
@@ -958,7 +957,8 @@ mod tests {
             Case::Native | Case::Unconfigured | Case::InvalidNative | Case::InvalidNativeReset
         ) {
             state
-                .replace_model_preferences_record(
+                .record(RecordKind::ModelPreferences)
+                .replace(
                     &serde_json::to_vec(&serde_json::json!({
                         "version": 1, "selected": { "profile": profile, "account_id": id },
                         "sources": [{ "profile": profile, "account_id": id, "model": "gpt-5.4",
@@ -969,30 +969,39 @@ mod tests {
                 .unwrap();
         }
         if case.name().starts_with("invalid_chatgpt") {
-            let mut record: serde_json::Value =
-                serde_json::from_slice(&state.read_chatgpt_accounts_record().unwrap().unwrap())
-                    .unwrap();
+            let mut record: serde_json::Value = serde_json::from_slice(
+                &state
+                    .record(RecordKind::ChatgptAccounts)
+                    .read()
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
             record["accounts"][0]
                 .as_object_mut()
                 .unwrap()
                 .remove("plan_permission_missing");
             state
-                .replace_chatgpt_accounts_record(&serde_json::to_vec(&record).unwrap())
+                .record(RecordKind::ChatgptAccounts)
+                .replace(&serde_json::to_vec(&record).unwrap())
                 .unwrap();
         }
         if case.name().starts_with("invalid_native") {
             state
-                .replace_saved_account_record(b"unsupported-api-setup")
+                .record(RecordKind::SavedAccount)
+                .replace(b"unsupported-api-setup")
                 .unwrap();
         }
         if case.name().starts_with("invalid_preferences") {
             state
-                .replace_model_preferences_record(b"unsupported-model-preferences")
+                .record(RecordKind::ModelPreferences)
+                .replace(b"unsupported-model-preferences")
                 .unwrap();
         }
         if case == Case::InvalidRegistration {
             state
-                .replace_chatgpt_registration_record(b"unsupported-registration")
+                .record(RecordKind::ChatgptRegistration)
+                .replace(b"unsupported-registration")
                 .unwrap();
         }
         if case == Case::InitialSetupFailure {
@@ -1007,9 +1016,9 @@ mod tests {
             || case == Case::InitialSetupFailure;
         let before_accounts = if recovery {
             Some((
-                state.read_saved_account_record().unwrap(),
-                state.read_chatgpt_accounts_record().unwrap(),
-                state.read_model_preferences_record().unwrap(),
+                state.record(RecordKind::SavedAccount).read().unwrap(),
+                state.record(RecordKind::ChatgptAccounts).read().unwrap(),
+                state.record(RecordKind::ModelPreferences).read().unwrap(),
             ))
         } else {
             None
@@ -1185,7 +1194,8 @@ mod tests {
                     );
                 }
                 assert!(
-                    state.read_chatgpt_accounts_record().unwrap() == before_accounts.unwrap().1
+                    state.record(RecordKind::ChatgptAccounts).read().unwrap()
+                        == before_accounts.unwrap().1
                 );
                 assert!(trust_path.exists());
                 return;
@@ -1205,11 +1215,11 @@ mod tests {
             let (native_before, chatgpt_before, models_before) = before_accounts.unwrap();
             let reset = case.name().ends_with("_reset");
             assert!(
-                state.read_saved_account_record().unwrap()
+                state.record(RecordKind::SavedAccount).read().unwrap()
                     == if reset && native { None } else { native_before }
             );
             assert!(
-                state.read_chatgpt_accounts_record().unwrap()
+                state.record(RecordKind::ChatgptAccounts).read().unwrap()
                     == if reset && case.name().starts_with("invalid_chatgpt") {
                         None
                     } else {
@@ -1218,12 +1228,15 @@ mod tests {
             );
             if case == Case::InvalidRegistration {
                 assert!(
-                    state.read_chatgpt_registration_record().unwrap()
+                    state
+                        .record(RecordKind::ChatgptRegistration)
+                        .read()
+                        .unwrap()
                         == Some(b"unsupported-registration".to_vec())
                 );
             } else {
                 assert!(
-                    state.read_model_preferences_record().unwrap()
+                    state.record(RecordKind::ModelPreferences).read().unwrap()
                         == if reset { None } else { models_before }
                 );
             }
@@ -1240,39 +1253,37 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     struct Greeting {
-        profile: &'static str,
-        account_id: Uuid,
+        identity: ProviderIdentity,
         observed: Arc<Mutex<Vec<ProviderRequest>>>,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Greeting {
+        fn new(
+            profile: &'static str,
+            account_id: Uuid,
+            observed: Arc<Mutex<Vec<ProviderRequest>>>,
+        ) -> Self {
+            let mut identity =
+                ProviderIdentity::new(profile, "synthetic-model", arany::Provenance::native());
+            identity.effort = Some(Effort::Low);
+            if profile == "chatgpt" {
+                identity.provenance = Provenance::ChatGpt(ChatGptProvenance {
+                    account_id,
+                    evidence_fingerprint: [1; 32],
+                    admission: ChatGptAdmission::AccountConsent,
+                });
+                identity.limits.output_token_bound = OutputTokenBound::LocalAcceptanceOnly;
+            }
+            Self { identity, observed }
+        }
     }
 
     #[cfg(target_os = "macos")]
     #[async_trait::async_trait]
     impl Provider for Greeting {
-        fn profile_name(&self) -> &str {
-            self.profile
-        }
-        fn model_name(&self) -> &str {
-            "synthetic-model"
-        }
-        fn reasoning_effort(&self) -> Option<Effort> {
-            Some(Effort::Low)
-        }
-        fn max_concurrent_calls(&self) -> u8 {
-            1
-        }
-        fn chatgpt_provenance(&self) -> Option<ChatGptProvenance> {
-            (self.profile == "chatgpt").then_some(ChatGptProvenance {
-                account_id: self.account_id,
-                evidence_fingerprint: [1; 32],
-                admission: ChatGptAdmission::AccountConsent,
-            })
-        }
-        fn output_token_bound(&self) -> OutputTokenBound {
-            if self.profile == "chatgpt" {
-                OutputTokenBound::LocalAcceptanceOnly
-            } else {
-                OutputTokenBound::ProviderEnforced
-            }
+        fn identity(&self) -> &ProviderIdentity {
+            &self.identity
         }
         async fn invoke(
             &self,
@@ -1399,11 +1410,7 @@ mod tests {
                 let outcome = run_with_provider(
                     &state,
                     &Telemetry::disabled(),
-                    Greeting {
-                        profile,
-                        account_id,
-                        observed: observed.clone(),
-                    },
+                    Greeting::new(profile, account_id, observed.clone()),
                     RunRequest {
                         session_id: session,
                         title: None,
@@ -1472,11 +1479,7 @@ mod tests {
             let error = run_with_provider(
                 &state,
                 &Telemetry::disabled(),
-                Greeting {
-                    profile,
-                    account_id,
-                    observed: observed.clone(),
-                },
+                Greeting::new(profile, account_id, observed.clone()),
                 RunRequest {
                     session_id: session,
                     title: None,

@@ -98,7 +98,38 @@ impl FromStr for GoalId {
 
 pub const MAX_GOAL_PROVIDER_CALLS: u32 = 64;
 pub const MAX_GOAL_ACTIVE_MS: u64 = 30 * 60 * 1000;
-pub(crate) const EVENT_PAYLOAD_VERSION: i64 = 6;
+/// Current payload version per Event kind. A format change bumps only that kind's arm.
+pub(crate) fn payload_version(kind: &str) -> Option<i64> {
+    match kind {
+        "SessionStarted"
+        | "SessionDefaultChanged"
+        | "SessionForked"
+        | "ContextCompacted"
+        | "SessionRenamed"
+        | "GoalStarted"
+        | "GoalRunLinked"
+        | "GoalResumed"
+        | "GoalActiveTimeReserved"
+        | "GoalActiveTimeSettled"
+        | "GoalPlanContractRecorded"
+        | "GoalFinished"
+        | "MessageAccepted"
+        | "RunStarted"
+        | "AgentSpawned"
+        | "ProviderCallRecorded"
+        | "GoalProviderCallReserved"
+        | "GoalCompactionCallReserved"
+        | "GoalContextCompacted"
+        | "GoalSteeringNoteRecorded"
+        | "AssistantDisplayRecorded"
+        | "ToolStarted"
+        | "ToolFinished"
+        | "AgentFinished"
+        | "MessageCommitted"
+        | "RunFinished" => Some(6),
+        _ => None,
+    }
+}
 pub(crate) const MAX_CHILD_TOOL_CALLS: usize = 16;
 /// Model Tool requests one Provider step may declare. Engine and adapters emit one until fan-out lands.
 pub(crate) const MAX_STEP_TOOL_CALLS: u8 = 4;
@@ -823,14 +854,23 @@ mod goal_success_tests {
         assert!(
             Event::decode(
                 kind,
-                EVENT_PAYLOAD_VERSION - 1,
+                payload_version(kind).expect("payload version") - 1,
                 &payload,
                 Some(run_id),
                 agent_run_id
             )
             .is_err()
         );
-        assert!(Event::decode(kind, EVENT_PAYLOAD_VERSION, &payload, None, None).is_err());
+        assert!(
+            Event::decode(
+                kind,
+                payload_version(kind).expect("payload version"),
+                &payload,
+                None,
+                None
+            )
+            .is_err()
+        );
         assert!(Event::decode(kind, 3, &payload, Some(run_id), None).is_err());
 
         let mut extra: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -838,7 +878,7 @@ mod goal_success_tests {
         assert!(
             Event::decode(
                 kind,
-                EVENT_PAYLOAD_VERSION,
+                payload_version(kind).expect("payload version"),
                 &extra.to_string(),
                 Some(run_id),
                 None
@@ -1614,19 +1654,36 @@ impl RunConfig {
         }) || self.history_run_ids.len() + 1 >= super::MAX_HISTORY_RUNS * 3 / 4
     }
 
-    pub(crate) fn validate(&self) -> Result<(), ReplayError> {
-        if !(crate::provider::ProviderIdentity {
-            profile: &self.provider,
-            model: &self.model,
+    fn identity(&self) -> Option<crate::provider::ProviderIdentity> {
+        use crate::provider::Provenance;
+        let provenance = match (
+            &self.custom_profile_provenance,
+            self.saved_api_account_id,
+            &self.chatgpt_provenance,
+        ) {
+            (Some(custom), None, None) => Provenance::Custom(custom.clone()),
+            (None, saved_api_account_id, None) => Provenance::Native {
+                saved_api_account_id,
+            },
+            (None, None, Some(chatgpt)) => Provenance::ChatGpt(chatgpt.clone()),
+            _ => return None,
+        };
+        Some(crate::provider::ProviderIdentity {
+            profile: self.provider.clone(),
+            model: self.model.clone(),
             effort: self.effort,
-            concurrency: self.provider_concurrency,
-            custom_profile_provenance: self.custom_profile_provenance.as_ref(),
-            saved_api_account_id: self.saved_api_account_id,
-            chatgpt_provenance: self.chatgpt_provenance.as_ref(),
-            output_token_bound: self.output_token_bound,
+            provenance,
+            limits: crate::provider::CallLimits {
+                concurrency: self.provider_concurrency,
+                max_output_tokens: self.output_token_cap,
+                output_token_bound: self.output_token_bound,
+                ..Default::default()
+            },
         })
-        .valid()
-            || !(1..=crate::provider::MAX_OUTPUT_TOKEN_CAP).contains(&self.output_token_cap)
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ReplayError> {
+        if !self.identity().is_some_and(|identity| identity.valid())
             || self
                 .tool_policy
                 .as_ref()
@@ -1996,6 +2053,7 @@ mod provider_call_tests {
 
     #[test]
     fn provider_call_record_v6_rejects_v5_and_inconsistent_cache_fields() {
+        let current = payload_version("ProviderCallRecorded").expect("payload version");
         let run = RunId::new();
         let agent = AgentRunId::new();
         let mut record = ProviderCallRecord {
@@ -2048,7 +2106,7 @@ mod provider_call_tests {
         assert_eq!(
             Event::decode(
                 "ProviderCallRecorded",
-                EVENT_PAYLOAD_VERSION,
+                current,
                 &payload,
                 Some(run),
                 Some(agent),
@@ -2059,7 +2117,7 @@ mod provider_call_tests {
         assert!(
             Event::decode(
                 "ProviderCallRecorded",
-                EVENT_PAYLOAD_VERSION - 1,
+                current - 1,
                 &payload,
                 Some(run),
                 Some(agent),
@@ -2071,6 +2129,7 @@ mod provider_call_tests {
 
     #[test]
     fn rejects_unbounded_or_unearned_provider_metadata() {
+        let current = payload_version("ProviderCallRecorded").expect("payload version");
         let mut record = ProviderCallRecord {
             phase: crate::provider::AgentPhase::RootPlan,
             disposition: ProviderCallDisposition::Finished,
@@ -2131,11 +2190,11 @@ mod provider_call_tests {
             record: decoded,
         };
         let payload = event.payload().expect("current payload");
-        assert_eq!(event.version(), EVENT_PAYLOAD_VERSION);
+        assert_eq!(event.version(), current);
         assert_eq!(
             Event::decode(
                 "ProviderCallRecorded",
-                EVENT_PAYLOAD_VERSION,
+                current,
                 &payload,
                 run_id,
                 agent_run_id
@@ -2143,7 +2202,7 @@ mod provider_call_tests {
             .unwrap(),
             event
         );
-        for version in [0, 1, 2, 3, 4, 5, EVENT_PAYLOAD_VERSION + 1] {
+        for version in [0, 1, 2, 3, 4, 5, current + 1] {
             assert!(
                 Event::decode(
                     "ProviderCallRecorded",
@@ -2226,11 +2285,11 @@ mod provider_call_tests {
                     record,
                 };
                 let payload = event.payload().expect("current payload");
-                assert_eq!(event.version(), EVENT_PAYLOAD_VERSION);
+                assert_eq!(event.version(), current);
                 assert_eq!(
                     Event::decode(
                         "ProviderCallRecorded",
-                        EVENT_PAYLOAD_VERSION,
+                        current,
                         &payload,
                         run_id,
                         agent_run_id,
@@ -2238,7 +2297,7 @@ mod provider_call_tests {
                     .expect("current replay"),
                     event
                 );
-                for version in [0, 1, 2, 3, 4, 5, EVENT_PAYLOAD_VERSION + 1] {
+                for version in [0, 1, 2, 3, 4, 5, current + 1] {
                     assert!(
                         Event::decode(
                             "ProviderCallRecorded",
@@ -2253,14 +2312,8 @@ mod provider_call_tests {
                 }
                 for scope in [(None, agent_run_id), (run_id, None)] {
                     assert!(
-                        Event::decode(
-                            "ProviderCallRecorded",
-                            EVENT_PAYLOAD_VERSION,
-                            &payload,
-                            scope.0,
-                            scope.1
-                        )
-                        .is_err()
+                        Event::decode("ProviderCallRecorded", current, &payload, scope.0, scope.1)
+                            .is_err()
                     );
                 }
                 let mut invalid: serde_json::Value =
@@ -2269,7 +2322,7 @@ mod provider_call_tests {
                 assert!(
                     Event::decode(
                         "ProviderCallRecorded",
-                        EVENT_PAYLOAD_VERSION,
+                        current,
                         &invalid.to_string(),
                         run_id,
                         agent_run_id
@@ -2640,7 +2693,7 @@ impl Event {
     }
 
     pub(crate) fn version(&self) -> i64 {
-        EVENT_PAYLOAD_VERSION
+        payload_version(self.kind()).expect("every Event kind has a payload version")
     }
 
     pub(crate) fn kind(&self) -> &'static str {
@@ -2883,7 +2936,7 @@ impl Event {
         run_id: Option<RunId>,
         agent_run_id: Option<AgentRunId>,
     ) -> Result<Self, ReplayError> {
-        if version != EVENT_PAYLOAD_VERSION {
+        if payload_version(kind) != Some(version) {
             return Err(ReplayError::UnknownEvent);
         }
         let event = match kind {
@@ -3317,7 +3370,7 @@ mod child_grant_tests {
         let decode = |event: &Event, payload: &str| {
             Event::decode(
                 event.kind(),
-                EVENT_PAYLOAD_VERSION,
+                payload_version(event.kind()).expect("payload version"),
                 payload,
                 Some(run_id),
                 Some(agent_run_id),
@@ -3343,7 +3396,7 @@ mod child_grant_tests {
         assert!(
             Event::decode(
                 child.kind(),
-                EVENT_PAYLOAD_VERSION - 1,
+                payload_version(child.kind()).expect("payload version") - 1,
                 &payload,
                 Some(run_id),
                 Some(agent_run_id)
@@ -3363,5 +3416,45 @@ mod child_grant_tests {
             serde_json::from_str(&primary_payload).expect("JSON");
         primary_value["grant"] = "no_tools".into();
         assert!(decode(&primary, &primary_value.to_string()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod payload_version_tests {
+    use super::*;
+
+    #[test]
+    fn decode_accepts_the_current_version_and_rejects_its_neighbours() {
+        let run = RunId::new();
+        let agent = AgentRunId::new();
+        let event = Event::SessionRenamed {
+            title: "renamed".into(),
+        };
+        let payload = event.payload().expect("payload");
+        let version = payload_version(event.kind()).expect("known kind");
+        assert_eq!(
+            Event::decode(event.kind(), version, &payload, None, None).expect("current replay"),
+            event
+        );
+        for stale in [version - 1, version + 1] {
+            assert!(matches!(
+                Event::decode(event.kind(), stale, &payload, None, None),
+                Err(ReplayError::UnknownEvent)
+            ));
+        }
+        for kind in ["ToolFinished", "RunStarted"] {
+            let version = payload_version(kind).expect("known kind");
+            for stale in [version - 1, version + 1] {
+                assert!(matches!(
+                    Event::decode(kind, stale, "{}", Some(run), Some(agent)),
+                    Err(ReplayError::UnknownEvent)
+                ));
+            }
+        }
+        assert!(matches!(
+            Event::decode("NotAKind", 6, "{}", Some(run), Some(agent)),
+            Err(ReplayError::UnknownEvent)
+        ));
+        assert_eq!(payload_version("NotAKind"), None);
     }
 }

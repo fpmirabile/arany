@@ -46,7 +46,8 @@ impl Engine {
         workspace: PathBuf,
         expected_run_id: Option<crate::session::RunId>,
     ) -> Result<Option<CompactionRecord>, EngineError> {
-        let selection = self.select_provider()?;
+        let provider = std::sync::Arc::clone(&self.provider);
+        let identity = super::checked_identity(provider.as_ref())?;
         let mut session_lock = self.lock_session(session_id)?;
         let (events, view) = self.store.load_resolved(session_id).await?;
         let view = view.ok_or(EngineError::MissingSession)?;
@@ -137,7 +138,7 @@ impl Engine {
         let trace = self.telemetry.begin_compaction(
             session_id,
             covered_run_id,
-            TraceProvider::from_profile(&selection.name),
+            TraceProvider::from_profile(&identity.profile),
         );
         let mut items = prepared.items;
         if let Some(goal) = goal {
@@ -176,7 +177,7 @@ impl Engine {
         let request = CompactionRequest {
             session_id,
             covered_run_id,
-            model: selection.model.clone(),
+            model: identity.model.clone(),
             previous_summary: prepared.previous_summary,
             items,
             max_output_tokens: MAX_COMPACTION_OUTPUT_TOKENS,
@@ -214,7 +215,7 @@ impl Engine {
                 .await?;
             crate::diagnostics::event_failure(&reserved.event);
         }
-        let provider_trace = trace.begin_provider(&selection.model);
+        let provider_trace = trace.begin_provider(&identity.model);
         let provider_deadline =
             active_reservation_ms.map_or(COMPACTION_CALL_DEADLINE, |reserved| {
                 let elapsed = active_started.map_or(0, |started| duration_ms(started.elapsed()));
@@ -275,8 +276,8 @@ impl Engine {
             covered_run_id,
             covered_sequence,
             source_digest,
-            provider: selection.name,
-            model: selection.model,
+            provider: identity.profile.clone(),
+            model: identity.model.clone(),
             prompt_version: 1,
             schema_version: 1,
             compiler_version,
@@ -288,8 +289,8 @@ impl Engine {
             cache_creation_input_tokens: usage.cache_creation_input_tokens,
             response_id,
             wire_provenance,
-            chatgpt_provenance: selection.chatgpt_provenance,
-            output_token_bound: selection.output_token_bound,
+            chatgpt_provenance: identity.chatgpt_provenance().cloned(),
+            output_token_bound: identity.limits.output_token_bound,
             status,
         };
         let committed = self

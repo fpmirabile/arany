@@ -1,11 +1,11 @@
 use super::{
     AgentStatus, GoalView, RunStatus, RunView, SessionView, active_run, current_goal_mut,
-    current_run, pending_tool_requests,
+    current_run, is_integration_tool, pending_tool_requests,
 };
 use crate::provider::AgentPhase;
 use crate::session::events::{
-    AgentRole, AgentRunId, GoalBudget, GoalId, GoalPhase, GoalPlanContract, GoalReport, GoalStatus,
-    ProviderCallDisposition, ReplayError, RunId,
+    AgentRole, AgentRunId, CompactionStatus, Event, GoalBudget, GoalId, GoalPhase,
+    GoalPlanContract, GoalReport, GoalStatus, ProviderCallDisposition, ReplayError, RunId,
 };
 use crate::session::{MAX_STEERING_LABEL_BYTES, MAX_STEERING_NOTE_BYTES};
 
@@ -578,4 +578,168 @@ fn seal_unfinished_goal(goal: &mut GoalView, runs: &mut [RunView]) {
     goal.active_run = None;
     goal.awaiting_plan_contract = false;
     goal.status = GoalStatus::Interrupted;
+}
+
+pub(super) fn apply(
+    current: &mut SessionView,
+    event: &Event,
+    prior: u64,
+) -> Result<(), ReplayError> {
+    match event {
+        Event::GoalStarted {
+            goal_id,
+            objective,
+            workspace_identity,
+            budget,
+            resource_settings,
+            phase,
+            autonomous,
+        } => {
+            current.start_goal(
+                goal_id,
+                objective,
+                workspace_identity,
+                budget,
+                resource_settings,
+                phase,
+                *autonomous,
+                prior,
+            )?;
+        }
+        Event::GoalRunLinked {
+            goal_id,
+            run_id,
+            phase,
+        } => {
+            current.link_goal_run(goal_id, run_id, phase)?;
+        }
+        Event::GoalResumed { goal_id } => {
+            current.resume_goal(goal_id)?;
+        }
+        Event::GoalActiveTimeReserved {
+            goal_id,
+            run_id,
+            reserved_ms,
+        } => {
+            current.reserve_goal_active_time(goal_id, run_id, reserved_ms)?;
+        }
+        Event::GoalActiveTimeSettled {
+            goal_id,
+            run_id,
+            active_ms,
+        } => {
+            current.settle_goal_active_time(goal_id, run_id, active_ms)?;
+        }
+        Event::GoalPlanContractRecorded {
+            goal_id,
+            run_id,
+            contract,
+        } => {
+            current.record_goal_plan_contract(goal_id, run_id, contract)?;
+        }
+        Event::GoalProviderCallReserved {
+            goal_id,
+            run_id,
+            agent_run_id,
+        } => {
+            current.reserve_goal_provider_call(goal_id, run_id, agent_run_id)?;
+        }
+        Event::GoalCompactionCallReserved { goal_id, run_id } => {
+            current.reserve_goal_compaction_call(goal_id, run_id)?;
+        }
+        Event::GoalContextCompacted {
+            goal_id,
+            run_id,
+            covered_tool_count,
+            record,
+        } => {
+            let goal = current
+                .goal(*goal_id)
+                .ok_or(ReplayError::InvalidTransition)?;
+            let run = current
+                .runs
+                .last()
+                .filter(|run| run.id == *run_id)
+                .ok_or(ReplayError::InvalidTransition)?;
+            let covered_count =
+                usize::try_from(*covered_tool_count).map_err(|_| ReplayError::InvalidTransition)?;
+            let covered_tool = covered_count
+                .checked_sub(1)
+                .and_then(|index| run.tools.get(index))
+                .ok_or(ReplayError::InvalidTransition)?;
+            if goal.status != GoalStatus::Running
+                || goal.active_run != Some(*run_id)
+                || goal.run_ids.last() != Some(run_id)
+                || goal.compaction_call_reserved != Some(*run_id)
+                || !goal.unobserved_provider_calls.is_empty()
+                || record.covered_run_id != *run_id
+                || run.status != RunStatus::Active
+                || run.tools.iter().any(|tool| tool.observation.is_none())
+                || covered_count > run.tools.len()
+                || !ends_whole_step(run, covered_count)
+                || *covered_tool_count <= run.tool_compaction_covered_count
+                || covered_tool.finished_sequence != Some(record.covered_sequence)
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let tokens = u64::from(record.input_tokens.unwrap_or_default())
+                .checked_add(u64::from(record.output_tokens.unwrap_or_default()))
+                .and_then(|tokens| goal.known_tokens.checked_add(tokens))
+                .ok_or(ReplayError::InvalidTransition)?;
+            let cached = goal
+                .known_cached_tokens
+                .checked_add(u64::from(
+                    record.cache_read_input_tokens.unwrap_or_default(),
+                ))
+                .ok_or(ReplayError::InvalidTransition)?;
+            let run = active_run(current, *run_id)?;
+            if let CompactionStatus::Succeeded { summary, .. } = &record.status {
+                run.tool_compaction_summary = Some(summary.clone());
+                run.tool_compaction_covered_count = *covered_tool_count;
+            }
+            let goal = current_goal_mut(current, *goal_id)?;
+            goal.known_tokens = tokens;
+            goal.known_cached_tokens = cached;
+            goal.token_usage_unknown |=
+                record.input_tokens.is_none() || record.output_tokens.is_none();
+            goal.compaction_call_reserved = None;
+        }
+        Event::GoalFinished {
+            goal_id,
+            status,
+            active_ms,
+            report,
+        } => {
+            current.finish_goal(goal_id, status, active_ms, report, prior)?;
+        }
+        Event::GoalSteeringNoteRecorded {
+            goal_id,
+            run_id,
+            text,
+        } => {
+            current.record_goal_steering_note(goal_id, run_id, text)?;
+        }
+        _ => return Err(ReplayError::InvalidTransition),
+    }
+    Ok(())
+}
+
+/// A covered prefix may not end inside a step: its model Tool count must be a cumulative step total.
+fn ends_whole_step(run: &RunView, covered_count: usize) -> bool {
+    let Some(primary) = run.primary() else {
+        return false;
+    };
+    let covered = run.tools[..covered_count]
+        .iter()
+        .filter(|tool| !is_integration_tool(tool))
+        .count();
+    let step_ends = primary
+        .provider_calls
+        .iter()
+        .filter(|call| call.disposition == ProviderCallDisposition::ToolRequested)
+        .scan(0, |total, call| {
+            *total += usize::from(call.requested_tools);
+            Some(*total)
+        });
+    step_ends.into_iter().any(|end| end == covered)
 }

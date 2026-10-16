@@ -170,7 +170,7 @@ pub(super) fn check(fd: BorrowedFd<'_>, private: bool) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use crate::test_process::BoundedOutput;
-    use crate::{SessionId, StateRoot, StoreError};
+    use crate::{RecordKind, SessionId, StateRoot, StoreError};
     use std::{os::unix::fs::PermissionsExt, path::Path, process::Command};
 
     fn chmod(path: &Path, args: &[&str]) {
@@ -192,7 +192,10 @@ mod tests {
         let workspace = temp.path().join("project");
         std::fs::create_dir(&workspace).unwrap();
         let state = StateRoot::admit(&path).unwrap();
-        state.replace_saved_account_record(b"synthetic").unwrap();
+        state
+            .record(RecordKind::SavedAccount)
+            .replace(b"synthetic")
+            .unwrap();
         let id = SessionId::new();
         let mut lock = state.lock_session(id).unwrap();
         lock.keep();
@@ -227,15 +230,17 @@ mod tests {
             let rejected = match name.as_str() {
                 "account-credentials.json" => {
                     matches!(
-                        state.read_saved_account_record(),
+                        state.record(RecordKind::SavedAccount).read(),
                         Err(StoreError::StateNotPrivate)
                     ) && matches!(
-                        state.saved_account_record_present(),
+                        state.record(RecordKind::SavedAccount).present(),
                         Err(StoreError::StateNotPrivate)
                     )
                 }
                 "account-credentials.pending" => matches!(
-                    state.replace_saved_account_record(b"replacement"),
+                    state
+                        .record(RecordKind::SavedAccount)
+                        .replace(b"replacement"),
                     Err(StoreError::StateNotPrivate)
                 ),
                 "events.sqlite3" => matches!(
@@ -280,7 +285,7 @@ mod tests {
         );
         chmod(temp.path(), &["-N"]);
         assert_eq!(
-            state.read_saved_account_record().unwrap(),
+            state.record(RecordKind::SavedAccount).read().unwrap(),
             Some(b"synthetic".to_vec())
         );
     }

@@ -2,6 +2,7 @@ use super::ToolError;
 use super::fs::{open_absolute, read_regular};
 use super::toolchains::{RuntimeGrant, validate_selection};
 use super::types::*;
+use crate::store::RecordKind;
 use crate::store::StateRoot;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -61,7 +62,8 @@ pub(crate) struct Server {
 impl Config {
     pub(crate) fn load(state: &StateRoot) -> Result<Self, ToolError> {
         let bytes = state
-            .read_tools_config()
+            .record(RecordKind::ToolsConfig)
+            .read()
             .map_err(|_| ToolError::Configuration)?
             .ok_or(ToolError::MissingConfiguration)?;
         let value =

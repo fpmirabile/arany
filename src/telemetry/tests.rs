@@ -64,16 +64,16 @@ struct WaitingTraceProvider {
 
 #[async_trait::async_trait]
 impl Provider for WaitingTraceProvider {
-    fn profile_name(&self) -> &str {
-        "scripted"
-    }
-
-    fn model_name(&self) -> &str {
-        "test-model"
-    }
-
-    fn max_concurrent_calls(&self) -> u8 {
-        1
+    fn identity(&self) -> &crate::provider::ProviderIdentity {
+        static IDENTITY: std::sync::LazyLock<crate::provider::ProviderIdentity> =
+            std::sync::LazyLock::new(|| {
+                crate::provider::ProviderIdentity::new(
+                    "scripted",
+                    "test-model",
+                    crate::provider::Provenance::native(),
+                )
+            });
+        &IDENTITY
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
@@ -85,16 +85,21 @@ impl Provider for WaitingTraceProvider {
 
 #[async_trait::async_trait]
 impl Provider for GatedFailureProvider {
-    fn profile_name(&self) -> &str {
-        "scripted"
-    }
-
-    fn model_name(&self) -> &str {
-        "test-model"
-    }
-
-    fn max_concurrent_calls(&self) -> u8 {
-        2
+    fn identity(&self) -> &crate::provider::ProviderIdentity {
+        static IDENTITY: std::sync::LazyLock<crate::provider::ProviderIdentity> =
+            std::sync::LazyLock::new(|| {
+                let mut identity = crate::provider::ProviderIdentity::new(
+                    "scripted",
+                    "test-model",
+                    crate::provider::Provenance::native(),
+                );
+                identity.limits = crate::provider::CallLimits {
+                    concurrency: 2,
+                    ..Default::default()
+                };
+                identity
+            });
+        &IDENTITY
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
