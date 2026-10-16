@@ -883,20 +883,43 @@ impl Provider for RuntimeJourney {
     }
 }
 
-struct MountedRuntimeImage(std::path::PathBuf);
+const DETACH_ATTEMPTS: usize = 5;
+const DETACH_RETRY_DELAY: Duration = Duration::from_millis(500);
+const DETACH_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// Detaches a fixture image that can stay busy briefly after its Guard children exit.
+/// Worst case is about 10 s; on failure every attempt's output is returned.
+fn detach_fixture_image(
+    mountpoint: &Path,
+    cwd: &Path,
+) -> Result<(), Vec<std::io::Result<std::process::Output>>> {
+    let mut attempts = Vec::with_capacity(DETACH_ATTEMPTS);
+    for attempt in 0..DETACH_ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(DETACH_RETRY_DELAY);
+        }
+        let output = std::process::Command::new("/usr/bin/hdiutil")
+            .args(["detach", "-force", "-quiet"])
+            .arg(mountpoint)
+            .env_clear()
+            .current_dir(cwd)
+            .bounded_output_for(DETACH_ATTEMPT_TIMEOUT, 4096);
+        if matches!(&output, Ok(output) if output.status.success()) {
+            return Ok(());
+        }
+        attempts.push(output);
+    }
+    Err(attempts)
+}
+
+struct MountedRuntimeImage {
+    mountpoint: std::path::PathBuf,
+    cwd: std::path::PathBuf,
+}
 
 impl Drop for MountedRuntimeImage {
     fn drop(&mut self) {
-        use crate::process::BoundedOutput;
-
-        let _ = std::process::Command::new("/usr/bin/hdiutil")
-            .args(["detach", "-force", "-quiet"])
-            .arg(&self.0)
-            .env_clear()
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .bounded_output_for(Duration::from_secs(20), 4096);
+        let _ = detach_fixture_image(&self.mountpoint, &self.cwd);
     }
 }
 
@@ -956,7 +979,10 @@ async fn native_runtime_mount_journey_helper() {
         .bounded_output_for(Duration::from_secs(30), 4096)
         .unwrap();
     assert!(attached.status.success(), "hdiutil attach: {attached:?}");
-    let mounted = MountedRuntimeImage(mountpoint.clone());
+    let mounted = MountedRuntimeImage {
+        mountpoint: mountpoint.clone(),
+        cwd: root.to_path_buf(),
+    };
 
     let permissions = arany::WorkspacePermissions::open(&workspace)
         .unwrap()
@@ -1072,14 +1098,8 @@ async fn native_runtime_mount_journey_helper() {
     assert_eq!(replay.runs.len(), 1);
     assert_eq!(replay.runs[0], refused.run, "closed runtime refusal replay");
     assert_eq!(replay.runs[0].status, RunStatus::Failed);
-    let detached = std::process::Command::new("/usr/bin/hdiutil")
-        .args(["detach", "-force", "-quiet"])
-        .arg(&mountpoint)
-        .env_clear()
-        .current_dir(root)
-        .bounded_output_for(Duration::from_secs(20), 4096)
-        .unwrap();
-    assert!(detached.status.success(), "hdiutil detach: {detached:?}");
+    let detached = detach_fixture_image(&mountpoint, root);
+    assert!(detached.is_ok(), "hdiutil detach attempts: {detached:?}");
     drop(mounted);
 
     let host_cache = root.join("home/.cargo/registry/cache");
