@@ -87,7 +87,7 @@ pub(super) const GIT_ROOT: &str = if cfg!(target_os = "macos") {
 } else {
     "/usr"
 };
-const GIT_CANDIDATE: &str = if cfg!(target_os = "macos") {
+pub(super) const GIT_CANDIDATE: &str = if cfg!(target_os = "macos") {
     "/Library/Developer/CommandLineTools/usr/bin/git"
 } else {
     "/usr/bin/git"

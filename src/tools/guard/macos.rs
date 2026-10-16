@@ -1285,7 +1285,18 @@ mod tests {
 
     #[test]
     fn native_git_profile_runs_pinned_git_and_denies_host_access() {
-        let git = crate::tools::git::discover().expect("pinned git");
+        let git = crate::tools::git::discover();
+        if !Path::new(crate::tools::git::GIT_CANDIDATE)
+            .try_exists()
+            .expect("Command Line Tools Git availability")
+        {
+            assert!(
+                git.is_none() && !cfg!(arany_ci),
+                "Git must be unavailable without Command Line Tools; CI requires Command Line Tools Git"
+            );
+            return;
+        }
+        let git = git.expect("pinned git");
         let temp = std::env::temp_dir().canonicalize().unwrap();
         let root = tempfile::Builder::new()
             .prefix("arany-git-root-")
