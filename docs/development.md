@@ -37,14 +37,29 @@ Choose `<filter>` from the owning corpus or journey of the changed code, for
 example `--test engine_run goals::`, `--test session_run tools::` or
 `--lib store::` for a module's own `tests.rs`; add `--release` when the change
 touches an optimized-profile gate. The complete workspace suite in both
-profiles runs in [CI](../.github/workflows/ci.yml) on every pull request,
-whatever its base branch; watch that run and fix a red result before handoff.
+profiles runs in [CI](../.github/workflows/ci.yml) on pull requests with code
+changes, whatever their base branch; watch that run and fix a red result before handoff.
 Run the full suite locally only when CI is unavailable or the change is
 cross-cutting:
 
 ```sh
 cargo test --workspace --locked --offline
 cargo test --workspace --locked --offline --release
+```
+
+CI skips Rust steps only when every changed path is on the workflow's non-code
+allowlist. Unknown paths, an empty diff or failed detection run the standard
+checks. Renames include both the old and new paths. The workflow stays enabled
+for all pull requests, and `Clippy`, `Linux Tests (debug)`, `Linux Tests (release)`,
+`macOS Tests (debug)` and `macOS Tests (release)` still complete when their Rust
+steps are skipped.
+Pushes to `main` and manual dispatch run all standard checks; dispatch inputs
+enable the additional native lanes and history measurement. When changing this
+policy, audit Rust includes and file reads before widening the allowlist, then run:
+
+```sh
+python3 scripts/test-ci-changes.py
+actionlint .github/workflows/ci.yml
 ```
 
 Linux terminal tests need Bubblewrap and util-linux `script`, with user and
