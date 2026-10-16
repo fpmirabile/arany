@@ -219,8 +219,8 @@ fn pathspecs(path: &str) -> Vec<String> {
         specs.push(format!(":(literal){path}"));
     }
     for name in FORBIDDEN_NAMES.into_iter().chain([".env.*"]) {
-        specs.push(format!(":(exclude,glob)**/{name}"));
-        specs.push(format!(":(exclude,glob)**/{name}/**"));
+        specs.push(format!(":(icase,exclude,glob)**/{name}"));
+        specs.push(format!(":(icase,exclude,glob)**/{name}/**"));
     }
     specs
 }
@@ -735,6 +735,7 @@ mod tests {
         std::fs::write(workspace.join("notes.md"), "notes\n").unwrap();
         std::fs::write(workspace.join(".env"), "SECRET_CANARY=1\n").unwrap();
         std::fs::write(workspace.join(".env.local"), "SECRET_CANARY=4\n").unwrap();
+        std::fs::write(workspace.join(".Env"), "SECRET_CANARY=6\n").unwrap();
         std::fs::write(workspace.join("cfg/.ssh/id"), "SECRET_CANARY key\n").unwrap();
         let big: String = (0..40_000).map(|n| format!("line-{n:05}\n")).collect();
         std::fs::write(workspace.join("src/big.txt"), big).unwrap();
@@ -746,6 +747,7 @@ mod tests {
         std::fs::write(workspace.join("src/a.txt"), "delta\n").unwrap();
         std::fs::write(workspace.join(".env"), "SECRET_CANARY=3\n").unwrap();
         std::fs::write(workspace.join(".env.local"), "SECRET_CANARY=5\n").unwrap();
+        std::fs::write(workspace.join(".Env"), "SECRET_CANARY=7\n").unwrap();
         let rewritten: String = (0..40_000).map(|n| format!("LINE-{n:05}\n")).collect();
         std::fs::write(workspace.join("src/big.txt"), rewritten).unwrap();
         std::fs::write(workspace.join("src/new.txt"), "new\n").unwrap();
@@ -1528,6 +1530,24 @@ mod tests {
     }
 
     #[test]
+    fn secret_components_match_regardless_of_ascii_case() {
+        for path in [
+            ".ENV",
+            ".Env",
+            ".SSH/id_rsa",
+            ".AWS/credentials",
+            ".env.LOCAL",
+        ] {
+            assert!(excluded(path), "{path}");
+            assert!(mentions_forbidden(&format!("fatal: {path}")), "{path}");
+        }
+        assert!(pathspecs("src").contains(&":(icase,exclude,glob)**/.env".to_owned()));
+        assert!(pathspecs("src").contains(&":(icase,exclude,glob)**/.aws/**".to_owned()));
+        assert!(pathspecs("src").contains(&":(icase,exclude,glob)**/.env.*".to_owned()));
+        assert!(!excluded("src/environment.rs"));
+    }
+
+    #[test]
     fn extensions_are_detected_after_a_byte_order_mark() {
         assert!(uses_extensions(
             b"\xef\xbb\xbf[extensions]\n\tobjectFormat = sha256\n"
@@ -1539,11 +1559,11 @@ mod tests {
     #[test]
     fn numstat_rows_and_patch_hunks_drop_secret_paths() {
         let numstat = captured(
-            b"1\t1\tsrc/ok.rs\x000\t3\t.env.local\x000\t1\tcfg/.ssh/id\x00",
+            b"1\t1\tsrc/ok.rs\x000\t3\t.env.local\x000\t1\tcfg/.ssh/id\x000\t2\t.ENV\x00",
             false,
         );
         let patch = captured(
-            b"diff --git a/.env.local b/.env.local\n+SECRET_CANARY=1\ndiff --git a/src/ok.rs b/src/ok.rs\n+ok\n",
+            b"diff --git a/.env.local b/.env.local\n+SECRET_CANARY=1\ndiff --git a/.ENV b/.ENV\n+SECRET_CANARY=2\ndiff --git a/src/ok.rs b/src/ok.rs\n+ok\n",
             false,
         );
         let value = diff_output(&numstat, &patch, 4096).unwrap();

@@ -1094,6 +1094,8 @@ fn tool_admission_corpus_is_closed_and_restrict_only() {
         ("nested/source.rs", true),
         (".git/config", false),
         (".env.local", false),
+        (".ENV", false),
+        (".Env.LOCAL", false),
         ("../outside", false),
     ] {
         assert_eq!(
@@ -1124,6 +1126,7 @@ fn tool_admission_corpus_is_closed_and_restrict_only() {
         ("src/../omitted", false),
         ("src/.git/config", false),
         ("src/.env.local", false),
+        ("src/.Env", false),
         ("src/line\nbreak", false),
     ] {
         assert_eq!(
