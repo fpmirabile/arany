@@ -24,6 +24,8 @@ pub use tools::tool_guard_unit_main;
 pub use diagnostics::{
     DevelopmentFailure, enable_development_diagnostics, record_development_failure,
 };
+#[cfg(feature = "test-support")]
+pub use engine::Action;
 pub use engine::{
     DisplayUpdate, Engine, EngineError, GoalRequest, RunCancellation, RunOutcome, RunPreview,
     RunProgress, RunRequest, RunSteering, RunUpdate, SteeringRefused, continue_session,

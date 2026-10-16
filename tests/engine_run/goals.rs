@@ -318,6 +318,7 @@ async fn compact_read_only_goal_prefix(objective: &str) {
         .load_session(outcome.session_id)
         .await
         .expect("Events");
+    assert_action_bounds(&events, false, false);
     let compacted = events
         .iter()
         .filter_map(|envelope| match &envelope.event {
@@ -2777,6 +2778,7 @@ async fn steering_note_reaches_the_next_primary_call_and_is_journaled_once() {
     assert_eq!(call_steering_notes(&calls[1]), ["use the smaller fixture"]);
     assert_eq!(steering.delivered_notes(), 1);
     let (events, view) = replayed(&state_path, outcome.session_id).await;
+    assert_action_bounds(&events, false, true);
     assert_eq!(view.runs[0].steering_notes, ["use the smaller fixture"]);
     assert_eq!(
         events
@@ -3145,6 +3147,7 @@ async fn pause_during_approval_wait_dispatches_no_tool() {
     );
     assert_eq!(requests.lock().expect("requests").len(), 1);
     let (events, view) = replayed(&state_path, outcome.session_id).await;
+    assert_action_bounds(&events, false, false);
     let observed: Vec<_> = events
         .iter()
         .filter_map(|event| match &event.event {
@@ -3482,6 +3485,7 @@ async fn read_only_child_reads_the_workspace_and_its_report_reaches_synthesis() 
     assert!(!format!("{:?}", calls[3]).contains(&facts_digest("v1")));
 
     let (events, view) = replayed(&state_path, outcome.session_id).await;
+    assert_action_bounds(&events, false, false);
     let child = view.runs[0].agents[1].id;
     assert_eq!(
         view.runs[0].agents[1].grant,
@@ -4264,4 +4268,563 @@ async fn plan_contract_recorded_mid_run_survives_compaction() {
             .all(|call| call.input.goal_plan_contract.as_ref() == Some(&plan)),
         "the recorded contract is re-introduced when its step is compacted away"
     );
+}
+
+/// Splits a journal at each action's first admission and asserts that the action's bound covers the
+/// Events up to the next admission, or up to the end of the journal (the terminal Events).
+fn assert_action_bounds(events: &[arany::EventEnvelope], previews: bool, steering: bool) {
+    use arany::Action;
+    let primaries: std::collections::HashSet<_> = events
+        .iter()
+        .filter_map(|envelope| match &envelope.event {
+            Event::AgentSpawned {
+                agent_run_id,
+                role: arany::AgentRole::Primary,
+                ..
+            } => Some(*agent_run_id),
+            _ => None,
+        })
+        .collect();
+    let in_flight = |at: usize| -> u32 {
+        let mut open: std::collections::HashMap<arany::AgentRunId, i32> = Default::default();
+        for envelope in &events[..at] {
+            match &envelope.event {
+                Event::GoalProviderCallReserved { agent_run_id, .. }
+                    if !primaries.contains(agent_run_id) =>
+                {
+                    *open.entry(*agent_run_id).or_default() += 1;
+                }
+                Event::ProviderCallRecorded { agent_run_id, .. } => {
+                    if let Some(count) = open.get_mut(agent_run_id) {
+                        *count -= 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        open.values().filter(|count| **count > 0).count() as u32
+    };
+    // (index, action, explicit end)
+    let mut points: Vec<(usize, Action, Option<usize>)> = Vec::new();
+    let mut markers: Vec<usize> = Vec::new();
+    for (index, envelope) in events.iter().enumerate() {
+        let next = events.get(index + 1).map(|next| &next.event);
+        let call = Action::ProviderCall { previews, steering };
+        match &envelope.event {
+            Event::GoalStarted { .. }
+            | Event::GoalResumed { .. }
+            | Event::SessionStarted { .. } => markers.push(index),
+            Event::GoalActiveTimeReserved { .. } => {
+                let action = match next {
+                    Some(Event::GoalProviderCallReserved { agent_run_id, .. }) => {
+                        let phase = events[index..].iter().find_map(|later| match &later.event {
+                            Event::ProviderCallRecorded {
+                                agent_run_id: recorded,
+                                record,
+                                ..
+                            } if recorded == agent_run_id => Some(record.phase),
+                            _ => None,
+                        });
+                        if phase == Some(AgentPhase::ToolReview) {
+                            (Action::Review, None)
+                        } else {
+                            (call, None)
+                        }
+                    }
+                    Some(Event::GoalCompactionCallReserved { .. }) => (Action::Compaction, None),
+                    Some(Event::AgentSpawned { .. }) => {
+                        let spawned: Vec<_> = events[index + 1..]
+                            .iter()
+                            .map_while(|later| match &later.event {
+                                Event::AgentSpawned { grant, .. } => Some(*grant),
+                                _ => None,
+                            })
+                            .collect();
+                        let settled = events[index..]
+                            .iter()
+                            .position(|later| {
+                                matches!(later.event, Event::GoalActiveTimeSettled { .. })
+                            })
+                            .map(|offset| index + offset + 1);
+                        (
+                            Action::Delegation {
+                                children: spawned.len(),
+                                research: spawned.contains(&Some(arany::ChildGrant::ReadOnly)),
+                            },
+                            settled,
+                        )
+                    }
+                    Some(Event::GoalActiveTimeSettled { .. }) => {
+                        if matches!(
+                            events.get(index + 2).map(|later| &later.event),
+                            Some(Event::AgentFinished { agent_run_id, .. })
+                                if primaries.contains(agent_run_id)
+                        ) {
+                            (Action::Stop, None)
+                        } else {
+                            (Action::Pause, None)
+                        }
+                    }
+                    Some(Event::ToolFinished { .. }) => (Action::Tool, None),
+                    // The between-Run compaction reserves its call first; it is classified there.
+                    _ if matches!(
+                        index.checked_sub(1).map(|previous| &events[previous].event),
+                        Some(Event::GoalCompactionCallReserved { .. })
+                    ) =>
+                    {
+                        continue;
+                    }
+                    other => panic!("unclassified active-time reservation at {index}: {other:?}"),
+                };
+                points.push((index, action.0, action.1));
+            }
+            Event::GoalCompactionCallReserved { .. }
+                if matches!(next, Some(Event::GoalActiveTimeReserved { .. })) =>
+            {
+                points.push((index, Action::BoundaryCompaction { goal: true }, None));
+            }
+            Event::ContextCompacted { .. }
+                if !matches!(
+                    index.checked_sub(1).map(|previous| &events[previous].event),
+                    Some(Event::GoalActiveTimeReserved { .. })
+                ) =>
+            {
+                points.push((index, Action::BoundaryCompaction { goal: false }, None));
+            }
+            Event::GoalPlanContractRecorded { .. } => points.push((index, Action::Tool, None)),
+            Event::ToolStarted { agent_run_id, .. } => {
+                let action = if primaries.contains(agent_run_id) {
+                    Action::Tool
+                } else {
+                    Action::Child {
+                        in_flight: in_flight(index),
+                    }
+                };
+                points.push((index, action, None));
+            }
+            Event::GoalProviderCallReserved { agent_run_id, .. }
+                if !primaries.contains(agent_run_id) =>
+            {
+                points.push((
+                    index,
+                    Action::Child {
+                        in_flight: in_flight(index),
+                    },
+                    None,
+                ));
+            }
+            _ => {}
+        }
+    }
+    assert!(!points.is_empty(), "the journal admits at least one action");
+    let boundaries: Vec<usize> = points
+        .iter()
+        .map(|(index, ..)| *index)
+        .chain(markers)
+        .collect();
+    for (index, action, end) in &points {
+        let end = end.unwrap_or_else(|| {
+            boundaries
+                .iter()
+                .copied()
+                .filter(|boundary| boundary > index)
+                .min()
+                .unwrap_or(events.len())
+        });
+        let observed = end - index;
+        assert!(
+            action.max_events() >= observed,
+            "{action:?} at {index} bounds {} Events but appends {observed}",
+            action.max_events()
+        );
+    }
+}
+
+#[tokio::test]
+async fn crash_left_reserved_active_time_reaches_the_resumed_runs_uncertain_facts() {
+    use std::os::unix::fs::MetadataExt;
+
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let metadata = std::fs::metadata(&workspace).expect("Workspace identity");
+    let identity = (metadata.dev(), metadata.ino());
+    let state_path = temp.path().join("state");
+    let session_id = SessionId::new();
+    let (goal_id, run_id, agent_run_id) =
+        (arany::GoalId::new(), RunId::new(), arany::AgentRunId::new());
+    let store = Store::open(StateRoot::admit(&state_path).expect("state")).expect("Store");
+    let crashed = [
+        Event::SessionStarted {
+            title: "Crashed Goal".into(),
+            workspace_identity: identity,
+        },
+        Event::GoalStarted {
+            goal_id,
+            phase: arany::GoalPhase::Implementation,
+            autonomous: false,
+            resource_settings: arany::ToolResourceSettings::default(),
+            objective: "Spend reserved time".into(),
+            workspace_identity: identity,
+            budget: arany::GoalBudget {
+                max_runs: 2,
+                ..arany::GoalBudget::default()
+            },
+        },
+        Event::GoalRunLinked {
+            goal_id,
+            run_id,
+            phase: arany::GoalPhase::Implementation,
+        },
+        Event::MessageAccepted {
+            run_id,
+            text: "Spend reserved time".into(),
+            images: Vec::new(),
+        },
+        Event::RunStarted {
+            run_id,
+            config: arany::RunConfig {
+                provider: "scripted".into(),
+                model: "scripted-model".into(),
+                effort: None,
+                custom_profile_provenance: None,
+                saved_api_account_id: None,
+                chatgpt_provenance: None,
+                output_token_bound: arany::OutputTokenBound::ProviderEnforced,
+                policy: CollaborationPolicy::Single,
+                output_token_cap: 4096,
+                provider_concurrency: 1,
+                workspace_device: identity.0,
+                workspace_inode: identity.1,
+                instruction_digest: None,
+                include_digests: Vec::new(),
+                history_run_ids: Vec::new(),
+                excluded_history_runs: 0,
+                context_usage: None,
+                compaction_event_sequence: None,
+                compaction_content_digest: None,
+                tool_policy: None,
+            },
+        },
+        Event::AgentSpawned {
+            run_id,
+            agent_run_id,
+            role: arany::AgentRole::Primary,
+            ordinal: 0,
+            objective: None,
+            grant: None,
+        },
+        Event::GoalActiveTimeReserved {
+            goal_id,
+            run_id,
+            reserved_ms: 7_000,
+        },
+    ];
+    for event in crashed {
+        store
+            .append(session_id, event)
+            .await
+            .expect("crash-left journal prefix");
+    }
+    store.close().await.expect("seed Store shutdown");
+
+    let provider = ScriptedProvider::new(vec![finish_with("recovered")]);
+    let requests = Arc::clone(&provider.requests);
+    let mut engine = Engine::open(
+        StateRoot::open_existing(&state_path).expect("reopened state"),
+        provider,
+    )
+    .expect("Engine");
+    let mut resumed = request(&workspace, "Resume the crashed Goal");
+    resumed.session_id = Some(session_id);
+    resumed.title = None;
+    resumed.include_paths.clear();
+    resumed.goal = arany::GoalRequest::resume(goal_id, true);
+    let outcome = engine.run(resumed).await.expect("explicit recovery");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    engine.close().await.expect("Engine shutdown");
+
+    let calls = requests.lock().expect("requests").clone();
+    let facts = call_facts(&calls[0]).expect("goal context facts");
+    assert_eq!(
+        facts.uncertain_active_ms, 7_000,
+        "the settled reservation is charged as uncertain time on the resumed Run's first call"
+    );
+    assert!(facts.active_ms >= 7_000);
+}
+
+#[tokio::test]
+async fn previews_chunk_a_finishing_call_within_its_bound() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let state_path = temp.path().join("state");
+    let answer = "x".repeat(5000);
+    let provider = crate::PreviewProvider {
+        text: arany::PreviewText {
+            answer: answer.clone(),
+            commentary: vec!["commentary".into()],
+            commentary_limited: false,
+        },
+        completion: Some(ProviderOutcome::Finish(Finish {
+            summary: "done".into(),
+            result: answer,
+        })),
+    };
+    let mut engine =
+        Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+    let mut input = request(&workspace, "question");
+    input.include_paths.clear();
+    let outcome = engine
+        .run_with_progress(input, RunCancellation::new(), RunProgress::with_previews())
+        .await
+        .expect("Run");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    engine.close().await.expect("engine shutdown");
+    let (events, _) = replayed(&state_path, outcome.session_id).await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.event, Event::AssistantDisplayRecorded { .. }))
+    );
+    assert_action_bounds(&events, true, false);
+}
+
+#[tokio::test]
+async fn between_run_goal_compaction_stays_within_its_bound() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let state_path = temp.path().join("state");
+    let provider = ScriptedProvider::new(vec![finish_with("first")]).with_compactions(vec![Ok(
+        CompactionResponse {
+            summary: "The completed Run remains in the canonical history.".into(),
+            response_id: None,
+            usage: arany::Usage {
+                input_tokens: Some(12),
+                output_tokens: Some(4),
+                ..Default::default()
+            },
+            wire_provenance: None,
+        },
+    )]);
+    let mut engine =
+        Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+    let mut first = request(&workspace, "Use one Provider call");
+    first.include_paths.clear();
+    first.goal.finish_after_run = false;
+    let initial = engine.run(first).await.expect("Goal Run");
+    engine
+        .compact_session(initial.session_id, workspace.clone())
+        .await
+        .expect("in-Goal compaction between Runs");
+    engine.close().await.expect("engine shutdown");
+    let (events, _) = replayed(&state_path, initial.session_id).await;
+    assert_action_bounds(&events, false, false);
+}
+
+#[tokio::test]
+async fn reviewed_write_stays_within_each_action_bound() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let provider = ScriptedProvider::new(vec![
+        crate::tool_outcome(
+            arany::ToolCall::Write {
+                path: "notes/a.txt".into(),
+                expected_digest: None,
+                content: "x".into(),
+            },
+            Some(Box::new(arany::GoalPlanContract {
+                mission: "Change the facts".into(),
+                resource_class: arany::ToolResourceClass::Default,
+                command_timeout_ms: None,
+                paths: vec!["notes".into()],
+                commands: Vec::new(),
+                skills: Vec::new(),
+                mcp_tools: Vec::new(),
+                success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
+                    path: "notes/a.txt".into(),
+                    content: "x".into(),
+                },
+                budget: arany::GoalBudget::default(),
+            })),
+        ),
+        finish_with("approve"),
+        finish_with("x"),
+    ]);
+    let mut engine =
+        Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+    let config = state_path.join("tools.json");
+    std::fs::write(
+        &config,
+        br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+    )
+    .expect("tool configuration");
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
+        .expect("tool configuration mode");
+    engine
+        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
+        .expect("Guard enabled");
+    let (approvals, _inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Auto);
+    engine.set_tool_approvals(approvals);
+    let mut input = request(&workspace, "Change the facts");
+    input.include_paths.clear();
+    let outcome = engine.run(input).await.expect("Run");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    engine.close().await.expect("engine shutdown");
+    let (events, _) = replayed(&state_path, outcome.session_id).await;
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        Event::ProviderCallRecorded { record, .. } if record.phase == AgentPhase::ToolReview
+    )));
+    assert_action_bounds(&events, false, false);
+}
+
+struct SteeredRun {
+    result: Result<arany::RunOutcome, EngineError>,
+    events: Vec<arany::EventEnvelope>,
+}
+
+/// Runs a Read-then-Finish Run whose second primary call carries a steering note, in a Session
+/// padded so that `free_at_second_call` Event slots remain when that call is admitted. `None` pads nothing.
+async fn steered_run(
+    root: &Path,
+    tag: &str,
+    free_at_second_call: Option<usize>,
+    run_offset: usize,
+) -> SteeredRun {
+    let workspace = facts_workspace(&root.join(tag), "v1");
+    let state_path = root.join(tag).join("state");
+    let engine_provider = ScriptedProvider::new(vec![finish_with("initial")]);
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        engine_provider,
+    );
+    let mut first = request(&workspace, "Initial");
+    first.include_paths.clear();
+    let session_id = engine.run(first).await.expect("initial Run").session_id;
+    engine.close().await.expect("initial shutdown");
+    if let Some(free) = free_at_second_call {
+        let prefix = 10_000 - run_offset - free;
+        let mut connection =
+            rusqlite::Connection::open(state_path.join("events.sqlite3")).expect("events");
+        let transaction = connection.transaction().expect("transaction");
+        let first_padding: i64 = transaction
+            .query_row(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM events",
+                [],
+                |row| row.get(0),
+            )
+            .expect("next sequence");
+        for sequence in first_padding..=i64::try_from(prefix).expect("prefix") {
+            transaction
+                .execute(
+                    "INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',6,'{\"title\":\"x\"}',0)",
+                    rusqlite::params![sequence, session_id.to_string()],
+                )
+                .expect("padding");
+        }
+        transaction.commit().expect("padding commit");
+    }
+    let steering = RunSteering::new();
+    let offer = steering.clone();
+    let provider = ScriptedProvider::new(vec![
+        crate::tool_outcome(facts_read(), None),
+        finish_with("noted"),
+    ])
+    .with_before_call(0, move || {
+        steering_note_at(&offer, "use the smaller fixture")
+    });
+    let mut engine = facts_engine(
+        StateRoot::open_existing(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    engine.set_steering(steering);
+    let mut second = request(&workspace, "Steered");
+    second.session_id = Some(session_id);
+    second.title = None;
+    second.include_paths.clear();
+    let result = engine.run(second).await;
+    engine.close().await.expect("shutdown");
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
+        .expect("read-only Store");
+    let events = store.load_session(session_id).await.expect("Events");
+    store.close().await.expect("Store shutdown");
+    SteeredRun { result, events }
+}
+
+#[tokio::test]
+async fn steered_run_near_the_event_cap_is_refused_up_front_never_stranded() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let dry = steered_run(temp.path(), "dry", None, 0).await;
+    assert_eq!(dry.result.expect("dry Run").run.status, RunStatus::Finished);
+    assert_action_bounds(&dry.events, false, true);
+    let second_call = dry
+        .events
+        .iter()
+        .enumerate()
+        .filter(|(index, envelope)| {
+            matches!(envelope.event, Event::GoalActiveTimeReserved { .. })
+                && matches!(
+                    dry.events.get(index + 1).map(|next| &next.event),
+                    Some(Event::GoalProviderCallReserved { .. })
+                )
+        })
+        .nth(2)
+        .map(|(index, _)| index)
+        .expect("the steered second call of the steered Run");
+    let run_start = dry
+        .events
+        .iter()
+        .enumerate()
+        .filter(|(_, envelope)| matches!(envelope.event, Event::GoalStarted { .. }))
+        .nth(1)
+        .map(|(index, _)| index)
+        .expect("the steered Run starts its Goal");
+    let run_offset = second_call - run_start;
+    let steered_bound = arany::Action::ProviderCall {
+        previews: false,
+        steering: true,
+    }
+    .max_events();
+    for free in steered_bound - 3..=steered_bound + 2 {
+        let case = steered_run(temp.path(), &format!("free-{free}"), Some(free), run_offset).await;
+        let count = |matches: fn(&Event) -> bool| {
+            case.events
+                .iter()
+                .filter(|envelope| matches(&envelope.event))
+                .count()
+        };
+        let run_receipts = count(|event| matches!(event, Event::RunFinished { .. }));
+        let goal_receipts = count(|event| matches!(event, Event::GoalFinished { .. }));
+        assert_eq!(
+            run_receipts, goal_receipts,
+            "free {free}: a Run is never left without its Goal receipt"
+        );
+        if free >= steered_bound {
+            assert_eq!(
+                case.result.expect("admitted Run").run.status,
+                RunStatus::Finished,
+                "free {free}"
+            );
+            assert_eq!(run_receipts, 2, "free {free}");
+        } else {
+            assert!(
+                matches!(
+                    case.result,
+                    Err(EngineError::Store(arany::StoreError::ReplayLimit))
+                ),
+                "free {free}: {:?}",
+                case.result.as_ref().map(|outcome| outcome.run.status)
+            );
+            assert_eq!(
+                run_receipts, 1,
+                "free {free}: the refused Run has no receipt"
+            );
+        }
+    }
 }
