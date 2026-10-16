@@ -1350,6 +1350,7 @@ mod tests {
             .env_clear()
             .env("ARANY_TEST_GIT_PROFILE_ROOT", root.path())
             .env("ARANY_TEST_GIT_PROFILE_WORKSPACE", workspace.path())
+            .env("ARANY_TEST_GIT_PROFILE_HOME", home.path())
             .env(
                 "ARANY_TEST_GIT_PROFILE_PORT",
                 network.local_addr().unwrap().port().to_string(),
@@ -1376,6 +1377,9 @@ mod tests {
         );
         let workspace = PathBuf::from(
             std::env::var_os("ARANY_TEST_GIT_PROFILE_WORKSPACE").expect("fixture workspace"),
+        );
+        let home = PathBuf::from(
+            std::env::var_os("ARANY_TEST_GIT_PROFILE_HOME").expect("synthetic host home"),
         );
         let port = std::env::var("ARANY_TEST_GIT_PROFILE_PORT")
             .unwrap()
@@ -1410,9 +1414,64 @@ mod tests {
             guard_executable: std::env::current_exe().unwrap(),
             system_programs: None,
         };
+        let sibling = Path::new(&git.executable).with_file_name("clang");
+        let exec_probes = [
+            (Path::new("/usr/bin/true"), &[][..]),
+            (sibling.as_path(), &["--version"][..]),
+            (Path::new("/usr/bin/git"), &["--version"][..]),
+        ];
+        let exec = |program: &Path, args: &[&str]| {
+            std::process::Command::new(program)
+                .args(args)
+                .env_clear()
+                .env("HOME", &home)
+                .env("PATH", "/usr/bin:/bin")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .bounded_output_for(Duration::from_secs(20), 16 * 1024)
+        };
+        for (program, args) in exec_probes {
+            let output = exec(program, args).expect("unsandboxed exec baseline");
+            assert!(output.status.success(), "exec baseline: {program:?}");
+        }
+        let gitconfig = home.join(".gitconfig");
+        let config_bytes = b"[user]\n\tname = Synthetic Host\n";
+        std::fs::write(&gitconfig, config_bytes).unwrap();
+        assert_eq!(std::fs::read(&gitconfig).unwrap(), config_bytes);
+        let outside = root.join("outside");
+        let outside_bytes = b"synthetic excluded data";
+        std::fs::write(&outside, outside_bytes).unwrap();
+        assert_eq!(std::fs::read(&outside).unwrap(), outside_bytes);
+        assert!(std::fs::read_dir(&root).unwrap().next().is_some());
+        let workspace_file = workspace.join("a.txt");
+        std::fs::write(&workspace_file, b"two\n").unwrap();
+        let view = root.join(crate::tools::git::VIEW);
+        let writable = view.join("write-probe");
+        std::fs::create_dir(&view).unwrap();
+        std::fs::write(&writable, b"allowed").unwrap();
+        assert_eq!(std::fs::read(&writable).unwrap(), b"allowed");
+        std::fs::remove_dir_all(&view).unwrap();
+        std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+            .expect("unsandboxed network baseline");
         configure_resources().unwrap();
         let mut stage = super::BootstrapStage::Workspace;
         assert_eq!(install(&task, &mut stage).unwrap(), root);
+        for path in [&outside, &workspace_file] {
+            assert_eq!(
+                std::fs::write(path, b"forbidden").unwrap_err().kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "write outside Git view: {path:?}"
+            );
+        }
+        assert_eq!(std::fs::read(&workspace_file).unwrap(), b"two\n");
+        assert_eq!(
+            std::fs::read(&gitconfig).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        std::fs::create_dir(&view).unwrap();
+        std::fs::write(&writable, b"allowed").unwrap();
+        assert_eq!(std::fs::read(&writable).unwrap(), b"allowed");
+        std::fs::remove_dir_all(&view).unwrap();
         assert_eq!(
             std::fs::read(root.join("outside")).unwrap_err().kind(),
             std::io::ErrorKind::PermissionDenied
@@ -1427,13 +1486,16 @@ mod tests {
                 .kind(),
             std::io::ErrorKind::PermissionDenied
         );
-        assert!(matches!(
-            std::process::Command::new("/usr/bin/true")
-                .status()
-                .unwrap_err()
-                .kind(),
-            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
-        ));
+        for (program, args) in exec_probes {
+            let error = exec(program, args).expect_err("only the pinned Git may execute");
+            assert!(
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
+                ),
+                "exec denial: {program:?}: {error}"
+            );
+        }
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
