@@ -107,7 +107,6 @@ const STEERING_SENT: &str = "Steering note sent to the agent";
 
 fn steering_refusal(refused: SteeringRefused, autonomous: bool) -> String {
     match refused {
-        SteeringRefused::NoteWaiting => "A steering note is already waiting; draft retained".into(),
         SteeringRefused::RunFull => format!(
             "No room for more steering notes this Run. {}",
             draft_retained_notice(autonomous)
@@ -350,14 +349,11 @@ pub(super) async fn submit_objective(
                 let restored = held.take().is_none_or(|draft| release_held_draft(composer, draft));
                 // Linear offers leave the composer empty, so the undelivered text returns to it here.
                 let mut withdrawn = false;
-                if let Some(text) = offered.take() {
-                    steering.withdraw_note();
-                    if terminal.is_linear() {
-                        if composer.is_empty() {
-                            withdrawn = !matches!(composer.insert_paste(&text), Ok(ComposerEdit::Changed));
-                        } else {
-                            withdrawn = true;
-                        }
+                if let Some(text) = steering.withdraw_note() && terminal.is_linear() {
+                    if composer.is_empty() {
+                        withdrawn = !matches!(composer.insert_paste(&text), Ok(ComposerEdit::Changed));
+                    } else {
+                        withdrawn = true;
                     }
                 }
                 if (result.is_err() || had_offer || sent || had_held)
@@ -620,13 +616,9 @@ pub(super) async fn submit_objective(
                                     Feedback::Transient("A draft is already retained; line not kept".into())
                                 } else if !composer.images().is_empty() {
                                     Feedback::Transient("Steering notes are text only; draft retained".into())
-                                } else if offered.is_some() {
-                                    if terminal.is_linear() {
-                                        composer.take();
-                                        Feedback::Transient("A steering note is already waiting; line not sent".into())
-                                    } else {
-                                        Feedback::Transient(steering_refusal(SteeringRefused::NoteWaiting, autonomous))
-                                    }
+                                } else if offered.is_some() && !terminal.is_linear() {
+                                    // The composer still holds the waiting note; editing it withdraws the offer.
+                                    Feedback::Transient("Steering note waits for the agent's next step; editing withdraws it".into())
                                 } else {
                                     match steering.offer_note(text) {
                                         Ok(()) => {
@@ -737,7 +729,7 @@ pub(super) async fn submit_objective(
                 };
                 if !terminal.is_linear() && offered.as_deref().is_some_and(|text| composer.text() != text || !composer.images().is_empty()) {
                     offered = None;
-                    notice = Some(if steering.withdraw_note() {
+                    notice = Some(if steering.withdraw_note().is_some() {
                         Feedback::Transient("Steering note withdrawn; draft retained".into())
                     } else {
                         // The Engine already took the note, so it is sent; the edited draft stays.

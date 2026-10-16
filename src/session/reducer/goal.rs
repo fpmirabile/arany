@@ -3,11 +3,11 @@ use super::{
     current_run, model_tool_count,
 };
 use crate::provider::AgentPhase;
+use crate::session::MAX_USER_MESSAGE_BYTES;
 use crate::session::events::{
     AgentRole, AgentRunId, GoalBudget, GoalId, GoalPhase, GoalPlanContract, GoalReport, GoalStatus,
     ProviderCallDisposition, ReplayError, RunId,
 };
-use crate::session::{MAX_GOAL_STEERING_NOTES_PER_RUN, MAX_USER_MESSAGE_BYTES};
 
 impl SessionView {
     // The event's fields plus the replay prior; a struct would only forward them.
@@ -325,10 +325,7 @@ impl SessionView {
             .tools
             .last()
             .is_some_and(|tool| tool.observation.is_none());
-        if tool_pending
-            || run.steering_notes.len() >= MAX_GOAL_STEERING_NOTES_PER_RUN
-            || stored_bytes + text.len() > MAX_USER_MESSAGE_BYTES
-        {
+        if tool_pending || stored_bytes + text.len() > MAX_USER_MESSAGE_BYTES {
             return Err(ReplayError::InvalidTransition);
         }
         let goal = current_goal_mut(self, *goal_id)?;

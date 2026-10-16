@@ -1825,8 +1825,11 @@ mod goal_replay_tests {
         let mut full = open();
         full.extend((1..=4).map(|n| note(goal_id, &n.to_string())));
         assert!(accepts(full.clone()));
-        full.push(note(goal_id, "fifth"));
-        assert!(!accepts(full));
+        full.push(note(
+            goal_id,
+            &"f".repeat(crate::session::MAX_USER_MESSAGE_BYTES),
+        ));
+        assert!(!accepts(full), "a Run's notes stay within the byte cap");
 
         // Exactly the per-Run byte cap is accepted; one more byte is not.
         let mut exact = open();
@@ -1904,6 +1907,43 @@ mod goal_replay_tests {
             review
                 .record_goal_steering_note(&goal_id, &run_id, "during a Tool review")
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn steering_notes_have_no_count_cap_but_keep_the_run_byte_bound() {
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let session = SessionId::new();
+        let open = || {
+            let mut events = vec![goal_started(goal_id, GoalBudget::default())];
+            events.extend(start_run(
+                goal_id,
+                run_id,
+                agent_run_id,
+                config(CollaborationPolicy::Single, false),
+            ));
+            events.push(Event::GoalProviderCallReserved {
+                goal_id,
+                run_id,
+                agent_run_id,
+            });
+            events
+        };
+        let note = |len: usize| Event::GoalSteeringNoteRecorded {
+            goal_id,
+            run_id,
+            text: "n".repeat(len),
+        };
+        let mut events = open();
+        events.extend((0..9).map(|_| note(800)));
+        let view = SessionView::replay_open(session, &session_with(session, events.clone()))
+            .expect("nine notes within 8 KiB replay")
+            .expect("Session exists");
+        assert_eq!(view.runs[0].steering_notes.len(), 9);
+        events.push(note(993));
+        assert!(
+            SessionView::replay_open(session, &session_with(session, events)).is_err(),
+            "the Run's notes together stay within 8 KiB"
         );
     }
 

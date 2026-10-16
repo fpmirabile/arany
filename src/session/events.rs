@@ -106,7 +106,6 @@ pub const MAX_GOAL_PLAN_MCP_TOOLS: usize = 64;
 pub const MAX_GOAL_PLAN_SKILLS: usize = 64;
 pub const MAX_GOAL_PLAN_CONTRACT_BYTES: usize = 8 * 1024;
 pub const MAX_GOAL_REPORT_BYTES: usize = 8 * 1024;
-pub const MAX_GOAL_STEERING_NOTES_PER_RUN: usize = 4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

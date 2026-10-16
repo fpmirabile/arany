@@ -282,14 +282,15 @@ pub struct RunSteering {
 #[derive(Default)]
 struct SteeringState {
     waiting: Option<String>,
-    run_notes: usize,
     run_bytes: usize,
     recorded: u64,
 }
 
+/// Separates notes offered before the Engine takes them; the Engine delivers them as one note.
+const NOTE_SEPARATOR: &str = "\n\n";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SteeringRefused {
-    NoteWaiting,
     RunFull,
     Empty,
     TooLarge,
@@ -306,31 +307,38 @@ impl RunSteering {
         self.state.lock().ok()
     }
 
-    /// Holds one note until the Engine records it or the caller withdraws it.
+    /// Holds a note until the Engine records it or the caller withdraws it. A note offered while
+    /// another waits is appended to it, so the Engine delivers one merged note. Waiting and
+    /// recorded text together stay within this Run's byte bound.
     pub fn offer_note(&self, text: String) -> Result<(), SteeringRefused> {
         let mut state = self.lock().ok_or(SteeringRefused::Unavailable)?;
-        if state.waiting.is_some() {
-            return Err(SteeringRefused::NoteWaiting);
-        }
         if text.trim().is_empty() {
             return Err(SteeringRefused::Empty);
         }
         if text.len() > MAX_OBJECTIVE_BYTES {
             return Err(SteeringRefused::TooLarge);
         }
-        if state.run_notes >= crate::session::MAX_GOAL_STEERING_NOTES_PER_RUN
-            || state.run_bytes + text.len() > MAX_OBJECTIVE_BYTES
-        {
+        let merged_len = state
+            .waiting
+            .as_ref()
+            .map_or(0, |waiting| waiting.len() + NOTE_SEPARATOR.len())
+            + text.len();
+        if state.run_bytes + merged_len > MAX_OBJECTIVE_BYTES {
             return Err(SteeringRefused::RunFull);
         }
-        state.waiting = Some(text);
+        match state.waiting.as_mut() {
+            Some(waiting) => {
+                waiting.push_str(NOTE_SEPARATOR);
+                waiting.push_str(&text);
+            }
+            None => state.waiting = Some(text),
+        }
         Ok(())
     }
 
-    /// Returns true when a waiting note was removed before the Engine took it.
-    pub fn withdraw_note(&self) -> bool {
-        self.lock()
-            .is_some_and(|mut state| state.waiting.take().is_some())
+    /// Removes the waiting note before the Engine took it and returns its full merged text.
+    pub fn withdraw_note(&self) -> Option<String> {
+        self.lock().and_then(|mut state| state.waiting.take())
     }
 
     pub fn delivered_notes(&self) -> u64 {
@@ -348,7 +356,6 @@ impl RunSteering {
 
     pub(crate) fn begin_run(&self) {
         if let Some(mut state) = self.lock() {
-            state.run_notes = 0;
             state.run_bytes = 0;
         }
     }
@@ -357,15 +364,14 @@ impl RunSteering {
     /// so an accepted offer always stays deliverable within this Run.
     pub(crate) fn take_note(&self) -> Option<String> {
         let mut state = self.lock()?;
-        let fits = state.waiting.as_ref().is_some_and(|text| {
-            state.run_notes < crate::session::MAX_GOAL_STEERING_NOTES_PER_RUN
-                && state.run_bytes + text.len() <= MAX_OBJECTIVE_BYTES
-        });
+        let fits = state
+            .waiting
+            .as_ref()
+            .is_some_and(|text| state.run_bytes + text.len() <= MAX_OBJECTIVE_BYTES);
         if !fits {
             return None;
         }
         let text = state.waiting.take()?;
-        state.run_notes += 1;
         state.run_bytes += text.len();
         Some(text)
     }
@@ -2622,7 +2628,7 @@ mod run_steering_tests {
     use super::*;
 
     #[test]
-    fn run_steering_quota_and_withdraw_race() {
+    fn run_steering_merges_waiting_notes_and_bounds_the_run() {
         let steering = RunSteering::new();
         assert_eq!(
             steering.offer_note(" \n".into()),
@@ -2633,33 +2639,38 @@ mod run_steering_tests {
             Err(SteeringRefused::TooLarge)
         );
         steering.offer_note("first".into()).expect("first note");
+        steering.offer_note("second".into()).expect("merged note");
         assert_eq!(
-            steering.offer_note("second".into()),
-            Err(SteeringRefused::NoteWaiting)
+            steering.withdraw_note().as_deref(),
+            Some("first\n\nsecond"),
+            "withdrawal returns the whole merged text"
         );
-        assert!(steering.withdraw_note());
-        assert!(!steering.withdraw_note(), "nothing is waiting twice");
-
-        steering.offer_note("taken".into()).expect("note offered");
-        assert_eq!(steering.take_note().as_deref(), Some("taken"));
         assert!(
-            !steering.withdraw_note(),
+            steering.withdraw_note().is_none(),
+            "nothing is waiting twice"
+        );
+
+        steering.offer_note("one".into()).expect("note offered");
+        steering.offer_note("two".into()).expect("note merged");
+        assert_eq!(steering.take_note().as_deref(), Some("one\n\ntwo"));
+        assert!(
+            steering.withdraw_note().is_none(),
             "a note the Engine took cannot be withdrawn"
         );
         assert_eq!(steering.delivered_notes(), 0);
         steering.note_recorded();
         assert_eq!(steering.delivered_notes(), 1);
 
-        for _ in 0..3 {
-            steering.offer_note("n".into()).expect("within quota");
-            assert!(steering.take_note().is_some());
-            steering.note_recorded();
-        }
+        let taken = "x".repeat(MAX_OBJECTIVE_BYTES - "one\n\ntwo".len());
+        steering
+            .offer_note(taken.clone())
+            .expect("fills the Run bound");
+        assert_eq!(steering.take_note(), Some(taken));
+        steering.note_recorded();
         assert_eq!(
-            steering.offer_note("fifth".into()),
+            steering.offer_note("y".into()),
             Err(SteeringRefused::RunFull)
         );
-
         steering.begin_run();
         steering
             .offer_note("x".repeat(MAX_OBJECTIVE_BYTES))
@@ -2679,10 +2690,10 @@ mod run_steering_tests {
     #[test]
     fn run_steering_take_reserves_quota_and_poisoned_lock_fails_closed() {
         let steering = RunSteering::new();
-        for _ in 0..crate::session::MAX_GOAL_STEERING_NOTES_PER_RUN {
-            steering.offer_note("n".into()).expect("within quota");
-            assert!(steering.take_note().is_some());
-        }
+        steering
+            .offer_note("x".repeat(MAX_OBJECTIVE_BYTES))
+            .expect("within quota");
+        assert!(steering.take_note().is_some());
         assert_eq!(
             steering.offer_note("unrecorded takes still count".into()),
             Err(SteeringRefused::RunFull)
