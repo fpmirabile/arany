@@ -1,10 +1,13 @@
 mod approval;
 mod cancel;
+pub(crate) mod catalog;
 pub(crate) mod config;
+mod dispatch;
 mod fs;
 mod git;
 mod guard;
 mod mcp;
+mod process;
 mod skills;
 pub(crate) mod toolchains;
 pub(crate) mod types;
@@ -370,17 +373,13 @@ impl ToolRuntime {
             "host_clock": {"unix_ms": now_ms(), "timezone":"UTC"},
             "workspace_paths": self.config.workspace_paths,
             "write": self.config.write,
-            "file_tools": "list (directory entries), read (UTF-8, zero-based byte offset, limit 1..4096, whole-file sha256), search (literal UTF-8 content in a file or directory; use Read or an include for edit sha256), mkdir (new directory; parent must exist), write (null digest only creates), edit (unique literal match, expected sha256)",
+            "file_tools": catalog::FILE_TOOLS,
             "commands": self.config.commands.iter().map(|program| serde_json::json!({"name":program.name,"interpreter":program.interpreter,"inputs":program.inputs.iter().map(|input| format!("/inputs/{}/{}", program.name, input.destination)).collect::<Vec<_>>()})).collect::<Vec<_>>(),
-            "command_contract": if cfg!(target_os = "macos") {
-                "Explicit argv only. Private selected-project cwd; use ARANY_TOOL_WORKSPACE, ARANY_TOOL_INPUTS and ARANY_TOOL_SKILLS for paths inside shell strings. Standalone /workspace, /scratch, /inputs, /skills and /programs argv paths map to private native paths; checked system programs execute at their original paths. No network, host home, credentials or state. Bounded regular-file changes return as a changeset; a separate applied integration receipt confirms Workspace publication."
-            } else {
-                "Explicit argv only. Private writable selected-project snapshot at /workspace; /scratch is bounded. No network, host home, credentials or state. Bounded regular-file changes return as a changeset; a separate applied integration receipt confirms Workspace publication. Skills available at /skills/NAME."
-            },
+            "command_contract": catalog::COMMAND_CONTRACT,
             "skills": self.skill_rows(),
-            "mcp_servers": self.config.mcp.iter().map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":"2025-11-25 stdio; use mcp_list before mcp_call"})).collect::<Vec<_>>(),
+            "mcp_servers": self.config.mcp.iter().map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::MCP_PROTOCOL})).collect::<Vec<_>>(),
             "git": if self.config.git_available() {
-                serde_json::json!({"operations":["git_status","git_diff","git_log"],"scope":"Read-only status, diff and log of the Workspace-root repository under Git defaults; paths are Workspace-relative and \".\" is the whole repository."})
+                serde_json::json!({"operations":catalog::git_operations(),"scope":catalog::GIT_SCOPE})
             } else {
                 serde_json::json!("unavailable")
             },
@@ -404,10 +403,10 @@ impl ToolRuntime {
             "host_clock": {"unix_ms": now_ms(), "timezone": "UTC"},
             "workspace_paths": self.config.workspace_paths,
             "write": false,
-            "file_tools": "list (directory entries), read (UTF-8, zero-based byte offset, limit 1..4096, whole-file sha256), search (literal UTF-8 content in a file or directory)",
+            "file_tools": catalog::RESEARCH_FILE_TOOLS,
             "commands": [],
             "skills": self.skill_rows(),
-            "mcp_servers": self.config.mcp.iter().map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":"2025-11-25 stdio; catalog listing with mcp_list only"})).collect::<Vec<_>>(),
+            "mcp_servers": self.config.mcp.iter().map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::RESEARCH_MCP_PROTOCOL})).collect::<Vec<_>>(),
             "tool_calls_remaining": tool_calls_remaining,
         })
         .to_string();

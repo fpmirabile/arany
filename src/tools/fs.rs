@@ -1,13 +1,90 @@
+use super::catalog::{nullable, string};
 use super::config::Config;
 use super::types::*;
 use super::{ToolError, ToolRuntime};
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, DirBuilder, OpenOptions};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
+
+pub(super) fn valid(call: &ToolCall) -> bool {
+    match call {
+        ToolCall::List { path } => valid_relative(path, true),
+        ToolCall::Read { path, limit, .. } => {
+            valid_relative(path, false) && (1..=4096).contains(limit)
+        }
+        ToolCall::Search { path, query } => {
+            valid_relative(path, true) && !query.is_empty() && query.len() <= 512
+        }
+        ToolCall::Mkdir { path } => valid_relative(path, false),
+        ToolCall::Write {
+            path,
+            expected_digest,
+            content,
+        } => {
+            valid_relative(path, false)
+                && content.len() <= 8 * 1024
+                && expected_digest
+                    .as_ref()
+                    .is_none_or(|digest| valid_digest(digest))
+        }
+        ToolCall::Edit {
+            path,
+            expected_digest,
+            old,
+            new,
+        } => {
+            valid_relative(path, false)
+                && valid_digest(expected_digest)
+                && !old.is_empty()
+                && old.len() + new.len() <= 8 * 1024
+        }
+        ToolCall::ApplyChangeset {
+            source_intent_digest,
+            changeset,
+        } => *source_intent_digest != [0; 32] && !changeset.files.is_empty() && changeset.valid(),
+        _ => false,
+    }
+}
+
+pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
+    let path = ("path", string());
+    Some(match operation {
+        "list" | "mkdir" => vec![path],
+        "read" => vec![
+            path,
+            (
+                "offset",
+                json!({"type":"integer", "description":"Zero-based byte offset, 0 through 4294967295. Start at 0; page using the returned next offset."}),
+            ),
+            (
+                "limit",
+                json!({"type":"integer", "description":"Number of UTF-8 bytes to read: integer 1 through 4096 inclusive. Use 4096 for a normal page; never request the whole file with a larger limit."}),
+            ),
+        ],
+        "search" => vec![path, ("query", string())],
+        "write" => vec![path, ("expected_digest", nullable()), ("content", string())],
+        "edit" => vec![
+            path,
+            (
+                "expected_digest",
+                json!({"type":"string", "description":"Exact lowercase 64-character SHA-256 from the file include or a successful Read. Never invent it."}),
+            ),
+            (
+                "old",
+                json!({"type":"string", "description":"Non-empty exact literal text occurring once in the current file. To append, select a unique ending and include that ending plus the appended text in new."}),
+            ),
+            (
+                "new",
+                json!({"type":"string", "description":"Replacement literal text. Combined old and new UTF-8 size must be at most 8192 bytes."}),
+            ),
+        ],
+        _ => return None,
+    })
+}
 
 struct Entry {
     path: String,
