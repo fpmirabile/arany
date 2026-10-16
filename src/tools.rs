@@ -1,6 +1,8 @@
 mod approval;
 pub(crate) mod config;
 mod fs;
+#[cfg(target_os = "linux")]
+mod git;
 mod guard;
 mod mcp;
 mod skills;
@@ -310,6 +312,10 @@ impl ToolRuntime {
         {
             program.verify()?;
         }
+        #[cfg(target_os = "linux")]
+        if let Some(git) = &config.git {
+            git::verify_host_executable(git)?;
+        }
         for path in config.resource_paths() {
             fs::reject_overlap(Path::new(path), state.path())?;
             fs::reject_overlap(Path::new(path), &account)?;
@@ -373,6 +379,11 @@ impl ToolRuntime {
             },
             "skills": self.skill_rows(),
             "mcp_servers": self.config.mcp.iter().map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":"2025-11-25 stdio; use mcp_list before mcp_call"})).collect::<Vec<_>>(),
+            "git": if self.config.git_available() {
+                serde_json::json!({"operations":["git_status","git_diff","git_log"],"scope":"Read-only status, diff and log of the Workspace-root repository under Git defaults; paths are Workspace-relative and \".\" is the whole repository."})
+            } else {
+                serde_json::json!("unavailable")
+            },
         }).to_string();
         if catalog.len() > types::MAX_TOOL_CATALOG_BYTES {
             return Err(ToolError::Limit);

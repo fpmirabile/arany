@@ -897,7 +897,8 @@ pub(super) fn helper_main() -> ExitCode {
                 | ToolCall::Edit { .. }
                 | ToolCall::Mkdir { .. }
                 | ToolCall::ApplyChangeset { .. }
-        ) || cfg!(target_os = "macos") && matches!(task.intent.call, ToolCall::Skill { .. }))
+        ) || task.intent.call.is_git_read()
+            || cfg!(target_os = "macos") && matches!(task.intent.call, ToolCall::Skill { .. }))
             && super::fs::identity(&super::fs::open_directory(workspace)?)?
                 != (task.intent.workspace_device, task.intent.workspace_inode)
         {
@@ -1015,6 +1016,27 @@ pub(super) fn helper_main() -> ExitCode {
                     )
                     .await
                 }
+                ToolCall::GitStatus { .. } | ToolCall::GitDiff { .. } | ToolCall::GitLog { .. } => {
+                    #[cfg(target_os = "linux")]
+                    {
+                        let git = task.config.git.as_ref().ok_or(ToolError::Configuration)?;
+                        let output = super::git::execute(
+                            workspace,
+                            Path::new("/scratch"),
+                            git,
+                            &task.intent.call,
+                            task.intent.limits.result_bytes as usize,
+                            Duration::from_millis(u64::from(task.intent.limits.runtime_ms)),
+                        )
+                        .await;
+                        linux::stop_command_descendants(&task.parent_namespaces).await?;
+                        output
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        Err(ToolError::ProtectionUnavailable)
+                    }
+                }
                 call => super::fs::native(workspace, call, &task.config),
             }
         });
@@ -1025,6 +1047,10 @@ pub(super) fn helper_main() -> ExitCode {
                         .map_or(true, |value| value["exit_code"] != 0),
                     ToolCall::McpCall { .. } => serde_json::from_str::<serde_json::Value>(&output)
                         .map_or(true, |value| value["is_error"] == true),
+                    ToolCall::GitStatus { .. }
+                    | ToolCall::GitDiff { .. }
+                    | ToolCall::GitLog { .. } => serde_json::from_str::<serde_json::Value>(&output)
+                        .map_or(true, |value| value.get("failed").is_some()),
                     _ => false,
                 };
                 (
@@ -1324,6 +1350,7 @@ mod tests {
             skills: Vec::new(),
             mcp: Vec::new(),
             runtime_grants,
+            git: None,
         }
     }
 

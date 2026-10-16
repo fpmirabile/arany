@@ -62,6 +62,9 @@ pub(crate) fn tool_summary(tool: &crate::session::ToolView) -> String {
         ToolCall::Skill { name, .. } => format!("Skill {name}"),
         ToolCall::McpList { server } => format!("MCP list {server}"),
         ToolCall::McpCall { server, tool, .. } => format!("MCP {server} / {tool}"),
+        ToolCall::GitStatus { path } => format!("Git status {path}"),
+        ToolCall::GitDiff { path, .. } => format!("Git diff {path}"),
+        ToolCall::GitLog { path, .. } => format!("Git log {path}"),
     };
     let state = match tool
         .observation
@@ -1184,5 +1187,60 @@ mod goal_status_tests {
             goal_status(&view),
             "No Goal in this Session; send a message or use /goal <objective>"
         );
+    }
+}
+
+#[cfg(test)]
+mod git_summary_tests {
+    use super::tool_summary;
+    use crate::session::{AgentRunId, RunId, ToolView};
+    use crate::tools::{EffectIntent, ToolCall, ToolLimits};
+    use uuid::Uuid;
+
+    #[test]
+    fn git_reads_summarize_their_paths() {
+        for (call, expected) in [
+            (
+                ToolCall::GitStatus { path: "src".into() },
+                "Tool · Git status src · pending",
+            ),
+            (
+                ToolCall::GitDiff {
+                    path: "src".into(),
+                    base: None,
+                    head: None,
+                    staged: false,
+                },
+                "Tool · Git diff src · pending",
+            ),
+            (
+                ToolCall::GitLog {
+                    path: ".".into(),
+                    revision: None,
+                    max_count: 1,
+                },
+                "Tool · Git log . · pending",
+            ),
+        ] {
+            let tool = ToolView {
+                intent: EffectIntent {
+                    id: Uuid::now_v7(),
+                    run_id: RunId::new(),
+                    agent_run_id: AgentRunId::new(),
+                    policy_digest: [1; 32],
+                    enforcement_digest: [2; 32],
+                    workspace_device: 1,
+                    workspace_inode: 2,
+                    call,
+                    limits: ToolLimits::default(),
+                    expires_at_ms: 1,
+                    use_count: 1,
+                },
+                observation: None,
+                review_call_index: None,
+                finished_sequence: None,
+            };
+            assert_eq!(tool_summary(&tool), expected);
+        }
     }
 }

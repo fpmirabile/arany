@@ -3171,6 +3171,24 @@ mod goal_replay_tests {
                 intent: mcp,
             }
         ));
+        for call in [
+            ToolCall::GitStatus { path: ".".into() },
+            ToolCall::GitLog {
+                path: ".".into(),
+                revision: None,
+                max_count: 1,
+            },
+        ] {
+            let intent = child_intent(run, child, call);
+            assert!(rejected(
+                &after_request,
+                Event::ToolStarted {
+                    run_id: run,
+                    agent_run_id: child,
+                    intent,
+                }
+            ));
+        }
         apply(&mut view, started.clone()).expect("child Tool starts");
         let mut open = view.clone();
         apply(&mut open, reserve_child_call(goal, run, child)).expect("second reservation");

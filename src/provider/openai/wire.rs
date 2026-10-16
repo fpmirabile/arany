@@ -410,6 +410,15 @@ fn function_definition(mut parameters: Value, discriminator: &str) -> Value {
         }
         "mcp_list" => "List an admitted local MCP server's bounded tool catalog.",
         "mcp_call" => "Invoke an admitted MCP tool in the disposable offline snapshot.",
+        "git_status" => {
+            "Show the Workspace repository's branch and its changed, unmerged and untracked paths under a path. Read-only; repository configuration, hooks and filters never run."
+        }
+        "git_diff" => {
+            "Show changed-file line counts and a bounded unified patch: working tree vs index, staged index vs base or HEAD, working tree vs base, or base vs head. Read-only."
+        }
+        "git_log" => {
+            "List up to max_count commits (hash, parents, author, Unix time, subject) from revision or HEAD that touch a path, newest first. Read-only."
+        }
         _ => unreachable!("compiled operation"),
     };
     json!({"type":"function","name":format!("arany_{operation}"),"description":description,"parameters":parameters,"strict":true})
@@ -617,7 +626,8 @@ impl WireResponse {
                             json!({"outcome": fields}).to_string()
                         }
                         "list" | "read" | "search" | "mkdir" | "write" | "edit" | "command"
-                        | "skill" | "mcp_list" | "mcp_call" => {
+                        | "skill" | "mcp_list" | "mcp_call" | "git_status" | "git_diff"
+                        | "git_log" => {
                             let plan_contract = fields.remove("plan_contract");
                             if fields
                                 .insert("operation".into(), json!(operation))

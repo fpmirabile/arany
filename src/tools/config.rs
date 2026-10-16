@@ -17,6 +17,9 @@ pub(crate) struct Config {
     pub mcp: Vec<Server>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runtime_grants: Vec<RuntimeGrant>,
+    /// Pinned system Git for typed Git reads; Linux only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<Program>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -102,6 +105,17 @@ impl Config {
         {
             program.validate()?;
         }
+        if let Some(git) = &self.git {
+            git.validate()?;
+            if !cfg!(target_os = "linux")
+                || git.name != "git"
+                || git.interpreter
+                || !git.inputs.is_empty()
+                || !std::path::Path::new(&git.executable).starts_with(super::guard::RUNTIME_ROOT)
+            {
+                return Err(ToolError::Configuration);
+            }
+        }
         for server in &self.mcp {
             if !valid_name(&server.name)
                 || server.tools.is_empty()
@@ -154,11 +168,17 @@ impl Config {
         self.commands
             .iter()
             .chain(self.mcp.iter().map(|server| &server.program))
+            .chain(self.git.iter())
             .flat_map(|program| {
                 std::iter::once(program.executable.as_str())
                     .chain(program.inputs.iter().map(|input| input.path.as_str()))
             })
             .chain(self.skills.iter().map(|skill| skill.directory.as_str()))
+    }
+
+    /// Typed Git reads need a pinned Git and the whole-Workspace grant, because Git output spans the repository.
+    pub(crate) fn git_available(&self) -> bool {
+        self.git.is_some() && self.workspace_paths == ["."]
     }
 
     pub(super) fn discover_skills(&mut self, workspace: &std::path::Path) -> Result<(), ToolError> {
@@ -233,6 +253,9 @@ impl Config {
             }
             ToolCall::McpList { server } => {
                 return self.mcp.iter().any(|value| &value.name == server);
+            }
+            ToolCall::GitStatus { .. } | ToolCall::GitDiff { .. } | ToolCall::GitLog { .. } => {
+                return self.git_available();
             }
             ToolCall::McpCall { server, tool, .. } => {
                 return self

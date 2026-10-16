@@ -1389,7 +1389,8 @@ fn provider_bound_schemas_carry_no_validation_keywords() {
             "write": true,
             "commands": [{"name":"bash"}],
             "skills": [{"name":"sample"}],
-            "mcp_servers": [{"name":"local"}]
+            "mcp_servers": [{"name":"local"}],
+            "git": {"operations": ["git_status", "git_diff", "git_log"]}
         })
         .to_string(),
         history_summary: None,
@@ -1500,4 +1501,98 @@ fn child_research_request_offers_only_read_only_functions_and_finish() {
 
     request.tools = Some(catalog(0));
     assert_eq!(names(&run_body(&request)), ["arany_finish"]);
+}
+
+#[test]
+fn git_reads_encode_as_strict_native_prelude_functions() {
+    use crate::tools::ToolCall;
+    let mut request = run_request();
+    request.collaboration = crate::session::CollaborationPolicy::Single;
+    request.phase = AgentPhase::RootPlan;
+    request.goal_budget = Some(crate::session::GoalBudget::default());
+    let git_catalog = |git: Value| crate::tools::ToolContext {
+        catalog: json!({
+            "write": false,
+            "commands": [],
+            "skills": [],
+            "mcp_servers": [],
+            "git": git
+        })
+        .to_string(),
+        history_summary: None,
+        observations: Vec::new(),
+    };
+    request.tools = Some(git_catalog(
+        json!({"operations": ["git_status", "git_diff", "git_log"]}),
+    ));
+    let body = run_body_with_effort(&request, Effort::Low);
+    let functions = body["tools"].as_array().unwrap();
+    for name in ["arany_git_status", "arany_git_diff", "arany_git_log"] {
+        let function = functions
+            .iter()
+            .find(|function| function["name"] == name)
+            .unwrap_or_else(|| panic!("{name}"));
+        assert_eq!(function["strict"], true);
+        assert!(!function["description"].as_str().unwrap().is_empty());
+        assert!(
+            function["parameters"]["properties"]["plan_contract"]["anyOf"]
+                .as_array()
+                .unwrap()
+                .contains(&json!({"type": "null"}))
+        );
+    }
+
+    for (call, name) in [
+        (ToolCall::GitStatus { path: ".".into() }, "arany_git_status"),
+        (
+            ToolCall::GitDiff {
+                path: "src".into(),
+                base: Some("HEAD~1".into()),
+                head: Some("HEAD".into()),
+                staged: false,
+            },
+            "arany_git_diff",
+        ),
+        (
+            ToolCall::GitLog {
+                path: ".".into(),
+                revision: None,
+                max_count: 5,
+            },
+            "arany_git_log",
+        ),
+    ] {
+        let mut arguments = serde_json::to_value(&call).unwrap();
+        arguments.as_object_mut().unwrap().remove("operation");
+        arguments["plan_contract"] = Value::Null;
+        let decoded = decode_tool_run(
+            &serde_json::to_vec(&response(
+                "completed",
+                json!([function_call(name, &arguments)]),
+            ))
+            .unwrap(),
+            "gpt-5.4",
+        )
+        .unwrap();
+        let ProviderOutcome::Tool {
+            call: decoded_call,
+            plan_contract,
+        } = decoded.outcome
+        else {
+            panic!("{name} did not decode as a Tool outcome");
+        };
+        assert_eq!(decoded_call, call);
+        assert!(plan_contract.is_none());
+    }
+
+    for catalog in [json!("unavailable"), Value::Null] {
+        let mut request = request.clone();
+        request.tools = Some(git_catalog(catalog.clone()));
+        let body = run_body_with_effort(&request, Effort::Low);
+        assert!(!body["tools"].as_array().unwrap().iter().any(|function| {
+            function["name"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("arany_git_"))
+        }));
+    }
 }

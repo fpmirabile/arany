@@ -10,6 +10,7 @@ limits and compatibility.
   adapter admits typed files and pinned Skill data through a non-spawning
   profile. Commands/MCP use the private snapshot and ordinary-launch profile;
   keep those authorities distinct and reject unavailable enforcement.
+- On Linux a typed Git read is the only non-process intent whose helper spawns a payload: after GO, only the digest-rechecked pinned Git, with the read-only real Workspace and a scratch repository view. Stop every other namespace process before the receipt, and keep the behavior named in the enforcement digest. macOS has no Git profile and rejects Git configuration.
 - Revalidate selected runtime path/version/directory identities before Ready
   and GO for process intents. File/Skill intents carry no runtime grants in
   their enforcement fingerprint or native profile and skip runtime rechecks.
@@ -77,7 +78,7 @@ limits and compatibility.
   or unit cleanup never commits cache bytes.
 - Close inherited descriptors at the single-threaded worker entry before Rust
   opens persistent handles. Install shared descriptor/core limits at bootstrap;
-  only the non-spawning file/Skill worker resets and unblocks SIGXCPU and installs
+  only the non-spawning macOS file/Skill worker resets and unblocks SIGXCPU and installs
   hard CPU expiry before Seatbelt prohibits changes. Commands/MCP and the
   supervisor use external CPU observation. Attest denial before GO; no payload
   may run under a partially installed profile.

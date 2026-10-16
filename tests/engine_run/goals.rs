@@ -3454,6 +3454,7 @@ async fn child_mcp_call_or_write_is_rejected_before_dispatch() {
             expected_digest: None,
             content: "v2".into(),
         },
+        arany::ToolCall::GitStatus { path: ".".into() },
     ];
     for call in outcomes {
         let temp = tempfile::tempdir().expect("temporary root");

@@ -31,6 +31,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         }],
         mcp: Vec::new(),
         runtime_grants: Vec::new(),
+        git: None,
     };
     let runtime = ToolRuntime {
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
@@ -220,6 +221,7 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
         skills: Vec::new(),
         mcp: Vec::new(),
         runtime_grants: Vec::new(),
+        git: None,
     };
     for (case, drift) in [("fresh", false), ("changed-input", true)] {
         let target = temp.path().join(case);
@@ -1721,7 +1723,8 @@ fn research_branches_offer_only_read_only_operations_until_exhausted() {
             "write": true,
             "commands": [{"name": "cargo"}],
             "skills": [{"name": "guide"}],
-            "mcp_servers": [{"name": "local", "tools": ["probe"]}]
+            "mcp_servers": [{"name": "local", "tools": ["probe"]}],
+            "git": {"operations": ["git_status", "git_diff", "git_log"]}
         });
         if let Some(remaining) = remaining {
             catalog["tool_calls_remaining"] = json!(remaining);
@@ -1744,4 +1747,382 @@ fn research_branches_offer_only_read_only_operations_until_exhausted() {
     assert!(branches[0]["properties"].get("plan_contract").is_none());
     assert!(context(Some(0)).research_branches().is_empty());
     assert!(context(None).research_branches().is_empty());
+}
+
+#[test]
+fn revision_grammar_admits_names_and_ancestry_only() {
+    let long = "a".repeat(128);
+    for value in [
+        "HEAD",
+        "main",
+        "feature/x-1",
+        "v1.2.3",
+        "HEAD~2",
+        "abc1234^",
+        "origin/main~1^2",
+        "main~",
+        long.as_str(),
+    ] {
+        assert!(valid_revision(value), "{value}");
+    }
+    let too_long = "a".repeat(129);
+    for value in [
+        "",
+        "-p",
+        "--output=x",
+        "HEAD:src",
+        "@{-1}",
+        "main..dev",
+        "a b",
+        "refs/.hidden",
+        "x.lock",
+        "a/../b",
+        "HEAD^{tree}",
+        "~1",
+        "main~12345",
+        "main~1~1~1~1~1",
+        too_long.as_str(),
+        "feature/",
+        "a//b",
+    ] {
+        assert!(!valid_revision(value), "{value}");
+    }
+}
+
+#[test]
+fn git_read_calls_validate_paths_combinations_and_counts() {
+    let valid = [
+        ToolCall::GitStatus { path: ".".into() },
+        ToolCall::GitStatus {
+            path: String::new(),
+        },
+        ToolCall::GitDiff {
+            path: "src".into(),
+            base: None,
+            head: None,
+            staged: false,
+        },
+        ToolCall::GitDiff {
+            path: "src".into(),
+            base: None,
+            head: None,
+            staged: true,
+        },
+        ToolCall::GitDiff {
+            path: ".".into(),
+            base: Some("HEAD~1".into()),
+            head: Some("HEAD".into()),
+            staged: false,
+        },
+        ToolCall::GitDiff {
+            path: ".".into(),
+            base: Some("main".into()),
+            head: None,
+            staged: true,
+        },
+        ToolCall::GitLog {
+            path: ".".into(),
+            revision: None,
+            max_count: 1,
+        },
+        ToolCall::GitLog {
+            path: ".".into(),
+            revision: Some("main".into()),
+            max_count: 50,
+        },
+    ];
+    for call in &valid {
+        assert!(call.valid(), "{call:?}");
+        assert!(call.is_goal_plan_prelude() && call.is_git_read() && !call.mutates());
+        assert!(!call.is_process() && !call.is_child_research());
+    }
+    assert_eq!(valid[0].label(), "git_status");
+    assert_eq!(valid[2].label(), "git_diff");
+    assert_eq!(valid[6].label(), "git_log");
+    let invalid = [
+        ToolCall::GitStatus {
+            path: ".git".into(),
+        },
+        ToolCall::GitStatus {
+            path: ".env".into(),
+        },
+        ToolCall::GitStatus {
+            path: "../x".into(),
+        },
+        ToolCall::GitDiff {
+            path: ".".into(),
+            base: None,
+            head: Some("HEAD".into()),
+            staged: false,
+        },
+        ToolCall::GitDiff {
+            path: ".".into(),
+            base: Some("a".into()),
+            head: Some("b".into()),
+            staged: true,
+        },
+        ToolCall::GitDiff {
+            path: ".".into(),
+            base: Some("-p".into()),
+            head: None,
+            staged: false,
+        },
+        ToolCall::GitLog {
+            path: ".".into(),
+            revision: None,
+            max_count: 0,
+        },
+        ToolCall::GitLog {
+            path: ".".into(),
+            revision: None,
+            max_count: 51,
+        },
+    ];
+    for call in &invalid {
+        assert!(!call.valid(), "{call:?}");
+    }
+    let missing_head = json!({"operation":"git_diff","path":".","base":null,"staged":false});
+    assert!(serde_json::from_value::<ToolCall>(missing_head).is_err());
+    let with_head =
+        json!({"operation":"git_diff","path":".","base":null,"head":null,"staged":false});
+    assert_eq!(
+        serde_json::from_value::<ToolCall>(with_head).unwrap(),
+        ToolCall::GitDiff {
+            path: ".".into(),
+            base: None,
+            head: None,
+            staged: false
+        }
+    );
+}
+
+#[test]
+fn git_pin_is_optional_closed_and_linux_only() {
+    let pin = json!({"name":"git","executable":"/usr/bin/git","sha256":"0".repeat(64),"interpreter":false,"inputs":[]});
+    let config_with = |workspace: Value, git: Option<Value>| {
+        let mut value = config_value();
+        value["workspace_paths"] = workspace;
+        if let Some(git) = git {
+            value["git"] = git;
+        }
+        serde_json::from_value::<Config>(value).unwrap()
+    };
+    let status = ToolCall::GitStatus { path: ".".into() };
+    let config = config_with(json!(["."]), Some(pin.clone()));
+    assert_eq!(config.validate().is_ok(), cfg!(target_os = "linux"));
+    if cfg!(target_os = "linux") {
+        assert!(config.allows(&status));
+        assert!(config.allows(&ToolCall::GitLog {
+            path: ".".into(),
+            revision: None,
+            max_count: 5
+        }));
+        assert!(config.allows(&ToolCall::GitDiff {
+            path: "src".into(),
+            base: None,
+            head: None,
+            staged: false,
+        }));
+    }
+    let mutations = [
+        json!({"name":"sh","executable":"/usr/bin/git","sha256":"0".repeat(64),"interpreter":false,"inputs":[]}),
+        json!({"name":"git","executable":"/usr/bin/git","sha256":"0".repeat(64),"interpreter":true,"inputs":[]}),
+        json!({"name":"git","executable":"/usr/bin/git","sha256":"0".repeat(64),"interpreter":false,"inputs":[{"path":"/usr/bin/true","destination":"t","sha256":"0".repeat(64)}]}),
+        json!({"name":"git","executable":"/opt/git/bin/git","sha256":"0".repeat(64),"interpreter":false,"inputs":[]}),
+        json!({"name":"git","executable":"/usr/../opt/git","sha256":"0".repeat(64),"interpreter":false,"inputs":[]}),
+    ];
+    for mutation in mutations {
+        assert!(
+            config_with(json!(["."]), Some(mutation))
+                .validate()
+                .is_err()
+        );
+    }
+    let narrow = config_with(json!(["src", "Cargo.toml"]), Some(pin));
+    assert_eq!(narrow.validate().is_ok(), cfg!(target_os = "linux"));
+    assert!(!narrow.allows(&status));
+    let absent = config_with(json!(["."]), None);
+    assert!(absent.validate().is_ok());
+    assert!(!absent.allows(&status));
+    assert!(serde_json::to_value(&absent).unwrap().get("git").is_none());
+}
+
+#[test]
+fn git_operations_are_offered_only_when_cataloged_and_join_the_prelude() {
+    let git_operations = ["git_status", "git_diff", "git_log"];
+    let plain_names = |branches: &[Value]| -> Vec<String> {
+        branches
+            .iter()
+            .flat_map(|branch| {
+                branch["properties"]["call"]["anyOf"]
+                    .as_array()
+                    .cloned()
+                    .unwrap()
+            })
+            .filter_map(|call| {
+                call["properties"]["operation"]["enum"][0]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .collect()
+    };
+    let operations = |catalog: Value| -> (Vec<Value>, Vec<String>) {
+        let context = ToolContext {
+            catalog: catalog.to_string(),
+            history_summary: None,
+            observations: Vec::new(),
+        };
+        let budget = crate::session::GoalBudget::default();
+        let planned = context.outcome_branch_with_plan(true, Some(&budget));
+        (
+            planned,
+            plain_names(&context.outcome_branch_with_plan(false, None)),
+        )
+    };
+    let base = json!({"write": false, "commands": [], "skills": [], "mcp_servers": []});
+    let mut cataloged = base.clone();
+    cataloged["git"] = json!({"operations": git_operations});
+    let (planned, plain) = operations(cataloged.clone());
+    assert_eq!(
+        plain,
+        [
+            "list",
+            "read",
+            "search",
+            "git_status",
+            "git_diff",
+            "git_log"
+        ]
+    );
+    assert_eq!(planned.len(), 1);
+    assert!(
+        planned[0]["properties"]["plan_contract"]["anyOf"]
+            .as_array()
+            .unwrap()
+            .contains(&json!({"type": "null"}))
+    );
+    let prelude: Vec<&str> = planned[0]["properties"]["call"]["anyOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|call| call["properties"]["operation"]["enum"][0].as_str())
+        .collect();
+    assert_eq!(
+        prelude,
+        [
+            "list",
+            "read",
+            "search",
+            "git_status",
+            "git_diff",
+            "git_log"
+        ]
+    );
+    for git in [Some(json!("unavailable")), None] {
+        let mut value = base.clone();
+        if let Some(git) = git {
+            value["git"] = git;
+        }
+        let (_, plain) = operations(value);
+        assert!(
+            plain
+                .iter()
+                .all(|name| !git_operations.contains(&name.as_str()))
+        );
+    }
+}
+
+#[test]
+fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
+    use super::ToolRuntime;
+    use std::path::PathBuf;
+
+    let runtime = |config: Config| ToolRuntime {
+        context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
+        cache_state: None,
+        config,
+        workspace: PathBuf::new(),
+        workspace_identity: (1, 2),
+        guard_executable: PathBuf::new(),
+        enforcement_digest: [1; 32],
+        queue_progress: None,
+        active_action_gate: None,
+        #[cfg(target_os = "macos")]
+        system_programs: None,
+        process_enforcement_digest: [1; 32],
+    };
+    let mut value = config_value();
+    value["workspace_paths"] = json!(["."]);
+    let mut config: Config = serde_json::from_value(value).unwrap();
+    let catalog = |config: Config| {
+        let context = runtime(config).context().unwrap();
+        parse_json(context.catalog.as_bytes(), MAX_TOOL_CATALOG_BYTES).unwrap()
+    };
+    assert_eq!(catalog(config.clone())["git"], "unavailable");
+    config.git = Some(
+        serde_json::from_value(json!({"name":"git","executable":"/usr/bin/git","sha256":"0".repeat(64),"interpreter":false,"inputs":[]})).unwrap(),
+    );
+    if cfg!(target_os = "linux") {
+        assert_eq!(
+            catalog(config)["git"]["operations"],
+            json!(["git_status", "git_diff", "git_log"])
+        );
+    }
+}
+
+#[test]
+fn child_research_excludes_git_reads() {
+    for call in [
+        ToolCall::GitStatus { path: ".".into() },
+        ToolCall::GitDiff {
+            path: ".".into(),
+            base: None,
+            head: None,
+            staged: false,
+        },
+        ToolCall::GitLog {
+            path: ".".into(),
+            revision: None,
+            max_count: 1,
+        },
+    ] {
+        assert!(call.is_goal_plan_prelude());
+        assert!(!call.is_child_research(), "{call:?}");
+    }
+    for call in [
+        ToolCall::List { path: ".".into() },
+        ToolCall::Read {
+            path: "a".into(),
+            offset: 0,
+            limit: 1,
+        },
+        ToolCall::Search {
+            path: ".".into(),
+            query: "x".into(),
+        },
+        ToolCall::Skill {
+            name: "review".into(),
+            resource: None,
+        },
+        ToolCall::McpList {
+            server: "local".into(),
+        },
+    ] {
+        assert!(call.is_child_research(), "{call:?}");
+    }
+    for call in [
+        ToolCall::McpCall {
+            server: "local".into(),
+            tool: "probe".into(),
+            schema_digest: "0".repeat(64),
+            arguments: "{}".into(),
+        },
+        ToolCall::Write {
+            path: "a".into(),
+            expected_digest: None,
+            content: "x".into(),
+        },
+    ] {
+        assert!(!call.is_child_research(), "{call:?}");
+    }
 }
