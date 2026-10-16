@@ -992,3 +992,58 @@ fn git_reads_join_the_structured_prelude_when_cataloged() {
         );
     }
 }
+
+fn compaction_bound_request(
+    model: &str,
+    body_of: fn(&CompactionRequest) -> Value,
+) -> (CompactionRequest, Value) {
+    let request = |user: String| CompactionRequest {
+        session_id: SessionId::new(),
+        covered_run_id: RunId::new(),
+        model: model.into(),
+        previous_summary: None,
+        items: vec![CompactionItem::Completed(HistoryTurn {
+            user,
+            assistant: String::new(),
+        })],
+        max_output_tokens: crate::session::MAX_COMPACTION_OUTPUT_TOKENS,
+    };
+    let base = crate::provider::compaction_input_bytes(&request(String::new())).expect("input");
+    let slack = crate::session::MAX_COMPACTION_INPUT_BYTES - base;
+    // Each quote serializes to two input bytes and four request bytes: the worst expansion.
+    let at_bound = request(format!(
+        "{}{}",
+        "\"".repeat(slack / 2),
+        "a".repeat(slack % 2)
+    ));
+    assert_eq!(
+        crate::provider::compaction_input_bytes(&at_bound).expect("input"),
+        crate::session::MAX_COMPACTION_INPUT_BYTES
+    );
+    let body = body_of(&at_bound);
+    (at_bound, body)
+}
+
+#[test]
+fn compaction_envelope_and_bound_fit_the_request_ceiling() {
+    let empty = CompactionRequest {
+        session_id: SessionId::new(),
+        covered_run_id: RunId::new(),
+        model: "claude-opus-4-5".into(),
+        previous_summary: None,
+        items: Vec::new(),
+        max_output_tokens: crate::session::MAX_COMPACTION_OUTPUT_TOKENS,
+    };
+    let envelope = serde_json::to_vec(&compaction_body(&empty, crate::provider::Effort::High))
+        .expect("body")
+        .len();
+    assert!(
+        envelope <= crate::provider::COMPACTION_REQUEST_ENVELOPE_BYTES,
+        "envelope {envelope} bytes"
+    );
+    let (_, body) = compaction_bound_request("claude-opus-4-5", |request| {
+        compaction_body(request, crate::provider::Effort::High)
+    });
+    let bytes = encode_request(&body).expect("a compaction request at the bound is sent");
+    assert!(bytes.len() <= crate::provider::MAX_PROVIDER_REQUEST_BYTES);
+}

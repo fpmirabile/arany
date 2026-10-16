@@ -1406,10 +1406,10 @@ fn compaction_is_derived_durable_context_and_failure_keeps_the_prior_summary() {
             (80, 100, 9, false),
             (80, 100, 10, true),
             (100, 100, 10, true),
-            // The automatic threshold is a fixed 162_176 policy value (session::compaction tests record its derivation); it does not follow the compaction input bound.
-            (162_175, 376 * 1024, 162_175, false),
-            (162_176, 376 * 1024, 162_176, true),
-            (162_176, 376 * 1024, 0, false),
+            // The automatic threshold is 158_080: the input bound less room for two 8 KiB-draft turns.
+            (158_079, 376 * 1024, 158_079, false),
+            (158_080, 376 * 1024, 158_080, true),
+            (158_080, 376 * 1024, 0, false),
         ] {
             pressure.context_usage = Some(ContextUsage {
                 used_bytes: used,
@@ -1426,7 +1426,7 @@ fn compaction_is_derived_durable_context_and_failure_keeps_the_prior_summary() {
         pressure.context_usage = None;
         assert!(!pressure.auto_compaction_due(), "unknown footprint");
         for (tool_history, bytes, due) in
-            [(1, 162_175, false), (1, 162_176, true), (0, 162_176, true)]
+            [(1, 158_079, false), (1, 158_080, true), (0, 158_080, true)]
         {
             pressure.context_usage = Some(ContextUsage {
                 used_bytes: bytes,
@@ -1938,7 +1938,7 @@ fn compaction_input_limit_rejects_before_provider_egress() {
             .expect("maintained Engine");
         let mut session_id = None;
         let mut maintenance_sequences = Vec::new();
-        // Steering headroom lowers the automatic threshold to 162_176, so each maintenance cycle covers five turns.
+        // The automatic threshold is 158_080, so 8 KiB-draft turns trigger maintenance every five turns and each cycle fits the input bound.
         for index in 0..16 {
             let objective = format!("{index:02}{}", "Q".repeat(8 * 1024 - 2));
             let mut next = request(&workspace, &objective);

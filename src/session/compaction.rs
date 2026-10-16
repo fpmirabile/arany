@@ -15,11 +15,23 @@ const _: () = assert!(
         + crate::provider::COMPACTION_REQUEST_ENVELOPE_BYTES
         <= crate::provider::MAX_PROVIDER_REQUEST_BYTES
 );
+// The pending turn and the previous unchecked turn both fit under the input bound.
+const _: () =
+    assert!(AUTO_COMPACTION_HISTORY_BYTES + 2 * TURN_RESERVE_BYTES <= MAX_COMPACTION_INPUT_BYTES);
 const _: () = assert!(AUTO_COMPACTION_HISTORY_BYTES < MAX_COMPACTION_INPUT_BYTES);
 pub(crate) const MAX_COMPACTION_OUTPUT_TOKENS: u32 = 1024;
 pub(crate) const MAX_COMPACTION_SUMMARY_BYTES: usize = 8 * 1024;
-// A fixed policy value, independent of MAX_COMPACTION_INPUT_BYTES. The unit test below records its derivation.
-pub(crate) const AUTO_COMPACTION_HISTORY_BYTES: usize = 162_176;
+// The attached composer and `arany --prompt` draft bound. Larger objectives can exceed the automatic reserve; they fail closed.
+const ATTACHED_DRAFT_RESERVE_BYTES: usize = 8 * 1024;
+// One turn's worst case: its draft, steering context, assistant answer, separators and image metadata.
+const TURN_RESERVE_BYTES: usize = ATTACHED_DRAFT_RESERVE_BYTES
+    + super::MAX_STEERING_CONTEXT_BYTES
+    + super::MAX_ASSISTANT_MESSAGE_BYTES
+    + 64
+    + crate::provider::MAX_MESSAGE_IMAGES * crate::provider::MAX_IMAGE_METADATA_BYTES;
+// Automatic compaction triggers with room for this turn and the previous unchecked turn.
+pub(crate) const AUTO_COMPACTION_HISTORY_BYTES: usize =
+    MAX_COMPACTION_INPUT_BYTES - 2 * TURN_RESERVE_BYTES;
 
 pub(crate) enum CompactionInputError {
     Empty,
@@ -240,14 +252,8 @@ mod bound_tests {
     use super::*;
 
     #[test]
-    fn automatic_threshold_keeps_its_recorded_derivation() {
-        // The former input bound (368 KiB) minus headroom for this turn and the previous unchecked turn.
-        let headroom = 2
-            * (super::super::MAX_USER_MESSAGE_BYTES
-                + super::super::MAX_STEERING_CONTEXT_BYTES
-                + super::super::MAX_ASSISTANT_MESSAGE_BYTES
-                + 64
-                + crate::provider::MAX_MESSAGE_IMAGES * crate::provider::MAX_IMAGE_METADATA_BYTES);
-        assert_eq!(AUTO_COMPACTION_HISTORY_BYTES, 368 * 1024 - headroom);
+    fn automatic_threshold_leaves_room_for_two_attached_draft_turns() {
+        assert_eq!(TURN_RESERVE_BYTES, 49_984);
+        assert_eq!(AUTO_COMPACTION_HISTORY_BYTES, 158_080);
     }
 }

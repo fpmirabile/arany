@@ -2159,7 +2159,7 @@ impl<P: Provider + 'static> Engine<P> {
             }
             return Err(EngineError::GoalBudgetExhausted);
         }
-        // Run start covers the Goal lifecycle, the first action's envelope and the image message envelope; each later action admits its own.
+        // Run start reserves the GoalStarted objective envelope, the MessageAccepted objective and image envelopes, the Goal lifecycle and the first action; each later action admits its own.
         let previews = progress.as_ref().is_some_and(RunProgress::previews_enabled);
         let event_slots =
             13 + if previews {
