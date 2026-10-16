@@ -46,5 +46,5 @@ Complete the [agentic coding teams plan](../agentic-teams/README.md) and
 resolve agreed implementation defects and required verification through their
 owners. Report unperformed checks without claiming support; a user-deferred
 integration is not completed functionality. Promote accepted behavior and
-invariants to specs and code docs and remove completed execution work. Git/CI
+invariants to specs and tests and remove completed execution work. Git/CI
 preserve completed changes and check results; this plan is not a changelog.

@@ -13,6 +13,9 @@ This contract owns the official ChatGPT-plan OAuth route: registration and sign-
 - The ID token verifies against the bounded, identity-encoded JWKS from the compiled issuer endpoint. The validator accepts RS256 only. Signature, issuer, audience, nonce, lifetime and a nonempty subject must hold, and the token response must carry the direct-use, resource-invocation and offline-access scopes. The audience is exactly the issued client, as a string or a one-element array. A present `azp` must equal that client. Rejection reports only a typed category (format, signing key, signature, claim binding or time), never a token, claim, callback or response body.
 - A returning attempt also requires the signed subject to match its selected account before replacement. The callback client ID and token response are never account authority, and a browser callback alone is not verified sign-in.
 
+- State, nonce and PKCE come only from the OS-backed `getrandom` source. An alternate entropy source, or a compiler or backend switch that could substitute one, needs separate provenance review.
+- The issued client ID is persisted under the default-user account lock before the code is redeemed, so a competing registration cannot replace it silently.
+
 ## Accounts, consent and storage
 
 - After risk consent, attached new-account setup offers Back or Resume for a retained issued client, Back focused. Cancelling preserves the registration and all saved accounts; it is not deletion or revocation. Returning accounts skip this choice.
@@ -25,6 +28,8 @@ This contract owns the official ChatGPT-plan OAuth route: registration and sign-
 - Attached setup can save a verified new account, switch to a saved UUID (pinning account-only Session defaults until a catalog or explicit choice) or reauthorize the selected one. Cancelling leaves the old selection unchanged.
 - With a connected selection, `/setup` and `--setup` offer `Use saved`, `Reconnect` and `Connect new`. A disconnected selection offers `Reconnect` or `Connect new`, plus `Use saved` when another connected account exists. Reconnect reads only validated selected-account metadata and starts a fresh returning attempt without reading the old token. Cancelling before save changes neither credentials nor defaults.
 - Opening a Session or `/provider chatgpt` reads the selected account ID from the OS-user index only. It loads no token, contacts no keyring and refreshes nothing. Catalog, check and Run paths reopen the consent-matched token, serialize near-expiry refresh and reject pending, disconnected or invalid renewal before any Provider request or Workspace disclosure. An attached caller passes its pinned UUID, and a different selection is rejected under the lock before token retrieval or renewal. Registration open rejects a host mismatch with the account index before any browser attempt. Exact check publication revalidates its account, registration and consent snapshot; no lock spans the inference sequence.
+
+- Refresh failures other than a recognized terminal error keep the stored credential: transport, rate-limit, server, malformed and unknown responses change nothing. Malformed saved metadata gets its own recovery diagnostic and never relaxes signed identity checks or contacts the token store.
 
 ## Logout
 
@@ -42,6 +47,8 @@ This contract owns the official ChatGPT-plan OAuth route: registration and sign-
 - Observed Runs preserve only closed reasons: account access, usage limit, temporary usage or service unavailability, stream protocol, selected response contract, structured outcome contract or local output acceptance. Canonical Events hold no raw status, code, upstream text, body or request ID. A reason does not establish credential invalidity, exact quota, retry time or billing. There is no automatic retry, model or encoding fallback, or billing switch.
 - Run and compaction Events pin an opaque admission fingerprint, account UUID, closed category and local-only output bound. Its `account_consent` HMAC uses a domain separate from optional checks and binds model, effort, verified client, subject, host, account UUID, exact storage consent and versions. Missing categories, unknown values or unknown fields fail closed.
 - Setup, after verified save, selects a low-effort default from the account catalog: visible `gpt-5.6-luna` if present, otherwise the first visible row with prices reported as unknown. It asks no model, effort or cost questions.
+
+- Changing the request or decoder, effort mapping, consent or output-bound semantics bumps the account-admission contract version. Checker versions do not affect it.
 
 ## Acceptance scenarios and evidence owners
 

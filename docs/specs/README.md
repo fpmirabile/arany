@@ -17,7 +17,7 @@ A spec is the maintained contract for one product domain: what a user or caller 
 | OTLP export, privacy, bounds and shutdown | [Telemetry](./telemetry.md) | [security](../../agents/security.md), [testing](../../agents/testing.md) |
 | Local development failure diagnostics, privacy and retention | [Diagnostics](./diagnostics.md) | [security](../../agents/security.md), [testing](../../agents/testing.md) |
 
-Every product domain has a spec; `agents/` holds working practice only and module invariants live in code docs. Create another spec when a real behavior change or an overloaded contract earns the extraction; avoid empty domain files.
+Every product domain has a spec; `agents/` holds working practice only and implementation invariants live in tests. Create another spec when a real behavior change or an overloaded contract earns the extraction; avoid empty domain files.
 
 ## Maintain a contract
 
@@ -40,4 +40,4 @@ Give scenarios stable headings or table names so plans and tests can reference t
 
 ## Extraction discipline
 
-Route each passage by [where each fact belongs](../README.md#where-each-fact-belongs): observable behavior to the spec, editing procedure to general rules and implementation invariants to code docs, data flow to architecture, rationale to the decision owner, proposals to a plan, completed verification to Git/PR/CI history and open checks to `NEXT_STEPS.md`. Validate with representative tasks (a terminal-copy edit reaches terminal behavior; a Provider decoder change reaches Provider, security and testing; a persistence change reaches Session, Store and testing). Extraction succeeds when agents locate the contract without losing a required boundary, not merely when a file gets shorter.
+Route each passage by [where each fact belongs](../README.md#where-each-fact-belongs): observable behavior to the spec, editing procedure to general rules and implementation invariants to tests, data flow to architecture, rationale to the decision owner, proposals to a plan, completed verification to Git/PR/CI history and open checks to `NEXT_STEPS.md`. Validate with representative tasks (a terminal-copy edit reaches terminal behavior; a Provider decoder change reaches Provider, security and testing; a persistence change reaches Session, Store and testing). Extraction succeeds when agents locate the contract without losing a required boundary, not merely when a file gets shorter.

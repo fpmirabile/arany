@@ -28,6 +28,10 @@ Shift+Tab cycles **Auto edits → Request approvals → Auto approval → Auto e
 
 A human approval shows the exact proposed action, with vertical Deny / Allow once choices and Deny focused. All pages must be reviewed before accepting. Approval is one-use, never expands the grant, and expires with the immutable intent within one minute. Escape, a dropped reply or timeout denies; Run cancellation prevents dispatch. Denial stops the Run without retry or rollback of completed actions. AI reviews have a 20-second ceiling, a 256-token output cap, no Tools or project instructions, history or includes, and canonical Provider-call usage. They share the primary call budget, preserving final continuation; review text never becomes an assistant answer. Headless `--tools` uses its explicit private upfront grant without an interactive approval channel.
 
+Workspace input resolves one component at a time beneath the pinned directory handle with no-follow semantics. Symlinks, special files, absolute paths, empty components, `.` and `..` reject. Candidates open nonblocking before the regular-file check, and the validated handle is used instead of reopening by path. Folder trust pins the exact path, device and inode in private OS-user state, never in Session facts. A saved toolchain grant for a recreated root is a new candidate.
+
+Each accepted AI review is pinned to its pending Tool in the projection. Ownership is never inferred from adjacent review calls, so an approval-mode change cannot duplicate an integration review.
+
 ## Private grants
 
 Put an owner-only `tools.json` beside the admitted Session database, outside the Workspace. Its directory must be private (`0700`) and the file must be regular, single-link, no-follow, current-user-owned and `0600`. `--state-dir` selects this Session and configuration root; it does not move your saved account. Permissions are not encryption or protection from another process running as the same user.
@@ -83,6 +87,8 @@ The cache result is separate from command success. Text receipts surface rejecte
 
 `/cache clear` removes only the current Workspace archive and displays `Cleared this Workspace's private build cache`; `/cache clear all` reclaims all committed caches and displays `Cleared all private build caches`. A busy clear displays `Build cache is in use; retry after its command finishes` and keeps the archive. A malformed clear displays `Error: Usage: /cache clear [all]`; other failures display `Error: private build cache could not be cleared`.
 
+Archives capture regular files by content regardless of link count, so Cargo hard links restore as independent files. Competing operations return busy rather than wait. Publication builds the candidate beside the committed archive, syncs it, durably records rollback intent before renaming, and treats the committed marker with parent-directory sync as the commit point. A marker write or sync failure returns the error, skips Drop-time recovery and retains both archives and transaction records. Task transport carries only the checked Workspace identity and the exact read-only exclusions, never a `StateRoot` path or handle.
+
 ## Command changesets
 
 After command completion and positive descendant termination, Guard compares the private snapshot with its admitted input and returns a sorted changeset of created, modified and deleted regular files with digest-bound before and after bytes and executable bits; binary content uses canonical base64. A nonzero exit may still return changes, since exit status and publication are separate outcomes. A failed capture, timeout, cancellation or unconfirmed cleanup publishes nothing.
@@ -94,6 +100,8 @@ Engine records the command observation, then creates a separate one-use integrat
 Before publishing, Guard validates the whole batch, Workspace identity, every before digest, executable bit or absent-file precondition, and parent types through no-follow handles; conflict, denial or overflow leaves every file unchanged. Publication uses fresh regular inodes and checked deletions, then synchronized directory receipts. It is not an atomic multi-file transaction: failure or drift after publication records Uncertain and stops the Run without retry. Cancellation during approval changes nothing; cancellation during publication may leave uncertain effects. Replay retains both outcomes and never repeats the command, approval or integration. Only a successful integration receipt proves publication.
 
 Before dispatch, a command reserves Store and Event headroom for its observation, any required integration and the terminal Run and Goal receipts; if that tail cannot be admitted, the command does not dispatch. Integration shares the Goal's active-time accounting, uses fresh authorization and never renews the command's approval.
+
+Command capture starts only after payload descendants are positively absent, and the changeset scan finishes before images detach. Guard, not the worker, validates the integration batch. The system-executable catalogue travels only through the trusted controller and supervisor channel, never Workspace or payload input, and is never persisted as an authority cache.
 
 ## Portable Skills
 
@@ -156,6 +164,8 @@ macOS trade-offs, known and accepted for this release:
 - The private view has no volume quota (`install_git` uses `unit_root`, which skips `storage::verify_storage`), so writes are bounded only by the 20-second cap and fixed argv. The pinned Git has no code-signature or entitlement verdict; its only check is a SHA-256 pin of a root-owned file, and the kernel enforces the platform signature at exec.
 - A TOCTOU window exists between `verify_pin` and spawn-by-path. Linux avoids the equivalent window by executing the pinned file in place; macOS cannot, so exploiting it requires root write access to the Command Line Tools tree. Ancestor directories of the pinned executable are not checked for ownership or writability on either platform; `verify_host_executable` checks only the leaf. This is a known limit.
 - A Command Line Tools update changes the digest, so Git reads fail with `ChangedInput` until folder trust is renewed. The read-only Workspace bind includes `.env`, so a Git memory-corruption bug triggered by a hostile pack could emit Workspace bytes through the bounded output channel, the only exit because there is no network. Encodings are offline-tested only; live evidence is listed in [next steps](../../NEXT_STEPS.md).
+
+Whole-project Search accepts named regular files through the checked opened handle; directory enumeration never reads file contents. YAML and JSON Schema compilation runs only inside the killable Guard. Guard failure receipts contain only compiled stage labels and must fit the 128-byte minimum result budget.
 
 ## Limits and failure behavior
 
@@ -222,6 +232,20 @@ Commands and MCP receive a fresh checked snapshot of the selected Workspace, inc
 
 macOS uses private physical paths rather than a mount namespace. The command's working directory lies inside its project snapshot. Standalone argv paths rooted at `/workspace`, `/scratch`, `/cache`, `/inputs`, `/skills` or `/programs` map into private storage, and copied-program aliases apply to copied executables. Shell strings are not rewritten; scripts use `ARANY_TOOL_WORKSPACE`, `ARANY_TOOL_INPUTS`, `ARANY_TOOL_SKILLS` or project-relative paths. `HOME` and `TMPDIR` point to private scratch. Checked system binaries execute at their original paths because native relocation is not universally supported.
 
+On macOS, absolute traversal opens intermediate directories with search-only descriptors and only the selected final directory readably, because a readable ancestor would expose sibling listings.
+
+Canonicalized selected roots reject strict descendant targets in the `getfsstat` mount table before Seatbelt and before Ready/GO. This is a point-in-time check, not a lifetime guarantee.
+
+Non-spawning file and Skill workers reset and unblock `SIGXCPU` and install hard CPU expiry before Seatbelt prohibits changes; commands and MCP rely on external CPU supervision. Denial is attested before GO, so no payload runs under a partially installed profile. The profile denies sysctl access, named socket creation, network operations and descriptor-bearing messages. Inherited bootstrap ports are cleared before payload exec, and `NOSUID` alone does not strip signed entitlements.
+
+System executables are revalidated per catalogue entry through no-follow handles (root ownership, non-writable and non-set-ID mode, device and inode, size and timestamps) opened relative to pinned `/bin` and `/usr/bin` handles. A signature verdict is reused only for the same path and an identical metadata stamp, and is never persisted.
+
+Unit membership is observed through bounded kernel metadata, never process arguments or environments. Memory is measured as aggregate physical footprint plus live thread count; resident size omits compressed and swapped pages, so a missing live observation fails closed. Cleanup requires an exact-target `bootout` that succeeds or reports absence, then positive emptiness, even after one-use retirement.
+
+Cleanup terminates and positively empties the payload coalition before detaching either disk image, including during preparation unwinds. It never removes a mounted or uncertain control root and never sweeps roots by filename prefix; deletion needs positive ownership and device or mount evidence. The unfinished-attachment marker is created immediately before attachment, after image creation and validation, and backing image inodes are pinned before attachment.
+
+Debug builds with an explicit account root and `ARANY_TEST_GUARD_TRACE` may record Guard stage snapshots for fixtures: one fixed record per compiled stage, at most 128 bytes each and 8 KiB in aggregate, each `active`, `complete` or `interrupted`. Repeated observations overwrite their stage, so the trace is a snapshot, not a log. Capture failures never change Tool outcomes, and records never reach Events, Provider context, telemetry or the development log.
+
 ## Shared native capacity and settings
 
 Linux and macOS coordinate Guard capacity across processes and Session roots through the effective user's fixed account root. The owner-only file `guard/limits.json` is created on first native admission with:
@@ -236,6 +260,8 @@ Every Guard unit, including file-only units, reserves one slot before native lau
 
 When capacity is occupied, the approved Tool remains pending in its Run. Up to `queued` Tools register in one shared FIFO ordered by registration under the namespace lock; newcomers cannot overtake registered waiters. Cancellation, original intent expiry and process death remove a participant's position. Overflow rejects before effects. Waiting never renews an intent, approval or Run budget, is not a durable queue, and restart never resumes old permissions. There is one pending Tool per Run. The [terminal contract](./terminal.md#conversation-progress-and-history) owns the temporary queued indication. Native recovery keeps its 30-second deadline within the original intent lifetime; local filesystem bounds remain cooperative, not hard-real-time guarantees.
 
+Coordination records are no-follow, owner-checked, mode-checked, ACL-checked, single-link and bounded. Coordination creates no database or history records, and admission never creates canonical Events; wait hints use the existing callback. Reaping in `Drop` never bypasses the attempt and deadline budget. Preparing without a committed identity authorizes only removal of an empty directory. macOS control roots count against capacity independently of reservations, with UUIDs deduplicated.
+
 ### Linux host seed ownership
 
 Every new host seed retains its reservation from creation until checked deletion. Normal completion leaves no seed or stale reservation. After controller death, the next admission recovers owned storage before releasing capacity, without replaying the effect. Failed deletion, identity uncertainty and ambiguous native launch keep the charge. A new boot settles old processes but not file deletion. Recovery resets a positively identified failed unit before retirement; a missing or not-loaded unit cannot settle an interrupted launch, so that reservation can exhaust capacity until positive native evidence or a later boot permits recovery. Linux reservations use version 2; macOS remains version 1. A locked lease owns one bounded seed record and at most one publication temporary; the planned location is committed before exclusive creation and the directory identity before copying payload. A dead preparation without a committed identity permits only empty-directory removal. Launch-requested precedes launcher invocation, and positive native termination precedes recursive deletion. Deletion rejects links, mounts, foreign ownership, unsafe permissions and replacements; incomplete cleanup retains its slot and prevents completion. Historical unrecorded roots need the [one-time maintenance procedure](../tools.md#historical-linux-seed-maintenance), with Arany stopped, positive native inactivity and authorization of exact inventoried objects; reboot is the fallback for uncertain inactivity. A name prefix never authorizes removal, and normal admission neither migrates nor deletes unsupported records.
@@ -247,6 +273,10 @@ The first enforcer requires installed non-set-ID, root-owned `/usr/bin/bwrap`, `
 The Guard verifies isolated mount, network, PID, user, IPC and UTS namespaces, dropped capabilities, no-new-privileges, inherited syscall filters and effective limits before releasing a one-use intent. It owns the exact transient unit, invocation and retained cgroup identity, including double-fork and setsid descendants, and verifies termination before accepting completion. Garbage collection of transient units relies on the retained group's empty or removed state. The compiled seccomp deny profile is defense in depth, not a universal syscall allowlist. ARM64's profile is source-supported; native runner evidence is required before claiming platform support.
 
 Byte and entry bounds on synchronous snapshot preparation do not guarantee a finite response from stalled host storage or an uninterruptible kernel operation. Process deadlines and cleanup bound ordinary payload execution; they are not hard-real-time or kernel-failure guarantees. Native file preconditions do not make a multi-file transaction or exclude concurrent hostile host mutation.
+
+Before Ready and again after GO, the Linux Guard parses `/proc/self/mountinfo` and requires a private root and exactly one private entry per selected runtime mount, with no propagation fields, stacked entries or descendant mounts. Read-only binds import source submounts recursively, so admitted mount sources are checked with that import in mind.
+
+After a typed Git read, only the digest-rechecked pinned Git runs, and every other namespace process stops before the receipt.
 
 ## Acceptance scenarios and evidence owners
 

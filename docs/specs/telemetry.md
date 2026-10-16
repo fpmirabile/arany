@@ -17,6 +17,8 @@ Editing constraints: [security rules](../../agents/security.md).
 - A segment that a cancelled Run leaves open exports the Run's `cancelled` outcome with Goal status `running`. No Goal span reports a cancelled Goal status. Terminal attributes are the closed status, provider-call count, known token usage, an unknown-usage flag and active and uncertain time. A later Run or explicit resume starts another segment, because trace context is not persisted. Event markers are capped by the SDK's 32-event span limit and remain lossy.
 - A Provider span succeeds only when its response passes Engine semantic and usage validation. Invalid outcomes and usage overflow receive a closed `error.type` class.
 
+A Provider span of a child aborted by its parent closes as `cancelled`. `abandoned` is reserved for an unknown terminal state.
+
 ## Export bounds
 
 - One batch worker runs with fixed queue, batch, body, request and shutdown bounds. A full queue drops spans, and the Engine never waits on export.

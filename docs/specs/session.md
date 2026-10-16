@@ -20,6 +20,8 @@ Editing constraints: [security rules](../../agents/security.md).
 - Titles: `SessionView.title` keeps the canonical creation or rename text; the readable name is a projection needing no rename Event. Replay keeps explicit-title provenance, including deliberate placeholder-looking names. Discovery uses the first completed primary summary as a bounded generated title unless creation or an explicit rename supplies a non-placeholder name, then falls back to the first objective or empty. Times come from canonical Event timestamps; titles add no Provider call or canonical rename.
 - Attached resume keeps configured defaults. Without an explicit selection it recovers the latest Run's tuple, then the current user default; an account-only selection restores only its same-account tuple. Inheritance is persisted before switching, and collaboration policy is preserved. Replay and preferences never authorize a replaced account or a billing fallback.
 
+A fork lookup is a hint only. Its parent is loaded and strictly replayed before any Event is disclosed.
+
 ## Session commands
 
 - Bare `arany` opens a local unsaved conversation. Attached startup, `/new` and `/clear` create its durable Session only at the first task submission after local selection validates. Local commands, setup, rename, model changes and draft edits keep it unsaved; exit or resume discards it without Events or a resumable ID.
@@ -49,6 +51,8 @@ Each Run pins one collaboration policy before it starts. `SessionDefaultChanged`
 - Cross-Session Memory is a different product: Session history never silently becomes durable Memory.
 - A step declares its model Tool requests on its `ToolRequested` record. `ToolStarted` needs a declared request not yet started, a continuation needs every declared request observed, and a compaction prefix ends on a whole step, counting model Tools only.
 
+Context compilation is a pure function of its inputs. It reads no clock, randomness or Provider-hosted state.
+
 ## Persistence facts
 
 - Every canonical Event carries `session_id`; Run and AgentRun scopes are optional where an Event is Session-only. Session lists may use rebuildable indexes, never as a second source of truth.
@@ -62,6 +66,8 @@ Each Run pins one collaboration policy before it starts. `SessionDefaultChanged`
 - `AssistantDisplayRecorded` is a display-only, primary or call-scoped Event. Replay enforces sequential byte offsets, legal active call phases and the terminal contract's per-Run bytes, items and chunk bounds, including at most one compiled detail-limit cue. It never supplies `MessageCommitted`, Agent results, Provider context or compaction items. An accepted primary result must match every checkpoint of its final call; delegation and Tool calls cannot accept answer checkpoints. Only primary planning and synthesis calls receive the coalescing preview, and its 64 display Event slots are reserved before disclosure. Cancellation flushes only credential-safe text; invalid, rejected or over-limit candidates are withdrawn. Cancelled or interrupted replay exposes these facts as incomplete, and a failed validation hides the candidate. Explicit JSONL export retains the qualified facts.
 - History, titles, fork lineage and snapshots are sensitive derived state. Resume never promotes them to authority, and Provider state cannot be the only recovery path.
 - Attached draft preflight reads Workspace input locally before Session materialization, with no Events, disclosure or Tool authority; it does not replace fresh Run admission.
+
+SQLite opens with no-follow and defensive settings, `trusted_schema` off, rollback journaling, `synchronous=EXTRA`, a 250 ms busy timeout and the declared page cap. Read-only inspection creates no file, directory or journal. One owner thread serves a bounded channel of 64 requests; a closed channel is a store failure, never a successful append. Provider evidence tables are derived caches, never Events: malformed or future-dated rows are unavailable.
 
 ## Acceptance scenarios and evidence owners
 

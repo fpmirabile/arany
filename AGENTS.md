@@ -25,7 +25,7 @@ Everything else (agent loop, wire formats, defaults, permission modes, hooks, ag
 
 ## Rules to load before editing
 
-**Documentation ownership.** `agents/` holds general working practice only. `docs/specs/<domain>.md` is the only home of behavior, decisions, limits and scenarios; load a spec only when the task changes, fixes or verifies that behavior, and read its scenarios first. Implementation invariants and pitfalls the code does not show live in `//!` module docs and `///` item docs, which load when the file opens. State each fact in one home and link elsewhere. A separate unit of work, such as a split-out crate, gets its own `agents/<unit>.md`; a module in the single crate does not.
+**Documentation ownership.** `agents/` holds general working practice only. `docs/specs/<domain>.md` is the only home of behavior, decisions, limits and scenarios; load a spec only when the task changes, fixes or verifies that behavior, and read its scenarios first. Implementation invariants live in the tests that pin them. State each fact in one home and link elsewhere. A separate unit of work, such as a split-out crate, gets its own `agents/<unit>.md`; a module in the single crate does not.
 
 | Task or boundary | Read |
 |---|---|
@@ -51,7 +51,7 @@ Open only the linked files whose triggers apply; they are not automatic imports.
 ## Global rules
 
 1. **English only**: all repository content, including code, comments, documentation, configuration, user-facing copy, commit messages and public API names.
-2. **Minimal comments**: default to none; add one short comment when the reason is non-obvious. Architectural reasoning belongs in the design document or ADR.
+2. **Minimal comments**: default to none; add short `//` lines only for a non-obvious reason beside its code. No `//!` or multi-line doc blocks in internal code: behavior belongs in specs, implementation invariants in tests. Architectural reasoning belongs in design documents or ADRs.
 3. **Deep modules**: keep interfaces small and hide complexity inside the implementation. Prefer in-process calls. Add a seam only with two adapters or when privilege, process, release or ownership isolation requires it. No speculative frameworks, traits or configuration.
 4. **Explicit resource bounds**: queues, buffers, caches, request bodies, decompression, stdout/stderr, tool output, artifacts, concurrency, and retry counts have declared limits and overflow behavior. Goal usage follows its pinned settings ([defaults](./docs/specs/goals.md#lifecycle-budgets-and-recovery)); this never removes finite per-action, storage, request, Tool and platform bounds.
 5. **No historical residue**: remove superseded code cleanly. During pre-beta, keep one current internal format without compatibility readers, automatic migrations or relocation fallbacks. Reject unsupported stored formats without changing their data; external protocol support stays with its owning contract. Documentation describes the current system; git history records the old one.
@@ -60,11 +60,11 @@ Open only the linked files whose triggers apply; they are not automatic imports.
 
 ## Auto-learning
 
-Record a newly found invariant, recurring failure mode or ownership decision once, in the same change: behavior, limits and decisions in the owning spec ([spec workflow](./docs/specs/README.md)); an implementation pitfall as a `//!` or `///` doc on the code it guards; a working practice in its general rule. Fix misleading guidance instead of duplicating it; add no task transcripts, check logs or facts readable from code.
+Record a found invariant, recurring failure or ownership decision once, in the same change: behavior, limits and decisions in the owning spec ([spec workflow](./docs/specs/README.md)); an implementation invariant as a test, or a non-obvious reason as one `//` line beside its code; a working practice in its general rule. Fix misleading guidance instead of duplicating it; add no task transcripts, check logs or facts readable from code.
 
 ## Module boundaries
 
-Read the [system overview](./docs/architecture/system-overview.md#2-runtime-architecture) and the affected module's `//!` docs before changing a boundary; the overview owns package and process shape, dependency direction and state ownership.
+Read the [system overview](./docs/architecture/system-overview.md#2-runtime-architecture) and the relevant module rules before changing a boundary; the overview owns package and process shape, dependency direction and state ownership.
 
 Create a module only once it has depth; a crate needs measured dependency, release, privilege, ownership or compile pressure. Add a daemon only for a second Client or detached execution. Effectful Tools require deterministic Policy and the separate Guard.
 

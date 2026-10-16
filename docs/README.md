@@ -10,7 +10,7 @@ Start with the task, then read the owning contract and editing rules. [AGENTS.md
 | Human contribution workflow, issues and pull requests | [Contribution guide](../CONTRIBUTING.md) |
 | Shared development commands and prerequisites | [Development guide](./development.md) |
 | Shared development rules and conditional loading | [AGENTS.md](../AGENTS.md) |
-| Implementation invariants and pitfalls the code does not show | `//!`/`///` docs on the owning Rust file; fixture procedures in [testing details](../agents/references/testing-details.md) |
+| Implementation invariants and pitfalls | Tests that pin them; a one-line `//` comment only for a non-obvious reason beside the code; fixture procedures in [testing details](../agents/references/testing-details.md) |
 | Agreed observable product behavior | [Domain specs](./specs/README.md); every domain has one |
 | Physical architecture, data model and dependency direction | [System overview](./architecture/system-overview.md) |
 | Architectural decisions, reasons and trade-offs | [Decision register](./research/next-step-decision-register.md), or a focused ADR when warranted |

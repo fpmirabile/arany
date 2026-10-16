@@ -132,7 +132,7 @@ current private file layout; this document does not mirror the repository tree.
 | Tool admission, Policy and dispatch | [Tools](../../src/tools.rs) | [Tool spec](../specs/tools.md) |
 | Separate native effect enforcement | [Guard](../../src/tools/guard.rs) | [Tool spec](../specs/tools.md) |
 | Canonical SQLite and private records | [Store](../../src/store.rs) | [Execution spec](../specs/execution.md#admission-persistence-and-recovery) |
-| Shared no-follow and ACL admission | [Private filesystem](../../src/private_fs.rs) | The `//!` docs of `src/private_fs.rs` |
+| Shared no-follow and ACL admission | [Private filesystem](../../src/private_fs.rs) | [Credentials spec](../specs/credentials.md#account-scope-and-identity) |
 | Semantic presentation and terminal ownership | [Presentation](../../src/presentation.rs), [terminal](../../src/terminal.rs) | [Terminal spec](../specs/terminal.md) |
 | Lossy export and private failure inspection | [Telemetry](../../src/telemetry.rs), [diagnostics](../../src/diagnostics.rs) | [Telemetry spec](../specs/telemetry.md), [Diagnostics spec](../specs/diagnostics.md) |
 | Product acceptance and Engine evidence | [Session journey](../../tests/session_run.rs), [Engine corpus](../../tests/engine_run.rs) | [Testing](../../agents/testing.md) |
@@ -266,7 +266,7 @@ The sole connection opens no-follow in a private owner-verified local state dire
 
 ## 8. Terminal presentation
 
-[The terminal spec](../specs/terminal.md) owns modes, layout, keys, draft retention, selectors, setup presentation, paste, accessibility, process channels and acceptance scenarios. Clipboard and image rules live in its [paste and attachments](../specs/terminal.md#paste-and-attachments) section; implementation invariants live in the code's `//!` docs.
+[The terminal spec](../specs/terminal.md) owns modes, layout, keys, draft retention, selectors, setup presentation, paste, accessibility, process channels and acceptance scenarios. Clipboard and image rules live in its [paste and attachments](../specs/terminal.md#paste-and-attachments) section; implementation invariants live in tests.
 
 `presentation.rs` maps committed SessionView/RunView facts to bounded semantic rows and append-only lines. The private terminal module owns the primary-screen viewport, Composer, history index, raw/canonical readers, keys, focus, mouse and one RAII lifecycle owner. None of these presentation types enters the Engine.
 

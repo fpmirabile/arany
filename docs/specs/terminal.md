@@ -29,6 +29,8 @@ An unavailable stderr sink never turns error reporting or cleanup into a panic, 
 
 Human output escapes or rejects ANSI/ECMA-48 controls, OSC sequences, C0/C1 controls, carriage return, backspace, bidirectional controls and forged line prefixes. JSONL comes only from a serializer, one object per line. Inline chat reserves one blank row above the transcript when at least five history rows fit, so a sticky command header cannot cover the first speaker label; with four or fewer history rows, content takes priority. Linear and deterministic output is unstyled and contains no CSI, OSC or carriage-return rewriting.
 
+Cursor-position queries travel only through the stderr backend and the sole raw reader. Unsolicited responses are discarded, and query bytes never enter drafts, stdout or history. Classic clearing starts at the owned viewport and never clears settled primary-screen output; cleanup uses the stored owned area and never queries a stopped reader.
+
 ## Conversation, progress and history
 
 A Tool waiting for shared Guard capacity shows `queued · waiting for capacity` in classic, fullscreen and linear mode. The one-slot hint follows the current committed pending intent, clears when waiting or the Run ends, and never enters Events, history, replay or Provider context. It grants no authority and does not resume after restart; draft editing and Ctrl+C stay available.
@@ -68,6 +70,8 @@ Preparing is transient admission feedback, not an Event or proof of inference; l
 
 Status prioritizes interaction state and model, adds Provider from 50 columns, and shows a recognizable title when space permits. Terminal outcomes return to ready. Request-size metrics appear only in explicitly requested `/status` details. Older-history navigation may take priority at narrow widths; actionable notices can occupy the row. Active `/status` explains its rounded local request-size percentage, counts agents with a singular or plural label, points to `/agents`, and includes chat, instructions, files and images. It measures the pinned Arany content budget, including encoded images; it is not a Provider context-window percentage. Model tokens show only recorded Provider usage, with unknown values labeled unknown. Agent details identify input and output tokens of the last recorded call. Clipped printable ASCII model IDs keep both ends. The composer, `/status`, resume feedback, human export headings and discovery share one generated title, with explicit-title precedence; canonical title Events stay unchanged. Resume feedback names the conversation, not its UUID.
 
+History rows derive only from the caller's loaded committed `SessionView`; indexing, search and drawing never read State, Workspace, credentials or Providers. During an active Run, `/status`, `/provider` and `/model` report only facts committed before its submission boundary.
+
 ## Draft editing and submission
 
 Inline edits operate on whole graphemes and keep the caret on a grapheme boundary. Insertion, deletion and wrapping preserve accepted bytes except explicit editing and paste newline normalization. Long drafts wrap into at most four visible rows around the caret; the heading identifies a clipped window. Growth clips activity before input and status.
@@ -100,6 +104,8 @@ Manual and automatic compaction preserve draft, caret and history through succes
 
 Draft feedback counts graphemes, including accepted whitespace; combined emoji and combining accents count as one. Storage and physical-line admission keep their UTF-8 bounds, so the UI promises no fixed Unicode-character maximum. Capacity errors ask the user to shorten input or paste a smaller section. Human attachment sizes use rounded decimal KB; canonical data and machine exports keep exact bytes.
 
+The sole raw reader keeps reads nonblocking through shutdown, so signal-flushed input cannot strand its join. A lone Escape waits at most one poll interval. Key repeats, releases and unowned focus or mouse events are ignored.
+
 ## Interactive commands and completion
 
 The [compiled registry](../../src/terminal/commands.rs) owns exact command names, aliases, argument syntax and availability. Workspace, Provider, Skill or persisted text cannot register or redefine commands. Only an exact lowercase name after a single column-zero slash is command syntax. `//text` submits `/text`; unknown commands give local suggestions without Provider input. No-argument controls accept trailing whitespace and reject extra arguments in every Run state.
@@ -123,6 +129,8 @@ Consent shows a compact question, the full sanitized folder path, a brief explan
 Inline Shift+Tab cycles Auto edits, Request approvals and Auto approval for trusted or enabled Tools, without changing draft, caret or a pending immutable intent; the composer names the mode. A pending effect shows its complete sanitized action in a paged vertical Deny / Allow once panel, initially Deny. Enter accepts only after all pages; Escape denies; Ctrl+C keeps whole-Run cancellation. Linear mode announces a literal one-use allow or deny question; empty Enter denies. Escape from initial folder consent closes the dialog without saving trust; chat stays read-only unless explicit `--tools` supplies a supported private configuration.
 
 Inline `@` at a whitespace boundary opens bounded local file and directory suggestions. Typing searches project names and relative paths case-insensitively, including nested paths; exact names and prefixes rank first. Empty queries show the selected folder's immediate entries. Up/Down selects; Tab or Enter inserts a quoted file mention without sending. Enter inserts a trailing-slash directory reference; Tab enters that directory. Escape retains the draft. Discovery is metadata-only and no-follow, excludes protected and generated paths, scans at most 8,192 entries to depth 16 and returns at most 64 deterministic candidates. Reaching the scan bound yields partial suggestions, not a grant or automatic retry. Explicit safe file mentions become bounded include snapshots labeled with their escaped relative path and raw-file SHA-256 at Run admission, at most 16 distinct paths, with no permission grant. Directory references stay objective data for the granted List, Search and Read Tools.
+
+After a deletion, the draft is resegmented: removing separators can merge graphemes or regroup regional indicators, so the caret snaps to the first surviving boundary at or after the deletion point. The Composer's model catalog is bounded and scoped to Provider and account; cached metadata and keystrokes grant no credential or Run authority.
 
 ## Selectors
 
@@ -180,6 +188,8 @@ API-key input disables echo and shows only a character count, never key content;
 
 Rejected linear setup or key characters form a correction-only suffix: Backspace removes them before earlier valid input, and later characters become no choice or key bytes until corrected. Anthropic's optional Console workspace ID is visible text with local validation, not a secret or ambient scope. Linear rejection restores echo and starts a new physical line. The OS store may show its own unlock prompt; Arany makes no OS-store encryption guarantee.
 
+Local history reset validates the database and its three fixed SQLite sidecars before any SQLite access. It snapshots their identities, sizes and modification times under the lease, and rejects any change before removing a file. It clears only those four files, recreates a checked empty database and leaves Session lock files in place.
+
 ## Paste and attachments
 
 Framed Unix inline text paste atomically inserts one bounded valid block into the editable draft, including during admission, work, maintenance and catalog waits. CR and CRLF become LF; tabs stay bytes with four-space visual expansion. Overflow or invalid UTF-8 rejects the entire record. Paste never submits, completes a command or activates a selector; modal pickers ignore it. An unterminated framed record fails terminal ownership closed after the ten-second deadline. Secret and Workspace fields keep separate bounds and explicit Enter. Linear canonical input does not claim safe unframed emulator multiline paste.
@@ -189,6 +199,10 @@ Explicit Ctrl+V, decoded Ctrl+Shift+V or `/paste` requests one bounded OS clipbo
 Linux supports admitted text and PNG through standard Wayland or local X11 clients; compiled routing is not proof of native desktop interoperability. macOS uses a bounded, supervised AppKit pasteboard read, preferring PNG over UTF-8 text and rejecting other advertised image formats, changed generations and excess bytes. AppKit exposes no size check before `dataForType`, so the bound applies to the parent's read of the child's output, and the child may materialize the full payload. The parent runs the `osascript` child in its own process group under the read deadline; cancellation, deadline expiry or excess output kills the group and reaps it before the read returns.
 
 The image contract admits at most four PNGs totaling 192 KiB raw bytes, including image-only submission. An image-only Message has empty user text. Human history shows metadata only; canonical history, forks and explicit JSONL export retain bytes. Compaction is metadata-only: it uses image metadata and prior assistant interpretation, not covered pixels. Overflow rejects a whole image or whole historical turn, never a truncated prefix or a silently lost attachment. Custom routes remain text-only.
+
+Clipboard transports come only from checked local OS metadata: standard Wayland or local X11 clients on Linux, and the checked `osascript` bridge on macOS. A transport is never selected from `PATH`, an external host, an arbitrary command or Provider content. The child receives a cleared environment with only the selected display or runtime variables, never account credentials, network settings or the home directory as configuration. Its process group is owned before any fallible pipe setup, and every exit kills and reaps it. Support checks never read the user's clipboard.
+
+Admitted PNG bytes are kept unchanged, including metadata, without local decompression. Admission checks structure, chunk CRCs and dimensions. Animated PNG and unknown critical chunks reject. Dimension admission is not raster decoding or proof of vision support. Filenames, URLs and terminal image escapes are never admitted.
 
 ## Interruption, suspension and restoration
 

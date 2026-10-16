@@ -43,6 +43,6 @@ Add context where it contributes the failed operation or domain meaning, and rep
 
 ## Comments and public documentation
 
-Prefer clear names and types for what the code does. Preserve concise comments explaining non-obvious invariants, ordering constraints, or tradeoffs. Rustdoc describes how callers use the API, including meaningful errors, panics, side effects, and safety obligations. Document why when that helps callers use the API correctly. Keep architecture rationale in the project's design documents; teaching a language concept does not by itself warrant a source comment.
+Prefer clear names and types for what the code does. Preserve at most one short comment for a non-obvious reason; invariants belong in tests and behavior in specs. Rustdoc describes how callers use the API, including meaningful errors, panics, side effects, and safety obligations. Document why when that helps callers use the API correctly. Keep architecture rationale in the project's design documents; teaching a language concept does not by itself warrant a source comment.
 
 Sources: [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/checklist.html), [trait objects](https://doc.rust-lang.org/book/ch18-02-trait-objects.html), [dyn compatibility](https://doc.rust-lang.org/reference/items/traits.html#dyn-compatibility), [panic or Result](https://doc.rust-lang.org/book/ch09-03-to-panic-or-not-to-panic.html), and [rustdoc examples](https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests.html).

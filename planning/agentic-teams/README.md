@@ -691,5 +691,5 @@ ownership rules and delivery order; the remaining questions are data-dependent:
 - Rejected, oversized, conflicting and cancelled changesets leave the Workspace
   unchanged or in a recorded uncertain state.
 - Unperformed native, live and user checks are reported without claiming
-  support. Accepted behavior moves to specs and code docs, and completed
+  support. Accepted behavior moves to specs and tests, and completed
   execution work is removed from this plan.

@@ -22,6 +22,8 @@ This contract owns Provider selection and pinning, native and custom admission, 
 - Offline fixtures establish neither live support nor an account-level zero-data-retention claim.
 - Attached native choices need no synthetic check; each Run still validates credential identity, workspace, bounded model and effort, and the strict actual response. Native setup selects a low-effort default from the account's catalog without model, effort or cost questions, preferring visible `gpt-5.6-luna` for OpenAI or `claude-sonnet-5-5` then `claude-sonnet-5` for Anthropic, otherwise the first visible row with unknown pricing disclosed. This is an economical preference, not a compatibility claim. `/model` selects model and effort atomically; selecting is staging, never credential or compatibility authority.
 
+An explicit unknown effort is admitted without a compatibility claim and runs one call at a time.
+
 ## Structured outcomes and Tool encoding
 
 - Prefer provider-enforced JSON Schema for `Delegate | Finish`, restricted by typed phase and collaboration policy. Read-only native and custom calls use structured text. Tool-enabled OpenAI and ChatGPT primaries use strict native functions for catalog-available operations and phase-available Finish or Delegate submissions, with `tool_choice: required` and parallel calls disabled. Exactly one completed call maps to the Engine outcome; final text, multiple, unknown or incomplete calls and invalid typed arguments reject with no encoding fallback.
@@ -33,6 +35,12 @@ This contract owns Provider selection and pinning, native and custom admission, 
 - Generated Tool branches and command, Skill and MCP names are restricted to bounded catalog availability. Catalog data never replaces pinned router or Guard authorization.
 - Structured-text decoding follows the [accepted-outcome rules](./execution.md#accepted-outcomes).
 
+Anthropic thinking blocks are opaque: they replay unchanged within a Run, are never interpreted, and are dropped from kept turns when compaction rewrites history.
+
+Changing the decoder, prompts, request encoding, effort mapping, output cap or validation semantics bumps the native and exact-custom check contract versions in the same change; a package version alone does not.
+
+Native adapters validate attachment count, aggregate bytes and objective or history origin before building a request body or egress.
+
 ## Configuration and egress
 
 - An explicit CLI profile and model override trusted Session or user-configuration defaults. There is no compiled model default, Workspace-defined profile or implicit discovery.
@@ -42,6 +50,8 @@ This contract owns Provider selection and pinning, native and custom admission, 
 - Operating-system TLS trust uses Reqwest's platform verifier with chain and server-name checks intact. Certificate and revocation connections the operating system makes during trust evaluation are not Provider destinations and never carry content, files or credentials.
 - Each adapter owns authentication, request encoding, error mapping, usage, privacy and parsing. Endpoint authorization is not content authorization: omitted-input canaries prove withheld data never reaches a payload.
 
+Provider HTTP clients follow no redirects, use no ambient proxy or cookies, and disable automatic protocol retries.
+
 ## Custom destinations and routing
 
 - Native endpoints come from compiled, reviewed profiles. A custom profile lives in trusted user configuration outside the Workspace and names a closed protocol family, exact endpoint and base path, exact model, credential reference, outcome encoding and capability-evidence version. It never accepts arbitrary headers, shell credential commands, redirects, ambient proxies or cross-profile credential reuse.
@@ -50,6 +60,8 @@ This contract owns Provider selection and pinning, native and custom admission, 
 - `CustomProvider::admit` re-reads the exact profile, re-resolves every address, compares fresh evidence and only then reads the selected key; `custom:NAME` Runs use it before Workspace input, and `RunStarted` pins the exact admitted endpoint and evidence fingerprint. The Engine rejects a `custom:` Provider without that provenance before Workspace input; replay treats it as historical evidence, never fresh authorization. Custom calls require positive labelled usage within the cap; their unproven concurrency ceiling is one.
 - Domain DNS answers admit IPv6 only from reviewed allocated ranges; unallocated and reserved ranges fail closed. The allowlist is refreshed against the [IANA global-unicast allocations](https://www.iana.org/assignments/ipv6-unicast-address-assignments) and the [special-purpose registry](https://www.iana.org/assignments/iana-ipv6-special-registry) when a range is needed. Numeric loopback is a separate explicit exception.
 - A future built-in OpenRouter profile is a broker: it pins one reviewed upstream endpoint, requires parameter support, disables fallback, denies data collection, requires ZDR, disables response caching, and records broker and upstream provenance.
+
+Check evidence is an HMAC: it authenticates evidence but does not encrypt history or process memory. Checked library constructors require exact evidence and pin concurrency at one; ordinary constructors and product Runs do not. The declared effort list is part of the evidence fingerprint, and a change to the compiled strict contract invalidates old evidence independently of the configuration version.
 
 ## Usage, provenance and reliability
 
@@ -66,6 +78,8 @@ This contract owns Provider selection and pinning, native and custom admission, 
 - The one-slot `ResponsePreview` observer holds the latest bounded snapshot; complete response, model, usage and outcome checks still decide acceptance. Only attached primary invocations receive a preview.
 - Shared framing admits at most 1 MiB and 8,192 events, requires duplicate-free event JSON within 4,096 nodes and depth 32, requires label and type agreement, and never silently switches media or response encoding. Native and custom streaming use strict SSE media admission; ChatGPT uses its [admitted SSE policy](./chatgpt.md#catalog-checks-and-runs).
 - Custom checks prove streaming for the default and each declared effort before Workspace-bearing use. Live streaming compatibility remains open evidence.
+
+Cancellation drops any buffered streaming tail instead of flushing it.
 
 ## Commands
 
