@@ -1,20 +1,12 @@
 # Local development diagnostics
 
-This contract owns activation, privacy, retention and safe failure metadata. [Execution](./execution.md) owns outcome acceptance; [diagnostic rules](../../agents/diagnostics.md) retain instrumentation constraints.
+This contract owns activation, privacy, retention and safe failure metadata. [Execution](./execution.md) owns outcome acceptance. Editing practice: [diagnosing failures](../../agents/testing.md#diagnosing-failures).
 
 `cargo run` uses this repository's development build; `cargo run --release` uses its optimized build. Development chat and `exec` automatically record runtime failures in `development.log` beneath their admitted Session State directory, outside the Workspace. No flag is required. With an explicit `--state-dir`, that is `STATE_DIR/development.log`; Linux's ordinary default is `$XDG_STATE_HOME/arany/development.log`, or `$HOME/.local/state/arany/development.log` when that variable is absent. This Session path is distinct from the stable OS-user account root. The optimized build does not enable this log.
 
 Admission writes a `DiagnosticsEnabled` marker, so a new process can be distinguished from a log left by an older executable. Failed Provider calls across routes retain the closed phase/disposition/reason; unsuccessful Tools retain their compiled operation, disposition, receipt presence and stopping decision. Failed Runs and compaction, typed Engine Run/compaction errors, selected-account admission and fatal attached/exec/output exits also produce bounded records. Errors before normal Session State admission remain stderr-only: logging does not create state for invalid startup, help, read-only inspection or internal helpers. Expected command-validation feedback and successful calls are not an exhaustive event trace.
 
 Rejected subscription Tool arguments additionally record `tool_arguments`: the compiled operation and numeric shape of its serialized size, path, digest, Read offset/limit, edit/replacement text and command arguments, with validity flags where available. This identifies the relevant field or bound without saving file names, digests, text, programs or argument values. It is metadata about a rejected proposal, not proof that the Tool was dispatched. No automatic replay or retry is introduced.
-
-For a deliberate account retry, start the development executable normally:
-
-```sh
-cargo run --locked
-```
-
-An actual submitted task can consume plan usage. Arany does not retry, switch billing routes, read another harness's credentials or run a preliminary model check. Existing failed journals cannot reconstruct this new diagnostic detail: the log records only subsequent observed failures.
 
 The log distinguishes transport/deadline errors, HTTP rejection, response encoding/length checks, EOF before `response.completed`, stream bounds, SSE framing/JSON/type rejection, `response.incomplete`, a remote failed event, and the local output cap. Completed-response rejection further distinguishes `ResponseEnvelope`, `ResponseModel`, `ResponseStatus`, `ResponseIdentifier`, `ResponseMessage`, `ResponseContent` and `ResponsePhase`. Final-message rejection has four closed causes:
 
