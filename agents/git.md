@@ -44,11 +44,8 @@ Load before running a git command or proposing a git step in a plan.
 
 ## Review before a PR
 
-- Read the complete diff after the last edit.
-- Remove debug output, dead code, commented-out blocks, and untracked TODOs.
-- Run the applicable [repository checks](../docs/development.md#verification) after the final edit; documentation-only work follows its document and skill checks. [Testing rules](./testing.md) own evidence selection and reporting.
-- Confirm every changed line belongs to the approved task.
-- Confirm durable learnings were written to the authoritative documentation.
+- Read the complete diff after the last edit; remove debug output, dead code, commented-out blocks and untracked TODOs, and confirm every changed line belongs to the approved task.
+- Run the targeted [repository checks](../docs/development.md#verification) after the final edit; [testing rules](./testing.md) own evidence selection and reporting.
 
 ## Pull requests
 
