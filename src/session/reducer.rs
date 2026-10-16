@@ -257,6 +257,7 @@ mod goal_recovery_tests {
         );
         assert_eq!(record["disposition"], "succeeded");
         assert_eq!(record["output"], "{}");
+        assert_eq!(record["execution"], "observed; never replay");
         for internal in [
             "\"intent\"",
             "policy_digest",

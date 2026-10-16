@@ -1,5 +1,5 @@
 use super::progress::{ProgressPublisher, append_observed};
-use super::{EngineError, RunCancellation, RunSteering};
+use super::{EngineError, RunCancellation, RunSteering, STORE_ACTION_OVERHEAD};
 use crate::provider::{
     AgentPhase, CompactionItem, CompactionRequest, Finish, HistoryTurn, MAX_REPORTED_INPUT_TOKENS,
     PreviewText, Provider, ProviderFailureClass, ProviderFailureReason, ProviderOutcome,
@@ -23,7 +23,6 @@ use tokio::time::Instant;
 mod children;
 
 const MAX_FINISH_SUMMARY_BYTES: usize = 2 * 1024;
-pub(super) const STORE_ACTION_OVERHEAD: Duration = Duration::from_secs(5);
 const TOOL_CLEANUP_OVERHEAD: Duration = Duration::from_secs(10);
 #[cfg(target_os = "linux")]
 const TOOL_PREPARATION_OVERHEAD: Duration = Duration::from_secs(5);

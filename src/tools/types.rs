@@ -915,11 +915,10 @@ impl ToolContext {
 /// The model-facing call; an internal changeset's source intent digest stays out of model input.
 pub(crate) fn model_call(call: &ToolCall) -> Value {
     let mut value = json!(call);
-    if let ToolCall::ApplyChangeset { .. } = call {
-        value
-            .as_object_mut()
-            .expect("typed call")
-            .remove("source_intent_digest");
+    if let ToolCall::ApplyChangeset { .. } = call
+        && let Some(object) = value.as_object_mut()
+    {
+        object.remove("source_intent_digest");
     }
     value
 }
@@ -1172,4 +1171,28 @@ pub(crate) fn outcome_branch() -> Value {
         json!({"type":"object", "properties":properties, "required":required, "additionalProperties":false})
     }).collect();
     json!({"type":"object", "properties": {"type":{"type":"string","enum":["tool"]}, "call":{"anyOf":branches}}, "required":["type","call"], "additionalProperties":false})
+}
+
+#[cfg(test)]
+mod model_call_tests {
+    use super::*;
+
+    #[test]
+    fn model_call_strips_only_the_changeset_source_digest() {
+        let changeset = ToolCall::ApplyChangeset {
+            source_intent_digest: [7; 32],
+            changeset: CommandChangeset::default(),
+        };
+        let value = model_call(&changeset);
+        assert!(value.get("source_intent_digest").is_none());
+        assert!(value.get("changeset").is_some());
+
+        let read = model_call(&ToolCall::Read {
+            path: "src/main.rs".into(),
+            offset: 0,
+            limit: 32,
+        });
+        assert_eq!(read["operation"], "read");
+        assert_eq!(read["path"], "src/main.rs");
+    }
 }
