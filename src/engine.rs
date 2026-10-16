@@ -316,7 +316,7 @@ impl RunSteering {
         if text.trim().is_empty() {
             return Err(SteeringRefused::Empty);
         }
-        if text.len() > MAX_OBJECTIVE_BYTES {
+        if text.len() + MAX_STEERING_LABEL_BYTES > MAX_OBJECTIVE_BYTES {
             return Err(SteeringRefused::TooLarge);
         }
         let merged_len = state
@@ -2638,6 +2638,15 @@ mod run_steering_tests {
             steering.offer_note("x".repeat(MAX_OBJECTIVE_BYTES + 1)),
             Err(SteeringRefused::TooLarge)
         );
+        // A note that can never fit with its label is TooLarge, not a full Run.
+        assert_eq!(
+            steering.offer_note("x".repeat(MAX_OBJECTIVE_BYTES - MAX_STEERING_LABEL_BYTES + 1)),
+            Err(SteeringRefused::TooLarge)
+        );
+        steering
+            .offer_note("x".repeat(MAX_OBJECTIVE_BYTES - MAX_STEERING_LABEL_BYTES))
+            .expect("the largest single note fits an empty Run");
+        assert!(steering.withdraw_note().is_some());
         steering.offer_note("first".into()).expect("first note");
         steering.offer_note("second".into()).expect("merged note");
         assert_eq!(

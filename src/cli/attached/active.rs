@@ -95,7 +95,8 @@ fn draft_retained_notice(autonomous: bool) -> &'static str {
     }
 }
 
-/// How the attached Run answers a stop request: `/goal pause` waits for a step boundary, Ctrl+C or Escape cancels now.
+/// How the attached Run answers a stop request: `/goal pause` waits for a step boundary; Ctrl+C cancels now,
+/// and in raw-key presentations Escape does too (canonical linear input cannot send Escape).
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ActiveStop {
     Running,
@@ -153,6 +154,25 @@ fn active_escape(
             TerminalInput::Interrupt
         }
         input => input,
+    }
+}
+
+/// The one notice a Run's end shows about retained text. A note that did not return to the
+/// composer is named as dropped, so no notice claims it was kept.
+fn run_end_notice(sent: bool, note_returned: bool, restored: bool) -> Option<&'static str> {
+    if !restored {
+        return Some(if note_returned {
+            "Retained draft, steering note and newer text exceed the draft limit; newer text kept"
+        } else {
+            "Retained draft and newer text exceed the draft limit; newer text kept"
+        });
+    }
+    if sent {
+        Some(STEERING_SENT)
+    } else if note_returned {
+        Some("Steering note withdrawn; draft retained")
+    } else {
+        None
     }
 }
 
@@ -384,27 +404,7 @@ pub(super) async fn submit_objective(
                 {
                     return Ok(RunSubmission::Shutdown("terminal input cleanup failed".into()));
                 }
-                if !restored
-                    && draw_active_snapshot(
-                        terminal,
-                        view,
-                        composer,
-                        user_recorded,
-                        stop,
-                        Some(TerminalNotice::History("Retained draft and newer text exceed the draft limit; newer text kept")),
-                    )
-                    .is_err()
-                {
-                    return Ok(RunSubmission::Shutdown("terminal rendering failed".into()));
-                }
-                let ended_notice = if sent {
-                    Some(STEERING_SENT)
-                } else if withdrawn {
-                    Some("Steering note withdrawn; draft retained")
-                } else {
-                    None
-                };
-                if let Some(notice) = ended_notice
+                if let Some(notice) = run_end_notice(sent, withdrawn, restored)
                     && draw_active_snapshot(terminal, view, composer, user_recorded, stop, Some(TerminalNotice::History(notice)))
                         .is_err()
                 {
@@ -1360,6 +1360,26 @@ mod goal_request_tests {
 #[cfg(test)]
 mod escape_tests {
     use super::*;
+
+    #[test]
+    fn run_end_notice_never_claims_a_dropped_note_was_kept() {
+        assert_eq!(
+            run_end_notice(false, true, false),
+            Some(
+                "Retained draft, steering note and newer text exceed the draft limit; newer text kept"
+            )
+        );
+        assert_eq!(
+            run_end_notice(false, false, false),
+            Some("Retained draft and newer text exceed the draft limit; newer text kept")
+        );
+        assert_eq!(
+            run_end_notice(false, true, true),
+            Some("Steering note withdrawn; draft retained")
+        );
+        assert_eq!(run_end_notice(true, false, true), Some(STEERING_SENT));
+        assert_eq!(run_end_notice(false, false, true), None);
+    }
 
     #[test]
     fn undelivered_note_stays_ahead_of_a_held_draft() {

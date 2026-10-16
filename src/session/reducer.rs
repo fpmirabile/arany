@@ -1980,10 +1980,17 @@ mod goal_replay_tests {
             .expect("nine notes within 8 KiB replay")
             .expect("Session exists");
         assert_eq!(view.runs[0].steering_notes.len(), 9);
-        events.push(note(993));
+        // Nine notes of 800 bytes charge 9 x (800 + 8) = 7272; a 912-byte tenth charges 920 and
+        // reaches exactly 8192, while 913 bytes would charge 921 and reach 8193.
+        events.push(note(912));
+        assert!(
+            SessionView::replay_open(session, &session_with(session, events.clone())).is_ok(),
+            "the Run's notes together reach exactly 8 KiB with labels"
+        );
+        events.push(note(913));
         assert!(
             SessionView::replay_open(session, &session_with(session, events)).is_err(),
-            "the Run's notes together stay within 8 KiB"
+            "one more byte exceeds the Run's bound"
         );
     }
 
