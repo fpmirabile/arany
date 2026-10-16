@@ -3,7 +3,7 @@ use crate::session::input::{InputError, WorkspaceInputs};
 use crate::session::{
     AgentRole, AgentRunId, CollaborationPolicy, CompiledContext, Event, GoalBudget, GoalId,
     GoalPhase, GoalPlanContract, GoalReport, GoalStatus, GoalUsage, MAX_STEERING_CONTEXT_BYTES,
-    MAX_STEERING_LABEL_BYTES, MAX_USER_MESSAGE_BYTES as MAX_OBJECTIVE_BYTES, RunConfig, RunId,
+    MAX_STEERING_LABEL_BYTES, MAX_STEERING_NOTE_BYTES, MAX_USER_MESSAGE_BYTES, RunConfig, RunId,
     RunView, SessionId,
 };
 use crate::store::{SessionRunLock, StateRoot, Store, StoreError, WorkspaceRunLock};
@@ -318,7 +318,7 @@ impl RunSteering {
         if text.trim().is_empty() {
             return Err(SteeringRefused::Empty);
         }
-        if text.len() + MAX_STEERING_LABEL_BYTES > MAX_OBJECTIVE_BYTES {
+        if text.len() + MAX_STEERING_LABEL_BYTES > MAX_STEERING_NOTE_BYTES {
             return Err(SteeringRefused::TooLarge);
         }
         let merged_len = state
@@ -326,7 +326,7 @@ impl RunSteering {
             .as_ref()
             .map_or(0, |waiting| waiting.len() + NOTE_SEPARATOR.len())
             + text.len();
-        if state.run_bytes + merged_len + MAX_STEERING_LABEL_BYTES > MAX_OBJECTIVE_BYTES {
+        if state.run_bytes + merged_len + MAX_STEERING_LABEL_BYTES > MAX_STEERING_NOTE_BYTES {
             return Err(SteeringRefused::RunFull);
         }
         match state.waiting.as_mut() {
@@ -368,7 +368,7 @@ impl RunSteering {
     pub(crate) fn take_note(&self) -> Option<String> {
         let mut state = self.lock()?;
         let fits = state.waiting.as_ref().is_some_and(|text| {
-            state.run_bytes + text.len() + MAX_STEERING_LABEL_BYTES <= MAX_OBJECTIVE_BYTES
+            state.run_bytes + text.len() + MAX_STEERING_LABEL_BYTES <= MAX_STEERING_NOTE_BYTES
         });
         if !fits {
             return None;
@@ -2161,7 +2161,7 @@ impl<P: Provider + 'static> Engine<P> {
             }
             return Err(EngineError::GoalBudgetExhausted);
         }
-        // Run start covers the Goal lifecycle, the first action's envelope and the image message envelope; each later action admits its own.
+        // Run start reserves the GoalStarted objective envelope, the MessageAccepted objective and image envelopes, the Goal lifecycle and the first action; each later action admits its own.
         let previews = progress.as_ref().is_some_and(RunProgress::previews_enabled);
         let event_slots =
             13 + if previews {
@@ -2583,7 +2583,7 @@ impl<P: Provider + 'static> Engine<P> {
         if (request.objective.trim().is_empty()
             && request.images.is_empty()
             && request.goal.id.is_none())
-            || request.objective.len() > MAX_OBJECTIVE_BYTES
+            || request.objective.len() > MAX_USER_MESSAGE_BYTES
             || !crate::provider::valid_image_collection(&request.images)
             || (request.session_id.is_some() && request.title.is_some())
             || request
@@ -2651,16 +2651,16 @@ mod run_steering_tests {
             Err(SteeringRefused::Empty)
         );
         assert_eq!(
-            steering.offer_note("x".repeat(MAX_OBJECTIVE_BYTES + 1)),
+            steering.offer_note("x".repeat(MAX_STEERING_NOTE_BYTES + 1)),
             Err(SteeringRefused::TooLarge)
         );
         // A note that can never fit with its label is TooLarge, not a full Run.
         assert_eq!(
-            steering.offer_note("x".repeat(MAX_OBJECTIVE_BYTES - MAX_STEERING_LABEL_BYTES + 1)),
+            steering.offer_note("x".repeat(MAX_STEERING_NOTE_BYTES - MAX_STEERING_LABEL_BYTES + 1)),
             Err(SteeringRefused::TooLarge)
         );
         steering
-            .offer_note("x".repeat(MAX_OBJECTIVE_BYTES - MAX_STEERING_LABEL_BYTES))
+            .offer_note("x".repeat(MAX_STEERING_NOTE_BYTES - MAX_STEERING_LABEL_BYTES))
             .expect("the largest single note fits an empty Run");
         assert!(steering.withdraw_note().is_some());
         steering.offer_note("first".into()).expect("first note");
@@ -2687,7 +2687,7 @@ mod run_steering_tests {
         assert_eq!(steering.delivered_notes(), 1);
 
         let taken =
-            "x".repeat(MAX_OBJECTIVE_BYTES - "one\n\ntwo".len() - 2 * MAX_STEERING_LABEL_BYTES);
+            "x".repeat(MAX_STEERING_NOTE_BYTES - "one\n\ntwo".len() - 2 * MAX_STEERING_LABEL_BYTES);
         steering
             .offer_note(taken.clone())
             .expect("fills the Run bound");
@@ -2699,7 +2699,7 @@ mod run_steering_tests {
         );
         steering.begin_run();
         steering
-            .offer_note("x".repeat(MAX_OBJECTIVE_BYTES - MAX_STEERING_LABEL_BYTES))
+            .offer_note("x".repeat(MAX_STEERING_NOTE_BYTES - MAX_STEERING_LABEL_BYTES))
             .expect("a new Run has its own byte quota");
         assert!(steering.take_note().is_some());
         steering.note_recorded();
@@ -2721,7 +2721,10 @@ mod run_steering_tests {
             assert!(steering.take_note().is_some());
             taken += 1;
         }
-        assert_eq!(taken, MAX_OBJECTIVE_BYTES / (1 + MAX_STEERING_LABEL_BYTES));
+        assert_eq!(
+            taken,
+            MAX_STEERING_NOTE_BYTES / (1 + MAX_STEERING_LABEL_BYTES)
+        );
         assert_eq!(
             steering.offer_note("n".into()),
             Err(SteeringRefused::RunFull),
@@ -2733,7 +2736,7 @@ mod run_steering_tests {
     fn run_steering_take_reserves_quota_and_poisoned_lock_fails_closed() {
         let steering = RunSteering::new();
         steering
-            .offer_note("x".repeat(MAX_OBJECTIVE_BYTES - MAX_STEERING_LABEL_BYTES))
+            .offer_note("x".repeat(MAX_STEERING_NOTE_BYTES - MAX_STEERING_LABEL_BYTES))
             .expect("within quota");
         assert!(steering.take_note().is_some());
         assert_eq!(

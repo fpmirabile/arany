@@ -7,7 +7,7 @@ use crate::session::events::{
     AgentRole, AgentRunId, GoalBudget, GoalId, GoalPhase, GoalPlanContract, GoalReport, GoalStatus,
     ProviderCallDisposition, ReplayError, RunId,
 };
-use crate::session::{MAX_STEERING_LABEL_BYTES, MAX_USER_MESSAGE_BYTES};
+use crate::session::{MAX_STEERING_LABEL_BYTES, MAX_STEERING_NOTE_BYTES};
 
 impl SessionView {
     // The event's fields plus the replay prior; a struct would only forward them.
@@ -328,7 +328,7 @@ impl SessionView {
             .last()
             .is_some_and(|tool| tool.observation.is_none());
         if tool_pending
-            || stored_bytes + text.len() + MAX_STEERING_LABEL_BYTES > MAX_USER_MESSAGE_BYTES
+            || stored_bytes + text.len() + MAX_STEERING_LABEL_BYTES > MAX_STEERING_NOTE_BYTES
         {
             return Err(ReplayError::InvalidTransition);
         }

@@ -140,6 +140,17 @@ async fn summary_within_the_serialized_report_budget_is_kept_whole() {
 
 #[tokio::test]
 async fn long_read_only_goal_compacts_only_an_acknowledged_run_prefix() {
+    compact_read_only_goal_prefix("Inspect the bounded file in pages").await;
+}
+
+#[tokio::test]
+async fn prose_objective_at_the_limit_compacts_its_read_only_goal_prefix() {
+    // Prose escapes about 1x; the pinned objective and the first turn each carry it once.
+    let prose = "Review the module and keep its contract. ".repeat(1_600);
+    compact_read_only_goal_prefix(&prose[..64 * 1024]).await;
+}
+
+async fn compact_read_only_goal_prefix(objective: &str) {
     const PAGE_BYTES: usize = 4096;
     const READS: usize = 104;
 
@@ -216,7 +227,7 @@ async fn long_read_only_goal_compacts_only_an_acknowledged_run_prefix() {
     engine
         .enable_tools(env!("CARGO_BIN_EXE_arany").into())
         .expect("admit read-only Tools");
-    let mut input = request(&workspace, "Inspect the bounded file in pages");
+    let mut input = request(&workspace, objective);
     input.include_paths.clear();
     input.goal.budget = Some(arany::GoalBudget {
         max_provider_calls: None,
@@ -264,7 +275,7 @@ async fn long_read_only_goal_compacts_only_an_acknowledged_run_prefix() {
         let input: serde_json::Value =
             serde_json::from_str(&turn.assistant).expect("bounded compaction context JSON");
         let goal = &input["pinned_goal"];
-        assert_eq!(goal["objective"], "Inspect the bounded file in pages");
+        assert_eq!(goal["objective"], objective);
         assert_eq!(goal["project_instructions"], serde_json::Value::Null);
         assert_eq!(goal["includes"], serde_json::json!([]));
         assert_eq!(goal["plan_contract"], serde_json::Value::Null);

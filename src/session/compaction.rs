@@ -4,17 +4,34 @@ use crate::provider::{CompactionItem, HistoryTurn, UnansweredStatus};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
-pub(crate) const MAX_COMPACTION_INPUT_BYTES: usize = 256 * 1024;
+/// The largest serialized compaction input whose adapter request still fits the request ceiling.
+pub(crate) const MAX_COMPACTION_INPUT_BYTES: usize = (crate::provider::MAX_PROVIDER_REQUEST_BYTES
+    - crate::provider::COMPACTION_REQUEST_ENVELOPE_BYTES)
+    / crate::provider::COMPACTION_INPUT_EXPANSION;
 pub(crate) const MAX_COMPACTION_TURNS: usize = 256;
+// The input bound must keep an adapter request within the ceiling at maximum expansion.
+const _: () = assert!(
+    MAX_COMPACTION_INPUT_BYTES * crate::provider::COMPACTION_INPUT_EXPANSION
+        + crate::provider::COMPACTION_REQUEST_ENVELOPE_BYTES
+        <= crate::provider::MAX_PROVIDER_REQUEST_BYTES
+);
+// The pending turn and the previous unchecked turn both fit under the input bound.
+const _: () =
+    assert!(AUTO_COMPACTION_HISTORY_BYTES + 2 * TURN_RESERVE_BYTES <= MAX_COMPACTION_INPUT_BYTES);
+const _: () = assert!(AUTO_COMPACTION_HISTORY_BYTES < MAX_COMPACTION_INPUT_BYTES);
 pub(crate) const MAX_COMPACTION_OUTPUT_TOKENS: u32 = 1024;
 pub(crate) const MAX_COMPACTION_SUMMARY_BYTES: usize = 8 * 1024;
-// The pre-reply footprint needs headroom for this turn and the previous unchecked turn.
-pub(crate) const AUTO_COMPACTION_HISTORY_BYTES: usize = MAX_COMPACTION_INPUT_BYTES
-    - 2 * (super::MAX_USER_MESSAGE_BYTES
-        + super::MAX_STEERING_CONTEXT_BYTES
-        + super::MAX_ASSISTANT_MESSAGE_BYTES
-        + 64
-        + crate::provider::MAX_MESSAGE_IMAGES * crate::provider::MAX_IMAGE_METADATA_BYTES);
+// The attached composer and `arany --prompt` draft bound. Larger objectives can exceed the automatic reserve; they fail closed.
+const ATTACHED_DRAFT_RESERVE_BYTES: usize = 8 * 1024;
+// One turn's worst case: its draft, steering context, assistant answer, separators and image metadata.
+const TURN_RESERVE_BYTES: usize = ATTACHED_DRAFT_RESERVE_BYTES
+    + super::MAX_STEERING_CONTEXT_BYTES
+    + super::MAX_ASSISTANT_MESSAGE_BYTES
+    + 64
+    + crate::provider::MAX_MESSAGE_IMAGES * crate::provider::MAX_IMAGE_METADATA_BYTES;
+// Automatic compaction triggers with room for this turn and the previous unchecked turn.
+pub(crate) const AUTO_COMPACTION_HISTORY_BYTES: usize =
+    MAX_COMPACTION_INPUT_BYTES - 2 * TURN_RESERVE_BYTES;
 
 pub(crate) enum CompactionInputError {
     Empty,
@@ -228,4 +245,15 @@ pub(crate) fn validate_compaction_references(view: &SessionView) -> Result<(), R
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod bound_tests {
+    use super::*;
+
+    #[test]
+    fn automatic_threshold_leaves_room_for_two_attached_draft_turns() {
+        assert_eq!(TURN_RESERVE_BYTES, 49_984);
+        assert_eq!(AUTO_COMPACTION_HISTORY_BYTES, 158_080);
+    }
 }

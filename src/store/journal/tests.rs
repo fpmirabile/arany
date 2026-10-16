@@ -1,4 +1,5 @@
 use super::*;
+use crate::session::EVENT_PAYLOAD_VERSION;
 
 #[test]
 fn append_refuses_event_past_replay_limit() {
@@ -188,16 +189,13 @@ fn failed_insert_drops_hot_projection_before_recovery() {
 }
 
 #[test]
-fn image_message_admission_reserves_the_extra_payload_bytes() {
+fn run_start_admission_reserves_the_current_version_payload_exceptions() {
     assert_eq!(
-        event_payload_limit("MessageAccepted", EVENT_PAYLOAD_VERSION),
-        320 * 1024
+        crate::store::RUN_START_EXTRA_BYTES,
+        event_payload_limit("MessageAccepted", EVENT_PAYLOAD_VERSION)
+            + event_payload_limit("GoalStarted", EVENT_PAYLOAD_VERSION)
+            - 2 * crate::store::MAX_EVENT_BYTES
     );
-    assert_eq!(
-        image_message_extra(true),
-        (320 * 1024 - crate::store::MAX_EVENT_BYTES) as i64
-    );
-    assert_eq!(image_message_extra(false), 0);
     assert_eq!(
         event_payload_limit("MessageAccepted", EVENT_PAYLOAD_VERSION - 1),
         crate::store::MAX_EVENT_BYTES

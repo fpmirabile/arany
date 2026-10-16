@@ -8,7 +8,7 @@ use crate::provider::{compaction_input, outcome_schema, run_input, summary_schem
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-const MAX_REQUEST_BYTES: usize = 512 * 1024;
+const MAX_REQUEST_BYTES: usize = crate::provider::MAX_PROVIDER_REQUEST_BYTES;
 
 pub(crate) fn encode_request(request: &Value) -> Result<Vec<u8>, ProviderError> {
     let body = serde_json::to_vec(request).map_err(|_| ProviderError::Rejected)?;
