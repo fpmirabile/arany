@@ -2675,3 +2675,288 @@ async fn older_paused_goal_is_refused_once_a_newer_goal_is_paused() {
     assert_eq!(outcome.run.objective, "Second paused objective");
     engine.close().await.expect("engine shutdown");
 }
+
+fn steering_note_at(steering: &RunSteering, text: &str) {
+    steering
+        .offer_note(text.into())
+        .expect("steering note offered while its Run is open");
+}
+
+#[tokio::test]
+async fn steering_note_reaches_the_next_primary_call_and_is_journaled_once() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let steering = RunSteering::new();
+    let offer = steering.clone();
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Tool {
+            call: facts_read(),
+            plan_contract: None,
+        },
+        finish_with("noted"),
+    ])
+    .with_before_call(0, move || {
+        steering_note_at(&offer, "use the smaller fixture")
+    });
+    let requests = provider.requests.clone();
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    engine.set_steering(steering.clone());
+    let mut input = request(&workspace, "Read the facts");
+    input.include_paths.clear();
+    let outcome = engine.run(input).await.expect("Run");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    engine.close().await.expect("engine shutdown");
+
+    let calls = requests.lock().expect("requests").clone();
+    assert_eq!(calls.len(), 2);
+    assert!(calls[0].steering_notes.is_empty());
+    assert_eq!(calls[1].steering_notes, ["use the smaller fixture"]);
+    assert_eq!(steering.delivered_notes(), 1);
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    assert_eq!(view.runs[0].steering_notes, ["use the smaller fixture"]);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, Event::GoalSteeringNoteRecorded { .. }))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn steering_note_never_reaches_children_and_is_kept_for_synthesis() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let steering = RunSteering::new();
+    let offer = steering.clone();
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Delegate(Delegate {
+            children: vec!["Inspect facts".into()],
+        }),
+        finish_with("child result"),
+        finish_with("synthesized"),
+    ])
+    .with_before_call(0, move || {
+        steering_note_at(&offer, "keep this for synthesis")
+    });
+    let requests = provider.requests.clone();
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    engine.set_steering(steering);
+    let mut input = request(&workspace, "Check the facts");
+    input.include_paths.clear();
+    input.policy = CollaborationPolicy::Auto {
+        max_active_children: 1,
+    };
+    let outcome = engine.run(input).await.expect("Run");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    engine.close().await.expect("engine shutdown");
+
+    let calls = requests.lock().expect("requests").clone();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[1].phase, AgentPhase::ChildWork);
+    assert!(calls[1].steering_notes.is_empty());
+    assert_eq!(calls[2].phase, AgentPhase::RootSynthesis);
+    assert_eq!(calls[2].steering_notes, ["keep this for synthesis"]);
+}
+
+#[tokio::test]
+async fn undelivered_steering_note_stays_with_the_caller_when_the_run_finishes() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let steering = RunSteering::new();
+    let offer = steering.clone();
+    let provider = ScriptedProvider::new(vec![finish_with("done")])
+        .with_before_call(0, move || steering_note_at(&offer, "too late"));
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    engine.set_steering(steering.clone());
+    let mut input = request(&workspace, "Answer quickly");
+    input.include_paths.clear();
+    let outcome = engine.run(input).await.expect("Run");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    engine.close().await.expect("engine shutdown");
+
+    assert_eq!(steering.delivered_notes(), 0);
+    assert!(steering.withdraw_note(), "the caller still holds the note");
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    assert!(view.runs[0].steering_notes.is_empty());
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.event, Event::GoalSteeringNoteRecorded { .. }))
+    );
+}
+
+#[tokio::test]
+async fn steering_note_is_history_for_a_later_run_and_never_redelivered() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let steering = RunSteering::new();
+    let offer = steering.clone();
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Tool {
+            call: facts_read(),
+            plan_contract: None,
+        },
+        finish_with("first answer"),
+        finish_with("second answer"),
+    ])
+    .with_before_call(0, move || {
+        steering_note_at(&offer, "use the smaller fixture")
+    });
+    let requests = provider.requests.clone();
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    engine.set_steering(steering.clone());
+    let mut first = request(&workspace, "Read the facts");
+    first.include_paths.clear();
+    let first_outcome = engine.run(first).await.expect("first Run");
+
+    let mut second = request(&workspace, "Second question");
+    second.session_id = Some(first_outcome.session_id);
+    second.title = None;
+    second.include_paths.clear();
+    let second_outcome = engine.run(second).await.expect("second Run");
+    assert_eq!(second_outcome.run.status, RunStatus::Finished);
+    engine.close().await.expect("engine shutdown");
+
+    let calls = requests.lock().expect("requests").clone();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(
+        calls[2].history[0].user,
+        "Read the facts\n\nSteering notes the user sent during this Run:\n[1] use the smaller fixture"
+    );
+    assert!(calls[2].steering_notes.is_empty());
+    assert_eq!(steering.delivered_notes(), 1);
+    let (events, _) = replayed(&state_path, second_outcome.session_id).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, Event::GoalSteeringNoteRecorded { .. }))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn pause_waits_for_the_in_flight_call_and_pauses_before_its_tool() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let steering = RunSteering::new();
+    let pause = steering.clone();
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Tool {
+            call: facts_read(),
+            plan_contract: None,
+        },
+        finish_with("never reached"),
+    ])
+    .with_before_call(0, move || assert!(pause.pause(), "first pause"));
+    let requests = provider.requests.clone();
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    engine.set_steering(steering);
+    let mut input = request(&workspace, "Read the facts");
+    input.include_paths.clear();
+    let outcome = engine.run(input).await.expect("paused Run");
+    assert_eq!(outcome.run.status, RunStatus::Cancelled);
+    engine.close().await.expect("engine shutdown");
+
+    assert_eq!(requests.lock().expect("requests").len(), 1);
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.event, Event::ToolStarted { .. })),
+        "the paused Run starts no requested Tool"
+    );
+    assert_eq!(
+        view.goal(outcome.goal_id).expect("Goal").status,
+        arany::GoalStatus::Interrupted
+    );
+}
+
+#[tokio::test]
+async fn pause_keeps_a_finish_returned_by_the_in_flight_call() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let steering = RunSteering::new();
+    let pause = steering.clone();
+    let provider = ScriptedProvider::new(vec![finish_with("finished before pause")])
+        .with_before_call(0, move || assert!(pause.pause(), "first pause"));
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    engine.set_steering(steering);
+    let mut input = request(&workspace, "Answer quickly");
+    input.include_paths.clear();
+    let outcome = engine.run(input).await.expect("Run");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    engine.close().await.expect("engine shutdown");
+}
+
+#[tokio::test]
+async fn pause_between_autonomous_runs_starts_no_next_run() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let steering = RunSteering::new();
+    let pause = steering.clone();
+    // The first Run's Finish is unsatisfied against the planned digest, so the Goal would continue.
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Tool {
+            call: facts_read(),
+            plan_contract: Some(Box::new(facts_plan(facts_digest("v2")))),
+        },
+        finish_with("first pass"),
+        finish_with("never started"),
+    ])
+    .with_before_call(1, move || assert!(pause.pause(), "first pause"));
+    let requests = provider.requests.clone();
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    engine.set_steering(steering);
+    let outcome = engine
+        .run(autonomous_input(&workspace))
+        .await
+        .expect("first pass returns without a next Run");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    engine.close().await.expect("engine shutdown");
+
+    assert_eq!(requests.lock().expect("requests").len(), 2);
+    let (_, view) = replayed(&state_path, outcome.session_id).await;
+    assert_eq!(view.runs.len(), 1);
+    // Like Ctrl+C between Runs, the pause leaves the Goal open for explicit resume.
+    assert_eq!(
+        view.goal(outcome.goal_id).expect("Goal").status,
+        arany::GoalStatus::Interrupted
+    );
+}

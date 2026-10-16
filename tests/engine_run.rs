@@ -4,7 +4,7 @@ use arany::{
     ContextUsage, Delegate, Effort, Engine, EngineError, Event, Finish, ImageAttachment,
     ImageOrigin, OutputTokenBound, Provider, ProviderCallDisposition, ProviderError, ProviderImage,
     ProviderOutcome, ProviderRequest, ProviderResponse, RunCancellation, RunId, RunProgress,
-    RunRequest, RunStatus, SessionId, SessionView, StateRoot, Store, UnansweredStatus,
+    RunRequest, RunStatus, RunSteering, SessionId, SessionView, StateRoot, Store, UnansweredStatus,
     continue_session, fork_session, list_sessions, rename_session, resume_session,
 };
 use sha2::{Digest, Sha256};
@@ -829,7 +829,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                     history: expected_history,
                     context_summary: (index == 4).then(|| "Image conversation summary".into()),
                     child_results, goal_budget: Some(arany::GoalBudget::default()),
-                    goal_plan_contract: None, goal_context_facts: None, max_output_tokens: 4096, tools: None,
+                    goal_plan_contract: None, goal_context_facts: None, steering_notes: Vec::new(), max_output_tokens: 4096, tools: None,
                 }, "image request {index}");
                 if phase == AgentPhase::ChildWork {
                     assert!(facts.is_none(), "child calls do not receive primary Goal state");
@@ -1382,9 +1382,10 @@ fn compaction_is_derived_durable_context_and_failure_keeps_the_prior_summary() {
             (80, 100, 9, false),
             (80, 100, 10, true),
             (100, 100, 10, true),
-            (179_071, 376 * 1024, 179_071, false),
-            (179_072, 376 * 1024, 179_072, true),
-            (179_072, 376 * 1024, 0, false),
+            // The automatic threshold is 162_176: steering headroom (2 x MAX_STEERING_CONTEXT_BYTES) lowered it from 179_072.
+            (162_175, 376 * 1024, 162_175, false),
+            (162_176, 376 * 1024, 162_176, true),
+            (162_176, 376 * 1024, 0, false),
         ] {
             pressure.context_usage = Some(ContextUsage {
                 used_bytes: used,
@@ -1401,7 +1402,7 @@ fn compaction_is_derived_durable_context_and_failure_keeps_the_prior_summary() {
         pressure.context_usage = None;
         assert!(!pressure.auto_compaction_due(), "unknown footprint");
         for (tool_history, bytes, due) in
-            [(1, 179_071, false), (1, 179_072, true), (0, 179_072, true)]
+            [(1, 162_175, false), (1, 162_176, true), (0, 162_176, true)]
         {
             pressure.context_usage = Some(ContextUsage {
                 used_bytes: bytes,
@@ -1895,7 +1896,7 @@ fn compaction_input_limit_rejects_before_provider_egress() {
             16
         ])
         .with_compactions(
-            (0..2)
+            (0..3)
                 .map(|_| {
                     Ok(CompactionResponse {
                         summary: "s".repeat(8 * 1024),
@@ -1913,6 +1914,7 @@ fn compaction_input_limit_rejects_before_provider_egress() {
             .expect("maintained Engine");
         let mut session_id = None;
         let mut maintenance_sequences = Vec::new();
+        // Steering headroom lowers the automatic threshold to 162_176, so each maintenance cycle covers five turns.
         for index in 0..16 {
             let objective = format!("{index:02}{}", "Q".repeat(8 * 1024 - 2));
             let mut next = request(&workspace, &objective);
@@ -1925,11 +1927,11 @@ fn compaction_input_limit_rejects_before_provider_egress() {
             let config = outcome.run.config.as_ref().expect("context footprint");
             assert_eq!(
                 config.auto_compaction_due(),
-                matches!(index, 5 | 11),
+                matches!(index, 4 | 9 | 14),
                 "maintenance must precede an oversized prefix at turn {}",
                 index + 1
             );
-            if matches!(index, 6 | 12) {
+            if matches!(index, 5 | 10 | 15) {
                 assert_eq!(
                     config.compaction_event_sequence,
                     maintenance_sequences.last().copied()
@@ -1969,7 +1971,7 @@ fn compaction_input_limit_rejects_before_provider_egress() {
             }
         }
         let session_id = session_id.expect("maintained Session");
-        assert_eq!(maintenance_sequences.len(), 2);
+        assert_eq!(maintenance_sequences.len(), 3);
         {
             let requests = requests.lock().expect("observed Run requests");
             assert_eq!(requests.len(), 16);
@@ -1986,19 +1988,19 @@ fn compaction_input_limit_rejects_before_provider_egress() {
                 assert!(request.child_results.is_empty());
             }
             let compactions = compactions.lock().expect("observed compactions");
-            assert_eq!(compactions.len(), 2);
+            assert_eq!(compactions.len(), 3);
             for (cycle, request) in compactions.iter().enumerate() {
                 assert_eq!(request.model, "test-model");
                 assert_eq!(request.max_output_tokens, 1024);
                 assert_eq!(request.previous_summary.is_some(), cycle > 0);
-                assert_eq!(request.items.len(), 6);
+                assert_eq!(request.items.len(), 5);
                 for (offset, item) in request.items.iter().enumerate() {
                     let CompactionItem::Completed(turn) = item else {
                         panic!("completed source turn");
                     };
                     assert_eq!(
                         turn.user,
-                        format!("{:02}{}", cycle * 6 + offset, "Q".repeat(8 * 1024 - 2))
+                        format!("{:02}{}", cycle * 5 + offset, "Q".repeat(8 * 1024 - 2))
                     );
                     assert_eq!(turn.assistant, "x".repeat(32 * 1024));
                 }
@@ -2015,7 +2017,7 @@ fn compaction_input_limit_rejects_before_provider_egress() {
             .expect("strict maintained replay")
             .expect("Session");
         assert_eq!(view.runs.len(), 16);
-        assert_eq!(view.compactions.len(), 2);
+        assert_eq!(view.compactions.len(), 3);
         for (index, run) in view.runs.iter().enumerate() {
             assert_eq!(run.status, RunStatus::Finished);
             assert_eq!(

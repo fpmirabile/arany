@@ -28,6 +28,7 @@ fn run_request() -> ProviderRequest {
             summary: "child summary canary".into(),
             result: "child result canary".into(),
         }],
+        steering_notes: Vec::new(),
         max_output_tokens: 4096,
         tools: None,
     }
@@ -842,4 +843,24 @@ fn provider_bound_schemas_carry_no_validation_keywords() {
     }
     request.goal_plan_contract = Some(goal_plan_contract());
     assert_no_schema_bounds(&run_body(&request, Effort::Low), "continued");
+}
+
+#[test]
+fn steering_notes_are_user_input_data_never_system_instructions() {
+    let mut request = run_request();
+    request.steering_notes = vec!["steering canary".into()];
+    let body = run_body(&request, Effort::Max);
+    let system = body["system"].as_str().unwrap();
+    assert!(system.contains(crate::provider::STEERING_INSTRUCTIONS));
+    assert!(!system.contains("steering canary"));
+    assert!(body["messages"].to_string().contains("steering canary"));
+
+    let plain = run_body(&run_request(), Effort::Max);
+    assert!(
+        !plain["system"]
+            .as_str()
+            .unwrap()
+            .contains(crate::provider::STEERING_INSTRUCTIONS)
+    );
+    assert!(!plain["messages"].to_string().contains("steering_notes"));
 }

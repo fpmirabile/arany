@@ -320,7 +320,13 @@ impl SessionView {
             .map(|agent| agent.id)
             .ok_or(ReplayError::InvalidTransition)?;
         let stored_bytes: usize = run.steering_notes.iter().map(String::len).sum();
-        if run.steering_notes.len() >= MAX_GOAL_STEERING_NOTES_PER_RUN
+        // A pending Tool observation means this reservation is a Tool review, not a planning or synthesis call.
+        let tool_pending = run
+            .tools
+            .last()
+            .is_some_and(|tool| tool.observation.is_none());
+        if tool_pending
+            || run.steering_notes.len() >= MAX_GOAL_STEERING_NOTES_PER_RUN
             || stored_bytes + text.len() > MAX_USER_MESSAGE_BYTES
         {
             return Err(ReplayError::InvalidTransition);

@@ -467,6 +467,19 @@ pub struct CompactionView {
 }
 
 impl RunView {
+    /// The objective, then the steering notes the user sent during this Run, as labelled user text.
+    pub(crate) fn history_user_text(&self) -> String {
+        let mut text = self.objective.clone();
+        if !self.steering_notes.is_empty() {
+            text.push_str("\n\nSteering notes the user sent during this Run:");
+            for (index, note) in self.steering_notes.iter().enumerate() {
+                use std::fmt::Write;
+                write!(&mut text, "\n[{}] {note}", index + 1).expect("String formatting");
+            }
+        }
+        text
+    }
+
     pub(crate) fn primary(&self) -> Option<&AgentView> {
         self.agents
             .first()
@@ -1737,62 +1750,75 @@ mod goal_replay_tests {
             .expect("Session exists");
         assert_eq!(view.runs[0].steering_notes, vec!["use the smaller fixture"]);
 
-        let mut before = started();
+        // Every rejected case first proves its prefix is accepted, so the rejection is not vacuous.
+        let prefix = started();
+        assert!(accepts(prefix.clone()));
+        let mut before = prefix;
         before.push(note(goal_id, "before the reservation"));
         assert!(!accepts(before));
 
-        let mut recorded = open();
-        recorded.push(Event::ProviderCallRecorded {
-            run_id,
-            agent_run_id,
-            record: record(
-                AgentPhase::RootPlan,
-                ProviderCallDisposition::Finished,
-                None,
-            ),
-        });
+        let recorded_prefix = {
+            let mut events = open();
+            events.push(Event::ProviderCallRecorded {
+                run_id,
+                agent_run_id,
+                record: record(
+                    AgentPhase::RootPlan,
+                    ProviderCallDisposition::Finished,
+                    None,
+                ),
+            });
+            events
+        };
+        assert!(accepts(recorded_prefix.clone()));
+        let mut recorded = recorded_prefix;
         recorded.push(note(goal_id, "after the call settled"));
         assert!(!accepts(recorded));
 
         let child = AgentRunId::new();
-        let mut child_open = vec![goal_started(goal_id, GoalBudget::default())];
-        child_open.extend(start_run(
-            goal_id,
-            run_id,
-            agent_run_id,
-            config(
-                CollaborationPolicy::Auto {
-                    max_active_children: 1,
-                },
-                false,
-            ),
-        ));
-        child_open.push(Event::GoalProviderCallReserved {
-            goal_id,
-            run_id,
-            agent_run_id,
-        });
-        child_open.push(Event::ProviderCallRecorded {
-            run_id,
-            agent_run_id,
-            record: record(
-                AgentPhase::RootPlan,
-                ProviderCallDisposition::Delegated,
-                None,
-            ),
-        });
-        child_open.push(Event::AgentSpawned {
-            run_id,
-            agent_run_id: child,
-            role: AgentRole::Child,
-            ordinal: 1,
-            objective: Some("inspect the parser".into()),
-        });
-        child_open.push(Event::GoalProviderCallReserved {
-            goal_id,
-            run_id,
-            agent_run_id: child,
-        });
+        let child_prefix = {
+            let mut events = vec![goal_started(goal_id, GoalBudget::default())];
+            events.extend(start_run(
+                goal_id,
+                run_id,
+                agent_run_id,
+                config(
+                    CollaborationPolicy::Auto {
+                        max_active_children: 1,
+                    },
+                    false,
+                ),
+            ));
+            events.push(Event::GoalProviderCallReserved {
+                goal_id,
+                run_id,
+                agent_run_id,
+            });
+            events.push(Event::ProviderCallRecorded {
+                run_id,
+                agent_run_id,
+                record: record(
+                    AgentPhase::RootPlan,
+                    ProviderCallDisposition::Delegated,
+                    None,
+                ),
+            });
+            events.push(Event::AgentSpawned {
+                run_id,
+                agent_run_id: child,
+                role: AgentRole::Child,
+                ordinal: 1,
+                objective: Some("inspect the parser".into()),
+            });
+            events.push(Event::GoalProviderCallReserved {
+                goal_id,
+                run_id,
+                agent_run_id: child,
+            });
+            events
+        };
+        assert!(accepts(child_prefix.clone()));
+        let mut child_open = child_prefix;
         child_open.push(note(goal_id, "for the child"));
         assert!(!accepts(child_open));
 
@@ -1802,19 +1828,120 @@ mod goal_replay_tests {
         full.push(note(goal_id, "fifth"));
         assert!(!accepts(full));
 
+        // Exactly the per-Run byte cap is accepted; one more byte is not.
+        let mut exact = open();
+        exact.push(note(goal_id, &"a".repeat(4 * 1024)));
+        exact.push(note(goal_id, &"b".repeat(4 * 1024)));
+        assert!(accepts(exact.clone()));
         let mut oversized = open();
-        oversized.push(note(goal_id, &"a".repeat(5 * 1024)));
-        oversized.push(note(goal_id, &"b".repeat(4 * 1024)));
+        oversized.push(note(goal_id, &"a".repeat(4 * 1024)));
+        oversized.push(note(goal_id, &"b".repeat(4 * 1024 + 1)));
         assert!(!accepts(oversized));
 
-        let mut finished = open();
-        finished.extend(cancel_run(run_id, agent_run_id));
+        let mut finished_prefix = open();
+        finished_prefix.push(Event::ProviderCallRecorded {
+            run_id,
+            agent_run_id,
+            record: record(
+                AgentPhase::RootPlan,
+                ProviderCallDisposition::Finished,
+                None,
+            ),
+        });
+        finished_prefix.push(Event::AgentFinished {
+            run_id,
+            agent_run_id,
+            disposition: AgentDisposition::Finished,
+            summary: Some("done".into()),
+            result: Some("done".into()),
+        });
+        assert!(accepts(finished_prefix.clone()));
+        let mut between = finished_prefix;
+        between.push(note(goal_id, "between AgentFinished and RunFinished"));
+        assert!(!accepts(between));
+
+        let mut ended_prefix = open();
+        ended_prefix.extend(cancel_run(run_id, agent_run_id));
+        assert!(accepts(ended_prefix.clone()));
+        let mut finished = ended_prefix;
         finished.push(note(goal_id, "after the Run ended"));
         assert!(!accepts(finished));
 
-        let mut other = open();
+        let other_prefix = open();
+        assert!(accepts(other_prefix.clone()));
+        let mut other = other_prefix;
         other.push(note(GoalId::new(), "another Goal"));
         assert!(!accepts(other));
+
+        // A Tool review reserves under the primary id; its pending Tool observation must reject notes.
+        let mut review = SessionView::replay_open(session, &session_with(session, open()))
+            .expect("open reservation replays")
+            .expect("Session exists");
+        let intent = crate::tools::EffectIntent {
+            id: uuid::Uuid::now_v7(),
+            run_id,
+            agent_run_id,
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call: crate::tools::ToolCall::Read {
+                path: "src/main.rs".into(),
+                offset: 0,
+                limit: 32,
+            },
+            limits: crate::tools::ToolLimits::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        };
+        review.runs[0].tools.push(ToolView {
+            intent,
+            observation: None,
+            review_call_index: None,
+            finished_sequence: None,
+        });
+        assert!(
+            review
+                .record_goal_steering_note(&goal_id, &run_id, "during a Tool review")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn history_user_text_labels_notes_within_the_steering_reserve() {
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let session = SessionId::new();
+        let mut events = vec![goal_started(goal_id, GoalBudget::default())];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.push(Event::GoalProviderCallReserved {
+            goal_id,
+            run_id,
+            agent_run_id,
+        });
+        for _ in 0..4 {
+            events.push(Event::GoalSteeringNoteRecorded {
+                goal_id,
+                run_id,
+                text: "n".repeat(2 * 1024),
+            });
+        }
+        let view = SessionView::replay_open(session, &session_with(session, events))
+            .expect("notes replay")
+            .expect("Session exists");
+        let run = &view.runs[0];
+        let text = run.history_user_text();
+        assert!(text.starts_with(&run.objective));
+        assert!(text.contains("\n[4] nnnn"));
+        // The reserve covers every note byte plus its labels and header, so compaction and history agree on size.
+        assert!(text.len() - run.objective.len() <= crate::session::MAX_STEERING_CONTEXT_BYTES);
+        let mut bare = run.clone();
+        bare.steering_notes.clear();
+        assert_eq!(bare.history_user_text(), run.objective);
     }
 
     #[test]

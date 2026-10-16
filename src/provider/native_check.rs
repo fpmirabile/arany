@@ -205,6 +205,7 @@ async fn probe<P: Provider>(provider: &P) -> Result<(), NativeCheckError> {
         goal_plan_contract: None,
         goal_context_facts: None,
         child_results: Vec::new(),
+        steering_notes: Vec::new(),
         max_output_tokens: PROBE_OUTPUT_CAP,
         tools: None,
     };

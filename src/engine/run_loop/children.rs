@@ -311,10 +311,12 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
             .collect::<Option<Vec<_>>>()
             .ok_or(EngineError::CoordinatorFailed)?;
         loop {
+            if self.pause_at_boundary() {
+                return self.fail_known_budget_exhaustion(primary).await;
+            }
             let synthesis_trace =
                 primary.begin_provider(AgentPhase::RootSynthesis, &root_request.model);
-            let (synthesis, active_segment) = match self.invoke_primary(root_request.clone()).await
-            {
+            let (synthesis, active_segment) = match self.invoke_primary(root_request).await {
                 Ok(result) => result,
                 Err(EngineError::GoalBudgetExhausted) => {
                     synthesis_trace.finish_refused();
@@ -365,6 +367,9 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                         },
                     ..
                 }) if valid_response => {
+                    if self.pause_at_boundary() {
+                        return self.fail_known_budget_exhaustion(primary).await;
+                    }
                     if let Some(contract) = plan_contract
                         && !self.admit_plan_contract(root_request, *contract).await?
                     {
@@ -437,6 +442,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 goal_plan_contract: None,
                 goal_context_facts: None,
                 child_results: Vec::new(),
+                steering_notes: Vec::new(),
                 max_output_tokens: OUTPUT_TOKEN_CAP,
                 tools: None,
             };
