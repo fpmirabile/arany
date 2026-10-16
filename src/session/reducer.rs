@@ -1825,17 +1825,21 @@ mod goal_replay_tests {
         let mut full = open();
         full.extend((1..=4).map(|n| note(goal_id, &n.to_string())));
         assert!(accepts(full.clone()));
-        full.push(note(goal_id, "fifth"));
-        assert!(!accepts(full));
+        full.push(note(
+            goal_id,
+            &"f".repeat(crate::session::MAX_USER_MESSAGE_BYTES),
+        ));
+        assert!(!accepts(full), "a Run's notes stay within the byte cap");
 
-        // Exactly the per-Run byte cap is accepted; one more byte is not.
+        // Each note charges its text plus its label, so exactly the per-Run byte cap is accepted.
+        let label = crate::session::MAX_STEERING_LABEL_BYTES;
         let mut exact = open();
-        exact.push(note(goal_id, &"a".repeat(4 * 1024)));
-        exact.push(note(goal_id, &"b".repeat(4 * 1024)));
+        exact.push(note(goal_id, &"a".repeat(4 * 1024 - label)));
+        exact.push(note(goal_id, &"b".repeat(4 * 1024 - label)));
         assert!(accepts(exact.clone()));
         let mut oversized = open();
-        oversized.push(note(goal_id, &"a".repeat(4 * 1024)));
-        oversized.push(note(goal_id, &"b".repeat(4 * 1024 + 1)));
+        oversized.push(note(goal_id, &"a".repeat(4 * 1024 - label)));
+        oversized.push(note(goal_id, &"b".repeat(4 * 1024 - label + 1)));
         assert!(!accepts(oversized));
 
         let mut finished_prefix = open();
@@ -1908,6 +1912,89 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn steering_notes_charge_labels_and_stay_within_the_run_byte_bound() {
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let session = SessionId::new();
+        let mut events = vec![goal_started(goal_id, GoalBudget::default())];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.push(Event::GoalProviderCallReserved {
+            goal_id,
+            run_id,
+            agent_run_id,
+        });
+        let note = |text: &str| Event::GoalSteeringNoteRecorded {
+            goal_id,
+            run_id,
+            text: text.into(),
+        };
+        // One byte of text plus its label is the densest packing the bound allows.
+        let most =
+            crate::session::MAX_USER_MESSAGE_BYTES / (1 + crate::session::MAX_STEERING_LABEL_BYTES);
+        events.extend((0..most).map(|_| note("n")));
+        let view = SessionView::replay_open(session, &session_with(session, events.clone()))
+            .expect("the maximum tiny notes replay")
+            .expect("Session exists");
+        let run = &view.runs[0];
+        assert_eq!(run.steering_notes.len(), most);
+        let text = run.history_user_text();
+        assert!(text.len() - run.objective.len() <= crate::session::MAX_STEERING_CONTEXT_BYTES);
+        events.push(note("n"));
+        assert!(
+            SessionView::replay_open(session, &session_with(session, events)).is_err(),
+            "the next tiny note exceeds the Run's bound with its label"
+        );
+    }
+
+    #[test]
+    fn steering_notes_have_no_count_cap_but_keep_the_run_byte_bound() {
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let session = SessionId::new();
+        let open = || {
+            let mut events = vec![goal_started(goal_id, GoalBudget::default())];
+            events.extend(start_run(
+                goal_id,
+                run_id,
+                agent_run_id,
+                config(CollaborationPolicy::Single, false),
+            ));
+            events.push(Event::GoalProviderCallReserved {
+                goal_id,
+                run_id,
+                agent_run_id,
+            });
+            events
+        };
+        let note = |len: usize| Event::GoalSteeringNoteRecorded {
+            goal_id,
+            run_id,
+            text: "n".repeat(len),
+        };
+        let mut events = open();
+        events.extend((0..9).map(|_| note(800)));
+        let view = SessionView::replay_open(session, &session_with(session, events.clone()))
+            .expect("nine notes within 8 KiB replay")
+            .expect("Session exists");
+        assert_eq!(view.runs[0].steering_notes.len(), 9);
+        // Nine notes of 800 bytes charge 9 x (800 + 8) = 7272; a 912-byte tenth charges 920 and
+        // reaches exactly 8192, while 913 bytes would charge 921 and reach 8193.
+        events.push(note(912));
+        assert!(
+            SessionView::replay_open(session, &session_with(session, events.clone())).is_ok(),
+            "the Run's notes together reach exactly 8 KiB with labels"
+        );
+        events.push(note(913));
+        assert!(
+            SessionView::replay_open(session, &session_with(session, events)).is_err(),
+            "one more byte exceeds the Run's bound"
+        );
+    }
+
+    #[test]
     fn history_user_text_labels_notes_within_the_steering_reserve() {
         let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
         let session = SessionId::new();
@@ -1927,7 +2014,7 @@ mod goal_replay_tests {
             events.push(Event::GoalSteeringNoteRecorded {
                 goal_id,
                 run_id,
-                text: "n".repeat(2 * 1024),
+                text: "n".repeat(2000),
             });
         }
         let view = SessionView::replay_open(session, &session_with(session, events))

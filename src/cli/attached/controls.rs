@@ -602,8 +602,8 @@ pub(super) fn handle_active_submission(
         }
         Ok(Submission::Objective(text)) => return ActiveSubmission::SteeringNote(text.to_owned()),
         Ok(Submission::Command {
-            command: InteractiveCommand::Pause,
-            argument: None,
+            command: InteractiveCommand::Goal,
+            argument: Some("pause"),
         }) => {
             composer.take();
             return ActiveSubmission::Pause;
@@ -731,6 +731,9 @@ pub(super) async fn handle_command(
                 }
                 Err(error) => format!("Error: {error}"),
             }
+        }
+        InteractiveCommand::Goal if argument == Some("pause") => {
+            "No Goal is running; /goal pause works during a Run".into()
         }
         InteractiveCommand::Goal => arany::goal_status(view),
         InteractiveCommand::Fork => {
@@ -890,7 +893,6 @@ pub(super) async fn handle_command(
         InteractiveCommand::Help => {
             return Err("Help requires the terminal command registry".into());
         }
-        InteractiveCommand::Pause => "No Goal is running; /pause works during a Run".into(),
         InteractiveCommand::Permissions => {
             if admission.tools {
                 "Tools requested from private tools.json; native protection must be admitted before a Run. File mutation requires the write grant; command changes are discarded. Primary only; commands/MCP have no network, host home or account state. Arany requests: selected Provider; OS TLS checks may connect separately.".into()
@@ -1082,7 +1084,7 @@ mod tests {
         assert_eq!(composer.text(), "//literal");
 
         composer.clear();
-        for character in "/pause".chars() {
+        for character in "/goal pause".chars() {
             composer.apply(TerminalInput::Character(character));
         }
         assert!(matches!(
@@ -1091,17 +1093,15 @@ mod tests {
         ));
         assert!(
             composer.is_empty(),
-            "/pause is a control, not steering text"
+            "/goal pause is a control, not steering text"
         );
-        for character in "/pause now".chars() {
+        for character in "/goal pause now".chars() {
             composer.apply(TerminalInput::Character(character));
         }
-        let ActiveSubmission::Rejected(notice) =
-            handle_active_submission(&mut composer, &view, starting_sequence)
-        else {
-            panic!("/pause takes no argument")
-        };
-        assert_eq!(notice, "Usage: /pause");
+        assert!(matches!(
+            handle_active_submission(&mut composer, &view, starting_sequence),
+            ActiveSubmission::Notice(ref notice) if notice == "Goal changes are locked for this run; /goal shows status"
+        ));
 
         composer.clear();
         for character in "/provder".chars() {
@@ -1674,12 +1674,12 @@ mod tests {
             &admission,
             &mut session_id,
             &mut view,
-            InteractiveCommand::Pause,
-            None,
+            InteractiveCommand::Goal,
+            Some("pause"),
         )
         .await
         .expect("local notice");
-        assert_eq!(notice, "No Goal is running; /pause works during a Run");
+        assert_eq!(notice, "No Goal is running; /goal pause works during a Run");
     }
 
     #[tokio::test]

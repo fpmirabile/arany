@@ -21,6 +21,7 @@ enum ActiveExit {
     Signal(Signal, &'static str),
     ProviderFailure,
     CtrlC,
+    Escape,
     HelpThenCtrlC,
     TypoThenCtrlC,
     SecondCtrlC,
@@ -318,6 +319,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     let expect_idle = matches!(
         exit,
         ActiveExit::CtrlC
+            | ActiveExit::Escape
             | ActiveExit::HelpThenCtrlC
             | ActiveExit::TypoThenCtrlC
             | ActiveExit::ProviderFailure
@@ -497,6 +499,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             kill_process(product_pid, signal).expect("deliver termination signal");
         }
         ActiveExit::CtrlC => write_input(&input, b"\x03"),
+        ActiveExit::Escape => write_input(&input, b"\x1b"),
         ActiveExit::HelpThenCtrlC => {
             write_input(&input, if inline { b"/help\r" } else { b"/help\n" });
             let stage = match stages.recv_timeout(Duration::from_secs(10)) {
@@ -891,6 +894,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             assert!(transcript.contains("error: forced shutdown after second Ctrl+C"))
         }
         ActiveExit::CtrlC
+        | ActiveExit::Escape
         | ActiveExit::HelpThenCtrlC
         | ActiveExit::TypoThenCtrlC
         | ActiveExit::ProviderFailure => {}
@@ -1103,6 +1107,11 @@ fn ctrl_c_over_active_help_still_cancels_the_run() {
     for inline in [true, false] {
         active_exit_during_provider_call(ActiveExit::HelpThenCtrlC, inline);
     }
+}
+
+#[test]
+fn escape_during_classic_provider_call_cancels_and_leaves_the_goal_paused() {
+    active_exit_during_provider_call(ActiveExit::Escape, true);
 }
 
 #[test]

@@ -2729,6 +2729,57 @@ async fn steering_note_reaches_the_next_primary_call_and_is_journaled_once() {
 }
 
 #[tokio::test]
+async fn steering_notes_offered_before_delivery_reach_one_primary_call_as_one_note() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let steering = RunSteering::new();
+    let offer = steering.clone();
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Tool {
+            call: facts_read(),
+            plan_contract: None,
+        },
+        finish_with("noted"),
+    ])
+    .with_before_call(0, move || {
+        steering_note_at(&offer, "use the smaller fixture");
+        steering_note_at(&offer, "and keep the old name");
+    });
+    let requests = provider.requests.clone();
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    engine.set_steering(steering.clone());
+    let mut input = request(&workspace, "Read the facts");
+    input.include_paths.clear();
+    let outcome = engine.run(input).await.expect("Run");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    engine.close().await.expect("engine shutdown");
+
+    let calls = requests.lock().expect("requests").clone();
+    assert_eq!(
+        calls[1].steering_notes,
+        ["use the smaller fixture\n\nand keep the old name"]
+    );
+    assert_eq!(steering.delivered_notes(), 1);
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    assert_eq!(
+        view.runs[0].steering_notes,
+        ["use the smaller fixture\n\nand keep the old name"]
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, Event::GoalSteeringNoteRecorded { .. }))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn steering_note_never_reaches_children_and_is_kept_for_synthesis() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "v1");
@@ -2791,7 +2842,11 @@ async fn undelivered_steering_note_stays_with_the_caller_when_the_run_finishes()
     engine.close().await.expect("engine shutdown");
 
     assert_eq!(steering.delivered_notes(), 0);
-    assert!(steering.withdraw_note(), "the caller still holds the note");
+    assert_eq!(
+        steering.withdraw_note().as_deref(),
+        Some("too late"),
+        "the caller still holds the note"
+    );
     let (events, view) = replayed(&state_path, outcome.session_id).await;
     assert!(view.runs[0].steering_notes.is_empty());
     assert!(

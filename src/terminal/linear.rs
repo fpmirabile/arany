@@ -100,7 +100,7 @@ impl LinearState {
         writeln!(writer, "Help: local commands; arguments are literal")?;
         writeln!(
             writer,
-            "During a Run: Enter offers a steering note; /pause pauses at the next step; Ctrl+C cancels; Session settings stay pinned"
+            "During a Run: Enter offers a steering note; /goal pause pauses at the next step; Ctrl+C cancels; Session settings stay pinned"
         )?;
         for index in 0..help_len() {
             let entry = help_entry(index).expect("compiled command entry");
@@ -660,7 +660,7 @@ mod tests {
             help,
             concat!(
                 "\nHelp: local commands; arguments are literal\n",
-                "During a Run: Enter offers a steering note; /pause pauses at the next step; Ctrl+C cancels; Session settings stay pinned\n",
+                "During a Run: Enter offers a steering note; /goal pause pauses at the next step; Ctrl+C cancels; Session settings stay pinned\n",
                 "Command: /help; List commands; during Run: available\n",
                 "Command: /setup; Set up an account; during Run: locked\n",
                 "Command: /paste; Paste clipboard into draft; during Run: view-only\n",
@@ -668,8 +668,7 @@ mod tests {
                 "Command: /new; New Session; during Run: locked\n",
                 "Command: /clear; New Session; during Run: locked\n",
                 "Command: /resume [session-id]; Resume Session; during Run: locked\n",
-                "Command: /goal [resume|objective]; Goal status, resume or autonomous objective; during Run: view-only\n",
-                "Command: /pause; Pause the running Goal at its next step; during Run: available\n",
+                "Command: /goal [pause|resume|objective]; Goal status; pause during a Run; resume or start when idle; during Run: available\n",
                 "Command: /fork [session-id]; Fork Session; during Run: locked\n",
                 "Command: /rename <title>; Rename Session; during Run: locked\n",
                 "Command: /compact; Compact context; during Run: locked\n",

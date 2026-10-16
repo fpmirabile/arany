@@ -95,7 +95,8 @@ fn draft_retained_notice(autonomous: bool) -> &'static str {
     }
 }
 
-/// How the attached Run answers a stop request: `/pause` waits for a step boundary, Ctrl+C cancels now.
+/// How the attached Run answers a stop request: `/goal pause` waits for a step boundary; Ctrl+C cancels now,
+/// and in raw-key presentations Escape does too (canonical linear input cannot send Escape).
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ActiveStop {
     Running,
@@ -107,7 +108,6 @@ const STEERING_SENT: &str = "Steering note sent to the agent";
 
 fn steering_refusal(refused: SteeringRefused, autonomous: bool) -> String {
     match refused {
-        SteeringRefused::NoteWaiting => "A steering note is already waiting; draft retained".into(),
         SteeringRefused::RunFull => format!(
             "No room for more steering notes this Run. {}",
             draft_retained_notice(autonomous)
@@ -137,6 +137,52 @@ fn settle_recorded_note(
         composer.take();
     }
     true
+}
+
+/// Maps Escape during a Run: a pending clipboard read takes it first, otherwise it cancels only
+/// when nothing is focused and no cancellation is already under way.
+fn active_escape(
+    input: TerminalInput,
+    menu_open: bool,
+    clipboard_loading: bool,
+    stop: ActiveStop,
+) -> TerminalInput {
+    match input {
+        TerminalInput::Escape
+            if !clipboard_loading && !menu_open && stop != ActiveStop::Cancelling =>
+        {
+            TerminalInput::Interrupt
+        }
+        input => input,
+    }
+}
+
+/// The one notice a Run's end shows about retained text. A note that did not return to the
+/// composer is named as dropped, so no notice claims it was kept.
+fn run_end_notice(sent: bool, note_returned: bool, restored: bool) -> Option<&'static str> {
+    if !restored {
+        return Some(if note_returned {
+            "Retained draft, steering note and newer text exceed the draft limit; newer text kept"
+        } else {
+            "Retained draft and newer text exceed the draft limit; newer text kept"
+        });
+    }
+    if sent {
+        Some(STEERING_SENT)
+    } else if note_returned {
+        Some("Steering note withdrawn; draft retained")
+    } else {
+        None
+    }
+}
+
+/// The undelivered note goes ahead of a held draft it was offered before; the result returns to the composer.
+fn retained_linear_draft(note: Option<String>, held: Option<HeldDraft>) -> Option<HeldDraft> {
+    match (note, held) {
+        (Some(note), Some((text, images))) => Some((format!("{note}\n{text}"), images)),
+        (Some(note), None) => Some((note, Vec::new())),
+        (None, draft) => draft,
+    }
 }
 
 /// A linear draft kept aside during a Run, where the composer is not drawn.
@@ -345,47 +391,20 @@ pub(super) async fn submit_objective(
                 // An undelivered note ends the Run as an ordinary retained draft.
                 let had_offer = offered.is_some();
                 let sent = settle_recorded_note(steering.delivered_notes(), &mut seen_delivered, &mut offered, composer);
-                // A held draft returns before the undelivered note, so a newer draft wins over the note.
                 let had_held = held.is_some();
-                let restored = held.take().is_none_or(|draft| release_held_draft(composer, draft));
-                // Linear offers leave the composer empty, so the undelivered text returns to it here.
-                let mut withdrawn = false;
-                if let Some(text) = offered.take() {
-                    steering.withdraw_note();
-                    if terminal.is_linear() {
-                        if composer.is_empty() {
-                            withdrawn = !matches!(composer.insert_paste(&text), Ok(ComposerEdit::Changed));
-                        } else {
-                            withdrawn = true;
-                        }
-                    }
-                }
+                // The undelivered note was offered before any held draft, so it joins ahead of that draft.
+                // Linear offers left the composer empty; the note always returns here, never dropped.
+                let note = steering.withdraw_note().filter(|_| terminal.is_linear());
+                let withdrawn = note.is_some();
+                let pending = retained_linear_draft(note, held.take());
+                // A held draft returns before the undelivered note, so a newer draft wins over the note.
+                let restored = pending.is_none_or(|draft| release_held_draft(composer, draft));
                 if (result.is_err() || had_offer || sent || had_held)
                     && terminal.restore_draft_input(composer.text().len()).is_err()
                 {
                     return Ok(RunSubmission::Shutdown("terminal input cleanup failed".into()));
                 }
-                if !restored
-                    && draw_active_snapshot(
-                        terminal,
-                        view,
-                        composer,
-                        user_recorded,
-                        stop,
-                        Some(TerminalNotice::History("Retained draft and newer text exceed the draft limit; newer text kept")),
-                    )
-                    .is_err()
-                {
-                    return Ok(RunSubmission::Shutdown("terminal rendering failed".into()));
-                }
-                let ended_notice = if sent {
-                    Some(STEERING_SENT)
-                } else if withdrawn {
-                    Some("Steering note withdrawn; draft retained")
-                } else {
-                    None
-                };
-                if let Some(notice) = ended_notice
+                if let Some(notice) = run_end_notice(sent, withdrawn, restored)
                     && draw_active_snapshot(terminal, view, composer, user_recorded, stop, Some(TerminalNotice::History(notice)))
                         .is_err()
                 {
@@ -532,7 +551,12 @@ pub(super) async fn submit_objective(
                     }
                     continue;
                 }
+                let input = active_escape(input, composer.has_open_menu(), terminal.clipboard_loading(), stop);
                 let mut notice = match input {
+                    TerminalInput::Escape if terminal.clipboard_loading() => {
+                        terminal.cancel_clipboard_paste();
+                        Some(Feedback::Transient("Clipboard read cancelled; draft retained".into()))
+                    }
                     TerminalInput::CycleApprovalMode => {
                         let notice = super::permissions::cycle(composer);
                         approvals.set_mode(composer.approval_mode().unwrap_or_default());
@@ -615,13 +639,9 @@ pub(super) async fn submit_objective(
                                     Feedback::Transient("A draft is already retained; line not kept".into())
                                 } else if !composer.images().is_empty() {
                                     Feedback::Transient("Steering notes are text only; draft retained".into())
-                                } else if offered.is_some() {
-                                    if terminal.is_linear() {
-                                        composer.take();
-                                        Feedback::Transient("A steering note is already waiting; line not sent".into())
-                                    } else {
-                                        Feedback::Transient(steering_refusal(SteeringRefused::NoteWaiting, autonomous))
-                                    }
+                                } else if offered.is_some() && !terminal.is_linear() {
+                                    // The composer still holds the waiting note; editing it withdraws the offer.
+                                    Feedback::Transient("Steering note waits for the agent's next step; editing withdraws it".into())
                                 } else {
                                     match steering.offer_note(text) {
                                         Ok(()) => {
@@ -732,7 +752,7 @@ pub(super) async fn submit_objective(
                 };
                 if !terminal.is_linear() && offered.as_deref().is_some_and(|text| composer.text() != text || !composer.images().is_empty()) {
                     offered = None;
-                    notice = Some(if steering.withdraw_note() {
+                    notice = Some(if steering.withdraw_note().is_some() {
                         Feedback::Transient("Steering note withdrawn; draft retained".into())
                     } else {
                         // The Engine already took the note, so it is sent; the edited draft stays.
@@ -1333,6 +1353,76 @@ mod goal_request_tests {
         assert_eq!(
             draft_retained_notice(false),
             "Draft retained; press Enter after this Run to submit"
+        );
+    }
+}
+
+#[cfg(test)]
+mod escape_tests {
+    use super::*;
+
+    #[test]
+    fn run_end_notice_never_claims_a_dropped_note_was_kept() {
+        assert_eq!(
+            run_end_notice(false, true, false),
+            Some(
+                "Retained draft, steering note and newer text exceed the draft limit; newer text kept"
+            )
+        );
+        assert_eq!(
+            run_end_notice(false, false, false),
+            Some("Retained draft and newer text exceed the draft limit; newer text kept")
+        );
+        assert_eq!(
+            run_end_notice(false, true, true),
+            Some("Steering note withdrawn; draft retained")
+        );
+        assert_eq!(run_end_notice(true, false, true), Some(STEERING_SENT));
+        assert_eq!(run_end_notice(false, false, true), None);
+    }
+
+    #[test]
+    fn undelivered_note_stays_ahead_of_a_held_draft() {
+        assert_eq!(
+            retained_linear_draft(Some("note".into()), Some(("held".into(), Vec::new()))),
+            Some(("note\nheld".into(), Vec::new()))
+        );
+        assert_eq!(
+            retained_linear_draft(Some("note".into()), None),
+            Some(("note".into(), Vec::new()))
+        );
+        assert_eq!(
+            retained_linear_draft(None, Some(("held".into(), Vec::new()))),
+            Some(("held".into(), Vec::new()))
+        );
+        assert_eq!(retained_linear_draft(None, None), None);
+    }
+
+    #[test]
+    fn escape_cancels_only_when_nothing_else_claims_it() {
+        let idle = |input, menu, clipboard, stop| active_escape(input, menu, clipboard, stop);
+        assert_eq!(
+            idle(TerminalInput::Escape, false, false, ActiveStop::Running),
+            TerminalInput::Interrupt
+        );
+        assert_eq!(
+            idle(TerminalInput::Escape, true, false, ActiveStop::Running),
+            TerminalInput::Escape,
+            "an open menu closes first"
+        );
+        assert_eq!(
+            idle(TerminalInput::Escape, false, true, ActiveStop::Running),
+            TerminalInput::Escape,
+            "a pending clipboard read is cancelled, not the Run"
+        );
+        assert_eq!(
+            idle(TerminalInput::Escape, false, false, ActiveStop::Cancelling),
+            TerminalInput::Escape,
+            "a second Escape never forces shutdown"
+        );
+        assert_eq!(
+            idle(TerminalInput::Interrupt, false, false, ActiveStop::Running),
+            TerminalInput::Interrupt
         );
     }
 }

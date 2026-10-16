@@ -782,7 +782,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                     Ok(Submission::Command {
                         command: InteractiveCommand::Goal,
                         argument: Some(argument),
-                    }) => {
+                    }) if argument != "pause" => {
                         let start = if argument == "resume" {
                             GoalStart::Resume
                         } else {
@@ -872,7 +872,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                     Submission::Command {
                         command: InteractiveCommand::Goal,
                         argument: Some(argument),
-                    } => {
+                    } if argument != "pause" => {
                         let (start, objective) = if argument == "resume" {
                             (GoalStart::Resume, String::new())
                         } else {

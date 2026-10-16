@@ -16,7 +16,6 @@ pub enum InteractiveCommand {
     New,
     Resume,
     Goal,
-    Pause,
     Fork,
     Rename,
     Compact,
@@ -41,10 +40,10 @@ impl InteractiveCommand {
             return CommandAvailability::Available;
         }
         match self {
-            Self::Help | Self::Status | Self::Permissions | Self::Transcript | Self::Pause => {
+            Self::Help | Self::Status | Self::Permissions | Self::Transcript | Self::Goal => {
                 CommandAvailability::Available
             }
-            Self::Agents | Self::Provider | Self::Model | Self::Exit | Self::Paste | Self::Goal => {
+            Self::Agents | Self::Provider | Self::Model | Self::Exit | Self::Paste => {
                 CommandAvailability::ViewOnly
             }
             Self::Setup
@@ -102,7 +101,7 @@ const fn spec(
     }
 }
 
-const COMMANDS: [CommandSpec; 20] = [
+const COMMANDS: [CommandSpec; 19] = [
     spec("help", InteractiveCommand::Help, None, &[]),
     spec("setup", InteractiveCommand::Setup, None, &[]),
     spec("paste", InteractiveCommand::Paste, None, &[]),
@@ -118,10 +117,9 @@ const COMMANDS: [CommandSpec; 20] = [
     spec(
         "goal",
         InteractiveCommand::Goal,
-        Some("[resume|objective]"),
-        &["resume"],
+        Some("[pause|resume|objective]"),
+        &["pause", "resume"],
     ),
-    spec("pause", InteractiveCommand::Pause, None, &[]),
     spec("fork", InteractiveCommand::Fork, Some("[session-id]"), &[]),
     spec("rename", InteractiveCommand::Rename, Some("<title>"), &[]),
     spec("compact", InteractiveCommand::Compact, None, &[]),
@@ -177,8 +175,7 @@ pub(super) fn help_entry(index: usize) -> Option<HelpEntry> {
         InteractiveCommand::Status => "Session status",
         InteractiveCommand::New => "New Session",
         InteractiveCommand::Resume => "Resume Session",
-        InteractiveCommand::Goal => "Goal status, resume or autonomous objective",
-        InteractiveCommand::Pause => "Pause the running Goal at its next step",
+        InteractiveCommand::Goal => "Goal status; pause during a Run; resume or start when idle",
         InteractiveCommand::Fork => "Fork Session",
         InteractiveCommand::Rename => "Rename Session",
         InteractiveCommand::Compact => "Compact context",
@@ -349,13 +346,19 @@ pub fn parse_submission(line: &str) -> Result<Submission<'_>, CommandParseError>
         if spec.argument.is_none() && argument.is_some() {
             return Err(CommandParseError::UnexpectedArgument { command: spec.name });
         }
-        // `/goal Resume` is the same explicit resume; only the exact word is normalized.
+        // `/goal Resume` and `/goal PAUSE` are the same explicit words; only they are normalized.
         let argument = match argument {
             Some(word)
                 if spec.command == InteractiveCommand::Goal
                     && word.eq_ignore_ascii_case("resume") =>
             {
                 Some("resume")
+            }
+            Some(word)
+                if spec.command == InteractiveCommand::Goal
+                    && word.eq_ignore_ascii_case("pause") =>
+            {
+                Some("pause")
             }
             other => other,
         };
@@ -645,7 +648,7 @@ mod tests {
 
     #[test]
     fn closed_registry_aliases_completion_and_lifecycle_are_exact() {
-        assert_eq!(COMMANDS.len(), 20);
+        assert_eq!(COMMANDS.len(), 19);
         assert_eq!(completion_suffix("/c", &CommandChoices::default()), None);
         assert_eq!(
             completion_suffix("/ca", &CommandChoices::default()),
@@ -752,22 +755,28 @@ mod tests {
         assert_eq!(command_completions("/pas"), vec!["paste"]);
         assert_eq!(command_completions("/mo"), vec!["model"]);
         assert_eq!(command_completions("/goa"), vec!["goal"]);
-        assert_eq!(command_completions("/pau"), vec!["pause"]);
-        assert_eq!(
-            InteractiveCommand::Pause.availability(false),
-            CommandAvailability::Available
-        );
-        assert_eq!(
-            InteractiveCommand::Pause.availability(true),
-            CommandAvailability::Available
-        );
-        assert_eq!(
-            parse_submission("/pause x"),
-            Err(CommandParseError::UnexpectedArgument { command: "pause" })
-        );
+        assert_eq!(command_completions("/pau"), Vec::<&str>::new());
         assert_eq!(
             completion_suffix("/goal r", &CommandChoices::default()),
             Some("esume".into())
+        );
+        assert_eq!(
+            completion_suffix("/goal p", &CommandChoices::default()),
+            Some("ause".into())
+        );
+        assert_eq!(
+            parse_submission("/goal pause"),
+            Ok(Submission::Command {
+                command: InteractiveCommand::Goal,
+                argument: Some("pause"),
+            })
+        );
+        assert_eq!(
+            parse_submission("/goal  PAUSE "),
+            Ok(Submission::Command {
+                command: InteractiveCommand::Goal,
+                argument: Some("pause"),
+            })
         );
         assert_eq!(
             parse_submission("/goal"),
@@ -810,7 +819,7 @@ mod tests {
         );
         assert_eq!(
             InteractiveCommand::Goal.availability(true),
-            CommandAvailability::ViewOnly
+            CommandAvailability::Available
         );
         let preview = command_preview("/goal", &CommandChoices::default()).unwrap();
         assert_eq!(
@@ -820,9 +829,9 @@ mod tests {
                 preview.status.as_str()
             ),
             (
-                " [resume|objective]",
+                " [pause|resume|objective]",
                 true,
-                "Command: /goal [resume|objective]; Tab: resume",
+                "Command: /goal [pause|resume|objective]; Tab: pause, resume",
             )
         );
         assert_eq!(

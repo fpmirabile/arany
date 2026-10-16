@@ -106,7 +106,7 @@ headless use offers an optional turn limit.
 
 | # | Decision | Answer | Applied to |
 |---|---|---|---|
-| R7-1 | Steering notes at the next call boundary; `/pause` | Yes | E1 |
+| R7-1 | Steering notes at the next call boundary; `/goal pause` | Yes | E1 |
 | R7-2 | Headless RPI behind an explicit flag | First answered "remove `exec`", then reversed: keep `exec` as the scriptable product surface for CI, scripts and API-style use. The headless RPI question returns as R8-1 | E10, R8-1 |
 | R7-3 | Phase Runs get artifacts, Goal facts and capsules, not transcripts | Yes | E2 |
 | R7-4 | One writing Goal per Workspace | Yes | E3 |

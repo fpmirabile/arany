@@ -7,7 +7,7 @@ use crate::session::events::{
     AgentRole, AgentRunId, GoalBudget, GoalId, GoalPhase, GoalPlanContract, GoalReport, GoalStatus,
     ProviderCallDisposition, ReplayError, RunId,
 };
-use crate::session::{MAX_GOAL_STEERING_NOTES_PER_RUN, MAX_USER_MESSAGE_BYTES};
+use crate::session::{MAX_STEERING_LABEL_BYTES, MAX_USER_MESSAGE_BYTES};
 
 impl SessionView {
     // The event's fields plus the replay prior; a struct would only forward them.
@@ -319,15 +319,18 @@ impl SessionView {
             .filter(|agent| agent.status == AgentStatus::Active)
             .map(|agent| agent.id)
             .ok_or(ReplayError::InvalidTransition)?;
-        let stored_bytes: usize = run.steering_notes.iter().map(String::len).sum();
+        let stored_bytes: usize = run
+            .steering_notes
+            .iter()
+            .map(|note| note.len() + MAX_STEERING_LABEL_BYTES)
+            .sum();
         // A pending Tool observation means this reservation is a Tool review, not a planning or synthesis call.
         let tool_pending = run
             .tools
             .last()
             .is_some_and(|tool| tool.observation.is_none());
         if tool_pending
-            || run.steering_notes.len() >= MAX_GOAL_STEERING_NOTES_PER_RUN
-            || stored_bytes + text.len() > MAX_USER_MESSAGE_BYTES
+            || stored_bytes + text.len() + MAX_STEERING_LABEL_BYTES > MAX_USER_MESSAGE_BYTES
         {
             return Err(ReplayError::InvalidTransition);
         }
