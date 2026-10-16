@@ -1,6 +1,6 @@
 use crate::session::{
-    EVENT_PAYLOAD_VERSION, Event, EventEnvelope, ReplayError, RunId, SessionId, SessionListItem,
-    SessionView,
+    Event, EventEnvelope, ReplayError, RunId, SessionId, SessionListItem, SessionView,
+    payload_version,
 };
 use std::io;
 use std::net::SocketAddr;
@@ -44,8 +44,8 @@ const RUN_START_EXTRA_BYTES: usize =
     MAX_GOAL_STARTED_BYTES + MAX_MESSAGE_ACCEPTED_BYTES - 2 * MAX_EVENT_BYTES;
 fn event_payload_limit(kind: &str, version: i64) -> usize {
     match kind {
-        "MessageAccepted" if version == EVENT_PAYLOAD_VERSION => MAX_MESSAGE_ACCEPTED_BYTES,
-        "GoalStarted" if version == EVENT_PAYLOAD_VERSION => MAX_GOAL_STARTED_BYTES,
+        "MessageAccepted" if payload_version(kind) == Some(version) => MAX_MESSAGE_ACCEPTED_BYTES,
+        "GoalStarted" if payload_version(kind) == Some(version) => MAX_GOAL_STARTED_BYTES,
         _ => MAX_EVENT_BYTES,
     }
 }

@@ -1,5 +1,5 @@
 use super::*;
-use crate::session::EVENT_PAYLOAD_VERSION;
+use crate::session::payload_version;
 
 #[test]
 fn append_refuses_event_past_replay_limit() {
@@ -190,14 +190,15 @@ fn failed_insert_drops_hot_projection_before_recovery() {
 
 #[test]
 fn run_start_admission_reserves_the_current_version_payload_exceptions() {
+    let message = payload_version("MessageAccepted").expect("payload version");
+    let goal = payload_version("GoalStarted").expect("payload version");
     assert_eq!(
         crate::store::RUN_START_EXTRA_BYTES,
-        event_payload_limit("MessageAccepted", EVENT_PAYLOAD_VERSION)
-            + event_payload_limit("GoalStarted", EVENT_PAYLOAD_VERSION)
+        event_payload_limit("MessageAccepted", message) + event_payload_limit("GoalStarted", goal)
             - 2 * crate::store::MAX_EVENT_BYTES
     );
     assert_eq!(
-        event_payload_limit("MessageAccepted", EVENT_PAYLOAD_VERSION - 1),
+        event_payload_limit("MessageAccepted", message - 1),
         crate::store::MAX_EVENT_BYTES
     );
 }
