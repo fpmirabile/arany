@@ -16,6 +16,7 @@ mod native_check;
 mod openai;
 pub(crate) mod prompts;
 mod streaming;
+mod tool_specs;
 pub use anthropic::AnthropicProvider;
 pub use catalog::{
     ModelEntry, list_native_models, list_native_models_with_api_key,
