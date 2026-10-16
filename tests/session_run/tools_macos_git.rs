@@ -1,22 +1,31 @@
+#[cfg(any(debug_assertions, arany_ci))]
 use crate::git::{host_git, tree_snapshot};
-use crate::process::BoundedOutput;
+#[cfg(any(debug_assertions, arany_ci))]
 use crate::{hash, private_file};
+#[cfg(any(debug_assertions, arany_ci))]
 use arany::{
     CollaborationPolicy, CompactionRequest, CompactionResponse, Engine, Finish, Provider,
     ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse, RunRequest, RunStatus,
     SessionView, StateRoot, Store, ToolCall, ToolDisposition,
 };
+#[cfg(any(debug_assertions, arany_ci))]
 use serde_json::json;
+#[cfg(any(debug_assertions, arany_ci))]
 use std::path::Path;
+#[cfg(any(debug_assertions, arany_ci))]
 use std::sync::{Arc, Mutex};
+#[cfg(any(debug_assertions, arany_ci))]
 use std::time::Duration;
 
+#[cfg(any(debug_assertions, arany_ci))]
 const CLT_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
 
+#[cfg(any(debug_assertions, arany_ci))]
 struct GitJourney {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
 }
 
+#[cfg(any(debug_assertions, arany_ci))]
 #[async_trait::async_trait]
 impl Provider for GitJourney {
     fn identity(&self) -> &arany::ProviderIdentity {
@@ -86,8 +95,23 @@ impl Provider for GitJourney {
 }
 
 #[test]
-#[cfg_attr(not(arany_ci), ignore = "native macOS Seatbelt typed Git reads")]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native macOS Git journey; release requires CI's disposable account"
+)]
 fn guarded_native_git_reads_survive_closed_replay() {
+    #[cfg(debug_assertions)]
+    crate::tools::native_journey("tools_git::native_git_journey_helper");
+    #[cfg(all(not(debug_assertions), arany_ci))]
+    release_git_journey();
+    #[cfg(all(not(debug_assertions), not(arany_ci)))]
+    panic!("release Git journey requires CI's disposable account");
+}
+
+#[cfg(all(not(debug_assertions), arany_ci))]
+fn release_git_journey() {
+    use crate::process::BoundedOutput;
+
     let _gate = crate::process::NATIVE_GATE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -103,7 +127,7 @@ fn guarded_native_git_reads_survive_closed_replay() {
             "--nocapture",
         ])
         .env_clear()
-        .env("ARANY_TEST_GIT_JOURNEY_ROOT", temp.path())
+        .env("ARANY_TEST_FILE_JOURNEY_ROOT", temp.path())
         .env("HOME", temp.path().join("home"))
         .env("XDG_STATE_HOME", temp.path().join("environment-state"))
         .env("XDG_DATA_HOME", temp.path().join("environment-data"))
@@ -121,11 +145,18 @@ fn guarded_native_git_reads_survive_closed_replay() {
     assert!(output.stderr.is_empty());
 }
 
+#[cfg(any(debug_assertions, arany_ci))]
 #[tokio::test]
 #[ignore = "isolated helper owned by native Git journey"]
 async fn native_git_journey_helper() {
-    let root = std::env::var_os("ARANY_TEST_GIT_JOURNEY_ROOT").expect("private fixture root");
+    let root = std::env::var_os("ARANY_TEST_FILE_JOURNEY_ROOT").expect("private fixture root");
     let root = Path::new(&root);
+    #[cfg(debug_assertions)]
+    {
+        crate::tools::trace_case(root, "git");
+        assert_eq!(StateRoot::account_path().unwrap(), root.join("account"));
+    }
+    #[cfg(not(debug_assertions))]
     assert!(std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").is_none());
     let home = root.join("home");
     let workspace = root.join("workspace");

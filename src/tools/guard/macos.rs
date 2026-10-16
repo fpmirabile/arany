@@ -1286,7 +1286,7 @@ mod tests {
     #[test]
     fn native_git_profile_runs_pinned_git_and_denies_host_access() {
         let git = crate::tools::git::discover();
-        if !Path::new("/Library/Developer/CommandLineTools/usr/bin/git")
+        if !Path::new(crate::tools::git::GIT_CANDIDATE)
             .try_exists()
             .expect("Command Line Tools Git availability")
         {

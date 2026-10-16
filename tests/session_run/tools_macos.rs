@@ -83,6 +83,7 @@ fn trace_snapshot(root: &Path) -> serde_json::Value {
                 if !matches!(
                     case,
                     "journey"
+                        | "git"
                         | "refusal"
                         | "denied"
                         | "cancelled"
@@ -352,7 +353,7 @@ fn guarded_runtime_profile_checks_mount_topology_before_dispatch() {
     native_journey("tools::native_runtime_mount_journey_helper");
 }
 
-fn native_journey(helper: &str) {
+pub(super) fn native_journey(helper: &str) {
     let _gate = crate::process::NATIVE_GATE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
