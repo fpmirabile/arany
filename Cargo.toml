@@ -8,6 +8,9 @@ description = "A durable, CLI-only agent harness"
 repository = "https://github.com/fpmirabile/arany"
 include = ["src/**", "tests/**", "scripts/**", "Cargo.toml", "Cargo.lock", "/LICENSE", "/NOTICE"]
 
+[features]
+test-support = []
+
 [dependencies]
 async-trait = "=0.1.92"
 aws-lc-rs = { version = "=1.18.1", default-features = false }

@@ -1,4 +1,5 @@
 use crate::provider::Effort;
+use crate::store::RecordKind;
 use crate::store::{StateRoot, StoreError};
 use reqwest::Url;
 use serde::Deserialize;
@@ -98,11 +99,13 @@ impl CustomProfile {
             return Err(CustomProfileError::InvalidConfiguration);
         }
         let bytes = state
-            .read_provider_profiles()
+            .record(RecordKind::ProviderProfiles)
+            .read()
             .map_err(|error| match error {
                 StoreError::StateNotPrivate => CustomProfileError::UnsafeFile,
                 _ => CustomProfileError::Unavailable,
-            })?;
+            })?
+            .ok_or(CustomProfileError::Unavailable)?;
         let document: ProfileDocument =
             serde_json::from_slice(&bytes).map_err(|_| CustomProfileError::InvalidConfiguration)?;
         if document.version != 1 || document.profiles.len() > MAX_PROFILES {

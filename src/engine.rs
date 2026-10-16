@@ -1249,13 +1249,10 @@ mod goal_workspace_lease_tests {
             .state
             .lock_workspace_in(&account_root, workspace_identity)
             .expect("provisional Workspace lock");
-        let (acknowledgment_entered, release_acknowledgment) = engine
-            .store
-            .gate_goal_append_acknowledgment(session_id, |event| {
+        let (acknowledgment_entered, release_acknowledgment) =
+            crate::fault::FaultPlan::gate_goal_append_acknowledgment(session_id, |event| {
                 matches!(event, Event::GoalStarted { .. } | Event::GoalResumed { .. })
-            })
-            .await
-            .expect("install acknowledgment gate");
+            });
         let mut leases = WorkspaceLeases::new();
         Engine::retain_goal_workspace(
             &mut leases,
@@ -1336,13 +1333,10 @@ mod goal_workspace_lease_tests {
             )
             .await
             .expect("Session start");
-        let (link_entered, release_link) = engine
-            .store
-            .gate_goal_append_acknowledgment(session_id, |event| {
+        let (link_entered, release_link) =
+            crate::fault::FaultPlan::gate_goal_append_acknowledgment(session_id, |event| {
                 matches!(event, Event::GoalRunLinked { .. })
-            })
-            .await
-            .expect("install acknowledgment gate");
+            });
         let request = RunRequest {
             session_id: Some(session_id),
             title: None,
@@ -1442,13 +1436,9 @@ mod goal_workspace_lease_tests {
         let state = StateRoot::admit(&temp.path().join("state")).expect("private State root");
         let mut engine = Engine::open(state, NeverProvider).expect("Engine");
         let (session_id, goal_id) = paused_goal_session(&mut engine, &workspace).await;
-        engine
-            .store
-            .fail_next_goal_append(session_id, |event| {
-                matches!(event, Event::GoalResumed { .. })
-            })
-            .await
-            .expect("install append failure");
+        crate::fault::FaultPlan::fail_goal_append(session_id, |event| {
+            matches!(event, Event::GoalResumed { .. })
+        });
         match engine
             .run(resume_request(session_id, goal_id, &workspace))
             .await
@@ -1474,13 +1464,10 @@ mod goal_workspace_lease_tests {
         let state = StateRoot::admit(&temp.path().join("state")).expect("private State root");
         let mut engine = Engine::open(state, NeverProvider).expect("Engine");
         let (session_id, goal_id) = paused_goal_session(&mut engine, &workspace).await;
-        let (resume_entered, release_resume) = engine
-            .store
-            .gate_goal_append_acknowledgment(session_id, |event| {
+        let (resume_entered, release_resume) =
+            crate::fault::FaultPlan::gate_goal_append_acknowledgment(session_id, |event| {
                 matches!(event, Event::GoalResumed { .. })
-            })
-            .await
-            .expect("install acknowledgment gate");
+            });
         let mut run = Box::pin(engine.run(resume_request(session_id, goal_id, &workspace)));
         tokio::time::timeout(Duration::from_secs(5), async {
             tokio::select! {
@@ -1507,13 +1494,9 @@ mod goal_workspace_lease_tests {
         let state = StateRoot::admit(&temp.path().join("state")).expect("private State root");
         let mut engine = Engine::open(state, NeverProvider).expect("Engine");
         let (session_id, goal_id) = paused_goal_session(&mut engine, &workspace).await;
-        engine
-            .store
-            .fail_next_goal_append(session_id, |event| {
-                matches!(event, Event::GoalRunLinked { .. })
-            })
-            .await
-            .expect("install append failure");
+        crate::fault::FaultPlan::fail_goal_append(session_id, |event| {
+            matches!(event, Event::GoalRunLinked { .. })
+        });
         match engine
             .run(resume_request(session_id, goal_id, &workspace))
             .await

@@ -229,7 +229,7 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                 let account =
                     StateRoot::admit(&temp.path().join("account-home/.local/state/arany")).unwrap();
                 account
-                    .replace_saved_account_record(
+                    .record(arany::RecordKind::SavedAccount).replace(
                         &serde_json::to_vec(&serde_json::json!({
                             "schema":1,"storage":"private_file","account":{
                                 "schema":2,"id":uuid::Uuid::now_v7(),"provider":"openai",

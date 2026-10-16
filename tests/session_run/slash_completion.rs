@@ -4,7 +4,9 @@ use super::{
     saved_ui_preferences,
     session_picker::{pump, tail},
 };
-use arany::{CollaborationPolicy, SessionDefaults, SessionId, StateRoot, Store, list_sessions};
+use arany::{
+    CollaborationPolicy, RecordKind, SessionDefaults, SessionId, StateRoot, Store, list_sessions,
+};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::process::{Signal, kill_process};
 use std::{
@@ -263,7 +265,8 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
     assert_eq!(
         StateRoot::open_existing(&state)
             .unwrap()
-            .read_ui_preferences_record()
+            .record(RecordKind::UiPreferences)
+            .read()
             .unwrap()
             .unwrap(),
         saved_ui_preferences("combined", "fullscreen")
@@ -1013,7 +1016,8 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     assert_eq!(
         StateRoot::open_existing(&state)
             .unwrap()
-            .read_ui_preferences_record()
+            .record(RecordKind::UiPreferences)
+            .read()
             .unwrap()
             .unwrap(),
         saved_ui_preferences("combined", "fullscreen"),
@@ -1358,7 +1362,8 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     assert_eq!(
         StateRoot::open_existing(&state)
             .unwrap()
-            .read_ui_preferences_record()
+            .record(RecordKind::UiPreferences)
+            .read()
             .unwrap()
             .unwrap(),
         saved_ui_preferences("combined", "fullscreen")
@@ -1411,7 +1416,8 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     assert_eq!(
         StateRoot::open_existing(&state)
             .unwrap()
-            .read_ui_preferences_record()
+            .record(RecordKind::UiPreferences)
+            .read()
             .unwrap()
             .unwrap(),
         saved_ui_preferences("tabs", "fullscreen")
@@ -1441,7 +1447,8 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         assert_eq!(
             StateRoot::open_existing(&state)
                 .unwrap()
-                .read_ui_preferences_record()
+                .record(RecordKind::UiPreferences)
+                .read()
                 .unwrap()
                 .unwrap(),
             record(view)
@@ -1523,7 +1530,8 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     assert_eq!(
         StateRoot::open_existing(&state)
             .unwrap()
-            .read_ui_preferences_record()
+            .record(RecordKind::UiPreferences)
+            .read()
             .unwrap()
             .unwrap(),
         record("fullscreen")
@@ -2163,7 +2171,8 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
             if malformed {
                 StateRoot::admit(&temp.path().join("account-root"))
                     .expect("isolated account root")
-                    .replace_chatgpt_accounts_record(b"synthetic-malformed-account-canary")
+                    .record(RecordKind::ChatgptAccounts)
+                    .replace(b"synthetic-malformed-account-canary")
                     .expect("synthetic malformed metadata");
             }
             let selection_at = transcript.len();
@@ -2621,7 +2630,8 @@ esac
         listener.set_nonblocking(true).expect("nonblocking bus");
         StateRoot::admit(&dir.join(".local/state/arany"))
             .expect("isolated account root")
-            .replace_saved_account_record(br#"{"schema":1,"storage":"keyring","account":null}"#)
+            .record(RecordKind::SavedAccount)
+            .replace(br#"{"schema":1,"storage":"keyring","account":null}"#)
             .expect("credential-free backend marker");
         std::fs::create_dir(dir.join("runtime")).expect("private Wayland runtime");
         std::fs::set_permissions(dir.join("runtime"), std::fs::Permissions::from_mode(0o700))

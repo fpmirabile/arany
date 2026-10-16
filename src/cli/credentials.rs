@@ -1,3 +1,4 @@
+use arany::RecordKind;
 use arany::{
     Effort, NativeApiCredentials, StateRoot, StoreError, resolve_native_effort,
     validate_native_model_id,
@@ -103,7 +104,7 @@ impl StoredAccountFile {
 
     fn encoded(&self) -> Result<Vec<u8>, CredentialError> {
         let record = serde_json::to_vec(self).map_err(|_| CredentialError::InvalidAccount)?;
-        if record.len() > StateRoot::MAX_ACCOUNT_RECORD_BYTES {
+        if record.len() > RecordKind::SavedAccount.limit() {
             return Err(CredentialError::InvalidAccount);
         }
         Ok(record)
@@ -172,20 +173,22 @@ impl SetupReset {
 
     fn read(state: &StateRoot, data: SetupData) -> Result<[Option<Vec<u8>>; 3], CredentialError> {
         let record = match data {
-            SetupData::Native => state.read_saved_account_record(),
-            SetupData::ChatGpt => state.read_chatgpt_accounts_record(),
+            SetupData::Native => state.record(RecordKind::SavedAccount).read(),
+            SetupData::ChatGpt => state.record(RecordKind::ChatgptAccounts).read(),
             SetupData::Models => Ok(None),
         }
         .map_err(|_| CredentialError::StateUnavailable)?;
         let registration = if matches!(data, SetupData::ChatGpt) {
             state
-                .read_chatgpt_registration_record()
+                .record(RecordKind::ChatgptRegistration)
+                .read()
                 .map_err(|_| CredentialError::StateUnavailable)?
         } else {
             None
         };
         let models = state
-            .read_model_preferences_record()
+            .record(RecordKind::ModelPreferences)
+            .read()
             .map_err(|_| CredentialError::StateUnavailable)?;
         Ok([record, registration, models])
     }
@@ -198,14 +201,18 @@ impl SetupReset {
                 }
                 let result = (|| {
                     match self.data {
-                        SetupData::Native => self.state.remove_saved_account_record()?,
+                        SetupData::Native => {
+                            self.state.record(RecordKind::SavedAccount).remove()?
+                        }
                         SetupData::ChatGpt => {
-                            self.state.remove_chatgpt_accounts_record()?;
-                            self.state.remove_chatgpt_registration_record()?;
+                            self.state.record(RecordKind::ChatgptAccounts).remove()?;
+                            self.state
+                                .record(RecordKind::ChatgptRegistration)
+                                .remove()?;
                         }
                         SetupData::Models => {}
                     }
-                    self.state.remove_model_preferences_record()
+                    self.state.record(RecordKind::ModelPreferences).remove()
                 })();
                 result.map_err(|_| CredentialError::StateUnavailable)
             })
@@ -371,7 +378,7 @@ async fn save_at(
     account.validate()?;
     admit_transport()?;
     let record = serde_json::to_string(&account).map_err(|_| CredentialError::InvalidAccount)?;
-    if record.len() > StateRoot::MAX_ACCOUNT_RECORD_BYTES {
+    if record.len() > RecordKind::SavedAccount.limit() {
         return Err(CredentialError::InvalidAccount);
     }
     let slot = slot.to_owned();
@@ -382,7 +389,8 @@ async fn save_at(
         state
             .with_account_replacement_lock(&workspace, || {
                 let existing = state
-                    .read_saved_account_record()
+                    .record(RecordKind::SavedAccount)
+                    .read()
                     .map_err(|_| CredentialError::StateUnavailable)?;
                 if existing
                     .as_deref()
@@ -399,7 +407,8 @@ async fn save_at(
                 }
                 .encoded()?;
                 state
-                    .replace_saved_account_record(&marker)
+                    .record(RecordKind::SavedAccount)
+                    .replace(&marker)
                     .map_err(|_| CredentialError::StateUnavailable)?;
                 keyring_helper::write(&slot, &record)
             })
@@ -432,7 +441,8 @@ async fn save_file_at(
         state
             .with_account_replacement_lock(&workspace, || {
                 let existing = state
-                    .read_saved_account_record()
+                    .record(RecordKind::SavedAccount)
+                    .read()
                     .map_err(|_| CredentialError::StateUnavailable)?;
                 if existing
                     .as_deref()
@@ -443,7 +453,8 @@ async fn save_file_at(
                     return Err(CredentialError::InvalidAccount);
                 }
                 state
-                    .replace_saved_account_record(&record)
+                    .record(RecordKind::SavedAccount)
+                    .replace(&record)
                     .map_err(|_| CredentialError::StateUnavailable)
             })
             .map_err(|error| match error {
@@ -515,7 +526,8 @@ fn load_file_at(path: &Path) -> Result<Option<StoredAccountFile>, CredentialErro
         return Ok(None);
     };
     let Some(record) = state
-        .read_saved_account_record()
+        .record(RecordKind::SavedAccount)
+        .read()
         .map_err(|_| CredentialError::StateUnavailable)?
     else {
         return Ok(None);
@@ -675,7 +687,8 @@ mod tests {
         {
             let state = StateRoot::open_existing(&state_dir).expect("private account root");
             let marker = state
-                .read_saved_account_record()
+                .record(RecordKind::SavedAccount)
+                .read()
                 .expect("backend marker")
                 .expect("pinned keyring backend");
             assert_eq!(
@@ -758,7 +771,7 @@ mod tests {
                 .with_account_replacement_lock(&workspace, || child("busy", "session-a"))
                 .expect("hold shared account lock");
             assert_eq!(
-                state.read_saved_account_record().unwrap(),
+                state.record(RecordKind::SavedAccount).read().unwrap(),
                 Some(marker.clone()),
                 "rejected replacement changed the backend marker"
             );
@@ -784,7 +797,10 @@ mod tests {
                 selected_key(&replaced, replaced.id, "openai"),
                 Ok("synthetic-replacement-key".into())
             );
-            assert_eq!(state.read_saved_account_record().unwrap(), Some(marker));
+            assert_eq!(
+                state.record(RecordKind::SavedAccount).read().unwrap(),
+                Some(marker)
+            );
         }
         assert_eq!(
             selected_key(&loaded, Uuid::now_v7(), "openai"),
@@ -966,7 +982,7 @@ mod tests {
             .encoded();
             if fits {
                 assert!(encoded.is_ok_and(|record| {
-                    record.len() <= StateRoot::MAX_ACCOUNT_RECORD_BYTES
+                    record.len() <= RecordKind::SavedAccount.limit()
                         && StoredAccountFile::parse(&record).is_ok()
                 }));
             } else {
@@ -1104,7 +1120,8 @@ mod tests {
         .encoded()
         .expect("keyring marker");
         state
-            .replace_saved_account_record(&marker)
+            .record(RecordKind::SavedAccount)
+            .replace(&marker)
             .expect("pin keyring backend");
         let replacement = SavedAccount::new(
             "openai".into(),
@@ -1125,16 +1142,20 @@ mod tests {
 
         for data in [SetupData::Native, SetupData::ChatGpt, SetupData::Models] {
             state
-                .replace_saved_account_record(b"unsupported-api-record")
+                .record(RecordKind::SavedAccount)
+                .replace(b"unsupported-api-record")
                 .unwrap();
             state
-                .replace_chatgpt_accounts_record(b"unsupported-chatgpt-record")
+                .record(RecordKind::ChatgptAccounts)
+                .replace(b"unsupported-chatgpt-record")
                 .unwrap();
             state
-                .replace_chatgpt_registration_record(b"unsupported-registration-record")
+                .record(RecordKind::ChatgptRegistration)
+                .replace(b"unsupported-registration-record")
                 .unwrap();
             state
-                .replace_model_preferences_record(b"unsupported-preferences")
+                .record(RecordKind::ModelPreferences)
+                .replace(b"unsupported-preferences")
                 .unwrap();
             let snapshot = SetupReset::read(&state, data).unwrap();
             let reset = SetupReset::at(
@@ -1155,7 +1176,8 @@ mod tests {
             )
             .unwrap();
             state
-                .replace_model_preferences_record(b"changed-preferences")
+                .record(RecordKind::ModelPreferences)
+                .replace(b"changed-preferences")
                 .unwrap();
             let changed = SetupReset::read(&state, data).unwrap();
             assert_eq!(reset.apply(&workspace), Err(CredentialError::SetupChanged));
@@ -1171,9 +1193,15 @@ mod tests {
             .unwrap()
             .apply(&workspace)
             .unwrap();
-            assert!(state.read_model_preferences_record().unwrap().is_none());
             assert!(
-                state.read_saved_account_record().unwrap()
+                state
+                    .record(RecordKind::ModelPreferences)
+                    .read()
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                state.record(RecordKind::SavedAccount).read().unwrap()
                     == if matches!(data, SetupData::Native) {
                         None
                     } else {
@@ -1181,7 +1209,7 @@ mod tests {
                     }
             );
             assert!(
-                state.read_chatgpt_accounts_record().unwrap()
+                state.record(RecordKind::ChatgptAccounts).read().unwrap()
                     == if matches!(data, SetupData::ChatGpt) {
                         None
                     } else {
@@ -1189,7 +1217,10 @@ mod tests {
                     }
             );
             assert!(
-                state.read_chatgpt_registration_record().unwrap()
+                state
+                    .record(RecordKind::ChatgptRegistration)
+                    .read()
+                    .unwrap()
                     == if matches!(data, SetupData::ChatGpt) {
                         None
                     } else {

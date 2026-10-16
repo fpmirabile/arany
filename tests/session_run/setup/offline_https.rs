@@ -593,7 +593,8 @@ fn isolated_stage() {
     let account_root = StateRoot::open_existing(Path::new("/root/.local/state/arany"))
         .expect("saved account root");
     let record = account_root
-        .read_saved_account_record()
+        .record(RecordKind::SavedAccount)
+        .read()
         .expect("saved account record")
         .expect("saved account");
     let json: serde_json::Value = serde_json::from_slice(&record).expect("account JSON");
@@ -774,7 +775,8 @@ fn isolated_stage() {
     );
     drop(server);
     let account_after = account_root
-        .read_saved_account_record()
+        .record(RecordKind::SavedAccount)
+        .read()
         .expect("account after empty catalog")
         .expect("saved account remains");
     assert!(
@@ -785,7 +787,8 @@ fn isolated_stage() {
 
     let mut preferences: serde_json::Value = serde_json::from_slice(
         &account_root
-            .read_model_preferences_record()
+            .record(RecordKind::ModelPreferences)
+            .read()
             .unwrap()
             .unwrap(),
     )
@@ -798,7 +801,8 @@ fn isolated_stage() {
     account_root
         .with_account_replacement_lock(std::path::Path::new("/root/workspace"), || {
             account_root
-                .replace_model_preferences_record(&serde_json::to_vec(&preferences).unwrap())
+                .record(RecordKind::ModelPreferences)
+                .replace(&serde_json::to_vec(&preferences).unwrap())
         })
         .unwrap()
         .unwrap();
@@ -872,7 +876,8 @@ fn isolated_stage() {
     assert!(
         record
             == account_root
-                .read_saved_account_record()
+                .record(RecordKind::SavedAccount)
+                .read()
                 .expect("account after loading")
                 .expect("saved account"),
         "catalog loading changed saved account"

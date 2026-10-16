@@ -2,6 +2,7 @@ use crate::cli::chatgpt::{
     self, CallbackListener, RiskAcknowledgment, RiskPrompt, registration::Registration,
 };
 use crate::cli::credentials::{self, AccountStorage, CredentialError, SavedAccount};
+use arany::RecordKind;
 use arany::{
     AttachedTerminal, CollaborationPolicy, Composer, Effort, MAX_ANTHROPIC_WORKSPACE_ID_BYTES,
     MAX_NATIVE_API_KEY_BYTES, ModelEntry, NativeApiCredentials, SessionDefaults, ShutdownSignal,
@@ -324,10 +325,12 @@ fn saved_account_presence(path: &Path) -> Result<(bool, bool), String> {
     };
     Ok((
         state
-            .saved_account_record_present()
+            .record(RecordKind::SavedAccount)
+            .present()
             .map_err(|error| error.to_string())?,
         state
-            .chatgpt_accounts_record_present()
+            .record(RecordKind::ChatgptAccounts)
+            .present()
             .map_err(|error| error.to_string())?,
     ))
 }
@@ -1475,10 +1478,12 @@ mod tests {
         let current = temp.path().join("current");
         assert_eq!(saved_account_presence(&current).unwrap(), (false, false));
         let root = StateRoot::admit(&current).unwrap();
-        root.replace_chatgpt_accounts_record(b"not a parsed account index")
+        root.record(RecordKind::ChatgptAccounts)
+            .replace(b"not a parsed account index")
             .unwrap();
         assert_eq!(saved_account_presence(&current).unwrap(), (false, true));
-        root.replace_saved_account_record(b"not a parsed native account")
+        root.record(RecordKind::SavedAccount)
+            .replace(b"not a parsed native account")
             .unwrap();
         assert_eq!(saved_account_presence(&current).unwrap(), (true, true));
     }

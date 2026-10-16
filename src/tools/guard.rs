@@ -653,17 +653,6 @@ pub(super) async fn send_cache_archive<W: tokio::io::AsyncWrite + Unpin>(
     Ok(())
 }
 
-#[cfg(test)]
-thread_local! {
-    static CANDIDATE_SYNC_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Makes the next candidate sync on this thread fail once.
-#[cfg(test)]
-fn fail_next_candidate_sync() {
-    CANDIDATE_SYNC_FAULT.with(|fault| fault.set(true));
-}
-
 pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
     lease: &BuildCacheLease,
@@ -695,13 +684,10 @@ pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
     let Some(file) = staged else {
         return Ok(CacheCandidate::Failed);
     };
-    #[cfg(test)]
-    let synced = if CANDIDATE_SYNC_FAULT.with(|fault| fault.replace(false)) {
-        Err(std::io::Error::other("injected candidate sync failure"))
-    } else {
-        file.sync_all()
-    };
-    #[cfg(not(test))]
+    #[cfg(any(test, feature = "test-support"))]
+    let synced =
+        crate::fault::FaultPlan::candidate_sync(lease.token()).and_then(|()| file.sync_all());
+    #[cfg(not(any(test, feature = "test-support")))]
     let synced = file.sync_all();
     if synced.is_err() {
         return Ok(CacheCandidate::Failed);
@@ -1622,7 +1608,7 @@ mod tests {
         valid.write_all(&candidate).unwrap();
         valid.sync_all().unwrap();
         drop(valid);
-        crate::store::fail_next_commit_marker(&identity);
+        crate::fault::FaultPlan::fail_commit_marker(&identity);
         let mut observation = command_observation();
         publish_cache_candidate(
             &mut observation,
@@ -1654,7 +1640,7 @@ mod tests {
         stream.extend(&candidate);
         stream.extend(b"CACHE_DONE\n");
         let mut reader = tokio::io::BufReader::new(stream.as_slice());
-        fail_next_candidate_sync();
+        crate::fault::FaultPlan::fail_candidate_sync(&identity);
         let outcome = receive_cache_candidate(&mut reader, &lease).await.unwrap();
         assert!(matches!(outcome, CacheCandidate::Failed));
         let mut trailer = String::new();
