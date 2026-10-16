@@ -1,52 +1,21 @@
 # Planning workflow
 
-Rules for maintained execution plans. [README.md](./README.md) defines the folder mechanism and [TEMPLATE.md](./TEMPLATE.md) defines the shared structure.
+Rules for maintained execution plans. [README.md](./README.md) defines the folder mechanism and [TEMPLATE.md](./TEMPLATE.md) the shared structure.
 
 ## Rules
 
-- Put repository-level plans under `planning/`, not in ad hoc documentation folders.
-- Edit an existing plan only when the user asks to change or continue it. Analysis does not silently mutate the plan.
-- Resolve checkable facts before finalizing. Turn unresolved material uncertainty into a concrete open question.
-- Sweep for placeholder language such as `assume`, `probably`, `maybe`, `TBD`, `later`, and `follow up`; resolve it or make the decision hole explicit.
-- Split work by responsibility and risk, not arbitrary file groups.
-- Each branch or PR should be describable in one sentence and leave the repository coherent.
-- Change status to `In progress` when implementation starts.
-- For multi-PR plans, update the current remaining work and next action before
-  starting the next slice; completed work stays in Git/PR/CI history.
-- Close completed implementation using the [planning lifecycle](./README.md#lifecycle), including local uncommitted work.
-- Cite adjacent rules and research instead of restating them.
-- Match the plan's detail to the work. Use the compact template for ordinary changes; add ownership, protocol or rollout detail only when those decisions are affected. Empty headings and repeated repository rules do not make a plan implementation-ready.
-- For behavior work, link the owning spec or unmigrated contract and its existing evidence owner. Describe proposed changes with successful and meaningful rejection/failure/recovery scenarios before implementation. Review contract impact after each planning pass using [the spec workflow](../docs/specs/README.md), which owns acceptance, updates, extraction and evidence status.
+- Put repository-level plans under `planning/`, not in ad hoc documentation folders. Edit an existing plan only when the user asks to change or continue it.
+- Resolve checkable facts before finalizing; turn remaining material uncertainty into a concrete open question. Sweep for `assume`, `probably`, `maybe`, `TBD`, `later` and `follow up`.
+- Split work by responsibility and risk. Each branch or PR is describable in one sentence and leaves the repository coherent.
+- Set status to `In progress` when implementation starts; for multi-PR plans keep only remaining work and the next action, and close completed plans under the [planning lifecycle](./README.md#lifecycle), including local uncommitted work.
+- Cite adjacent rules, specs and research instead of restating them. Match detail to the work: empty headings and repeated repository rules do not make a plan implementation-ready.
+- For behavior work, link the owning spec and its evidence owner and describe the successful path plus meaningful rejection, failure and recovery scenarios before implementation; the [spec workflow](../docs/specs/README.md) owns contract updates.
 
 ## Harness-specific questions
 
-Apply the [product and implementation priorities](../AGENTS.md#product-and-implementation-priorities) to every implementation plan: identify the harness responsibility served, the simplest sufficient solution after Ponytail, and any OS impact. For platform work, name the common behavior, necessary native differences, unavailable capabilities and native verification; platform-independent changes need only that conclusion.
+Apply the [product and implementation priorities](../AGENTS.md#product-and-implementation-priorities): name the harness responsibility served, the simplest sufficient solution after Ponytail, and the OS impact (common behavior, necessary native differences, unavailable capabilities, native verification) or that there is none.
 
-Every architecture or module plan resolves:
-
-- Which module owns each invariant and piece of state?
-- What is the module's interface, including ordering, errors, cancellation, and performance characteristics?
-- Is each proposed seam in-process, local-substitutable, remote-owned, or truly external?
-- Which concrete adapters justify the seam today?
-- Which data crosses the seam, and which external types must be translated at the edge?
-- How are compatibility, capability negotiation, and event replay handled across language or process boundaries?
-- What is bounded: queues, buffers, bodies, artifacts, concurrency, retries, and tool output?
-- What is the backpressure or overflow behavior for every bound?
-- What is the security model for credentials, permissions, tools, files, network access, memory scope, and untrusted content?
-- What latency, resource, correctness, and recovery evidence decides whether the design succeeds?
-- Which tests exercise the module through its interface, including cross-language golden fixtures when a protocol changes?
-
-## Process
-
-1. Define the outcome and the user or system behavior it enables.
-2. Map current facts and ownership before proposing crates or directories.
-3. Separate policy from details and identify information each module must hide.
-4. Design the interface and failure semantics before the implementation layout.
-5. Compare at least two materially different designs for hard-to-reverse interfaces.
-6. Select seams only where variation, isolation, or an external dependency earns them.
-7. Order implementation into coherent, verifiable slices.
-8. Define exit criteria and measurements before implementation begins.
-9. Run a final assumption, security, compatibility, and auto-learning sweep.
+A plan that changes a module boundary or interface also answers, for the affected seam only: which module owns each invariant and piece of state; the interface's ordering, errors, cancellation and performance; whether the seam is in-process, local-substitutable, remote-owned or external and which concrete adapters justify it today; which data crosses it and which external types are translated at the edge; what is bounded (queues, buffers, bodies, artifacts, concurrency, retries, tool output) and its overflow behavior; the security model for credentials, permissions, tools, files, network, memory and untrusted content; and which tests exercise the module through its interface.
 
 ## Smell test
 
@@ -55,6 +24,6 @@ Every architecture or module plan resolves:
 - Transport or database types cross into policy → translate them at the edge.
 - The same state can be mutated by several modules → assign one owner.
 - A client needs internal engine knowledge → deepen the engine interface.
-- A plan says “plugin” without a capability, lifecycle, trust, and versioning model → it is not designed yet.
+- A plan says "plugin" without a capability, lifecycle, trust and versioning model → it is not designed yet.
 - A plan contains a language choice without a workload or interoperability reason → state the reason or defer the choice.
 - A section can disappear without losing decision-relevant information → delete it.
