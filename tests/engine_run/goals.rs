@@ -3343,3 +3343,454 @@ async fn steering_note_waits_for_the_next_autonomous_run_primary_call() {
     );
     assert_eq!(view.runs[1].id, outcome.run.id);
 }
+
+/// Parses the catalog a child Tool request carried; the catalog is pinned JSON data.
+fn child_catalog(request: &arany::ProviderRequest) -> serde_json::Value {
+    let tools = request.tools.as_ref().expect("research catalog");
+    serde_json::from_str(&tools.catalog).expect("catalog JSON")
+}
+
+fn child_tool_starts(events: &[arany::EventEnvelope], child: arany::AgentRunId) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.event,
+                Event::ToolStarted { agent_run_id, .. } if *agent_run_id == child
+            )
+        })
+        .count()
+}
+
+#[tokio::test]
+async fn read_only_child_reads_the_workspace_and_its_report_reaches_synthesis() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Delegate(Delegate {
+            children: vec!["Inspect facts".into()],
+        }),
+        ProviderOutcome::Tool {
+            call: facts_read(),
+            plan_contract: None,
+        },
+        finish_with("facts say v1"),
+        finish_with("synthesized"),
+    ]);
+    let requests = provider.requests.clone();
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    let mut input = request(&workspace, "Check the facts");
+    input.include_paths.clear();
+    input.policy = CollaborationPolicy::Auto {
+        max_active_children: 1,
+    };
+    input.goal.budget = Some(arany::GoalBudget {
+        max_provider_calls: Some(8),
+        ..arany::GoalBudget::default()
+    });
+    let outcome = engine.run(input).await.expect("Run");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    engine.close().await.expect("engine shutdown");
+
+    let calls = requests.lock().expect("requests").clone();
+    assert_eq!(calls.len(), 4);
+    assert_eq!(calls[1].phase, AgentPhase::ChildWork);
+    assert_eq!(calls[1].collaboration, CollaborationPolicy::Single);
+    assert!(calls[1].steering_notes.is_empty());
+    assert!(calls[1].goal_context_facts.is_none());
+    let first = child_catalog(&calls[1]);
+    assert_eq!(first["write"], false);
+    assert_eq!(first["commands"], serde_json::json!([]));
+    assert_eq!(first["tool_calls_remaining"], 2);
+    let second = child_catalog(&calls[2]);
+    assert_eq!(second["tool_calls_remaining"], 1);
+    let observations = &calls[2]
+        .tools
+        .as_ref()
+        .expect("child observations")
+        .observations;
+    assert_eq!(observations.len(), 1);
+    assert_eq!(
+        observations[0].disposition,
+        arany::ToolDisposition::Succeeded
+    );
+    assert_eq!(calls[3].phase, AgentPhase::RootSynthesis);
+    assert_eq!(calls[3].child_results[0].result, "facts say v1");
+    assert!(
+        calls[3]
+            .tools
+            .as_ref()
+            .is_none_or(|tools| tools.observations.is_empty())
+    );
+    assert!(!format!("{:?}", calls[3]).contains(&facts_digest("v1")));
+
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    let child = view.runs[0].agents[1].id;
+    assert_eq!(
+        view.runs[0].agents[1].grant,
+        Some(arany::ChildGrant::ReadOnly)
+    );
+    assert_eq!(child_tool_starts(&events, child), 1);
+    assert!(view.runs[0].tools.is_empty());
+    assert_eq!(view.runs[0].agents[1].tools.len(), 1);
+}
+
+#[tokio::test]
+async fn child_mcp_call_or_write_is_rejected_before_dispatch() {
+    let outcomes = [
+        arany::ToolCall::McpCall {
+            server: "local".into(),
+            tool: "probe".into(),
+            schema_digest: "a".repeat(64),
+            arguments: "{}".into(),
+        },
+        arany::ToolCall::Write {
+            path: "notes/facts.txt".into(),
+            expected_digest: None,
+            content: "v2".into(),
+        },
+    ];
+    for call in outcomes {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = facts_workspace(temp.path(), "v1");
+        let state_path = temp.path().join("state");
+        let provider = ScriptedProvider::new(vec![
+            ProviderOutcome::Delegate(Delegate {
+                children: vec!["Inspect facts".into()],
+            }),
+            ProviderOutcome::Tool {
+                call,
+                plan_contract: None,
+            },
+            finish_with("never reached"),
+        ]);
+        let requests = provider.requests.clone();
+        let mut engine = facts_engine(
+            StateRoot::admit(&state_path).expect("state"),
+            &state_path,
+            provider,
+        );
+        let mut input = request(&workspace, "Check the facts");
+        input.include_paths.clear();
+        input.policy = CollaborationPolicy::Auto {
+            max_active_children: 1,
+        };
+        let outcome = engine.run(input).await.expect("Run");
+        assert_eq!(outcome.run.status, RunStatus::Failed);
+        engine.close().await.expect("engine shutdown");
+        assert_eq!(requests.lock().expect("requests").len(), 2);
+
+        let (events, view) = replayed(&state_path, outcome.session_id).await;
+        let child = view.runs[0].agents[1].id;
+        assert_eq!(child_tool_starts(&events, child), 0);
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            Event::ProviderCallRecorded { agent_run_id, record, .. }
+                if *agent_run_id == child
+                    && record.disposition == ProviderCallDisposition::InvalidResponse
+        )));
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            Event::AgentFinished { agent_run_id, disposition, .. }
+                if *agent_run_id == child && *disposition == arany::AgentDisposition::Failed
+        )));
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("notes/facts.txt")).expect("facts"),
+            "v1"
+        );
+    }
+}
+
+#[tokio::test]
+async fn child_reads_stay_inside_the_plan_and_never_satisfy_the_goal_criterion() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    std::fs::write(workspace.join("notes/other.txt"), "OTHER-CANARY").expect("other file");
+    let state_path = temp.path().join("state");
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Tool {
+            call: arany::ToolCall::Search {
+                path: "notes/facts.txt".into(),
+                query: "v".into(),
+            },
+            plan_contract: Some(Box::new(facts_plan(facts_digest("v1")))),
+        },
+        ProviderOutcome::Delegate(Delegate {
+            children: vec!["Inspect notes".into()],
+        }),
+        ProviderOutcome::Tool {
+            call: facts_read(),
+            plan_contract: None,
+        },
+        ProviderOutcome::Tool {
+            call: arany::ToolCall::Read {
+                path: "notes/other.txt".into(),
+                offset: 0,
+                limit: 4096,
+            },
+            plan_contract: None,
+        },
+        finish_with("report"),
+        finish_with("done"),
+    ]);
+    let requests = provider.requests.clone();
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    let mut input = request(&workspace, "Check the facts");
+    input.include_paths.clear();
+    input.policy = CollaborationPolicy::Auto {
+        max_active_children: 1,
+    };
+    let outcome = engine.run(input).await.expect("Run");
+    assert_eq!(outcome.run.status, RunStatus::Failed);
+    engine.close().await.expect("engine shutdown");
+
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    let child = view.runs[0].agents[1].id;
+    let dispositions: Vec<_> = view.runs[0].agents[1]
+        .tools
+        .iter()
+        .filter_map(|tool| {
+            tool.observation
+                .as_ref()
+                .map(|observation| observation.disposition)
+        })
+        .collect();
+    assert_eq!(
+        dispositions,
+        [
+            arany::ToolDisposition::Succeeded,
+            arany::ToolDisposition::Denied
+        ]
+    );
+    let denied = view.runs[0].agents[1].tools[1]
+        .observation
+        .as_ref()
+        .expect("Denied observation");
+    assert_eq!(
+        denied.output,
+        "The effect is outside the active Goal plan; no operation was dispatched"
+    );
+    assert!(denied.guard.is_none());
+    assert!(!format!("{:?}", requests.lock().expect("requests")).contains("OTHER-CANARY"));
+    assert!(!format!("{events:?}").contains("OTHER-CANARY"));
+    assert!(!view.goals[0].success_criterion_satisfied);
+    assert_eq!(child_tool_starts(&events, child), 2);
+}
+
+#[tokio::test]
+async fn child_tool_bound_offers_only_finish_and_rejects_a_further_tool() {
+    for further_tool in [false, true] {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = facts_workspace(temp.path(), "v1");
+        let state_path = temp.path().join("state");
+        let mut outcomes = vec![ProviderOutcome::Delegate(Delegate {
+            children: vec!["Inspect facts".into()],
+        })];
+        outcomes.extend((0..16).map(|_| ProviderOutcome::Tool {
+            call: facts_read(),
+            plan_contract: None,
+        }));
+        if further_tool {
+            outcomes.push(ProviderOutcome::Tool {
+                call: facts_read(),
+                plan_contract: None,
+            });
+        } else {
+            outcomes.push(finish_with("report"));
+        }
+        outcomes.push(finish_with("done"));
+        let provider = ScriptedProvider::new(outcomes);
+        let requests = provider.requests.clone();
+        let mut engine = facts_engine(
+            StateRoot::admit(&state_path).expect("state"),
+            &state_path,
+            provider,
+        );
+        let mut input = request(&workspace, "Check the facts");
+        input.include_paths.clear();
+        input.policy = CollaborationPolicy::Auto {
+            max_active_children: 1,
+        };
+        let outcome = engine.run(input).await.expect("Run");
+        engine.close().await.expect("engine shutdown");
+
+        let calls = requests.lock().expect("requests").clone();
+        let (events, view) = replayed(&state_path, outcome.session_id).await;
+        let child = view.runs[0].agents[1].id;
+        assert_eq!(child_tool_starts(&events, child), 16);
+        if further_tool {
+            assert_eq!(outcome.run.status, RunStatus::Failed);
+            assert!(events.iter().any(|event| matches!(
+                &event.event,
+                Event::ProviderCallRecorded { agent_run_id, record, .. }
+                    if *agent_run_id == child
+                        && record.disposition == ProviderCallDisposition::InvalidResponse
+            )));
+        } else {
+            assert_eq!(outcome.run.status, RunStatus::Finished);
+            assert_eq!(child_catalog(&calls[17])["tool_calls_remaining"], 0);
+            assert_eq!(calls[17].phase, AgentPhase::ChildWork);
+        }
+    }
+}
+
+#[tokio::test]
+async fn pause_during_research_finishes_the_child_call_and_dispatches_no_child_tool() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let steering = RunSteering::new();
+    let pause = steering.clone();
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Delegate(Delegate {
+            children: vec!["Inspect facts".into()],
+        }),
+        ProviderOutcome::Tool {
+            call: facts_read(),
+            plan_contract: None,
+        },
+        finish_with("never reached"),
+    ])
+    .with_before_call(1, move || assert!(pause.pause(), "first pause"));
+    let requests = provider.requests.clone();
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    engine.set_steering(steering);
+    let mut input = request(&workspace, "Check the facts");
+    input.include_paths.clear();
+    input.policy = CollaborationPolicy::Auto {
+        max_active_children: 1,
+    };
+    let outcome = engine.run(input).await.expect("paused Run");
+    assert_eq!(outcome.run.status, RunStatus::Cancelled);
+    engine.close().await.expect("engine shutdown");
+    assert_eq!(requests.lock().expect("requests").len(), 2);
+    assert_paused_child_stopped(&state_path, outcome.session_id, outcome.goal_id).await;
+}
+
+#[tokio::test]
+async fn cancellation_after_a_child_tool_request_dispatches_no_child_tool() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let cancellation = RunCancellation::new();
+    let mut provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Delegate(Delegate {
+            children: vec!["Inspect facts".into()],
+        }),
+        ProviderOutcome::Tool {
+            call: facts_read(),
+            plan_contract: None,
+        },
+        finish_with("never reached"),
+    ]);
+    provider.cancel_at_completion = Some((AgentPhase::ChildWork, cancellation.clone()));
+    let requests = provider.requests.clone();
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    let mut input = request(&workspace, "Check the facts");
+    input.include_paths.clear();
+    input.policy = CollaborationPolicy::Auto {
+        max_active_children: 1,
+    };
+    let outcome = engine
+        .run_with_cancel(input, cancellation)
+        .await
+        .expect("cancelled Run");
+    assert_eq!(outcome.run.status, RunStatus::Cancelled);
+    engine.close().await.expect("engine shutdown");
+    assert_eq!(requests.lock().expect("requests").len(), 2);
+    assert_paused_child_stopped(&state_path, outcome.session_id, outcome.goal_id).await;
+}
+
+/// The child's last call is its observed Tool request; no Tool starts and the Goal is interrupted.
+async fn assert_paused_child_stopped(
+    state_path: &Path,
+    session_id: arany::SessionId,
+    goal_id: arany::GoalId,
+) {
+    let (events, view) = replayed(state_path, session_id).await;
+    let child = view.runs[0].agents[1].id;
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        Event::ProviderCallRecorded { agent_run_id, record, .. }
+            if *agent_run_id == child
+                && record.disposition == ProviderCallDisposition::ToolRequested
+    )));
+    assert_eq!(child_tool_starts(&events, child), 0);
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        Event::AgentFinished { agent_run_id, disposition, .. }
+            if *agent_run_id == child && *disposition == arany::AgentDisposition::Cancelled
+    )));
+    assert_eq!(
+        view.goal(goal_id).expect("Goal").status,
+        arany::GoalStatus::Interrupted
+    );
+}
+
+#[tokio::test]
+async fn near_deadline_child_tool_stops_before_tool_started() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Delegate(Delegate {
+            children: vec!["Inspect facts".into()],
+        }),
+        ProviderOutcome::Tool {
+            call: facts_read(),
+            plan_contract: None,
+        },
+        finish_with("never reached"),
+    ]);
+    let requests = provider.requests.clone();
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    let mut input = request(&workspace, "Check the facts");
+    input.include_paths.clear();
+    input.policy = CollaborationPolicy::Auto {
+        max_active_children: 1,
+    };
+    input.goal.budget = Some(arany::GoalBudget {
+        max_active_ms: Some(15_000),
+        ..arany::GoalBudget::default()
+    });
+    let outcome = engine.run(input).await.expect("Run");
+    assert_eq!(outcome.run.status, RunStatus::Failed);
+    engine.close().await.expect("engine shutdown");
+    assert_eq!(requests.lock().expect("requests").len(), 2);
+
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    let child = view.runs[0].agents[1].id;
+    assert_eq!(child_tool_starts(&events, child), 0);
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        Event::ProviderCallRecorded { agent_run_id, record, .. }
+            if *agent_run_id == child
+                && record.disposition == ProviderCallDisposition::ToolRequested
+    )));
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        Event::AgentFinished { agent_run_id, disposition, .. }
+            if *agent_run_id == child && *disposition == arany::AgentDisposition::Failed
+    )));
+}

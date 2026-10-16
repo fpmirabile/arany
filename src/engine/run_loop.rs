@@ -907,13 +907,17 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         Ok(())
     }
 
-    /// Converts a requested pause into this Run's cancellation; callers stop at their boundary.
-    pub(super) fn pause_at_boundary(&self) -> bool {
-        let requested = self
-            .controls
+    /// Whether the caller asked to pause; unlike `pause_at_boundary` it never cancels in-flight calls.
+    pub(super) fn pause_requested(&self) -> bool {
+        self.controls
             .steering
             .as_ref()
-            .is_some_and(RunSteering::pause_requested);
+            .is_some_and(RunSteering::pause_requested)
+    }
+
+    /// Converts a requested pause into this Run's cancellation; callers stop at their boundary.
+    pub(super) fn pause_at_boundary(&self) -> bool {
+        let requested = self.pause_requested();
         if requested {
             self.controls.cancellation.cancel();
         }
