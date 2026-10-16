@@ -802,7 +802,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         let third = engine.run(next).await.expect("image-only team after reopen");
         let fork_id = engine.fork_session(first.session_id, workspace.clone(), Some("Image fork".into())).await.unwrap();
         let large_image = image_fixture(arany::MAX_IMAGE_BYTES);
-        let maximal_objective = "\0".repeat(8 * 1024);
+        let maximal_objective = "\0".repeat(64 * 1024);
         let mut next = request(&workspace, &maximal_objective);
         next.title = None;
         next.session_id = Some(first.session_id);
@@ -991,11 +991,13 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 assert_eq!(accepted[2]["payload"]["text"], "");
                 assert!(accepted[3]["payload"]["text"].as_str() == Some(maximal_objective.as_str()));
                 let image_payload_bytes = accepted[3]["payload"].to_string().len();
-                assert!((300 * 1024..=320 * 1024).contains(&image_payload_bytes), "maximally escaped image input fits its Event");
+                assert!((640 * 1024..=656 * 1024).contains(&image_payload_bytes), "maximally escaped image input fits its Event");
                 assert_eq!(accepted[4]["event_version"], 5);
                 assert!(accepted[4]["payload"]["text"].as_str() == Some(maximal_objective.as_str()));
-                assert_eq!(accepted[4]["payload"].to_string().len(), 6 * 8 * 1024 + 23, "maximally escaped text-only input fits its Event");
+                assert_eq!(accepted[4]["payload"].to_string().len(), 6 * 64 * 1024 + 23, "maximally escaped text-only input fits its Event");
                 assert_eq!(accepted[4]["payload"]["images"], serde_json::json!([]), "text-only input retains the current Message shape");
+                let goal_started = lines.iter().filter(|line| line["kind"] == "GoalStarted").map(|line| line["payload"].to_string().len()).max().unwrap();
+                assert!((384 * 1024..=400 * 1024).contains(&goal_started), "maximally escaped objective fits GoalStarted");
             }
         }
         let fork = store.load_view(fork_id).await.unwrap().unwrap();
@@ -1026,8 +1028,8 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 "corrupted image" => invalid["images"][0]["data"] = "not PNG".into(),
                 "URL" => invalid["images"][0]["data"] = "https://example.invalid/image.png".into(),
                 "extra field" => invalid["images"][0]["path"] = "/outside.png".into(),
-                "text overflow" => invalid["text"] = "x".repeat(8 * 1024 + 1).into(),
-                "payload overflow" => invalid["text"] = "x".repeat(320 * 1024).into(),
+                "text overflow" => invalid["text"] = "x".repeat(64 * 1024 + 1).into(),
+                "payload overflow" => invalid["text"] = "x".repeat(656 * 1024).into(),
                 "agent scope" => agent_scope = Some(AgentRunId::new().to_string()),
                 _ => unreachable!(),
             }
@@ -1858,7 +1860,7 @@ fn compaction_input_limit_rejects_before_provider_egress() {
                 summary: "done".into(),
                 result: "x".repeat(32 * 1024),
             });
-            7
+            10
         ]);
         let compact_requests = Arc::clone(&provider.compact_requests);
         let mut engine = Engine::open(
@@ -1867,7 +1869,7 @@ fn compaction_input_limit_rejects_before_provider_egress() {
         )
         .expect("engine");
         let mut session_id = None;
-        for _ in 0..7 {
+        for _ in 0..10 {
             let mut next = request(&workspace, &"Q".repeat(8 * 1024));
             next.session_id = session_id;
             if session_id.is_some() {
@@ -1889,20 +1891,20 @@ fn compaction_input_limit_rejects_before_provider_egress() {
             .load_session(session_id)
             .await
             .expect("durable Events");
-        assert_eq!(events.len(), 92);
+        assert_eq!(events.len(), 131);
         assert_eq!(
             events
                 .iter()
                 .filter(|event| matches!(event.event, Event::GoalStarted { .. }))
                 .count(),
-            7
+            10
         );
         assert_eq!(
             events
                 .iter()
                 .filter(|event| matches!(event.event, Event::ProviderCallRecorded { .. }))
                 .count(),
-            7
+            10
         );
         assert!(
             !events
@@ -5187,9 +5189,9 @@ fn workspace_paths_fail_closed_before_a_run_is_accepted() {
             (String::new(), Vec::new()),
             (String::new(), vec![image_fixture(69); 5]),
             (String::new(), vec![image_fixture(64 * 1024); 4]),
-            ("x".repeat(8 * 1024 + 1), Vec::new()),
+            ("x".repeat(64 * 1024 + 1), Vec::new()),
             (
-                "x".repeat(8 * 1024 + 1),
+                "x".repeat(64 * 1024 + 1),
                 vec![image_fixture(arany::MAX_IMAGE_BYTES)],
             ),
         ] {

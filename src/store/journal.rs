@@ -29,7 +29,7 @@ pub(super) fn admit_operation(
     connection: &mut Connection,
     session_id: SessionId,
     event_slots: usize,
-    message_extra: bool,
+    run_start: bool,
 ) -> Result<(), StoreError> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let mut count = 0;
@@ -44,13 +44,13 @@ pub(super) fn admit_operation(
     let page_size: i64 = transaction.query_row("PRAGMA page_size", [], |row| row.get(0))?;
     let event_bytes = i64::try_from(event_slots).map_err(|_| StoreError::ReplayLimit)?
         * (super::MAX_EVENT_BYTES as i64 + EVENT_SQLITE_OVERHEAD_PAGES * page_size);
-    let image_message_extra = if message_extra {
-        (event_payload_limit("MessageAccepted", 4) - super::MAX_EVENT_BYTES) as i64
+    let run_start_extra = if run_start {
+        super::RUN_START_EXTRA_BYTES as i64
     } else {
         0
     };
     if MAX_DATABASE_BYTES - page_count * page_size
-        < ADMISSION_HEADROOM_BYTES + event_bytes + image_message_extra
+        < ADMISSION_HEADROOM_BYTES + event_bytes + run_start_extra
     {
         return Err(StoreError::StorageFull);
     }
