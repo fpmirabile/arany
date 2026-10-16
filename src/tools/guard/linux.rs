@@ -21,6 +21,8 @@ const MANAGER_DEADLINE: Duration = Duration::from_secs(4);
 const MOUNTINFO_BYTES_CAP: usize = 1024 * 1024;
 const MOUNTINFO_ENTRIES_CAP: usize = 4096;
 const MOUNTINFO_LINE_CAP: usize = 16 * 1024;
+const HARDENED_THREADS_CAP: usize = 64;
+const STATUS_BYTES_CAP: usize = 16 * 1024;
 const BWRAP_BOOTSTRAP: &[&str] = &[
     "/usr/bin/env",
     "-i",
@@ -116,7 +118,7 @@ pub(super) async fn stop_command_descendants(
     }
 }
 
-/// Drops capabilities, installs the syscall profile and verifies the result before Ready.
+/// Drops capabilities, installs the syscall profile and verifies every thread before Ready.
 pub(super) fn harden() -> Result<(), ToolError> {
     rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
         .map_err(|_| ToolError::ProtectionUnavailable)?;
@@ -138,8 +140,37 @@ pub(super) fn harden() -> Result<(), ToolError> {
         },
     )
     .map_err(|_| ToolError::ProtectionUnavailable)?;
-    let status = std::fs::read_to_string("/proc/self/status")
-        .map_err(|_| ToolError::ProtectionUnavailable)?;
+    let mut threads = 0usize;
+    for entry in
+        std::fs::read_dir("/proc/self/task").map_err(|_| ToolError::ProtectionUnavailable)?
+    {
+        threads += 1;
+        if threads > HARDENED_THREADS_CAP {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        let path = entry
+            .map_err(|_| ToolError::ProtectionUnavailable)?
+            .path()
+            .join("status");
+        let mut status = String::new();
+        std::fs::File::open(path)
+            .and_then(|file| {
+                file.take(STATUS_BYTES_CAP as u64 + 1)
+                    .read_to_string(&mut status)
+            })
+            .map_err(|_| ToolError::ProtectionUnavailable)?;
+        if status.len() > STATUS_BYTES_CAP {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        verify_hardened_status(&status)?;
+    }
+    if threads == 0 {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok(())
+}
+
+fn verify_hardened_status(status: &str) -> Result<(), ToolError> {
     let field = |name: &str| {
         status.lines().find_map(|line| {
             let (key, value) = line.split_once(':')?;
@@ -1175,6 +1206,29 @@ fn decode_mount_path(bytes: &[u8]) -> Result<Vec<u8>, ToolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hardened_status_requires_filter_no_new_privs_and_zero_capabilities() {
+        let hardened = "Name:\tarany\nNoNewPrivs:\t1\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapBnd:\t000001ffffffffff\nCapAmb:\t0000000000000000\nSeccomp:\t2\nSeccomp_filters:\t2\n";
+        assert!(verify_hardened_status(hardened).is_ok());
+        for (from, to) in [
+            ("Seccomp:\t2\n", "Seccomp:\t0\n"),
+            ("Seccomp:\t2\n", "Seccomp:\t1\n"),
+            ("Seccomp:\t2\n", ""),
+            ("NoNewPrivs:\t1\n", "NoNewPrivs:\t0\n"),
+            ("NoNewPrivs:\t1\n", ""),
+            ("CapEff:\t0000000000000000", "CapEff:\t0000000000200000"),
+            ("CapPrm:\t0000000000000000", "CapPrm:\t0000000000000001"),
+            ("CapInh:\t0000000000000000", "CapInh:\t0000000000000001"),
+            ("CapAmb:\t0000000000000000", "CapAmb:\t0000000000000001"),
+            ("CapAmb:\t0000000000000000\n", ""),
+        ] {
+            let status = hardened.replacen(from, to, 1);
+            assert_ne!(status, hardened);
+            assert!(verify_hardened_status(&status).is_err(), "{status}");
+        }
+        assert!(verify_hardened_status("").is_err());
+    }
 
     #[test]
     fn mountinfo_escapes_decode_only_separator_bytes() {
