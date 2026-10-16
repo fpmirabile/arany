@@ -65,7 +65,7 @@ use arany::semantic;
 #[path = "common/process.rs"]
 pub mod process;
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "common/git.rs"]
 pub mod git;
 
@@ -81,6 +81,10 @@ mod tools;
 #[path = "session_run/tools_macos.rs"]
 mod tools;
 
+#[cfg(target_os = "macos")]
+#[path = "session_run/tools_macos_git.rs"]
+mod tools_git;
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "session_run/tools/replay.rs"]
 mod tool_replay;
@@ -95,7 +99,7 @@ fn hash(bytes: &[u8]) -> String {
         .collect()
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn private_file(path: &std::path::Path, bytes: &[u8]) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::write(path, bytes).unwrap();
