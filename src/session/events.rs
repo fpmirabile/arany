@@ -102,7 +102,7 @@ pub(crate) const EVENT_PAYLOAD_VERSION: i64 = 6;
 pub(crate) const MAX_CHILD_TOOL_CALLS: usize = 16;
 /// Model Tool requests one Provider step may declare. Engine and adapters emit one until fan-out lands.
 pub(crate) const MAX_STEP_TOOL_CALLS: u8 = 4;
-const _: () = assert!(MAX_STEP_TOOL_CALLS as usize <= MAX_CHILD_TOOL_CALLS);
+const _: () = assert!(MAX_STEP_TOOL_CALLS as u32 <= u8::MAX as u32);
 pub(crate) const MAX_GOAL_ACTION_ACTIVE_MS: u64 = 31 * 60 * 1000;
 pub const MAX_GOAL_RUNS: u8 = 16;
 pub const MAX_GOAL_PLAN_PATHS: usize = 64;
@@ -1211,7 +1211,7 @@ pub struct GoalReport {
     pub changes: Vec<String>,
     pub evidence: Vec<String>,
     pub unresolved: Vec<String>,
-    /// Information only: the part of reported input served from the Provider's prompt cache.
+    /// Information only: total cache-read input tokens across the Goal's Provider calls, never a budget.
     pub cached_input_tokens: u64,
 }
 
@@ -2136,7 +2136,7 @@ mod provider_call_tests {
             .unwrap(),
             event
         );
-        for version in [0, 1, 2, 3, 4, EVENT_PAYLOAD_VERSION + 1] {
+        for version in [0, 1, 2, 3, 4, 5, EVENT_PAYLOAD_VERSION + 1] {
             assert!(
                 Event::decode(
                     "ProviderCallRecorded",
@@ -2231,7 +2231,7 @@ mod provider_call_tests {
                     .expect("current replay"),
                     event
                 );
-                for version in [0, 1, 2, 3, 4, EVENT_PAYLOAD_VERSION + 1] {
+                for version in [0, 1, 2, 3, 4, 5, EVENT_PAYLOAD_VERSION + 1] {
                     assert!(
                         Event::decode(
                             "ProviderCallRecorded",

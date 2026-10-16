@@ -2361,7 +2361,13 @@ async fn invoke_bounded_with_preview<P: Provider>(
         biased;
         () = cancellation.cancelled() => CallResult::Cancelled,
         result = tokio::time::timeout(timeout, invocation) => match result {
-            Ok(Ok(response)) if response.usage.input_tokens.is_some_and(|count| count > MAX_REPORTED_INPUT_TOKENS) => {
+            Ok(Ok(response))
+                if response
+                    .usage
+                    .input_tokens
+                    .is_some_and(|count| count > MAX_REPORTED_INPUT_TOKENS)
+                    || !response.usage.cache_consistent() =>
+            {
                 CallResult::Failed(CallFailure::InvalidResponse(None))
             }
             Ok(Ok(response)) if response.usage.output_tokens.is_some_and(|count| count > output_cap) => {

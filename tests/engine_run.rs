@@ -46,6 +46,7 @@ struct ScriptedProvider {
     clock_advance: Option<(usize, Duration)>,
     known_input_tokens: bool,
     cached_input_tokens: u32,
+    usage_override: Option<arany::Usage>,
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
     compact_responses: Mutex<VecDeque<Result<CompactionResponse, ProviderError>>>,
     compact_requests: Arc<Mutex<Vec<CompactionRequest>>>,
@@ -67,6 +68,7 @@ impl ScriptedProvider {
             clock_advance: None,
             known_input_tokens: false,
             cached_input_tokens: 0,
+            usage_override: None,
             requests: Arc::new(Mutex::new(Vec::new())),
             compact_responses: Mutex::new(VecDeque::new()),
             compact_requests: Arc::new(Mutex::new(Vec::new())),
@@ -86,6 +88,11 @@ impl ScriptedProvider {
     }
 
     /// Reports known input usage (zero tokens) so a finite Goal token budget counts every call.
+    fn with_reported_usage(mut self, usage: arany::Usage) -> Self {
+        self.usage_override = Some(usage);
+        self
+    }
+
     fn with_cached_input_tokens(mut self, count: u32) -> Self {
         self.known_input_tokens = true;
         self.cached_input_tokens = count;
@@ -198,12 +205,12 @@ impl Provider for ScriptedProvider {
         Ok(ProviderResponse {
             outcome: outcome?,
             response_id: None,
-            usage: arany::Usage {
+            usage: self.usage_override.unwrap_or(arany::Usage {
                 input_tokens: input,
                 cache_read_input_tokens: input,
                 output_tokens: Some(8),
                 ..Default::default()
-            },
+            }),
             wire_provenance: None,
         })
     }
@@ -792,7 +799,11 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             ProviderOutcome::Finish(Finish { summary: "fork".into(), result: "Fork answer".into() }),
         ]).with_compactions(vec![Ok(CompactionResponse {
             summary: "Image conversation summary".into(), response_id: None,
-            usage: arany::Usage { input_tokens: Some(50), output_tokens: Some(12), ..Default::default() },
+            usage: arany::Usage {
+                input_tokens: Some(50),
+                output_tokens: Some(12),
+                ..Default::default()
+            },
             wire_provenance: None,
         })]);
         let requests = Arc::clone(&provider.requests);
@@ -2674,8 +2685,11 @@ fn database_capacity_is_admitted_before_provider_usage() {
         })]).with_compactions(vec![Ok(CompactionResponse {
             summary: "source and recovered answer".into(),
             response_id: None,
-            usage: arany::Usage { input_tokens: None,
-            output_tokens: Some(8), ..Default::default() },
+            usage: arany::Usage {
+                input_tokens: None,
+                output_tokens: Some(8),
+                ..Default::default()
+            },
             wire_provenance: None,
         })]);
         let calls = provider.requests.clone();
@@ -2736,8 +2750,11 @@ fn database_capacity_is_admitted_before_provider_usage() {
         })]).with_compactions(vec![Ok(CompactionResponse {
             summary: "source and recovered answer".into(),
             response_id: None,
-            usage: arany::Usage { input_tokens: None,
-            output_tokens: Some(8), ..Default::default() },
+            usage: arany::Usage {
+                input_tokens: None,
+                output_tokens: Some(8),
+                ..Default::default()
+            },
             wire_provenance: None,
         })]);
         let calls = provider.requests.clone();
@@ -2911,6 +2928,51 @@ fn bounded_finish_output_must_fit_canonical_json() {
             }
             store.close().await.unwrap();
         }
+    });
+}
+
+#[test]
+fn inconsistent_cache_usage_closes_as_invalid_response() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let state_path = temp.path().join("state");
+        let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
+            summary: "done".into(),
+            result: "accepted result".into(),
+        })])
+        .with_reported_usage(arany::Usage {
+            input_tokens: Some(4),
+            cache_read_input_tokens: Some(9),
+            output_tokens: Some(8),
+            ..Default::default()
+        });
+        let mut engine = Engine::open(
+            StateRoot::admit(&state_path).expect("private state"),
+            provider,
+        )
+        .expect("engine");
+        let mut input = request(&workspace, "Question");
+        input.include_paths.clear();
+        let outcome = engine.run(input).await.expect("durable failed Run");
+        assert_eq!(outcome.run.status, RunStatus::Failed);
+        assert_eq!(
+            outcome.run.agents[0].provider_calls[0].disposition,
+            ProviderCallDisposition::InvalidResponse
+        );
+        engine.close().await.expect("engine shutdown");
+        let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+        let view = store
+            .load_view(outcome.session_id)
+            .await
+            .expect("strict replay of the closed Run")
+            .expect("Session");
+        assert_eq!(view.runs[0].status, RunStatus::Failed);
     });
 }
 

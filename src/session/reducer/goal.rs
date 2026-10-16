@@ -1,6 +1,6 @@
 use super::{
     AgentStatus, GoalView, RunStatus, RunView, SessionView, active_run, current_goal_mut,
-    current_run, model_tool_count, pending_tool_requests,
+    current_run, pending_tool_requests,
 };
 use crate::provider::AgentPhase;
 use crate::session::events::{
@@ -382,14 +382,7 @@ impl SessionView {
                                 call.phase == AgentPhase::ToolReview
                                     && call.disposition == ProviderCallDisposition::Finished
                             })
-                        && model_tool_count(run)
-                            == primary
-                                .provider_calls
-                                .iter()
-                                .filter(|call| {
-                                    call.disposition == ProviderCallDisposition::ToolRequested
-                                })
-                                .count()
+                        && pending_tool_requests(run) == Some(0)
                 });
         let goal = current_goal_mut(self, *goal_id)?;
         let budget = goal.effective_budget();
@@ -424,6 +417,13 @@ impl SessionView {
         report: &GoalReport,
         prior: u64,
     ) -> Result<(), ReplayError> {
+        // The report's cache-read total must be exactly what the Goal accumulated from its Provider calls.
+        if self
+            .goal(*goal_id)
+            .is_none_or(|goal| report.cached_input_tokens != goal.known_cached_tokens)
+        {
+            return Err(ReplayError::InvalidTransition);
+        }
         // An unaccepted trailing link is not a Run, so the last accepted Run decides the disposition.
         let run_status = self
             .goal(*goal_id)

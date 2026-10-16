@@ -1155,3 +1155,14 @@ fn attached_stream_preview_is_in_place_and_never_exposes_wire_arguments() {
         assert!(observed.borrow().answer.is_empty());
     }
 }
+
+#[test]
+fn subscription_accept_rejects_cached_tokens_above_input() {
+    let usage = Usage {
+        input_tokens: Some(12),
+        output_tokens: Some(8),
+        cache_read_input_tokens: Some(13),
+        cache_creation_input_tokens: None,
+    };
+    assert!(accept_result(false, usage, 4096, StreamCounts::default()).is_err());
+}

@@ -185,8 +185,11 @@ impl Provider for Journey {
                         result: "Built, tested, loaded Skill and called local MCP.".into(),
                     }),
                     response_id: None,
-                    usage: arany::Usage { input_tokens: None,
-                    output_tokens: None, ..Default::default() },
+                    usage: arany::Usage {
+                        input_tokens: None,
+                        output_tokens: None,
+                        ..Default::default()
+                    },
                     wire_provenance: None,
                 });
             }

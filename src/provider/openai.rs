@@ -491,4 +491,20 @@ mod tests {
             Err(ProviderError::InvalidOutcome)
         ));
     }
+
+    #[test]
+    fn cached_tokens_above_reported_input_are_rejected() {
+        let consistent = Usage {
+            input_tokens: Some(12),
+            output_tokens: Some(8),
+            cache_read_input_tokens: Some(12),
+            cache_creation_input_tokens: None,
+        };
+        assert!(valid_usage(consistent, 4096));
+        let inconsistent = Usage {
+            cache_read_input_tokens: Some(13),
+            ..consistent
+        };
+        assert!(!valid_usage(inconsistent, 4096));
+    }
 }

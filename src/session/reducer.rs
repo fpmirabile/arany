@@ -363,7 +363,7 @@ fn ends_whole_step(run: &RunView, covered_count: usize) -> bool {
             *total += usize::from(call.requested_tools);
             Some(*total)
         });
-    covered == 0 || step_ends.into_iter().any(|end| end == covered)
+    step_ends.into_iter().any(|end| end == covered)
 }
 
 fn observed_command_changeset(
@@ -1393,8 +1393,8 @@ impl SessionView {
                     goal.success_criterion_satisfied =
                         contract.success_state_satisfied(&goal.success_state);
                 }
-                // A multi-request step keeps its plan wait open until every declared request has started.
-                let step_started = current
+                // Tools run one at a time, so once every declared request has started, this observation completes the step.
+                let all_requests_observed = current
                     .runs
                     .iter()
                     .find(|run| run.id == *run_id)
@@ -1404,7 +1404,7 @@ impl SessionView {
                     .goal(goal_id)
                     .is_some_and(|goal| goal.plan_contract.is_none())
                     && observation.intent.call.is_goal_plan_prelude();
-                if unplanned_prelude && step_started {
+                if unplanned_prelude && all_requests_observed {
                     current_goal_mut(current, goal_id)?.awaiting_plan_contract = false;
                 }
             }
@@ -3918,12 +3918,12 @@ mod goal_replay_tests {
         apply(&mut view, continuation).expect("all declared requests observed");
     }
 
-    #[test]
-    fn compaction_prefix_never_splits_a_step() {
-        let (mut view, goal, run, agent) = primary_tool_session(false);
+    /// A planned Goal whose completed two-request step has a compaction call reserved.
+    fn compacting_session() -> (SessionView, GoalId, RunId) {
+        let (mut view, goal, run, agent) = primary_tool_session(true);
         let (first, second) = (
             read_intent(run, agent, "src/lib.rs"),
-            read_intent(run, agent, "src/main.rs"),
+            read_intent(run, agent, "src/lib.rs"),
         );
         apply(&mut view, reserve_child_call(goal, run, agent)).expect("primary call");
         apply(&mut view, requesting_step(run, agent, 2)).expect("two-request step");
@@ -3931,9 +3931,134 @@ mod goal_replay_tests {
         apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
         apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
         apply(&mut view, tool_finished(run, agent, &second, b"two")).expect("second observed");
-        let run_view = &view.runs[0];
-        assert!(!ends_whole_step(run_view, 1), "a prefix inside the step");
-        assert!(ends_whole_step(run_view, 2), "the whole step");
+        apply(
+            &mut view,
+            Event::GoalCompactionCallReserved {
+                goal_id: goal,
+                run_id: run,
+            },
+        )
+        .expect("compaction call reserved");
+        (view, goal, run)
+    }
+
+    /// A Failed compaction record covering the first `count` Tools, ending at the last of them.
+    fn covering_compaction(view: &SessionView, goal: GoalId, run: RunId, count: u32) -> Event {
+        let covered = &view.runs[0].tools[count as usize - 1];
+        Event::GoalContextCompacted {
+            goal_id: goal,
+            run_id: run,
+            covered_tool_count: count,
+            record: crate::session::events::CompactionRecord {
+                covered_run_id: run,
+                covered_sequence: covered.finished_sequence.expect("observed Tool"),
+                source_digest: [0; 32],
+                provider: "openai".into(),
+                model: "gpt-5.4".into(),
+                prompt_version: 1,
+                schema_version: 1,
+                compiler_version: 3,
+                source_bytes: 1,
+                source_tokens_estimate: 1,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+                response_id: None,
+                wire_provenance: None,
+                chatgpt_provenance: None,
+                output_token_bound: OutputTokenBound::ProviderEnforced,
+                status: crate::session::events::CompactionStatus::Failed {
+                    reason: crate::session::events::CompactionFailure::ProviderUnavailable,
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn compaction_prefix_never_splits_a_step() {
+        let (view, goal, run) = compacting_session();
+        assert!(
+            rejected(&view, covering_compaction(&view, goal, run, 1)),
+            "a covered prefix inside the two-request step"
+        );
+        let whole = covering_compaction(&view, goal, run, 2);
+        let mut replayed = view.clone();
+        apply(&mut replayed, whole).expect("the whole step is covered");
+        assert_eq!(replayed.goals[0].compaction_call_reserved, None);
+    }
+
+    #[test]
+    fn goal_report_cached_tokens_must_match_the_goal_total() {
+        let session_id = SessionId::new();
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let cached_call = ProviderCallRecord {
+            cache_read_input_tokens: Some(5),
+            ..record(
+                AgentPhase::RootPlan,
+                ProviderCallDisposition::Finished,
+                Some(5),
+            )
+        };
+        let finish = |cached_input_tokens| {
+            let mut events = vec![goal_started(goal_id, GoalBudget::default())];
+            events.extend(start_run(
+                goal_id,
+                run_id,
+                agent_run_id,
+                config(CollaborationPolicy::Single, false),
+            ));
+            events.extend([
+                Event::GoalProviderCallReserved {
+                    goal_id,
+                    run_id,
+                    agent_run_id,
+                },
+                Event::ProviderCallRecorded {
+                    run_id,
+                    agent_run_id,
+                    record: cached_call.clone(),
+                },
+                Event::AgentFinished {
+                    run_id,
+                    agent_run_id,
+                    disposition: AgentDisposition::Finished,
+                    summary: Some("done".into()),
+                    result: Some("done".into()),
+                },
+                Event::MessageCommitted {
+                    run_id,
+                    text: "done".into(),
+                },
+                Event::RunFinished {
+                    run_id,
+                    disposition: RunDisposition::Finished,
+                },
+                Event::GoalFinished {
+                    goal_id,
+                    status: GoalStatus::Completed,
+                    active_ms: 0,
+                    report: GoalReport {
+                        summary: "done".into(),
+                        changes: Vec::new(),
+                        evidence: Vec::new(),
+                        unresolved: Vec::new(),
+                        cached_input_tokens,
+                    },
+                },
+            ]);
+            SessionView::replay(session_id, &session_with(session_id, events))
+        };
+        let view = finish(5).expect("matching cache total").expect("Session");
+        assert_eq!(
+            view.goals[0].report.as_ref().map(|r| r.cached_input_tokens),
+            Some(5)
+        );
+        assert!(
+            finish(0).is_err(),
+            "a report may not understate cache reads"
+        );
+        assert!(finish(6).is_err(), "a report may not overstate cache reads");
     }
 
     #[test]
