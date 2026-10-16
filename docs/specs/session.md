@@ -73,12 +73,10 @@ SQLite opens with no-follow and defensive settings, `trusted_schema` off, rollba
 
 ## Acceptance scenarios and evidence owners
 
-Tests: [`tests/engine_run.rs::scripted_runs_snapshot_workspace_and_replay_across_process_exit`](../../tests/engine_run.rs); [`tests/engine_run.rs::invalid_compaction_snapshot_corpus_fails_before_provider_disclosure`](../../tests/engine_run.rs); [`tests/session_run/session_picker.rs::session_picker_selects_visible_rows_and_restores_capture`](../../tests/session_run/session_picker.rs); [`tests/engine_run.rs::attached_previews_checkpoint_cancel_reopen_and_stay_out_of_context`](../../tests/engine_run.rs).
-
-| Scenario | Required outcome |
-|---|---|
-| Multi-Run journey | Multiple Runs, process exit, resume, a Provider change between Runs, bounded children, fork prefix identity, compaction failure safety and deterministic replay hold in one scenario. |
-| Collaboration boundaries | Single and auto policy, capacity, cancellation and invalid snapshot cases are admitted or refused at the stated boundary. |
-| Fork and compaction snapshots | Invalid, outside-prefix, deleted-source and non-current snapshots fail closed. A failed attempt keeps the last good summary. |
-| Discovery and picker | Only canonical heads for the admitted Workspace appear. A selected row resumes by exact ID or does not switch. |
-| Display checkpoints | Checkpoints replay in order, cannot accept answers from delegation or Tool calls, and are withdrawn when invalid. |
+| Scenario | Required outcome | Owner |
+|---|---|---|
+| Multi-Run journey | Multiple Runs, process exit, resume, a Provider change between Runs, bounded children, fork prefix identity, compaction failure safety and deterministic replay hold in one scenario. | [`tests/engine_run.rs::scripted_runs_snapshot_workspace_and_replay_across_process_exit`](../../tests/engine_run.rs), [`tests/session_run.rs`](../../tests/session_run.rs) |
+| Collaboration boundaries | Single and auto policy, capacity, cancellation and invalid snapshot cases are admitted or refused at the stated boundary. | [`src/engine/run_loop/children.rs`](../../src/engine/run_loop/children.rs), [`tests/engine_run.rs`](../../tests/engine_run.rs) |
+| Fork and compaction snapshots | Invalid, outside-prefix, deleted-source and non-current snapshots fail closed. A failed attempt keeps the last good summary. | [`src/session/compaction.rs`](../../src/session/compaction.rs), [`src/session/reducer.rs`](../../src/session/reducer.rs) |
+| Discovery and picker | Only canonical heads for the admitted Workspace appear. A selected row resumes by exact ID or does not switch. | [`tests/session_run/session_picker.rs::session_picker_selects_visible_rows_and_restores_capture`](../../tests/session_run/session_picker.rs), [`src/store/replay.rs`](../../src/store/replay.rs) |
+| Display checkpoints | Checkpoints replay in order, cannot accept answers from delegation or Tool calls, and are withdrawn when invalid. | [`src/session/reducer.rs`](../../src/session/reducer.rs), [`src/session/events.rs`](../../src/session/events.rs) |

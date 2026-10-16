@@ -52,14 +52,14 @@ This contract owns the official ChatGPT-plan OAuth route: registration and sign-
 
 ## Acceptance scenarios and evidence owners
 
-Tests: [`src/cli/chatgpt/account/tests.rs::private_file_accounts_reopen_and_reject_cross_account_drift`](../../src/cli/chatgpt/account/tests.rs); [`tests/session_run/setup/offline_https/chatgpt.rs::release_private_file_chatgpt_checked_direct_and_team_turns`](../../tests/session_run/setup/offline_https/chatgpt.rs); [`src/provider/openai/subscription/tests.rs::only_a_complete_bounded_terminal_event_yields_an_outcome`](../../src/provider/openai/subscription/tests.rs).
+These owners define verification scope, not gate results. Native and live gates run in CI or stay listed in [next steps](../../NEXT_STEPS.md).
 
-| Scenario | Required outcome |
-|---|---|
-| Authorization transaction | One attempt binds state, nonce and PKCE to one exact callback. Invalid, stalled or wrong-path requests get inert rejections, and no code or token is reflected. |
-| Identity and subject | Only RS256 tokens with exact audience, `azp` and signed subject return credentials. A returning sign-in with another subject cannot replace the account. |
-| Checked turn | Setup completes without inference. An explicit diagnostic publishes evidence, and two account-bound direct Runs plus one team child replay under the local-only bound. |
-| Subscription stream and outcome | Only `response.completed` with bounded usage and a valid strict outcome succeeds. Failed, incomplete, malformed or interrupted streams publish no partial outcome. |
-| Renewal, logout and uncertain storage | Pending renewal or sign-out markers block use until verified reauthorization. Uncertain deletion stays blocked and visible. |
+| Scenario | Required outcome | Owner |
+|---|---|---|
+| Authorization transaction | One attempt binds state, nonce and PKCE to one exact callback. Invalid, stalled or wrong-path requests get inert rejections, and no code or token is reflected. | [`src/cli/chatgpt/account/tests.rs`](../../src/cli/chatgpt/account/tests.rs), [`tests/session_run/setup/offline_https/chatgpt.rs`](../../tests/session_run/setup/offline_https/chatgpt.rs); [item 1: Broader ChatGPT workflows](../../NEXT_STEPS.md#beta-1-final-user-owned-checks) (live account gate open) |
+| Identity and subject | Only RS256 tokens with exact audience, `azp` and signed subject return credentials. A returning sign-in with another subject cannot replace the account. | [`src/cli/chatgpt/account/tests.rs`](../../src/cli/chatgpt/account/tests.rs); [item 1: Broader ChatGPT workflows](../../NEXT_STEPS.md#beta-1-final-user-owned-checks) (live account gate open) |
+| Checked turn | Setup completes without inference. An explicit diagnostic publishes evidence, and two account-bound direct Runs plus one team child replay under the local-only bound. | [`tests/session_run/setup/offline_https/chatgpt.rs::release_private_file_chatgpt_checked_direct_and_team_turns`](../../tests/session_run/setup/offline_https/chatgpt.rs); native/live: [item 1: Broader ChatGPT workflows](../../NEXT_STEPS.md#beta-1-final-user-owned-checks) (open) |
+| Subscription stream and outcome | Only `response.completed` with bounded usage and a valid strict outcome succeeds. Failed, incomplete, malformed or interrupted streams publish no partial outcome. | [`src/provider/openai/subscription/tests.rs::only_a_complete_bounded_terminal_event_yields_an_outcome`](../../src/provider/openai/subscription/tests.rs) |
+| Renewal, logout and uncertain storage | Pending renewal or sign-out markers block use until verified reauthorization. Uncertain deletion stays blocked and visible. | [`src/cli/chatgpt/account/tests.rs`](../../src/cli/chatgpt/account/tests.rs), [`src/cli/credentials.rs`](../../src/cli/credentials.rs); [item 1: Broader ChatGPT workflows](../../NEXT_STEPS.md#beta-1-final-user-owned-checks) (live account gate open) |
 
 Offline proof establishes no live browser, live account, native keyring setup or paid Run.

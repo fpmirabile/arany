@@ -218,7 +218,7 @@ flowchart LR
 
 ## 5. Target: crates, modules and dependency direction (after PR14)
 
-Every box is named for what it owns. The `arany` library keeps its name so test imports stay valid; `arany-journal` is conditional on roadmap item 7.
+Every box is named for what it owns. The `arany` library keeps its name so test imports stay valid; `arany-journal` is conditional on roadmap item 8.
 
 ```mermaid
 flowchart TB
@@ -229,7 +229,7 @@ flowchart TB
         TERMI["terminal: Ratatui screens, composer, history, clipboard"]
         PRESI["presentation: pure projections of views to rows and lines"]
         ACCT["accounts: ChatGPT OAuth, saved API accounts, keyring helper<br/>(today cli/chatgpt + cli/credentials)"]
-        SERVE["serve: JSON-RPC stdio server (roadmap item 7, not in this plan)"]
+        SERVE["serve: JSON-RPC stdio server (roadmap item 8, not in this plan)"]
     end
 
     subgraph ENGINE["crate arany (library: the harness)"]

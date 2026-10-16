@@ -29,13 +29,11 @@ Subscription media compatibility, complete item reconciliation and strict final-
 
 ## Acceptance and evidence owners
 
-Tests: [`tests/session_run/custom.rs::custom_profile_process_gate_proves_conformance_and_durable_runs`](../../tests/session_run/custom.rs); [`src/provider/openai/wire/tests.rs::rejected_native_calls_report_their_diagnostic_stage`](../../src/provider/openai/wire/tests.rs); [`src/diagnostics.rs::diagnostic_file_is_bounded_private_and_rejects_aliases`](../../src/diagnostics.rs).
-
-| Scenario | Required observation |
-|---|---|
-| Normal debug admission, then a rejected custom-provider Run | Activation, failed Provider phase/disposition and failed Run appear in the private log; exact task channels and closed replay retain their contract |
-| Subscription stream/outcome rejection | One subscription rejection record preserves actual counters alongside Engine failure facts; credentials, conversation and upstream canaries are absent |
-| Malformed typed Tool argument | Strict decoder still rejects; compiled operation and numeric argument shape identify bounds without field values |
-| Tool uncertainty or Engine filesystem error | Compiled operation/receipt/stopping facts or closed error kind are logged; nested raw errors and Tool output are omitted |
-| Log links, unsafe permissions, contention or capacity | Checked writer refuses unsafe aliases; bounded best-effort logging never changes task acceptance |
-| Optimized process or pre-admission inspection | No enabled diagnostic file; existing stdout/stderr and no-state contracts remain intact |
+| Scenario | Required observation | Owner |
+| --- | --- | --- |
+| Normal debug admission, then a rejected custom-provider Run | Activation, failed Provider phase/disposition and failed Run appear in the private log; exact task channels and closed replay retain their contract | [`tests/session_run/custom.rs::custom_profile_process_gate_proves_conformance_and_durable_runs`](../../tests/session_run/custom.rs) |
+| Subscription stream/outcome rejection | One subscription rejection record preserves actual counters alongside Engine failure facts; credentials, conversation and upstream canaries are absent | [`tests/session_run/setup/offline_https/chatgpt/checked_turn.rs`](../../tests/session_run/setup/offline_https/chatgpt/checked_turn.rs) |
+| Malformed typed Tool argument | Strict decoder still rejects; compiled operation and numeric argument shape identify bounds without field values | [`src/provider/openai/wire/tests.rs::rejected_native_calls_report_their_diagnostic_stage`](../../src/provider/openai/wire/tests.rs) |
+| Tool uncertainty or Engine filesystem error | Compiled operation/receipt/stopping facts or closed error kind are logged; nested raw errors and Tool output are omitted | [`src/diagnostics.rs`](../../src/diagnostics.rs) |
+| Log links, unsafe permissions, contention or capacity | Checked writer refuses unsafe aliases; bounded best-effort logging never changes task acceptance | [`src/diagnostics.rs::diagnostic_file_is_bounded_private_and_rejects_aliases`](../../src/diagnostics.rs), [`src/store/state.rs`](../../src/store/state.rs) |
+| Optimized process or pre-admission inspection | No enabled diagnostic file; existing stdout/stderr and no-state contracts remain intact | [`tests/session_run/custom.rs`](../../tests/session_run/custom.rs), [`tests/session_run/setup/offline_https/chatgpt/checked_turn.rs`](../../tests/session_run/setup/offline_https/chatgpt/checked_turn.rs), [`tests/session_run.rs`](../../tests/session_run.rs) |
