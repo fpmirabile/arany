@@ -170,7 +170,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
     const TEST: &str = "terminal_readers_preserve_shared_output_and_setup_redraw";
     if let Some(case) = std::env::var_os(CASE) {
         let linear = case == "linear" || case == "linear-panic" || case == "cursor-timeout";
-        let unwind = case == "inline-panic" || case == "linear-panic";
+        let unwind = case == "inline-panic" || case == "linear-panic" || case == "fullscreen-panic";
         let flags = fcntl_getfl(std::io::stdin()).expect("inherited input flags");
         assert!(!flags.contains(OFlags::NONBLOCK));
         assert_eq!(fcntl_getfl(std::io::stderr()).unwrap(), flags);
@@ -180,7 +180,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
             .build()
             .unwrap();
         runtime.block_on(async {
-            let mode = if case == "fullscreen" {
+            let mode = if case == "fullscreen" || case == "fullscreen-panic" {
                 TerminalMode::Fullscreen
             } else {
                 TerminalMode::Classic
@@ -328,6 +328,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
         "inline-query-key",
         "cursor-timeout",
         "fullscreen",
+        "fullscreen-panic",
         "linear",
         "inline-panic",
         "linear-panic",
@@ -411,10 +412,10 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                     {
                         if unwind {
                             let acquired = process::terminal_settings(&probe);
-                            if case == "inline-panic" {
-                                assert_ne!(acquired, before, "raw mode acquired before unwind");
-                            } else {
+                            if case.starts_with("linear") {
                                 assert_eq!(acquired, before, "linear mode remains canonical");
+                            } else {
+                                assert_ne!(acquired, before, "raw mode acquired before unwind");
                             }
                         }
                         input
@@ -449,6 +450,15 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
             before,
             "{case} restoration"
         );
+        if case.starts_with("fullscreen") {
+            // Cursor visibility is global, so the final show may precede the leave of the alternate screen.
+            let text = String::from_utf8_lossy(&output.stderr);
+            let last_show = text.rfind("\x1b[?25h").expect("cursor shown on exit");
+            let last_hide = text.rfind("\x1b[?25l").unwrap_or(0);
+            let leave = text.rfind("\x1b[?1049l").expect("alternate screen left");
+            assert!(last_show > last_hide, "{case} leaves cursor hidden");
+            assert!(leave > last_hide, "{case} hides cursor after leaving");
+        }
         if case == "inline-long" {
             let text = String::from_utf8_lossy(&output.stderr);
             let mut primary = String::new();
