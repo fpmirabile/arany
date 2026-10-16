@@ -864,3 +864,59 @@ fn steering_notes_are_user_input_data_never_system_instructions() {
     );
     assert!(!plain["messages"].to_string().contains("steering_notes"));
 }
+
+#[test]
+fn child_research_request_offers_only_read_only_calls_and_finish() {
+    let mut request = run_request();
+    request.phase = AgentPhase::ChildWork;
+    request.collaboration = crate::session::CollaborationPolicy::Single;
+    let catalog = |remaining: u64| crate::tools::ToolContext {
+        catalog: json!({
+            "write": false,
+            "commands": [{"name": "cargo"}],
+            "skills": [{"name": "guide"}],
+            "mcp_servers": [{"name": "local", "tools": ["probe"]}],
+            "tool_calls_remaining": remaining
+        })
+        .to_string(),
+        history_summary: None,
+        observations: Vec::new(),
+    };
+    request.tools = Some(catalog(2));
+    let body = run_body(&request, Effort::Low);
+    assert!(
+        body["system"]
+            .as_str()
+            .unwrap()
+            .starts_with(crate::provider::RESEARCH_INSTRUCTIONS)
+    );
+    let branches = body["output_config"]["format"]["schema"]["properties"]["outcome"]["anyOf"]
+        .as_array()
+        .unwrap();
+    let types: Vec<&str> = branches
+        .iter()
+        .filter_map(|branch| branch["properties"]["type"]["enum"][0].as_str())
+        .collect();
+    assert_eq!(types, ["finish", "tool"]);
+    let tool = &branches[1];
+    let mut operations: Vec<&str> = tool["properties"]["call"]["anyOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|call| call["properties"]["operation"]["enum"][0].as_str())
+        .collect();
+    operations.sort();
+    assert_eq!(operations, ["list", "mcp_list", "read", "search", "skill"]);
+    assert!(tool["properties"].get("plan_contract").is_none());
+
+    request.tools = Some(catalog(0));
+    let exhausted = run_body(&request, Effort::Low);
+    let types: Vec<&str> = exhausted["output_config"]["format"]["schema"]["properties"]["outcome"]
+        ["anyOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|branch| branch["properties"]["type"]["enum"][0].as_str())
+        .collect();
+    assert_eq!(types, ["finish"]);
+}

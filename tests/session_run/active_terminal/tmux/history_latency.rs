@@ -237,6 +237,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                     role: AgentRole::Primary,
                     ordinal: 0,
                     objective: None,
+                    grant: None,
                 },
                 Event::GoalActiveTimeReserved {
                     goal_id,

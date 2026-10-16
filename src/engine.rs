@@ -805,6 +805,8 @@ mod goal_report_tests {
                 summary: Some("A concise result".into()),
                 result: Some("Done".into()),
                 provider_calls: Vec::new(),
+                grant: None,
+                tools: Vec::new(),
                 status: AgentStatus::Finished,
             }],
             assistant_message: Some("Done".into()),
@@ -2424,6 +2426,7 @@ impl<P: Provider + 'static> Engine<P> {
                 role: AgentRole::Primary,
                 ordinal: 0,
                 objective: None,
+                grant: None,
             },
         )
         .await?;

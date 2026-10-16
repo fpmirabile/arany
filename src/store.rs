@@ -1,5 +1,6 @@
 use crate::session::{
-    Event, EventEnvelope, ReplayError, RunId, SessionId, SessionListItem, SessionView,
+    EVENT_PAYLOAD_VERSION, Event, EventEnvelope, ReplayError, RunId, SessionId, SessionListItem,
+    SessionView,
 };
 use std::io;
 use std::net::SocketAddr;
@@ -34,7 +35,7 @@ pub(crate) use state::{capture_archive_with_limit, restore_archive_with_limit};
 const DATABASE_FILE: &str = "events.sqlite3";
 pub(crate) const MAX_EVENT_BYTES: usize = 64 * 1024;
 fn event_payload_limit(kind: &str, version: i64) -> usize {
-    if kind == "MessageAccepted" && version == 4 {
+    if kind == "MessageAccepted" && version == EVENT_PAYLOAD_VERSION {
         320 * 1024
     } else {
         MAX_EVENT_BYTES

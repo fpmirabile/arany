@@ -206,6 +206,16 @@ impl ToolRuntime {
     pub(crate) fn context_limit_bytes(&self) -> usize {
         self.context_limit_bytes
     }
+
+    /// Result bytes one Tool may return after its serialized `overhead` and `reserved` extra bytes;
+    /// `None` when fewer than 128 bytes remain.
+    pub(crate) fn result_capacity(&self, overhead: usize, reserved: usize) -> Option<usize> {
+        let capacity = self
+            .context_limit_bytes
+            .saturating_sub(overhead.saturating_add(512 + reserved))
+            / 6;
+        (capacity >= 128).then_some(capacity)
+    }
     pub(crate) fn allows(&self, call: &ToolCall) -> bool {
         self.config.allows(call)
     }
@@ -345,8 +355,11 @@ impl ToolRuntime {
         receipt
     }
 
+    fn skill_rows(&self) -> Vec<serde_json::Value> {
+        self.config.skills.iter().map(|skill| serde_json::json!({"name":skill.name,"description":skill.description.chars().take(96).collect::<String>()})).collect()
+    }
+
     pub(crate) fn context(&self) -> Result<ToolContext, ToolError> {
-        let skill_rows: Vec<_> = self.config.skills.iter().map(|skill| serde_json::json!({"name":skill.name,"description":skill.description.chars().take(96).collect::<String>()})).collect();
         let catalog = serde_json::json!({
             "host_clock": {"unix_ms": now_ms(), "timezone":"UTC"},
             "workspace_paths": self.config.workspace_paths,
@@ -358,9 +371,35 @@ impl ToolRuntime {
             } else {
                 "Explicit argv only. Private writable selected-project snapshot at /workspace; /scratch is bounded. No network, host home, credentials or state. Bounded regular-file changes return as a changeset; a separate applied integration receipt confirms Workspace publication. Skills available at /skills/NAME."
             },
-            "skills": skill_rows,
+            "skills": self.skill_rows(),
             "mcp_servers": self.config.mcp.iter().map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":"2025-11-25 stdio; use mcp_list before mcp_call"})).collect::<Vec<_>>(),
         }).to_string();
+        if catalog.len() > types::MAX_TOOL_CATALOG_BYTES {
+            return Err(ToolError::Limit);
+        }
+        Ok(ToolContext {
+            catalog,
+            history_summary: None,
+            observations: Vec::new(),
+        })
+    }
+
+    /// Catalog for a read-only researcher child; `tool_calls_remaining == 0` offers only Finish.
+    pub(crate) fn research_context(
+        &self,
+        tool_calls_remaining: usize,
+    ) -> Result<ToolContext, ToolError> {
+        let catalog = serde_json::json!({
+            "host_clock": {"unix_ms": now_ms(), "timezone": "UTC"},
+            "workspace_paths": self.config.workspace_paths,
+            "write": false,
+            "file_tools": "list (directory entries), read (UTF-8, zero-based byte offset, limit 1..4096, whole-file sha256), search (literal UTF-8 content in a file or directory)",
+            "commands": [],
+            "skills": self.skill_rows(),
+            "mcp_servers": self.config.mcp.iter().map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":"2025-11-25 stdio; catalog listing with mcp_list only"})).collect::<Vec<_>>(),
+            "tool_calls_remaining": tool_calls_remaining,
+        })
+        .to_string();
         if catalog.len() > types::MAX_TOOL_CATALOG_BYTES {
             return Err(ToolError::Limit);
         }

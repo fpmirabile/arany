@@ -98,6 +98,8 @@ impl FromStr for GoalId {
 
 pub const MAX_GOAL_PROVIDER_CALLS: u32 = 64;
 pub const MAX_GOAL_ACTIVE_MS: u64 = 30 * 60 * 1000;
+pub(crate) const EVENT_PAYLOAD_VERSION: i64 = 5;
+pub(crate) const MAX_CHILD_TOOL_CALLS: usize = 16;
 pub(crate) const MAX_GOAL_ACTION_ACTIVE_MS: u64 = 31 * 60 * 1000;
 pub const MAX_GOAL_RUNS: u8 = 16;
 pub const MAX_GOAL_PLAN_PATHS: usize = 64;
@@ -754,13 +756,31 @@ mod goal_success_tests {
 
         let kind = event.kind();
         let agent_run_id = Some(AgentRunId::new());
-        assert!(Event::decode(kind, 4, &payload, Some(run_id), agent_run_id).is_err());
-        assert!(Event::decode(kind, 4, &payload, None, None).is_err());
+        assert!(
+            Event::decode(
+                kind,
+                EVENT_PAYLOAD_VERSION - 1,
+                &payload,
+                Some(run_id),
+                agent_run_id
+            )
+            .is_err()
+        );
+        assert!(Event::decode(kind, EVENT_PAYLOAD_VERSION, &payload, None, None).is_err());
         assert!(Event::decode(kind, 3, &payload, Some(run_id), None).is_err());
 
         let mut extra: serde_json::Value = serde_json::from_str(&payload).unwrap();
         extra["unexpected"] = serde_json::Value::Bool(true);
-        assert!(Event::decode(kind, 4, &extra.to_string(), Some(run_id), None).is_err());
+        assert!(
+            Event::decode(
+                kind,
+                EVENT_PAYLOAD_VERSION,
+                &extra.to_string(),
+                Some(run_id),
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1561,6 +1581,14 @@ pub enum AgentRole {
     Child,
 }
 
+/// Authority a child AgentRun receives at spawn; `ReadOnly` children may only research the Workspace.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildGrant {
+    NoTools,
+    ReadOnly,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentDisposition {
@@ -1909,12 +1937,19 @@ mod provider_call_tests {
             record: decoded,
         };
         let payload = event.payload().expect("current payload");
-        assert_eq!(event.version(), 4);
+        assert_eq!(event.version(), EVENT_PAYLOAD_VERSION);
         assert_eq!(
-            Event::decode("ProviderCallRecorded", 4, &payload, run_id, agent_run_id).unwrap(),
+            Event::decode(
+                "ProviderCallRecorded",
+                EVENT_PAYLOAD_VERSION,
+                &payload,
+                run_id,
+                agent_run_id
+            )
+            .unwrap(),
             event
         );
-        for version in [0, 1, 2, 3, 5] {
+        for version in [0, 1, 2, 3, 4, EVENT_PAYLOAD_VERSION + 1] {
             assert!(
                 Event::decode(
                     "ProviderCallRecorded",
@@ -1993,14 +2028,20 @@ mod provider_call_tests {
                     agent_run_id: agent,
                     record,
                 };
-                let payload = event.payload().expect("v4 payload");
-                assert_eq!(event.version(), 4);
+                let payload = event.payload().expect("current payload");
+                assert_eq!(event.version(), EVENT_PAYLOAD_VERSION);
                 assert_eq!(
-                    Event::decode("ProviderCallRecorded", 4, &payload, run_id, agent_run_id)
-                        .expect("v4 replay"),
+                    Event::decode(
+                        "ProviderCallRecorded",
+                        EVENT_PAYLOAD_VERSION,
+                        &payload,
+                        run_id,
+                        agent_run_id,
+                    )
+                    .expect("current replay"),
                     event
                 );
-                for version in [0, 1, 2, 3, 5] {
+                for version in [0, 1, 2, 3, 4, EVENT_PAYLOAD_VERSION + 1] {
                     assert!(
                         Event::decode(
                             "ProviderCallRecorded",
@@ -2015,8 +2056,14 @@ mod provider_call_tests {
                 }
                 for scope in [(None, agent_run_id), (run_id, None)] {
                     assert!(
-                        Event::decode("ProviderCallRecorded", 4, &payload, scope.0, scope.1)
-                            .is_err()
+                        Event::decode(
+                            "ProviderCallRecorded",
+                            EVENT_PAYLOAD_VERSION,
+                            &payload,
+                            scope.0,
+                            scope.1
+                        )
+                        .is_err()
                     );
                 }
                 let mut invalid: serde_json::Value =
@@ -2025,7 +2072,7 @@ mod provider_call_tests {
                 assert!(
                     Event::decode(
                         "ProviderCallRecorded",
-                        4,
+                        EVENT_PAYLOAD_VERSION,
                         &invalid.to_string(),
                         run_id,
                         agent_run_id
@@ -2177,6 +2224,7 @@ pub enum Event {
         role: AgentRole,
         ordinal: u8,
         objective: Option<String>,
+        grant: Option<ChildGrant>,
     },
     ProviderCallRecorded {
         run_id: RunId,
@@ -2366,6 +2414,8 @@ struct SpawnPayload {
     ordinal: u8,
     #[serde(deserialize_with = "Option::deserialize")]
     objective: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    grant: Option<ChildGrant>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2393,7 +2443,7 @@ impl Event {
     }
 
     pub(crate) fn version(&self) -> i64 {
-        4
+        EVENT_PAYLOAD_VERSION
     }
 
     pub(crate) fn kind(&self) -> &'static str {
@@ -2579,11 +2629,13 @@ impl Event {
                 role,
                 ordinal,
                 objective,
+                grant,
                 ..
             } => serialize(&SpawnPayload {
                 role: *role,
                 ordinal: *ordinal,
                 objective: objective.clone(),
+                grant: *grant,
             }),
             Self::ProviderCallRecorded { record, .. } => serialize(record),
             Self::GoalProviderCallReserved { goal_id, .. } => {
@@ -2634,7 +2686,7 @@ impl Event {
         run_id: Option<RunId>,
         agent_run_id: Option<AgentRunId>,
     ) -> Result<Self, ReplayError> {
-        if version != 4 {
+        if version != EVENT_PAYLOAD_VERSION {
             return Err(ReplayError::UnknownEvent);
         }
         let event = match kind {
@@ -2746,6 +2798,7 @@ impl Event {
                     role: data.role,
                     ordinal: data.ordinal,
                     objective: data.objective,
+                    grant: data.grant,
                 }
             }
             "AgentFinished" if run_id.is_some() && agent_run_id.is_some() => {
@@ -2957,10 +3010,11 @@ impl Event {
                 role,
                 ordinal,
                 objective,
+                grant,
                 ..
-            } => match role {
-                AgentRole::Primary if *ordinal == 0 && objective.is_none() => Ok(()),
-                AgentRole::Child if (1..=8).contains(ordinal) => bounded(
+            } => match (role, grant) {
+                (AgentRole::Primary, None) if *ordinal == 0 && objective.is_none() => Ok(()),
+                (AgentRole::Child, Some(_)) if (1..=8).contains(ordinal) => bounded(
                     objective.as_deref().ok_or(ReplayError::InvalidPayload)?,
                     2 * 1024,
                 ),
@@ -3046,4 +3100,71 @@ fn serialize<T: Serialize>(value: &T) -> Result<String, ReplayError> {
 
 fn parse<T: for<'de> Deserialize<'de>>(value: &str) -> Result<T, ReplayError> {
     serde_json::from_str(value).map_err(|_| ReplayError::InvalidPayload)
+}
+
+#[cfg(test)]
+mod child_grant_tests {
+    use super::*;
+
+    #[test]
+    fn child_grant_round_trips_and_rejects_missing_or_misplaced_pins() {
+        let (run_id, agent_run_id) = (RunId::new(), AgentRunId::new());
+        let spawned = |role, ordinal, objective: Option<&str>, grant| Event::AgentSpawned {
+            run_id,
+            agent_run_id,
+            role,
+            ordinal,
+            objective: objective.map(String::from),
+            grant,
+        };
+        let decode = |event: &Event, payload: &str| {
+            Event::decode(
+                event.kind(),
+                EVENT_PAYLOAD_VERSION,
+                payload,
+                Some(run_id),
+                Some(agent_run_id),
+            )
+        };
+        for grant in [ChildGrant::NoTools, ChildGrant::ReadOnly] {
+            let event = spawned(AgentRole::Child, 1, Some("inspect"), Some(grant));
+            let payload = event.payload().expect("child payload");
+            assert_eq!(decode(&event, &payload).expect("child replay"), event);
+        }
+        let primary = spawned(AgentRole::Primary, 0, None, None);
+        let payload = primary.payload().expect("primary payload");
+        assert_eq!(decode(&primary, &payload).expect("primary replay"), primary);
+
+        let child = spawned(
+            AgentRole::Child,
+            1,
+            Some("inspect"),
+            Some(ChildGrant::ReadOnly),
+        );
+        let payload = child.payload().expect("child payload");
+        let mut value: serde_json::Value = serde_json::from_str(&payload).expect("JSON");
+        assert!(
+            Event::decode(
+                child.kind(),
+                EVENT_PAYLOAD_VERSION - 1,
+                &payload,
+                Some(run_id),
+                Some(agent_run_id)
+            )
+            .is_err_and(|error| matches!(error, ReplayError::UnknownEvent))
+        );
+        let mut missing = value.clone();
+        missing.as_object_mut().expect("object").remove("grant");
+        assert!(decode(&child, &missing.to_string()).is_err());
+        value["grant"] = serde_json::Value::Null;
+        assert!(decode(&child, &value.to_string()).is_err());
+        value["grant"] = "write".into();
+        assert!(decode(&child, &value.to_string()).is_err());
+
+        let primary_payload = primary.payload().expect("primary payload");
+        let mut primary_value: serde_json::Value =
+            serde_json::from_str(&primary_payload).expect("JSON");
+        primary_value["grant"] = "no_tools".into();
+        assert!(decode(&primary, &primary_value.to_string()).is_err());
+    }
 }

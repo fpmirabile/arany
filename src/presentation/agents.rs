@@ -213,6 +213,8 @@ mod tests {
                     summary: Some("safe\u{1b}[31m\u{202e} summary".into()),
                     result: Some("Result\nforged line".into()),
                     provider_calls: Vec::new(),
+                    grant: None,
+                    tools: Vec::new(),
                     status: AgentStatus::Finished,
                 },
                 AgentView {
@@ -223,6 +225,8 @@ mod tests {
                     summary: None,
                     result: None,
                     provider_calls: Vec::new(),
+                    grant: None,
+                    tools: Vec::new(),
                     status: AgentStatus::Failed,
                 },
             ],

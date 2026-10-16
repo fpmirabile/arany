@@ -702,6 +702,29 @@ impl ToolContext {
             .map(|observations| observations.iter().map(model_observation).collect())
     }
 
+    /// The read-only research calls a child may still make; empty once its catalog allows none.
+    pub(crate) fn research_branches(&self) -> Vec<Value> {
+        let catalog = super::skills::parse_json(self.catalog.as_bytes(), MAX_TOOL_CATALOG_BYTES)
+            .unwrap_or(Value::Null);
+        if catalog["tool_calls_remaining"]
+            .as_u64()
+            .is_none_or(|remaining| remaining == 0)
+        {
+            return Vec::new();
+        }
+        let mut branches = self.outcome_branch_with_plan(false, None);
+        for branch in &mut branches {
+            if let Some(calls) = branch["properties"]["call"]["anyOf"].as_array_mut() {
+                calls.retain(|call| {
+                    call["properties"]["operation"]["enum"][0]
+                        .as_str()
+                        .is_some_and(|operation| GOAL_PLAN_PRELUDE_OPERATIONS.contains(&operation))
+                });
+            }
+        }
+        branches
+    }
+
     pub(crate) fn outcome_branch_with_plan(
         &self,
         require_plan_contract: bool,

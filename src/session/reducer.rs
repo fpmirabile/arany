@@ -1,11 +1,12 @@
 use super::events::{
-    AgentDisposition, AgentRole, AgentRunId, CompactionRecord, CompactionStatus, Event,
+    AgentDisposition, AgentRole, AgentRunId, ChildGrant, CompactionRecord, CompactionStatus, Event,
     EventEnvelope, ForkLineage, GoalBudget, GoalId, GoalPhase, GoalPlanContract, GoalReport,
     GoalStatus, GoalUsage, ProviderCallDisposition, ProviderCallRecord, ReplayError, RunConfig,
     RunDisposition, RunId, SessionDefaults, SessionId,
 };
 use crate::provider::AgentPhase;
 
+mod child;
 mod goal;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -130,11 +131,14 @@ impl GoalView {
                 .iter()
                 .find(|run| run.id == *run_id)
                 .is_some_and(|run| {
-                    run.tools.iter().all(|tool| {
-                        tool.observation
-                            .as_ref()
-                            .is_some_and(|observation| !observation.stops_run())
-                    })
+                    run.tools
+                        .iter()
+                        .chain(run.agents.iter().flat_map(|agent| agent.tools.iter()))
+                        .all(|tool| {
+                            tool.observation
+                                .as_ref()
+                                .is_some_and(|observation| !observation.stops_run())
+                        })
                 })
         })
     }
@@ -269,6 +273,9 @@ pub struct AgentView {
     pub summary: Option<String>,
     pub result: Option<String>,
     pub provider_calls: Vec<ProviderCallRecord>,
+    pub grant: Option<crate::session::ChildGrant>,
+    /// Read-only research Tools of a child; the primary's Tools stay in `RunView::tools`.
+    pub tools: Vec<ToolView>,
     pub status: AgentStatus,
 }
 
@@ -930,6 +937,7 @@ impl SessionView {
                 role,
                 ordinal,
                 objective,
+                grant,
             } => {
                 if *role == AgentRole::Child {
                     let goal =
@@ -947,12 +955,18 @@ impl SessionView {
                 }
                 let run = active_run(current, *run_id)?;
                 let config = run.config.as_ref().ok_or(ReplayError::InvalidTransition)?;
+                let child_grant = if config.tool_policy.is_some() {
+                    ChildGrant::ReadOnly
+                } else {
+                    ChildGrant::NoTools
+                };
                 match role {
                     AgentRole::Primary if run.agents.is_empty() && *ordinal == 0 => {}
                     AgentRole::Child
                         if !run.agents.is_empty()
                             && *ordinal as usize == run.agents.len()
-                            && *ordinal <= config.policy.max_children() => {}
+                            && *ordinal <= config.policy.max_children()
+                            && *grant == Some(child_grant) => {}
                     _ => return Err(ReplayError::InvalidTransition),
                 }
                 if run.agents.iter().any(|agent| agent.id == *agent_run_id) {
@@ -974,6 +988,8 @@ impl SessionView {
                     summary: None,
                     result: None,
                     provider_calls: Vec::new(),
+                    grant: *grant,
+                    tools: Vec::new(),
                     status: AgentStatus::Active,
                 });
             }
@@ -1012,15 +1028,24 @@ impl SessionView {
                         {
                             all_children_finished(run)
                         }
-                        (AgentRole::Child, [], AgentPhase::ChildWork) => true,
+                        (AgentRole::Child, _, AgentPhase::ChildWork) => {
+                            child::is_child_step(agent, record)
+                        }
                         _ => false,
                     };
                 if agent.status != AgentStatus::Active
                     || !valid
                     || record.disposition == ProviderCallDisposition::ToolRequested
-                        && (!tools_enabled
-                            || agent.role != AgentRole::Primary
-                            || record.phase == crate::provider::AgentPhase::ToolReview)
+                        && !(tools_enabled
+                            && match agent.role {
+                                AgentRole::Primary => record.phase != AgentPhase::ToolReview,
+                                AgentRole::Child => {
+                                    record.phase == AgentPhase::ChildWork
+                                        && agent.grant == Some(ChildGrant::ReadOnly)
+                                        && child::child_tool_requests(agent)
+                                            < crate::session::MAX_CHILD_TOOL_CALLS
+                                }
+                            })
                     || (record.phase != AgentPhase::RootPlan
                         && record.disposition == ProviderCallDisposition::Delegated)
                 {
@@ -1048,6 +1073,7 @@ impl SessionView {
                             .map_err(|_| ReplayError::InvalidTransition)?,
                     );
                 }
+                let primary_call = run.agents[index].role == AgentRole::Primary;
                 run.agents[index].provider_calls.push(record.clone());
                 let goal = current_goal_mut(current, goal_id)?;
                 let reservation_index = goal
@@ -1065,7 +1091,8 @@ impl SessionView {
                     .ok_or(ReplayError::InvalidTransition)?;
                 goal.token_usage_unknown |=
                     record.input_tokens.is_none() || record.output_tokens.is_none();
-                if record.disposition == ProviderCallDisposition::ToolRequested
+                if primary_call
+                    && record.disposition == ProviderCallDisposition::ToolRequested
                     && goal.plan_contract.is_none()
                 {
                     if goal.awaiting_plan_contract {
@@ -1148,6 +1175,13 @@ impl SessionView {
                 run_id,
                 agent_run_id,
                 intent,
+            } if child::names_child(current, *run_id, *agent_run_id) => {
+                current.start_child_tool(*run_id, *agent_run_id, intent)?;
+            }
+            Event::ToolStarted {
+                run_id,
+                agent_run_id,
+                intent,
             } => {
                 let goal =
                     active_run_goal(current, *run_id).ok_or(ReplayError::InvalidTransition)?;
@@ -1211,6 +1245,13 @@ impl SessionView {
                     review_call_index: None,
                     finished_sequence: None,
                 });
+            }
+            Event::ToolFinished {
+                run_id,
+                agent_run_id,
+                observation,
+            } if child::names_child(current, *run_id, *agent_run_id) => {
+                current.finish_child_tool(*run_id, *agent_run_id, observation, prior)?;
             }
             Event::ToolFinished {
                 run_id,
@@ -1342,6 +1383,20 @@ impl SessionView {
                 }
                 if run.agents[index].role == AgentRole::Child
                     && result.as_ref().is_some_and(|text| text.len() > 16 * 1024)
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
+                if run.agents[index].role == AgentRole::Child
+                    && (run.agents[index]
+                        .tools
+                        .iter()
+                        .any(|tool| tool.observation.is_none())
+                        || *disposition == AgentDisposition::Finished
+                            && run.agents[index].tools.iter().any(|tool| {
+                                tool.observation
+                                    .as_ref()
+                                    .is_some_and(|observation| observation.stops_run())
+                            }))
                 {
                     return Err(ReplayError::InvalidTransition);
                 }
@@ -1631,6 +1686,7 @@ mod goal_replay_tests {
                 role: AgentRole::Primary,
                 ordinal: 0,
                 objective: None,
+                grant: None,
             },
         ]
     }
@@ -1809,6 +1865,7 @@ mod goal_replay_tests {
                 role: AgentRole::Child,
                 ordinal: 1,
                 objective: Some("inspect the parser".into()),
+                grant: Some(ChildGrant::NoTools),
             });
             events.push(Event::GoalProviderCallReserved {
                 goal_id,
@@ -2859,6 +2916,8 @@ mod goal_replay_tests {
                         ProviderCallDisposition::Delegated,
                         Some(0),
                     )],
+                    grant: None,
+                    tools: Vec::new(),
                     status: AgentStatus::Active,
                 }],
                 assistant_message: None,
@@ -2904,7 +2963,7 @@ mod goal_replay_tests {
         }
     }
 
-    fn apply_child_spawn(view: &mut SessionView) -> Result<(), ReplayError> {
+    fn apply_child_spawn(view: &mut SessionView, grant: ChildGrant) -> Result<(), ReplayError> {
         let run_id = view.runs[0].id;
         let event = Event::AgentSpawned {
             run_id,
@@ -2912,6 +2971,7 @@ mod goal_replay_tests {
             role: AgentRole::Child,
             ordinal: 1,
             objective: Some("Check the child result".into()),
+            grant: Some(grant),
         };
         let (run_id, agent_run_id) = event.scope();
         view.apply_committed(&EventEnvelope {
@@ -2925,12 +2985,421 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn child_spawn_grant_follows_the_run_tool_policy() {
+        let session_with_tools = |tools| {
+            let mut view = delegated_session(0);
+            view.runs[0].config = Some(config(
+                CollaborationPolicy::Auto {
+                    max_active_children: 1,
+                },
+                tools,
+            ));
+            view
+        };
+        let mut no_tools = session_with_tools(false);
+        assert!(apply_child_spawn(&mut no_tools, ChildGrant::NoTools).is_ok());
+        assert_eq!(no_tools.runs[0].agents[1].grant, Some(ChildGrant::NoTools));
+        assert!(apply_child_spawn(&mut session_with_tools(false), ChildGrant::ReadOnly).is_err());
+
+        let mut with_tools = session_with_tools(true);
+        assert!(apply_child_spawn(&mut with_tools, ChildGrant::ReadOnly).is_ok());
+        assert_eq!(
+            with_tools.runs[0].agents[1].grant,
+            Some(ChildGrant::ReadOnly)
+        );
+        assert!(apply_child_spawn(&mut session_with_tools(true), ChildGrant::NoTools).is_err());
+    }
+
+    /// Applies one Event at the next sequence, as the Store would.
+    fn apply(view: &mut SessionView, event: Event) -> Result<(), ReplayError> {
+        let (run_id, agent_run_id) = event.scope();
+        let sequence = view.last_sequence + 1;
+        view.apply_committed(&EventEnvelope {
+            sequence,
+            session_id: view.id,
+            run_id,
+            agent_run_id,
+            event,
+            created_at_ms: 0,
+        })
+    }
+
+    fn child_intent(run_id: RunId, agent_run_id: AgentRunId, call: ToolCall) -> EffectIntent {
+        EffectIntent {
+            id: uuid::Uuid::now_v7(),
+            run_id,
+            agent_run_id,
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call,
+            limits: ToolLimits::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        }
+    }
+
+    /// A delegated Tool Run with one spawned `ReadOnly` child; returns (goal, run, child) ids.
+    fn research_session() -> (SessionView, GoalId, RunId, AgentRunId) {
+        let mut view = delegated_session(0);
+        view.runs[0].config = Some(config(
+            CollaborationPolicy::Auto {
+                max_active_children: 1,
+            },
+            true,
+        ));
+        apply_child_spawn(&mut view, ChildGrant::ReadOnly).expect("research child spawn");
+        let (goal, run, child) = (view.goals[0].id, view.runs[0].id, view.runs[0].agents[1].id);
+        (view, goal, run, child)
+    }
+
+    fn reserve_child_call(goal_id: GoalId, run_id: RunId, agent_run_id: AgentRunId) -> Event {
+        Event::GoalProviderCallReserved {
+            goal_id,
+            run_id,
+            agent_run_id,
+        }
+    }
+
+    fn child_record(
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        disposition: ProviderCallDisposition,
+    ) -> Event {
+        Event::ProviderCallRecorded {
+            run_id,
+            agent_run_id,
+            record: record(AgentPhase::ChildWork, disposition, Some(0)),
+        }
+    }
+
+    /// Whether `event` is rejected when applied after the accepted prefix in `view`.
+    fn rejected(view: &SessionView, event: Event) -> bool {
+        apply(&mut view.clone(), event).is_err()
+    }
+
+    #[test]
+    fn child_research_tools_replay_in_order_and_reject_widening() {
+        let (mut view, goal, run, child) = research_session();
+        let read = child_intent(
+            run,
+            child,
+            ToolCall::Read {
+                path: "src/lib.rs".into(),
+                offset: 0,
+                limit: 1024,
+            },
+        );
+        apply(&mut view, reserve_child_call(goal, run, child)).expect("child call");
+        assert!(rejected(
+            &view,
+            Event::ToolStarted {
+                run_id: run,
+                agent_run_id: child,
+                intent: read.clone(),
+            }
+        ));
+        let mut no_tools = delegated_session(0);
+        apply_child_spawn(&mut no_tools, ChildGrant::NoTools).expect("no-tools child spawn");
+        let (no_tools_goal, no_tools_run, no_tools_child) = (
+            no_tools.goals[0].id,
+            no_tools.runs[0].id,
+            no_tools.runs[0].agents[1].id,
+        );
+        apply(
+            &mut no_tools,
+            reserve_child_call(no_tools_goal, no_tools_run, no_tools_child),
+        )
+        .expect("no-tools child call");
+        assert!(rejected(
+            &no_tools,
+            child_record(
+                no_tools_run,
+                no_tools_child,
+                ProviderCallDisposition::ToolRequested
+            ),
+        ));
+        apply(
+            &mut view,
+            child_record(run, child, ProviderCallDisposition::ToolRequested),
+        )
+        .expect("child Tool request");
+        let started = Event::ToolStarted {
+            run_id: run,
+            agent_run_id: child,
+            intent: read.clone(),
+        };
+        let finished = Event::ToolFinished {
+            run_id: run,
+            agent_run_id: child,
+            observation: observation_for(read.clone(), b"ok"),
+        };
+        let after_request = view.clone();
+        let write = child_intent(
+            run,
+            child,
+            ToolCall::Write {
+                path: "src/lib.rs".into(),
+                expected_digest: None,
+                content: "x".into(),
+            },
+        );
+        assert!(rejected(
+            &after_request,
+            Event::ToolStarted {
+                run_id: run,
+                agent_run_id: child,
+                intent: write,
+            }
+        ));
+        let mcp = child_intent(
+            run,
+            child,
+            ToolCall::McpCall {
+                server: "local".into(),
+                tool: "probe".into(),
+                schema_digest: "a".repeat(64),
+                arguments: "{}".into(),
+            },
+        );
+        assert!(rejected(
+            &after_request,
+            Event::ToolStarted {
+                run_id: run,
+                agent_run_id: child,
+                intent: mcp,
+            }
+        ));
+        apply(&mut view, started.clone()).expect("child Tool starts");
+        let mut open = view.clone();
+        apply(&mut open, reserve_child_call(goal, run, child)).expect("second reservation");
+        assert!(rejected(
+            &open,
+            child_record(run, child, ProviderCallDisposition::Finished)
+        ));
+        assert!(rejected(
+            &view,
+            Event::AgentFinished {
+                run_id: run,
+                agent_run_id: child,
+                disposition: AgentDisposition::Cancelled,
+                summary: None,
+                result: None,
+            }
+        ));
+        let mismatched = ToolObservation {
+            intent: child_intent(
+                run,
+                child,
+                ToolCall::Read {
+                    path: "src/lib.rs".into(),
+                    offset: 0,
+                    limit: 2,
+                },
+            ),
+            ..observation_for(read.clone(), b"ok")
+        };
+        assert!(rejected(
+            &view,
+            Event::ToolFinished {
+                run_id: run,
+                agent_run_id: child,
+                observation: mismatched,
+            }
+        ));
+        apply(&mut view, finished).expect("child Tool finishes");
+
+        apply(&mut view, reserve_child_call(goal, run, child)).expect("child call");
+        apply(
+            &mut view,
+            child_record(run, child, ProviderCallDisposition::Finished),
+        )
+        .expect("child finishes");
+        apply(
+            &mut view,
+            Event::AgentFinished {
+                run_id: run,
+                agent_run_id: child,
+                disposition: AgentDisposition::Finished,
+                summary: Some("report".into()),
+                result: Some("report".into()),
+            },
+        )
+        .expect("child report");
+        assert!(view.runs[0].tools.is_empty());
+        assert_eq!(view.runs[0].agents[1].tools.len(), 1);
+        assert!(!view.goals[0].awaiting_plan_contract);
+        assert!(!view.goals[0].success_criterion_satisfied);
+    }
+
+    #[test]
+    fn child_tool_outside_the_plan_replays_only_as_denied() {
+        let (mut view, goal, run, child) = research_session();
+        let outside = child_intent(
+            run,
+            child,
+            ToolCall::Read {
+                path: "src/main.rs".into(),
+                offset: 0,
+                limit: 1024,
+            },
+        );
+        apply(&mut view, reserve_child_call(goal, run, child)).expect("child call");
+        apply(
+            &mut view,
+            child_record(run, child, ProviderCallDisposition::ToolRequested),
+        )
+        .expect("child Tool request");
+        apply(
+            &mut view,
+            Event::ToolStarted {
+                run_id: run,
+                agent_run_id: child,
+                intent: outside.clone(),
+            },
+        )
+        .expect("child Tool starts");
+        assert!(rejected(
+            &view,
+            Event::ToolFinished {
+                run_id: run,
+                agent_run_id: child,
+                observation: observation_for(outside.clone(), b"x"),
+            }
+        ));
+        apply(
+            &mut view,
+            Event::ToolFinished {
+                run_id: run,
+                agent_run_id: child,
+                observation: ToolObservation {
+                    intent: outside,
+                    disposition: ToolDisposition::Denied,
+                    output:
+                        "The effect is outside the active Goal plan; no operation was dispatched"
+                            .into(),
+                    guard: None,
+                    cache_update: CacheUpdate::NotApplicable,
+                },
+            },
+        )
+        .expect("out-of-plan child read is denied");
+    }
+
+    #[test]
+    fn child_research_tool_bound_admits_sixteen_requests_and_no_seventeenth() {
+        let (mut view, goal, run, child) = research_session();
+        for _ in 0..crate::session::MAX_CHILD_TOOL_CALLS {
+            let read = child_intent(
+                run,
+                child,
+                ToolCall::Read {
+                    path: "src/lib.rs".into(),
+                    offset: 0,
+                    limit: 1024,
+                },
+            );
+            apply(&mut view, reserve_child_call(goal, run, child)).expect("child call");
+            apply(
+                &mut view,
+                child_record(run, child, ProviderCallDisposition::ToolRequested),
+            )
+            .expect("child Tool request");
+            apply(
+                &mut view,
+                Event::ToolStarted {
+                    run_id: run,
+                    agent_run_id: child,
+                    intent: read.clone(),
+                },
+            )
+            .expect("child Tool starts");
+            apply(
+                &mut view,
+                Event::ToolFinished {
+                    run_id: run,
+                    agent_run_id: child,
+                    observation: observation_for(read, b"ok"),
+                },
+            )
+            .expect("child Tool finishes");
+        }
+        apply(&mut view, reserve_child_call(goal, run, child)).expect("child call");
+        assert!(rejected(
+            &view,
+            child_record(run, child, ProviderCallDisposition::ToolRequested)
+        ));
+        apply(
+            &mut view,
+            child_record(run, child, ProviderCallDisposition::Finished),
+        )
+        .expect("child may still finish at the bound");
+    }
+
+    #[test]
+    fn crash_left_child_tool_interrupts_the_run_and_blocks_goal_resume() {
+        let (mut view, goal, run, child) = research_session();
+        let read = child_intent(
+            run,
+            child,
+            ToolCall::Read {
+                path: "src/lib.rs".into(),
+                offset: 0,
+                limit: 1024,
+            },
+        );
+        apply(&mut view, reserve_child_call(goal, run, child)).expect("child call");
+        apply(
+            &mut view,
+            child_record(run, child, ProviderCallDisposition::ToolRequested),
+        )
+        .expect("child Tool request");
+        apply(
+            &mut view,
+            Event::ToolStarted {
+                run_id: run,
+                agent_run_id: child,
+                intent: read.clone(),
+            },
+        )
+        .expect("child Tool starts");
+        let mut crashed = view.clone();
+        apply(
+            &mut crashed,
+            goal_started(GoalId::new(), GoalBudget::default()),
+        )
+        .expect("a new Goal seals the crashed Goal");
+        assert_eq!(crashed.goals[0].status, GoalStatus::Interrupted);
+        assert_eq!(crashed.runs[0].status, RunStatus::Interrupted);
+        assert_eq!(crashed.runs[0].agents[1].status, AgentStatus::Interrupted);
+        assert!(!crashed.goals[0].can_resume(&crashed));
+
+        apply(
+            &mut view,
+            Event::ToolFinished {
+                run_id: run,
+                agent_run_id: child,
+                observation: observation_for(read, b"ok"),
+            },
+        )
+        .expect("child Tool finishes");
+        let mut settled = view.clone();
+        apply(
+            &mut settled,
+            goal_started(GoalId::new(), GoalBudget::default()),
+        )
+        .expect("a new Goal seals the settled Goal");
+        assert!(settled.goals[0].can_resume(&settled));
+    }
+
+    #[test]
     fn child_admission_uses_the_effective_plan_token_ceiling() {
         let mut below_cap = delegated_session(999);
-        assert!(apply_child_spawn(&mut below_cap).is_ok());
+        assert!(apply_child_spawn(&mut below_cap, ChildGrant::NoTools).is_ok());
 
         let mut at_cap = delegated_session(1000);
-        assert!(apply_child_spawn(&mut at_cap).is_err());
+        assert!(apply_child_spawn(&mut at_cap, ChildGrant::NoTools).is_err());
     }
 
     fn read_observation(path: &str, content: &[u8]) -> ToolObservation {
@@ -2958,6 +3427,10 @@ mod goal_replay_tests {
             expires_at_ms: 1,
             use_count: 1,
         };
+        observation_for(intent, content)
+    }
+
+    fn observation_for(intent: EffectIntent, content: &[u8]) -> ToolObservation {
         ToolObservation {
             guard: Some(GuardReceipt {
                 contract_version: 1,
@@ -3029,6 +3502,8 @@ mod goal_replay_tests {
                             Some(0),
                         ),
                     ],
+                    grant: None,
+                    tools: Vec::new(),
                     status: AgentStatus::Active,
                 }],
                 assistant_message: None,
@@ -3169,6 +3644,8 @@ mod goal_replay_tests {
                             ProviderCallDisposition::ToolRequested,
                             Some(0),
                         )],
+                        grant: None,
+                        tools: Vec::new(),
                         status: AgentStatus::Active,
                     }],
                     assistant_message: None,

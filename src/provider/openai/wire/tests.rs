@@ -1427,3 +1427,77 @@ fn steering_notes_are_user_input_data_never_instructions() {
     let plain_input: Value = serde_json::from_str(plain["input"].as_str().unwrap()).unwrap();
     assert!(plain_input.get("steering_notes").is_none());
 }
+
+#[test]
+fn child_research_request_offers_only_read_only_functions_and_finish() {
+    let mut request = run_request();
+    request.phase = AgentPhase::ChildWork;
+    request.collaboration = crate::session::CollaborationPolicy::Single;
+    let catalog = |remaining: u64| crate::tools::ToolContext {
+        catalog: json!({
+            "write": false,
+            "commands": [{"name": "cargo"}],
+            "skills": [{"name": "guide"}],
+            "mcp_servers": [{"name": "local", "tools": ["probe"]}],
+            "tool_calls_remaining": remaining
+        })
+        .to_string(),
+        history_summary: None,
+        observations: Vec::new(),
+    };
+    let names = |body: &Value| {
+        let mut names: Vec<String> = body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|function| function["name"].as_str().unwrap().to_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    request.tools = Some(catalog(2));
+    let body = run_body(&request);
+    assert_eq!(body["tool_choice"], "required");
+    assert_eq!(body["parallel_tool_calls"], false);
+    assert!(
+        body["instructions"]
+            .as_str()
+            .unwrap()
+            .starts_with(crate::provider::RESEARCH_INSTRUCTIONS)
+    );
+    assert_eq!(
+        names(&body),
+        [
+            "arany_finish",
+            "arany_list",
+            "arany_mcp_list",
+            "arany_read",
+            "arany_search",
+            "arany_skill"
+        ]
+    );
+    assert!(body["tools"].as_array().unwrap().iter().all(|function| {
+        function["parameters"]["properties"]
+            .get("plan_contract")
+            .is_none()
+    }));
+    let read = response(
+        "completed",
+        json!([function_call(
+            "arany_read",
+            &json!({"path": "src/lib.rs", "offset": 0, "limit": 1024})
+        )]),
+    );
+    assert!(matches!(
+        decode_tool_run(&serde_json::to_vec(&read).unwrap(), "gpt-5.4")
+            .unwrap()
+            .outcome,
+        ProviderOutcome::Tool {
+            plan_contract: None,
+            ..
+        }
+    ));
+
+    request.tools = Some(catalog(0));
+    assert_eq!(names(&run_body(&request)), ["arany_finish"]);
+}

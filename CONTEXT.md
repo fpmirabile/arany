@@ -37,7 +37,7 @@ The AgentRuns participating in one Run: one accountable primary and zero or more
 _Avoid_: Session, fixed worker pair, peer swarm
 
 **AgentRun**:
-One accountable execution within a Run. The primary AgentRun owns the iterative Tool/delegation/synthesis loop; each child AgentRun makes one bounded read-only Provider call.
+One accountable execution within a Run. The primary AgentRun owns the iterative Tool/delegation/synthesis loop; each child AgentRun is read-only: one Provider call, or bounded read-only research steps in a Tool-enabled Run.
 _Avoid_: Agent, worker process, task
 
 **Event**:

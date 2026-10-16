@@ -907,13 +907,17 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
         Ok(())
     }
 
-    /// Converts a requested pause into this Run's cancellation; callers stop at their boundary.
-    pub(super) fn pause_at_boundary(&self) -> bool {
-        let requested = self
-            .controls
+    /// Whether the caller asked to pause; unlike `pause_at_boundary` it never cancels in-flight calls.
+    pub(super) fn pause_requested(&self) -> bool {
+        self.controls
             .steering
             .as_ref()
-            .is_some_and(RunSteering::pause_requested);
+            .is_some_and(RunSteering::pause_requested)
+    }
+
+    /// Converts a requested pause into this Run's cancellation; callers stop at their boundary.
+    pub(super) fn pause_at_boundary(&self) -> bool {
+        let requested = self.pause_requested();
         if requested {
             self.controls.cancellation.cancel();
         }
@@ -1470,13 +1474,10 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             } else {
                 0
             };
-            let context_limit = runtime.context_limit_bytes();
-            let capacity = context_limit
-                .saturating_sub(overhead.saturating_add(512 + integration_capacity))
-                / 6;
-            if capacity < 128 {
+            let Some(capacity) = runtime.result_capacity(overhead, integration_capacity) else {
                 return Ok(false);
-            }
+            };
+            let context_limit = runtime.context_limit_bytes();
             intent.limits.result_bytes =
                 if matches!(intent.call, crate::tools::ToolCall::ApplyChangeset { .. }) {
                     128

@@ -1496,7 +1496,12 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
                 if index == 1 {
                     assert!(request.history.is_empty());
                     assert_eq!(request.objective, "Review the stated task without effects");
-                    assert!(request.tools.is_none() && request.child_results.is_empty());
+                    assert!(request.child_results.is_empty());
+                    let research: Value =
+                        serde_json::from_str(&request.tools.as_ref().unwrap().catalog).unwrap();
+                    assert_eq!(research["write"], false);
+                    assert_eq!(research["commands"], serde_json::json!([]));
+                    assert!(request.tools.as_ref().unwrap().observations.is_empty());
                 } else {
                     assert_eq!(request.history.len(), 1);
                     let history: Value =

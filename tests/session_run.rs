@@ -1275,8 +1275,8 @@ fn exact_resume_and_rename_survive_file_backed_reopen() {
         assert!(shown.status.success());
         assert_eq!(shown.stderr, b"");
         let expected = format!(
-            "{{\"sequence\":1,\"session_id\":\"{id}\",\"run_id\":null,\"agent_run_id\":null,\"kind\":\"SessionStarted\",\"event_version\":4,\"payload\":{{\"title\":\"New Session\",\"workspace_device\":{device},\"workspace_inode\":{inode}}},\"created_at_ms\":{}}}\n\
-             {{\"sequence\":2,\"session_id\":\"{id}\",\"run_id\":null,\"agent_run_id\":null,\"kind\":\"SessionRenamed\",\"event_version\":4,\"payload\":{{\"title\":\"Research thread\"}},\"created_at_ms\":{}}}\n",
+            "{{\"sequence\":1,\"session_id\":\"{id}\",\"run_id\":null,\"agent_run_id\":null,\"kind\":\"SessionStarted\",\"event_version\":5,\"payload\":{{\"title\":\"New Session\",\"workspace_device\":{device},\"workspace_inode\":{inode}}},\"created_at_ms\":{}}}\n\
+             {{\"sequence\":2,\"session_id\":\"{id}\",\"run_id\":null,\"agent_run_id\":null,\"kind\":\"SessionRenamed\",\"event_version\":5,\"payload\":{{\"title\":\"Research thread\"}},\"created_at_ms\":{}}}\n",
             events[0].created_at_ms, events[1].created_at_ms
         );
         assert_eq!(shown.stdout, expected.as_bytes());
@@ -1287,7 +1287,7 @@ fn exact_resume_and_rename_survive_file_backed_reopen() {
                 row.get(0)
             })
             .expect("start Event version");
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
         connection
             .execute("UPDATE events SET event_version=1 WHERE sequence=1", [])
             .expect("version fault injection");
@@ -1771,7 +1771,7 @@ fn session_journal_survives_reopen_and_rejects_invalid_history() {
             assert_eq!(line["session_id"], id.to_string());
             assert!(line["run_id"].is_null());
             assert!(line["agent_run_id"].is_null());
-            assert_eq!(line["event_version"], 4);
+            assert_eq!(line["event_version"], 5);
             assert_eq!(line["created_at_ms"], event.created_at_ms);
         }
 
@@ -2224,6 +2224,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                     role: AgentRole::Primary,
                     ordinal: 0,
                     objective: None,
+                    grant: None,
                 },
                 Event::GoalProviderCallReserved {
                     goal_id,
@@ -2438,6 +2439,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                         role: AgentRole::Primary,
                         ordinal: 0,
                         objective: None,
+                        grant: None,
                     },
                 )
                 .await
