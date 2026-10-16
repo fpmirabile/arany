@@ -2308,3 +2308,365 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     );
     assert_eq!(view.compactions[0].record.covered_run_id, view.runs[0].id);
 }
+
+// Accepts one synthetic Provider request within a deadline and returns its semantic input.
+fn accept_provider_request(
+    listener: &TcpListener,
+    what: &str,
+) -> (std::net::TcpStream, serde_json::Value) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    listener.set_nonblocking(true).expect("bounded accept");
+    let mut stream = loop {
+        match listener.accept() {
+            Ok((stream, _)) => break stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(Instant::now() < deadline, "{what}");
+                thread::yield_now();
+            }
+            Err(error) => panic!("accept failed: {error}"),
+        }
+    };
+    stream.set_nonblocking(false).expect("blocking request");
+    let body = read_request(&mut stream);
+    let wire: serde_json::Value = serde_json::from_slice(&body).expect("Responses request");
+    let input = serde_json::from_str(wire["input"].as_str().expect("semantic input text"))
+        .expect("semantic input JSON");
+    (stream, input)
+}
+
+#[test]
+#[ignore = "native Linux tmux steering gate; requires /usr/bin/tmux"]
+fn classic_steering_note_and_pause_in_tmux() {
+    const NOTE: &str = "use the smaller fixture";
+    let executable = test_product_executable();
+    let temp = tempfile::tempdir().expect("private test root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("Workspace");
+    let state = temp.path().join("state");
+    let exit_path = temp.path().join("exit");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback Provider");
+    write_profile(
+        &state,
+        listener.local_addr().expect("Provider address").port(),
+    );
+    let (child_ready_sender, child_ready) = mpsc::channel();
+    let (release_child_sender, release_child) = mpsc::channel::<()>();
+    let (pause_ready_sender, pause_ready) = mpsc::channel();
+    let (release_sender, release_primary) = mpsc::channel::<()>();
+    let (stop_sender, stop) = mpsc::channel::<()>();
+    // Calls 0-2 are the provider check; 3 primary Delegate, 4 held child, 5 synthesis with the note;
+    // 6 the second primary, held until pause. Any later request is a violation.
+    let provider = thread::spawn(move || {
+        for index in 0..7 {
+            let (mut stream, input) =
+                accept_provider_request(&listener, "synthetic Provider request missing");
+            match index {
+                0 => send_response_for(
+                    &mut stream,
+                    index,
+                    serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}}),
+                    true,
+                ),
+                1 => send_response_for(
+                    &mut stream,
+                    index,
+                    serde_json::json!({"outcome":{"type":"delegate","children":["synthetic child"]}}),
+                    true,
+                ),
+                2 => send_response_for(
+                    &mut stream,
+                    index,
+                    serde_json::json!({"summary":"synthetic summary"}),
+                    false,
+                ),
+                3 => {
+                    assert_eq!(input["objective"], "steer");
+                    send_response_for(
+                        &mut stream,
+                        index,
+                        serde_json::json!({"outcome":{"type":"delegate","children":["synthetic child"]}}),
+                        true,
+                    );
+                }
+                4 => {
+                    child_ready_sender.send(()).expect("held child gate");
+                    release_child
+                        .recv_timeout(Duration::from_secs(10))
+                        .expect("release held child");
+                    send_response_for(
+                        &mut stream,
+                        index,
+                        serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"child result"}}),
+                        false,
+                    );
+                }
+                5 => {
+                    assert_eq!(input["steering_notes"], serde_json::json!([NOTE]));
+                    send_response_for(
+                        &mut stream,
+                        index,
+                        serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"synthesized"}}),
+                        true,
+                    );
+                }
+                _ => {
+                    assert_eq!(input["objective"], "pause");
+                    pause_ready_sender.send(()).expect("held primary gate");
+                    release_primary
+                        .recv_timeout(Duration::from_secs(10))
+                        .expect("release held primary call");
+                    send_response_for(
+                        &mut stream,
+                        index,
+                        serde_json::json!({"outcome":{"type":"delegate","children":["synthetic child"]}}),
+                        true,
+                    );
+                }
+            }
+        }
+        stop.recv_timeout(Duration::from_secs(15))
+            .expect("product exit observed");
+        listener
+            .set_nonblocking(true)
+            .expect("bounded final accept");
+        listener.accept().is_err()
+    });
+    check_profile_with_binary(&workspace, &state, &executable);
+
+    let wrapper = temp.path().join("tmux-pane.sh");
+    std::fs::write(
+        &wrapper,
+        "#!/bin/sh\n\"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 --no-color\nresult=$?\nprintf '%s\\n' \"$result\" > \"$ARANY_TEST_EXIT\"\nexit \"$result\"\n",
+    )
+    .expect("tmux pane wrapper");
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))
+        .expect("private executable wrapper");
+    let server = TmuxServer {
+        socket: temp.path().join("tmux.sock"),
+    };
+    let mut start =
+        crate::isolation::account_isolated_command(temp.path(), "/usr/bin/tmux", &executable);
+    crate::isolation::remember_workspace_trust(
+        &temp.path().join("account-home/.local/state/arany"),
+        &workspace,
+        &workspace,
+    );
+    start
+        .env_clear()
+        .env("TERM", "xterm")
+        .env("SHELL", "/bin/sh")
+        .env("PATH", "/usr/bin:/bin")
+        .env("ARANY_TEST_EXE", &executable)
+        .env("ARANY_TEST_STATE", &state)
+        .env("ARANY_TEST_WORKSPACE", &workspace)
+        .env("ARANY_TEST_EXIT", &exit_path)
+        .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+        .arg("-S")
+        .arg(&server.socket)
+        .args([
+            "-f",
+            "/dev/null",
+            "new-session",
+            "-d",
+            "-x",
+            "80",
+            "-y",
+            "24",
+            "-s",
+            "arany-test",
+        ])
+        .arg(&wrapper)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let started = wait_product(start.spawn().expect("tmux server start"));
+    assert!(started.status.success(), "tmux pane started");
+    let pane_pid = server.run(&[
+        "display-message",
+        "-p",
+        "-t",
+        "arany-test:0.0",
+        "#{pane_pid}",
+    ]);
+    assert!(pane_pid.status.success(), "test-owned pane PID");
+    let pane_pid = String::from_utf8(pane_pid.stdout)
+        .expect("pane PID UTF-8")
+        .trim()
+        .parse::<u32>()
+        .expect("pane PID");
+    let product_pid = try_product_child_of_executable(pane_pid, &executable)
+        .expect("active Arany process beneath tmux pane");
+    let product_guard =
+        ProductGuard::for_executable(product_pid, state.clone(), executable.clone());
+    wait_owned_product(&product_guard);
+    let mut declined = false;
+    wait_screen(&server, "idle composer missing", |screen| {
+        decline_initial_consent(&server, screen, &mut declined);
+        classic_idle(screen)
+    });
+
+    // Step 1: a note stays in the composer until the Engine records it for the next primary call.
+    assert!(
+        server
+            .run(&["send-keys", "-l", "-t", "arany-test:0.0", "steer"])
+            .status
+            .success()
+    );
+    assert!(
+        server
+            .run(&["send-keys", "-t", "arany-test:0.0", "Enter"])
+            .status
+            .success()
+    );
+    child_ready
+        .recv_timeout(Duration::from_secs(10))
+        .expect("child call reached the Provider");
+    assert!(
+        server
+            .run(&["send-keys", "-l", "-t", "arany-test:0.0", NOTE])
+            .status
+            .success()
+    );
+    wait_screen(&server, "typed steering note missing", |screen| {
+        String::from_utf8_lossy(screen).contains(NOTE)
+    });
+    assert!(
+        server
+            .run(&["send-keys", "-t", "arany-test:0.0", "Enter"])
+            .status
+            .success()
+    );
+    wait_screen(&server, "steering offer missing", |screen| {
+        let text = String::from_utf8_lossy(screen);
+        text.contains("Steering note waits for the agent's next step") && text.contains(NOTE)
+    });
+    release_child_sender.send(()).expect("release child call");
+    wait_screen(&server, "steering confirmation missing", |screen| {
+        let text = String::from_utf8_lossy(screen);
+        text.contains("Steering note sent to the agent") && !text.contains(NOTE)
+    });
+    wait_screen(&server, "idle prompt after first Run", classic_idle);
+
+    // Step 2: a held primary call pauses at its boundary and starts no further Provider request.
+    assert!(
+        server
+            .run(&["send-keys", "-l", "-t", "arany-test:0.0", "pause"])
+            .status
+            .success()
+    );
+    assert!(
+        server
+            .run(&["send-keys", "-t", "arany-test:0.0", "Enter"])
+            .status
+            .success()
+    );
+    pause_ready
+        .recv_timeout(Duration::from_secs(10))
+        .expect("second primary call reached the Provider");
+    assert!(
+        server
+            .run(&["send-keys", "-l", "-t", "arany-test:0.0", "/pause"])
+            .status
+            .success()
+    );
+    assert!(
+        server
+            .run(&["send-keys", "-t", "arany-test:0.0", "Enter"])
+            .status
+            .success()
+    );
+    wait_screen(&server, "pausing status row missing", |screen| {
+        String::from_utf8_lossy(screen).contains("Pausing at the next step; Ctrl+C cancels now")
+            && status_row(screen).contains("Pausing at the next step... Ctrl+C cancels now")
+    });
+    release_sender.send(()).expect("release held primary call");
+    wait_screen(&server, "goal pause notice missing", |screen| {
+        String::from_utf8_lossy(screen).contains("Goal paused; use /goal resume to continue.")
+    });
+    wait_screen(&server, "idle prompt after pause", |screen| {
+        classic_idle(screen) && !status_row(screen).contains("Pausing at the next step")
+    });
+    assert!(
+        server
+            .run(&["send-keys", "-t", "arany-test:0.0", "/exit", "Enter"])
+            .status
+            .success()
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(exit) = std::fs::read_to_string(&exit_path)
+            && exit.ends_with('\n')
+        {
+            assert_eq!(exit, "0\n", "product exit success");
+            break;
+        }
+        assert!(Instant::now() < deadline, "tmux pane did not exit");
+        thread::yield_now();
+    }
+    stop_sender.send(()).expect("stop Provider observation");
+    assert!(
+        provider.join().expect("synthetic Provider conversation"),
+        "no child or follow-up Provider request after pause"
+    );
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("replay runtime");
+    let sessions = runtime
+        .block_on(list_sessions(
+            StateRoot::open_existing(&state).expect("read-only State"),
+            workspace.clone(),
+        ))
+        .expect("committed Sessions");
+    assert_eq!(sessions.len(), 1);
+    let view = runtime
+        .block_on(resume_session(
+            StateRoot::open_existing(&state).expect("read-only State"),
+            workspace,
+            sessions[0].id,
+        ))
+        .expect("strict Session replay");
+    assert_eq!(view.runs.len(), 2);
+    assert_eq!(view.runs[0].status, arany::RunStatus::Finished);
+    assert_eq!(view.runs[0].steering_notes, [NOTE]);
+    assert_eq!(view.runs[1].status, arany::RunStatus::Cancelled);
+    assert!(view.runs[1].steering_notes.is_empty());
+    assert_eq!(
+        view.goals.last().expect("paused Goal").status,
+        arany::GoalStatus::Interrupted
+    );
+}
+
+// The bottom non-empty row is the status row; its state leads.
+fn status_row(screen: &[u8]) -> String {
+    String::from_utf8_lossy(screen)
+        .lines()
+        .rev()
+        .find(|row| !row.trim().is_empty())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+// The composer placeholder shows only when it is empty; a busy Run labels its status row "working".
+fn classic_idle(screen: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(screen);
+    text.contains("Ask Arany") && !text.to_lowercase().contains("working")
+}
+
+fn wait_screen(server: &TmuxServer, what: &str, mut ready: impl FnMut(&[u8]) -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last = Vec::new();
+    loop {
+        if let Some(screen) = capture_pane(server) {
+            if ready(&screen) {
+                return;
+            }
+            last = screen;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{what}: {}",
+            redacted_tail(&last)
+        );
+        thread::yield_now();
+    }
+}

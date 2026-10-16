@@ -647,15 +647,25 @@ pub(super) async fn submit_objective(
                                 }
                                 Some(feedback)
                             }
-                            ActiveSubmission::Pause => Some(Feedback::History(match stop {
-                                ActiveStop::Running => {
-                                    steering.pause();
-                                    stop = ActiveStop::Pausing;
-                                    "Pausing at the next step; Ctrl+C cancels now".into()
+                            ActiveSubmission::Pause => {
+                                let notice = match stop {
+                                    ActiveStop::Running => {
+                                        steering.pause();
+                                        stop = ActiveStop::Pausing;
+                                        "Pausing at the next step; Ctrl+C cancels now"
+                                    }
+                                    ActiveStop::Pausing => "Already pausing at the next step",
+                                    ActiveStop::Cancelling => "Run is already cancelling",
+                                };
+                                // Classic filters the history notice from the status row, so a redraw without it shows the pausing state there; linear prints notices as lines.
+                                if draw_active_snapshot(terminal, view, composer, user_recorded, stop, Some(TerminalNotice::History(notice))).is_err()
+                                    || (!terminal.is_linear()
+                                        && draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err())
+                                {
+                                    break "terminal rendering failed".to_owned();
                                 }
-                                ActiveStop::Pausing => "Already pausing at the next step".into(),
-                                ActiveStop::Cancelling => "Run is already cancelling".into(),
-                            })),
+                                None
+                            }
                             ActiveSubmission::Rejected(notice) => {
                                 if terminal.is_linear() {
                                     composer.take();

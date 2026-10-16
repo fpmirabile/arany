@@ -367,8 +367,20 @@ fn pause_during_attached_run_waits_for_the_call_and_pauses_the_goal() {
     stage(&attached.stages, 7, "idle prompt after clearing draft");
     write_input(&attached.input, b"/exit\n");
     let result = wait_product(attached.process.take());
-    let _ = attached.reader.join().expect("PTY output reader");
+    let output = attached.reader.join().expect("PTY output reader");
     assert!(result.status.success(), "attached exit after pause");
+    let count = |text: &[u8]| {
+        output
+            .windows(text.len())
+            .filter(|part| *part == text)
+            .count()
+    };
+    assert_eq!(
+        count(b"Notice: Pausing at the next step; Ctrl+C cancels now"),
+        1,
+        "linear pause prints one pausing notice"
+    );
+
     stop_sender.send(()).expect("stop Provider observation");
     assert!(
         !server.join().expect("synthetic Provider conversation"),
