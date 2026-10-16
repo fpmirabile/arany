@@ -8,7 +8,7 @@ applied to the plan; this file keeps the decision trail and open nodes.
 
 | # | Decision | Answer | Applied to |
 |---|---|---|---|
-| Q1 | Single-agent foundation (A) and Supervisor core before writable teams (C) | Yes | Plan execution order |
+| Q1 | Single-agent foundation (A) and Supervisor core before writable teams (C) | Yes, revisited by R14-8 (b): writable teams are staged ahead of the Supervisor, not after it | Plan execution order (see R14-8) |
 | Q2 | Command writes return as Engine-validated changesets, not a writable Workspace mount | Yes | A1 |
 | Q3 | Supervisor owned by the Engine over journaled Events | Yes, amended: evaluators must be configurable and not tied to Engine-only deterministic rules; typed model judges such as TypeSafe AI's Jev can decide non-deterministic cases | B intro, execution step 4 |
 | Q4 | A valid plan contract must precede the first non-prelude Tool; bounded read-only inspection may precede it, and the contract may accompany inspection | Yes, amended by R13-1 | B1 |
@@ -226,10 +226,9 @@ names only; every MCP tool invocation and command still requires the contract.
 Any contract supplied with a prelude call is validated and journaled before
 dispatch. A pure read-only task can finish without fabricated effect scope.
 
-## Round 14 — open
+## Round 14 — settled 2026-10-16
 
-Planning-only proposal; nothing here is accepted behavior. C needs these
-ownership rules before implementation: the
+C needs these ownership rules before implementation: the
 [multi-agent supervision research](../../docs/research/multi-agent-loop-and-user-feedback.md#ownership-before-scheduling)
 puts stale-attempt rejection and lost-effect reconciliation ahead of leases
 and reassignment. Nodes build on R6-5, R7-8 and R11-1–R11-8 rather than
@@ -241,16 +240,16 @@ slice.
 
 | # | Decision | Recommendation | Answer |
 |---|---|---|---|
-| R14-1 | Assignment identity: one assignment is one child AgentRun (UUIDv7 ID, ordinal) whose spawn fact pins mission, lease, grant (R7-8), success criterion and assignment base (digests of the leased paths). Reassignment (R11-4, R11-6) is always a new AgentRun; an AgentRun never takes a second assignment. This extends the AgentRun Events and needs a new current Event payload version (one current format, no compatibility readers) | Yes. The existing AgentRun identity is the attempt, so no separate attempt counter or fencing token is needed | Pending |
-| R14-2 | Stale-result rejection: a handover is a journaled fact bound to its AgentRun and changeset digest. The primary integrates only the handover of a Finished worker AgentRun of an open Run (no `RunFinished`) with no cancellation observed, that no reassignment superseded, whose own criterion passed (R11-5), and that was not already integrated or discarded. Any other handover is journaled as discarded with its reason, including a conflicted handover the primary resolves by hand (the resolution is the primary's own new change) and a handover whose Run has no terminal fact when the Goal resumes, which is never carried over. Replay rejects an integration without an eligible handover | Yes. Eligibility derives from journaled facts, so a late, duplicate or cancelled result cannot publish | Pending |
-| R14-3 | Lease lifecycle: Run-scoped and fixed at assignment, non-overlapping among live assignments, a subset of the Goal path scope; held until its handover is integrated or discarded, or until its AgentRun ends without one, so two pending changesets never overlap (R11-3); never carried across a Run boundary (R6-5). The Goal's Workspace OS writer lock already excludes other writers; out-of-lease writes reject at changeset validation (R11-2) | Yes. Inside one locked Run there is no lease renewal, expiry clock or cross-Run fencing to get wrong | Pending |
-| R14-4 | Worker view lifetime: the view (R11-1) is disposable Guard-owned storage, lost on cancellation, crash or process exit and never recovered. A resumed Goal reports the discarded worker work; the primary may reassign within budget; no automatic restart (R11-6) | Yes. Recovery stays at Run boundaries; recovering a half-built view would need its own durability contract | Pending |
-| R14-5 | Lost-effect reconciliation: a result lost inside a worker's view fails that worker and discards its view; the Workspace is not marked Uncertain. Workspace integration stays the primary's `ApplyChangeset`: a missing receipt after GO is Uncertain and stops the Run without retry; a failed digest precondition is a conflict (R11-4). This changes the [execution](../../docs/specs/execution.md#collaboration) rule that child failure drains siblings before primary failure: a worker failure is not fatal to the Run (R11-6) | Yes. The view bounds the loss; only the existing integration path can leave the Workspace uncertain | Pending |
-| R14-6 | Worker commands and the per-Workspace build cache (open): workers read the archive as of assignment and never publish, so only primary commands publish; or workers publish serially in completion order | Read-only for workers. Serial publication lets build state from work discarded after publication reach the shared archive; the cost is repeated builds inside worker views | Pending |
-| R14-7 | MCP for workers (open): the first C slice grants workers catalog listing only, no MCP invocations; this narrows the C intro's worker grant | Yes. MCP effects land outside the worker's view and lease, so neither R11-1 isolation nor R11-2 enforcement covers them | Pending |
-| R14-8 | Delivery order (user decision): (a) keep plan order, C at execution step 13; (b) stage C earlier: read-only researcher children, then edit-only workers, then command-capable views; (c) pull C1–C3 forward with only B5 ahead | (b) if multi-agent coding is wanted soon, otherwise (a). Until its last stage, (b) deviates from R11-1 and R11-5: edit-only workers cannot run their criterion inside a view. (b) and (c) revisit Q1, and before D every worker shares the primary's profile | Pending |
+| R14-1 | Assignment identity: one assignment is one child AgentRun (UUIDv7 ID, ordinal) whose spawn fact pins mission, lease, grant (R7-8), success criterion and assignment base (digests of the leased paths). Reassignment (R11-4, R11-6) is always a new AgentRun; an AgentRun never takes a second assignment. This extends the AgentRun Events and needs a new current Event payload version (one current format, no compatibility readers) | Yes. The existing AgentRun identity is the attempt, so no separate attempt counter or fencing token is needed | Yes; applied to C1 and C2 |
+| R14-2 | Stale-result rejection: a handover is a journaled fact bound to its AgentRun and changeset digest. The primary integrates only the handover of a Finished worker AgentRun of an open Run (no `RunFinished`) with no cancellation observed, that no reassignment superseded, whose own criterion passed (R11-5), and that was not already integrated or discarded. Any other handover is journaled as discarded with its reason, including a conflicted handover the primary resolves by hand (the resolution is the primary's own new change) and a handover whose Run has no terminal fact when the Goal resumes, which is never carried over. Replay rejects an integration without an eligible handover | Yes. Eligibility derives from journaled facts, so a late, duplicate or cancelled result cannot publish | Yes; applied to C2 (criterion condition waived until C3) |
+| R14-3 | Lease lifecycle: Run-scoped and fixed at assignment, non-overlapping among live assignments, a subset of the Goal path scope; held until its handover is integrated or discarded, or until its AgentRun ends without one, so two pending changesets never overlap (R11-3); never carried across a Run boundary (R6-5). The Goal's Workspace OS writer lock already excludes other writers; out-of-lease writes reject at changeset validation (R11-2) | Yes. Inside one locked Run there is no lease renewal, expiry clock or cross-Run fencing to get wrong | Yes; applied to C2 |
+| R14-4 | Worker view lifetime: the view (R11-1) is disposable Guard-owned storage, lost on cancellation, crash or process exit and never recovered. A resumed Goal reports the discarded worker work; the primary may reassign within budget; no automatic restart (R11-6) | Yes. Recovery stays at Run boundaries; recovering a half-built view would need its own durability contract | Yes; applied to C2 and C3 |
+| R14-5 | Lost-effect reconciliation: a result lost inside a worker's view fails that worker and discards its view; the Workspace is not marked Uncertain. Workspace integration stays the primary's `ApplyChangeset`: a missing receipt after GO is Uncertain and stops the Run without retry; a failed digest precondition is a conflict (R11-4). This changes the [execution](../../docs/specs/execution.md#collaboration) rule that child failure drains siblings before primary failure: a worker failure is not fatal to the Run (R11-6) | Yes. The view bounds the loss; only the existing integration path can leave the Workspace uncertain | Yes; applied to C2 |
+| R14-6 | Worker commands and the per-Workspace build cache: workers read the archive as of assignment and never publish, so only primary commands publish; or workers publish serially in completion order | Read-only for workers. Serial publication lets build state from work discarded after publication reach the shared archive; the cost is repeated builds inside worker views | Read-only for workers; applied to C3 |
+| R14-7 | MCP for workers: the first C slice grants workers catalog listing only, no MCP invocations; this narrows the C intro's worker grant | Yes. MCP effects land outside the worker's view and lease, so neither R11-1 isolation nor R11-2 enforcement covers them | Yes; applied to C1–C3 (catalog listing only) |
+| R14-8 | Delivery order (user decision): (a) keep plan order, C at execution step 13; (b) stage C earlier: read-only researcher children, then edit-only workers, then command-capable views; (c) pull C1–C3 forward with only B5 ahead | (b) if multi-agent coding is wanted soon, otherwise (a). Until its last stage, (b) deviates from R11-1 and R11-5: edit-only workers cannot run their criterion inside a view. (b) and (c) revisit Q1, and before D every worker shares the primary's profile | (b), staged delivery; applied to execution steps 6–8 and C. Revisits Q1. Until C3, deviates from R11-1 and R11-5; before D, every worker shares the primary's profile |
 
-Evidence owners if accepted; no new owner is proposed:
+Evidence owners:
 
 | Node | Owner |
 |---|---|
@@ -270,6 +269,10 @@ Evidence owners if accepted; no new owner is proposed:
 | 2026-10-13 | No native Windows: Windows users run the Linux build under WSL2 | AGENTS.md priority 2, README, CONTRIBUTING, planning template, security rules, decision D-17, next steps, plan OS impact |
 | 2026-10-13 | Registry fetch joins Beta 1 as A6 (reverses Q6) | Plan A6, security model, OS impact, execution step 8; removed from next steps as a separate initiative |
 | 2026-10-13 | A3/A4 finite configurable ceilings: 4 GiB memory, 8 GiB cache, 1 GiB writable project storage, 256 tasks; 120-second command default, 600-second maximum | A3/A4 policy defaults; native build evidence and named-host measurement remain separate support gates |
+| 2026-10-16 | R14-8 option (b): stage C before the Supervisor as read-only researchers, then edit-only workers, then command-capable views; revisits Q1; until C3, the R11-1/R11-5 deviation applies | Execution steps 6–8, Q1, Round 14 |
+| 2026-10-16 | A5 typed Git reads run the system `git` CLI as a read-only command inside Guard and parse its output; no Git library dependency; without `git` the capability is unavailable (fail closed), never emulated | A5, security model (Git) |
+| 2026-10-16 | E4 checkpoints store pre-images in the private per-Session StateRoot only for files changed through validated changesets (`ApplyChangeset`); command and MCP effects are not rewindable and rewind says so; explicit per-file and per-Goal bounds and automatic pruning, numbers decided in the E4 implementation change; no Git ghost commits in the user's repository | E4, security bounds |
+| 2026-10-16 | Beta 1 check 7 is run by the user later; stage 1 may be implemented before it, with its new child Tool encodings marked unvalidated live until check 7 passes | Execution step 6 |
 
 ## Expansion options
 
@@ -282,7 +285,7 @@ Not part of this plan; recorded so they are not lost.
 
 Rounds 1–6 settled the decisions opened during the plan review, Rounds 7–10
 the lifecycle and cross-cutting sweeps, Round 11 the team mechanics and
-Round 12 the execution order. The
+Round 12 the execution order, and Round 14 the team ownership rules and staged C delivery. The
 nodes below wait on implementation data; they are not silently assumed.
 
 ## Blocked nodes

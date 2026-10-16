@@ -4,7 +4,7 @@
 
 - Status: `In progress`
 - Owner: Fernando Mirabile
-- Last updated: 2026-10-15
+- Last updated: 2026-10-16
 
 ## Outcome
 
@@ -61,7 +61,7 @@ the user-owned checks in [next steps](../../NEXT_STEPS.md).
   start (D).
 - **Lease.** The file or directory prefixes a worker may write (C2).
 - **Wave.** A group of workers that starts after the previous group integrates
-  (C3).
+  (C2).
 - **Steering note.** A user message delivered to a running Goal's primary at
   its next call boundary (E1).
 
@@ -136,9 +136,14 @@ unsupported enforcement fails closed. Child authority remains
      supervision with its threshold derived from the admitted command timeout,
      up to 600 seconds, and makes no aggregate CPU-rate claim. Memory,
      storage, task and wall-time ceilings stay finite.
-4. **Typed Git reads.** Read-only `status`, `diff` and `log` operations
-   implemented in-process over the repository, without executing Git hooks,
-   filters or configuration from the project. Commits stay with the user.
+4. **Typed Git reads.** Read-only `status`, `diff` and `log` operations run the
+   system `git` CLI as a read-only command inside the Guard and parse its
+   output. No Git library dependency. Repository configuration, hooks, filters,
+   textconv and external diff programs stay inert; the exact neutralizing
+   arguments are part of the A5 security pass. `.git` stays excluded from file
+   grants, so history is reachable only through these typed operations. Git is
+   required on the host: without it the capability reports as unavailable and
+   fails closed, never emulated. Commits stay with the user.
 5. **Registry fetch.** Lets an agent add dependencies to the project it works
    on (`npm install zod`, `cargo add serde`, `pip install requests`) without
    giving project code the network.
@@ -291,45 +296,89 @@ a research note verifies its API from primary sources.
 ### C. Coding teams
 
 The primary composes the team from the user's request: roles, profiles (D2),
-missions, direction and path leases.
+missions, direction and path leases. Until D lands, every worker shares the
+primary's Provider profile.
 
 Topology is one level: workers cannot spawn workers or message each other,
 and everything flows through the primary. Concurrent workers are capped by a
 setting (default 4) and by each Provider's concurrency. A worker's grant is the
 intersection of the Goal grant and its assignment, which names its commands,
-Skills and MCP tools; workers never receive Git or network capabilities.
+Skills and MCP tools; workers never receive Git or network capabilities. The
+first C slices grant workers catalog listing only; MCP invocation is excluded
+(R14-7).
 
-1. **Writable workers.** Children can receive an explicit Tool grant. Each
-   worker gets one persistent private Guard view for its whole assignment
-   (the Workspace at assignment plus its own work); its commands run there,
-   and it hands the primary one cumulative changeset against its assignment
-   base, never writing to the Workspace directly. No Git worktrees.
-2. **Path leases.** The primary assigns each worker file or directory prefix
-   leases. They are enforced: writes outside the lease reject at changeset
-   validation. Reads stay within the Goal grant.
-3. **Single integrator.** The primary integrates changesets in completion
-   order, recorded in the journal so replay stays deterministic, and remains
-   the only publisher and final answer owner.
-   - A failed digest precondition is a conflict: the primary receives both
-     versions and resolves it itself or reassigns the work on the current
-     base. No automatic text merge.
-   - A worker must pass its own success criterion inside its view before
-     handing over; the primary re-verifies after integration.
-   - A failed or cancelled worker's changeset is discarded and reported; the
-     primary may issue a new assignment against the budget. No automatic
-     retry.
-   - A changeset holds at most 2,048 files and 32 MiB; oversized changesets
-     reject whole with a count report and are never split.
-   - Dependencies are expressed as waves: a later wave starts after the
-     earlier wave integrates. There is no general task DAG.
+Delivery is staged (R14-8, which revisits Q1): read-only researchers, then
+edit-only workers, then command-capable views. The rationale is in
+[Round 14](./design-tree.md#round-14--settled-2026-10-16). Until C3 lands, C1
+and C2 deviate from R11-1 and R11-5: edit-only workers cannot run their success
+criterion inside a view, so the primary verifies each criterion after
+integration, and the handover rule below omits the criterion condition.
+
+**Assignment identity (from C1).** One assignment is one child AgentRun with a
+UUIDv7 ID and an ordinal. Its spawn fact pins mission, lease, grant, success
+criterion and assignment base (digests of the leased paths). Reassignment is
+always a new AgentRun; an AgentRun never takes a second assignment. The AgentRun
+Events gain a new current payload version, with no compatibility readers.
+
+1. **Read-only researchers (stage 1, C1).** Children may receive a read-only
+   Tool grant: Workspace List/Read/Search, admitted Skill reads and MCP catalog
+   listing. They write nothing, run no command and return a bounded report to
+   the primary. The Goal plan contract, delivered in Goal Foundation, scopes
+   child Tool calls.
+2. **Edit-only workers (stage 2, C2).** Workers are writable but run no
+   commands. Each worker's edits accumulate into one changeset against its
+   assignment base, which it hands to the primary; it never writes to the
+   Workspace directly. No Git worktrees.
+   - **Leases.** A lease is fixed at assignment for its Run, does not overlap
+     another live assignment, and is a subset of the Goal path scope. It is held
+     until its handover is integrated or discarded, or until its AgentRun ends
+     without one, and never crosses a Run boundary. A write outside the lease
+     rejects at changeset validation and leaves the Workspace unchanged. Reads
+     stay within the Goal grant; the Goal's Workspace writer lock already
+     excludes other writers.
+   - **Handover.** A handover is a journaled fact bound to its AgentRun and
+     changeset digest. The primary integrates only the handover of a Finished
+     worker AgentRun of an open Run (no `RunFinished`), with no cancellation
+     observed, that no reassignment superseded and that was not already
+     integrated or discarded. Until C3, the worker's own criterion is not part of
+     this test; the primary verifies the criterion after integration. Any other
+     handover is journaled as discarded with its reason, including a conflicted
+     handover the primary resolves by hand (its resolution is the primary's own
+     new change), and a handover whose Run has no terminal fact when the Goal
+     resumes, which is never carried over. Replay rejects an integration without
+     an eligible handover.
+   - **Conflicts.** A failed digest precondition is a conflict: the primary
+     receives both versions and resolves it itself or reassigns the work on the
+     current base. No automatic text merge.
+   - **Failure and loss.** A failed or cancelled worker's changeset is discarded
+     and reported; the primary may issue a new assignment within budget; no
+     automatic retry. A result lost inside a worker's private storage fails that
+     worker only and discards it; the Workspace is not marked Uncertain.
+     Integration stays the primary's `ApplyChangeset`: a missing receipt after GO
+     is Uncertain and stops the Run without retry. A worker failure is not fatal
+     to the Run, which replaces the execution rule that child failure drains
+     siblings before primary failure.
+   - **Worker storage lifetime.** The worker's private storage is disposable
+     Guard-owned storage, lost on cancellation, crash or process exit and never
+     recovered. A resumed Goal reports the discarded worker work; the primary may
+     reassign within budget. There is no automatic restart.
+   - **Integration order and bounds.** Changesets integrate in completion order,
+     recorded in the journal so replay stays deterministic. Dependencies are
+     waves: a later wave starts after the earlier wave integrates; there is no
+     general task DAG. A changeset holds at most 2,048 files and 32 MiB;
+     oversized changesets reject whole with a count report and are never split.
+3. **Command-capable views (stage 3, C3).** Each worker gets one persistent
+   private Guard view for its whole assignment: the Workspace at assignment plus
+   its own work. Its commands run there, and it must pass its own success
+   criterion inside the view before handover; the primary re-verifies after
+   integration. The build cache is read-only for workers: they read the archive
+   as of assignment and never publish; only primary commands publish. With C3,
+   C again matches R11-1 and R11-5.
 4. **Reviewer role.** A read-only reviewer child evaluates each changeset
    before integration, feeding the Supervisor review point (B4).
 
-This replaces decision D-03 for coding Runs.
-[Round 14](./design-tree.md#round-14--open) proposes the attempt, lease,
-stale-result and lost-effect reconciliation rules that
-[multi-agent supervision](../../docs/research/multi-agent-loop-and-user-feedback.md#ownership-before-scheduling)
-requires. C implementation is blocked until Round 14 is answered.
+This replaces decision D-03 for coding Runs. Stage-specific gates, owners and
+exclusions are in the [execution](#execution) list.
 
 ### D. Provider roster and per-agent routing
 
@@ -388,10 +437,15 @@ execution contracts own the resulting behavior.
 4. **Checkpoints and rewind.** Cancellation keeps integrated changes, as in
    other harnesses. A checkpoint is taken at every user prompt and Goal phase
    boundary; `/rewind` restores code, conversation (through the existing
-   fork) or both. Code rewind applies reverse changesets with digest
-   preconditions, so command edits are rewindable too; drifted files reject
-   and are listed. Never automatic. Checkpoints are kept 30 days and bounded
-   per Session; overflow drops the oldest with a visible notice.
+   fork) or both. Pre-images are stored in Arany's private StateRoot, per
+   Session, only for files changed through Arany's validated changesets
+   (`ApplyChangeset`). Code rewind applies reverse changesets with digest
+   preconditions; drifted files reject and are listed. Command and MCP effects
+   are not rewindable, and rewind says so explicitly. Checkpoints are never Git
+   ghost commits in the user's repository. Rewind is never automatic.
+   Checkpoints are kept 30 days, bounded per file and per Goal, and pruned
+   automatically with a visible notice; exact numbers are decided in the E4
+   implementation change.
 5. **Supervisor override.** The user can override any Supervisor response
    with a one-use approval; overrides are journaled, feed threshold
    calibration and never change configuration.
@@ -484,8 +538,9 @@ Each slice that crosses one of these boundaries runs the
 - **Registry fetch (A6).** The only network path from a Tool: allowlisted
   public registries through the Guard-owned proxy, with SSRF rejection,
   install scripts disabled and no credentials.
-- **Git (A5, E6).** Reads are in-process without executing repository
-  configuration, hooks or filters. Writes run host `git` only after closed
+- **Git (A5, E6).** Reads run the system `git` inside Guard with repository
+  configuration, hooks, filters and external diff programs neutralized; without
+  `git` the capability is unavailable. Writes run host `git` only after closed
   allowlist admission of `.git/config`, with hooks disabled on the host.
 - **Providers and judges (D, B).** Every roster profile and judge is an egress
   destination with its own credential, usage consent and disclosure scope,
@@ -494,7 +549,7 @@ Each slice that crosses one of these boundaries runs the
 - **Authority.** The Supervisor, judges and project rules can only narrow,
   except the explicit per-folder commit authorization and global
   disruptive-Git setting, which the user owns.
-- **Bounds.** Changesets, checkpoints (30 days, per-Session cap), progress
+- **Bounds.** Changesets, checkpoints (30-day retention, per-file and per-Goal bounds), progress
   notes (160 characters), grilling (12 questions × 6 rounds), judge budgets,
   concurrent workers (default 4) and settings maxima are declared with
   overflow behavior. User-chosen unlimited usage applies only to Goal usage
@@ -520,19 +575,53 @@ triggered and evidence under [testing rules](../../agents/testing.md).
    [next steps](../../NEXT_STEPS.md#beta-1-final-user-owned-checks). Every
    later slice is exercised through real use, which supplies the shadow-mode
    calibration data B2 needs.
-6. **Goal completion.** E1–E4 steering, context reinjection, Workspace
+6. **C1 Read-only researchers (stage 1 of C, R14-8 (b)).** Child AgentRun
+   identity and pins, read-only grants, bounded reports, catalog listing only,
+   and every child on the primary's profile. Gate: the Goal plan contract
+   (landed); Round 14 rules R14-1 and R14-7 land in the execution and Tools
+   specs with this stage. Beta 1 check 7 is run by the user later. This stage may
+   be implemented before it, and its new child Tool encodings stay marked
+   unvalidated live until check 7 passes. Evidence: [Engine Run corpus](../../tests/engine_run.rs)
+   for live admission and for a worker `McpCall` rejected before dispatch
+   (R14-1, R14-7); [reducer replay corpus](../../src/session/reducer.rs) for
+   spawn pins (R14-1). Stays out: writes, commands, MCP invocation and build
+   cache publication.
+7. **C2 Edit-only workers (stage 2 of C).** Leases, handover eligibility,
+   conflicts, loss and worker storage lifetime, waves and completion-order
+   integration, as specified in C2. Gate: C1 landed; Round 14 rules R14-2 to
+   R14-5 land in the execution, Goals and Tools specs with this stage; the new
+   child write Tool encodings follow the same check 7 rule as C1. Evidence:
+   [Tool journeys](../../tests/session_run/tools.rs) for out-of-lease rejection
+   with the Workspace unchanged, post-GO Uncertain and digest conflict
+   (R14-3, R14-5); [Goal corpus](../../tests/engine_run/goals.rs) for the
+   Goal-scope subset, writer lock and resume reporting discarded work (R14-3,
+   R14-4); [reducer replay corpus](../../src/session/reducer.rs) for overlapping
+   live leases, lease lifetime and integration without an eligible handover
+   (R14-2, R14-3); [Engine Run corpus](../../tests/engine_run.rs) for a
+   worker-local loss failing only that worker and for cancellation discarding
+   unintegrated worker work (R14-4, R14-5). Stays out: command execution in
+   workers, build cache publication, MCP invocation, and the criterion inside a
+   view (deviation until C3).
+8. **C3 Command-capable views (stage 3 of C).** The persistent per-worker Guard
+   view, worker commands in it, the own-criterion handover condition and the
+   read-only build cache for workers (R14-4, R11-1, R11-5, R14-6). Gate: C2
+   landed; A4's command timeout and Build profile in place; R14-6 lands in the
+   Tools build-cache section with this stage. Evidence: [Tool journeys](../../tests/session_run/tools.rs)
+   for the worker command's cache outcome (R14-6); [Engine Run corpus](../../tests/engine_run.rs)
+   for cancellation discarding views (R14-4). Stays out: MCP invocation (R14-7)
+   and worker cache publication.
+9. **Goal completion.** E1–E4 steering, context reinjection, Workspace
    checkpoints and rewind, E8 compaction and E10 `exec` integration. This
    follows dogfooding and extends Goal Foundation with the remaining durable
    workflows and UI.
-7. B6 modes including RPI and grilling, E7 Goal view and E12 settings.
-8. B2, B3, B5 and E5 Supervisor signals, escalation, Finish gate and override.
-9. A5 Typed Git reads and E6 Git writes.
-10. A6 Registry fetch.
-11. D1–D5 Provider roster and per-agent routing.
-12. Configurable judges over the roster (agent-capable judges first, then a
+10. B6 modes including RPI and grilling, E7 Goal view and E12 settings.
+11. B2, B3, B5 and E5 Supervisor signals, escalation, Finish gate and override.
+12. A5 Typed Git reads and E6 Git writes.
+13. A6 Registry fetch.
+14. D1–D5 Provider roster and per-agent routing.
+15. Configurable judges over the roster (agent-capable judges first, then a
     typed-judge adapter after its API research note).
-13. C1–C3 Writable workers, leases and integrator.
-14. B4 and C4 Review-point review and reviewer role.
+16. B4 and C4 Review-point review and reviewer role.
 
 Observe during dogfooding, without changing the plan unless evidence demands
 it: whether RPI's Plan gate adds friction to small tasks, and whether the
@@ -541,7 +630,8 @@ per-slice specification and evidence cost slows delivery.
 E13 telemetry spans land with the slice that introduces each span's subject.
 
 Next action: after A4's full review and hosted CI pass, complete the authorized
-dogfooding milestone before the remaining Goal workflows. The A3 per-Workspace
+dogfooding milestone before the staged team delivery (C1–C3) and the remaining
+Goal workflows. The A3 per-Workspace
 cache retains its 64 MiB default and shares an 8 GiB StateRoot aggregate; A4
 derives the effective admitted cache quota from remaining aggregate headroom,
 so the 8 GiB requested maximum is not guaranteed usable capacity. Approved
@@ -553,8 +643,8 @@ required before support claims.
 ## Open questions
 
 The [design tree](./design-tree.md) records every grilling round.
-[Round 14](./design-tree.md#round-14--open) holds the open C ownership
-decisions; the remaining questions are data-dependent:
+[Round 14](./design-tree.md#round-14--settled-2026-10-16) records the C
+ownership rules and delivery order; the remaining questions are data-dependent:
 
 - Default thresholds for loop, probing and disproportion signals. Decided from
   shadow-mode corpus and real Runs before those signals enforce.
