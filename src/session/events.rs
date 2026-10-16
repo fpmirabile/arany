@@ -99,6 +99,7 @@ impl FromStr for GoalId {
 pub const MAX_GOAL_PROVIDER_CALLS: u32 = 64;
 pub const MAX_GOAL_ACTIVE_MS: u64 = 30 * 60 * 1000;
 pub(crate) const EVENT_PAYLOAD_VERSION: i64 = 5;
+pub(crate) const MAX_CHILD_TOOL_CALLS: usize = 16;
 pub(crate) const MAX_GOAL_ACTION_ACTIVE_MS: u64 = 31 * 60 * 1000;
 pub const MAX_GOAL_RUNS: u8 = 16;
 pub const MAX_GOAL_PLAN_PATHS: usize = 64;
